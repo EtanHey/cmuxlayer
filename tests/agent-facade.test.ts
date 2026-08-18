@@ -74,7 +74,43 @@ describe("agent facade projections", () => {
       value: true,
       source: "inferred",
       observed_at_ms: 2_000,
+      coverage: "harness_only",
+      note: "cmux-UI pause not detectable; see #447",
     });
+  });
+
+  it("keeps value false on a clean agent and names the uncovered cmux-UI case", () => {
+    const projected = toObservedPublicAgent(makeRecord(), {
+      derivedAtMs: 2_000,
+    });
+
+    expect(projected.paused.value).toBe(false);
+    expect(projected.paused).toEqual({
+      value: false,
+      source: "inferred",
+      observed_at_ms: 2_000,
+      coverage: "harness_only",
+      note: "cmux-UI pause not detectable; see #447",
+    });
+  });
+
+  it("omits the harness-only pause caveat when a cmux-reported source exists", () => {
+    const projected = toObservedPublicAgent(
+      makeRecord({ paused: false, paused_source: "cmux-reported" }),
+      {
+        derivedAtMs: 2_000,
+        paused: false,
+        pausedSource: "cmux-reported",
+      },
+    );
+
+    expect(projected.paused).toEqual({
+      value: false,
+      source: "cmux-reported",
+      observed_at_ms: 2_000,
+    });
+    expect(projected.paused).not.toHaveProperty("coverage");
+    expect(projected.paused).not.toHaveProperty("note");
   });
 
   it("exposes whether a listed agent was spawned or adopted", () => {

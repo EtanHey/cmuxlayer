@@ -223,8 +223,33 @@ describe("paused pane visibility", () => {
       paused: {
         value: true,
         source: "inferred",
+        coverage: "harness_only",
+        note: "cmux-UI pause not detectable; see #447",
       },
     });
+  });
+
+  it("list_agents summary rows keep boolean false and name harness-only coverage on a clean agent", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "agent-idle",
+        surface_id: "surface:idle",
+      }),
+    );
+    const result = await callTool(server, "list_agents", {});
+    const parsed = parseResult(result);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agents[0]).toMatchObject({
+      agent_id: "agent-idle",
+      paused: {
+        value: false,
+        source: "inferred",
+        coverage: "harness_only",
+        note: "cmux-UI pause not detectable; see #447",
+      },
+    });
+    expect(typeof parsed.agents[0].paused.value).toBe("boolean");
   });
 
   it("read_screen parsed output includes paused with inferred source", async () => {
@@ -243,7 +268,32 @@ describe("paused pane visibility", () => {
     expect(parsed.parsed).toMatchObject({
       paused: true,
       paused_source: "inferred",
+      paused_coverage: "harness_only",
+      paused_note: "cmux-UI pause not detectable; see #447",
     });
+    expect(typeof parsed.parsed.paused).toBe("boolean");
+  });
+
+  it("read_screen parsed output names harness-only coverage on a clean idle pane", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "agent-idle",
+        surface_id: "surface:idle",
+      }),
+    );
+    const result = await callTool(server, "read_screen", {
+      surface: "surface:idle",
+      parsed_only: true,
+    });
+    const parsed = parseResult(result);
+    expect(parsed.parsed).toMatchObject({
+      paused: false,
+      paused_source: "inferred",
+      paused_coverage: "harness_only",
+      paused_note: "cmux-UI pause not detectable; see #447",
+    });
+    expect(typeof parsed.parsed.paused).toBe("boolean");
   });
 
   it("send_to a paused target queues with an unmissable warning and never submitted", async () => {

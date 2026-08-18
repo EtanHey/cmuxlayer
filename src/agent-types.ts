@@ -3,7 +3,11 @@
  * Every field is a primitive (string | number | null).
  */
 import { randomUUID } from "node:crypto";
-import type { ParsedControlPlaneState, PauseSource } from "./types.js";
+import type {
+  ParsedControlPlaneState,
+  PauseCoverage,
+  PauseSource,
+} from "./types.js";
 
 export type AgentState =
   "creating" | "booting" | "ready" | "working" | "idle" | "done" | "error";
@@ -192,6 +196,8 @@ export interface ObservedPublicAgent {
     value: boolean;
     source: PauseSource;
     observed_at_ms: number;
+    coverage?: PauseCoverage;
+    note?: string;
   };
 }
 

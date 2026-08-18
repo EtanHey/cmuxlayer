@@ -154,6 +154,23 @@ export type ParsedControlPlaneState =
   | "stale_surface"
   | "poisoned_registry";
 export type PauseSource = "cmux-reported" | "inferred";
+/** Pause forms the detector can actually see. UI pause is not among them today. */
+export type PauseCoverage = "harness_only";
+
+export const HARNESS_ONLY_PAUSE_NOTE =
+  "cmux-UI pause not detectable; see #447";
+
+/** Caveat attached to inferred pause so value:false is not read as authoritative. */
+export function pauseHonestyFields(source: PauseSource): {
+  coverage?: PauseCoverage;
+  note?: string;
+} {
+  if (source === "cmux-reported") return {};
+  return {
+    coverage: "harness_only",
+    note: HARNESS_ONLY_PAUSE_NOTE,
+  };
+}
 
 export interface ParsedScreenResult {
   agent_type: ParsedScreenAgentType;
@@ -173,6 +190,9 @@ export interface ParsedScreenResult {
   /** Visible pause chrome. Absent cmux field means this is always inferred. */
   paused: boolean;
   paused_source: PauseSource;
+  /** Present while source is inferred; omitted once a cmux-reported pause exists. */
+  paused_coverage?: PauseCoverage;
+  paused_note?: string;
 }
 
 export interface CmuxStatusEntry {
