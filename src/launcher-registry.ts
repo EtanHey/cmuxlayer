@@ -45,11 +45,20 @@ function registryPath(options?: LauncherRegistryOptions): string {
   );
 }
 
-function normalizeLauncherKey(value: string): string {
+/**
+ * Registry key normalization: case-, hyphen-, and underscore-insensitive.
+ * Exported so the registry-less fallback path matches repos to directories by
+ * exactly the same rule the registered path uses (spawn/resume parity).
+ */
+export function normalizeRepoKey(value: string): string {
   return value
     .trim()
     .toLowerCase()
     .replace(/[-_\s]/g, "");
+}
+
+function normalizeLauncherKey(value: string): string {
+  return normalizeRepoKey(value);
 }
 
 function shellWords(line: string): string[] {
@@ -115,26 +124,63 @@ export function parseLauncherRegistry(
   return entries;
 }
 
+/**
+ * Non-throwing registry probe. The registry is an OPTIONAL enhancement
+ * (issue #392): a fresh install has no `launchers.zsh`, and that is a
+ * supported state, not an error. Callers that need the strict behaviour keep
+ * using the throwing resolvers below.
+ */
+export interface LauncherRegistrySnapshot {
+  available: boolean;
+  entries: LauncherRegistryEntry[];
+  sourcePath: string;
+  unavailable_reason: string | null;
+}
+
+export function loadLauncherRegistrySnapshot(
+  options?: LauncherRegistryOptions,
+): LauncherRegistrySnapshot {
+  const sourcePath = registryPath(options);
+  if (options?.entries) {
+    return {
+      available: true,
+      entries: options.entries,
+      sourcePath,
+      unavailable_reason: null,
+    };
+  }
+  const reader =
+    options?.readRegistry ?? ((path: string) => readFileSync(path, "utf8"));
+  try {
+    const input = reader(sourcePath);
+    return {
+      available: true,
+      entries: parseLauncherRegistry(input, sourcePath),
+      sourcePath,
+      unavailable_reason: null,
+    };
+  } catch (error) {
+    return {
+      available: false,
+      entries: [],
+      sourcePath,
+      unavailable_reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function loadLauncherRegistry(
   options?: LauncherRegistryOptions,
 ): { entries: LauncherRegistryEntry[]; sourcePath: string } {
-  const sourcePath = registryPath(options);
-  if (options?.entries) return { entries: options.entries, sourcePath };
-  const reader = options?.readRegistry ?? ((path: string) => readFileSync(path, "utf8"));
-  let input: string;
-  try {
-    input = reader(sourcePath);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+  const snapshot = loadLauncherRegistrySnapshot(options);
+  if (!snapshot.available) {
     throw new Error(
-      `Launcher registry unavailable at ${sourcePath}: ${reason}. ` +
+      `Launcher registry unavailable at ${snapshot.sourcePath}: ` +
+        `${snapshot.unavailable_reason}. ` +
         "Register repoGolem launchers before using spawn_agent.",
     );
   }
-  return {
-    entries: parseLauncherRegistry(input, sourcePath),
-    sourcePath,
-  };
+  return { entries: snapshot.entries, sourcePath: snapshot.sourcePath };
 }
 
 export function resolveLauncherPrefix(
@@ -237,6 +283,42 @@ export function resolveRepoRootFromLauncherRegistry(
         `Registered launchers: ${registeredLauncherSummary(entries)}.`,
     );
   }
+  if (!isAbsolute(entry.path)) {
+    throw new Error(
+      `Launcher registry path for repo "${repo}" must be absolute: ` +
+        `"${entry.path}" in ${sourcePath}.`,
+    );
+  }
+  return resolve(entry.path);
+}
+
+/**
+ * Registry-optional launcher lookup: `null` means "no registry, or no entry
+ * for this repo" — the caller should fall back to the raw CLI. A malformed
+ * registry (ambiguous alias, relative path) still throws, because that is a
+ * broken config rather than an absent one.
+ */
+export function resolveLauncherNameFromRegistryOrNull(
+  repo: string,
+  cli: CliType,
+  options?: LauncherRegistryOptions,
+): string | null {
+  const suffix = CLI_SUFFIX[cli];
+  if (!suffix) return null;
+
+  const { entries } = loadLauncherRegistrySnapshot(options);
+  const registeredPrefix = resolveLauncherPrefix(repo, entries);
+  return registeredPrefix ? launcherName(registeredPrefix, suffix) : null;
+}
+
+/** Registry-optional repo-root lookup. See the launcher variant above. */
+export function resolveRepoRootFromLauncherRegistryOrNull(
+  repo: string,
+  options?: LauncherRegistryOptions,
+): string | null {
+  const { entries, sourcePath } = loadLauncherRegistrySnapshot(options);
+  const entry = resolveLauncherEntry(repo, entries);
+  if (!entry) return null;
   if (!isAbsolute(entry.path)) {
     throw new Error(
       `Launcher registry path for repo "${repo}" must be absolute: ` +

@@ -52,6 +52,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:topology": "vitest run tests/topology-contract.test.ts",
+    "test:parity": "vitest run tests/spawn-resume-parity.test.ts tests/launcher-registry.test.ts tests/repo-root-fallback.test.ts tests/registry-optional-resume.test.ts",
     "test:contract": "bun run build && tsx scripts/run-real-cmux-contract.ts",
     "pre-pr": "bun run typecheck && bun run pre-pr:harness",
     "pre-pr:harness": "vitest run tests/live-agent-harness.test.ts tests/live-agent-harness-ci.test.ts tests/live-agent-harness-replay.test.ts tests/pre-pr-scripts.test.ts",

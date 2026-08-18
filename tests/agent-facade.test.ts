@@ -18,6 +18,8 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     model: "sonnet",
     cli: "claude",
     cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    launcher_name: "brainlayerClaude",
+    launch_cwd: "/Users/etanheyman/Gits/brainlayer",
     task_summary: "Fix the bug",
     pid: null,
     version: 1,
@@ -138,6 +140,36 @@ describe("agent facade projections", () => {
         "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
     expect((projected as any).surface_id).toBeUndefined();
+  });
+
+  it("emits a raw cd+CLI resume for a registry-less record (issue #392)", () => {
+    const projected = toPublicAgent(
+      makeRecord({ launcher_name: null, launch_cwd: "/srv/repos/brainlayer" }),
+    );
+
+    expect(projected.resumable).toBe(true);
+    expect(projected.resume_command).toBe(
+      "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+  });
+
+  it("withholds a cwd-keyed raw resume it cannot aim", () => {
+    const projected = toPublicAgent(
+      makeRecord({ launcher_name: null, launch_cwd: null }),
+    );
+
+    expect(projected.resumable).toBe(false);
+    expect(projected).not.toHaveProperty("resume_command");
+  });
+
+  it("still advertises codex, whose session store is not cwd-keyed", () => {
+    const projected = toPublicAgent(
+      makeRecord({ cli: "codex", launcher_name: null, launch_cwd: null }),
+    );
+
+    expect(projected.resume_command).toBe(
+      "codex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
   });
 
   it("omits resume_command when no session id has been captured", () => {

@@ -3737,7 +3737,7 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(false);
   });
 
-  it("spawn_agent rejects an unregistered repo before worktree or focus mutation", async () => {
+  it("spawn_agent rejects an unresolvable repo before worktree or focus mutation", async () => {
     const registryPath = join(TEST_DIR, "launchers-missing-repo.zsh");
     writeFileSync(
       registryPath,
@@ -3769,7 +3769,11 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(false);
-    expect(parsed.error).toMatch(/Launcher registry miss.*wt-eval-scratch/s);
+    // Registry-optional (#392): an unregistered repo now falls through to the
+    // raw-CLI path, which still refuses when the repo exists nowhere on disk.
+    expect(parsed.error).toMatch(
+      /Cannot resolve a working directory for repo "wt-eval-scratch".*Searched:/s,
+    );
     expect(worktreeExec).not.toHaveBeenCalled();
     expect(
       exec.mock.calls.some(
@@ -7220,7 +7224,7 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
-  it("list_agents keeps a corrupt legacy repo visible but not resumable", async () => {
+  it("list_agents keeps a corrupt legacy repo visible and raw-resumable", async () => {
     const routeClient = makeUuidRouteClient([
       {
         ref: "surface:healthy",
@@ -7280,15 +7284,64 @@ describe("agent lifecycle tool handlers", () => {
     };
 
     expect(parsed.ok).toBe(true);
+    // Issue #392: `codex --dangerously-bypass-approvals-and-sandbox resume <uuid>` reads a global session store, so a
+    // corrupt repo LABEL no longer blocks recovery -- the raw form is real and
+    // runnable. Previously this row advertised nothing at all.
     expect(parsed.agents).toEqual([
       expect.objectContaining({ agent_id: "healthy-agent" }),
       expect.objectContaining({
         agent_id: "corrupt-agent",
-        resumable: expect.objectContaining({ value: false }),
+        resumable: expect.objectContaining({ value: true }),
+        resume_command: "codex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
       }),
     ]);
-    expect(parsed.agents[1]).not.toHaveProperty("resume_command");
     expect(parsed.skipped_agents).toBeUndefined();
+  });
+
+  it("list_agents withholds a cwd-keyed resume for a corrupt legacy repo", async () => {
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:corrupt-claude",
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeef",
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    await serverContexts.at(-1)?.lifecycleStartPromise;
+    const engine = testLifecycleEngine(server);
+    const corrupt = makeServerAgentRecord({
+      agent_id: "corrupt-claude-agent",
+      surface_id: "surface:corrupt-claude",
+      surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeef",
+      workspace_id: "workspace:1",
+      state: "ready",
+      cli: "claude",
+      repo: "brainlayerClaude [surface:199]",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
+    });
+    engine.stateMgr.writeState(corrupt);
+    engine.getRegistry().set(corrupt.agent_id, corrupt);
+    vi.spyOn(engine.getRegistry(), "listMerged").mockResolvedValue([corrupt]);
+
+    const result = await registeredTestTool(server, "list_agents").handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseToolResult(result) as {
+      agents: Array<Record<string, unknown>>;
+    };
+
+    expect(parsed.agents[0]).toMatchObject({
+      agent_id: "corrupt-claude-agent",
+      resumable: expect.objectContaining({ value: false }),
+    });
+    expect(parsed.agents[0]).not.toHaveProperty("resume_command");
   });
 
   it("send_to keeps repaired registry repo ownership when a title contains a surface suffix", async () => {
@@ -8759,6 +8812,8 @@ describe("agent lifecycle tool handlers", () => {
     const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
     const updated = stateMgr.updateRecord(currentAgentId, {
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      launcher_name: "brainlayerClaude",
+      launch_cwd: "/Users/etanheyman/Gits/brainlayer",
     });
     engine.getRegistry().set(currentAgentId, updated);
 
@@ -8775,6 +8830,42 @@ describe("agent lifecycle tool handlers", () => {
       resume_command:
         "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
+  });
+
+  it("list_agents emits a raw cd+CLI resume for a launcher-less agent (#392)", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const list = (server as any)._registeredTools["list_agents"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "task 1",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const stateMgr = engine["stateMgr"];
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const updated = stateMgr.updateRecord(currentAgentId, {
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      launcher_name: null,
+      launch_cwd: "/srv/repos/brainlayer",
+    });
+    engine.getRegistry().set(currentAgentId, updated);
+
+    const result = await list.handler({}, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.agents[0].resume_command).toBe(
+      "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
   });
 
   it("get_agent_state returns full record", async () => {
@@ -9667,6 +9758,7 @@ codex>
     const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
     const updated = stateMgr.updateRecord(currentAgentId, {
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      launcher_name: "golemsCodex",
     });
     engine.getRegistry().set(currentAgentId, updated);
 
@@ -14213,6 +14305,7 @@ codex>
     const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
     const updated = stateMgr.updateRecord(currentAgentId, {
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      launcher_name: "voicelayerClaude",
     });
     engine.getRegistry().set(currentAgentId, updated);
 

@@ -56,6 +56,19 @@ export interface AgentRecord {
   cli_session_id: string | null;
   cli_session_path?: string | null;
   launcher_name?: string | null;
+  /**
+   * Which door launched this agent: the repoGolem launcher, or the raw CLI
+   * because no launcher registration answered (#392). Recorded rather than
+   * inferred from `launcher_name === null`, so a raw launch past a PRESENT
+   * registry is legible after the fact.
+   */
+  launch_mode?: "launcher" | "raw" | null;
+  /**
+   * Whether `model` was actually pinned at launch, and by what (#433 family):
+   * "launcher" (repoGolem carries it), "cli_flag" (an explicit --model the raw
+   * binary understands), or "cli_default" (UNPINNED -- the CLI chose).
+   */
+  model_pin?: "launcher" | "cli_flag" | "cli_default" | null;
   /** Deliberately pinned tab title used by the resume-integrity manifest. */
   tab_name?: string | null;
   seat_id?: string | null;
