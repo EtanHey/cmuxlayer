@@ -11,6 +11,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../src/server.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 import type { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
@@ -219,13 +220,45 @@ describe("F1 — live state, not the stale registry record", () => {
     });
     const parsed = parseResult(result);
 
+    // The receipt may be terminal — but only as a PROVEN success. What must
+    // never happen again is a terminal `failed` against a live prompt.
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
-    expect(parsed.terminal, JSON.stringify(parsed)).toBe(false);
     expect(parsed.delivery).not.toBe("failed");
     expect(parsed.delivery_state).not.toBe("failed");
+    expect(parsed.delivered).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
     // The registry lie survives as provenance, not as the verdict.
     expect(parsed.registry_state).toBe("done");
     expect(parsed.health?.reconciled_state).toBe("ready");
+  });
+
+  it("send_to VERIFIES the submit on the stale-done/screen-ready class it newly admits", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-staleverify",
+        surface_id: client.idleSurface,
+        state: "done",
+      }),
+    );
+
+    const result = await callTool(server, "send_to", {
+      mode: "agent",
+      agent_id: "cmuxlayerCodex-staleverify",
+      text: "status?",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+
+    // Widening the gate on live evidence must not hand these deliveries to the
+    // unverified submit path: that is the same receipt lie with the sign
+    // flipped -- a false `ok` instead of a false `failed`.
+    expect(parsed.submit_verified, JSON.stringify(parsed)).toBe(true);
+    // NOTE: `markAgentWorking` still only transitions from `idle`
+    // (agent-engine.ts:8339), so a verified send does not yet correct a
+    // poisoned `done` record. Widening that precondition would erase
+    // done-detection whenever a lead pings a finished worker, so it is a
+    // separate state-machine decision, not part of this gate fix.
   });
 
   it("send_to still refuses when the live screen agrees the surface is dead", async () => {
@@ -272,6 +305,55 @@ describe("F1 — live state, not the stale registry record", () => {
     expect(parsed.terminal, JSON.stringify(parsed)).not.toBe(true);
     expect(parsed.delivery_state ?? parsed.delivery).not.toBe("failed");
     expect(parsed.accepted ?? parsed.ok).toBe(true);
+  });
+
+  it("caller resolution prefers a live record over a stale one on the same surface", async () => {
+    // Pins the tier order the AIDEV-NOTE asserts: live-first, terminal records
+    // only as a fallback. A future reorder that put the stale record first
+    // would resurrect the #378 MEDIUM-A hazard. `mine:true` lists the resolved
+    // caller's children, so whose child comes back names the caller.
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-deadseat",
+        surface_id: client.workingSurface,
+        state: "done",
+      }),
+    );
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-liveseat",
+        surface_id: client.workingSurface,
+        state: "working",
+      }),
+    );
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-childofdead",
+        surface_id: "surface:childofdead",
+        parent_agent_id: "cmuxlayerCodex-deadseat",
+      }),
+    );
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-childoflive",
+        surface_id: "surface:childoflive",
+        parent_agent_id: "cmuxlayerCodex-liveseat",
+      }),
+    );
+
+    const parsed = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: client.workingSurface },
+      async () => parseResult(await callTool(server, "list_agents", { mine: true })),
+    );
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.agents.map((agent: any) => agent.agent_id)).toEqual([
+      "cmuxlayerCodex-childoflive",
+    ]);
   });
 
   it("P11 closure reads pending, not artifact_missing, on a screen-working agent", async () => {

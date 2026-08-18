@@ -3575,6 +3575,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // is the best available caller identity even when the record is stale --
     // the call itself is the liveness evidence. The live-first ordering still
     // lets a genuinely live record win a recycled surface (#378 MEDIUM-A).
+    // AIDEV-TODO (F1 review, finding 2): the LAST tier below matches a terminal
+    // record by `surface_id`, and `surface_id` is a RECYCLABLE ref -- a dead
+    // worker's record whose ref got reused can claim to be the caller, and #378
+    // then forces the new pane's children to worker/right off a corpse. The
+    // obvious guard -- compare the live pane's CLI to the record's, as
+    // deliverAgentInput does -- does NOT work here: `registry.listMerged`
+    // rewrites `record.cli` from the live pane, so by the time caller
+    // resolution runs, a recycled record already claims the new occupant's CLI.
+    // Needs a signal the merge does not overwrite. Tiers 1 and 3 (UUID) are
+    // unaffected. Tracked in #468.
     const live = (agent: AgentRecord): boolean =>
       !isLiveTerminal(liveStateFor(agent));
     return (
@@ -11054,10 +11064,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // be caught, never reported as ok. Verified agent messages may
             // retry Return once only while the exact text remains in a Codex
             // composer; accepted TUI queues are nonterminal receipts instead.
+            // AIDEV-NOTE (F1): gate verification on the SAME live-resolved
+            // state the delivery gate above used. Reading the registry record
+            // here meant the class this lane newly admits -- registry-terminal
+            // + screen `ready` + allow_busy:false -- skipped verification
+            // entirely and returned an unproven success: the same receipt lie
+            // with the sign flipped (false `failed` -> false `ok`). It also
+            // suppressed markAgentWorking below, so the poisoned record was
+            // never corrected and every later send repeated the unverified path.
             verify_submit:
               args.press_enter &&
-              (args.allow_busy ||
-                INTERACTIVE_AGENT_STATES.has(deliveryRoute.state)),
+              (args.allow_busy || isLiveDeliverable(liveRouteState)),
             // A single recovery Return is part of verified sends and inbox
             // wakeups. Other lifecycle mutations (notably goal supersession)
             // retain their stricter no-retry evidence semantics.
