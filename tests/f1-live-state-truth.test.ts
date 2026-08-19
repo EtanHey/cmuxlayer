@@ -356,6 +356,73 @@ describe("F1 — live state, not the stale registry record", () => {
     ]);
   });
 
+  it("#468: a terminal record from a prior observer cannot claim a recycled ref", async () => {
+    // `surface_id` is a RECYCLABLE ref. A dead worker's record whose ref was
+    // reused by a new pane used to win the last resolution tier and become the
+    // caller -- and the #378 guard then forced the new pane's children to
+    // worker/right off a corpse. The record's own CLI cannot arbitrate
+    // (`listMerged` rewrites it from the live pane), but `surface_observer_id`
+    // is not rewritten by the merge: a ref stamped by a dead socket generation
+    // says nothing about who is on that ref now.
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-corpse",
+        surface_id: client.idleSurface,
+        state: "done",
+        surface_observer_id: "cmux:/tmp/cmux-f1-previous-generation.sock",
+      }),
+    );
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-childofcorpse",
+        surface_id: "surface:childofcorpse",
+        parent_agent_id: "cmuxlayerCodex-corpse",
+      }),
+    );
+
+    const parsed = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: client.idleSurface },
+      async () => parseResult(await callTool(server, "list_agents", { mine: true })),
+    );
+
+    // An explicit refusal, not a confident wrong answer.
+    expect(parsed.ok).toBe(false);
+    expect(JSON.stringify(parsed)).toContain("managed calling agent identity");
+  });
+
+  it("#468: a terminal record this observer owns still resolves as the caller", async () => {
+    // Tier 4 exists because #408 flips live agents to `done`; the guard must
+    // narrow it to recycling-proof records, not delete it (that re-breaks U6).
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-ownedterminal",
+        surface_id: client.idleSurface,
+        state: "done",
+      }),
+    );
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-childofowned",
+        surface_id: "surface:childofowned",
+        parent_agent_id: "cmuxlayerCodex-ownedterminal",
+      }),
+    );
+
+    const parsed = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: client.idleSurface },
+      async () => parseResult(await callTool(server, "list_agents", { mine: true })),
+    );
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.agents.map((agent: any) => agent.agent_id)).toEqual([
+      "cmuxlayerCodex-childofowned",
+    ]);
+  });
+
   it("P11 closure reads pending, not artifact_missing, on a screen-working agent", async () => {
     registerAgent(
       server,

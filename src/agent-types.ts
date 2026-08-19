@@ -21,7 +21,9 @@ export type AgentFunction = "implementor" | "reviewer" | "gatherer";
 export type AgentPlacement = "left" | "right";
 export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
-export type ObservationSource = "screen" | "registry" | "process";
+// `disk` is a filesystem observation (today: the harness session artifact
+// behind `resumable`, #482), as opposed to a remembered registry field.
+export type ObservationSource = "screen" | "registry" | "process" | "disk";
 export type AgentReviveOutcome =
   "pending" | "failed" | "revived" | "unrecoverable";
 export type AgentHaltType =
