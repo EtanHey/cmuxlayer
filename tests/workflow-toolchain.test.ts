@@ -38,9 +38,10 @@ function suiteJobs(): Job[] {
     flush();
   }
 
-  return jobs.filter(({ source }) =>
-    /^\s*-?\s*run:.*\b(npm|bun) (run )?test\b/m.test(source),
-  );
+  // Match the job BODY, not the `run:` line: `run: |` with the invocation on the
+  // next line is the ordinary Actions idiom, and a filter anchored to `run:`
+  // walks straight past it — along with composite and reusable workflows.
+  return jobs.filter(({ source }) => /\b(npm|bun) (run )?test\b/.test(source));
 }
 
 /**

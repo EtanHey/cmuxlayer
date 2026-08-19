@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -456,9 +457,28 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
 
     expect(result.status).toBe(0);
-    expect(readReceipt(fixture, "0.4.1").gates.ci).toBe("success");
+    const receipt = readReceipt(fixture, "0.4.1");
+    expect(receipt.gates.ci).toBe("success");
+    // The verdict names the commit it is ABOUT. The read happens before the
+    // version bump, so it is the commit the release was cut from, not the tag's.
+    expect(receipt.gates.ci_commit).toBe("1".repeat(40));
+    // `gh run list --commit` matches nothing on an abbreviated sha, so a short
+    // one would silently read as "unknown". Keep the full form.
     expect(result.log).toContain(`gh run list --commit ${"1".repeat(40)}`);
-    expect(result.stdout).toContain("CI: success");
+    expect(result.stdout).toContain(
+      `CI: success (ci.yml on ${"1".repeat(40)} — the commit this release was cut from)`,
+    );
+  });
+
+  it("bumps package.json without changing its file mode", () => {
+    const fixture = makeReleaseFixture();
+    const manifest = join(fixture.repoDir, "package.json");
+    chmodSync(manifest, 0o640);
+
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(statSync(manifest).mode & 0o777).toBe(0o640);
   });
 
   it("never lets a release read as clean while its CI is red", () => {

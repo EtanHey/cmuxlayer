@@ -33,6 +33,7 @@ DRY=0
 REQUIRE_CONTRACT=0
 REQUIRE_CI=0
 CI_CONCLUSION="unknown"
+CI_COMMIT_LABEL="HEAD"
 for arg in "${@:2}"; do
   case "$arg" in
     --yes) YES=1 ;;
@@ -59,10 +60,13 @@ run() { if [ "$DRY" -eq 1 ]; then printf 'DRY  %s\n' "$*"; else eval "$@"; fi; }
 # reads the '' as the script and the expression as a filename, exits 2, and
 # takes this script down with it — which is why every Linux CI run of the
 # release-receipt tests failed while the same tests passed on a Mac.
+# Writes back through the ORIGINAL file rather than mv-ing the tmpfile over it:
+# mv would hand the target the tmpfile's 0600 and owner, a mode change `sed -i`
+# never makes.
 sed_inplace() {
   local expression="$1" file="$2" tmp
   tmp="$(mktemp)"
-  sed -E "$expression" "$file" >"$tmp" && mv "$tmp" "$file"
+  sed -E "$expression" "$file" >"$tmp" && cat "$tmp" >"$file" && rm -f "$tmp"
 }
 
 # Receipt writes are never allowed to fail a release: the ledger records the
@@ -108,13 +112,21 @@ fi
 if [ "$DRY" -eq 1 ]; then
   printf 'DRY  %s\n' "read CI status for HEAD"
 else
+  # `gh run list --commit` needs the FULL sha; an abbreviated one matches nothing
+  # and would read as `unknown`. Never loosen this to a short sha.
   RELEASE_COMMIT="$(git rev-parse HEAD)"
+  CI_COMMIT_LABEL="$RELEASE_COMMIT"
   # An unusable gh -- absent, unauthenticated, offline -- reads as unknown.
   # Only a real `success` from a real run is allowed to look green.
   CI_CONCLUSION="$(gh run list --commit "$RELEASE_COMMIT" --workflow ci.yml \
     --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || true)"
   [ -n "$CI_CONCLUSION" ] || CI_CONCLUSION="unknown"
   receipt_record "gates.ci" "$CI_CONCLUSION"
+  # Name the commit the verdict is ABOUT. The read happens before the version
+  # bump, so this is the commit the release was cut from -- not the tag's commit.
+  # In the one file whose purpose is that a release cannot look cleaner than it
+  # is, "which commit" cannot be left to inference.
+  receipt_record "gates.ci_commit" "$RELEASE_COMMIT"
   if [ "$CI_CONCLUSION" != "success" ]; then
     if [ "$REQUIRE_CI" -eq 1 ]; then
       die "--require-ci: CI for $RELEASE_COMMIT is $CI_CONCLUSION, not success"
@@ -283,7 +295,7 @@ fi
 cat <<EOF
 
 release: done — cmuxlayer $TAG is tagged and the formula is bumped.
-CI: $CI_CONCLUSION (workflow ci.yml on the released commit)
+CI: $CI_CONCLUSION (ci.yml on $CI_COMMIT_LABEL — the commit this release was cut from)
 Receipt: $RECEIPT_LABEL
 Next (on EACH Mac — each run appends its own install evidence to the receipt):
   $REPO_DIR/scripts/release-verify.sh "$VERSION"
