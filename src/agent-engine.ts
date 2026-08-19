@@ -5751,7 +5751,19 @@ export class AgentEngine {
       // text in hand, closure resolves from THAT rather than from the discovery
       // cache, which may be cold on this path too. No new read: when there is
       // no screen text, the injected probe is used exactly as before.
-      const sweepScreenText = taskDoneResult.screenText;
+      // The done-detection pass returns early for a record already at `done`
+      // -- exactly #488's shape -- so its screen text is absent precisely when
+      // closure needs it. `readSweepScreen` memoizes on `sweepCtx`, which the
+      // health input below reuses for this same agent, so this shares that
+      // read rather than adding one.
+      let sweepScreenText = taskDoneResult.screenText;
+      if (sweepScreenText === undefined) {
+        try {
+          sweepScreenText = (await this.readSweepScreen(agent, sweepCtx)).text;
+        } catch {
+          // No screen is no evidence; the injected probe answers as before.
+        }
+      }
       const harvestability = this.assessHarvestability(agent, {
         live:
           sweepScreenText === undefined
