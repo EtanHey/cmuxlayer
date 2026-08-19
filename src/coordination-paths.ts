@@ -121,8 +121,15 @@ export function coordinationFooterBytes(contract: CoordinationContract): number 
  * into one falsey value, the same hazard `paused` shipped with in v0.4.41 and
  * that v0.4.42 fixed by attaching provenance (types.ts pauseHonestyFields).
  *
- * Invariant: `artifact_missing` is reachable ONLY from state "done", so it is
- * an actionable deadlock signal on its own -- no cross-referencing required.
+ * Invariant: `artifact_missing` is reachable ONLY from state "done" AND from
+ * POSITIVE done evidence, so it is an actionable deadlock signal on its own --
+ * no cross-referencing required.
+ *
+ * AIDEV-NOTE (T1b/#488): the second half of that invariant is the fix. A bare
+ * registry flip to `done` (#408 does this within minutes, with nothing having
+ * observed a done) used to be enough, so healthy mid-work children -- one of
+ * them two minutes old -- rendered the "route a reviewer NOW" signal. Absence
+ * of done evidence is `pending`, never a deadlock claim.
  */
 export type ClosureState =
   | "verified"
@@ -135,13 +142,20 @@ export function resolveClosureState(input: {
   role?: string | null;
   contractIssued: boolean;
   closureArtifactVerified: boolean | null;
+  /**
+   * Something OBSERVED this agent finish: a done marker on screen
+   * (`task_done_detected_at`), a harness transcript that ended, or a verified
+   * report. Required -- not optional -- so every call site has to say which
+   * evidence it has rather than inheriting the record's word for it.
+   */
+  doneEvidence: boolean;
 }): ClosureState {
   if (!input.contractIssued) return "not_applicable";
   if (input.role === "orchestrator") return "not_applicable";
   if (input.state !== "done") return "pending";
-  return input.closureArtifactVerified === true
-    ? "verified"
-    : "artifact_missing";
+  // A verified artifact IS positive done evidence, so it is checked first.
+  if (input.closureArtifactVerified === true) return "verified";
+  return input.doneEvidence ? "artifact_missing" : "pending";
 }
 
 // ---------------------------------------------------------------------------

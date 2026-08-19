@@ -13690,6 +13690,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   topology,
                 );
                 const reconciledState = health.reconciled_state ?? agent.state;
+                // AIDEV-NOTE (T1b/#488): ONE observation per row. `closure`
+                // used to re-resolve live state through the discovery cache
+                // (`cachedScan()`, null past 2000ms) while `state` right above
+                // used THIS call's own scan -- so a cold cache made one row
+                // read `working` and `artifact_missing` at the same time, and
+                // flap as the cache aged. Same evidence, resolved once, passed
+                // to both. Costs zero extra screen reads: the scan already
+                // happened at the top of this call.
+                const rowLiveState = resolveLiveAgentState(
+                  agent,
+                  trustedScreenObservation
+                    ? {
+                        status: trustedScreenObservation.parsed_status,
+                        agent_type:
+                          trustedScreenObservation.cli === "kiro"
+                            ? "unknown"
+                            : trustedScreenObservation.cli,
+                        control_state: trustedScreenObservation.control_state,
+                      }
+                    : null,
+                );
+                const rowHarvestability = engine.assessHarvestability(agent, {
+                  live: rowLiveState,
+                });
                 const screenObservation = trustedScreenObservation
                   ? {
                       observed_at_ms: liveDiscovery!.observed_at_ms,
@@ -13732,7 +13756,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     // deadlocked child (done, no artifact -> act) from a busy one
                     // (pending -> wait) WITHOUT a second full-detail call. A bare
                     // boolean made both of those `false`; that was the S3 bug.
-                    closure: engine.assessHarvestability(agent).closure,
+                    closure: rowHarvestability.closure,
                     ...(args.detail === "full"
                       ? {
                           health: {
@@ -13743,7 +13767,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           },
                           detail: {
                             ...toAgentStatePayload(agent),
-                            harvestability: engine.assessHarvestability(agent),
+                            harvestability: rowHarvestability,
                           },
                         }
                       : {}),

@@ -112,7 +112,11 @@ describe("P11 boot footer (Constraint 1: <=2 short lines, bytes declared)", () =
 });
 
 describe("P11 closure state (Constraint 3: no bare boolean at default detail)", () => {
-  const issued = { contractIssued: true };
+  // T1b (#488): `observed` is a done that something actually SAW -- a done
+  // marker on screen, a finished transcript. `unobserved` is the bare registry
+  // flip #408 writes on live agents, which must never claim a deadlock.
+  const issued = { contractIssued: true, doneEvidence: true };
+  const unobserved = { contractIssued: true, doneEvidence: false };
 
   it("done + verified artifact => verified", () => {
     expect(
@@ -124,7 +128,7 @@ describe("P11 closure state (Constraint 3: no bare boolean at default detail)", 
     ).toBe("verified");
   });
 
-  it("S3 SIGNATURE: done + no artifact => artifact_missing, NOT pending", () => {
+  it("S3 SIGNATURE: done + done evidence + no artifact => artifact_missing, NOT pending", () => {
     expect(
       resolveClosureState({
         ...issued,
@@ -132,6 +136,26 @@ describe("P11 closure state (Constraint 3: no bare boolean at default detail)", 
         closureArtifactVerified: false,
       }),
     ).toBe("artifact_missing");
+  });
+
+  it("T1b: done with NO done evidence => pending, never artifact_missing", () => {
+    const closure = resolveClosureState({
+      ...unobserved,
+      state: "done",
+      closureArtifactVerified: false,
+    });
+    expect(closure).toBe("pending");
+    expect(closure).not.toBe("artifact_missing");
+  });
+
+  it("T1b: a verified artifact IS done evidence, so it still reads verified", () => {
+    expect(
+      resolveClosureState({
+        ...unobserved,
+        state: "done",
+        closureArtifactVerified: true,
+      }),
+    ).toBe("verified");
   });
 
   it("still working => pending, and NEVER artifact_missing", () => {
@@ -165,6 +189,7 @@ describe("P11 closure state (Constraint 3: no bare boolean at default detail)", 
     expect(
       resolveClosureState({
         contractIssued: false,
+        doneEvidence: true,
         state: "done",
         closureArtifactVerified: null,
       }),

@@ -382,7 +382,7 @@ describe("F1 — live state, not the stale registry record", () => {
     expect(row.closure).toBe("pending");
   });
 
-  it("P11 closure still reports artifact_missing when the screen confirms done", async () => {
+  it("P11 closure still reports artifact_missing when a done was OBSERVED", async () => {
     client.screens["surface:idle"] = [
       "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
       "codex>",
@@ -393,6 +393,10 @@ describe("F1 — live state, not the stale registry record", () => {
         agent_id: "cmuxlayerCodex-finished",
         surface_id: client.idleSurface,
         state: "done",
+        // T1b (#488): the record alone is no longer enough to claim a deadlock
+        // -- #408 writes `done` on live agents without anything observing one.
+        // This agent's done WAS observed, so the signal must survive.
+        task_done_detected_at: "2026-08-18T13:41:00.000Z",
         report_path: join(TEST_DIR, "reports", "missing.md"),
         done_marker: "### @cmuxlayerCodex-finished DONE",
       } as Partial<AgentRecord> as any),
