@@ -292,9 +292,9 @@ export function buildAdjudicationManifest(run, { fps = 10 } = {}) {
     for (const question of spec.questions) {
       const mark = step.marks?.[question.mark];
       const id = `${step.id}.${question.suffix}`;
-      // A mark taken while the probe window was not frontmost recorded some
-      // OTHER window. Those frames cannot answer anything about the probe, and
-      // asking a sub-agent about them invites a confident wrong answer.
+      // A mark taken while the probe window was occluded recorded some OTHER
+      // window. Those frames cannot answer anything about the probe, and asking
+      // a sub-agent about them invites a confident wrong answer.
       if (mark && mark.frontmost === false) {
         questions.push({
           id,
@@ -309,7 +309,7 @@ export function buildAdjudicationManifest(run, { fps = 10 } = {}) {
           frames: [],
           frame_times: [],
           unadjudicable_reason:
-            "the probe window was not frontmost at this mark; the recording captured a different window",
+            "the probe window was occluded at this mark; the recording captured a different window",
         });
         continue;
       }

@@ -19,17 +19,12 @@
 
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import {
-  DRY_RUN_SPEC,
-  PROBE_SPECS,
-  buildAdjudicationManifest,
-  wallToVideoSeconds,
-} from "./qa-video-lib.mjs";
+import { DRY_RUN_SPEC, PROBE_SPECS, buildAdjudicationManifest } from "./qa-video-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -40,9 +35,8 @@ const DEFAULTS = {
   cli: "cursor",
   repo: "cmuxlayer",
   captureFps: 15,
+  scaleWidth: 0,
   frameFps: 10,
-  scaleWidth: 1728,
-  crop: "auto",
   waitTimeoutMs: 8_000,
   agentReadyTimeoutMs: 180_000,
   root: "",
@@ -62,9 +56,8 @@ Options:
   --cli <claude|codex|cursor|gemini|kiro>  Agent CLI for probe agents (default: ${DEFAULTS.cli})
   --repo <name>             repoGolem repo for spawns (default: ${DEFAULTS.repo})
   --capture-fps <n>         Screen capture framerate (default: ${DEFAULTS.captureFps})
+  --scale-width <px>        Downscale the recording to this width (default: native)
   --frame-fps <n>           Frame extraction density around each mark (default: ${DEFAULTS.frameFps})
-  --scale-width <px>        Downscale recording to this width (default: ${DEFAULTS.scaleWidth}, 0 = native)
-  --crop <auto|off|x,y,w,h> Crop to the probe window (default: ${DEFAULTS.crop})
   --wait-timeout-ms <ms>    Timeout for the wait_for probe (default: ${DEFAULTS.waitTimeoutMs})
   --root <dir>              Output dir (default: results/qa-video/<runId>)
   --server-command <cmd>    MCP server executable
@@ -97,14 +90,11 @@ function parseArgs(argv) {
       case "--capture-fps":
         options.captureFps = Number(argv[++index]);
         break;
-      case "--frame-fps":
-        options.frameFps = Number(argv[++index]);
-        break;
       case "--scale-width":
         options.scaleWidth = Number(argv[++index]);
         break;
-      case "--crop":
-        options.crop = argv[++index];
+      case "--frame-fps":
+        options.frameFps = Number(argv[++index]);
         break;
       case "--wait-timeout-ms":
         options.waitTimeoutMs = Number(argv[++index]);
@@ -177,38 +167,105 @@ async function listWindowIds() {
 }
 
 /**
- * Locate the probe window by its unique title.
+ * Read cmux's on-screen windows from CoreGraphics.
  *
- * AIDEV-NOTE: an earlier version of this asked System Events for "the frontmost
- * process" instead. On a live desktop that is whatever the human last touched —
- * the first dry-run cropped the recording to a browser window and captured the
- * operator's private messages instead of the probe. Never widen this back to a
- * frontmost/heuristic lookup: the window is addressed by the title this harness
- * assigned to it, or it is not addressed at all.
+ * AIDEV-NOTE: an earlier implementation used System Events / AppleScript and was
+ * wrong in three escalating ways. It asked for "the frontmost process", which on
+ * a live desktop is whatever the human last touched — the first recording cropped
+ * to a browser window and captured private content. Targeting cmux by window
+ * title then failed because a freshly created cmux window is intermittently
+ * absent from the accessibility window list. And even with correct bounds, cmux
+ * does not always open its new window on the main display, so the recorder was
+ * capturing a different screen entirely. CoreGraphics is the window server's own
+ * list: no Accessibility grant, it always sees the window, and it hands back the
+ * CGWindowID that makes all of the above moot.
  */
-async function probeWindowRect(title) {
-  try {
-    const { stdout } = await execFileAsync("osascript", [
-      "-e",
-      `tell application "System Events" to tell process "cmux" to get {position, size} of (first window whose name is "${title}")`,
-    ]);
-    const [x, y, width, height] = stdout.trim().split(", ").map(Number);
-    if ([x, y, width, height].some((value) => !Number.isFinite(value))) return null;
-    if (width < 400 || height < 300) return null;
-    return { x, y, width, height };
-  } catch {
-    return null;
-  }
+async function readWindowState() {
+  const { stdout } = await execFileAsync("python3", [join(__dirname, "qa-video-windows.py")], {
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const parsed = JSON.parse(stdout);
+  if (parsed.error) throw new Error(`window enumeration failed: ${parsed.error}`);
+  return parsed;
+}
+
+function rectsIntersect(a, b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+function displayContaining(displays, bounds) {
+  const centre = { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h / 2 };
+  return (
+    displays.find(
+      (display) =>
+        centre.x >= display.bounds.x &&
+        centre.x < display.bounds.x + display.bounds.w &&
+        centre.y >= display.bounds.y &&
+        centre.y < display.bounds.y + display.bounds.h,
+    ) ?? displays.find((display) => display.main) ?? displays[0] ?? null
+  );
 }
 
 /**
- * Raise the probe window so the recording sees it rather than whatever occludes it.
+ * Everything the recorder needs about the probe window: which display it is on,
+ * the crop rectangle in that display's capture pixels, and whether any other
+ * ordinary window is covering it.
  *
- * AIDEV-NOTE: `cmux focus-window` changes cmux's own selection but does not
- * reorder macOS windows, so on its own it left the operator's main cmux window
- * on top and the recording captured that instead. AXRaise is what actually
- * restacks; the frontmost check below is what proves it worked.
+ * AIDEV-NOTE: cmux does NOT always open its new window on the main display.
+ * Recording display 0 while the probe window sat on display 1 is what made two
+ * whole runs' worth of frames show the wrong screen while looking perfectly
+ * plausible.
  */
+async function probeWindowGeometry(title) {
+  const state = await readWindowState();
+  const cmuxWindows = state.windows.filter((window) => window.owner === "cmux");
+  // The short sibling window is cmux's tab strip, not the window we mean.
+  const probe = cmuxWindows.find((window) => window.name === title && window.bounds.h > 200);
+  if (!probe) return null;
+
+  const display = displayContaining(state.displays, probe.bounds);
+  if (!display) return null;
+
+  // Anything at the same window layer sitting ahead of the probe in front-to-back
+  // order and overlapping it is, literally, covering the evidence.
+  const occluders = state.windows
+    .slice(0, state.windows.indexOf(probe))
+    .filter(
+      (window) =>
+        window.layer === probe.layer &&
+        window.bounds.w > 40 &&
+        window.bounds.h > 40 &&
+        rectsIntersect(window.bounds, probe.bounds),
+    )
+    .map((window) => `${window.owner}: ${window.name || "(untitled)"}`);
+
+  const scale = display.scale || 1;
+  return {
+    id: probe.id,
+    bounds: probe.bounds,
+    display,
+    occluders,
+    clear: occluders.length === 0,
+    crop: {
+      x: Math.round((probe.bounds.x - display.bounds.x) * scale),
+      y: Math.round((probe.bounds.y - display.bounds.y) * scale),
+      width: Math.round(probe.bounds.w * scale),
+      height: Math.round(probe.bounds.h * scale),
+    },
+  };
+}
+
+/** True when the probe window exists and nothing ordinary is covering it. */
+async function probeWindowIsFrontmost(title) {
+  try {
+    const geometry = await probeWindowGeometry(title);
+    return Boolean(geometry?.clear);
+  } catch {
+    return false;
+  }
+}
+
+/** Raise the probe window so the recorded region shows it and not something else. */
 async function focusProbeWindow(windowId, title) {
   try {
     await cmux(["focus-window", "--window", windowId]);
@@ -218,22 +275,8 @@ async function focusProbeWindow(windowId, title) {
   try {
     await execFileAsync("osascript", ["-e", 'tell application "cmux" to activate']);
   } catch {
-    /* cmux may be named differently in a fresh install; AXRaise below still helps */
+    /* cmux may be named differently in a fresh install */
   }
-  await raiseProbeWindow(title);
-}
-
-/**
- * Restack-only raise: AXRaise plus app activation, and nothing that touches
- * cmux's own state.
- *
- * AIDEV-NOTE: the per-step re-assert deliberately does NOT call
- * `cmux focus-window`. Doing so between probes churned cmux's surface topology
- * badly enough that spawn_agent started failing with "not live or uniquely
- * resolvable in a complete fresh topology" — the harness was perturbing the
- * system it is supposed to observe.
- */
-async function raiseProbeWindow(title) {
   if (!title) return;
   try {
     await execFileAsync("osascript", [
@@ -244,81 +287,167 @@ async function raiseProbeWindow(title) {
        end tell`,
     ]);
   } catch {
-    /* verified separately by probeWindowIsFrontmost */
+    /* best effort; the recorder does not care */
   }
 }
 
 /**
- * True only when cmux is the frontmost app AND the probe window is that app's
- * main window — i.e. nothing can be occluding the region we are about to crop.
- *
- * AIDEV-NOTE: this used to test `name of window 1`. cmux keeps a nameless
- * utility window that intermittently occupies index 1, which made the check
- * fail on a correctly-raised probe window. AXMain asks the question directly.
+ * AIDEV-NOTE: a cmux window that is not on the active Space is absent from the
+ * on-screen window list and cannot be captured at all ("could not create image
+ * from window"). Focusing it brings its Space forward, so the wait re-focuses
+ * each round rather than passively polling.
  */
-async function probeWindowIsFrontmost(title) {
+/**
+ * Restack-only raise: AXRaise plus app activation, and nothing that touches
+ * cmux's own state.
+ *
+ * AIDEV-NOTE: the per-step re-assert deliberately does NOT call
+ * `cmux focus-window`. Doing so between probes churned cmux's surface topology
+ * badly enough that spawn_agent started failing with "not live or uniquely
+ * resolvable in a complete fresh topology" — the harness was perturbing the
+ * system it exists to observe. AXRaise returns before the window server has
+ * restacked, hence the settle-and-verify loop.
+ */
+async function raiseProbeWindow(title, { attempts = 4, settleMs = 400 } = {}) {
+  if (!title) return false;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await execFileAsync("osascript", [
+        "-e",
+        `tell application "System Events" to tell process "cmux"
+           set frontmost to true
+           perform action "AXRaise" of (first window whose name is "${title}")
+         end tell`,
+      ]);
+    } catch {
+      /* verified below by CoreGraphics, not by the raise's own report */
+    }
+    await sleep(settleMs);
+    if (await probeWindowIsFrontmost(title)) return true;
+  }
+  return false;
+}
+
+/**
+ * Move the probe window onto a display that no other ordinary window occupies.
+ *
+ * AIDEV-NOTE: this is the fix that finally made isolation hold. The harness runs
+ * from inside a cmux pane, so the operator's own cmux window is being activated
+ * constantly by the very commands driving the probe — fighting it for z-order on
+ * a shared rectangle is a fight the harness cannot win, and every run that tried
+ * ended up recording the operator's window. Occlusion is per-display, so putting
+ * the probe window on its own display makes stacking irrelevant. On a
+ * single-display machine this is a no-op and the z-order checks still apply.
+ */
+async function isolateProbeWindowOnOwnDisplay(title, attempt = 0) {
+  const state = await readWindowState();
+  if (state.displays.length < 2) return false;
+  const probe = state.windows.find(
+    (window) => window.owner === "cmux" && window.name === title && window.bounds.h > 200,
+  );
+  if (!probe) return false;
+
+  const occupancy = new Map(state.displays.map((display) => [display.index, 0]));
+  for (const window of state.windows) {
+    if (window.layer !== probe.layer) continue;
+    if (window === probe) continue;
+    if (window.bounds.w < 200 || window.bounds.h < 200) continue;
+    const display = displayContaining(state.displays, window.bounds);
+    if (display) occupancy.set(display.index, (occupancy.get(display.index) ?? 0) + 1);
+  }
+  const ranked = state.displays
+    .slice()
+    .sort((a, b) => (occupancy.get(a.index) ?? 0) - (occupancy.get(b.index) ?? 0));
+  // Retries walk down the ranking: the emptiest display is a good guess, not a
+  // guarantee, and a full-screen window the heuristic under-counts should not
+  // wedge the harness onto a display it can never own.
+  const target = ranked[attempt % ranked.length];
+  if (!target) return false;
+  const current = displayContaining(state.displays, probe.bounds);
+  if (current && current.index === target.index && attempt === 0) return true;
+
   try {
-    const { stdout } = await execFileAsync("osascript", [
+    await execFileAsync("osascript", [
       "-e",
-      `tell application "System Events" to tell process "cmux" to get {frontmost, value of attribute "AXMain" of (first window whose name is "${title}")}`,
+      `tell application "System Events" to tell process "cmux" to tell (first window whose name is "${title}")
+         set position to {${target.bounds.x}, ${target.bounds.y + 25}}
+         set size to {${target.bounds.w}, ${target.bounds.h - 50}}
+       end tell`,
     ]);
-    const [frontmost, isMain] = stdout.trim().split(", ");
-    return frontmost === "true" && isMain === "true";
   } catch {
     return false;
   }
+  await sleep(800);
+  return true;
 }
 
-/**
- * AIDEV-NOTE: a cmux window only publishes its title to the accessibility layer
- * once it has been focused, and the update lags the rename by a second or two.
- * Poll rather than sleeping a guessed amount, re-asserting focus each round.
- */
-async function waitForProbeWindowRect(probeWindow, timeoutMs = 20_000) {
+async function waitForProbeGeometry(probeWindow, timeoutMs = 25_000) {
   const deadline = nowMs() + timeoutMs;
-  for (;;) {
+  for (let attempt = 0; ; attempt += 1) {
+    await isolateProbeWindowOnOwnDisplay(probeWindow.title, attempt);
     await focusProbeWindow(probeWindow.windowId, probeWindow.title);
-    await sleep(1_000);
-    const rect = await probeWindowRect(probeWindow.title);
-    if (rect && (await probeWindowIsFrontmost(probeWindow.title))) return rect;
-    if (nowMs() >= deadline) return null;
+    await sleep(800);
+    await raiseProbeWindow(probeWindow.title);
+    const geometry = await probeWindowGeometry(probeWindow.title).catch(() => null);
+    if (geometry?.clear) return geometry;
+    if (nowMs() >= deadline) return geometry ?? null;
   }
 }
-
 
 // ---------------------------------------------------------------------------
 // Recorder
 // ---------------------------------------------------------------------------
 
-async function detectScreenDeviceIndex() {
-  return new Promise((resolveIndex) => {
-    const child = spawn("ffmpeg", [
-      "-hide_banner",
-      "-f",
-      "avfoundation",
-      "-list_devices",
-      "true",
-      "-i",
-      "",
-    ]);
-    let output = "";
+/**
+ * Map a CoreGraphics display index onto its avfoundation input index.
+ *
+ * ffmpeg names these "Capture screen N" following CGGetActiveDisplayList order,
+ * but the surrounding numbering also counts cameras, so the two indices are not
+ * interchangeable and must be looked up rather than assumed.
+ */
+async function screenDeviceIndexFor(displayIndex = 0) {
+  const output = await new Promise((resolveOutput) => {
+    const child = spawn("ffmpeg", ["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]);
+    let buffer = "";
     child.stderr.on("data", (chunk) => {
-      output += chunk.toString();
+      buffer += chunk.toString();
     });
-    child.on("close", () => {
-      const match = output.match(/\[(\d+)\]\s+Capture screen 0/);
-      resolveIndex(match ? match[1] : "1");
-    });
+    child.on("close", () => resolveOutput(buffer));
   });
+  const screens = new Map();
+  for (const match of output.matchAll(/\[(\d+)\]\s+Capture screen (\d+)/g)) {
+    screens.set(Number(match[2]), match[1]);
+  }
+  const found = screens.get(Number(displayIndex));
+  if (found) return found;
+  const fallback = screens.get(0);
+  if (fallback) {
+    process.stderr.write(
+      `[qa-video] warning: no avfoundation input for display ${displayIndex}; falling back to Capture screen 0\n`,
+    );
+    return fallback;
+  }
+  throw new Error("ffmpeg reports no screen-capture inputs; check Screen Recording permission");
 }
 
 /**
- * ffmpeg/avfoundation recorder.
+ * ffmpeg/avfoundation screen-region recorder.
  *
  * AIDEV-NOTE: ffmpeg is chosen over `screencapture -v` because it reports its
  * own clock through `-progress`, which is what lets every probe timestamp be
  * mapped onto the recording. `screencapture -v` gives no such signal, so its
  * frames could only ever be aligned by eye.
+ *
+ * AIDEV-NOTE: capturing the window's own content with `screencapture -l
+ * <CGWindowID>` was tried and REJECTED, despite being immune to occlusion,
+ * display placement and focus stealing. cmux renders its terminals with Metal,
+ * and window-content capture returns the window chrome with a blank content
+ * area — the sidebar and title render, the terminal text does not. Do not
+ * "improve" this back to window capture without checking a frame first.
+ *
+ * Because this records a REGION, isolation is not free: the probe window has to
+ * be the frontmost thing on that region, which is what the CoreGraphics
+ * occlusion check above is for, and what every mark's `frontmost` flag records.
  */
 class Recorder {
   constructor({ path, captureFps, scaleWidth, crop, deviceIndex }) {
@@ -399,6 +528,11 @@ class Recorder {
         done();
       });
     });
+  }
+
+  /** Seconds from the recording's anchor for a wall-clock instant. */
+  secondsAt(wallMs) {
+    return Math.round((this.t0VideoS + (wallMs - this.t0WallMs) / 1000) * 1000) / 1000;
   }
 
   async stop() {
@@ -625,12 +759,10 @@ class RunLog {
   }
 
   /**
-   * Re-assert the raise before every probe.
-   *
-   * AIDEV-NOTE: a five-minute full run lost the probe window to the operator's
-   * main cmux window partway through, and every probe after that point recorded
-   * the wrong window. Raising once before the recorder starts is not enough —
-   * anything on the desktop can restack at any time.
+   * Re-assert the raise before every probe. Raising once before the recorder
+   * starts is not enough — anything on the desktop can restack at any time, and
+   * a five-minute run has already been observed losing the probe window to the
+   * operator's own cmux window partway through.
    */
   async enterStep(spec, context = {}) {
     await raiseProbeWindow(this.probeWindow.title);
@@ -644,16 +776,16 @@ class RunLog {
   }
 
   /**
-   * Every mark records whether the probe window was frontmost at that instant.
-   * A mark with `frontmost: false` is one the manifest refuses to ask about.
+   * Marks are wall-clock instants stamped onto the capture timeline.
+   *
+   * AIDEV-NOTE: every mark records whether the probe window was actually
+   * unoccluded at that instant. The recorder captures a screen REGION, so
+   * anything stacked over it silently replaces the evidence; a mark with
+   * `frontmost: false` is one the manifest refuses to ask a question about.
    */
   async mark(step, name) {
     const wallMs = nowMs();
-    const videoS = wallToVideoSeconds(
-      { t0WallMs: this.recorder.t0WallMs, t0VideoS: this.recorder.t0VideoS },
-      wallMs,
-    );
-    const entry = { wallMs, videoS, at: new Date(wallMs).toISOString() };
+    const entry = { wallMs, videoS: this.recorder.secondsAt(wallMs), at: new Date(wallMs).toISOString() };
     step.marks[name] = entry;
     entry.frontmost = await probeWindowIsFrontmost(this.probeWindow.title);
     return entry;
@@ -671,15 +803,14 @@ class RunLog {
       error = thrown instanceof Error ? thrown.message : String(thrown);
     }
     const finishedAt = nowMs();
-    const clock = { t0WallMs: this.recorder.t0WallMs, t0VideoS: this.recorder.t0VideoS };
     step.calls.push({
       tool,
       args,
       receipt,
       error,
       started_at: new Date(startedAt).toISOString(),
-      started_video_s: wallToVideoSeconds(clock, startedAt),
-      finished_video_s: wallToVideoSeconds(clock, finishedAt),
+      started_video_s: this.recorder.secondsAt(startedAt),
+      finished_video_s: this.recorder.secondsAt(finishedAt),
       duration_ms: finishedAt - startedAt,
     });
     return { receipt, error };
@@ -1008,46 +1139,40 @@ async function runOnce(options, { runId, root }) {
   process.once("SIGTERM", onSignal);
   let recorder = null;
   let log = null;
+  let geometry = null;
   let occlusionRisk = null;
   const startedAt = new Date().toISOString();
   try {
-    let crop = null;
-    if (options.crop === "auto") {
-      const rect = await waitForProbeWindowRect(probeWindow);
-      if (!rect) {
-        throw new Error(
-          `Could not confirm the probe window "${probeWindow.title}" is frontmost and locatable via System Events. ` +
-            "Recording anyway would capture whatever window is really on top — ambiguous evidence, and a privacy leak. " +
-            "Grant Accessibility to this terminal, or pass an explicit --crop x,y,w,h (capture pixels), or --crop off to accept a full-desktop recording deliberately.",
-        );
-      }
-      // System Events reports logical points; avfoundation captures device
-      // pixels. Scale the rect by the display's backing factor.
-      const native = displayBackingScale();
-      crop = {
-        x: Math.round(rect.x * native),
-        y: Math.round(rect.y * native),
-        width: Math.round(rect.width * native),
-        height: Math.round(rect.height * native),
-      };
-    } else if (options.crop !== "off") {
-      const [x, y, width, height] = options.crop.split(",").map(Number);
-      if ([x, y, width, height].some((value) => !Number.isFinite(value))) {
-        throw new Error(`--crop must be auto, off, or x,y,w,h (got ${options.crop})`);
-      }
-      crop = { x, y, width, height };
+    geometry = await waitForProbeGeometry(probeWindow);
+    if (!geometry) {
+      throw new Error(
+        `Could not find the probe window "${probeWindow.title}" in the CoreGraphics window list, so there is no window to record.`,
+      );
     }
-
+    if (!geometry.clear) {
+      throw new Error(
+        `The probe window is covered by: ${geometry.occluders.join(", ")}. Recording now would capture those windows instead — ` +
+          "ambiguous evidence, and a privacy leak. Move or close them, or free up a second display for the probe window, and re-run.",
+      );
+    }
+    const deviceIndex = await screenDeviceIndexFor(geometry.display.index);
+    // Diagnostic: the probe window has been observed vanishing mid-run.
+    const stillThere = await probeWindowGeometry(probeWindow.title).catch(() => null);
+    process.stderr.write(
+      `[qa-video] pre-record check: window="${probeWindow.title}" present=${Boolean(stillThere)} display=${stillThere?.display?.index ?? "?"} clear=${stillThere?.clear}\n`,
+    );
     recorder = new Recorder({
       path: videoPath,
       captureFps: options.captureFps,
       scaleWidth: options.scaleWidth,
-      crop,
-      deviceIndex: await detectScreenDeviceIndex(),
+      crop: geometry.crop,
+      deviceIndex,
     });
     await recorder.start();
     log = new RunLog(recorder, probeWindow);
 
+    const beforeProbes = await probeWindowGeometry(probeWindow.title).catch(() => null);
+    process.stderr.write(`[qa-video] post-record check: present=${Boolean(beforeProbes)}\n`);
     if (options.mode === "dry-run") {
       await runDryRunProbe({ log, probeWindow });
     } else {
@@ -1060,8 +1185,8 @@ async function runOnce(options, { runId, root }) {
         client.close();
       }
     }
-    // The window could have been restacked mid-run by anything on the desktop.
-    // Say so in the receipts rather than letting the frames read as trustworthy.
+    // The window can be restacked mid-run by anything on the desktop. Say so in
+    // the receipts rather than letting the frames read as trustworthy.
     occlusionRisk = !(await probeWindowIsFrontmost(probeWindow.title));
   } finally {
     process.off("SIGINT", onSignal);
@@ -1084,6 +1209,9 @@ async function runOnce(options, { runId, root }) {
       windowRef: probeWindow.windowRef,
       workspaceRef: probeWindow.workspaceRef,
       title: probeWindow.title,
+      cgWindowId: geometry.id,
+      bounds: geometry.bounds,
+      display: geometry.display,
     },
     video: {
       path: "video.mov",
@@ -1131,18 +1259,6 @@ async function runOnce(options, { runId, root }) {
   return { run, manifest, root, extracted };
 }
 
-/**
- * System Events reports window geometry in logical points; avfoundation captures
- * device pixels. This is the backing-scale factor between them.
- *
- * AIDEV-NOTE: 2 is correct for every current Retina display. On a non-Retina or
- * mixed-DPI setup it is wrong — pass an explicit --crop x,y,w,h (in capture
- * pixels) or --crop off instead of trusting auto-crop.
- */
-function displayBackingScale() {
-  const override = Number(process.env.CMUX_QA_VIDEO_BACKING_SCALE);
-  return Number.isFinite(override) && override > 0 ? override : 2;
-}
 
 async function main() {
   assertOptIn();
@@ -1172,7 +1288,7 @@ async function main() {
   process.stdout.write(
     [
       `[qa-video] run: ${result.run.runId}`,
-      `[qa-video] video: ${join(result.root, "video.mov")} (${result.run.video.durationS}s, ${result.run.video.frames} frames, ${result.run.video.width}x${result.run.video.height})`,
+      `[qa-video] video: ${join(result.root, "video.mov")} (${result.run.video.durationS}s, ${result.run.video.frames} frames, ${result.run.video.width}x${result.run.video.height}, display ${result.run.window.display?.index})`,
       `[qa-video] receipts: ${join(result.root, "run.json")}`,
       `[qa-video] manifest: ${join(result.root, "manifest.json")} (${result.manifest.questions.length} questions, ${result.extracted} frames)`,
       `[qa-video] next: adjudicate with Sonnet sub-agents, then render the report (docs/qa-video-harness.md)`,

@@ -166,15 +166,14 @@ describe("adjudication manifest", () => {
     expect(queued.questions[1].expected_if_receipt_true).toBe("YES");
   });
 
-  it("refuses to ask about frames recorded while the probe window was not frontmost", () => {
+  it("refuses to ask about frames recorded while the probe window was occluded", () => {
     const occluded = {
       ...sendStep("submitted"),
       marks: { send: { videoS: 12.4, frontmost: false }, plus2: { videoS: 14.4, frontmost: true } },
     };
     const manifest = buildAdjudicationManifest(runFixture([occluded]));
     expect(manifest.questions[0].frames).toEqual([]);
-    expect(manifest.questions[0].unadjudicable_reason).toContain("not frontmost");
-    // The unaffected mark is still adjudicable.
+    expect(manifest.questions[0].unadjudicable_reason).toContain("occluded");
     expect(manifest.questions[1].frames.length).toBeGreaterThan(0);
   });
 
@@ -275,6 +274,26 @@ describe("harness script wiring", () => {
     expect(source).not.toContain("env: process.env });");
   });
 
+  it("records the display the probe window is actually on", () => {
+    // cmux does not always open its new window on the main display; earlier runs
+    // recorded display 0 while the probe window sat on display 1.
+    expect(source).toContain("screenDeviceIndexFor(geometry.display.index)");
+    expect(source).toContain("Capture screen");
+  });
+
+  it("resolves geometry and occlusion through CoreGraphics, not AppleScript", () => {
+    expect(source).toContain("qa-video-windows.py");
+    expect(source).toContain("clear: occluders.length === 0");
+    expect(source).not.toContain("first process whose frontmost is true");
+  });
+
+  it("keeps the rejected window-capture approach documented so it is not retried", () => {
+    // screencapture -l is occlusion-proof but returns a blank content area for
+    // cmux's Metal-rendered terminals.
+    expect(source).toContain("REJECTED");
+    expect(source).toContain("Metal");
+  });
+
   it("tears the isolated window down even when the harness is killed", () => {
     expect(source).toContain('process.once("SIGINT", onSignal)');
     expect(source).toContain('process.once("SIGTERM", onSignal)');
@@ -283,6 +302,12 @@ describe("harness script wiring", () => {
   it("verifies the recording is real before deriving anything from it", () => {
     expect(source).toContain("has no decodable frames");
     expect(source).toContain("assertVideoUsable");
+  });
+
+  it("ships the CoreGraphics window helper it depends on", () => {
+    const helper = readFileSync(join(repoRoot, "scripts", "qa-video-windows.py"), "utf8");
+    expect(helper).toContain("CGWindowListCopyWindowInfo");
+    expect(helper).toContain("CGGetActiveDisplayList");
   });
 
   it("is exposed through package.json", () => {
