@@ -210,7 +210,7 @@ import type {
   ControlMode,
   ParsedScreenResult,
 } from "./types.js";
-import { normalizeKeyName } from "./key-names.js";
+import { isSubmitKey, normalizeKeyName } from "./key-names.js";
 import { currentCallerContext, type CallerContext } from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
@@ -474,6 +474,10 @@ export const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
   DEFAULT_SEND_INPUT_MAX_INLINE_CHARS,
 );
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
+// A bare submit key either takes effect on the next render or it did not take
+// effect at all -- there is no chunked typing to wait out, so the key path uses
+// a much shorter verification window than the text path (#484).
+const SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS = 1500;
 // Busy relays are interjections into an already-running UI. Observe several
 // repaint frames, accept a correlated TUI queue, and bound exact-composer
 // recovery so fleet fan-out does not inherit the general 5s timeout.
@@ -530,7 +534,12 @@ const SendToArgsSchema = z.object({
   surface: z.string().optional(),
   text: z.string().optional(),
   command: z.string().optional(),
-  key: z.string().optional(),
+  key: z
+    .string()
+    .optional()
+    .describe(
+      'Key name for mode="key". Submit aliases (return, enter, KPEnter, ctrl-m, a raw CR) are normalized to "return" and verified: the receipt reports key_dispatched, and a submit that leaves the composer populated fails instead of returning ok.',
+    ),
   workspace: z.string().optional(),
   chunk_size: z.number().int().min(1).optional().default(200),
   background: z.boolean().optional().default(false),
@@ -1021,6 +1030,16 @@ type SubmitVerificationFailureReason =
   | "surface_screen_empty"
   | "input_still_pending"
   | "working_status_not_observed"
+  | "submit_evidence_absent";
+
+/**
+ * Why a bare submit-key dispatch could not be confirmed. A key send carries no
+ * text, so the text path's evidence (does the screen still show what we typed?)
+ * does not apply; the composer region itself is the evidence.
+ */
+type SubmitKeyVerificationReason =
+  | "surface_read_unavailable"
+  | "composer_still_populated"
   | "submit_evidence_absent";
 
 class SubmitVerificationError extends Error {
@@ -5026,6 +5045,66 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
   };
 
+  /**
+   * AIDEV-NOTE (#484): a bare submit key used to return ok:true with
+   * submit_verified:null and no evidence of any kind -- the documented
+   * "type, then press Return" recovery reported success for a no-op and two
+   * leads silently stopped being able to talk to each other. A submit key now
+   * has to answer the only question that matters: did the composer let go of
+   * its contents? Positive evidence either way is reported; absence of
+   * evidence is reported as absence, never as success.
+   */
+  const verifySubmitKeyOutcome = async (opts: {
+    surface: string;
+    workspace?: string;
+    timeout_ms?: number;
+  }): Promise<{
+    submit_verified: boolean | null;
+    submit_verification_reason: SubmitKeyVerificationReason | null;
+  }> => {
+    const timeoutMs = opts.timeout_ms ?? SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS;
+    const startedAt = Date.now();
+    let sawReadableScreen = false;
+    let lastComposerInput: string | null = null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+      if (!snapshot || !snapshot.text.trim()) {
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        continue;
+      }
+      sawReadableScreen = true;
+      const composerInput = extractComposerInputRegion(snapshot.text);
+      lastComposerInput = composerInput;
+      if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
+        return { submit_verified: true, submit_verification_reason: null };
+      }
+      if (composerInput !== null && composerInput.trim() === "") {
+        return { submit_verified: true, submit_verification_reason: null };
+      }
+      await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+    }
+
+    if (!sawReadableScreen) {
+      return {
+        submit_verified: null,
+        submit_verification_reason: "surface_read_unavailable",
+      };
+    }
+    if (lastComposerInput !== null && lastComposerInput.trim() !== "") {
+      // The key reached the pane and the composer still holds its contents:
+      // that is a submit that did not land, not a submit we failed to observe.
+      return {
+        submit_verified: false,
+        submit_verification_reason: "composer_still_populated",
+      };
+    }
+    return {
+      submit_verified: null,
+      submit_verification_reason: "submit_evidence_absent",
+    };
+  };
+
   const executeDeliveryEngine = async (opts: {
     surface: string;
     workspace?: string;
@@ -5044,7 +5123,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verify_timeout_ms?: number;
     stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
-  }): Promise<PublicDeliveryReceipt & { bytes: number }> => {
+  }): Promise<
+    PublicDeliveryReceipt & {
+      bytes: number;
+      /** Present only on the key path: the key really reached the pane. */
+      key_dispatched?: boolean;
+      submit_verification_reason?: SubmitKeyVerificationReason;
+    }
+  > => {
     await opts.beforeMutation?.();
     if (opts.key !== undefined) {
       if (opts.chunks.length > 0 || opts.press_enter) {
@@ -5053,16 +5139,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
+      // sendKeyWithRetry throws when nothing reached the pane, so reaching the
+      // next line is the dispatch evidence the receipt was missing (#484).
       await sendKeyWithRetry(
         opts.surface,
         key,
         opts.workspace,
         opts.beforeMutation,
       );
+      const submitAttempted = isSubmitKey(key);
+      const verification =
+        submitAttempted && opts.verify_submit
+          ? await verifySubmitKeyOutcome({
+              surface: opts.surface,
+              workspace: opts.workspace,
+              timeout_ms: opts.submit_verify_timeout_ms,
+            })
+          : { submit_verified: null, submit_verification_reason: null };
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
-        submit_attempted: key === "return",
-        submit_verified: null,
+        submit_attempted: submitAttempted,
+        submit_verified: verification.submit_verified,
         retry_count: 0,
       });
       if (opts.source_event) {
@@ -5071,12 +5168,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes: 0,
-          press_enter: key === "return",
-          submit_verified: null,
+          press_enter: submitAttempted,
+          submit_verified: verification.submit_verified,
           retry_count: 0,
         });
       }
-      return { ...receipt, bytes: 0 };
+      return {
+        ...receipt,
+        key_dispatched: true,
+        ...(verification.submit_verification_reason
+          ? {
+              submit_verification_reason:
+                verification.submit_verification_reason,
+            }
+          : {}),
+        bytes: 0,
+      };
     }
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe(
       opts.surface,
@@ -8988,6 +9095,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               chunk_size: 0,
               chunk_delay_ms: 0,
               press_enter: false,
+              // A submit key is the documented recovery for a typed-but-unsent
+              // message. It has to prove it landed rather than assert it.
+              verify_submit: true,
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: "send_key",
               beforeMutation: route.assertCurrent,
@@ -9006,6 +9116,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ...delivery,
           ...remapFields(route),
         };
+        if (delivery.submit_verified === false) {
+          return err(
+            new Error(
+              `send_key ${key} reached ${route.surface} but the submit did not land (${delivery.submit_verification_reason}). The composer still holds its unsent contents — nothing was delivered. Read the surface and resolve the pending input before relaying this as sent.`,
+            ),
+            data,
+          );
+        }
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
         return err(e);
@@ -9469,7 +9587,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 10. close_surface
   server.tool(
     "close_surface",
-    "Close one surface, managed agent, or workspace with live-agent guards.",
+    "Close one surface, managed agent, or workspace with live-agent guards. scope=\"agent\" stops the agent AND closes its pane, and reports the two halves separately (agent_stopped, surface_closed) so a pane that survives is never reported as closed.",
     {
       scope: z
         .enum(["surface", "agent", "workspace"])
@@ -9496,17 +9614,113 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const handler = toolHandlersByName.get("stop_agent");
           if (!handler)
             throw new Error("Internal agent close adapter unavailable");
+          // AIDEV-NOTE (#485): this used to stop the agent and hand back
+          // stop_agent's receipt verbatim -- ok:true, state:"done" -- for a
+          // tool named close_surface, while the pane stayed open. A lead
+          // harvesting panes got success and kept every one of them. Resolve
+          // the bound surface BEFORE stopping (the stop can evict the record),
+          // stop, then close the pane for real and say which halves happened.
+          const boundAgent =
+            context.lifecycleRegistry?.get(args.agent_id) ??
+            stateMgr
+              .listStates()
+              .find((record) => record.agent_id === args.agent_id);
+          const boundSurface = boundAgent?.surface_id?.trim() || null;
+          const boundWorkspace = boundAgent?.workspace_id ?? undefined;
           const result = await handler(
             { agent_id: args.agent_id, force: args.force },
             {},
           );
-          return {
-            ...result,
-            structuredContent: {
-              ...(result.structuredContent ?? {}),
+          const agentStopped = result.isError !== true;
+          const rawStopContent = (result.structuredContent ?? {}) as Record<
+            string,
+            unknown
+          >;
+          // Drop the stop receipt's own envelope fields; this response owns
+          // ok/error, and letting stop_agent's ok:true through was exactly how
+          // a half-done close reported success.
+          const { ok: _stopOk, error: _stopError, ...stopContent } =
+            rawStopContent;
+          if (!agentStopped) {
+            // The stop itself failed: keep its verbatim ok:false/error and add
+            // the surface half, which was never attempted.
+            return {
+              ...result,
+              structuredContent: {
+                ...rawStopContent,
+                scope: "agent",
+                agent_stopped: false,
+                surface_closed: false,
+                surface_close_skipped: "agent_stop_failed",
+              },
+            };
+          }
+          if (!boundSurface) {
+            const data = {
+              ...stopContent,
               scope: "agent",
+              agent_stopped: true,
+              surface_closed: false,
+              surface_close_skipped: "no_surface_bound",
+            };
+            return okFormatted(
+              `close_surface scope=agent — agent ${args.agent_id} stopped; no surface was bound, so no pane was closed`,
+              data,
+            );
+          }
+          const closeHandler = toolHandlersByName.get("close_surface");
+          if (!closeHandler) {
+            throw new Error("Internal surface close adapter unavailable");
+          }
+          const closeResult = await closeHandler(
+            {
+              scope: "surface",
+              surface: boundSurface,
+              workspace: boundWorkspace,
+              // The agent has just been stopped at the caller's explicit
+              // request; the liveness guard would otherwise refuse on a
+              // registry row that has not caught up yet.
+              force: true,
             },
+            {},
+          );
+          const closeContent = (closeResult.structuredContent ?? {}) as Record<
+            string,
+            unknown
+          >;
+          if (closeResult.isError === true) {
+            const reason =
+              typeof closeContent.error === "string"
+                ? closeContent.error
+                : "close failed";
+            return err(
+              new Error(
+                `close_surface scope=agent: agent ${args.agent_id} was stopped but surface ${boundSurface} is still open — ${reason}`,
+              ),
+              {
+                ...stopContent,
+                scope: "agent",
+                agent_stopped: true,
+                surface: boundSurface,
+                surface_closed: false,
+                surface_close_error: reason,
+              },
+            );
+          }
+          const data = {
+            ...stopContent,
+            scope: "agent",
+            agent_stopped: true,
+            surface: boundSurface,
+            surface_closed: true,
+            ...(closeContent.collapse_pane !== undefined
+              ? { collapse_pane: closeContent.collapse_pane }
+              : {}),
           };
+          return okFormatted(
+            `close_surface scope=agent — agent ${args.agent_id} stopped and surface ${boundSurface} closed`,
+            data,
+          );
         }
         if (args.scope === "workspace") {
           if (!args.workspace) {
@@ -9520,11 +9734,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             { workspace: args.workspace, force: args.force },
             {},
           );
+          // Cross-check for the #485 class: unlike scope=agent, this delegate
+          // really does perform the action the scope names -- delete_workspace
+          // tears the tab and its panes down and surfaces its own failures.
+          // State the outcome explicitly rather than leaving the caller to
+          // infer it from a bolted-on scope field.
           return {
             ...result,
             structuredContent: {
               ...(result.structuredContent ?? {}),
               scope: "workspace",
+              workspace_deleted: result.isError !== true,
             },
           };
         }
