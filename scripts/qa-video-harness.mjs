@@ -216,7 +216,23 @@ function displayContaining(displays, bounds) {
  * whole runs' worth of frames show the wrong screen while looking perfectly
  * plausible.
  */
-async function probeWindowGeometry(title) {
+async function probeWindowGeometry(title, { attempts = 3, gapMs = 400 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const found = await probeWindowGeometryOnce(title);
+    if (found) return found;
+    if (attempt < attempts - 1) await sleep(gapMs);
+  }
+  return null;
+}
+
+/**
+ * AIDEV-NOTE: a cmux window drops out of the on-screen window list whenever its
+ * Space is not the active one on its display, which it does intermittently right
+ * after being moved. A single miss is a flap, not an absence, hence the retry
+ * above — an early version treated the first miss as "the window is gone" and
+ * aborted runs that were perfectly fine a moment later.
+ */
+async function probeWindowGeometryOnce(title) {
   const state = await readWindowState();
   const cmuxWindows = state.windows.filter((window) => window.owner === "cmux");
   // The short sibling window is cmux's tab strip, not the window we mean.
