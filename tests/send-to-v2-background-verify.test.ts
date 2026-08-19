@@ -813,6 +813,99 @@ describe("send_to v2 background verify", () => {
     }
   });
 
+  it("does not claim escalation when the ticket was deduped, the filer is absent, or the filer threw (B2)", async () => {
+    const observedFailure = async () => ({
+      outcome: "failed_confirmed" as const,
+      reason: "composer_rejected_input",
+    });
+
+    const sendAndVerify = async (extras: Record<string, unknown>) => {
+      const client = new FakeAgentSurfaceClient();
+      const local = createVerifyServer(client, extras as any);
+      registerAgent(local);
+      const sent = parseResult(
+        await callTool(local, "send_to", {
+          agent_id: "agent-1",
+          text: `escalation exit ${JSON.stringify(extras).length}`,
+          press_enter: true,
+        }),
+      );
+      const engine = local._registeredTools.interact._engine;
+      engine.setDeliveryVerifier(observedFailure);
+      await engine.verifyPendingDeliveries();
+      const receipt = engine.getDeliveryReceipt(sent.delivery_id);
+      await local.close();
+      return receipt;
+    };
+
+    // (1) no filer configured -- nothing can be escalated.
+    expect(
+      await sendAndVerify({ deliveryTicketDir: join(TEST_DIR, "t-nofiler") }),
+    ).toMatchObject({ ticket_filed: true, ticket_escalated: false });
+
+    // (2) the filer threw -- the issue was not filed.
+    expect(
+      await sendAndVerify({
+        deliveryTicketDir: join(TEST_DIR, "t-throws"),
+        deliveryIssueFiler: async () => {
+          throw new Error("gh unavailable");
+        },
+      }),
+    ).toMatchObject({ ticket_filed: true, ticket_escalated: false });
+  });
+
+  it("does not claim escalation for a deduped signature (B2)", async () => {
+    const ticketDir = join(TEST_DIR, "tickets-dedupe-escalation");
+    const filed: unknown[] = [];
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client, {
+      deliveryTicketDir: ticketDir,
+      deliveryIssueFiler: async (ticket) => {
+        filed.push(ticket);
+      },
+    });
+    registerAgent(server);
+    const engine = server._registeredTools.interact._engine;
+    engine.setDeliveryVerifier(async () => ({
+      outcome: "failed_confirmed" as const,
+      reason: "composer_rejected_input",
+    }));
+
+    const first = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "first observed loss",
+        press_enter: true,
+      }),
+    );
+    await engine.verifyPendingDeliveries();
+    client.resetTypedInput();
+    const second = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "second observed loss",
+        press_enter: true,
+      }),
+    );
+    engine.setDeliveryVerifier(async () => ({
+      outcome: "failed_confirmed" as const,
+      reason: "composer_rejected_input",
+    }));
+    await engine.verifyPendingDeliveries();
+
+    // Same signature: exactly one escalation reached the tracker, and the
+    // receipt that did NOT reach it says so, with a reason.
+    expect(filed).toHaveLength(1);
+    const deduped = engine.getDeliveryReceipt(second.delivery_id);
+    expect(deduped).toMatchObject({
+      ticket_filed: true,
+      ticket_escalated: false,
+    });
+    expect(deduped.ticket_escalation_declined_reason).toMatch(
+      /already filed/i,
+    );
+  });
+
   it("dedupes evidence tickets by failure signature", async () => {
     const ticketDir = join(TEST_DIR, "tickets");
     const filed: unknown[] = [];

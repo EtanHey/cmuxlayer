@@ -6920,29 +6920,16 @@ export class AgentEngine {
             }
             snapshot = snapshots.get(snapshotKey) ?? null;
           }
-          let timeout: ReturnType<typeof setTimeout> | null = null;
           try {
-            observation = await Promise.race([
+            observation = await this.withDeliveryVerifyTimeout(
               this.deliveryVerifier(receipt, snapshot),
-              new Promise<never>((_resolve, reject) => {
-                timeout = setTimeout(
-                  () =>
-                    reject(
-                      new Error(
-                        `Delivery verify timed out after ${this.deliveryVerifyTimeoutMs}ms`,
-                      ),
-                    ),
-                  this.deliveryVerifyTimeoutMs,
-                );
-              }),
-            ]);
+              "Delivery verify",
+            );
           } catch (error) {
             observation = {
               outcome: "pending",
               reason: error instanceof Error ? error.message : String(error),
             };
-          } finally {
-            if (timeout) clearTimeout(timeout);
           }
           receipt.verify_last_attempt_at = new Date().toISOString();
           this.persistDeliveryReceipts();
@@ -7109,17 +7096,39 @@ export class AgentEngine {
       dir: ticketDir,
     });
     receipt.ticket_filed = true;
+
+    // AIDEV-NOTE (T2 B2): both fields are written from the SAME resolved
+    // outcome, at every exit, and never before the escalation is known.
+    // Stamping `escalated: true` up front and then returning early -- deduped
+    // signature, no filer configured, filer threw -- left receipts asserting
+    // an escalation that never happened. That is this lane's own disease: a
+    // receipt reporting something the engine did not observe.
+    const settleEscalation = (declined: string | null): void => {
+      receipt.ticket_escalated = declined === null;
+      receipt.ticket_escalation_declined_reason = declined;
+      this.persistDeliveryReceipts();
+    };
+
     const declineReason = this.deliveryFailureEscalationDecline(reason);
-    receipt.ticket_escalated = declineReason === null;
-    receipt.ticket_escalation_declined_reason = declineReason;
-    this.persistDeliveryReceipts();
-    if (declineReason !== null) return;
-    if (!written.created) return;
-    if (!this.deliveryIssueFiler) return;
+    if (declineReason !== null) return settleEscalation(declineReason);
+    if (!written.created) {
+      return settleEscalation(
+        "an issue for this failure signature was already filed; " +
+          "this occurrence was appended to the existing ticket",
+      );
+    }
+    if (!this.deliveryIssueFiler) {
+      return settleEscalation("no issue filer is configured");
+    }
     try {
       await this.deliveryIssueFiler(ticket);
-    } catch {
-      // Local ticket is authoritative; GitHub is best-effort.
+      settleEscalation(null);
+    } catch (error) {
+      // Local ticket is authoritative; GitHub is best-effort -- but the
+      // receipt must say the escalation did not land.
+      settleEscalation(
+        `issue filer failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -7140,6 +7149,12 @@ export class AgentEngine {
           this.appendDeliveryReceiptEventBestEffort(receipt);
           continue;
         }
+        // AIDEV-NOTE (T2 N1): a paused target deliberately does NOT age out.
+        // #467's bounded lifetime exists for a target that is failing to
+        // become interactive on its own; pausing is a human's resumable act,
+        // and expiring queued work under it would discard the message the
+        // pause was protecting. The receipt stays nonterminal, and the
+        // paused-target WARNING already tells the caller it is not delivered.
         if (agent.paused === true) {
           continue;
         }

@@ -139,6 +139,9 @@ export class CmuxClient {
         : await execFileAsync(bin, cliArgs, {
             ...(env ? { env } : {}),
             timeout: this.execTimeoutMs,
+            // N2: a subprocess that ignores SIGTERM would still hang the
+            // promise the timeout exists to bound.
+            killSignal: "SIGKILL",
           });
       return stdout;
     } catch (error) {

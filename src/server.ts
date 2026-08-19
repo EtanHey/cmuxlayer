@@ -1049,6 +1049,29 @@ class DeliveryError extends Error {
   }
 }
 
+/**
+ * Why a submit could not be verified. This is the sentence a receipt shows the
+ * fleet when a delivery did not land, so it is spelled out rather than nested:
+ * the order is "what we saw" before "what we required", most specific first.
+ */
+function resolveSubmitVerificationFailureReason(observed: {
+  sawPendingInput: boolean;
+  sawReadableScreen: boolean;
+  sawBlankScreen: boolean;
+  bootConsumptionRefuted: boolean;
+  requireWorkingStatus: boolean;
+}): SubmitVerificationFailureReason {
+  if (observed.sawPendingInput) return "input_still_pending";
+  if (!observed.sawReadableScreen) {
+    return observed.sawBlankScreen
+      ? "surface_screen_empty"
+      : "surface_read_unavailable";
+  }
+  if (observed.bootConsumptionRefuted) return "consumption_not_observed";
+  if (observed.requireWorkingStatus) return "working_status_not_observed";
+  return "submit_evidence_absent";
+}
+
 type SubmitVerificationFailureReason =
   | "surface_read_unavailable"
   | "surface_screen_empty"
@@ -1099,19 +1122,13 @@ class DeliverySafetyGateError extends Error {
 
   constructor(
     readonly error_code:
-      | "blocked_by_interactive_prompt"
-      | "blocked_by_permission_prompt"
-      | "blocked_by_composer_draft",
+      "blocked_by_interactive_prompt" | "blocked_by_permission_prompt",
     readonly screen: ParsedScreenResult,
   ) {
     super(
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
-        : error_code === "blocked_by_composer_draft"
-          ? "target composer already holds text this delivery did not write; " +
-            "refused to type (typing + Return would submit or mutate someone " +
-            "else's draft). Clear the composer, or resend once it is empty."
-          : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
+        : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
   }
@@ -2435,14 +2452,48 @@ function screenShowsPendingInput(
 }
 
 /**
- * True when the target composer holds text that this delivery did not put
- * there -- a human's half-written draft, or another agent's unsent message.
+ * The text sitting on the composer's OWN input line, or null when no composer
+ * prompt line is on screen.
  *
- * AIDEV-NOTE (T2 #442): the discriminator is "is the visible composer content
- * contained in the payload we are about to type". A partially-typed payload
- * (chunk 1 landed, chunk 2 pending) IS ours and must stay deliverable, so it
- * is compared whitespace-insensitively against the payload rather than
- * required to be empty. Anything else is foreign and must not be typed into.
+ * AIDEV-NOTE (T2 #442/B1): deliberately NOT `extractComposerInputRegion`. That
+ * one appends every following line until it recognises a chrome line, so any
+ * footer missing from `isComposerFooterOrChromeLine` -- `? for shortcuts`,
+ * `accept edits on`, `Working (2s * esc to interrupt)` -- reads as composer
+ * content. That is fine for its own callers, which ask "is the composer
+ * CLEAR", where a false non-empty just withholds submit evidence. It is not
+ * fine for the draft guard, where a false non-empty REFUSES a ready pane. So
+ * the guard reads only the prompt line: a human draft always begins there,
+ * and chrome never does. Widening the chrome whitelist instead is what put
+ * this hole in the first place.
+ */
+function composerPromptLineInput(screenText: string): string | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  const cli = inferComposerCli(screenText);
+  const start = currentComposerRegionStart(cli, lines);
+  let end = lines.length;
+  while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
+    end -= 1;
+  }
+
+  for (let index = end - 1; index >= start; index -= 1) {
+    const line = lines[index] ?? "";
+    const match =
+      matchComposerPromptLine(line) ?? matchLegacyClaudePromptLine(cli, line);
+    if (match) {
+      return normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
+    }
+  }
+  return null;
+}
+
+/**
+ * True when the target composer holds text that this delivery did not put
+ * there -- a human's half-written draft, or an earlier message still unflushed.
+ *
+ * AIDEV-NOTE (T2 #442): a partially-typed payload (chunk 1 landed, chunk 2
+ * pending) IS ours and must stay deliverable, so the line content is compared
+ * whitespace-insensitively against the payload rather than required to be
+ * empty.
  */
 function composerHoldsForeignDraft(
   screenText: string,
@@ -2458,18 +2509,21 @@ function composerHoldsForeignDraft(
   if (inferComposerCli(screenText) === "cursor") {
     return false;
   }
-  const composer = extractComposerInputRegion(screenText, submittedText);
-  if (composer === null) {
-    // No recognisable composer region (bare shell, unreadable frame). The
-    // pre-existing gates own those cases; do not invent a refusal here.
+  // No recognisable composer prompt line (bare shell, unreadable frame). The
+  // pre-existing gates own those cases; do not invent a refusal here.
+  const promptLine = composerPromptLineInput(screenText);
+  if (promptLine === null) {
     return false;
   }
-  const compactDraft = composer.replace(/\s+/g, "");
+  const compactDraft = promptLine.replace(/\s+/g, "");
   if (!compactDraft) {
     return false;
   }
   const compactPayload = submittedText.replace(/\s+/g, "");
-  return !(compactPayload.length > 0 && compactPayload.includes(compactDraft));
+  if (compactPayload.length === 0) {
+    return true;
+  }
+  return !compactPayload.includes(compactDraft);
 }
 
 function stripCodexQueueGutter(line: string): string {
@@ -4753,12 +4807,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  const assertDeliveryTargetIsSafe = async (
-    surface: string,
-    workspace?: string,
-    cli?: CliType,
-    draftGuard?: { submittedText: string },
-  ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
+  const assertDeliveryTargetIsSafe = async (opts: {
+    surface: string;
+    workspace?: string;
+    cli?: CliType;
+    /** When set, also refuse a composer already holding someone else's text. */
+    draftGuardText?: string;
+  }): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
+    const { surface, workspace, cli } = opts;
     const snapshot = await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
     });
@@ -4787,13 +4843,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // perfectly ordinary ready composer, it just is not empty. Refuse before
     // the first keystroke -- a refused send is recoverable, a submitted draft
     // is not.
+    //
+    // RETRYABLE, not terminal (T2 B1a): the same screen is produced by this
+    // delivery's OWN unflushed prior message (the queued_followup shape), and
+    // the guard cannot tell that from a human draft. For both, the right
+    // answer is "wait for the composer to flush", which the v2 queue already
+    // expresses -- and #467's bounded queue lifetime guarantees the caller
+    // still gets a terminal answer if it never does. A terminal `failed` here
+    // would be this PR's own disease: a verdict the engine did not observe.
     if (
-      draftGuard &&
-      composerHoldsForeignDraft(snapshot.text, draftGuard.submittedText)
+      opts.draftGuardText !== undefined &&
+      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
     ) {
-      throw new DeliverySafetyGateError(
-        "blocked_by_composer_draft",
-        snapshot.parsed,
+      throw new RetryableDeliveryError(
+        "target composer already holds text this delivery did not write; " +
+          "refused to type (typing + Return would submit or mutate it). " +
+          "Delivery stays queued until the composer is clear.",
       );
     }
 
@@ -5105,24 +5170,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.require_working_status ||
       lastHasPendingSubmitEvidence ||
       lastRetryEligiblePendingInput ||
-      lastBootConsumptionRefuted ||
       !sawReadableScreen
         ? false
         : noSubmitEvidenceResult;
     const failureReason: SubmitVerificationFailureReason | null =
-      submitVerified !== false
-        ? null
-        : lastHasPendingSubmitEvidence || lastRetryEligiblePendingInput
-          ? "input_still_pending"
-          : !sawReadableScreen
-            ? sawBlankScreen
-              ? "surface_screen_empty"
-              : "surface_read_unavailable"
-            : lastBootConsumptionRefuted
-              ? "consumption_not_observed"
-              : opts.require_working_status
-                ? "working_status_not_observed"
-                : "submit_evidence_absent";
+      submitVerified === false
+        ? resolveSubmitVerificationFailureReason({
+            sawPendingInput:
+              lastHasPendingSubmitEvidence || lastRetryEligiblePendingInput,
+            sawReadableScreen,
+            sawBlankScreen,
+            bootConsumptionRefuted: lastBootConsumptionRefuted,
+            requireWorkingStatus: opts.require_working_status === true,
+          })
+        : null;
     const allowPendingVerify =
       opts.source_event === "send_to" || opts.source_event === "dispatch_nudge";
     if (allowPendingVerify && submitVerified === false) {
@@ -5204,14 +5265,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "send_input" ||
       opts.source_event === "dispatch_nudge";
     const draftGuardText = opts.chunks.join("");
-    const deliverySafetySnapshot = await assertDeliveryTargetIsSafe(
-      opts.surface,
-      opts.workspace,
-      undefined,
-      draftGuardedEvent && draftGuardText.trim().length > 0
-        ? { submittedText: draftGuardText }
-        : undefined,
-    );
+    const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
+      surface: opts.surface,
+      workspace: opts.workspace,
+      ...(draftGuardedEvent && draftGuardText.trim().length > 0
+        ? { draftGuardText }
+        : {}),
+    });
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,

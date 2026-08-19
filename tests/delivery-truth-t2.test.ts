@@ -173,16 +173,13 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     );
 
     const parsed = parseToolResult(result);
-    expect(result.isError).toBe(true);
     expect(parsed).toMatchObject({
-      ok: false,
       delivered: false,
-      delivery_state: "failed",
-      terminal: true,
-      typed: false,
-      submit_attempted: false,
-      error_code: "blocked_by_composer_draft",
+      terminal: false,
+      delivery_state: "queued",
     });
+    expect(parsed.WARNING).toMatch(/not delivered yet/i);
+    expect(parsed.WARNING).toMatch(/composer already holds text/i);
     expect(mutatedPane(mockExec)).toBe(false);
     context.dispose();
   }, 20_000);
@@ -212,6 +209,144 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     expect(mutatedPane(mockExec)).toBe(true);
     context.dispose();
   });
+});
+
+describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () => {
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-t2-delivery-truth-"));
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  // Every frame below has an EMPTY composer. The line under it is ordinary
+  // Claude chrome that `isComposerFooterOrChromeLine` does not happen to
+  // whitelist -- and a whitelist miss must never cost a ready pane a refusal.
+  const EMPTY_COMPOSER_FRAMES: Array<[string, string]> = [
+    [
+      "shortcut hint",
+      ["Claude Code", "", "\u23fa Compared both approaches.", "", "\u276f", "? for shortcuts"].join(
+        "\n",
+      ),
+    ],
+    [
+      "accept-edits mode",
+      ["Claude Code", "> ", "\u23f5\u23f5 accept edits on (shift+tab to cycle)"].join("\n"),
+    ],
+    [
+      "busy spinner",
+      ["Claude Code", "\u23fa Done.", "> ", "Working (2s \u2022 esc to interrupt)"].join("\n"),
+    ],
+    ["interrupt hint", ["Claude Code", "> ", "  esc to interrupt"].join("\n")],
+  ];
+
+  it.each(EMPTY_COMPOSER_FRAMES)(
+    "treats an empty composer under %s as deliverable",
+    async (_label, screen) => {
+      const { __submitEvidenceTestHooks } = await loadServerModule();
+      expect(
+        __submitEvidenceTestHooks.composerHoldsForeignDraft(
+          screen,
+          "fleet message",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("still refuses when the prompt line itself carries someone else's text", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    expect(
+      __submitEvidenceTestHooks.composerHoldsForeignDraft(
+        ["Claude Code", "> so about the release, I think we", "? for shortcuts"].join(
+          "\n",
+        ),
+        "fleet message",
+      ),
+    ).toBe(true);
+  });
+
+  it("send_to delivers to a busy Claude pane whose composer is empty", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n\u276f ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+
+    screenText = [
+      "Claude Code",
+      "\u23fa Done.",
+      "> ",
+      "Working (2s \u2022 esc to interrupt)",
+    ].join("\n");
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      { agent_id: agentId, text: "fleet message", press_enter: true },
+      {} as any,
+    );
+
+    expect(parseToolResult(result).ok).toBe(true);
+    expect(mutatedPane(mockExec)).toBe(true);
+    context.dispose();
+  }, 20_000);
+});
+
+describe("T2 delivery truth — a blocked composer is not a terminal verdict (B1a)", () => {
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-t2-delivery-truth-"));
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it("queues instead of terminally failing when the composer holds unflushed text", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n\u276f ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+
+    // This delivery's OWN prior message, still sitting unflushed in the
+    // composer (the queued_followup shape). The guard cannot tell it from a
+    // human draft -- and must not, because the right answer for both is
+    // "wait for the composer to flush", never a terminal failure.
+    screenText = "Claude Code\n> an earlier message that has not flushed yet\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      { agent_id: agentId, text: "second message", press_enter: true },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(parsed).toMatchObject({
+      ok: true,
+      delivered: false,
+      delivery_state: "queued",
+      terminal: false,
+    });
+    expect(parsed.WARNING).toMatch(/not delivered yet/i);
+    expect(parsed.WARNING).toMatch(/composer already holds text/i);
+    // Still the property #442 exists for: nothing was typed.
+    expect(mutatedPane(mockExec)).toBe(false);
+    context.dispose();
+  }, 20_000);
 });
 
 describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
