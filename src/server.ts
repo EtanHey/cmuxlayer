@@ -13310,16 +13310,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const observed = resultAgent
                   ? await observeAgentOnce(resultAgent, topology)
                   : null;
-                const health = resultAgent
-                  ? await evaluateServerAgentHealth(
-                      resultAgent,
-                      {
-                        ...healthTopologyOverrides(resultAgent, topology),
-                        ...(observed?.screenOverrides ?? {}),
-                      },
-                      topology,
-                    )
-                  : undefined;
                 // P11 Contract B: a lead that BLOCKS on its children gets the
                 // closure state in the reply it was already waiting for -- the
                 // completion signal surfaces where the parent actually looks,
@@ -13330,6 +13320,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       live: observed?.live ?? null,
                     })
                   : null;
+                const health = resultAgent
+                  ? await evaluateServerAgentHealth(
+                      resultAgent,
+                      {
+                        ...healthTopologyOverrides(resultAgent, topology),
+                        ...(observed?.screenOverrides ?? {}),
+                        ...(harvest ? { harvestability: harvest } : {}),
+                      },
+                      topology,
+                    )
+                  : undefined;
                 return {
                   ...result,
                   health,
@@ -13733,6 +13734,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   observedSurface && !observedSurface.read_error
                     ? observedSurface
                     : null;
+                // AIDEV-NOTE (T1b/#488): ONE observation per row. `closure`
+                // used to re-resolve live state through the discovery cache
+                // (`cachedScan()`, null past 2000ms) while `state` below used
+                // THIS call's own scan -- so a cold cache made one row read
+                // `working` and `artifact_missing` at the same time, and flap
+                // as the cache aged. Same evidence, resolved once, passed to
+                // the health block AND to closure. Costs zero extra screen
+                // reads: the scan already happened at the top of this call.
+                const rowLiveState = resolveLiveAgentState(
+                  agent,
+                  trustedScreenObservation
+                    ? {
+                        status: trustedScreenObservation.parsed_status,
+                        agent_type:
+                          trustedScreenObservation.cli === "kiro"
+                            ? "unknown"
+                            : trustedScreenObservation.cli,
+                        control_state: trustedScreenObservation.control_state,
+                      }
+                    : null,
+                );
+                const rowHarvestability = engine.assessHarvestability(agent, {
+                  live: rowLiveState,
+                });
                 const health = await evaluateServerAgentHealth(
                   agent,
                   {
@@ -13750,34 +13775,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             trustedScreenObservation.actions ?? [],
                         }
                       : {}),
+                    // Without this the health block re-derived harvestability
+                    // through the probe (buildAgentHealthInput's
+                    // `deps.assessHarvestability`), putting a THIRD resolution
+                    // in the same row: `closure_without_artifact` could fire
+                    // beside `closure: "pending"`.
+                    harvestability: rowHarvestability,
                   },
                   topology,
                 );
                 const reconciledState = health.reconciled_state ?? agent.state;
-                // AIDEV-NOTE (T1b/#488): ONE observation per row. `closure`
-                // used to re-resolve live state through the discovery cache
-                // (`cachedScan()`, null past 2000ms) while `state` right above
-                // used THIS call's own scan -- so a cold cache made one row
-                // read `working` and `artifact_missing` at the same time, and
-                // flap as the cache aged. Same evidence, resolved once, passed
-                // to both. Costs zero extra screen reads: the scan already
-                // happened at the top of this call.
-                const rowLiveState = resolveLiveAgentState(
-                  agent,
-                  trustedScreenObservation
-                    ? {
-                        status: trustedScreenObservation.parsed_status,
-                        agent_type:
-                          trustedScreenObservation.cli === "kiro"
-                            ? "unknown"
-                            : trustedScreenObservation.cli,
-                        control_state: trustedScreenObservation.control_state,
-                      }
-                    : null,
-                );
-                const rowHarvestability = engine.assessHarvestability(agent, {
-                  live: rowLiveState,
-                });
                 const screenObservation = trustedScreenObservation
                   ? {
                       observed_at_ms: liveDiscovery!.observed_at_ms,

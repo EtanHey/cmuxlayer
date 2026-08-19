@@ -441,6 +441,36 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     expect(parsed.health.issue_codes).toContain("closure_without_artifact");
   });
 
+  it("detail:full health carries the SAME resolution, not a third one", async () => {
+    // The health block re-derived harvestability through the probe, so a cold
+    // cache could fire the blocking `closure_without_artifact` issue on the
+    // very row whose `closure` reads `pending` -- the divergence moved one
+    // field over.
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-t1b-health",
+        surface_id: client.workingSurface,
+        state: "done",
+        task_done_detected_at: "2026-08-19T13:41:00.000Z",
+        report_path: join(TEST_DIR, "reports", "health.md"),
+        done_marker: "DONE_T1B_HEALTH",
+      } as Partial<AgentRecord> as any),
+    );
+
+    await callTool(server, "list_agents", {});
+    poisonProbeCold(server);
+
+    const parsed = parseResult(
+      await callTool(server, "list_agents", { detail: "full" }),
+    );
+    const row = rowFor(parsed, "cmuxlayerCodex-t1b-health");
+    expect(row, JSON.stringify(parsed)).toBeTruthy();
+    expect(row.closure).toBe("pending");
+    expect(row.detail.harvestability.closure).toBe("pending");
+    expect(row.health.issue_codes).not.toContain("closure_without_artifact");
+  });
+
   it("three consecutive calls for an unchanged agent do not flap the closure", async () => {
     registerAgent(
       server,

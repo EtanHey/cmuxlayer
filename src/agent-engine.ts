@@ -5744,7 +5744,20 @@ export class AgentEngine {
         this.clearAgentLifecycleMemory(initialAgentId);
         continue;
       }
-      const harvestability = this.assessHarvestability(agent);
+      // AIDEV-NOTE (T1b/#488): the sweep is the third emitter -- its
+      // harvestability feeds the health input, the sidebar row's `report=` and
+      // the done notification, beside a state derived from the screen it reads
+      // below. When the done-detection pass already has this agent's screen
+      // text in hand, closure resolves from THAT rather than from the discovery
+      // cache, which may be cold on this path too. No new read: when there is
+      // no screen text, the injected probe is used exactly as before.
+      const sweepScreenText = taskDoneResult.screenText;
+      const harvestability = this.assessHarvestability(agent, {
+        live:
+          sweepScreenText === undefined
+            ? null
+            : resolveLiveAgentState(agent, parseScreen(sweepScreenText)),
+      });
       const healthScreenContexts = new Map<string, SweepAgentContext>();
       let screenCurrentAction: string | null = null;
       const healthScreenContextFor = (
