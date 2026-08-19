@@ -408,6 +408,39 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     expect(waited.results[0].closure).toBe("artifact_missing");
   });
 
+  it("narrowing artifact_missing silences the CLAIM, not the evidence: health still flags it", async () => {
+    // The reviewer's named false-negative: a worker that finished without a
+    // recognized done marker looks identical to a #408 flip. Closure withholds
+    // the deadlock CLAIM there -- but `closure_artifact_verified:false` and the
+    // blocking `closure_without_artifact` health issue still render, so the
+    // population is auditable rather than invisible. This is the post-merge
+    // signal to watch: records at `done` with `closure:"pending"` and
+    // `done_source:"none"`.
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-t1b-unobserved",
+        surface_id: client.readySurface,
+        state: "done",
+        task_done_detected_at: null,
+        report_path: join(TEST_DIR, "reports", "unobserved.md"),
+        done_marker: "DONE_T1B_UNOBSERVED",
+      } as Partial<AgentRecord> as any),
+    );
+
+    const parsed = parseResult(
+      await callTool(server, "get_agent_state", {
+        agent_id: "cmuxlayerCodex-t1b-unobserved",
+      }),
+    );
+    expect(parsed.harvestability.closure, JSON.stringify(parsed)).toBe(
+      "pending",
+    );
+    expect(parsed.harvestability.closure_artifact_verified).toBe(false);
+    expect(parsed.harvestability.evidence_channel.done_source).toBe("none");
+    expect(parsed.health.issue_codes).toContain("closure_without_artifact");
+  });
+
   it("three consecutive calls for an unchanged agent do not flap the closure", async () => {
     registerAgent(
       server,
