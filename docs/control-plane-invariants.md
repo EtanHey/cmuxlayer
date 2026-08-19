@@ -46,11 +46,17 @@ measured 36-day ghosts violated.
 | Row | Window | Constant | Path |
 | --- | --- | --- | --- |
 | `surface_observer_id` equals the current observer | 5 s of continuous absence | `SURFACE_EVICTION_CONFIRMATION_MS` (`src/agent-registry.ts`) | sweep + `list_agents` |
-| `surface_observer_id` is null or from a prior observer generation | 60 s of continuous absence, where absence means no live surface bears the row's UUID **or** its ref | `UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS` (`src/agent-registry.ts`) | sweep + `list_agents` |
+| `surface_observer_id` is null or from a prior observer generation | 60 s of continuous absence, where absence means no live surface bears the row's identity key — its UUID when it has one, else its ref | `UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS` (`src/agent-registry.ts`) | sweep + `list_agents` |
 
 Ownership stops one observer mutating another's *live* row; it is not a claim on a row that no
 live surface bears. An unclaimed row is evicted, never crash-marked: eviction is the reversible
 direction, because `listMerged` re-mints a row from discovery if the pane turns out to be alive.
+
+One exception, and it is deliberate: a row whose captured `cli_session_id` still resolves to a
+session artifact on disk is retained regardless of the window. `resumeAgent` has no ownership gate,
+so that row is the record resume-by-ID acts on, and the registry is the only `agent_id` →
+`cli_session_id` mapping. `missing` and session-less rows still evict, so the ghost class #480 was
+filed about still closes.
 
 ## Allowed Transitions
 

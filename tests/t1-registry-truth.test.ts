@@ -8,11 +8,13 @@
  * agents against 13 live surfaces.
  *
  * The rule these tests pin: observer ownership protects a row that a LIVE
- * observer claims. It must not protect a row that no live surface bears — by
- * uuid OR by ref — for a bounded, documented window.
+ * observer claims. It must not protect a row that no live surface bears on its
+ * identity key (its UUID when it has one, else its ref) for a bounded,
+ * documented window — unless the row still carries a session artifact that
+ * resume-by-ID can act on.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,6 +24,7 @@ import {
 } from "../src/agent-registry.js";
 import { createServer } from "../src/server.js";
 import { StateManager } from "../src/state-manager.js";
+import { setResumeArtifactResolver } from "../src/resume-verification.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
 
@@ -103,6 +106,8 @@ describe("T1 #480 — unclaimed rows are evictable within a bounded window", () 
   });
 
   afterEach(() => {
+    // Restore the suite-wide stub from tests/vitest.setup.ts.
+    setResumeArtifactResolver(() => "unverifiable");
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -184,6 +189,13 @@ describe("T1 #480 — unclaimed rows are evictable within a bounded window", () 
     // The ownership gate's real job: a foreign/legacy row on a ref a live
     // surface still bears must never be evicted by this observer. Eviction is
     // for rows NO live surface bears.
+    //
+    // Belt-and-braces on purpose: the property is upheld UPSTREAM of the code
+    // this lane added — `matchingLiveSurface` catches the row at the top of
+    // the loop, and `clearSurfacelessObservationsForLiveSurfaces` wipes its
+    // absence clock every tick. This case therefore passes against `main`
+    // too. It is here because "never evict a live row" is the property most
+    // worth pinning, not because it isolates the new branch.
     stateMgr.writeState(
       makeRecord({
         agent_id: "legacy-on-live-ref",
@@ -238,6 +250,64 @@ describe("T1 #480 — unclaimed rows are evictable within a bounded window", () 
     expect(registry.get("auto-claude-surface-618")).not.toBeNull();
   });
 
+  it("keeps an unclaimed row whose captured session is still on disk", async () => {
+    // The row is the ONLY agent_id -> cli_session_id mapping, and
+    // `resumeAgent` has no ownership gate: an unclaimed row with a live
+    // session artifact is the one thing resume-by-ID can still act on
+    // (AGENTS.md: "a worker got killed because its pane broke"). Evicting it
+    // would delete the mapping and strand the transcript. Retention here is
+    // not the old immortality: the row is retained because it is usable, and
+    // a successful resume re-stamps it with the current observer.
+    setResumeArtifactResolver(() => "present");
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "killed-but-resumable",
+        surface_id: "surface:gone",
+        surface_uuid: "GONE-UUID",
+        surface_observer_id: DEAD_OBSERVER,
+        state: "done",
+        cli_session_id: "5f1d0c6a-1f2b-4a3c-8d4e-9f0a1b2c3d4e",
+      }),
+    );
+    const registry = makeRegistry(stateMgr, [
+      makeSurface("surface:700", "AAAA-live-uuid"),
+    ]);
+    await registry.reconstitute();
+
+    await expect(
+      evictAcrossWindow(registry, {
+        elapsedMs: UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS * 10,
+      }),
+    ).resolves.toEqual([]);
+    expect(registry.get("killed-but-resumable")).not.toBeNull();
+  });
+
+  it("evicts an unclaimed row whose captured session is gone from disk", async () => {
+    // The counter-case: a session id that resolves to nothing restores
+    // nothing, so the row protects no capability and #480 still closes.
+    setResumeArtifactResolver(() => "missing");
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "killed-and-unrecoverable",
+        surface_id: "surface:gone",
+        surface_uuid: "GONE-UUID",
+        surface_observer_id: DEAD_OBSERVER,
+        state: "done",
+        cli_session_id: "5f1d0c6a-1f2b-4a3c-8d4e-9f0a1b2c3d4e",
+      }),
+    );
+    const registry = makeRegistry(stateMgr, [
+      makeSurface("surface:700", "AAAA-live-uuid"),
+    ]);
+    await registry.reconstitute();
+
+    await expect(
+      evictAcrossWindow(registry, {
+        elapsedMs: UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS + 1,
+      }),
+    ).resolves.toEqual(["killed-and-unrecoverable"]);
+  });
+
   it("leaves rows this observer owns on the existing 5s confirmation path", async () => {
     // The owned path must not silently inherit the longer unclaimed window.
     stateMgr.writeState(
@@ -270,14 +340,36 @@ describe("T1 #480 — unclaimed rows are evictable within a bounded window", () 
  * caller that never evicted anything, which is why it reported 17 agents while
  * `list_surfaces` reported 13.
  */
+const SEAT_REGISTRY = {
+  cmuxlayerClaude: {
+    repo: "cmuxlayer",
+    launchers: { claude: "cmuxlayerClaude" },
+    lane: "cmuxlayer",
+    role: "lead",
+  },
+} as const;
+
 const SERVER_DIR = join(tmpdir(), "cmux-t1-list-agents-eviction");
 const SERVER_OBSERVER = "cmux:/tmp/cmux-t1-list-agents.sock";
 
+const CLAUDE_SCREEN = [
+  "✻ Welcome to Claude Code",
+  "bypass permissions on",
+  "> ",
+].join("\n");
+
 class TwoSurfaceClient {
   readonly workspace = "workspace:1";
-  readonly screens: Record<string, string> = {
-    "surface:lead": "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\ncodex>",
-  };
+  readonly title: string;
+  readonly screens: Record<string, string>;
+
+  constructor(opts: { title?: string; screen?: string } = {}) {
+    this.title = opts.title ?? "cmuxlayerCodex-lead";
+    this.screens = {
+      "surface:lead":
+        opts.screen ?? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\ncodex>",
+    };
+  }
 
   async listWorkspaces() {
     return {
@@ -319,7 +411,7 @@ class TwoSurfaceClient {
         {
           ref: "surface:lead",
           id: "LEAD-UUID",
-          title: "cmuxlayerCodex-lead",
+          title: this.title,
           type: "terminal",
           index: 0,
           selected: true,
@@ -360,22 +452,73 @@ describe("T1 #481 — the seat proof reaches a path callers actually use", () =>
     rmSync(SERVER_DIR, { recursive: true, force: true });
   });
 
-  it("list_agents evicts with an observer-pinned live seat proof", async () => {
+  it("list_agents evicts a crash-recovery ghost whose seat a live pane holds", async () => {
+    // Outcome, not wiring: `hasLiveManagedSeatSibling` returns false for every
+    // row unless it is handed a proof built from THIS cycle's scan, so a
+    // crash-recovery-eligible ghost is retained forever without one. Asserting
+    // the ghost is gone fails both ways a regression can happen -- the call
+    // removed, and a proof built from the wrong (or empty) scan.
+    server = createServer({
+      client: new TwoSurfaceClient({
+        title: "cmuxlayerClaude",
+        screen: CLAUDE_SCREEN,
+      }) as any,
+      stateDir: SERVER_DIR,
+      disableSpawnPreflight: true,
+      seatRegistry: SEAT_REGISTRY,
+      surfaceObserverOwnerIdProvider: () => SERVER_OBSERVER,
+      surfaceObserverEpochProvider: () => `${SERVER_OBSERVER}@test`,
+    } as any);
     const engine = server._registeredTools["interact"]._engine;
+    const seatFields = {
+      repo: "cmuxlayer",
+      cli: "claude",
+      launcher_name: "cmuxlayerClaude",
+      seat_id: "cmuxlayerClaude",
+      role: "orchestrator",
+      surface_observer_id: SERVER_OBSERVER,
+      workspace_id: "workspace:1",
+    };
+    for (const record of [
+      makeRecord({
+        ...seatFields,
+        agent_id: "cmuxlayerClaude-live",
+        state: "working",
+        surface_id: "surface:lead",
+        surface_uuid: "LEAD-UUID",
+      }),
+      makeRecord({
+        ...seatFields,
+        agent_id: "cmuxlayerClaude-ghost",
+        state: "error",
+        surface_id: "surface:gone",
+        surface_uuid: "GONE-UUID",
+        crash_recover: true,
+        cli_session_id: "5f1d0c6a-1f2b-4a3c-8d4e-9f0a1b2c3d4e",
+        error: "Surface surface:gone disappeared",
+      }),
+    ]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+
+    const nowSpy = vi.spyOn(Date, "now");
+    try {
+      // First call observes the absence; the 5 s confirmation window is the
+      // owned path's, unchanged by this lane.
+      nowSpy.mockReturnValue(1_000_000);
+      await server._registeredTools["list_agents"].handler({}, {} as any);
+      nowSpy.mockReturnValue(1_006_000);
+      await server._registeredTools["list_agents"].handler({}, {} as any);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
     const registry = engine.getRegistry();
-    const evictSpy = vi.spyOn(registry, "evictSurfaceless");
-
-    const tool = server._registeredTools["list_agents"];
-    await tool.handler({}, {} as any);
-
-    expect(evictSpy).toHaveBeenCalled();
-    const opts = evictSpy.mock.calls.at(-1)?.[0] as any;
-    expect(opts?.confirmationMs).toBe(SURFACE_EVICTION_CONFIRMATION_MS);
-    expect(opts?.liveSeatProof).not.toBeNull();
-    expect(opts?.liveSeatProof?.observer_id).toBe(SERVER_OBSERVER);
-    expect(opts?.liveSeatProof?.observer_epoch).toBe(
-      `${SERVER_OBSERVER}@test`,
-    );
+    expect(registry.get("cmuxlayerClaude-ghost")).toBeNull();
+    expect(engine.stateMgr.readState("cmuxlayerClaude-ghost")).toBeNull();
+    // The live seat itself must survive: the proof identifies it, it is not a ghost.
+    expect(registry.get("cmuxlayerClaude-live")).not.toBeNull();
   });
 });
 
@@ -453,5 +596,20 @@ describe("T1 #481 — parsed_cli_mismatch reaches a reader again", () => {
       if (other.agent_id === "cmuxlayerCodex-lead") continue;
       expect(other).not.toHaveProperty("parsed_cli_mismatch");
     }
+  });
+});
+
+/**
+ * #481/#477 class: a removal that leaves its instructions behind is not a
+ * removal. `resync_agents` errors unconditionally, so any surface that still
+ * tells a caller to run it hands them a second error.
+ */
+describe("T1 #481 — nothing still instructs callers to run resync_agents", () => {
+  const read = (relative: string) =>
+    readFileSync(new URL(`../${relative}`, import.meta.url), "utf8");
+
+  it("keeps the removed tool out of runtime guidance and the README", () => {
+    expect(read("src/server.ts")).not.toContain("Run resync_agents");
+    expect(read("README.md")).not.toContain("resync_agents");
   });
 });

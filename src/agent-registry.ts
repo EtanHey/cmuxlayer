@@ -36,6 +36,7 @@ import {
 import { validateSurfaceIdentityBijection } from "./surface-topology.js";
 import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
 import { inferRepoFromDirectory } from "./repo-workspace.js";
+import { resumeArtifactStatus } from "./resume-verification.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
@@ -61,11 +62,6 @@ interface SurfacelessEvictionOptions extends SurfaceAbsenceOptions {
    * still owns the shell, so crash-recovery rows may only yield to this proof.
    */
   liveSeatProof?: LiveSeatDiscoveryProof | null;
-  /**
-   * Continuous-absence window before a row that no live observer claims is
-   * dropped (#480). Defaults to `UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS`.
-   */
-  unclaimedConfirmationMs?: number;
 }
 
 export interface AgentRegistryOptions {
@@ -120,8 +116,8 @@ export const SURFACE_EVICTION_CONFIRMATION_MS = 5_000;
  * four such rows, oldest 36 days, `list_agents` 17 vs `list_surfaces` 13.
  *
  * Ownership exists to stop one observer mutating another's LIVE row. It is not
- * a claim on a row that no live surface bears — by uuid or by ref — across a
- * continuous absence window. This constant is that window: twelve consecutive
+ * a claim on a row that no live surface bears — matched on the row's UUID when
+ * it has one, else on its ref — across a continuous absence window. This constant is that window: twelve consecutive
  * 5 s sweeps of proven absence before an unclaimed row is dropped, so the
  * worst case is bounded and documented rather than infinite.
  */
@@ -1757,9 +1753,20 @@ export class AgentRegistry {
       // (`recoverCrashedAgents` quarantines unowned rows) on any other path,
       // so without this they live forever.
       if (!this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId)) {
-        if (
-          !this.isUnclaimedAbsenceConfirmed(agent, liveSurfaceKeys, opts)
-        ) {
+        // The row is the only `agent_id` -> `cli_session_id` mapping, and
+        // `resumeAgent` is the one recovery path with no ownership gate. So a
+        // row whose captured session is still on disk is not a ghost: it is
+        // the record resume-by-ID acts on, and a successful resume re-stamps
+        // it with this observer. Deleting it would strand a live transcript.
+        // Only a PRESENT artifact retains: `missing` restores nothing, and
+        // `unverifiable` (no store on this machine) must not make eviction
+        // depend on a directory's existence -- that would reopen #480 wherever
+        // the harness store is absent.
+        if (this.hasVerifiedResumeArtifact(agent)) {
+          this.unclaimedAbsenceObservations.delete(agent.agent_id);
+          continue;
+        }
+        if (!this.isUnclaimedAbsenceConfirmed(agent, opts)) {
           continue;
         }
         const removedUnclaimedId = this.evictUnchecked(id);
@@ -1933,14 +1940,27 @@ export class AgentRegistry {
   }
 
   /**
-   * Continuous, ref-AND-uuid absence of a row that this observer does not own
-   * (#480). Deliberately does NOT consult `isSurfaceAbsenceAuthoritative`:
-   * that helper refuses to read a UUID-less row's absence in a UUID-bearing
-   * topology because a live occupant on the same mutable ref proves nothing
-   * about the row. Here the ref is not occupied at all -- no live surface
-   * carries the row's uuid OR its ref -- across a coherent, non-empty scan.
-   * That is real absence evidence, and it is the only evidence an unclaimed
-   * row can ever produce.
+   * #480/#482: a captured session this machine can still see on disk — the
+   * one thing an unclaimed row still protects, since `resumeAgent` has no
+   * ownership gate and the registry holds the only agent_id -> session map.
+   */
+  private hasVerifiedResumeArtifact(agent: AgentRecord): boolean {
+    if (!agent.cli_session_id) return false;
+    return resumeArtifactStatus(agent.cli, agent.cli_session_id) === "present";
+  }
+
+  /**
+   * Continuous absence of a row that this observer does not own (#480).
+   *
+   * The row's identity is ONE key: its UUID when it has one, else its ref
+   * (`agentSurfaceKey`). Absence means the caller's `matchingLiveSurface`
+   * found nothing for that key in a coherent, non-empty scan.
+   *
+   * Deliberately does NOT consult `isSurfaceAbsenceAuthoritative`: that helper
+   * refuses to read a UUID-less row's absence in a UUID-bearing topology,
+   * because a live occupant sitting ON the same mutable ref proves nothing
+   * about the row. Here the ref is not occupied at all. That is real absence
+   * evidence, and it is the only evidence an unclaimed row can ever produce.
    *
    * Eviction, not crash-marking: dropping the registry row is the reversible
    * direction. If the pane were somehow alive, `listMerged` re-mints it from
@@ -1949,21 +1969,10 @@ export class AgentRegistry {
    */
   private isUnclaimedAbsenceConfirmed(
     agent: AgentRecord,
-    liveSurfaceKeys: ReadonlySet<string>,
-    opts: { unclaimedConfirmationMs?: number; now?: number },
+    opts: { now?: number },
   ): boolean {
     const surfaceKey = this.agentSurfaceKey(agent);
-    if (liveSurfaceKeys.has(surfaceKey)) {
-      this.unclaimedAbsenceObservations.delete(agent.agent_id);
-      return false;
-    }
-    const confirmationMs = Math.max(
-      0,
-      opts.unclaimedConfirmationMs ?? UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS,
-    );
-    if (confirmationMs === 0) {
-      return true;
-    }
+    const confirmationMs = UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS;
     const now = opts.now ?? Date.now();
     const observation = this.unclaimedAbsenceObservations.get(agent.agent_id);
     if (!observation || observation.surfaceId !== surfaceKey) {

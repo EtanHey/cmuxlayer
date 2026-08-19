@@ -10916,7 +10916,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw new Error(
             `Agent "${args.agent_id}" no longer maps to a live surface ` +
               `(stale surface ref); its pane likely closed or was recycled. ` +
-              `Run resync_agents and retry.`,
+              `Call list_agents for a refreshed live view and retry.`,
           );
         }
         route = reresolved;
@@ -10971,7 +10971,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw new Error(
               `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
                 `surface ${route.surface_id} — it now hosts a ${freshOccupant?.cli} ` +
-                `agent (surface recycled). Run resync_agents and retry.`,
+                `agent (surface recycled). Call list_agents for a refreshed ` +
+                `live view and retry.`,
             );
           }
         }
