@@ -1751,7 +1751,19 @@ export class AgentEngine {
     );
   }
 
-  assessHarvestability(agent: AgentRecord): WorkerHarvestability {
+  /**
+   * AIDEV-NOTE (T1b/#488): `live` is how a caller that ALREADY has a screen
+   * observation hands it in, so one response cannot resolve `closure` from one
+   * evidence source and `state` from another. `list_agents` takes a fresh scan
+   * on every call and then rendered closure off `cachedScan()`, which returns
+   * null once that scan is 2000ms old -- so the same row said `working` and
+   * `artifact_missing`, and flapped as the cache aged. Callers without an
+   * observation keep the injected probe; there is no new screen read here.
+   */
+  assessHarvestability(
+    agent: AgentRecord,
+    opts?: { live?: LiveAgentState | null },
+  ): WorkerHarvestability {
     const issueCodes: string[] = [];
     const issues: string[] = [];
     const addIssue = (code: string, message: string): void => {
@@ -1768,7 +1780,7 @@ export class AgentEngine {
     // on an agent mid-turn. A `ready` prompt cannot overturn done (a finished
     // worker sits at one too), and a dead/shell pane must not either: there
     // the record's `done` plus the missing artifact IS the story.
-    const live = this.liveStateOf(agent);
+    const live = opts?.live ?? this.liveStateOf(agent);
     const effectiveState = isLiveActive(live) ? live.state : agent.state;
     const neutralEvidenceChannel: HarvestabilityEvidenceChannel = {
       done_source: agent.task_done_detected_at ? "screen" : "none",
@@ -1797,6 +1809,8 @@ export class AgentEngine {
             Boolean(agent.report_path && agent.done_marker) ||
             Boolean(agent.goal_file),
           closureArtifactVerified: null,
+          // Unreachable as a deadlock claim: this branch is not `done`.
+          doneEvidence: false,
         }),
         closure_artifact_verified: null,
         report_path: preClosureGoal.reportPath,
@@ -1842,6 +1856,15 @@ export class AgentEngine {
       reportText !== null &&
       reportFresh === true &&
       reportFinalLine === goal.doneMarker;
+    // AIDEV-NOTE (T1b/#488): the POSITIVE done evidence `artifact_missing`
+    // now requires. `evidence_channel.done_source` is already the engine's
+    // answer to "what saw this agent finish" -- `screen` from
+    // task_done_detected_at, `transcript` from the harness JSONL -- and a
+    // screen that itself reads `done` counts. `none` means the only thing
+    // claiming done is the record, which #408 writes without observing
+    // anything.
+    const doneEvidence =
+      evidenceChannel.done_source !== "none" || live.screen_state === "done";
     const keptOpen = reportText
       ? this.extractKeptOpenContract(reportText)
       : null;
@@ -1916,6 +1939,7 @@ export class AgentEngine {
         role,
         contractIssued: Boolean(goal.reportPath && goal.doneMarker),
         closureArtifactVerified,
+        doneEvidence,
       }),
       closure_artifact_verified: closureArtifactVerified,
       report_path: goal.reportPath,
@@ -5737,7 +5761,32 @@ export class AgentEngine {
         this.clearAgentLifecycleMemory(initialAgentId);
         continue;
       }
-      const harvestability = this.assessHarvestability(agent);
+      // AIDEV-NOTE (T1b/#488): the sweep is the third emitter -- its
+      // harvestability feeds the health input, the sidebar row's `report=` and
+      // the done notification, beside a state derived from the screen it reads
+      // below. When the done-detection pass already has this agent's screen
+      // text in hand, closure resolves from THAT rather than from the discovery
+      // cache, which may be cold on this path too. No new read: when there is
+      // no screen text, the injected probe is used exactly as before.
+      // The done-detection pass returns early for a record already at `done`
+      // -- exactly #488's shape -- so its screen text is absent precisely when
+      // closure needs it. `readSweepScreen` memoizes on `sweepCtx`, which the
+      // health input below reuses for this same agent, so this shares that
+      // read rather than adding one.
+      let sweepScreenText = taskDoneResult.screenText;
+      if (sweepScreenText === undefined) {
+        try {
+          sweepScreenText = (await this.readSweepScreen(agent, sweepCtx)).text;
+        } catch {
+          // No screen is no evidence; the injected probe answers as before.
+        }
+      }
+      const harvestability = this.assessHarvestability(agent, {
+        live:
+          sweepScreenText === undefined
+            ? null
+            : resolveLiveAgentState(agent, parseScreen(sweepScreenText)),
+      });
       const healthScreenContexts = new Map<string, SweepAgentContext>();
       let screenCurrentAction: string | null = null;
       const healthScreenContextFor = (

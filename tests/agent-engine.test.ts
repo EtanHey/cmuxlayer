@@ -3247,6 +3247,50 @@ describe("AgentEngine", () => {
       }
     });
 
+    // T1b (#488): the sweep is the third emitter of closure -- its assessment
+    // feeds the health input, this row's `report=`/`health=` text and the done
+    // notification, beside a state it derives from the screen it reads. It used
+    // to take closure from the discovery-cache probe, which is cold on this
+    // path too, so a live-working agent whose record #408 had flipped rendered
+    // the blocking `closure_without_artifact` here as well.
+    it("sweep row closure follows the screen it read, at no extra read", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-sweep-live-closure",
+          state: "done",
+          surface_id: "surface:sweep-live-closure",
+          workspace_id: "workspace:brainlayer",
+          cli: "codex",
+          role: "worker",
+          task_done_detected_at: "2026-05-25T12:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:sweep-live-closure"),
+          workspace_ref: "workspace:brainlayer",
+        },
+      ];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:sweep-live-closure",
+        text: "codex\n• Working (12s • esc to interrupt)\ncodex> ",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockClear();
+
+      await engine.runSweep();
+
+      const row = (mockClient.setStatus as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[1] as string | undefined;
+      expect(row, JSON.stringify((mockClient.setStatus as any).mock.calls)).toBeTruthy();
+      expect(row).not.toContain("closure_without_artifact");
+      // The pre-read shares `sweepCtx` with the health input's own read, so
+      // resolving closure from the screen costs nothing extra.
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(1);
+    });
+
     it("does not rewrite TASK_DONE candidate metadata while the sweep stamps liveness", async () => {
       vi.useFakeTimers();
       try {
