@@ -9,6 +9,9 @@
  *   recovery therefore reports success for a no-op and the message is lost.
  * - #485 close_surface(scope:"agent") delegates to stop_agent and returns
  *   ok:true state:"done" while the pane stays open.
+ *
+ * Every test here fails against the pre-fix tree; see the PR body for the
+ * red run.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -17,43 +20,50 @@ import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import {
+  getEngine,
+  getTool,
+  type ToolCallResult,
+} from "./helpers/mcp-tool-harness.js";
 
-type ToolResult = {
-  isError?: boolean;
-  structuredContent?: Record<string, unknown>;
-  content?: Array<{ text: string }>;
-};
-
-function payload(result: ToolResult): Record<string, unknown> {
-  return (
-    result.structuredContent ??
-    (JSON.parse(result.content?.[0]?.text ?? "{}") as Record<string, unknown>)
-  );
-}
-
-function tool(server: unknown, name: string) {
-  const registered = (
-    server as { _registeredTools: Record<string, { handler: Function }> }
-  )._registeredTools[name];
-  if (!registered) throw new Error(`Tool not found: ${name}`);
-  return registered;
+/**
+ * Both defects are about what a FAILING receipt says, so these tests read the
+ * payload of ok and errored results alike — `parseToolResult` throws on the
+ * error results half of this suite exists to inspect.
+ */
+function payload(result: ToolCallResult): Record<string, unknown> {
+  return (result.structuredContent ??
+    JSON.parse(result.content[0]?.text ?? "{}")) as Record<string, unknown>;
 }
 
 const SURFACE = "surface:89";
 
+const IDLE_CLAUDE_SCREEN = "Claude Code\nWhat can I help you with?\n> ";
+const POPULATED_CLAUDE_SCREEN =
+  "Claude Code\nWhat can I help you with?\n> lead: please pick up lane T4";
+const WORKING_CLAUDE_SCREEN = "Claude Code\n✻ Working (3s · esc to interrupt)";
+// Working, with the composer visibly empty: the submit was taken up.
+const WORKING_AND_CLEARED_CLAUDE_SCREEN =
+  "Claude Code\n✻ Working (3s · esc to interrupt)\n> ";
+// The reported scenario, and the fixture the first round of this lane missed:
+// the recipient is busy on its previous turn WHILE the relayed message sits
+// unsent in its composer. Status and composer disagree, and the composer wins.
+const WORKING_AND_POPULATED_CLAUDE_SCREEN =
+  "Claude Code\n✻ Working (3s · esc to interrupt)\n> lead: please pick up lane T4";
+
 /**
  * Minimal cmux CLI mock. `screen` is a live box so a test can change what the
  * pane shows after the key is dispatched, which is the whole point of a
- * submit-verification test.
+ * submit-verification test. Closing a surface removes it from the topology, so
+ * a test can assert the pane is really gone rather than only that a command ran.
  */
 function makeExec(opts?: {
   screen?: () => string;
   onSendKey?: (key: string) => void;
   closeSurfaceFails?: boolean;
-  surfaceRef?: string;
 }): ExecFn & { calls: string[][] } {
-  const surfaceRef = opts?.surfaceRef ?? SURFACE;
   const calls: string[][] = [];
+  let surfaceLive = true;
   const exec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     calls.push(args);
     if (args.includes("list-workspaces")) {
@@ -75,7 +85,17 @@ function makeExec(opts?: {
     if (args.includes("list-panes")) {
       return {
         stdout: JSON.stringify({
-          panes: [{ ref: "pane:1", workspace: "workspace:1", focused: true }],
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:1",
+              workspace: "workspace:1",
+              focused: true,
+              surface_count: surfaceLive ? 1 : 0,
+              surface_refs: surfaceLive ? [SURFACE] : [],
+            },
+          ],
         }),
         stderr: "",
       };
@@ -83,17 +103,20 @@ function makeExec(opts?: {
     if (args.includes("list-pane-surfaces")) {
       return {
         stdout: JSON.stringify({
-          pane: "pane:1",
-          surfaces: [
-            {
-              ref: surfaceRef,
-              pane: "pane:1",
-              workspace: "workspace:1",
-              title: "golemsClaude",
-              type: "terminal",
-              selected: true,
-            },
-          ],
+          pane_ref: "pane:1",
+          workspace_ref: "workspace:1",
+          surfaces: surfaceLive
+            ? [
+                {
+                  ref: SURFACE,
+                  pane: "pane:1",
+                  workspace: "workspace:1",
+                  title: "golemsClaude",
+                  type: "terminal",
+                  selected: true,
+                },
+              ]
+            : [],
         }),
         stderr: "",
       };
@@ -101,7 +124,7 @@ function makeExec(opts?: {
     if (args.includes("read-screen")) {
       return {
         stdout: JSON.stringify({
-          surface: surfaceRef,
+          surface: SURFACE,
           text: opts?.screen?.() ?? "$ ",
           lines: 30,
           scrollback_used: false,
@@ -113,19 +136,18 @@ function makeExec(opts?: {
       opts?.onSendKey?.(String(args[args.length - 1] ?? ""));
       return { stdout: "{}", stderr: "" };
     }
-    if (args.includes("close-surface") && opts?.closeSurfaceFails) {
-      throw new Error("cmux close-surface: pane is not closable");
+    if (args.includes("close-surface")) {
+      if (opts?.closeSurfaceFails) {
+        throw new Error("cmux close-surface: pane is not closable");
+      }
+      surfaceLive = false;
+      return { stdout: "{}", stderr: "" };
     }
     return { stdout: "{}", stderr: "" };
   }) as ExecFn & { calls: string[][] };
-  (exec as unknown as { calls: string[][] }).calls = calls;
+  exec.calls = calls;
   return exec;
 }
-
-const IDLE_CLAUDE_SCREEN = "Claude Code\nWhat can I help you with?\n> ";
-const POPULATED_CLAUDE_SCREEN =
-  "Claude Code\nWhat can I help you with?\n> lead: please pick up lane T4";
-const WORKING_CLAUDE_SCREEN = "Claude Code\n✻ Working (3s · esc to interrupt)";
 
 let stateDir: string;
 
@@ -147,68 +169,66 @@ function makeServer(exec: ExecFn) {
   }) as unknown;
 }
 
-describe("#484 — send_to(mode:key) must not report success for an unattempted submit", () => {
-  it.each(["return", "Return", "enter", "Enter", "KPEnter", "\r"])(
-    "recognises %j as a submit key so the receipt cannot claim submit_attempted:false",
-    async (key) => {
-      const exec = makeExec({ screen: () => WORKING_CLAUDE_SCREEN });
-      const server = makeServer(exec);
+async function sendKey(server: unknown, key: string): Promise<ToolCallResult> {
+  return (await getTool(server, "send_to").handler(
+    { mode: "key", target: SURFACE, key },
+    {},
+  )) as ToolCallResult;
+}
 
-      const result = (await tool(server, "send_to").handler(
-        { mode: "key", target: SURFACE, key },
-        {},
-      )) as ToolResult;
+describe("#484 — send_to(mode:key) must not report success for an unattempted submit", () => {
+  it.each(["return", "Return", "enter", "Enter", "KPEnter", "ctrl-m"])(
+    "recognises %j as a submit key and states that it reached the pane",
+    async (key) => {
+      const exec = makeExec({ screen: () => WORKING_AND_CLEARED_CLAUDE_SCREEN });
+      const result = await sendKey(makeServer(exec), key);
 
       const data = payload(result);
       expect(result.isError).toBeUndefined();
       expect(data.submit_attempted).toBe(true);
+      expect(data.key_dispatched).toBe(true);
     },
   );
 
-  it("reports the key actually reached the pane instead of an evidence-free ok:true", async () => {
-    const exec = makeExec({ screen: () => WORKING_CLAUDE_SCREEN });
-    const server = makeServer(exec);
+  it("dispatches the caller's key verbatim rather than rewriting it for cmux", async () => {
+    // The receipt is what had to become truthful; the bytes cmux receives are
+    // not this lane's to change, and "\n" in particular is shift+enter.
+    const exec = makeExec({ screen: () => WORKING_AND_CLEARED_CLAUDE_SCREEN });
+    const result = await sendKey(makeServer(exec), "Enter");
 
-    const result = (await tool(server, "send_to").handler(
-      { mode: "key", target: SURFACE, key: "return" },
-      {},
-    )) as ToolResult;
-
-    const data = payload(result);
     expect(result.isError).toBeUndefined();
-    expect(data.key_dispatched).toBe(true);
+    expect(payload(result).key).toBe("Enter");
+    expect(
+      exec.calls.some(
+        (args) => args.includes("send-key") && args.includes("Enter"),
+      ),
+    ).toBe(true);
   });
 
   it("verifies the submit landed when the composer clears", async () => {
     let pressed = false;
     const exec = makeExec({
-      screen: () => (pressed ? WORKING_CLAUDE_SCREEN : POPULATED_CLAUDE_SCREEN),
+      screen: () =>
+        pressed ? WORKING_AND_CLEARED_CLAUDE_SCREEN : POPULATED_CLAUDE_SCREEN,
       onSendKey: () => {
         pressed = true;
       },
     });
-    const server = makeServer(exec);
 
-    const result = (await tool(server, "send_to").handler(
-      { mode: "key", target: SURFACE, key: "return" },
-      {},
-    )) as ToolResult;
+    const result = await sendKey(makeServer(exec), "return");
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
     expect(data.submit_verified).toBe(true);
+    expect(data.submit_verification_reason).toBeNull();
   });
 
   it("fails instead of returning ok:true when the composer still holds the unsent text", async () => {
     // The exact #484 shape: a lead typed a message, it sat unsent, and the
     // documented mode:"key" recovery reported success while the pane never moved.
     const exec = makeExec({ screen: () => POPULATED_CLAUDE_SCREEN });
-    const server = makeServer(exec);
 
-    const result = (await tool(server, "send_to").handler(
-      { mode: "key", target: SURFACE, key: "return" },
-      {},
-    )) as ToolResult;
+    const result = await sendKey(makeServer(exec), "return");
 
     const data = payload(result);
     expect(result.isError).toBe(true);
@@ -217,14 +237,44 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     expect(data.submit_verification_reason).toBe("composer_still_populated");
   });
 
+  it("lets a populated composer veto a working status instead of losing the race to it", async () => {
+    // The reported target was BUSY: working on its previous turn while the
+    // relayed message sat unsent. Reading "working" as proof of submit reported
+    // submit_verified:true for a message still visible on screen — worse than
+    // the null it replaced, because null admits ignorance and true asserts an
+    // observation the pane contradicts.
+    const exec = makeExec({
+      screen: () => WORKING_AND_POPULATED_CLAUDE_SCREEN,
+    });
+
+    const result = await sendKey(makeServer(exec), "return");
+
+    const data = payload(result);
+    expect(result.isError).toBe(true);
+    expect(data.ok).toBe(false);
+    expect(data.submit_verified).toBe(false);
+    expect(data.submit_verification_reason).toBe("composer_still_populated");
+  });
+
+  it("will not treat a working status as proof when the composer cannot be read", async () => {
+    // A composer that renders boxed reads as unreadable, and the reported
+    // target was ALREADY working — so status cannot tell "my submit started a
+    // turn" from "a turn was already running". Unconfirmed says unconfirmed.
+    const exec = makeExec({ screen: () => WORKING_CLAUDE_SCREEN });
+
+    const result = await sendKey(makeServer(exec), "return");
+
+    const data = payload(result);
+    expect(result.isError).toBeUndefined();
+    expect(data.key_dispatched).toBe(true);
+    expect(data.submit_verified).toBeNull();
+    expect(data.submit_verification_reason).toBe("submit_evidence_absent");
+  });
+
   it("leaves non-submit keys unverified but still states that they were dispatched", async () => {
     const exec = makeExec({ screen: () => POPULATED_CLAUDE_SCREEN });
-    const server = makeServer(exec);
 
-    const result = (await tool(server, "send_to").handler(
-      { mode: "key", target: SURFACE, key: "escape" },
-      {},
-    )) as ToolResult;
+    const result = await sendKey(makeServer(exec), "escape");
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
@@ -235,10 +285,10 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
 });
 
 function seedAgent(server: unknown, overrides: Partial<AgentRecord> = {}) {
-  const engine = (
-    server as { _registeredTools: Record<string, { _engine?: any }> }
-  )._registeredTools.interact?._engine;
-  if (!engine) throw new Error("Lifecycle engine not registered");
+  const engine = getEngine(server) as unknown as {
+    stateMgr: { writeState(record: AgentRecord): unknown };
+    getRegistry(): { set(id: string, record: AgentRecord): unknown };
+  };
   const record: AgentRecord = {
     agent_id: "golemsClaude-bcc283d3",
     surface_id: SURFACE,
@@ -280,24 +330,34 @@ function seedAgent(server: unknown, overrides: Partial<AgentRecord> = {}) {
   return record;
 }
 
+async function listSurfaceRefs(server: unknown): Promise<string[]> {
+  const result = (await getTool(server, "list_surfaces").handler(
+    {},
+    {},
+  )) as ToolCallResult;
+  const text = JSON.stringify(payload(result));
+  return text.includes(SURFACE) ? [SURFACE] : [];
+}
+
 describe("#485 — close_surface(scope:agent) must close the surface or say it did not", () => {
   it("actually closes the pane instead of only stopping the agent", async () => {
     const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN });
     const server = makeServer(exec);
     const record = seedAgent(server);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
 
-    const result = (await tool(server, "close_surface").handler(
+    const result = (await getTool(server, "close_surface").handler(
       { scope: "agent", agent_id: record.agent_id },
       {},
-    )) as ToolResult;
+    )) as ToolCallResult;
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
     expect(data.surface_closed).toBe(true);
     expect(data.surface).toBe(SURFACE);
-    expect(
-      exec.calls.some((args) => args.includes("close-surface")),
-    ).toBe(true);
+    // The brief asked for the list_surfaces check, not only that a CLI command
+    // was issued: the pane is gone from the topology afterwards.
+    expect(await listSurfaceRefs(server)).not.toContain(SURFACE);
   });
 
   it("refuses to report success when the agent stopped but the pane survived", async () => {
@@ -308,10 +368,10 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     const server = makeServer(exec);
     const record = seedAgent(server);
 
-    const result = (await tool(server, "close_surface").handler(
+    const result = (await getTool(server, "close_surface").handler(
       { scope: "agent", agent_id: record.agent_id },
       {},
-    )) as ToolResult;
+    )) as ToolCallResult;
 
     const data = payload(result);
     expect(result.isError).toBe(true);
@@ -319,25 +379,7 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     expect(data.agent_stopped).toBe(true);
     expect(data.surface_closed).toBe(false);
     expect(String(data.error)).toMatch(/surface/i);
-  });
-
-  it("cross-checks scope=workspace: the delegate really deletes, and says so", async () => {
-    const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN });
-    const server = makeServer(exec);
-
-    const result = (await tool(server, "close_surface").handler(
-      { scope: "workspace", workspace: "workspace:1", force: true },
-      {},
-    )) as ToolResult;
-
-    const data = payload(result);
-    expect(result.isError).toBeUndefined();
-    expect(data.workspace_deleted).toBe(true);
-    expect(
-      exec.calls.some(
-        (args) => args.includes("workspace") && args.includes("close"),
-      ),
-    ).toBe(true);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
   });
 
   it("states plainly that there was no surface to close rather than implying one closed", async () => {
@@ -348,14 +390,52 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
       surface_id: "",
     });
 
-    const result = (await tool(server, "close_surface").handler(
+    const result = (await getTool(server, "close_surface").handler(
       { scope: "agent", agent_id: record.agent_id },
       {},
-    )) as ToolResult;
+    )) as ToolCallResult;
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
     expect(data.surface_closed).toBe(false);
     expect(data.surface_close_skipped).toBe("no_surface_bound");
+  });
+
+  it("does not escalate to a forced close: an unforced call leaves a live agent's pane alone", async () => {
+    // Reviewer catch: stop_agent has no liveness refusal of its own, so forcing
+    // the inner close unconditionally would let an UNFORCED close_surface tear
+    // down a still-live agent's pane through a guard that could never fire for
+    // this scope. The caller's own force is passed through instead.
+    const exec = makeExec({ screen: () => WORKING_CLAUDE_SCREEN });
+    const server = makeServer(exec);
+    const record = seedAgent(server, { state: "working" });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    const data = payload(result);
+    expect(data.surface_closed).toBe(false);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
+  });
+
+  it("cross-checks scope=workspace: the delegate really deletes, and says so", async () => {
+    const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN });
+    const server = makeServer(exec);
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "workspace", workspace: "workspace:1", force: true },
+      {},
+    )) as ToolCallResult;
+
+    const data = payload(result);
+    expect(result.isError).toBeUndefined();
+    expect(data.workspace_deleted).toBe(true);
+    expect(
+      exec.calls.some(
+        (args) => args.includes("workspace") && args.includes("close"),
+      ),
+    ).toBe(true);
   });
 });

@@ -5057,17 +5057,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const verifySubmitKeyOutcome = async (opts: {
     surface: string;
     workspace?: string;
-    timeout_ms?: number;
   }): Promise<{
     submit_verified: boolean | null;
     submit_verification_reason: SubmitKeyVerificationReason | null;
   }> => {
-    const timeoutMs = opts.timeout_ms ?? SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS;
     const startedAt = Date.now();
     let sawReadableScreen = false;
-    let lastComposerInput: string | null = null;
+    let composerStillPopulated = false;
 
-    while (Date.now() - startedAt < timeoutMs) {
+    while (Date.now() - startedAt < SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS) {
       const snapshot = await readParsedSurface(opts.surface, opts.workspace);
       if (!snapshot || !snapshot.text.trim()) {
         await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
@@ -5075,11 +5073,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       sawReadableScreen = true;
       const composerInput = extractComposerInputRegion(snapshot.text);
-      lastComposerInput = composerInput;
-      if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
-        return { submit_verified: true, submit_verification_reason: null };
+      composerStillPopulated =
+        composerInput !== null && composerInput.trim() !== "";
+
+      // AIDEV-NOTE (#484 review): a populated composer VETOES every other
+      // signal. A busy target is the reported scenario -- the recipient was
+      // working on its previous turn while the relayed message sat unsent in
+      // its composer -- so reading "working" as proof of submit reported
+      // submit_verified:true for a message still visible on screen. That is
+      // worse than the null it replaced: null admits ignorance, true asserts
+      // an observation contradicted by the pane. The text path already gets
+      // this right by gating the same status branch on !hasPendingSubmitEvidence.
+      if (composerStillPopulated) {
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        continue;
       }
-      if (composerInput !== null && composerInput.trim() === "") {
+      if (composerInput !== null) {
+        // The composer is readable and empty: it let go of its contents. This
+        // is the ONLY positive proof available to a key send. A "working"
+        // status deliberately does not count: the reported target was already
+        // working on its previous turn, so status cannot distinguish "my
+        // submit started a turn" from "a turn was already running" -- and a
+        // composer that renders boxed reads as unreadable here, so accepting
+        // status would resurrect the same false-true through a blind spot.
         return { submit_verified: true, submit_verification_reason: null };
       }
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
@@ -5091,7 +5107,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_verification_reason: "surface_read_unavailable",
       };
     }
-    if (lastComposerInput !== null && lastComposerInput.trim() !== "") {
+    if (composerStillPopulated) {
       // The key reached the pane and the composer still holds its contents:
       // that is a submit that did not land, not a submit we failed to observe.
       return {
@@ -5128,7 +5144,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       bytes: number;
       /** Present only on the key path: the key really reached the pane. */
       key_dispatched?: boolean;
-      submit_verification_reason?: SubmitKeyVerificationReason;
+      submit_verification_reason?: SubmitKeyVerificationReason | null;
     }
   > => {
     await opts.beforeMutation?.();
@@ -5153,7 +5169,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? await verifySubmitKeyOutcome({
               surface: opts.surface,
               workspace: opts.workspace,
-              timeout_ms: opts.submit_verify_timeout_ms,
             })
           : { submit_verified: null, submit_verification_reason: null };
       const receipt = buildPublicDeliveryReceipt({
@@ -5176,12 +5191,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return {
         ...receipt,
         key_dispatched: true,
-        ...(verification.submit_verification_reason
-          ? {
-              submit_verification_reason:
-                verification.submit_verification_reason,
-            }
-          : {}),
+        submit_verification_reason: verification.submit_verification_reason,
         bytes: 0,
       };
     }
@@ -9587,7 +9597,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 10. close_surface
   server.tool(
     "close_surface",
-    "Close one surface, managed agent, or workspace with live-agent guards. scope=\"agent\" stops the agent AND closes its pane, and reports the two halves separately (agent_stopped, surface_closed) so a pane that survives is never reported as closed.",
+    "Close one surface, managed agent, or workspace with live-agent guards. scope=\"agent\" stops the agent AND closes its pane, and reports the two halves separately (agent_stopped, surface_closed) so a pane that survives is never reported as closed. The pane close obeys the same live-agent guard as scope=\"surface\": without force:true a still-live agent keeps its pane, and the receipt says so.",
     {
       scope: z
         .enum(["surface", "agent", "workspace"])
@@ -9620,11 +9630,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // harvesting panes got success and kept every one of them. Resolve
           // the bound surface BEFORE stopping (the stop can evict the record),
           // stop, then close the pane for real and say which halves happened.
-          const boundAgent =
-            context.lifecycleRegistry?.get(args.agent_id) ??
-            stateMgr
-              .listStates()
-              .find((record) => record.agent_id === args.agent_id);
+          const boundAgent = context.lifecycleRegistry?.get(args.agent_id) ?? null;
           const boundSurface = boundAgent?.surface_id?.trim() || null;
           const boundWorkspace = boundAgent?.workspace_id ?? undefined;
           const result = await handler(
@@ -9677,10 +9683,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               scope: "surface",
               surface: boundSurface,
               workspace: boundWorkspace,
-              // The agent has just been stopped at the caller's explicit
-              // request; the liveness guard would otherwise refuse on a
-              // registry row that has not caught up yet.
-              force: true,
+              // AIDEV-NOTE (#485 review): pass the caller's own force through
+              // rather than forcing unconditionally. stop_agent has no liveness
+              // refusal of its own, so forcing here would let an unforced
+              // close_surface(scope:"agent") tear down a still-live agent's
+              // pane through a guard that could never fire for this scope --
+              // a silent escalation of destructiveness. If the guard refuses,
+              // the receipt says the agent stopped and the pane did not close.
+              force: args.force ?? false,
             },
             {},
           );
