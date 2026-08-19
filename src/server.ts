@@ -9717,18 +9717,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             );
           }
+          // Forward the surface path's OBSERVATION of whether the pane is
+          // gone; never restate a returned call as a completed close.
+          const surfaceClosed = closeContent.surface_closed === true;
           const data = {
             ...stopContent,
             scope: "agent",
             agent_stopped: true,
             surface: boundSurface,
-            surface_closed: true,
+            surface_closed: surfaceClosed,
+            ...(closeContent.WARNING ? { WARNING: closeContent.WARNING } : {}),
             ...(closeContent.collapse_pane !== undefined
               ? { collapse_pane: closeContent.collapse_pane }
               : {}),
           };
           return okFormatted(
-            `close_surface scope=agent — agent ${args.agent_id} stopped and surface ${boundSurface} closed`,
+            surfaceClosed
+              ? `close_surface scope=agent — agent ${args.agent_id} stopped and surface ${boundSurface} closed`
+              : `close_surface scope=agent — agent ${args.agent_id} stopped, but surface ${boundSurface} is STILL LISTED — not closed`,
             data,
           );
         }
@@ -9991,6 +9997,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: route.stableSurfaceIdentity,
           },
         );
+        // AIDEV-NOTE (#485): confirm the pane is actually gone rather than
+        // inferring it from the CLI returning. One observation, no waiting --
+        // the "eventually consistent" theory was withdrawn once the mechanism
+        // turned out to be the scope argument, so there is no window to sit
+        // through. If cmux still lists the surface, the receipt says so.
+        const surfaceStillPresent =
+          (await findSurfaceByRef(route.surface, route.workspace)) !== null;
         for (const record of stateMgr.listStates()) {
           // Stable identity wins whenever cmux exposes it. On a ref-only or
           // unavailable observation, preserve the explicit close intent by
@@ -10010,6 +10023,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               user_killed: true,
             });
             context.lifecycleRegistry?.set(record.agent_id, terminal);
+            // AIDEV-NOTE (#485 reframe): marking user_killed left the RECORD's
+            // state untouched, so list_agents kept reporting a closed agent as
+            // "working" after its close was acknowledged -- reported live by
+            // golemsClaude, and independent of which scope was used.
+            // An acknowledged close means this agent is not running any more;
+            // say so in the same breath as accepting the close.
+            if (!TERMINAL_AGENT_STATES.has(terminal.state)) {
+              const stopped = stateMgr.transition(record.agent_id, "done");
+              context.lifecycleRegistry?.set(record.agent_id, stopped);
+            }
           } catch (error) {
             if (
               error instanceof Error &&
@@ -10034,9 +10057,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           surface: route.surface,
           pane: closePolicy?.pane ?? undefined,
           collapse_pane: collapsePane,
+          surface_closed: !surfaceStillPresent,
           stale_registry_done_consolidated: staleRegistryDoneConsolidated,
+          ...(surfaceStillPresent
+            ? {
+                WARNING: `cmux accepted the close but ${route.surface} is STILL listed. Do not relay this as closed.`,
+              }
+            : {}),
         };
-        return okFormatted(formatOk("close_surface", data), data);
+        return okFormatted(
+          surfaceStillPresent
+            ? `close_surface accepted — ${route.surface} is still listed; NOT closed`
+            : formatOk("close_surface", data),
+          data,
+        );
       } catch (e) {
         return err(e);
       }

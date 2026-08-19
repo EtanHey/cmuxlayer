@@ -61,6 +61,8 @@ function makeExec(opts?: {
   screen?: () => string;
   onSendKey?: (key: string) => void;
   closeSurfaceFails?: boolean;
+  /** Model a cmux that accepts close-surface but keeps listing the pane. */
+  closeLeavesSurfaceListed?: boolean;
 }): ExecFn & { calls: string[][] } {
   const calls: string[][] = [];
   let surfaceLive = true;
@@ -140,7 +142,9 @@ function makeExec(opts?: {
       if (opts?.closeSurfaceFails) {
         throw new Error("cmux close-surface: pane is not closable");
       }
-      surfaceLive = false;
+      if (!opts?.closeLeavesSurfaceListed) {
+        surfaceLive = false;
+      }
       return { stdout: "{}", stderr: "" };
     }
     return { stdout: "{}", stderr: "" };
@@ -340,7 +344,11 @@ async function listSurfaceRefs(server: unknown): Promise<string[]> {
 }
 
 describe("#485 — close_surface(scope:agent) must close the surface or say it did not", () => {
-  it("actually closes the pane instead of only stopping the agent", async () => {
+  it("closes the pane under agent scope — the surface is gone from list_surfaces", async () => {
+    // The mechanism (confirmed in source, server.ts:9492-9510 pre-fix):
+    // scope:"agent" delegated to stop_agent and NO path in that branch closed
+    // the surface, so ok:true/state:"done" was truthful about the agent and
+    // silent about the pane. Asserted against list_surfaces, not the receipt.
     const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN });
     const server = makeServer(exec);
     const record = seedAgent(server);
@@ -351,13 +359,68 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
       {},
     )) as ToolCallResult;
 
-    const data = payload(result);
     expect(result.isError).toBeUndefined();
-    expect(data.surface_closed).toBe(true);
-    expect(data.surface).toBe(SURFACE);
-    // The brief asked for the list_surfaces check, not only that a CLI command
-    // was issued: the pane is gone from the topology afterwards.
     expect(await listSurfaceRefs(server)).not.toContain(SURFACE);
+    expect(payload(result).surface_closed).toBe(true);
+  });
+
+  it("never reads like a completed close while the pane is still listed", async () => {
+    // cmux accepted the command; the pane is still there. The receipt must not
+    // claim a closure it can see did not happen.
+    const exec = makeExec({
+      screen: () => IDLE_CLAUDE_SCREEN,
+      closeLeavesSurfaceListed: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server);
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    const data = payload(result);
+    expect(data.surface_closed).toBe(false);
+    expect(String(data.WARNING)).toMatch(/still listed|not.*closed/i);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
+  });
+
+  it("stops reporting the agent as working once its close has been acknowledged", async () => {
+    // golemsClaude's datum, and the one that stands regardless of latency:
+    // list_agents reported an agent "working" AFTER its close was acknowledged.
+    // A state claim inside the settle window is still a state claim, and it was
+    // wrong, and independent of which scope was used. Driven through
+    // scope:"surface" because that is where the record marking lives;
+    // scope:"agent" routes into the same code.
+    const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN });
+    const server = makeServer(exec);
+    const record = seedAgent(server, { state: "working" });
+
+    const closeRes = (await getTool(server, "close_surface").handler(
+      { scope: "surface", surface: SURFACE, force: true },
+      {},
+    )) as ToolCallResult;
+    expect(payload(closeRes).surface_closed).toBe(true);
+
+    const listed = (await getTool(server, "list_agents").handler(
+      {},
+      {},
+    )) as ToolCallResult;
+    const agents = (payload(listed).agents ?? []) as Array<{
+      agent_id: string;
+      state?: { value?: string };
+    }>;
+    // Whether the closed agent is still listed at all depends on when the
+    // lifecycle sweep runs, so do not pin that. The claim under test is the
+    // STATE: nothing may report this agent as working once its close was
+    // acknowledged. Checked at the record too, so an absent row cannot make
+    // this pass vacuously.
+    const closed = agents.find((a) => a.agent_id === record.agent_id);
+    expect(closed?.state?.value).not.toBe("working");
+    const engine = getEngine(server) as unknown as {
+      getAgentState(id: string): { state?: string } | null;
+    };
+    expect(engine.getAgentState(record.agent_id)?.state).not.toBe("working");
   });
 
   it("refuses to report success when the agent stopped but the pane survived", async () => {
