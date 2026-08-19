@@ -37,6 +37,21 @@ recovery, and sidebar/reporting decisions.
 An empty/failed surface listing is inconclusive (`unknown`); only a non-empty topology lacking a
 specific surface proves absence; stale records reap on the next non-empty scan.
 
+### Bounded eviction windows (#480)
+
+A registry row is dropped once its absence is confirmed for a window, and the window depends on
+whether a live observer claims the row. Neither window is unbounded, which is the invariant the
+measured 36-day ghosts violated.
+
+| Row | Window | Constant | Path |
+| --- | --- | --- | --- |
+| `surface_observer_id` equals the current observer | 5 s of continuous absence | `SURFACE_EVICTION_CONFIRMATION_MS` (`src/agent-registry.ts`) | sweep + `list_agents` |
+| `surface_observer_id` is null or from a prior observer generation | 60 s of continuous absence, where absence means no live surface bears the row's UUID **or** its ref | `UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS` (`src/agent-registry.ts`) | sweep + `list_agents` |
+
+Ownership stops one observer mutating another's *live* row; it is not a claim on a row that no
+live surface bears. An unclaimed row is evicted, never crash-marked: eviction is the reversible
+direction, because `listMerged` re-mints a row from discovery if the pane turns out to be alive.
+
 ## Allowed Transitions
 
 Allowed transitions are intentionally narrower than current ad hoc state movement:

@@ -105,10 +105,8 @@ import {
   toObservedPublicAgent,
 } from "./agent-facade.js";
 import {
-  DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
   evaluateAgentHealth,
   type AgentHealth,
-  type AgentHealthIssueCode,
 } from "./agent-health.js";
 import {
   AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
@@ -140,7 +138,6 @@ import {
   formatAgentState,
   formatOk,
   formatDelivery,
-  formatResync,
 } from "./format.js";
 import {
   cleanScreenText,
@@ -3621,23 +3618,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // is the best available caller identity even when the record is stale --
     // the call itself is the liveness evidence. The live-first ordering still
     // lets a genuinely live record win a recycled surface (#378 MEDIUM-A).
-    // AIDEV-TODO (F1 review, finding 2): the LAST tier below matches a terminal
-    // record by `surface_id`, and `surface_id` is a RECYCLABLE ref -- a dead
-    // worker's record whose ref got reused can claim to be the caller, and #378
-    // then forces the new pane's children to worker/right off a corpse. The
-    // obvious guard -- compare the live pane's CLI to the record's, as
+    // AIDEV-NOTE (#468): the LAST tier matches a TERMINAL record by
+    // `surface_id`, and `surface_id` is a RECYCLABLE ref -- a dead worker's
+    // record whose ref got reused could claim to be the caller, and #378 then
+    // forced the new pane's children to worker/right off a corpse. The obvious
+    // guard -- compare the live pane's CLI to the record's, as
     // deliverAgentInput does -- does NOT work here: `registry.listMerged`
     // rewrites `record.cli` from the live pane, so by the time caller
     // resolution runs, a recycled record already claims the new occupant's CLI.
-    // Needs a signal the merge does not overwrite. Tiers 1 and 3 (UUID) are
-    // unaffected. Tracked in #468.
+    //
+    // `surface_observer_id` IS a signal the merge does not overwrite: it is
+    // stamped when this observer binds the surface and only ever replaced by
+    // another binding. A ref stamped by a dead socket generation (or never
+    // stamped at all) proves nothing about who occupies that ref now, so those
+    // records are refused at the ref-only tier. Tiers 1 and 3 (UUID) are
+    // unaffected -- a UUID is not recyclable -- and a record this observer owns
+    // still resolves, which is what keeps U6 working for #408-poisoned rows.
+    //
+    // Cost, stated plainly: a caller whose record predates observer identity
+    // gets no attribution and sees an explicit refusal instead of a wrong
+    // parent. That is the trade this repo already makes everywhere else
+    // absence is ambiguous.
+    const observerOwnerId = context.surfaceObserverId?.trim() || null;
+    const ownsRefBinding = (agent: AgentRecord): boolean =>
+      Boolean(
+        observerOwnerId && agent.surface_observer_id === observerOwnerId,
+      );
     const live = (agent: AgentRecord): boolean =>
       !isLiveTerminal(liveStateFor(agent));
     return (
       records.find((agent) => matchesUuid(agent) && live(agent)) ??
       records.find((agent) => matchesSurfaceId(agent) && live(agent)) ??
       records.find(matchesUuid) ??
-      records.find(matchesSurfaceId) ??
+      records.find(
+        (agent) => matchesSurfaceId(agent) && ownsRefBinding(agent),
+      ) ??
       null
     );
   };
@@ -7328,65 +7343,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     result: { workspace_id?: string },
     fallback?: string,
   ): string | undefined => result.workspace_id || fallback;
-
-  const isLeadLikeSurfaceTitle = (title: string): boolean =>
-    /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
-
-  const buildOrphanSurfaceHealth = (surface: DiscoveredAgent) => {
-    const issueCodes: AgentHealthIssueCode[] = [];
-    const issues: string[] = [];
-    if (surface.has_agent) {
-      issueCodes.push("auto_discovered_agent");
-      issues.push(
-        "live agent surface has no managed registry seat; repair/register the seat or leave it visible as an unresolved orphan",
-      );
-    }
-    if (isLeadLikeSurfaceTitle(surface.surface_title)) {
-      issueCodes.push("missing_managed_lead_agent_id");
-      issues.push(
-        "lead/coordinator surface has no managed agent_id; recover/register or replace with a managed lead",
-      );
-    }
-
-    const title = surface.surface_title.trim().toLowerCase();
-    if (
-      title === "" ||
-      title === "gits" ||
-      title === "git" ||
-      title === "repos" ||
-      title === "projects" ||
-      title === "workspace"
-    ) {
-      issueCodes.push("ambiguous_repo_cwd_label");
-      issues.push(
-        "orphan terminal surface has an ambiguous repo/cwd label; tab title is not lane ownership",
-      );
-    }
-
-    const issueSeverities = Object.fromEntries(
-      issueCodes.map((code) => [
-        code,
-        DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code],
-      ]),
-    );
-    const hasBlockingIssue = issueCodes.some(
-      (code) => DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code] === "blocking",
-    );
-    return {
-      surface_id: surface.surface_id,
-      surface_title: surface.surface_title,
-      workspace_id: surface.workspace_id ?? null,
-      status:
-        issueCodes.length === 0
-          ? "unknown"
-          : hasBlockingIssue
-            ? "unhealthy"
-            : "degraded",
-      issue_codes: issueCodes,
-      issues,
-      ...(issueCodes.length > 0 ? { issue_severities: issueSeverities } : {}),
-    };
-  };
 
   const collectDeliveryEvidence = async (agentId: string) => {
     const agent = context.lifecycleSweepEngine?.getAgentState(agentId) ?? null;
@@ -13637,7 +13593,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return okFormatted(formatted, data);
         };
         const buildListAgentsResponse = async (
-          records: AgentRecord[],
+          // `listMerged` hands back MergedAgent rows; the merge-only fields are
+          // optional so cached/registry-only callers still type-check.
+          records: Array<AgentRecord & { parsed_cli_mismatch?: boolean }>,
           topology: SurfaceTopologySnapshot | null,
           topologySignature: string,
           liveDiscovery?: {
@@ -13728,6 +13686,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     }),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
+                    // #481: computed on every listMerged, read only by the
+                    // removed resync tool's dead body -- so a pane whose
+                    // observed CLI disagreed with its record was silently
+                    // un-surfaced. Sparse on purpose: agreement is the normal
+                    // case and must cost no payload.
+                    ...(agent.parsed_cli_mismatch === true
+                      ? { parsed_cli_mismatch: true }
+                      : {}),
                     // P11 Constraint 3: at DEFAULT detail, so a lead can tell a
                     // deadlocked child (done, no artifact -> act) from a busy one
                     // (pending -> wait) WITHOUT a second full-detail call. A bare
@@ -13804,6 +13770,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             registry.repairFromDiscovery(discovered, {
               seatRegistry,
               orphansOnly: true,
+            });
+            // #481: `createLiveSeatDiscoveryProof` had exactly one call site --
+            // inside the removed resync tool's unreachable body -- so
+            // `hasLiveManagedSeatSibling` returned false unconditionally and
+            // every crash-recovery-eligible ghost was retained forever. This is
+            // the live path that already holds a same-cycle, observer-pinned
+            // scan, so the proof belongs here.
+            // #480: it is also the only reconciliation callers actually
+            // trigger. Without an eviction here `list_agents` was the one
+            // reader that never dropped a row: 17 agents against 13 surfaces.
+            const liveSeatProof = registry.createLiveSeatDiscoveryProof(
+              discovered,
+              {
+                seatRegistry,
+                expectedObserverId: registry.getObserverId(),
+                expectedObserverEpoch: registry.getObserverEpoch(),
+              },
+            );
+            await registry.evictSurfaceless({
+              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+              now: observedAtMs,
+              liveSeatProof,
             });
             const merged = await registry.listMerged(discovery, {
               filter,
@@ -14080,582 +14068,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "resync_agents",
-      "Removed compatibility stub. Agent discovery and reconciliation now happen automatically on list_agents; callers must not resync manually.",
+      "Removed. Reconciliation runs automatically on list_agents: fresh discovery, orphan repair, and ghost eviction carrying a same-cycle live-seat proof. Role reflow runs on the periodic sweep. Call list_agents.",
       {},
       ANNOTATIONS.readOnly,
-      async () => {
-        const compatibilityStubRemoved: boolean = true;
-        if (compatibilityStubRemoved) {
-          return err(
-            new Error(
-              "resync_agents was removed; call list_agents for an automatically refreshed live view",
-            ),
-          );
-        }
-        /* c8 ignore start -- retained for one release as unreachable rollback reference */
-        await awaitLifecycleStart();
-        return engine.runLifecycleMutation(async () => {
-          try {
-            const beforeIds = new Set(
-              registry.list().map((agent) => agent.agent_id),
-            );
-            const surfaceAbsenceConfirmation = {
-              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
-            };
-            await registry.reconcile(surfaceAbsenceConfirmation);
-            for (const agent of registry.list()) {
-              beforeIds.add(agent.agent_id);
-            }
-            discovery.invalidate();
-            const discoveredBeforeRepair = await discovery.scan(true);
-            const repair = registry.repairFromDiscovery(
-              discoveredBeforeRepair,
-              {
-                seatRegistry,
-              },
-            );
-            const liveSeatProofObserverId = registry.getObserverId();
-            const liveSeatProofObserverEpoch = registry.getObserverEpoch();
-            discovery.invalidate();
-            const discoveredAfterRepair = await discovery.scan(true);
-            const liveSeatProof = registry.createLiveSeatDiscoveryProof(
-              discoveredAfterRepair,
-              {
-                seatRegistry,
-                expectedObserverId: liveSeatProofObserverId,
-                expectedObserverEpoch: liveSeatProofObserverEpoch,
-              },
-            );
-            await registry.listMerged(discovery, {
-              force: true,
-              discovered: discoveredAfterRepair,
-            });
-            const surfacelessEvicted = await registry.evictSurfaceless({
-              ...surfaceAbsenceConfirmation,
-              liveSeatProof,
-            });
-            engine.evictDeadProcessAgents();
-            discovery.invalidate();
-            let after = await registry.listMerged(discovery, { force: true });
-            const reflowObserverEpoch = captureObserverEpoch(
-              surfaceObserverEpochProvider(),
-            );
-            const topologyBeforeReflow = await collectSurfaceTopology();
-            const topologyIsCoherent = (
-              topology: SurfaceTopologySnapshot | null,
-            ): topology is SurfaceTopologySnapshot => {
-              const surfaceCount = topology?.workspaceBySurface.size ?? 0;
-              const uuidCount = topology?.surfaceIdByRef.size ?? 0;
-              return (
-                topology?.complete === true &&
-                surfaceCount > 0 &&
-                (uuidCount === 0 || uuidCount === surfaceCount)
-              );
-            };
-            const topologyBeforeReflowIsCoherent =
-              topologyIsCoherent(topologyBeforeReflow);
-            const reflowed: Array<{
-              agent_id: string;
-              surface_id: string;
-              from_column: number;
-              to_column: number;
-              pane: string;
-            }> = [];
-            type ReflowOperation =
-              "new_split" | "move_surface" | "verify_reflow" | "close_surface";
-            const reflowSkipped: Array<{
-              agent_id: string;
-              surface_id: string;
-              operation: ReflowOperation;
-              reason: string;
-            }> = [];
-            const recordReflowSkip = (
-              agent: AgentRecord,
-              surfaceId: string,
-              operation: ReflowOperation,
-              error: unknown,
-            ): void => {
-              reflowSkipped.push({
-                agent_id: agent.agent_id,
-                surface_id: surfaceId,
-                operation,
-                reason: error instanceof Error ? error.message : String(error),
-              });
-            };
-            const assertCurrentReflowAuthority = (
-              agent: AgentRecord,
-              expectedWorkspace: string,
-              operation: ReflowOperation,
-            ): AgentRecord => {
-              const currentAgent =
-                registry.get(agent.agent_id) ??
-                stateMgr.readState(agent.agent_id);
-              const expectedUuid = agent.surface_uuid?.trim().toLowerCase();
-              const currentUuid = currentAgent?.surface_uuid
-                ?.trim()
-                .toLowerCase();
-              if (
-                !currentAgent ||
-                currentAgent.surface_provenance !== "cmuxlayer_spawn" ||
-                inferRecordRoleOrNull(currentAgent) !== "worker" ||
-                (currentAgent.state !== "idle" &&
-                  !TERMINAL_AGENT_STATES.has(currentAgent.state)) ||
-                !expectedUuid ||
-                currentUuid !== expectedUuid ||
-                (currentAgent.workspace_id ?? null) !== expectedWorkspace
-              ) {
-                throw new Error(
-                  `Agent ${agent.agent_id} provenance, role, state, or stable ` +
-                    `binding changed before ${operation}; refusing to move a busy or unowned pane.`,
-                );
-              }
-              return currentAgent;
-            };
-            const resolveFreshReflowBinding = async (
-              agent: AgentRecord,
-              expectedSurfaceRef: string,
-              expectedWorkspace: string,
-              operation: ReflowOperation,
-            ) => {
-              assertCurrentReflowAuthority(agent, expectedWorkspace, operation);
-              assertSurfaceObserverEpochCurrent(
-                reflowObserverEpoch,
-                `resync_agents ${operation}`,
-              );
-              const topology = await collectSurfaceTopology();
-              assertSurfaceObserverEpochCurrent(
-                reflowObserverEpoch,
-                `resync_agents ${operation}`,
-              );
-              if (!topologyIsCoherent(topology)) {
-                throw new Error(
-                  `Fresh topology is incomplete before ${operation}; refusing reflow mutation.`,
-                );
-              }
-              const currentAgent = assertCurrentReflowAuthority(
-                agent,
-                expectedWorkspace,
-                operation,
-              );
-              const binding = resolveAgentSurfaceBinding(
-                currentAgent,
-                topology,
-              );
-              if (!binding) {
-                throw new Error(
-                  `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} is not uniquely bound before ${operation}; refusing reflow mutation.`,
-                );
-              }
-              const observedUuid =
-                topology.surfaceIdByRef.get(binding.surfaceRef) ?? null;
-              if (!registry.canUseObservedBinding(currentAgent, observedUuid)) {
-                throw new Error(
-                  `Fresh binding ${binding.surfaceRef} is not owned by the current observer before ${operation}; refusing reflow mutation.`,
-                );
-              }
-              const workspace =
-                topology.workspaceBySurface.get(binding.surfaceRef) ??
-                binding.workspaceId;
-              if (
-                binding.surfaceRef !== expectedSurfaceRef ||
-                workspace !== expectedWorkspace
-              ) {
-                throw new Error(
-                  `Surface binding changed before ${operation} ` +
-                    `(${expectedSurfaceRef}@${expectedWorkspace} -> ` +
-                    `${binding.surfaceRef}@${workspace ?? "unknown"}); refusing to mutate a recycled ref.`,
-                );
-              }
-              const current = topology.topologyBySurface.get(
-                binding.surfaceRef,
-              );
-              if (current?.column !== 0) {
-                throw new Error(
-                  `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} no longer needs left-column reflow before ${operation}.`,
-                );
-              }
-              return { binding, current, topology, workspace };
-            };
-
-            if (topologyBeforeReflow && topologyBeforeReflowIsCoherent) {
-              const panesByWorkspace = new Map<
-                string,
-                Awaited<ReturnType<typeof client.listPanes>>
-              >();
-
-              for (const agent of after) {
-                if (inferRecordRoleOrNull(agent) !== "worker") continue;
-                if (agent.surface_provenance !== "cmuxlayer_spawn") continue;
-                if (
-                  agent.state !== "idle" &&
-                  !TERMINAL_AGENT_STATES.has(agent.state)
-                ) {
-                  continue;
-                }
-                const binding = resolveAgentSurfaceBinding(
-                  agent,
-                  topologyBeforeReflow,
-                );
-                if (!binding) continue;
-                const observedUuid =
-                  topologyBeforeReflow.surfaceIdByRef.get(binding.surfaceRef) ??
-                  null;
-                if (!registry.canUseObservedBinding(agent, observedUuid)) {
-                  continue;
-                }
-                const liveSurfaceRef = binding.surfaceRef;
-                const current =
-                  topologyBeforeReflow.topologyBySurface.get(liveSurfaceRef);
-                if (current?.column !== 0) continue;
-
-                let seededSurface: string | null = null;
-                let seededSurfaceUuid: string | null = null;
-                let workspace: string | null = null;
-                let attemptedOperation: ReflowOperation =
-                  (current.column_count ?? 0) < 2
-                    ? "new_split"
-                    : "move_surface";
-                try {
-                  workspace =
-                    topologyBeforeReflow.workspaceBySurface.get(
-                      liveSurfaceRef,
-                    ) ??
-                    agent.workspace_id ??
-                    null;
-                  if (!workspace) continue;
-
-                  let targetPane: string | null = null;
-                  if ((current.column_count ?? 0) < 2) {
-                    attemptedOperation = "new_split";
-                    await resolveFreshReflowBinding(
-                      agent,
-                      liveSurfaceRef,
-                      workspace,
-                      attemptedOperation,
-                    );
-                    await assertWorkspaceMutationAllowed(
-                      "new_split",
-                      workspace,
-                    );
-                    await withSurfaceWrite(
-                      liveSurfaceRef,
-                      async () => {
-                        const immediate = await resolveFreshReflowBinding(
-                          agent,
-                          liveSurfaceRef,
-                          workspace!,
-                          attemptedOperation,
-                        );
-                        await assertWorkspaceMutationAllowed(
-                          "new_split",
-                          immediate.workspace ?? workspace!,
-                        );
-                        assertSurfaceObserverEpochCurrent(
-                          reflowObserverEpoch,
-                          "resync_agents new_split",
-                        );
-                        assertCurrentReflowAuthority(
-                          agent,
-                          immediate.workspace ?? workspace!,
-                          attemptedOperation,
-                        );
-                        const seed = await client.newSplit("right", {
-                          workspace: immediate.workspace,
-                          surface: immediate.binding.surfaceRef,
-                          type: "terminal",
-                        });
-                        seededSurface = seed.surface;
-                        seededSurfaceUuid = seed.surface_id ?? null;
-                        targetPane = seed.pane;
-                        assertSurfaceObserverEpochCurrent(
-                          reflowObserverEpoch,
-                          "resync_agents new_split",
-                        );
-                      },
-                      {
-                        owner: `resync-reflow:new_split:${agent.agent_id}`,
-                        stableSurfaceIdentity: agent.surface_uuid,
-                      },
-                    );
-                    panesByWorkspace.delete(workspace);
-                  } else {
-                    assertSurfaceObserverEpochCurrent(
-                      reflowObserverEpoch,
-                      "resync_agents move_surface pane selection",
-                    );
-                    let panes = panesByWorkspace.get(workspace);
-                    if (!panes) {
-                      panes = await client.listPanes({ workspace });
-                      panesByWorkspace.set(workspace, panes);
-                    }
-                    assertSurfaceObserverEpochCurrent(
-                      reflowObserverEpoch,
-                      "resync_agents move_surface pane selection",
-                    );
-                    targetPane =
-                      topPaneInRoleColumn(panes.panes, "worker")?.ref ?? null;
-                  }
-                  if (!targetPane) continue;
-
-                  attemptedOperation = "move_surface";
-                  const freshBeforeMove = await resolveFreshReflowBinding(
-                    agent,
-                    liveSurfaceRef,
-                    workspace,
-                    attemptedOperation,
-                  );
-                  await withSurfaceWrite(
-                    freshBeforeMove.binding.surfaceRef,
-                    async () => {
-                      const immediate = await resolveFreshReflowBinding(
-                        agent,
-                        liveSurfaceRef,
-                        workspace!,
-                        attemptedOperation,
-                      );
-                      await assertSurfaceMutationAllowed(
-                        "move_surface",
-                        immediate.binding.surfaceRef,
-                        immediate.workspace ?? workspace!,
-                      );
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents move_surface",
-                      );
-                      assertCurrentReflowAuthority(
-                        agent,
-                        immediate.workspace ?? workspace!,
-                        attemptedOperation,
-                      );
-                      await client.moveSurface({
-                        surface: immediate.binding.surfaceRef,
-                        pane: targetPane!,
-                        workspace: immediate.workspace,
-                        focus: false,
-                      });
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents move_surface",
-                      );
-                    },
-                    {
-                      toolName: "move_surface",
-                      workspace: freshBeforeMove.workspace ?? workspace,
-                      owner: `resync-reflow:move_surface:${agent.agent_id}`,
-                      stableSurfaceIdentity: agent.surface_uuid,
-                    },
-                  );
-                  panesByWorkspace.delete(workspace);
-
-                  attemptedOperation = "verify_reflow";
-                  const topologyAfterMove =
-                    await collectSurfaceTopology(workspace);
-                  assertSurfaceObserverEpochCurrent(
-                    reflowObserverEpoch,
-                    "resync_agents verify_reflow",
-                  );
-                  if (!topologyIsCoherent(topologyAfterMove)) {
-                    throw new Error(
-                      "Post-move topology is incomplete; reflow could not be verified.",
-                    );
-                  }
-                  const bindingAfterMove = resolveAgentSurfaceBinding(
-                    agent,
-                    topologyAfterMove,
-                  );
-                  if (!bindingAfterMove) {
-                    throw new Error(
-                      "Post-move stable UUID binding is unavailable; reflow could not be verified.",
-                    );
-                  }
-                  const actual = topologyAfterMove.topologyBySurface.get(
-                    bindingAfterMove.surfaceRef,
-                  );
-                  if (actual?.column !== 1) {
-                    throw new Error(
-                      "Post-move topology does not place the worker in canonical column 1.",
-                    );
-                  }
-
-                  reflowed.push({
-                    agent_id: agent.agent_id,
-                    surface_id: bindingAfterMove.surfaceRef,
-                    from_column: current.column,
-                    to_column: actual.column,
-                    pane: targetPane,
-                  });
-                } catch (error) {
-                  // Reflow is self-healing best effort. One stale workspace, pane,
-                  // or topology read must not abort the registry-wide resync.
-                  recordReflowSkip(
-                    agent,
-                    liveSurfaceRef,
-                    attemptedOperation,
-                    error,
-                  );
-                } finally {
-                  if (seededSurface) {
-                    try {
-                      const cleanupSeedUuid = seededSurfaceUuid as
-                        string | null;
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents close_surface",
-                      );
-                      if (!cleanupSeedUuid) {
-                        throw new Error(
-                          `Seed ${seededSurface} has no stable UUID; refusing cleanup by mutable ref.`,
-                        );
-                      }
-                      const cleanupTopology = await collectSurfaceTopology();
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents close_surface",
-                      );
-                      if (!topologyIsCoherent(cleanupTopology)) {
-                        throw new Error(
-                          "Fresh topology is incomplete before seed cleanup; refusing close_surface.",
-                        );
-                      }
-                      const seedUuidKey = cleanupSeedUuid.toLowerCase();
-                      const freshSeedRef = [
-                        ...cleanupTopology.surfaceRefById,
-                      ].find(
-                        ([surfaceUuid]) =>
-                          surfaceUuid.toLowerCase() === seedUuidKey,
-                      )?.[1];
-                      if (!freshSeedRef) {
-                        throw new Error(
-                          `Seed UUID ${cleanupSeedUuid} is no longer uniquely bound; refusing close_surface.`,
-                        );
-                      }
-                      const cleanupWorkspace =
-                        cleanupTopology.workspaceBySurface.get(freshSeedRef) ??
-                        workspace ??
-                        undefined;
-                      await withSurfaceWrite(
-                        freshSeedRef,
-                        async () => {
-                          const immediateTopology =
-                            await collectSurfaceTopology();
-                          assertSurfaceObserverEpochCurrent(
-                            reflowObserverEpoch,
-                            "resync_agents close_surface",
-                          );
-                          if (!topologyIsCoherent(immediateTopology)) {
-                            throw new Error(
-                              "Immediate topology is incomplete before seed cleanup; refusing close_surface.",
-                            );
-                          }
-                          const immediateSeedRef = [
-                            ...immediateTopology.surfaceRefById,
-                          ].find(
-                            ([surfaceUuid]) =>
-                              surfaceUuid.toLowerCase() === seedUuidKey,
-                          )?.[1];
-                          if (immediateSeedRef !== freshSeedRef) {
-                            throw new Error(
-                              `Seed binding changed before close_surface (${freshSeedRef} -> ${immediateSeedRef ?? "missing"}); refusing to close a recycled ref.`,
-                            );
-                          }
-                          const immediateCleanupWorkspace =
-                            immediateTopology.workspaceBySurface.get(
-                              freshSeedRef,
-                            ) ?? cleanupWorkspace;
-                          await assertSurfaceMutationAllowed(
-                            "close_surface",
-                            freshSeedRef,
-                            immediateCleanupWorkspace,
-                          );
-                          assertSurfaceObserverEpochCurrent(
-                            reflowObserverEpoch,
-                            "resync_agents close_surface",
-                          );
-                          await client.closeSurface(freshSeedRef, {
-                            ...(immediateCleanupWorkspace
-                              ? { workspace: immediateCleanupWorkspace }
-                              : {}),
-                          });
-                          assertSurfaceObserverEpochCurrent(
-                            reflowObserverEpoch,
-                            "resync_agents close_surface",
-                          );
-                        },
-                        {
-                          toolName: "close_surface",
-                          workspace: cleanupWorkspace,
-                          owner: `resync-reflow:close_surface:${agent.agent_id}`,
-                          stableSurfaceIdentity: cleanupSeedUuid,
-                        },
-                      );
-                    } catch (error) {
-                      // A seed cleanup race is isolated to this worker as well.
-                      recordReflowSkip(
-                        agent,
-                        seededSurface,
-                        "close_surface",
-                        error,
-                      );
-                    }
-                  }
-                }
-              }
-            }
-
-            if (reflowed.length > 0) {
-              discovery.invalidate();
-              after = await registry.listMerged(discovery, { force: true });
-            }
-            const discovered = await discovery.scan();
-            const afterIds = new Set(after.map((agent) => agent.agent_id));
-            const managedSurfaceIds = new Set(
-              registry
-                .list()
-                .filter((agent) => !agent.agent_id.startsWith("auto-"))
-                .map((agent) => agent.surface_id),
-            );
-            const orphanedSurfaces = discovered.filter(
-              (surface) =>
-                !surface.read_error &&
-                !managedSurfaceIds.has(surface.surface_id),
-            );
-            const orphanedHealth = orphanedSurfaces.map(
-              buildOrphanSurfaceHealth,
-            );
-            const evicted = [
-              ...new Set([
-                ...repair.evicted,
-                ...surfacelessEvicted,
-                ...[...beforeIds].filter((id) => !afterIds.has(id)),
-              ]),
-            ];
-            const diff = {
-              added: [...afterIds].filter((id) => !beforeIds.has(id)),
-              evicted,
-              repaired: repair.repaired,
-              repair_skipped: repair.skipped,
-              reflowed,
-              reflow_skipped: reflowSkipped,
-              mismatches: after
-                .filter((agent) => agent.parsed_cli_mismatch)
-                .map((agent) => agent.agent_id),
-              orphaned: orphanedSurfaces.map((surface) => surface.surface_id),
-              orphaned_health: orphanedHealth,
-              health_failures: orphanedHealth.filter(
-                (health) => health.status === "unhealthy",
-              ),
-            };
-
-            return okFormatted(formatResync(diff), {
-              diff,
-              count: after.length,
-            });
-          } catch (e) {
-            return err(e);
-          }
-        });
-        /* c8 ignore stop */
-      },
+      // AIDEV-NOTE (#481): the original body was kept here behind an early
+      // return as an unreachable rollback reference, which made three
+      // capabilities look covered while their only producer/consumer sat in
+      // dead code. It is deleted; `liveSeatProof` and `parsed_cli_mismatch`
+      // now run on the live list_agents path, and orphan surfaces are already
+      // visible there as auto-discovered rows.
+      async () =>
+        err(
+          new Error(
+            "resync_agents was removed; call list_agents for an automatically refreshed live view",
+          ),
+        ),
     );
 
     // 16. stop_agent

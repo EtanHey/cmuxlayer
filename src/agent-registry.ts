@@ -61,6 +61,11 @@ interface SurfacelessEvictionOptions extends SurfaceAbsenceOptions {
    * still owns the shell, so crash-recovery rows may only yield to this proof.
    */
   liveSeatProof?: LiveSeatDiscoveryProof | null;
+  /**
+   * Continuous-absence window before a row that no live observer claims is
+   * dropped (#480). Defaults to `UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS`.
+   */
+  unclaimedConfirmationMs?: number;
 }
 
 export interface AgentRegistryOptions {
@@ -104,6 +109,23 @@ export function deriveSurfaceObserverId(
 }
 
 export const SURFACE_EVICTION_CONFIRMATION_MS = 5_000;
+
+/**
+ * Absence window for rows NO live observer claims (#480).
+ *
+ * `canMutateForObservedAbsence` requires an exact observer match, so a row
+ * whose `surface_observer_id` is null (pre-observer-identity) or belongs to a
+ * dead socket generation could never be evicted, never be crash-marked, and
+ * never be purged: worst-case survival was unbounded. Measured 2026-08-19:
+ * four such rows, oldest 36 days, `list_agents` 17 vs `list_surfaces` 13.
+ *
+ * Ownership exists to stop one observer mutating another's LIVE row. It is not
+ * a claim on a row that no live surface bears — by uuid or by ref — across a
+ * continuous absence window. This constant is that window: twelve consecutive
+ * 5 s sweeps of proven absence before an unclaimed row is dropped, so the
+ * worst case is bounded and documented rather than infinite.
+ */
+export const UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS = 60_000;
 
 export interface AgentFilter {
   state?: AgentState;
@@ -501,6 +523,16 @@ export class AgentRegistry {
     string,
     { surfaceId: string; firstObservedAt: number }
   >();
+  /**
+   * Absence clock for rows this observer does not own (#480). Kept separate
+   * from `surfacelessObservations` on purpose: that map is cleared by the
+   * ownership gate itself (`isSurfacelessConfirmed`), so an unclaimed row can
+   * never accumulate time in it.
+   */
+  private unclaimedAbsenceObservations = new Map<
+    string,
+    { surfaceId: string; firstObservedAt: number }
+  >();
   private stateMgr: StateManager;
   private surfaceProvider: SurfaceProvider;
   private observerId: string | null;
@@ -645,7 +677,7 @@ export class AgentRegistry {
   async reconstitute(opts: SurfaceAbsenceOptions = {}): Promise<Set<string>> {
     this.agents.clear();
     this.aliases.clear();
-    this.surfacelessObservations.clear();
+    this.clearAbsenceObservations();
 
     const stateFiles = this.stateMgr.listStates();
     for (const record of stateFiles) {
@@ -749,7 +781,7 @@ export class AgentRegistry {
       // Incomplete or contradictory identity evidence can prove neither
       // presence nor absence.
       // Reset pending absence timers so a later valid scan starts fresh.
-      this.surfacelessObservations.clear();
+      this.clearAbsenceObservations();
       return new Set();
     }
     const liveSurfaceKeys = this.liveSurfaceKeys(surfaces);
@@ -909,6 +941,7 @@ export class AgentRegistry {
     const aliases = this.aliasesResolvingTo(resolved);
     this.agents.delete(resolved);
     this.surfacelessObservations.delete(resolved);
+    this.unclaimedAbsenceObservations.delete(resolved);
     this.aliases.delete(agentId);
     this.aliases.delete(resolved);
     for (const alias of aliases) {
@@ -1013,7 +1046,7 @@ export class AgentRegistry {
     if (!discoveryIsBijective || discoveryHasMixedIdentity) {
       // A degraded discovery scan must break any pending negative-evidence
       // streak even when exact UUID matches remain safe for positive sync.
-      this.surfacelessObservations.clear();
+      this.clearAbsenceObservations();
     }
     if (!discoveryIsBijective) {
       return this.list(opts?.filter).map((record) => ({
@@ -1237,7 +1270,7 @@ export class AgentRegistry {
     const discoveryHasMixedIdentity =
       hasMixedDiscoveryIdentityCoverage(discovered);
     if (!discoveryIsBijective || discoveryHasMixedIdentity) {
-      this.surfacelessObservations.clear();
+      this.clearAbsenceObservations();
     }
     if (!discoveryIsBijective) {
       return opts?.agentId ? this.get(opts.agentId) : null;
@@ -1629,6 +1662,12 @@ export class AgentRegistry {
     if (surfacelessObservation?.surfaceId === this.agentSurfaceKey(record)) {
       this.surfacelessObservations.set(newAgentId, surfacelessObservation);
     }
+    const unclaimedObservation =
+      this.unclaimedAbsenceObservations.get(oldAgentId);
+    this.unclaimedAbsenceObservations.delete(oldAgentId);
+    if (unclaimedObservation?.surfaceId === this.agentSurfaceKey(record)) {
+      this.unclaimedAbsenceObservations.set(newAgentId, unclaimedObservation);
+    }
     for (const [alias, target] of this.aliases) {
       if (target === oldAgentId) {
         this.aliases.set(alias, newAgentId);
@@ -1693,7 +1732,7 @@ export class AgentRegistry {
       return [];
     }
     if (!hasCoherentSurfaceIdentity(surfaces)) {
-      this.surfacelessObservations.clear();
+      this.clearAbsenceObservations();
       return [];
     }
 
@@ -1704,10 +1743,29 @@ export class AgentRegistry {
     for (const [id, agent] of [...this.agents.entries()]) {
       if (agent.transcript_session_capture_deferred === true) {
         this.surfacelessObservations.delete(agent.agent_id);
+        this.unclaimedAbsenceObservations.delete(agent.agent_id);
         continue;
       }
       if (this.matchingLiveSurface(agent, surfaces)) {
         this.surfacelessObservations.delete(agent.agent_id);
+        this.unclaimedAbsenceObservations.delete(agent.agent_id);
+        continue;
+      }
+      // #480: rows no live observer claims take the bounded unclaimed path
+      // instead of dying at the ownership gate below. They cannot be evicted,
+      // crash-marked (`reconcileSurfaces` applies the same gate) or recovered
+      // (`recoverCrashedAgents` quarantines unowned rows) on any other path,
+      // so without this they live forever.
+      if (!this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId)) {
+        if (
+          !this.isUnclaimedAbsenceConfirmed(agent, liveSurfaceKeys, opts)
+        ) {
+          continue;
+        }
+        const removedUnclaimedId = this.evictUnchecked(id);
+        if (removedUnclaimedId) {
+          evicted.push(removedUnclaimedId);
+        }
         continue;
       }
       if (!this.isSurfaceAbsenceAuthoritative(agent, surfaces)) {
@@ -1874,6 +1932,50 @@ export class AgentRegistry {
     return now - observation.firstObservedAt >= confirmationMs;
   }
 
+  /**
+   * Continuous, ref-AND-uuid absence of a row that this observer does not own
+   * (#480). Deliberately does NOT consult `isSurfaceAbsenceAuthoritative`:
+   * that helper refuses to read a UUID-less row's absence in a UUID-bearing
+   * topology because a live occupant on the same mutable ref proves nothing
+   * about the row. Here the ref is not occupied at all -- no live surface
+   * carries the row's uuid OR its ref -- across a coherent, non-empty scan.
+   * That is real absence evidence, and it is the only evidence an unclaimed
+   * row can ever produce.
+   *
+   * Eviction, not crash-marking: dropping the registry row is the reversible
+   * direction. If the pane were somehow alive, `listMerged` re-mints it from
+   * discovery on the next call; marking a live agent `error` would not
+   * self-correct.
+   */
+  private isUnclaimedAbsenceConfirmed(
+    agent: AgentRecord,
+    liveSurfaceKeys: ReadonlySet<string>,
+    opts: { unclaimedConfirmationMs?: number; now?: number },
+  ): boolean {
+    const surfaceKey = this.agentSurfaceKey(agent);
+    if (liveSurfaceKeys.has(surfaceKey)) {
+      this.unclaimedAbsenceObservations.delete(agent.agent_id);
+      return false;
+    }
+    const confirmationMs = Math.max(
+      0,
+      opts.unclaimedConfirmationMs ?? UNCLAIMED_SURFACE_EVICTION_CONFIRMATION_MS,
+    );
+    if (confirmationMs === 0) {
+      return true;
+    }
+    const now = opts.now ?? Date.now();
+    const observation = this.unclaimedAbsenceObservations.get(agent.agent_id);
+    if (!observation || observation.surfaceId !== surfaceKey) {
+      this.unclaimedAbsenceObservations.set(agent.agent_id, {
+        surfaceId: surfaceKey,
+        firstObservedAt: now,
+      });
+      return false;
+    }
+    return now - observation.firstObservedAt >= confirmationMs;
+  }
+
   private canMutateForObservedAbsence(
     agent: AgentRecord,
     observerEpoch?: string | null,
@@ -1895,12 +1997,22 @@ export class AgentRegistry {
     return !owner || Boolean(observerId && owner === observerId);
   }
 
+  private clearAbsenceObservations(): void {
+    this.surfacelessObservations.clear();
+    this.unclaimedAbsenceObservations.clear();
+  }
+
   private clearSurfacelessObservationsForLiveSurfaces(
     liveSurfaceKeys: ReadonlySet<string>,
   ): void {
     for (const [agentId, observation] of this.surfacelessObservations) {
       if (liveSurfaceKeys.has(observation.surfaceId)) {
         this.surfacelessObservations.delete(agentId);
+      }
+    }
+    for (const [agentId, observation] of this.unclaimedAbsenceObservations) {
+      if (liveSurfaceKeys.has(observation.surfaceId)) {
+        this.unclaimedAbsenceObservations.delete(agentId);
       }
     }
   }
@@ -1916,7 +2028,7 @@ export class AgentRegistry {
       !hasBijectiveDiscoveryIdentity(discovered) ||
       hasMixedDiscoveryIdentityCoverage(discovered)
     ) {
-      this.surfacelessObservations.clear();
+      this.clearAbsenceObservations();
       return { repaired: [], evicted: [], skipped: [] };
     }
     const repaired: RegistryRepairEntry[] = [];
@@ -2463,7 +2575,7 @@ export class AgentRegistry {
       return 0;
     }
     if (!hasCoherentSurfaceIdentity(surfaces)) {
-      this.surfacelessObservations.clear();
+      this.clearAbsenceObservations();
       return 0;
     }
     const liveSurfaceKeys = this.liveSurfaceKeys(surfaces);
