@@ -708,6 +708,8 @@ export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
+/** One retry: a watch observation must not read a transient failure as absence. */
+const WATCH_OBSERVATION_READ_ATTEMPTS = 2;
 const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
 const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
@@ -2360,11 +2362,18 @@ export class AgentEngine {
     );
   }
 
+  /**
+   * AIDEV-NOTE (F1b): `effectiveState` is the LIVE-resolved state when the
+   * caller has one. `wait_for` passes it so a record the screen contradicts
+   * can never be read as evidence the target state was reached; every other
+   * caller keeps the record's own value and behaves exactly as before.
+   */
   private async getTargetStateEvidenceSource(
     agent: AgentRecord,
     targetState: AgentState,
+    effectiveState: AgentState = agent.state,
   ): Promise<TargetStateEvidenceSource | null> {
-    if (agent.state !== targetState) return null;
+    if (effectiveState !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
     if (await this.hasGroundTruthDone(agent)) return "transcript";
     return this.hasRecordedOutputDoneEvidence(agent) ||
@@ -7354,29 +7363,118 @@ export class AgentEngine {
     }
   }
 
+  /** The on-disk record for an agent the in-memory registry has not bound. */
+  private readPersistedAgentRecord(agentId: string): AgentRecord | null {
+    try {
+      return this.stateMgr.readState(agentId);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * AIDEV-NOTE (F1b, #472): watch-target existence, and NOTHING more.
+   *
+   * This resolver used to answer "does this agent exist?" with "did one
+   * registry lookup hit AND did one screen read parse into a known CLI?", so a
+   * transient read failure, an unreconstituted record, or a pane still booting
+   * all collapsed into `exists:false` -> a hard `WatchArmError` saying the
+   * agent does not exist. Live, that denied a watch on `voicelayerClaude-2ac0d960`
+   * in the same second `send_to` delivered to it and verified submission.
+   *
+   * So: the record decides existence (registry first, then the state dir that
+   * `send_to` also resolves from), and the screen only refines what the agent
+   * is DOING. A read failure is reported as a read failure and retried once --
+   * it is not evidence of absence. A booting or unparseable frame is a legal
+   * watch target: it arms, and the predicate resolves on a later sweep. Only
+   * positive evidence that the surface is gone -- dead, evicted, or fallen back
+   * to a bare shell -- returns `exists:false`, and it says which one.
+   */
   private watchAgentObservation = async (
     agentId: string,
   ): Promise<WatchAgentObservation> => {
-    const agent = this.registry.get(agentId);
+    const agent =
+      this.registry.get(agentId) ?? this.readPersistedAgentRecord(agentId);
     const source = `screen:${agent?.surface_uuid ?? agent?.surface_id ?? agentId}`;
-    if (!agent) return { exists: false, state: null, source };
-    try {
-      const screen = await this.client.readScreen(agent.surface_id, {
-        ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
-        lines: 30,
-      });
-      const parsed = parseScreen(cleanScreenText(screen.text));
+    if (!agent) {
       return {
-        exists:
-          parsed.agent_type !== "unknown" &&
-          parsed.control_state !== "dead" &&
-          parsed.control_state !== "stale_surface",
-        state: parsed.status === "frozen" ? "error" : parsed.status,
+        exists: false,
+        state: null,
         source,
+        detail: `no registry or state record for ${agentId}`,
       };
-    } catch {
-      return { exists: false, state: null, source };
     }
+
+    let screenText: string | null = null;
+    let readError: unknown = null;
+    for (let attempt = 0; attempt < WATCH_OBSERVATION_READ_ATTEMPTS; attempt++) {
+      try {
+        const screen = await this.client.readScreen(agent.surface_id, {
+          ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
+          lines: 30,
+        });
+        screenText = screen.text;
+        readError = null;
+        break;
+      } catch (error) {
+        readError = error;
+      }
+    }
+
+    if (screenText === null) {
+      // A record we can read, on a surface we momentarily cannot. That is a
+      // read failure, not a missing agent -- report the record's own state.
+      return {
+        exists: true,
+        state: resolveLiveAgentState(agent, null).state,
+        source,
+        detail: `registry hit, screen unreadable after ${WATCH_OBSERVATION_READ_ATTEMPTS} attempts: ${
+          readError instanceof Error ? readError.message : String(readError)
+        }`,
+      };
+    }
+
+    const parsed = parseScreen(cleanScreenText(screenText));
+    if (
+      parsed.control_state === "dead" ||
+      parsed.control_state === "stale_surface"
+    ) {
+      return {
+        exists: false,
+        state: null,
+        source,
+        detail: `registry hit, screen shows ${parsed.control_state}`,
+      };
+    }
+    const live = resolveLiveAgentState(agent, {
+      status: parsed.status,
+      agent_type: parsed.agent_type,
+      control_state: parsed.control_state,
+    });
+    if (parsed.control_state === "shell" && parsed.agent_type === "unknown") {
+      return {
+        exists: false,
+        state: null,
+        source,
+        detail: "registry hit, surface fell back to a bare shell",
+      };
+    }
+    if (parsed.agent_type === "unknown") {
+      // Mid-boot or an unparseable frame: the screen has no authority over the
+      // status here, and reading its default as an idle prompt would fire an
+      // `idle` predicate on an agent that has not started yet.
+      return {
+        exists: true,
+        state: live.state,
+        source,
+        detail: "registry hit, screen unparseable",
+      };
+    }
+    return {
+      exists: true,
+      state: parsed.status === "frozen" ? "error" : parsed.status,
+      source,
+    };
   };
 
   private async sweepWatchesBestEffort(): Promise<void> {
@@ -8130,15 +8228,27 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
+    // AIDEV-NOTE (F1b, #473): a wait must never terminate on a record state the
+    // screen contradicts. #408 flips live agents to `done` within minutes, and
+    // these short-circuits read that record raw -- so `wait_for(target:"idle")`
+    // returned `{state:"done", error:"Agent has already completed", elapsed:0}`
+    // for an agent mid-`brew install`, and the lead that trusted it reported a
+    // false completion. Every termination decision below reads the LIVE state
+    // instead, and the top-level `state` reports the reconciled value rather
+    // than the poisoned record. With no live probe wired the resolution IS the
+    // record, so an unprobed engine behaves exactly as it did before.
+    const initialLive = this.liveStateOf(initial);
+
     // Retroactive check — already in target state with required evidence?
     const initialEvidence = await this.getTargetStateEvidenceSource(
       initial,
       targetState,
+      initialLive.state,
     );
     if (initialEvidence) {
       return {
         matched: true,
-        state: initial.state,
+        state: initialLive.state,
         elapsed: Date.now() - start,
         source: initialEvidence === "state" ? "immediate" : initialEvidence,
         agent: toPublicAgent(initial),
@@ -8146,10 +8256,10 @@ export class AgentEngine {
     }
 
     // Already in terminal error state and target isn't error?
-    if (initial.state === "error" && targetState !== "error") {
+    if (initialLive.state === "error" && targetState !== "error") {
       return {
         matched: false,
-        state: initial.state,
+        state: initialLive.state,
         elapsed: Date.now() - start,
         source: "immediate",
         agent: toPublicAgent(initial),
@@ -8158,10 +8268,10 @@ export class AgentEngine {
     }
 
     // Already in terminal done state and target isn't done?
-    if (initial.state === "done" && targetState !== "done") {
+    if (initialLive.state === "done" && targetState !== "done") {
       return {
         matched: false,
-        state: initial.state,
+        state: initialLive.state,
         elapsed: Date.now() - start,
         source: "immediate",
         agent: toPublicAgent(initial),
@@ -8185,7 +8295,7 @@ export class AgentEngine {
           const current = this.registry.get(agentId);
           finish({
             matched: false,
-            state: current?.state ?? "error",
+            state: current ? this.liveStateOf(current).state : "error",
             elapsed,
             source: "timeout",
             agent: current ? toPublicAgent(current) : null,
@@ -8219,15 +8329,21 @@ export class AgentEngine {
         );
         current = refreshed.agent;
 
+        // The sweep runs the same live gate as the retroactive check: gating
+        // only the entry short-circuit would just move the false completion
+        // one poll interval later.
+        const live = this.liveStateOf(current);
+
         const evidenceSource = await this.getTargetStateEvidenceSource(
           current,
           targetState,
+          live.state,
         );
         if (evidenceSource) {
           clearInterval(checkInterval);
           finish({
             matched: true,
-            state: current.state,
+            state: live.state,
             elapsed,
             source:
               refreshed.source ??
@@ -8238,19 +8354,16 @@ export class AgentEngine {
         }
 
         // Fail-fast on terminal error
-        if (
-          TERMINAL_STATES.has(current.state) &&
-          current.state !== targetState
-        ) {
+        if (TERMINAL_STATES.has(live.state) && live.state !== targetState) {
           clearInterval(checkInterval);
           finish({
             matched: false,
-            state: current.state,
+            state: live.state,
             elapsed,
             source: "sweep",
             agent: toPublicAgent(current),
             error:
-              current.error ?? `Agent entered terminal state: ${current.state}`,
+              current.error ?? `Agent entered terminal state: ${live.state}`,
           });
         }
       }, WAIT_FOR_SWEEP_INTERVAL_MS);

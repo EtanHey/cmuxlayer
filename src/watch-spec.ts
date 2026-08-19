@@ -84,6 +84,14 @@ export interface WatchAgentObservation {
   exists: boolean;
   state: string | null;
   source: string;
+  /**
+   * AIDEV-NOTE (F1b, #472): what the observer actually saw, in the observer's
+   * own words ("registry hit, screen unparseable"). The arm refusal quotes it
+   * instead of asserting the agent "does not exist" -- a claim the observer
+   * cannot make from a failed screen read, and one that was demonstrably false
+   * for agents `send_to` was delivering to in the same second.
+   */
+  detail?: string;
 }
 
 export interface WatchRegistryOptions {
@@ -490,7 +498,9 @@ export async function armWatch(
     throw new WatchArmError(
       "watch_target_missing",
       target,
-      `Watch target agent does not exist: ${target}`,
+      `Watch target agent is not observable: ${target} (${
+        agentObservation?.detail ?? "no observation was returned"
+      })`,
     );
   }
   const source: WatchObservedSource =
