@@ -7,7 +7,10 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import type { LiveAgentState } from "../src/live-agent-state.js";
-import { resolveLiveAgentState } from "../src/live-agent-state.js";
+import {
+  resolveLiveAgentState,
+  screenConfirmedAgentState,
+} from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
 import { WatchArmError, readWatchRegistry } from "../src/watch-spec.js";
 import type { CmuxSurface } from "../src/types.js";
@@ -498,10 +501,10 @@ describe("F1b round 2 — the wait buys its own evidence instead of hoping the c
     const record = engine.getAgentState("voicelayerClaude-2ac0d960");
     if (!record) throw new Error("fixture record missing");
 
-    // Cold, before the wait: no evidence, so closure honestly reads the record.
-    expect(engine.assessHarvestability(record).closure).toBe(
-      "artifact_missing",
-    );
+    // Cold, before the wait. Round 3 also made this `pending` -- with no
+    // evidence anywhere, a bare `done` record may not fire the alarm either --
+    // so what this test now pins is the STATE half: the wait's own evidence.
+    expect(engine.assessHarvestability(record).closure).toBe("pending");
 
     const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 1_500);
     await vi.advanceTimersByTimeAsync(2_000);
@@ -677,5 +680,133 @@ describe("F1b — a watch still refuses when the surface is positively gone", ()
     expect(error?.code).toBe("watch_target_missing");
     expect(error?.message).toMatch(/bare shell/i);
     expect(error?.message).not.toContain("does not exist");
+  });
+});
+
+
+
+/** A fresh agent sitting at a live prompt, waiting for its first instruction. */
+const readyScreenProbe = (agent: AgentRecord): LiveAgentState =>
+  resolveLiveAgentState(agent, {
+    status: "idle",
+    agent_type: "claude",
+    control_state: "ready",
+  });
+
+describe("F1b round 3 — one row, one state rule: closure cannot contradict the state beside it", () => {
+  let stateMgr: StateManager;
+  let engine: AgentEngine;
+  let liveSurfaces: CmuxSurface[];
+
+  const buildEngine = (): void => {
+    stateMgr = new StateManager(TEST_DIR);
+    liveSurfaces = [makeSurface("surface:worker")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(stateMgr, registry, makeMockClient(), {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+    });
+  };
+
+  const contractRecord = (overrides?: Partial<AgentRecord>): AgentRecord =>
+    makeRecord({
+      report_path: join(TEST_DIR, "report.md"),
+      done_marker: "DONE_WORKER",
+      ...overrides,
+    });
+
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    buildEngine();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    engine.dispose();
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("shape 1 — a READY agent whose record flipped done reads pending, not artifact_missing", () => {
+    // golemsClaude's live specimen: five agents, one spawned two minutes
+    // earlier, all on v0.4.47 with the F1 fix present. The screen said `ready`,
+    // the row said `ready`, and the closure beside it said `artifact_missing`.
+    stateMgr.writeState(contractRecord({ state: "done" }));
+    const record = stateMgr.readState("voicelayerClaude-2ac0d960");
+    if (!record) throw new Error("fixture record missing");
+    engine.setLiveStateResolver(readyScreenProbe);
+
+    const harvest = engine.assessHarvestability(record);
+
+    expect(harvest.closure).toBe("pending");
+    // And it says why, in the field that was already in the payload.
+    expect(harvest.evidence_channel.done_source).toBe("none");
+  });
+
+  it("shape 2 — a WORKING agent on a cold cache reads pending, not artifact_missing", () => {
+    // Same alarm, different root: no live evidence at all, so the record's
+    // bare `done` is the only thing speaking. It still must not fire the alarm.
+    stateMgr.writeState(contractRecord({ state: "done" }));
+    const record = stateMgr.readState("voicelayerClaude-2ac0d960");
+    if (!record) throw new Error("fixture record missing");
+    engine.setLiveStateResolver((agent) => resolveLiveAgentState(agent, null));
+
+    expect(engine.assessHarvestability(record).closure).toBe("pending");
+  });
+
+  it("the deadlock alarm SURVIVES for a worker that earned its done", () => {
+    // The other half of the contract: a finished worker sits at a ready prompt
+    // too. With real done evidence and no report, `artifact_missing` must still
+    // fire -- otherwise this change trades a false alarm for a silent one.
+    stateMgr.writeState(
+      contractRecord({
+        state: "done",
+        task_done_detected_at: "2026-08-19T10:05:00.000Z",
+      }),
+    );
+    const record = stateMgr.readState("voicelayerClaude-2ac0d960");
+    if (!record) throw new Error("fixture record missing");
+    engine.setLiveStateResolver(readyScreenProbe);
+
+    const harvest = engine.assessHarvestability(record);
+
+    expect(harvest.closure).toBe("artifact_missing");
+    expect(harvest.evidence_channel.done_source).toBe("screen");
+  });
+
+  it("a screen showing work in progress still outranks an earned done", () => {
+    // Ordering check: evidence that the agent is working NOW beats evidence
+    // that it finished earlier — a re-tasked worker is not a deadlocked one.
+    stateMgr.writeState(
+      contractRecord({
+        state: "done",
+        task_done_detected_at: "2026-08-19T10:05:00.000Z",
+      }),
+    );
+    const record = stateMgr.readState("voicelayerClaude-2ac0d960");
+    if (!record) throw new Error("fixture record missing");
+    engine.setLiveStateResolver(workingScreenProbe);
+
+    expect(engine.assessHarvestability(record).closure).toBe("pending");
+  });
+
+  it("closure agrees with the state the same response reports", () => {
+    // The row publishes `reconciled_state ?? record.state`, derived from
+    // `screenConfirmedAgentState`. Closure now reads the same value, so the two
+    // fields of one row cannot disagree about whether the agent is done.
+    stateMgr.writeState(contractRecord({ state: "done" }));
+    const record = stateMgr.readState("voicelayerClaude-2ac0d960");
+    if (!record) throw new Error("fixture record missing");
+    engine.setLiveStateResolver(readyScreenProbe);
+
+    const rowState =
+      screenConfirmedAgentState({
+        status: "idle",
+        agent_type: "claude",
+        control_state: "ready",
+      }) ?? record.state;
+
+    expect(rowState).toBe("ready");
+    expect(engine.assessHarvestability(record).closure).toBe("pending");
   });
 });

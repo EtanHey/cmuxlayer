@@ -112,7 +112,9 @@ describe("P11 boot footer (Constraint 1: <=2 short lines, bytes declared)", () =
 });
 
 describe("P11 closure state (Constraint 3: no bare boolean at default detail)", () => {
-  const issued = { contractIssued: true };
+  // A genuinely finished worker: the contract was issued AND something observed
+  // the task ending. `doneEvidence:false` is its own case below.
+  const issued = { contractIssued: true, doneEvidence: true };
 
   it("done + verified artifact => verified", () => {
     expect(
@@ -161,12 +163,37 @@ describe("P11 closure state (Constraint 3: no bare boolean at default detail)", 
     expect(deadlocked).not.toBe(working);
   });
 
+  it("F1b: done WITHOUT done evidence => pending, never the artifact_missing alarm", () => {
+    // #408 flips live records to `done` on its own. `artifact_missing` means
+    // "route a reviewer NOW", so a record flip must not be able to fire it.
+    expect(
+      resolveClosureState({
+        contractIssued: true,
+        state: "done",
+        closureArtifactVerified: false,
+        doneEvidence: false,
+      }),
+    ).toBe("pending");
+  });
+
+  it("F1b: a verified artifact stands on its own, evidence channel or not", () => {
+    expect(
+      resolveClosureState({
+        contractIssued: true,
+        state: "done",
+        closureArtifactVerified: true,
+        doneEvidence: false,
+      }),
+    ).toBe("verified");
+  });
+
   it("no contract issued => not_applicable, never a falsey negative", () => {
     expect(
       resolveClosureState({
         contractIssued: false,
         state: "done",
         closureArtifactVerified: null,
+        doneEvidence: true,
       }),
     ).toBe("not_applicable");
   });

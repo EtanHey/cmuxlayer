@@ -135,13 +135,26 @@ export function resolveClosureState(input: {
   role?: string | null;
   contractIssued: boolean;
   closureArtifactVerified: boolean | null;
+  /**
+   * Positive evidence the task actually ENDED -- a done signal detected on the
+   * screen or in the harness transcript -- as opposed to a registry record
+   * that merely says `done`.
+   */
+  doneEvidence: boolean;
 }): ClosureState {
   if (!input.contractIssued) return "not_applicable";
   if (input.role === "orchestrator") return "not_applicable";
   if (input.state !== "done") return "pending";
-  return input.closureArtifactVerified === true
-    ? "verified"
-    : "artifact_missing";
+  if (input.closureArtifactVerified === true) return "verified";
+  // AIDEV-NOTE (F1b round 3): `artifact_missing` is not a description, it is an
+  // ALARM -- P11's table reads it as "route a reviewer NOW". Firing it takes
+  // positive evidence that the work ended, because #408 flips live records to
+  // `done` on its own: five agents were observed rendering `artifact_missing`
+  // while sitting at a fresh `ready` prompt, one of them spawned two minutes
+  // earlier. A record that flipped is not a task that finished, and the
+  // difference is exactly this evidence.
+  if (!input.doneEvidence) return "pending";
+  return "artifact_missing";
 }
 
 // ---------------------------------------------------------------------------

@@ -395,6 +395,11 @@ describe("F1 — live state, not the stale registry record", () => {
         state: "done",
         report_path: join(TEST_DIR, "reports", "missing.md"),
         done_marker: "### @cmuxlayerCodex-finished DONE",
+        // F1b round 3: this worker EARNED its done -- a done signal was
+        // detected on its screen. Without that, the fixture is
+        // indistinguishable from a #408 record flip, and the sibling test
+        // below is what that shape must produce.
+        task_done_detected_at: "2026-08-19T10:05:00.000Z",
       } as Partial<AgentRecord> as any),
     );
 
@@ -407,5 +412,34 @@ describe("F1 — live state, not the stale registry record", () => {
     // A finished worker sits at a ready prompt too, so `ready` must NOT
     // overturn a recorded done: the deadlock signal has to survive.
     expect(row.closure).toBe("artifact_missing");
+  });
+
+  it("F1b: a fresh agent at a ready prompt whose record flipped done reads pending", async () => {
+    client.screens["surface:idle"] = [
+      "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+      "codex>",
+    ].join("\n");
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-flipped",
+        surface_id: client.idleSurface,
+        state: "done",
+        report_path: join(TEST_DIR, "reports", "missing.md"),
+        done_marker: "### @cmuxlayerCodex-flipped DONE",
+      } as Partial<AgentRecord> as any),
+    );
+
+    const result = await callTool(server, "list_agents", { detail: "full" });
+    const parsed = parseResult(result);
+    const row = parsed.agents.find(
+      (agent: any) => agent.agent_id === "cmuxlayerCodex-flipped",
+    );
+    expect(row, JSON.stringify(parsed)).toBeTruthy();
+    // Same screen, same missing report — and NOTHING ever observed this task
+    // ending. The row's own `state` says the agent is at a live prompt, so the
+    // closure beside it may not say the work is over and unaccounted for.
+    expect(row.state.value).toBe("ready");
+    expect(row.closure).toBe("pending");
   });
 });
