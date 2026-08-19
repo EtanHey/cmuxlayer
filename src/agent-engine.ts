@@ -1847,9 +1847,7 @@ export class AgentEngine {
     // claiming done is the record, which #408 writes without observing
     // anything.
     const doneEvidence =
-      evidenceChannel.done_source !== "none" ||
-      live.screen_state === "done" ||
-      closureArtifactVerified;
+      evidenceChannel.done_source !== "none" || live.screen_state === "done";
     const keptOpen = reportText
       ? this.extractKeptOpenContract(reportText)
       : null;

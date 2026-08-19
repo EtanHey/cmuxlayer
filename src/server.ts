@@ -7212,6 +7212,56 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       : parsed;
 
+  /**
+   * AIDEV-NOTE (T1b/#488): ONE screen observation for a response that emits
+   * `closure` and `state`/health together. `list_agents` threads its own scan;
+   * `get_agent_state` and `wait_for` have no scan, so they read the surface ONCE
+   * here and hand the same observation to both consumers -- the health block via
+   * the screen_* overrides it already accepts (which stop it re-reading), and
+   * closure via `assessHarvestability(agent, { live })`. Without this, closure
+   * fell back to `cachedScan()`, null past 2000ms, and the same response could
+   * say `working` and `artifact_missing` at once. Read count is unchanged: the
+   * read moves out of the health call, it is not added to it.
+   */
+  const observeAgentOnce = async (
+    agent: AgentRecord,
+    topology: SurfaceTopologySnapshot | null,
+  ): Promise<{
+    screenOverrides: AgentHealthInputOverrides;
+    live: LiveAgentState;
+  }> => {
+    const binding = resolveAuthorizedAgentSurfaceBinding(agent, topology);
+    if (!binding) {
+      // No authorized surface is no evidence -- the same answer the health path
+      // reaches on its own, and `resolveLiveAgentState` records it as
+      // `source: "registry"` rather than passing the record off as observed.
+      return { screenOverrides: {}, live: resolveLiveAgentState(agent, null) };
+    }
+    const parsed = await readParsedSurface(
+      binding.surfaceRef,
+      binding.workspaceId ?? undefined,
+      { agent },
+    );
+    return {
+      screenOverrides: {
+        screen_status: parsed?.parsed.status ?? null,
+        screen_agent_type: parsed?.parsed.agent_type ?? null,
+        screen_control_state: parsed?.parsed.control_state ?? null,
+        screen_actions: parsed?.parsed.actions ?? null,
+      },
+      live: resolveLiveAgentState(
+        agent,
+        parsed
+          ? {
+              status: parsed.parsed.status,
+              agent_type: parsed.parsed.agent_type,
+              control_state: parsed.parsed.control_state,
+            }
+          : null,
+      ),
+    };
+  };
+
   const evaluateServerAgentHealth = async (
     agent: AgentRecord,
     overrides?: AgentHealthInputOverrides,
@@ -13255,11 +13305,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const resultAgent = result.agent
                   ? engine.getAgentState(result.agent.agent_id)
                   : null;
+                // T1b (#488): one observation feeds this reply's health block
+                // AND its closure, so the two cannot contradict each other.
+                const observed = resultAgent
+                  ? await observeAgentOnce(resultAgent, topology)
+                  : null;
                 const health = resultAgent
                   ? await evaluateServerAgentHealth(
                       resultAgent,
                       {
                         ...healthTopologyOverrides(resultAgent, topology),
+                        ...(observed?.screenOverrides ?? {}),
                       },
                       topology,
                     )
@@ -13270,7 +13326,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 // with no new carrier (#414: a carrier without a reader is not
                 // a carrier).
                 const harvest = resultAgent
-                  ? engine.assessHarvestability(resultAgent)
+                  ? engine.assessHarvestability(resultAgent, {
+                      live: observed?.live ?? null,
+                    })
                   : null;
                 return {
                   ...result,
@@ -13440,7 +13498,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!state)
             return err(new Error(`Agent not found: ${args.agent_id}`));
           const topology = await collectSurfaceTopology();
-          const harvestability = engine.assessHarvestability(state);
+          // T1b (#488): the screen this response reports on is the screen its
+          // closure is resolved from. Read once, used by both.
+          const observed = await observeAgentOnce(state, topology);
+          const harvestability = engine.assessHarvestability(state, {
+            live: observed.live,
+          });
           const authorizedBinding = resolveAuthorizedAgentSurfaceBinding(
             state,
             topology,
@@ -13450,6 +13513,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               state,
               {
                 ...healthTopologyOverrides(state, topology),
+                ...observed.screenOverrides,
                 harvestability,
               },
               topology,

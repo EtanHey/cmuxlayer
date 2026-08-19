@@ -311,6 +311,103 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     expect(reads).toBe(Object.keys(client.screens).length);
   });
 
+  it("get_agent_state does not render artifact_missing beside a working screen", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-t1b-getstate",
+        surface_id: client.workingSurface,
+        // The residual shape the reviewer reproduced: a done that WAS once
+        // observed, on an agent that is demonstrably working again.
+        state: "done",
+        task_done_detected_at: "2026-08-19T13:41:00.000Z",
+        report_path: join(TEST_DIR, "reports", "getstate.md"),
+        done_marker: "DONE_T1B_GETSTATE",
+      } as Partial<AgentRecord> as any),
+    );
+
+    await callTool(server, "list_agents", {});
+    poisonProbeCold(server);
+
+    const parsed = parseResult(
+      await callTool(server, "get_agent_state", {
+        agent_id: "cmuxlayerCodex-t1b-getstate",
+      }),
+    );
+    expect(parsed.health?.reconciled_state, JSON.stringify(parsed)).toBe(
+      "working",
+    );
+    expect(parsed.harvestability.closure).toBe("pending");
+  });
+
+  it("wait_for does not render artifact_missing beside a working screen", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-t1b-waitfor",
+        surface_id: client.workingSurface,
+        state: "done",
+        task_done_detected_at: "2026-08-19T13:41:00.000Z",
+        report_path: join(TEST_DIR, "reports", "waitfor.md"),
+        done_marker: "DONE_T1B_WAITFOR",
+      } as Partial<AgentRecord> as any),
+    );
+
+    await callTool(server, "list_agents", {});
+    poisonProbeCold(server);
+
+    const parsed = parseResult(
+      await callTool(server, "wait_for", {
+        ids: ["cmuxlayerCodex-t1b-waitfor"],
+        target_state: "done",
+        timeout_ms: 2000,
+      }),
+    );
+    const result = parsed.results[0];
+    expect(result.health?.reconciled_state, JSON.stringify(parsed)).toBe(
+      "working",
+    );
+    expect(result.closure).toBe("pending");
+  });
+
+  it("the deadlock signal survives on ALL THREE emitters, not just list_agents", async () => {
+    // The false-negative the reviewer named: narrowing `artifact_missing` must
+    // not silence the case it exists for. Done evidence, ready prompt, report
+    // never written -- every path that emits closure must still say so.
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-t1b-realdeadlock",
+        surface_id: client.readySurface,
+        state: "done",
+        task_done_detected_at: "2026-08-19T13:41:00.000Z",
+        report_path: join(TEST_DIR, "reports", "real-deadlock.md"),
+        done_marker: "DONE_T1B_REALDEADLOCK",
+      } as Partial<AgentRecord> as any),
+    );
+
+    const listed = parseResult(await callTool(server, "list_agents", {}));
+    const state = parseResult(
+      await callTool(server, "get_agent_state", {
+        agent_id: "cmuxlayerCodex-t1b-realdeadlock",
+      }),
+    );
+    const waited = parseResult(
+      await callTool(server, "wait_for", {
+        ids: ["cmuxlayerCodex-t1b-realdeadlock"],
+        target_state: "done",
+        timeout_ms: 2000,
+      }),
+    );
+
+    expect(
+      rowFor(listed, "cmuxlayerCodex-t1b-realdeadlock")?.closure,
+      JSON.stringify(listed),
+    ).toBe("artifact_missing");
+    expect(state.harvestability.closure).toBe("artifact_missing");
+    expect(waited.results[0].closure).toBe("artifact_missing");
+  });
+
   it("three consecutive calls for an unchanged agent do not flap the closure", async () => {
     registerAgent(
       server,
