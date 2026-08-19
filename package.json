@@ -63,7 +63,9 @@
     "install:fleet-sidebar:dev": "node scripts/install-fleet-sidebar-dev.mjs",
     "bench:daemon": "node scripts/bench-daemon.mjs",
     "test:watch": "vitest",
-    "live:harness": "node scripts/run-live-agent-harness.mjs"
+    "live:harness": "node scripts/run-live-agent-harness.mjs",
+    "qa:video": "node scripts/qa-video-harness.mjs",
+    "qa:video:dry-run": "node scripts/qa-video-harness.mjs --dry-run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
