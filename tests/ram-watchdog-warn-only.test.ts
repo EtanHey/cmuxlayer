@@ -176,7 +176,9 @@ done
   writeFileSync(join(root, "fixtures/memsize.fixture"), "1048576\n");
 }
 
-describe("cmux RAM watchdog warn-only regression", () => {
+// Each case runs a real bash script through spawnSync; vitest's 5s default is
+// the wrong budget for that and flakes under full-suite load.
+describe("cmux RAM watchdog warn-only regression", { timeout: 30_000 }, () => {
   it("turns a watchdog memory breach into notification/snapshot work without SIGKILLing cmux", () => {
     const root = makeRoot("cmux-watchdog-vitest-");
     const logDir = join(root, "logs");
