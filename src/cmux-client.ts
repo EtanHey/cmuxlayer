@@ -28,6 +28,16 @@ import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
 import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 
 const execFileAsync = promisify(execFile);
+/**
+ * Hard ceiling on one CLI-fallback `cmux` invocation.
+ *
+ * AIDEV-NOTE (T2 #450): the socket transport is bounded by its own
+ * REQUEST_TIMEOUT_MS, but this fallback had none -- a wedged `cmux`
+ * subprocess held its caller (notably the delivery snapshot read) forever.
+ * Matches the socket client's 10s budget so neither transport can outlast the
+ * other.
+ */
+export const CMUX_CLI_EXEC_TIMEOUT_MS = 10_000;
 const STANDARD_BUNDLED_CMUX =
   "/Applications/cmux.app/Contents/Resources/bin/cmux";
 
@@ -55,6 +65,8 @@ interface CmuxClientOptions {
   bin?: string;
   env?: NodeJS.ProcessEnv;
   existsSync?: (path: string) => boolean;
+  /** Hard ceiling on one CLI-fallback exec; defaults to CMUX_CLI_EXEC_TIMEOUT_MS. */
+  execTimeoutMs?: number;
 }
 
 interface CmuxIdentifyResult {
@@ -75,6 +87,7 @@ export class CmuxClient {
   private bin?: string;
   private env?: NodeJS.ProcessEnv;
   private existsSync: (path: string) => boolean;
+  private execTimeoutMs: number;
   private observerTransportGeneration = 0;
 
   constructor(opts?: CmuxClientOptions) {
@@ -82,6 +95,10 @@ export class CmuxClient {
     this.bin = opts?.bin;
     this.env = opts?.env;
     this.existsSync = opts?.existsSync ?? fs.existsSync;
+    this.execTimeoutMs = Math.max(
+      1,
+      opts?.execTimeoutMs ?? CMUX_CLI_EXEC_TIMEOUT_MS,
+    );
   }
 
   setEnv(env: NodeJS.ProcessEnv | undefined): void {
@@ -121,6 +138,7 @@ export class CmuxClient {
           )
         : await execFileAsync(bin, cliArgs, {
             ...(env ? { env } : {}),
+            timeout: this.execTimeoutMs,
           });
       return stdout;
     } catch (error) {

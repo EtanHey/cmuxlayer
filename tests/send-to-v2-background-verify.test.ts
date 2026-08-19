@@ -629,7 +629,188 @@ describe("send_to v2 background verify", () => {
     });
     expect(existsSync(ticketDir)).toBe(true);
     expect(readdirSync(ticketDir).length).toBeGreaterThan(0);
+    // T2 #471: the local evidence ticket stays; escalating a deadline the
+    // ENGINE ran out of to the issue tracker does not.
+    expect(filed).toHaveLength(0);
+  });
+
+  it("does not escalate a verify_deadline_elapsed failure to a GitHub issue (#471)", async () => {
+    const ticketDir = join(TEST_DIR, "tickets");
+    const filed: unknown[] = [];
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client, {
+      deliveryVerifyDeadlineMs: 1_000,
+      deliveryTicketDir: ticketDir,
+      deliveryIssueFiler: async (ticket) => {
+        filed.push(ticket);
+      },
+    });
+    registerAgent(server);
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "engine stopped looking",
+        press_enter: true,
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const engine = server._registeredTools.interact._engine;
+    await engine.verifyPendingDeliveries();
+
+    const receipt = engine.getDeliveryReceipt(sent.delivery_id);
+    expect(receipt).toMatchObject({
+      delivery_state: "failed_confirmed",
+      terminal: true,
+      error: "verify_deadline_elapsed",
+    });
+    // Local forensics are still written -- the verdict must cite its evidence.
+    expect(readdirSync(ticketDir).length).toBeGreaterThan(0);
+    // ...but the tracker does not get an issue for the engine giving up.
+    expect(filed).toHaveLength(0);
+    expect(receipt.ticket_escalated).toBe(false);
+    expect(receipt.ticket_escalation_declined_reason).toMatch(
+      /no evidence the message was lost/i,
+    );
+  });
+
+  it("does not escalate a target_gone failure to a GitHub issue (#443)", async () => {
+    const ticketDir = join(TEST_DIR, "tickets");
+    const filed: unknown[] = [];
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client, {
+      deliveryTicketDir: ticketDir,
+      deliveryIssueFiler: async (ticket) => {
+        filed.push(ticket);
+      },
+    });
+    registerAgent(server);
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "target vanished",
+        press_enter: true,
+      }),
+    );
+
+    const engine = server._registeredTools.interact._engine;
+    engine.getRegistry().remove("agent-1");
+    for (let miss = 0; miss < DELIVERY_TARGET_GONE_CONFIRM_MISSES; miss += 1) {
+      await engine.verifyPendingDeliveries();
+    }
+
+    const receipt = engine.getDeliveryReceipt(sent.delivery_id);
+    expect(receipt).toMatchObject({
+      delivery_state: "failed_confirmed",
+      terminal: true,
+      error: "target_gone",
+      ticket_escalated: false,
+    });
+    expect(readdirSync(ticketDir).length).toBeGreaterThan(0);
+    expect(filed).toHaveLength(0);
+  });
+
+  it("still escalates a failure the verifier positively observed", async () => {
+    const ticketDir = join(TEST_DIR, "tickets");
+    const filed: unknown[] = [];
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client, {
+      deliveryTicketDir: ticketDir,
+      deliveryIssueFiler: async (ticket) => {
+        filed.push(ticket);
+      },
+    });
+    registerAgent(server);
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "observed lost",
+        press_enter: true,
+      }),
+    );
+
+    const engine = server._registeredTools.interact._engine;
+    engine.setDeliveryVerifier(async () => ({
+      outcome: "failed_confirmed" as const,
+      reason: "composer_rejected_input",
+    }));
+    await engine.verifyPendingDeliveries();
+
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_state: "failed_confirmed",
+      terminal: true,
+      error: "composer_rejected_input",
+      ticket_escalated: true,
+    });
     expect(filed).toHaveLength(1);
+  });
+
+  it("bounds a wedged snapshot read so the verifier cannot stall forever (#450)", async () => {
+    let reads = 0;
+    const client = new FakeAgentSurfaceClient();
+    const stateMgr = new StateManager(TEST_DIR);
+    const engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => []),
+      client as any,
+      {
+        deliveryVerifyTimeoutMs: 50,
+        // Mirrors the production verifier: no snapshot, no evidence.
+        deliveryVerifier: async (_receipt, snapshot) =>
+          snapshot?.text
+            ? { outcome: "delivered" as const, submit_verified: true }
+            : {
+                outcome: "pending" as const,
+                reason: "surface_read_unavailable",
+              },
+        // The CLI-fallback surface read has no subprocess timeout of its own;
+        // model a wedged `cmux` on the first pass.
+        deliverySnapshotReader: async () => {
+          reads += 1;
+          if (reads === 1) {
+            return new Promise(() => {}) as never;
+          }
+          return { text: "Claude Code\n> \n" };
+        },
+      },
+    );
+    try {
+      engine.acceptPendingVerify({
+        delivery_id: "wedged-read-1",
+        agent_id: "agent-1",
+        text: "snapshot read wedges",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+      });
+
+      let settled = false;
+      const first = engine.verifyPendingDeliveries().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      await first;
+
+      expect(settled).toBe(true);
+      expect(engine.getDeliveryReceipt("wedged-read-1")).toMatchObject({
+        delivery_state: "pending_verify",
+        terminal: false,
+      });
+
+      // The latch was released, so a later sweep still resolves the receipt.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await engine.verifyPendingDeliveries();
+      expect(reads).toBe(2);
+      expect(engine.getDeliveryReceipt("wedged-read-1")).toMatchObject({
+        delivery_state: "submitted",
+        terminal: true,
+      });
+    } finally {
+      engine.dispose();
+    }
   });
 
   it("dedupes evidence tickets by failure signature", async () => {
@@ -665,7 +846,8 @@ describe("send_to v2 background verify", () => {
     await server._registeredTools.interact._engine.verifyPendingDeliveries();
 
     expect(readdirSync(ticketDir)).toHaveLength(1);
-    expect(filed).toHaveLength(1);
+    // T2 #471: deadline-elapsed verdicts are never escalated, deduped or not.
+    expect(filed).toHaveLength(0);
   });
 
   it("returns a nonterminal wait_for delivery receipt with timed_out instead of rejecting", async () => {

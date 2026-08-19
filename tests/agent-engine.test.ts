@@ -14053,6 +14053,80 @@ Session ID: ${sessionId}`,
       }
     });
 
+    it("terminalizes a retryable requeue once its bounded queue lifetime elapses (#467)", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));
+      const boundedEngine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          deliveryQueueDeadlineMs: 60_000,
+        },
+      );
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "stuck-booting-delivery",
+            state: "booting",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await boundedEngine.getRegistry().reconstitute();
+        boundedEngine.setDeliverySubmitter(async () => {
+          throw new RetryableDeliveryError(
+            'Agent "stuck-booting-delivery" is not in an interactive state (current: booting)',
+          );
+        });
+        const receipt = boundedEngine.queueDelivery({
+          agent_id: "stuck-booting-delivery",
+          text: "a lead is waiting on this",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        await boundedEngine.drainDeliveryQueue();
+        const deferred = boundedEngine.getDeliveryReceipt(
+          receipt.delivery_id,
+        )!;
+        expect(deferred).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+        });
+        // The requeue now carries a stated lifetime instead of retrying forever.
+        expect(deferred.queue_deadline_at).toBe("2026-08-11T18:01:00.000Z");
+
+        // Retries inside the lifetime stay nonterminal.
+        vi.setSystemTime(new Date("2026-08-11T18:00:30.000Z"));
+        await boundedEngine.drainDeliveryQueue();
+        expect(
+          boundedEngine.getDeliveryReceipt(receipt.delivery_id),
+        ).toMatchObject({ delivery_state: "queued", terminal: false });
+
+        // Past the lifetime the lead gets an answer, citing the gate reason.
+        vi.setSystemTime(new Date("2026-08-11T18:01:00.001Z"));
+        await boundedEngine.drainDeliveryQueue();
+        expect(
+          boundedEngine.getDeliveryReceipt(receipt.delivery_id),
+        ).toMatchObject({
+          delivery_state: "failed_confirmed",
+          terminal: true,
+          submit_verified: false,
+          resolved_at: expect.any(String),
+          error: expect.stringMatching(
+            /queue_deadline_elapsed.*not in an interactive state.*booting/s,
+          ),
+        });
+      } finally {
+        boundedEngine.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it("does not replay a queued receipt whose persisted submission had started", () => {
       const receipt = engine.queueDelivery({
         agent_id: "crashed-queued-delivery",

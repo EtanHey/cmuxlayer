@@ -955,6 +955,7 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "submitted" ||
     evidencedState === "failed" ||
     evidencedState === "failed_confirmed";
+  const warning = input.WARNING ?? defaultNonDeliveryWarning(evidencedState);
   return {
     delivered: evidencedState === "submitted",
     terminal,
@@ -966,8 +967,40 @@ export function buildPublicDeliveryReceipt(input: {
       ? { delivery: evidencedState, delivery_state: evidencedState }
       : {}),
     ...(input.delivery_id ? { delivery_id: input.delivery_id } : {}),
-    ...(input.WARNING ? { WARNING: input.WARNING } : {}),
+    ...(warning ? { WARNING: warning } : {}),
   };
+}
+
+/**
+ * One plain-language line a caller cannot honestly quote as "sent".
+ *
+ * AIDEV-NOTE (T2 #445): `ok:true` with `delivered:false` was routinely read as
+ * success -- a lead's own words: "I treated the first as evidence of the
+ * second." The booleans two levels down were correct and still misread, so the
+ * receipt now says it in words at the top level. Explicit callers keep their
+ * own WARNING (the paused-target line is more specific than this default).
+ */
+function defaultNonDeliveryWarning(
+  state: PublicDeliveryState | undefined,
+): string | undefined {
+  switch (state) {
+    case "pending_verify":
+    case "queued":
+    case "queued_followup":
+      return (
+        `NOT DELIVERED YET — state ${state}: the message has not been observed ` +
+        "to land. It resolves in the background; do not relay as sent. " +
+        "Query wait_for({delivery_id}) for the terminal outcome."
+      );
+    case "failed":
+    case "failed_confirmed":
+      return (
+        `NOT DELIVERED — terminal failure (${state}). The message did not ` +
+        "land and will not be retried; do not relay as sent."
+      );
+    default:
+      return undefined;
+  }
 }
 
 export function pausedTargetWarning(source: string): string {
@@ -1021,6 +1054,7 @@ type SubmitVerificationFailureReason =
   | "surface_screen_empty"
   | "input_still_pending"
   | "working_status_not_observed"
+  | "consumption_not_observed"
   | "submit_evidence_absent";
 
 class SubmitVerificationError extends Error {
@@ -1065,13 +1099,19 @@ class DeliverySafetyGateError extends Error {
 
   constructor(
     readonly error_code:
-      "blocked_by_interactive_prompt" | "blocked_by_permission_prompt",
+      | "blocked_by_interactive_prompt"
+      | "blocked_by_permission_prompt"
+      | "blocked_by_composer_draft",
     readonly screen: ParsedScreenResult,
   ) {
     super(
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
-        : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
+        : error_code === "blocked_by_composer_draft"
+          ? "target composer already holds text this delivery did not write; " +
+            "refused to type (typing + Return would submit or mutate someone " +
+            "else's draft). Clear the composer, or resend once it is empty."
+          : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
   }
@@ -2394,6 +2434,44 @@ function screenShowsPendingInput(
   );
 }
 
+/**
+ * True when the target composer holds text that this delivery did not put
+ * there -- a human's half-written draft, or another agent's unsent message.
+ *
+ * AIDEV-NOTE (T2 #442): the discriminator is "is the visible composer content
+ * contained in the payload we are about to type". A partially-typed payload
+ * (chunk 1 landed, chunk 2 pending) IS ours and must stay deliverable, so it
+ * is compared whitespace-insensitively against the payload rather than
+ * required to be empty. Anything else is foreign and must not be typed into.
+ */
+function composerHoldsForeignDraft(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  // AIDEV-NOTE (T2 #442): Cursor is deliberately exempt. Its composer RETAINS
+  // the accepted text after a submit (the "retained composer" state #441/#449
+  // built evidence rules around), so a non-empty Cursor composer is the normal
+  // post-send screen, not an unsent draft -- and nothing on that screen
+  // distinguishes the two. Guarding it would refuse every legitimate second
+  // send to a Cursor pane. Claude and Codex clear on submit, so there a
+  // non-empty composer really does mean somebody's text is sitting unsent.
+  if (inferComposerCli(screenText) === "cursor") {
+    return false;
+  }
+  const composer = extractComposerInputRegion(screenText, submittedText);
+  if (composer === null) {
+    // No recognisable composer region (bare shell, unreadable frame). The
+    // pre-existing gates own those cases; do not invent a refusal here.
+    return false;
+  }
+  const compactDraft = composer.replace(/\s+/g, "");
+  if (!compactDraft) {
+    return false;
+  }
+  const compactPayload = submittedText.replace(/\s+/g, "");
+  return !(compactPayload.length > 0 && compactPayload.includes(compactDraft));
+}
+
 function stripCodexQueueGutter(line: string): string {
   return line.replace(/^\s*[│┃║┆┊]\s?/, "").trimEnd();
 }
@@ -2756,6 +2834,7 @@ function parseRawSubmitEvidenceMetrics(
 export const __submitEvidenceTestHooks = {
   extractComposerInputRegion,
   screenShowsPendingInput,
+  composerHoldsForeignDraft,
 };
 
 function hasRawSubmitEvidenceIncrease(
@@ -4678,6 +4757,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string,
     workspace?: string,
     cli?: CliType,
+    draftGuard?: { submittedText: string },
   ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
     const snapshot = await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
@@ -4696,6 +4776,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (isPickerOrMenuScreen(snapshot.text, cli)) {
       throw new DeliverySafetyGateError(
         "blocked_by_interactive_prompt",
+        snapshot.parsed,
+      );
+    }
+
+    // AIDEV-NOTE (T2 #442): a composer that already holds text nobody in this
+    // delivery wrote is a human (or another agent) mid-draft. Typing into it
+    // concatenates, and the Return that follows SUBMITS their words. The
+    // picker/permission gates above never covered this: the screen is a
+    // perfectly ordinary ready composer, it just is not empty. Refuse before
+    // the first keystroke -- a refused send is recoverable, a submitted draft
+    // is not.
+    if (
+      draftGuard &&
+      composerHoldsForeignDraft(snapshot.text, draftGuard.submittedText)
+    ) {
+      throw new DeliverySafetyGateError(
+        "blocked_by_composer_draft",
         snapshot.parsed,
       );
     }
@@ -4780,6 +4877,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let retriedAt: number | null = null;
     let sawReadableScreen = false;
     let sawBlankScreen = false;
+    let lastBootConsumptionRefuted = false;
     const screenIncludesSubmittedText = (screenText: string): boolean => {
       const trimmed = opts.text.trim();
       if (!trimmed) {
@@ -4842,6 +4940,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery: "queued_followup",
         };
       }
+      // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative. An agent
+      // handed a prompt that has consumed nothing did not receive it, whatever
+      // the composer looks like -- a slow boot can render a working-looking
+      // banner while the CLI is still initialising, and that race produced
+      // `submit_verified: true` receipts for prompts that never left the
+      // composer. A NULL token count stays inconclusive on purpose: several
+      // CLIs never report one, and treating unknown as zero would turn this
+      // guard into a fleet-wide false negative.
+      const bootConsumptionRefuted =
+        opts.require_working_status === true &&
+        snapshot.parsed.token_count === 0;
+      lastBootConsumptionRefuted = bootConsumptionRefuted;
       const screenCli = inferComposerCli(snapshot.text, snapshot.parsed);
       const cursorShowsSubmittedResponse =
         screenCli === "cursor" &&
@@ -4856,6 +4966,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const composerInput = extractComposerInputRegion(snapshot.text);
       if (
         !hasPendingSubmitEvidence &&
+        !bootConsumptionRefuted &&
         (isSubmitVerifiedStatus(snapshot.parsed.status) ||
           cursorShowsSubmittedResponse)
       ) {
@@ -4870,6 +4981,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         composerInput !== null &&
         composerInput.trim() === "" &&
         !hasPendingSubmitEvidence &&
+        !bootConsumptionRefuted &&
         screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
       if (hasClearedAgentComposer) {
         sawClearedComposerEvidence = true;
@@ -4993,6 +5105,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.require_working_status ||
       lastHasPendingSubmitEvidence ||
       lastRetryEligiblePendingInput ||
+      lastBootConsumptionRefuted ||
       !sawReadableScreen
         ? false
         : noSubmitEvidenceResult;
@@ -5005,9 +5118,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? sawBlankScreen
               ? "surface_screen_empty"
               : "surface_read_unavailable"
-            : opts.require_working_status
-              ? "working_status_not_observed"
-              : "submit_evidence_absent";
+            : lastBootConsumptionRefuted
+              ? "consumption_not_observed"
+              : opts.require_working_status
+                ? "working_status_not_observed"
+                : "submit_evidence_absent";
     const allowPendingVerify =
       opts.source_event === "send_to" || opts.source_event === "dispatch_nudge";
     if (allowPendingVerify && submitVerified === false) {
@@ -5078,9 +5193,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       return { ...receipt, bytes: 0 };
     }
+    // AIDEV-NOTE (T2 #442): the draft guard covers the caller-initiated relay
+    // paths, where refusing is cheap and a foreign draft is a live risk. Boot
+    // and cwd delivery run against a pane cmuxlayer just launched, where the
+    // only text on screen is the launcher's own echo -- refusing there would
+    // break spawn, not protect a human.
+    const draftGuardedEvent =
+      opts.source_event === "send_to" ||
+      opts.source_event === "send_to_agent" ||
+      opts.source_event === "send_input" ||
+      opts.source_event === "dispatch_nudge";
+    const draftGuardText = opts.chunks.join("");
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe(
       opts.surface,
       opts.workspace,
+      undefined,
+      draftGuardedEvent && draftGuardText.trim().length > 0
+        ? { submittedText: draftGuardText }
+        : undefined,
     );
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
@@ -5489,7 +5619,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
       if (snapshot) {
         lastText = snapshot.text;
-        if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
+        const metrics = parseRawSubmitEvidenceMetrics(snapshot.text);
+        // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative -- an agent
+        // handed a prompt that has consumed nothing did not receive it. A slow
+        // boot (MCP servers still connecting, banner mid-render) can present a
+        // working-looking status while the prompt is still sitting in the
+        // composer, and accepting that status produced fully-verified receipts
+        // for workers that sat at `0 tokens` with their entire brief unsent.
+        // A NULL count stays inconclusive on purpose: several CLIs never
+        // report one, and reading unknown as zero would break every boot.
+        const consumptionRefuted = metrics.tokenCount === 0;
+        if (!consumptionRefuted && isSubmitVerifiedStatus(snapshot.parsed.status)) {
           return;
         }
 
@@ -5501,10 +5641,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (
           composerInput !== null &&
           !hasPendingInput &&
-          hasRawSubmitEvidenceIncrease(
-            parseRawSubmitEvidenceMetrics(snapshot.text),
-            opts.baseline_metrics,
-          )
+          hasRawSubmitEvidenceIncrease(metrics, opts.baseline_metrics)
         ) {
           return;
         }
@@ -5515,6 +5652,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !hasPendingInput;
         if (
           composerCleared &&
+          !consumptionRefuted &&
           screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed)
         ) {
           if (composerInput === lastClearedComposerInput) {

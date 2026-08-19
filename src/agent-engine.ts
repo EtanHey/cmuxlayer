@@ -260,7 +260,17 @@ export interface AgentDeliveryReceipt {
   composer_accepted?: boolean;
   /** Hard deadline for background verify; ISO timestamp. */
   verify_deadline_at?: string | null;
+  /**
+   * Hard deadline for a retryable requeue; ISO timestamp. Set on the first
+   * retryable refusal so a target that never becomes interactive resolves
+   * instead of leaving the caller an open queue forever (#467).
+   */
+  queue_deadline_at?: string | null;
   ticket_filed?: boolean;
+  /** Whether the local evidence ticket was escalated to the issue tracker. */
+  ticket_escalated?: boolean;
+  /** Why escalation was declined, when it was. */
+  ticket_escalation_declined_reason?: string | null;
   /** Consecutive verifier observations that the target agent is missing. */
   verify_miss_count?: number;
   /** Last time background verify actually read the target surface. */
@@ -268,6 +278,7 @@ export interface AgentDeliveryReceipt {
 }
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
+export const DEFAULT_DELIVERY_QUEUE_DEADLINE_MS = 10 * 60 * 1000;
 export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
 const DELIVERY_WAIT_POLL_MS = 100;
 
@@ -664,6 +675,7 @@ export interface AgentEngineOptions {
   deliveryVerifyTimeoutMs?: number;
   /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
   deliveryVerifyDeadlineMs?: number;
+  deliveryQueueDeadlineMs?: number;
   /**
    * Local evidence-ticket directory. Omitted/null disables tickets so bare
    * construction never writes ~/.cmuxlayer/tickets or calls gh. Production
@@ -1546,6 +1558,7 @@ export class AgentEngine {
   private deliverySubmitTimeoutMs: number;
   private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
+  private deliveryQueueDeadlineMs: number;
   private deliveryTicketDir: string | null;
   private deliveryIssueFiler: DeliveryIssueFiler | null = null;
   private autoReviveBackoffBaseMs: number;
@@ -1577,6 +1590,10 @@ export class AgentEngine {
     this.deliveryVerifyDeadlineMs = Math.max(
       1,
       opts?.deliveryVerifyDeadlineMs ?? DEFAULT_DELIVERY_VERIFY_DEADLINE_MS,
+    );
+    this.deliveryQueueDeadlineMs = Math.max(
+      1,
+      opts?.deliveryQueueDeadlineMs ?? DEFAULT_DELIVERY_QUEUE_DEADLINE_MS,
     );
     this.deliveryTicketDir = opts?.deliveryTicketDir ?? null;
     this.deliveryIssueFiler = opts?.deliveryIssueFiler ?? null;
@@ -6885,9 +6902,20 @@ export class AgentEngine {
           let snapshot: DeliveryVerifySnapshot | null | undefined;
           if (this.deliverySnapshotReader) {
             if (!snapshots.has(snapshotKey)) {
+              // AIDEV-NOTE (T2 #450): the snapshot read must be inside the
+              // hang guard, not before it. SF8 hoisted the surface read out of
+              // the verifier and awaited it OUTSIDE SF7's race; the CLI
+              // fallback path has no subprocess timeout, so one wedged `cmux`
+              // held deliveryVerifyInFlight forever and every later verify
+              // pass short-circuited -- exactly the stall SF7 exists to
+              // prevent. A timed-out read yields a null snapshot, which the
+              // verifier already treats as "no evidence, stay pending".
               snapshots.set(
                 snapshotKey,
-                await this.deliverySnapshotReader(receipt),
+                await this.withDeliveryVerifyTimeout(
+                  this.deliverySnapshotReader(receipt),
+                  "Delivery snapshot read",
+                ).catch(() => null),
               );
             }
             snapshot = snapshots.get(snapshotKey) ?? null;
@@ -6964,6 +6992,30 @@ export class AgentEngine {
     }
   }
 
+  /** Bound one delivery-verify side quest to the verify timeout. */
+  private withDeliveryVerifyTimeout<T>(
+    work: Promise<T>,
+    label: string,
+  ): Promise<T> {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    return Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `${label} timed out after ${this.deliveryVerifyTimeoutMs}ms`,
+              ),
+            ),
+          this.deliveryVerifyTimeoutMs,
+        );
+      }),
+    ]).finally(() => {
+      if (timeout) clearTimeout(timeout);
+    });
+  }
+
   private verifyReadIntervalMs(
     receipt: AgentDeliveryReceipt,
     now: number,
@@ -6992,6 +7044,35 @@ export class AgentEngine {
     if (!receipt.verify_last_attempt_at) return false;
     const since = now - Date.parse(receipt.verify_last_attempt_at);
     return since > 0 && since < this.verifyReadIntervalMs(receipt, now);
+  }
+
+  /**
+   * A confirmed-failure verdict is worth an issue only when something was
+   * actually observed to go wrong with the message.
+   *
+   * AIDEV-NOTE (T2 #471/#443): `verify_deadline_elapsed` means the ENGINE
+   * stopped looking, and `target_gone` means there was nothing left to look
+   * at. Neither is evidence the message was lost, and auto-filing them
+   * produced issues #471 and #443 -- tracker noise describing cmuxlayer's own
+   * timers, not a defect. The local evidence ticket is still written either
+   * way, so the verdict keeps citing its evidence; only the escalation stops.
+   */
+  private deliveryFailureEscalationDecline(
+    reason: string,
+  ): string | null {
+    if (reason === "verify_deadline_elapsed") {
+      return (
+        "background verify ran out of deadline before observing an outcome; " +
+        "no evidence the message was lost"
+      );
+    }
+    if (reason === "target_gone") {
+      return (
+        "the target agent disappeared before an outcome could be observed; " +
+        "no evidence the message was lost"
+      );
+    }
+    return null;
   }
 
   private async fileConfirmedFailureTicket(
@@ -7028,7 +7109,11 @@ export class AgentEngine {
       dir: ticketDir,
     });
     receipt.ticket_filed = true;
+    const declineReason = this.deliveryFailureEscalationDecline(reason);
+    receipt.ticket_escalated = declineReason === null;
+    receipt.ticket_escalation_declined_reason = declineReason;
     this.persistDeliveryReceipts();
+    if (declineReason !== null) return;
     if (!written.created) return;
     if (!this.deliveryIssueFiler) return;
     try {
@@ -7056,6 +7141,27 @@ export class AgentEngine {
           continue;
         }
         if (agent.paused === true) {
+          continue;
+        }
+        // AIDEV-NOTE (T2 #467): a retryable refusal is nonterminal, but it is
+        // not unbounded. Without this, a target stuck `booting` retried behind
+        // a 30s-capped backoff forever and the caller's receipt never resolved
+        // -- a lead could wait on it indefinitely. The lifetime is stamped on
+        // the first retryable requeue below; when it elapses the caller gets a
+        // terminal answer that cites the gate reason that kept refusing.
+        if (
+          receipt.queue_deadline_at &&
+          Date.now() >= Date.parse(receipt.queue_deadline_at)
+        ) {
+          const gateReason = receipt.error ?? "no gate reason recorded";
+          receipt.delivery_state = "failed_confirmed";
+          receipt.terminal = true;
+          receipt.submit_verified = false;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.next_attempt_at = null;
+          receipt.error = `queue_deadline_elapsed after ${receipt.retry_count} retryable refusals; last gate reason: ${gateReason}`;
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
           continue;
         }
         if (
@@ -7123,6 +7229,9 @@ export class AgentEngine {
           if (error instanceof RetryableDeliveryError) {
             receipt.submission_started_at = null;
             receipt.retry_count += 1;
+            receipt.queue_deadline_at ??= new Date(
+              Date.now() + this.deliveryQueueDeadlineMs,
+            ).toISOString();
             const backoffMs = Math.min(
               30_000,
               250 * 2 ** Math.min(receipt.retry_count - 1, 16),
