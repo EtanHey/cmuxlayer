@@ -12982,7 +12982,7 @@ codex>
     engine.getRegistry().set(agentId, doneState);
 
     const result = await waitFor.handler(
-      { agent_id: currentAgentId, timeout_ms: 5000 },
+      { agent_id: currentAgentId, timeout_ms: 1500 },
       {} as any,
     );
     const parsed =
@@ -12990,7 +12990,13 @@ codex>
 
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
-    expect(parsed.state).toBe("done");
+    // F1b (#473): the omitted target still defaults to `done` -- but this
+    // fixture's pane shows `✻ Working` while the record was forced to `done`,
+    // and a wait may no longer terminate on a record the screen contradicts.
+    // So the default-target wait runs and reports the reconciled state instead
+    // of matching. Asserting `done` here would re-encode the false completion.
+    expect(parsed.state).toBe("working");
+    expect(parsed.matched).toBe(false);
     expect(parsed.agent.session_id).toBeNull();
   }, 10_000);
 

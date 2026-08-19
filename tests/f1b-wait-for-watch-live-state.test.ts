@@ -6,6 +6,7 @@ import { AgentEngine } from "../src/agent-engine.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxClient } from "../src/cmux-client.js";
+import type { LiveAgentState } from "../src/live-agent-state.js";
 import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
 import { WatchArmError, readWatchRegistry } from "../src/watch-spec.js";
@@ -43,9 +44,48 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     renameTab: vi.fn(),
     setStatus: vi.fn(),
     closeSurface: vi.fn(),
-    listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
-    listPanes: vi.fn().mockResolvedValue({ panes: [] }),
-    listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
+    // A complete topology: terminal I/O refuses to read a surface it cannot
+    // prove is live and uniquely bound, so a suite that asserts on screen
+    // reads has to describe the pane the record points at.
+    listWorkspaces: vi.fn().mockResolvedValue({
+      workspaces: [
+        {
+          ref: "workspace:fleet",
+          title: "Fleet",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+      ],
+    }),
+    listPanes: vi.fn().mockResolvedValue({
+      workspace_ref: "workspace:fleet",
+      window_ref: "window:fleet",
+      panes: [
+        {
+          ref: "pane:fleet",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:worker"],
+        },
+      ],
+    }),
+    listPaneSurfaces: vi.fn().mockResolvedValue({
+      workspace_ref: "workspace:fleet",
+      window_ref: "window:fleet",
+      pane_ref: "pane:fleet",
+      surfaces: [
+        {
+          id: "uuid-worker",
+          ref: "surface:worker",
+          title: "cmuxlayerClaude",
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+      ],
+    }),
     selectWorkspace: vi.fn(),
     clearStatus: vi.fn(),
     setProgress: vi.fn(),
@@ -310,5 +350,332 @@ describe("F1b #472 — a watch arms on any observable agent", () => {
     expect(error.message).not.toContain("does not exist");
     expect(error.message).toContain("voicelayerClaude-2ac0d960");
     expect(error.message).toMatch(/no registry or state record/i);
+  });
+});
+
+
+/**
+ * The cold discovery cache, modelled honestly.
+ *
+ * `screenObservationForRecord` reads `discovery.cachedScan()`, which returns
+ * null once the scan is 2000ms old — so the SYNC resolver's ordinary answer on
+ * the `wait_for` path is "no evidence", not "working". A probe that returns
+ * live evidence forever models the resolver's shape and never its availability,
+ * which is how round 1 shipped a fix that reproduced the original bug live.
+ */
+const coldSyncResolver = (agent: AgentRecord): LiveAgentState =>
+  resolveLiveAgentState(agent, null);
+
+/** A sync resolver that goes cold after N calls, as the real cache does. */
+function coldAfter(calls: number): {
+  resolve: (agent: AgentRecord) => LiveAgentState;
+  calls: () => number;
+} {
+  let seen = 0;
+  return {
+    resolve: (agent) => {
+      seen += 1;
+      return seen <= calls ? workingScreenProbe(agent) : coldSyncResolver(agent);
+    },
+    calls: () => seen,
+  };
+}
+
+/** The forcing probe: what a real single-surface screen read would return. */
+const workingFreshProbe = async (
+  agent: AgentRecord,
+): Promise<LiveAgentState> => workingScreenProbe(agent);
+
+describe("F1b round 2 — the wait buys its own evidence instead of hoping the cache is warm", () => {
+  let stateMgr: StateManager;
+  let engine: AgentEngine;
+  let liveSurfaces: CmuxSurface[];
+
+  const buildEngine = (client?: CmuxClient): void => {
+    stateMgr = new StateManager(TEST_DIR);
+    liveSurfaces = [makeSurface("surface:worker")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(stateMgr, registry, client ?? makeMockClient(), {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      watchRegistryPath: registryPath(),
+      watchRegistryNow: () => 1_000,
+    });
+  };
+
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    buildEngine();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    engine.dispose();
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("blocks with a COLD cache at entry — the reported bug, byte for byte", async () => {
+    vi.useFakeTimers();
+    stateMgr.writeState(makeRecord({ state: "done" }));
+    await engine.getRegistry().reconstitute();
+    // Nothing scanned recently: the sync resolver has no evidence at all.
+    engine.setLiveStateResolver(coldSyncResolver);
+    engine.setFreshLiveStateProbe(workingFreshProbe);
+
+    const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await pending;
+
+    expect(result.source).toBe("timeout");
+    expect(result.elapsed).toBeGreaterThanOrEqual(1_500);
+    expect(result.state).toBe("working");
+    expect(result.error).not.toBe("Agent has already completed");
+  });
+
+  it("blocks when the cache goes cold mid-wait, not just at entry", async () => {
+    vi.useFakeTimers();
+    stateMgr.writeState(makeRecord({ state: "done" }));
+    await engine.getRegistry().reconstitute();
+    const resolver = coldAfter(1);
+    engine.setLiveStateResolver(resolver.resolve);
+    engine.setFreshLiveStateProbe(workingFreshProbe);
+
+    const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 3_500);
+    await vi.advanceTimersByTimeAsync(4_000);
+    const result = await pending;
+
+    expect(result.source).toBe("timeout");
+    expect(result.state).toBe("working");
+  });
+
+  it("forces one read at entry and then only on the declared cadence", async () => {
+    vi.useFakeTimers();
+    stateMgr.writeState(makeRecord({ state: "done" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(coldSyncResolver);
+    const probe = vi.fn(workingFreshProbe);
+    engine.setFreshLiveStateProbe(probe);
+
+    const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 4_500);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await pending;
+
+    // Entry + one per 2000ms of a 4500ms wait: bounded and countable, not
+    // one screen read per 1000ms tick.
+    expect(probe.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(probe.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("still short-circuits with a cold cache and NO forcing probe", async () => {
+    stateMgr.writeState(makeRecord({ state: "done" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(coldSyncResolver);
+
+    const result = await engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      1_500,
+    );
+
+    // Unprobed, no evidence exists anywhere: the record stands, unchanged.
+    expect(result.source).toBe("immediate");
+    expect(result.state).toBe("done");
+  });
+
+  it("renders closure:pending — never artifact_missing — for a working child on a cold cache", async () => {
+    vi.useFakeTimers();
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        report_path: "/tmp/report.md",
+        done_marker: "DONE_WORKER",
+      }),
+    );
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(coldSyncResolver);
+    engine.setFreshLiveStateProbe(workingFreshProbe);
+    const record = engine.getAgentState("voicelayerClaude-2ac0d960");
+    if (!record) throw new Error("fixture record missing");
+
+    // Cold, before the wait: no evidence, so closure honestly reads the record.
+    expect(engine.assessHarvestability(record).closure).toBe(
+      "artifact_missing",
+    );
+
+    const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await pending;
+
+    // P11 Contract B: the closure the lead reads in the wait's own reply is
+    // computed from the evidence that wait bought. Two fields of one payload
+    // must not disagree about whether the child is working.
+    expect(result.state).toBe("working");
+    expect(engine.assessHarvestability(record).closure).toBe("pending");
+  });
+
+  it("expires forced evidence rather than answering from a stale observation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-19T10:00:00.000Z"));
+    stateMgr.writeState(makeRecord({ state: "done" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(coldSyncResolver);
+    engine.setFreshLiveStateProbe(workingFreshProbe);
+    const record = engine.getAgentState("voicelayerClaude-2ac0d960");
+    if (!record) throw new Error("fixture record missing");
+
+    await engine.refreshLiveState(record);
+    expect(engine.liveStateOf(record).state).toBe("working");
+
+    vi.setSystemTime(new Date("2026-08-19T10:00:03.000Z"));
+    // Three seconds later the observation is older than the discovery TTL, so
+    // it stops speaking for the agent instead of aging into a new lie.
+    expect(engine.liveStateOf(record).state).toBe("done");
+  });
+});
+
+describe("F1b round 2 — finding B: the ready-evidence gate no longer reads the raw record", () => {
+  let stateMgr: StateManager;
+  let engine: AgentEngine;
+  let liveSurfaces: CmuxSurface[];
+
+  const buildEngine = (readScreen: ReturnType<typeof vi.fn>): void => {
+    stateMgr = new StateManager(TEST_DIR);
+    // A UUID-bound surface: terminal I/O refuses a UUID-less ref it cannot
+    // prove ownership of, and this suite is about whether the read HAPPENS.
+    liveSurfaces = [{ ...makeSurface("surface:worker"), id: "uuid-worker" }];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(
+      stateMgr,
+      registry,
+      makeMockClient({ readScreen } as Partial<CmuxClient>),
+      {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      },
+    );
+  };
+
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    engine.dispose();
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("reads the screen for a working record whose live state agrees", async () => {
+    vi.useFakeTimers();
+    const readScreen = vi.fn().mockResolvedValue({
+      surface: "surface:worker",
+      text: WORKING_SCREEN,
+      lines: 30,
+      scrollback_used: false,
+    });
+    buildEngine(readScreen);
+    stateMgr.writeState(
+      makeRecord({ state: "working", surface_uuid: "uuid-worker" }),
+    );
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(workingScreenProbe);
+
+    const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pending;
+
+    expect(readScreen).toHaveBeenCalled();
+  });
+
+  it("does not buy a screen read for a transition the record cannot make", async () => {
+    vi.useFakeTimers();
+    const readScreen = vi.fn().mockResolvedValue({
+      surface: "surface:worker",
+      text: WORKING_SCREEN,
+      lines: 30,
+      scrollback_used: false,
+    });
+    buildEngine(readScreen);
+    // `VALID_TRANSITIONS.done` is empty: no screen can move this record to
+    // idle, so the widened gate must not spend a read per tick trying.
+    stateMgr.writeState(
+      makeRecord({ state: "done", surface_uuid: "uuid-worker" }),
+    );
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(workingScreenProbe);
+
+    const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await pending;
+
+    expect(readScreen).not.toHaveBeenCalled();
+    // Fails safe: a timeout, never a false completion. Closing the other half
+    // means #408 stopping the poisoning, which is not this lane.
+    expect(result.source).toBe("timeout");
+    expect(result.matched).toBe(false);
+  });
+});
+
+describe("F1b — a watch still refuses when the surface is positively gone", () => {
+  let stateMgr: StateManager;
+  let engine: AgentEngine;
+  let liveSurfaces: CmuxSurface[];
+
+  const buildEngine = (screenText: string): void => {
+    stateMgr = new StateManager(TEST_DIR);
+    liveSurfaces = [makeSurface("surface:worker")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(
+      stateMgr,
+      registry,
+      makeMockClient({
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:worker",
+          text: screenText,
+          lines: 30,
+          scrollback_used: false,
+        }),
+      } as Partial<CmuxClient>),
+      {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        watchRegistryPath: registryPath(),
+        watchRegistryNow: () => 1_000,
+      },
+    );
+  };
+
+  const spec = {
+    owner: "voiceClaude",
+    target: "voicelayerClaude-2ac0d960",
+    predicate: "idle" as const,
+    deadline: 60_000,
+  };
+
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+  });
+
+  afterEach(() => {
+    engine.dispose();
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("refuses a bare shell, naming it — existence did not become unconditional", async () => {
+    buildEngine("etanheyman@Mac cmuxlayer % \n");
+    stateMgr.writeState(makeRecord({ state: "working" }));
+    await engine.getRegistry().reconstitute();
+
+    const error = await engine
+      .armWatch(spec)
+      .then(() => null)
+      .catch((e: WatchArmError) => e);
+
+    expect(error?.code).toBe("watch_target_missing");
+    expect(error?.message).toMatch(/bare shell/i);
+    expect(error?.message).not.toContain("does not exist");
   });
 });
