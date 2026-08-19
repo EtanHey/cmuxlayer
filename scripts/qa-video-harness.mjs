@@ -1172,11 +1172,6 @@ async function runOnce(options, { runId, root }) {
       );
     }
     const deviceIndex = await screenDeviceIndexFor(geometry.display.index);
-    // Diagnostic: the probe window has been observed vanishing mid-run.
-    const stillThere = await probeWindowGeometry(probeWindow.title).catch(() => null);
-    process.stderr.write(
-      `[qa-video] pre-record check: window="${probeWindow.title}" present=${Boolean(stillThere)} display=${stillThere?.display?.index ?? "?"} clear=${stillThere?.clear}\n`,
-    );
     recorder = new Recorder({
       path: videoPath,
       captureFps: options.captureFps,
@@ -1187,8 +1182,6 @@ async function runOnce(options, { runId, root }) {
     await recorder.start();
     log = new RunLog(recorder, probeWindow);
 
-    const beforeProbes = await probeWindowGeometry(probeWindow.title).catch(() => null);
-    process.stderr.write(`[qa-video] post-record check: present=${Boolean(beforeProbes)}\n`);
     if (options.mode === "dry-run") {
       await runDryRunProbe({ log, probeWindow });
     } else {

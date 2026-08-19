@@ -42,8 +42,8 @@ bun run build                       # the harness talks to dist/index.js
 CMUX_QA_VIDEO=1 npm run qa:video -- --cli cursor --repo cmuxlayer
 ```
 
-Useful flags: `--crop auto|off|x,y,w,h`, `--capture-fps`, `--frame-fps`, `--scale-width`,
-`--keep-window`, `--root <dir>`, `--server-command`/`--server-arg`, `--skip-preflight` (don't).
+Useful flags: `--capture-fps`, `--frame-fps`, `--scale-width`, `--keep-window`, `--root <dir>`,
+`--server-command`/`--server-arg`, `--skip-preflight` (don't).
 
 Output under `results/qa-video/<runId>/` (gitignored):
 
@@ -86,34 +86,43 @@ The report reconciles each verdict against what the receipt claimed:
 
 ## Design notes, and the traps already hit
 
-**Isolation is by window, not by workspace.** `cmux new-window` gets a window that contains only the
-probe panes, renamed to a unique `QAV-<runId>` title. Teardown closes exactly that window and
-refuses to touch any window that existed beforehand.
+**Isolation is by window, and where possible by display.** `cmux new-window` gets a window containing
+only the probe panes, renamed to a unique `QAV-<runId>` title. Teardown closes exactly that window,
+refuses to touch any window that existed beforehand, and also runs on SIGINT/SIGTERM so an
+interrupted run does not leave an orphan window on the operator's desktop.
 
-**The window must be provably frontmost before recording starts.** Two real failures, both caught by
-the dry-run:
+The recorder captures a screen **region**, so isolation is not free — whatever is stacked over that
+region silently becomes the evidence. Five things had to be true before the frames could be trusted,
+and each was learned by getting it wrong first:
 
-1. Asking System Events for "the frontmost process" resolved to whatever the human last touched. The
-   first recording cropped to a browser window and captured private messages. The window is now
-   addressed by the title the harness assigned it — never heuristically.
-2. `cmux focus-window` changes cmux's own selection but does not restack macOS windows, so the
-   operator's main cmux window stayed on top and got recorded instead. The fix is an AX `AXRaise`
-   plus a check that the probe window really is `window 1` of a frontmost cmux.
+1. **Address the window, never "the frontmost process."** That resolved to whatever the human last
+   touched; the first recording cropped to a browser window and captured private content.
+2. **Resolve geometry through CoreGraphics, not System Events.** A freshly created cmux window is
+   intermittently absent from the accessibility window list entirely, and it drops out of the
+   on-screen list whenever its Space is not active — so a single miss is a flap, not an absence.
+3. **Record the display the window is actually on.** cmux does not always open on the main display.
+   Two runs' worth of frames showed display 0 while the probe window sat on display 1, and every one
+   of those frames looked completely plausible.
+4. **Do not fight for z-order; take a display.** The harness runs from inside a cmux pane, so the
+   operator's own cmux window is being activated constantly by the commands driving the probe.
+   `isolateProbeWindowOnOwnDisplay` moves the probe window to the least-occupied display, because
+   occlusion is per-display and stacking then stops mattering. On a single-display machine this is a
+   no-op and the z-order checks carry the weight instead.
+5. **Raise with AXRaise only.** An earlier per-probe re-assert also called `cmux focus-window`, which
+   churned cmux's surface topology hard enough that `spawn_agent` began failing with `not live or
+   uniquely resolvable in a complete fresh topology`. An observer that changes the observed state
+   produces evidence about itself.
 
-If neither can be confirmed, the harness **aborts** rather than recording the whole desktop.
+Every mark records whether the window was unoccluded at that instant, and
+`buildAdjudicationManifest` refuses to generate a question for any mark where it was not. A
+compromised probe reports NOT OBSERVABLE; it never reports as a pass. If the window cannot be made
+clear at all, the run aborts rather than recording the desktop.
 
-**Frontmost-ness is re-asserted before every probe, and recorded at every mark.** A five-minute run
-lost the probe window partway through, and every probe after that point recorded the operator's main
-window instead — three adjudicators independently reported seeing the wrong workspace. So every mark
-now carries `frontmost`, `buildAdjudicationManifest` refuses to generate a question for any mark
-where it is `false`, and `video.occlusionRisk` records whether the window was still on top when the
-run ended. A compromised probe reports as NOT OBSERVABLE; it never reports as a pass.
-
-The per-probe re-assert is AXRaise plus app activation and **nothing else**. An earlier version also
-called `cmux focus-window` between probes and churned cmux's surface topology hard enough that
-`spawn_agent` began failing with `not live or uniquely resolvable in a complete fresh topology` — the
-harness was perturbing the system it exists to observe. An observer that changes the observed state
-produces evidence about itself.
+**Rejected: capturing the window's own content.** `screencapture -l <CGWindowID>` composites a single
+window and is immune to occlusion, display placement and focus stealing — it looked like the answer.
+It is not: cmux renders its terminals with Metal, so window capture returns the chrome and sidebar
+with a **blank content area**. The terminal text, which is the entire point, is absent. Do not retry
+this without looking at a frame.
 
 **The harness must carry no caller identity.** cmux exports the operator pane's `CMUX_SURFACE_ID`,
 `CMUX_TAB_ID`, `CMUX_WORKSPACE_ID` and friends into every child process. With those inherited, the
@@ -121,19 +130,16 @@ MCP server resolved the *caller* as whatever agent was running the harness and s
 agent's surface — the first full run died on `refusing terminal I/O`. They are stripped before the
 server is spawned. `CMUX_SOCKET_PATH` is kept: it addresses the daemon, it does not identify anyone.
 
-**A killed harness tears its window down.** SIGINT/SIGTERM close the isolated window; without that,
-an interrupted run leaves an orphan window on the operator's desktop.
-
 **Recorder: ffmpeg + avfoundation**, not `screencapture -v`. Not because ffmpeg records better, but
 because `-progress` makes it report its own clock. That first progress block with a real `out_time_us`
 is the anchor that maps wall-clock instants onto recording seconds; without it, frames could only be
 aligned by eye. The recording is verified with `ffprobe` (non-empty, real duration, decodable frames)
-before anything is derived from it. `screencapture -v` remains a fallback if ffmpeg is unavailable,
-but it gives no clock signal and would need a visual clapper for every probe.
+before anything is derived from it.
 
 **Frames are sampled densely at transitions, not uniformly.** Each question gets its own window
-around its own mark (typically ~1s before to ~2-4s after, at 10 fps). Sampling the whole video
-uniformly would either miss the transition or cost a fortune in frames.
+around its own mark, at 10 fps. The window reaches well past the mark because a mark is the instant
+of the tool *call* and the pixels lag it — a dry-run measured that lag at ~1.7s for a plain
+`cmux send`, so a tight window would simply miss the event it exists to catch.
 
 **The dry-run is a clock test, not just a smoke test.** It prints a unique nonce into the probe pane
 at a known instant and asks a sub-agent whether that nonce is visible in the frames the harness
@@ -142,17 +148,24 @@ predicted. If the wall-clock-to-video mapping were wrong, that question would fa
 ## Requirements
 
 - macOS with **Screen Recording** permission for whatever runs the harness (ffmpeg inherits it).
-- **Accessibility** permission for the same process, for the window-targeting AppleScript. Without
-  it `--crop auto` cannot confirm the window and the run aborts by design.
+- **Accessibility** permission for the same process, for the AXRaise/window-move AppleScript.
+- `python3` with `pyobjc` Quartz bindings, for `scripts/qa-video-windows.py`. This is how the harness
+  finds the probe window, its display and its occluders; without it the run aborts rather than
+  guessing.
 - `ffmpeg` and `ffprobe` on PATH (`brew install ffmpeg`).
 - A running cmux, and `bun run build` so `dist/index.js` exists (or pass `--server-command`).
-- Auto-crop assumes a Retina backing scale of 2; override with `CMUX_QA_VIDEO_BACKING_SCALE` or an
-  explicit `--crop x,y,w,h` in capture pixels.
+- A second display is not required, but it is the difference between reliable isolation and fighting
+  the operator's own cmux window for z-order.
 
 ## Known limits
 
 - Activating the probe window steals focus for the length of the run. That is inherent to recording
-  a live GUI; run it when the machine is free.
+  a live GUI; run it when the machine is free. Running the harness from inside a cmux pane makes this
+  materially worse, because the operator's own cmux window is being raised by the very commands
+  driving the probe.
+- The composer questions are binary, and Cursor's TUI has a third state: a queued "follow-ups" panel
+  that is neither the composer nor the transcript. The first live run landed exactly there. The
+  question wording should become three-way before the next run.
 - Anything that is not on screen cannot be adjudicated. Registry-internal fields — `closure` most of
   all — have no pixels. `list-closure-flap` therefore asks the nearest observable question ("did the
   pane visibly change at all during the span?") and will often be NOT OBSERVABLE. That is the honest
