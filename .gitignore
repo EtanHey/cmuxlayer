@@ -22,3 +22,5 @@ node_modules
 # local collab/scratch notes
 collab/
 .cmux/worktrees/
+results/qa-video/
+results-qa-video-run.log
