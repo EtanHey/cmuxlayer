@@ -14,8 +14,7 @@ import {
 } from "./agent-discovery.js";
 import {
   type MergedAgent,
-  isCrashRecoveryEligible,
-  shouldRetainCrashRecoveryError,
+  shouldRetainForExplicitResume,
   type AgentRecord,
   type AgentRole,
   type AgentState,
@@ -1790,7 +1789,7 @@ export class AgentRegistry {
         continue;
       }
       if (
-        isCrashRecoveryEligible(agent) &&
+        shouldRetainForExplicitResume(agent) &&
         !this.hasLiveManagedSeatSibling(
           agent,
           surfaces,
@@ -2373,21 +2372,7 @@ export class AgentRegistry {
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: null,
-      crash_recover: candidate.role === "orchestrator",
-      respawn_attempts: 0,
       user_killed: false,
-      auto_revive: continuityRecord?.auto_revive ?? false,
-      revive_attempts: 0,
-      revive_last_attempt_at: null,
-      revive_next_attempt_at: null,
-      revive_completed_at: null,
-      revive_last_outcome: null,
-      revive_last_error: null,
-      revive_observation_source: null,
-      revive_observed_at_ms: null,
-      revive_previous_state: null,
-      revive_consecutive_observations: 0,
-      revive_notification_sent_at: null,
       halt_escalation:
         continuityRecord?.parent_agent_id != null &&
         (continuityRecord.halt_escalation ?? true),
@@ -2541,7 +2526,7 @@ export class AgentRegistry {
         continue;
       }
       if (
-        shouldRetainCrashRecoveryError(agent) &&
+        shouldRetainForExplicitResume(agent) &&
         this.canControlSurface(agent)
       ) {
         continue;
@@ -2601,7 +2586,7 @@ export class AgentRegistry {
         this.surfacelessObservations.delete(agent.agent_id);
         continue;
       }
-      if (shouldRetainCrashRecoveryError(agent)) {
+      if (shouldRetainForExplicitResume(agent)) {
         continue;
       }
       const role = inferRecordRoleOrNull(agent);

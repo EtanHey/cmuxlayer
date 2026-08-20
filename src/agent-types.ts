@@ -24,8 +24,6 @@ export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 // `disk` is a filesystem observation (today: the harness session artifact
 // behind `resumable`, #482), as opposed to a remembered registry field.
 export type ObservationSource = "screen" | "registry" | "process" | "disk";
-export type AgentReviveOutcome =
-  "pending" | "failed" | "revived" | "unrecoverable";
 export type AgentHaltType =
   "awaiting_input" | "idle_without_done" | "wedged" | "paused";
 
@@ -37,7 +35,6 @@ export interface Observed<T> {
 
 export const MAX_SPAWN_DEPTH = 2;
 export const MAX_CHILDREN = 10;
-export const MAX_RESPAWN_ATTEMPTS = 10;
 
 export interface AgentRecord {
   agent_id: string;
@@ -113,23 +110,8 @@ export interface AgentRecord {
   // Quality fields (Task 19)
   quality: AgentQuality;
   max_cost_per_agent: number | null;
-  // Crash recovery fields (Task 20)
-  crash_recover?: boolean;
-  respawn_attempts?: number;
+  /** Someone MEANT to end this agent (stop_agent, or an operator tab close). */
   user_killed?: boolean;
-  /** Engine-owned same-surface CLI recovery; managed spawns default true. */
-  auto_revive?: boolean;
-  revive_attempts?: number;
-  revive_last_attempt_at?: string | null;
-  revive_next_attempt_at?: string | null;
-  revive_completed_at?: string | null;
-  revive_last_outcome?: AgentReviveOutcome | null;
-  revive_last_error?: string | null;
-  revive_observation_source?: ObservationSource | null;
-  revive_observed_at_ms?: number | null;
-  revive_previous_state?: AgentState | null;
-  revive_consecutive_observations?: number;
-  revive_notification_sent_at?: string | null;
   /** Set false for deliberate debugging lanes that must not notify ancestors. */
   halt_escalation?: boolean;
   /** Durable identity and delivery state for one continuous live-halt episode. */
@@ -242,41 +224,21 @@ export function hasRecoverableCrashError(error: string | null): boolean {
   );
 }
 
-export function isCrashRecoveryExhausted(error: string | null): boolean {
-  return error?.startsWith("Max crash recoveries exceeded:") ?? false;
-}
-
-export function isCrashRecoveryEligible(
-  agent: Pick<
-    AgentRecord,
-    | "state"
-    | "crash_recover"
-    | "user_killed"
-    | "cli_session_id"
-    | "error"
-    | "revive_last_outcome"
-  >,
+/**
+ * #492: cmuxlayer never respawns a pane on its own, so a row that died on its
+ * own is the operator's ONLY handle for an explicit `spawn_agent
+ * ({resume_agent_id})`. Keep such a row (and its captured session) instead of
+ * reaping it. A row someone MEANT to end is not retained -- that close was the
+ * decision.
+ */
+export function shouldRetainForExplicitResume(
+  agent: Pick<AgentRecord, "state" | "user_killed" | "cli_session_id" | "error">,
 ): boolean {
   return (
     agent.state === "error" &&
-    agent.crash_recover === true &&
     agent.user_killed !== true &&
     !!agent.cli_session_id &&
-    !["pending", "failed", "unrecoverable"].includes(
-      agent.revive_last_outcome ?? "",
-    ) &&
     hasRecoverableCrashError(agent.error)
-  );
-}
-
-export function shouldRetainCrashRecoveryError(
-  agent: Pick<
-    AgentRecord,
-    "state" | "crash_recover" | "user_killed" | "cli_session_id" | "error"
-  >,
-): boolean {
-  return (
-    isCrashRecoveryEligible(agent) || isCrashRecoveryExhausted(agent.error)
   );
 }
 
@@ -348,10 +310,6 @@ export interface AgentCliExitEvent {
   consecutive_observations: number;
   inbox_dispatched: boolean;
   error: string;
-  auto_revive?: boolean;
-  revive_attempts?: number;
-  revive_outcome?: AgentReviveOutcome | null;
-  verified_model?: string | null;
   manual_resume_command?: string | null;
 }
 

@@ -27,6 +27,7 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient, CmuxNewSplitResult } from "../src/cmux-client.js";
 import type { CliType } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
+import { useHarnessHome } from "./helpers/harness-home.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-parity-registry-optional");
 const REPO = "parityrepo";
@@ -183,8 +184,14 @@ describe.each<LauncherPath>(["registry", "raw"])(
     let liveSurfaces: CmuxSurface[];
     /** True when this lane read the HOST's registry instead of a stubbed one. */
     let registryIsAmbient = false;
+    // Resume is only advertised for a session that EXISTS (#482), so every
+    // harness whose resume this matrix exercises gets a transcript.
+    const harnessHome = useHarnessHome();
 
     beforeEach(() => {
+      for (const cli of ["claude", "codex", "cursor"] as const) {
+        harnessHome.give(cli, SESSION);
+      }
       rmSync(TEST_DIR, { recursive: true, force: true });
       mkdirSync(TEST_DIR, { recursive: true });
       registryIsAmbient = false;
@@ -282,10 +289,10 @@ describe.each<LauncherPath>(["registry", "raw"])(
         .calls[0];
       expect(launchCmd).toBe(expectedLaunch(cli, path, repoRoot));
 
-      // The tab title is a discovery contract and must NOT vary by lane.
+      // The tab title names the AGENT (#492), and must not vary by lane.
       expect(client.renameTab).toHaveBeenCalledWith(
         "surface:new",
-        `${EXPECTED_LAUNCHER_NAME[cli]} [surface:new]`,
+        `${result.agent_id} [surface:new]`,
         expect.anything(),
       );
     });
@@ -377,21 +384,17 @@ describe.each<LauncherPath>(["registry", "raw"])(
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
 
-        if (path === "raw") {
-          // `gemini --resume` takes "latest" or an index, never a UUID.
-          await expect(engine.resumeAgent(spawned.agent_id)).rejects.toThrow(
-            /no runnable resume command/i,
-          );
-          expect(client.send).not.toHaveBeenCalled();
-          expect(
-            engine.resolveAgentRoute(spawned.agent_id).resumable,
-          ).toBe(false);
-        } else {
-          await engine.resumeAgent(spawned.agent_id);
-          const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
-            .calls[0];
-          expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
-        }
+        // Raw: `gemini --resume` takes "latest" or an index, never a UUID.
+        // Registry: the launcher form IS formattable, but cmuxlayer cannot read
+        // gemini's session store, so it cannot claim the session still exists
+        // (#482/#492) -- and an unverifiable resume is refused, not sent.
+        await expect(engine.resumeAgent(spawned.agent_id)).rejects.toThrow(
+          /no runnable resume command/i,
+        );
+        expect(client.send).not.toHaveBeenCalled();
+        expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(
+          false,
+        );
       },
     );
 

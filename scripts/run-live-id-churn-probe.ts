@@ -255,7 +255,6 @@ async function main(): Promise<void> {
         workspace: parent.workspace_id,
         force_new: true,
         focus: false,
-        auto_revive: true,
         parent_agent_id: parent.agent_id,
         prompt:
           "Issue #416 live acceptance fixture. Do not modify files and do not spawn agents. Immediately use AskUserQuestion with one question and two choices, then after the answer reply briefly and become idle.",

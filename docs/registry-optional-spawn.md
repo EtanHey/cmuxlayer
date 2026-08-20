@@ -42,14 +42,10 @@ session. Use \"latest\" for most recent or index number (e.g. --resume 5)"),
 never a session UUID. There is therefore no raw gemini resume addressable by
 the id cmuxlayer captures. `buildRawResumeCommand` refuses rather than emitting
 a command that would start a *fresh* session while reading as a successful
-resume; raw gemini agents report `resumable: false`, and gemini is excluded
-from same-surface auto-revive. The registered gemini launcher path is
-unchanged.
-
-Retired command forms are still *recognized* on screen
-(`rawResumeEchoCandidates`) even when they are no longer *emitted* — the
-stale-resume guards match against scrollback typed by older builds, including
-the old bypass-less forms and the old gemini form.
+resume; raw gemini agents report `resumable: false`. The registered gemini
+launcher path still *formats* a resume, but cmuxlayer cannot read gemini's
+session store, so it cannot verify the session still exists and refuses the
+resume rather than claiming one (#482/#492).
 
 ## Model pin provenance (`model_pin`)
 
@@ -138,11 +134,12 @@ that would silently start a *new* session. Codex reads a global session store
 and needs no cwd to find the session.
 
 `resumeInvocationForAgent` in `src/agent-facade.ts` is the **single authority**
-for this: `list_agents`, `get_agent_state`, `resolveAgentRoute`, `resume_agent`,
-and crash recovery all go through it, so what the tools advertise and what the
-engine sends can never disagree. It returns either a command or a *reason*, and
-the engine surfaces that reason — a malformed session id, a missing cwd, a
-harness with no UUID resume form — instead of flattening it to "not resumable".
+for this: `list_agents`, `get_agent_state`, `resolveAgentRoute`, and
+`spawn_agent({resume_agent_id})` all go through it, so what the tools advertise
+and what the engine sends can never disagree. It returns either a command or a
+*reason*, and the engine surfaces that reason — a malformed session id, a
+missing cwd, a harness with no UUID resume form, or (since #492) **no session
+transcript on disk** — instead of flattening it to "not resumable".
 
 `harnessCwdForAgent`'s default remains, but only for transcript probing; it is
 no longer used to aim a resume command. It now reads the first

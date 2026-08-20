@@ -30,9 +30,7 @@ export type AgentStatePayload = AgentRecord & {
 export function resumeCwdForAgent(
   record: Pick<AgentRecord, "launch_cwd" | "worktree_path">,
 ): string | null {
-  return (
-    record.worktree_path?.trim() || record.launch_cwd?.trim() || null
-  );
+  return record.worktree_path?.trim() || record.launch_cwd?.trim() || null;
 }
 
 /**
@@ -92,23 +90,22 @@ export function resumeInvocationForAgent(
       };
     }
   }
+  let command: string;
   try {
-    return {
-      command: buildResumeCommand(
-        record.cli,
-        record.repo,
-        record.cli_session_id,
-        record.launcher_name,
-        { cwd },
-      ),
-      reason: null,
-    };
+    command = buildResumeCommand(
+      record.cli,
+      record.repo,
+      record.cli_session_id,
+      record.launcher_name,
+      { cwd },
+    );
   } catch (error) {
     return {
       command: null,
       reason: error instanceof Error ? error.message : String(error),
     };
   }
+  return { command, reason: null };
 }
 
 export function resumeCommandForAgent(

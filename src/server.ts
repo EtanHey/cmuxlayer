@@ -11110,26 +11110,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               throw error;
             }
           },
-          beforeCrashRecoveryMutation: async ({
-            phase,
-            surface,
-            workspace,
-          }) => {
-            if (phase === "placement") {
-              await assertWorkspaceMutationAllowed("agent_engine", workspace);
-              return;
-            }
-            if (!surface) {
-              throw new Error(
-                "Crash recovery resume mutation requires a surface route",
-              );
-            }
-            await assertSurfaceMutationAllowed(
-              "agent_engine",
-              surface,
-              workspace,
-            );
-          },
           outboxDrain: opts?.outboxDrain,
           monitorRegistryPath: opts?.monitorRegistryPath,
           monitorRegistryNow: opts?.monitorRegistryNow,
@@ -11812,7 +11792,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Resume this captured agent session on a fresh surface while preserving its public agent ID. Mutually exclusive with new-spawn fields.",
+            "THE way to revive an agent: resume this captured session on a fresh surface, keeping its public agent ID and re-issuing its coordination contract. cmuxlayer never revives a pane by itself (#492) -- a pane you close stays closed -- so a lead that wants an agent back asks here, by id. Refused with a reason when the session transcript is not on disk, rather than opening an empty pane. Mutually exclusive with new-spawn fields.",
           ),
         repo: z
           .string()
@@ -11838,7 +11818,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe("Initial working directory for type=terminal"),
-        title: z.string().optional().describe("Tab title for type=terminal"),
+        title: z
+          .string()
+          .optional()
+          .describe(
+            "Human label for the pane. For type=agent the tab is titled `<agent_id> · <title> [surface:N]` -- the agent id is always there, so five workers in one repo are still distinguishable when you omit this (#479/#492).",
+          ),
         prompt: z
           .string()
           .optional()
@@ -11909,19 +11894,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .number()
           .optional()
           .describe("Maximum cost cap in USD for this agent"),
-        crash_recover: z
-          .boolean()
-          .optional()
-          .describe(
-            "When true, automatically respawn the agent after unexpected PTY death using its captured CLI session ID.",
-          ),
-        auto_revive: z
-          .boolean()
-          .optional()
-          .default(true)
-          .describe(
-            "Automatically resume a captured CLI session in the same surviving surface after unexpected CLI exit. Set false for debugging sessions where CLI death is intentional evidence.",
-          ),
         halt_escalation: z
           .boolean()
           .optional()
@@ -12002,7 +11974,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "placement",
               "authority",
               "max_cost_per_agent",
-              "crash_recover",
             ].filter((field) =>
               Object.prototype.hasOwnProperty.call(args, field),
             );
@@ -12425,9 +12396,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               function: normalizedRole.function,
               placement: callerIsWorker ? "right" : normalizedRole.placement,
               auto_archive_on_done: args.auto_archive_on_done ?? false,
+              title: args.title,
               max_cost_per_agent: args.max_cost_per_agent,
-              crash_recover: args.crash_recover,
-              auto_revive: args.auto_revive,
               halt_escalation: args.halt_escalation,
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async (created) => {
@@ -12884,8 +12854,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("MCP profile hint. Defaults to inherit."),
         parent_agent_id: z.string().optional(),
         auto_archive_on_done: z.boolean().optional().default(false),
-        crash_recover: z.boolean().optional(),
-        auto_revive: z.boolean().optional().default(true),
         halt_escalation: z.boolean().optional().default(true),
         verbose: z
           .boolean()
@@ -12949,8 +12917,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             parent_agent_id: args.parent_agent_id,
             role: "worker",
             auto_archive_on_done: args.auto_archive_on_done ?? false,
-            crash_recover: args.crash_recover,
-            auto_revive: args.auto_revive,
             halt_escalation: args.halt_escalation,
             on_surface_created: async (created) => {
               surfaceCreated = true;

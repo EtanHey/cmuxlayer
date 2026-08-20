@@ -2400,7 +2400,6 @@ describe("AgentRegistry", () => {
           parent_agent_id: "cmuxlayerCodex-parent",
           spawn_depth: 2,
           role: "worker",
-          auto_revive: true,
           halt_escalation: true,
         }),
       );
@@ -2448,7 +2447,6 @@ describe("AgentRegistry", () => {
         parent_agent_id: "cmuxlayerCodex-parent",
         spawn_depth: 2,
         role: "worker",
-        auto_revive: true,
         halt_escalation: true,
       });
     });
