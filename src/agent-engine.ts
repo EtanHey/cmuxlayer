@@ -7321,6 +7321,11 @@ export class AgentEngine {
           if (error instanceof RetryableDeliveryError) {
             receipt.submission_started_at = null;
             receipt.retry_count += 1;
+            // The submitter proved that no mutation occurred. Persist that
+            // replay-safe boundary before the diagnostic snapshot awaits so a
+            // crash cannot resurrect the old "submission started" marker and
+            // terminalize a delivery that is safe to retry.
+            this.persistDeliveryReceipts();
             await this.recordRetryScreenAttention(receipt);
             receipt.queue_deadline_at ??= new Date(
               Date.now() + this.deliveryQueueDeadlineMs,

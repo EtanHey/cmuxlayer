@@ -14110,9 +14110,15 @@ Session ID: ${sessionId}`,
         );
         liveSurfaces = [makeSurface("surface:42")];
         await engine.getRegistry().reconstitute();
-        engine.setDeliverySnapshotReader(async () => ({
-          text: ">_ OpenAI Codex\n› a human draft remains here",
-        }));
+        engine.setDeliverySnapshotReader(async () => {
+          const persisted = JSON.parse(
+            readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"),
+          );
+          expect(persisted[0].submission_started_at).toBeNull();
+          return {
+            text: ">_ OpenAI Codex\n› a human draft remains here",
+          };
+        });
         engine.setDeliverySubmitter(async () => {
           throw new RetryableDeliveryError(
             "target composer already holds text this delivery did not write",

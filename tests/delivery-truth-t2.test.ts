@@ -246,6 +246,40 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     expect(mutatedPane(mockExec)).toBe(true);
     context.dispose();
   }, 20_000);
+
+  it("does not mistake a Codex-shaped human draft for a placeholder", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText =
+      ">_ OpenAI Codex\n› Implement {feature}\n" +
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer\n";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server, "codex");
+
+    screenText =
+      ">_ OpenAI Codex\n› Write tests for @server.ts\n" +
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      { agent_id: agentId, text: "fleet message", press_enter: true },
+      {} as any,
+    );
+
+    expect(parseToolResult(result)).toMatchObject({
+      delivered: false,
+      terminal: false,
+      delivery_state: "queued",
+    });
+    expect(mutatedPane(mockExec)).toBe(false);
+    context.dispose();
+  }, 20_000);
 });
 
 describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () => {

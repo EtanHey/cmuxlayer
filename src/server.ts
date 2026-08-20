@@ -2381,14 +2381,15 @@ function matchLegacyClaudePromptLine(
  * Codex renders empty-composer hints as dim text, but cmux read-screen exposes
  * only flattened terminal text here -- no cell styling survives the client
  * boundary. Keep the observed rotating hints in one anchored pattern so they
- * cannot be mistaken for arbitrary human prose. The variable-looking parts
- * cover Codex's documented placeholder forms rather than one release literal.
+ * cannot be mistaken for arbitrary human prose. These are exact rendered
+ * placeholders, not templates: expanding their variable-looking segments
+ * would swallow real drafts such as `Write tests for @server.ts`.
  *
  * Observed on 2026-08-20: `Implement {feature}`,
  * `Ask Codex to do anything`, and `Write tests for @filename`.
  */
 const CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE =
-  /^(?:Implement \{[^{}\n]+\}|Ask Codex to do anything|Write tests for @[A-Za-z0-9_.-]+)$/;
+  /^(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)$/;
 
 function normalizeKnownPlaceholderComposerInput(
   cli: CliType | null,
