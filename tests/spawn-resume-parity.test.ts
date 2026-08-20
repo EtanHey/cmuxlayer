@@ -370,7 +370,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
     );
 
     it.each(RAW_RESUME_UNSUPPORTED)(
-      "refuses to fabricate a raw %s resume rather than sending a bogus one",
+      "handles %s resume according to launcher availability",
       async (cli) => {
         const spawned = await engine.spawnAgent({
           repo: REPO,
@@ -384,17 +384,24 @@ describe.each<LauncherPath>(["registry", "raw"])(
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
 
-        // Raw: `gemini --resume` takes "latest" or an index, never a UUID.
-        // Registry: the launcher form IS formattable, but cmuxlayer cannot read
-        // gemini's session store, so it cannot claim the session still exists
-        // (#482/#492) -- and an unverifiable resume is refused, not sent.
-        await expect(engine.resumeAgent(spawned.agent_id)).rejects.toThrow(
-          /no runnable resume command/i,
-        );
-        expect(client.send).not.toHaveBeenCalled();
-        expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(
-          false,
-        );
+        if (path === "raw") {
+          // `gemini --resume` takes "latest" or an index, never a UUID.
+          await expect(engine.resumeAgent(spawned.agent_id)).rejects.toThrow(
+            /no runnable resume command/i,
+          );
+          expect(client.send).not.toHaveBeenCalled();
+          expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(
+            false,
+          );
+          return;
+        }
+
+        // The registered launcher has a UUID resume form. Main's #486 policy
+        // refuses only on proof of absence; an unreadable Gemini store leaves
+        // the registry claim standing instead of fabricating a disk verdict.
+        await engine.resumeAgent(spawned.agent_id);
+        expect(client.send).toHaveBeenCalled();
+        expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(true);
       },
     );
 

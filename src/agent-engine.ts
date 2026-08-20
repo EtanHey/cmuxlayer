@@ -23,6 +23,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
+import { buildTitle } from "./naming.js";
 import {
   AGENT_ENV,
   buildRawResumeCommand,
@@ -491,7 +492,7 @@ export function managedPaneTitle(
   title?: string | null,
 ): string {
   const label = title?.trim();
-  return `${agentId}${label ? ` · ${label}` : ""} [${surface}]`;
+  return buildTitle(`${agentId} [${surface}]`, label);
 }
 
 function sessionCollisionSuffix(sessionId: string): string {

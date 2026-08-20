@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentEngine } from "../src/agent-engine.js";
+import { AgentEngine, managedPaneTitle } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import {
   AgentRegistry,
@@ -18,6 +18,8 @@ import {
 import type { CmuxClient } from "../src/cmux-client.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
+import { inferAgentRole } from "../src/layout-policy.js";
+import { resetResumeArtifactResolver } from "../src/resume-verification.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-revive-on-purpose");
 const CODEX_SESSION = "019faccc-1111-7222-8333-444455556666";
@@ -129,6 +131,7 @@ describe("revive on purpose (#492)", () => {
     harnessHome = mkdtempSync(join(tmpdir(), "cmux-harness-home-"));
     previousHarnessHome = process.env.CMUXLAYER_HARNESS_HOME;
     process.env.CMUXLAYER_HARNESS_HOME = harnessHome;
+    resetResumeArtifactResolver();
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
@@ -203,6 +206,7 @@ describe("revive on purpose (#492)", () => {
 
   afterEach(() => {
     engine.dispose();
+    resetResumeArtifactResolver();
     rmSync(TEST_DIR, { recursive: true, force: true });
     rmSync(harnessHome, { recursive: true, force: true });
     if (previousHarnessHome === undefined) {
@@ -296,6 +300,7 @@ describe("revive on purpose (#492)", () => {
   });
 
   it("refuses to resume into a session that is not on disk, and opens no pane", async () => {
+    mkdirSync(join(harnessHome, ".codex", "sessions"), { recursive: true });
     stateMgr.writeState(
       makeRecord({
         state: "done",
@@ -306,7 +311,7 @@ describe("revive on purpose (#492)", () => {
     await engine.getRegistry().reconstitute();
 
     await expect(engine.resumeAgent("cmuxlayerCodex-revive")).rejects.toThrow(
-      /no .*session transcript|session .* not found on disk/i,
+      /no .*session transcript|session .* (?:not found on disk|not in the harness session store)/i,
     );
     expect(mockClient.newSplit).not.toHaveBeenCalled();
     expect(mockClient.newSurface).not.toHaveBeenCalled();
@@ -332,5 +337,27 @@ describe("revive on purpose (#492)", () => {
       expect.stringContaining(spawned.agent_id),
       { workspace: "ws:1" },
     );
+  });
+
+  it("keeps caller labels outside the launcher prefix used for role inference", () => {
+    const leadTitle = managedPaneTitle(
+      "brainlayerClaude-ab12cd34",
+      "surface:3",
+      "review Codex output",
+    );
+    const workerTitle = managedPaneTitle(
+      "cmuxlayerCodex-99887766",
+      "surface:9",
+      "pair with Claude",
+    );
+
+    expect(leadTitle).toBe(
+      "brainlayerClaude-ab12cd34 [surface:3]: review Codex output",
+    );
+    expect(workerTitle).toBe(
+      "cmuxlayerCodex-99887766 [surface:9]: pair with Claude",
+    );
+    expect(inferAgentRole({ title: leadTitle })).toBe("orchestrator");
+    expect(inferAgentRole({ title: workerTitle })).toBe("worker");
   });
 });

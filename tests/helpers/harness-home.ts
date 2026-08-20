@@ -1,5 +1,5 @@
 /**
- * Test seam for the session-artifact check (#482/#492).
+ * Test seam for the resume-artifact check (#482/#492).
  *
  * `resumable` is now an observation: it asks whether the harness transcript is
  * on disk. Tests must therefore decide which sessions exist, without reading
@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach } from "vitest";
 import type { CliType } from "../../src/agent-types.js";
+import { resetResumeArtifactResolver } from "../../src/resume-verification.js";
 
 export interface HarnessHome {
   /** Create the transcript that makes `sessionId` a resumable session. */
@@ -26,9 +27,11 @@ export function useHarnessHome(): HarnessHome {
     home = mkdtempSync(join(tmpdir(), "cmux-harness-home-"));
     previous = process.env.CMUXLAYER_HARNESS_HOME;
     process.env.CMUXLAYER_HARNESS_HOME = home;
+    resetResumeArtifactResolver();
   });
 
   afterEach(() => {
+    resetResumeArtifactResolver();
     rmSync(home, { recursive: true, force: true });
     if (previous === undefined) delete process.env.CMUXLAYER_HARNESS_HOME;
     else process.env.CMUXLAYER_HARNESS_HOME = previous;
