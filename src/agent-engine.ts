@@ -52,6 +52,22 @@ import {
 /** Live-derived state for a record, injected by the server (F1). */
 export type LiveStateResolver = (agent: AgentRecord) => LiveAgentState | null;
 
+/**
+ * AIDEV-NOTE (F1b round 2): the FORCING counterpart to `LiveStateResolver`.
+ *
+ * The sync resolver reads whatever screen scan happens to be cached, and the
+ * cache is deliberately evidence-free once it is 2000ms old -- so a lead whose
+ * next action after a spawn is `wait_for` gets no live evidence at all, and
+ * every live gate in this file silently degrades to the poisoned record. This
+ * probe reads ONE agent's screen on demand, so a wait can obtain its own
+ * evidence instead of hoping somebody else scanned recently. Returns null when
+ * the read fails or the surface does not bind to the record: no evidence, which
+ * leaves the record unchallenged rather than inventing a state.
+ */
+export type FreshLiveStateProbe = (
+  agent: AgentRecord,
+) => Promise<LiveAgentState | null>;
+
 import {
   resumeCommandForAgent,
   resumeCwdForAgent,
@@ -86,6 +102,7 @@ import {
   resolveBootPromptText,
   summarizeTaskSummary,
   type AgentRoute,
+  isValidTransition,
   type AgentRecord,
   type AgentAuthority,
   type AgentFunction,
@@ -720,6 +737,21 @@ export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
+/** One retry: a watch observation must not read a transient failure as absence. */
+const WATCH_OBSERVATION_READ_ATTEMPTS = 2;
+/**
+ * How long a forced live-state observation stays usable, matched to
+ * `AgentDiscovery`'s own 2000ms TTL so nothing in the fleet trusts screen
+ * evidence longer than the scan cache would.
+ */
+const LIVE_EVIDENCE_TTL_MS = 2000;
+/**
+ * Sweep cadence for re-forcing live evidence during a wait. One extra screen
+ * read per agent per interval, and never older than `LIVE_EVIDENCE_TTL_MS` --
+ * the two are the same number on purpose: the memo covers exactly the gap
+ * between refreshes, so no tick ever decides on expired evidence.
+ */
+const WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS = LIVE_EVIDENCE_TTL_MS;
 const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
 const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
@@ -1476,6 +1508,12 @@ export function resolveSpawnLaunchPlan(
 export class AgentEngine {
   private stateMgr: StateManager;
   private liveStateResolver: LiveStateResolver | null = null;
+  private freshLiveStateProbe: FreshLiveStateProbe | null = null;
+  /** Forced observations, TTL-bounded, keyed by agent id. */
+  private freshLiveStates = new Map<
+    string,
+    { live: LiveAgentState; at: number }
+  >();
   private registry: AgentRegistry;
   private client: AgentEngineClient;
   private spawnPreflight: (
@@ -1744,8 +1782,79 @@ export class AgentEngine {
     this.liveStateResolver = resolver;
   }
 
+  /**
+   * AIDEV-NOTE (F1b round 2): the probe that lets a path FORCE evidence instead
+   * of depending on an incidentally-warm scan cache. The server wires it to a
+   * single-surface discovery scan; without it `refreshLiveState` degrades to
+   * the sync resolver, and this engine behaves exactly as it did before.
+   */
+  setFreshLiveStateProbe(probe: FreshLiveStateProbe | null): void {
+    this.freshLiveStateProbe = probe;
+    this.freshLiveStates.clear();
+  }
+
+  /**
+   * Read one agent's screen NOW and memoize the resolution for
+   * `LIVE_EVIDENCE_TTL_MS`. The memo is what makes the forced read pay for the
+   * whole tick: `liveStateOf` -- and so every live gate reached from the same
+   * turn, closure included -- sees the evidence this call bought.
+   */
+  async refreshLiveState(agent: AgentRecord): Promise<LiveAgentState> {
+    const probe = this.freshLiveStateProbe;
+    if (!probe) return this.liveStateOf(agent);
+    let live: LiveAgentState | null = null;
+    try {
+      live = await probe(agent);
+    } catch {
+      // A failed read is not evidence; fall back to whatever else is known.
+      live = null;
+    }
+    if (!live) return this.liveStateOf(agent);
+    const at = Date.now();
+    for (const [agentId, entry] of this.freshLiveStates) {
+      if (at - entry.at >= LIVE_EVIDENCE_TTL_MS) {
+        this.freshLiveStates.delete(agentId);
+      }
+    }
+    this.freshLiveStates.set(agent.agent_id, { live, at });
+    return live;
+  }
+
+  /**
+   * The live state a WAIT may terminate on.
+   *
+   * AIDEV-NOTE (F1b round 2): F1's rule, applied to termination. Only positive
+   * evidence of ACTIVITY -- the screen showing the agent still working -- is
+   * strong enough to overturn a terminal record. A ready prompt is where a
+   * finished worker sits, and a pane reclaimed by a bare shell says nothing
+   * about whether the task completed; treating either as truth would fail an
+   * agent that genuinely finished (`wait_for(done)` reporting `error` because
+   * the pane was later reclaimed). The record keeps terminal states it earned;
+   * it only loses the ones the screen contradicts with work in progress.
+   */
+  private terminationStateOf(
+    agent: AgentRecord,
+    live: LiveAgentState,
+  ): AgentState {
+    if (TERMINAL_STATES.has(agent.state) && !isLiveActive(live)) {
+      return agent.state;
+    }
+    return live.state;
+  }
+
   /** Live state for one record, or the record's own state when unprobed. */
   liveStateOf(agent: AgentRecord): LiveAgentState {
+    const memo = this.freshLiveStates.get(agent.agent_id);
+    // The memo is a reconciliation OF a specific record. If the record moved,
+    // the reconciliation is about a state that no longer exists -- drop it, or
+    // a wait would keep answering with evidence about the agent's past.
+    if (
+      memo &&
+      Date.now() - memo.at < LIVE_EVIDENCE_TTL_MS &&
+      memo.live.registry_state === agent.state
+    ) {
+      return memo.live;
+    }
     return (
       this.liveStateResolver?.(agent) ?? resolveLiveAgentState(agent, null)
     );
@@ -2401,11 +2510,18 @@ export class AgentEngine {
     );
   }
 
+  /**
+   * AIDEV-NOTE (F1b): `effectiveState` is the LIVE-resolved state when the
+   * caller has one. `wait_for` passes it so a record the screen contradicts
+   * can never be read as evidence the target state was reached; every other
+   * caller keeps the record's own value and behaves exactly as before.
+   */
   private async getTargetStateEvidenceSource(
     agent: AgentRecord,
     targetState: AgentState,
+    effectiveState: AgentState = agent.state,
   ): Promise<TargetStateEvidenceSource | null> {
-    if (agent.state !== targetState) return null;
+    if (effectiveState !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
     if (await this.hasGroundTruthDone(agent)) return "transcript";
     return this.hasRecordedOutputDoneEvidence(agent) ||
@@ -2418,6 +2534,7 @@ export class AgentEngine {
     agent: AgentRecord,
     targetState: AgentState,
     waitForReadyPatternMatches: Map<string, number>,
+    effectiveState: AgentState = agent.state,
   ): Promise<{
     agent: AgentRecord;
     source?: RefreshedTargetStateEvidenceSource;
@@ -2427,6 +2544,7 @@ export class AgentEngine {
         agent,
         targetState,
         waitForReadyPatternMatches,
+        effectiveState,
       );
     }
     if (!this.requiresOutputDoneEvidence(targetState)) return { agent };
@@ -2434,19 +2552,40 @@ export class AgentEngine {
     return { agent: (await this.maybeMarkTaskDone(agent, {})).agent };
   }
 
+  /**
+   * AIDEV-NOTE (F1b round 2, reviewer finding B): this gate decides whether to
+   * READ the screen for ready-evidence, and it used to decide purely from the
+   * raw record -- so on a `done`-poisoned agent it bailed, and once the wait
+   * correctly stopped short-circuiting it could never MATCH either.
+   *
+   * It now opens when EITHER the record or the live state says the agent is in
+   * the pre-target state, so a poisoned record alone no longer closes it. But
+   * it also requires the record to be able to REACH the target, because the
+   * transition below writes from the record: `VALID_TRANSITIONS.done` is empty,
+   * so a `done` record cannot become `idle` no matter what the screen shows.
+   * That guard is what keeps the widened gate from buying a screen read per
+   * tick for a transition that would throw anyway.
+   *
+   * Consequence, stated plainly: for a `done`-poisoned agent the wait still
+   * runs to timeout. It fails safe -- a timeout is not a false completion --
+   * and the remaining half is #408 itself (stop poisoning the record) or a
+   * deliberate repair path, both outside this lane.
+   */
   private async refreshInteractiveTargetStateEvidence(
     agent: AgentRecord,
     targetState: "ready" | "idle",
     waitForReadyPatternMatches: Map<string, number>,
+    effectiveState: AgentState = agent.state,
   ): Promise<{
     agent: AgentRecord;
     source?: RefreshedTargetStateEvidenceSource;
   }> {
+    const inPreTargetState = (state: AgentState): boolean =>
+      targetState === "ready" ? state === "booting" : state === "working";
     const canTransition =
-      targetState === "ready"
-        ? agent.state === "booting"
-        : agent.state === "working";
-    if (!canTransition || TERMINAL_STATES.has(agent.state)) {
+      (inPreTargetState(agent.state) || inPreTargetState(effectiveState)) &&
+      isValidTransition(agent.state, targetState);
+    if (!canTransition || TERMINAL_STATES.has(effectiveState)) {
       waitForReadyPatternMatches.delete(agent.agent_id);
       return { agent };
     }
@@ -7527,29 +7666,125 @@ export class AgentEngine {
     }
   }
 
+  /** The on-disk record for an agent the in-memory registry has not bound. */
+  private readPersistedAgentRecord(agentId: string): AgentRecord | null {
+    try {
+      return this.stateMgr.readState(agentId);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * AIDEV-NOTE (F1b, #472): watch-target existence, and NOTHING more.
+   *
+   * This resolver used to answer "does this agent exist?" with "did one
+   * registry lookup hit AND did one screen read parse into a known CLI?", so a
+   * transient read failure, an unreconstituted record, or a pane still booting
+   * all collapsed into `exists:false` -> a hard `WatchArmError` saying the
+   * agent does not exist. Live, that denied a watch on `voicelayerClaude-2ac0d960`
+   * in the same second `send_to` delivered to it and verified submission.
+   *
+   * So: the record decides existence (registry first, then the state dir that
+   * `send_to` also resolves from), and the screen only refines what the agent
+   * is DOING. A read failure is reported as a read failure and retried once --
+   * it is not evidence of absence. A booting or unparseable frame is a legal
+   * watch target: it arms, and the predicate resolves on a later sweep. Only
+   * positive evidence that the surface is gone -- dead, evicted, or fallen back
+   * to a bare shell -- returns `exists:false`, and it says which one.
+   */
   private watchAgentObservation = async (
     agentId: string,
   ): Promise<WatchAgentObservation> => {
-    const agent = this.registry.get(agentId);
+    const agent =
+      this.registry.get(agentId) ?? this.readPersistedAgentRecord(agentId);
     const source = `screen:${agent?.surface_uuid ?? agent?.surface_id ?? agentId}`;
-    if (!agent) return { exists: false, state: null, source };
-    try {
-      const screen = await this.client.readScreen(agent.surface_id, {
-        ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
-        lines: 30,
-      });
-      const parsed = parseScreen(cleanScreenText(screen.text));
+    if (!agent) {
       return {
-        exists:
-          parsed.agent_type !== "unknown" &&
-          parsed.control_state !== "dead" &&
-          parsed.control_state !== "stale_surface",
-        state: parsed.status === "frozen" ? "error" : parsed.status,
+        exists: false,
+        state: null,
         source,
+        detail: `no registry or state record for ${agentId}`,
       };
-    } catch {
-      return { exists: false, state: null, source };
     }
+
+    let screenText: string | null = null;
+    let readError: unknown = null;
+    for (let attempt = 0; attempt < WATCH_OBSERVATION_READ_ATTEMPTS; attempt++) {
+      try {
+        const screen = await this.client.readScreen(agent.surface_id, {
+          ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
+          lines: 30,
+        });
+        screenText = screen.text;
+        readError = null;
+        break;
+      } catch (error) {
+        readError = error;
+      }
+    }
+
+    if (screenText === null) {
+      // A record we can read, on a surface we momentarily cannot. That is a
+      // read failure, not a missing agent -- report the record's own state.
+      //
+      // AIDEV-NOTE (F1b, reviewer nit): this state IS the raw record, and a
+      // `done`-predicate watch on an unreadable pane will therefore fire on a
+      // #408-poisoned `done`. That is deliberate, not an oversight: the rule
+      // this lane enforces is that absence of evidence leaves the record
+      // unchallenged, and inventing a state for a pane nobody could read would
+      // break it in the other direction. The deadline is the backstop.
+      return {
+        exists: true,
+        state: resolveLiveAgentState(agent, null).state,
+        source,
+        detail: `registry hit, screen unreadable after ${WATCH_OBSERVATION_READ_ATTEMPTS} attempts: ${
+          readError instanceof Error ? readError.message : String(readError)
+        }`,
+      };
+    }
+
+    const parsed = parseScreen(cleanScreenText(screenText));
+    if (
+      parsed.control_state === "dead" ||
+      parsed.control_state === "stale_surface"
+    ) {
+      return {
+        exists: false,
+        state: null,
+        source,
+        detail: `registry hit, screen shows ${parsed.control_state}`,
+      };
+    }
+    if (parsed.control_state === "shell" && parsed.agent_type === "unknown") {
+      return {
+        exists: false,
+        state: null,
+        source,
+        detail: "registry hit, surface fell back to a bare shell",
+      };
+    }
+    if (parsed.agent_type === "unknown") {
+      const live = resolveLiveAgentState(agent, {
+        status: parsed.status,
+        agent_type: parsed.agent_type,
+        control_state: parsed.control_state,
+      });
+      // Mid-boot or an unparseable frame: the screen has no authority over the
+      // status here, and reading its default as an idle prompt would fire an
+      // `idle` predicate on an agent that has not started yet.
+      return {
+        exists: true,
+        state: live.state,
+        source,
+        detail: "registry hit, screen unparseable",
+      };
+    }
+    return {
+      exists: true,
+      state: parsed.status === "frozen" ? "error" : parsed.status,
+      source,
+    };
   };
 
   private async sweepWatchesBestEffort(): Promise<void> {
@@ -8303,15 +8538,38 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
+    // AIDEV-NOTE (F1b, #473): a wait must never terminate on a record state the
+    // screen contradicts. #408 flips live agents to `done` within minutes, and
+    // these short-circuits read that record raw -- so `wait_for(target:"idle")`
+    // returned `{state:"done", error:"Agent has already completed", elapsed:0}`
+    // for an agent mid-`brew install`, and the lead that trusted it reported a
+    // false completion. Every termination decision below reads the LIVE state
+    // instead, and the top-level `state` reports the reconciled value rather
+    // than the poisoned record. With no live probe wired the resolution IS the
+    // record, so an unprobed engine behaves exactly as it did before.
+    //
+    // Round 2 (reviewer finding A): reading the live state is not enough if
+    // nothing GUARANTEES there is any. `screenObservationForRecord` reads
+    // `discovery.cachedScan()`, which returns null once the scan is 2000ms old
+    // -- and nothing on this path refreshes it, so for a lead whose next action
+    // is `wait_for` the cache is ordinarily cold and the resolution degrades to
+    // the poisoned record, reproducing the original bug byte-for-byte. So the
+    // wait BUYS its own evidence at entry, and again on a deliberate cadence
+    // below. Cost: one screen read per agent at entry, one more per
+    // WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS thereafter.
+    const initialLive = await this.refreshLiveState(initial);
+    const initialState = this.terminationStateOf(initial, initialLive);
+
     // Retroactive check — already in target state with required evidence?
     const initialEvidence = await this.getTargetStateEvidenceSource(
       initial,
       targetState,
+      initialState,
     );
     if (initialEvidence) {
       return {
         matched: true,
-        state: initial.state,
+        state: initialState,
         elapsed: Date.now() - start,
         source: initialEvidence === "state" ? "immediate" : initialEvidence,
         agent: toPublicAgent(initial),
@@ -8319,10 +8577,10 @@ export class AgentEngine {
     }
 
     // Already in terminal error state and target isn't error?
-    if (initial.state === "error" && targetState !== "error") {
+    if (initialState === "error" && targetState !== "error") {
       return {
         matched: false,
-        state: initial.state,
+        state: initialState,
         elapsed: Date.now() - start,
         source: "immediate",
         agent: toPublicAgent(initial),
@@ -8331,10 +8589,10 @@ export class AgentEngine {
     }
 
     // Already in terminal done state and target isn't done?
-    if (initial.state === "done" && targetState !== "done") {
+    if (initialState === "done" && targetState !== "done") {
       return {
         matched: false,
-        state: initial.state,
+        state: initialState,
         elapsed: Date.now() - start,
         source: "immediate",
         agent: toPublicAgent(initial),
@@ -8343,6 +8601,9 @@ export class AgentEngine {
     }
 
     const waitForReadyPatternMatches = new Map<string, number>();
+    // Entry already bought evidence, so the first sweep refresh is due one
+    // full interval in.
+    let lastForcedEvidenceElapsed = 0;
 
     // Polling sweep loop
     return new Promise<WaitResult>((resolve) => {
@@ -8356,9 +8617,20 @@ export class AgentEngine {
         if (elapsed >= timeoutMs) {
           clearInterval(checkInterval);
           const current = this.registry.get(agentId);
+          // The timeout answer is the one a lead acts on, and it lands after
+          // the memo from the last cadence refresh has expired -- so buy one
+          // final observation rather than reporting the record by default.
+          // It also leaves fresh evidence behind for whatever renders the
+          // reply (P11 closure reads it in the same turn).
+          const timeoutLive = current
+            ? await this.refreshLiveState(current)
+            : null;
           finish({
             matched: false,
-            state: current?.state ?? "error",
+            state:
+              current && timeoutLive
+                ? this.terminationStateOf(current, timeoutLive)
+                : "error",
             elapsed,
             source: "timeout",
             agent: current ? toPublicAgent(current) : null,
@@ -8385,22 +8657,43 @@ export class AgentEngine {
           return;
         }
 
+        // Re-force evidence on a deliberate cadence. Between refreshes the
+        // memo from the last one answers, and it expires exactly when the next
+        // is due, so no tick ever decides on evidence older than the TTL.
+        if (
+          elapsed - lastForcedEvidenceElapsed >=
+          WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS
+        ) {
+          lastForcedEvidenceElapsed = elapsed;
+          await this.refreshLiveState(current);
+        }
+
         const refreshed = await this.refreshTargetStateEvidence(
           current,
           targetState,
           waitForReadyPatternMatches,
+          this.terminationStateOf(current, this.liveStateOf(current)),
         );
         current = refreshed.agent;
+
+        // The sweep runs the same live gate as the retroactive check: gating
+        // only the entry short-circuit would just move the false completion
+        // one poll interval later. Resolved AFTER the refresh, because a
+        // refresh that transitions the record is itself fresh screen evidence
+        // -- and `liveStateOf` drops a memo whose record has moved.
+        const live = this.liveStateOf(current);
+        const liveState = this.terminationStateOf(current, live);
 
         const evidenceSource = await this.getTargetStateEvidenceSource(
           current,
           targetState,
+          liveState,
         );
         if (evidenceSource) {
           clearInterval(checkInterval);
           finish({
             matched: true,
-            state: current.state,
+            state: liveState,
             elapsed,
             source:
               refreshed.source ??
@@ -8411,19 +8704,16 @@ export class AgentEngine {
         }
 
         // Fail-fast on terminal error
-        if (
-          TERMINAL_STATES.has(current.state) &&
-          current.state !== targetState
-        ) {
+        if (TERMINAL_STATES.has(liveState) && liveState !== targetState) {
           clearInterval(checkInterval);
           finish({
             matched: false,
-            state: current.state,
+            state: liveState,
             elapsed,
             source: "sweep",
             agent: toPublicAgent(current),
             error:
-              current.error ?? `Agent entered terminal state: ${current.state}`,
+              current.error ?? `Agent entered terminal state: ${liveState}`,
           });
         }
       }, WAIT_FOR_SWEEP_INTERVAL_MS);

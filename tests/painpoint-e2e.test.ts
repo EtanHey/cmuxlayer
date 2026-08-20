@@ -634,10 +634,15 @@ describe("Phase 10 painpoint e2e replay", () => {
         state: AgentState;
       }>(await pending);
 
+      // F1b (#473): the registry says `done`, the screen says `Working` --
+      // so the wait blocks (unchanged) AND the state it reports is the
+      // reconciled value. Reporting the record's `done` here is the exact
+      // field a lead reads first, and reading `done` off a working agent is
+      // the false completion this lane exists to kill.
       expect(result).toMatchObject({
         matched: false,
         source: "timeout",
-        state: "done",
+        state: "working",
       });
     } finally {
       await closeServer(server);

@@ -10801,6 +10801,50 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // reads the last screen scan only -- no I/O on the caller's path -- and
     // returns null when there is no fresh evidence, which degrades to the
     // registry record with honest `registry` provenance.
+    type ScreenObservationRow = {
+      surface_id: string;
+      surface_uuid?: string | null;
+      parsed_status?: string | null;
+      control_state?: string | null;
+      cli?: string | null;
+      read_error?: unknown;
+    };
+    // Same binding rule list_agents uses: a UUID pair, or a surface_id match
+    // ONLY when neither side has a UUID and this observer owns the seat.
+    // A looser match would let an unrelated pane's screen decide an agent's
+    // state, which is a worse lie than the stale record it replaces.
+    const rowBindsToRecord = (
+      agent: AgentRecord,
+      row: ScreenObservationRow,
+    ): boolean => {
+      const uuidKey = (value: string | null | undefined): string | null =>
+        value?.trim().toLowerCase() || null;
+      const agentUuid = uuidKey(agent.surface_uuid);
+      const surfaceUuid = uuidKey(row.surface_uuid);
+      return agentUuid && surfaceUuid
+        ? agentUuid === surfaceUuid
+        : Boolean(
+            !agentUuid &&
+            !surfaceUuid &&
+            agent.surface_observer_id &&
+            agent.surface_observer_id === registry.getObserverId() &&
+            row.surface_id === agent.surface_id,
+          );
+    };
+    const observationFromRow = (
+      row: ScreenObservationRow | null | undefined,
+    ): {
+      status: string | null;
+      agent_type: string | null;
+      control_state: string | null;
+    } | null => {
+      if (!row || row.read_error) return null;
+      return {
+        status: row.parsed_status ?? null,
+        agent_type: row.cli === "kiro" ? "unknown" : (row.cli ?? null),
+        control_state: row.control_state ?? null,
+      };
+    };
     const screenObservationForRecord = (
       agent: AgentRecord,
     ): {
@@ -10810,34 +10854,37 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     } | null => {
       const cached = discovery.cachedScan();
       if (!cached) return null;
-      const uuidKey = (value: string | null | undefined): string | null =>
-        value?.trim().toLowerCase() || null;
-      const agentUuid = uuidKey(agent.surface_uuid);
-      // Same binding rule list_agents uses: a UUID pair, or a surface_id match
-      // ONLY when neither side has a UUID and this observer owns the seat.
-      // A looser match would let an unrelated pane's screen decide an agent's
-      // state, which is a worse lie than the stale record it replaces.
-      const row = cached.rows.find((surface) => {
-        const surfaceUuid = uuidKey(surface.surface_uuid);
-        return agentUuid && surfaceUuid
-          ? agentUuid === surfaceUuid
-          : Boolean(
-              !agentUuid &&
-              !surfaceUuid &&
-              agent.surface_observer_id &&
-              agent.surface_observer_id === registry.getObserverId() &&
-              surface.surface_id === agent.surface_id,
-            );
-      });
-      if (!row || row.read_error) return null;
-      return {
-        status: row.parsed_status ?? null,
-        agent_type: row.cli === "kiro" ? "unknown" : (row.cli ?? null),
-        control_state: row.control_state ?? null,
-      };
+      return observationFromRow(
+        cached.rows.find((row) => rowBindsToRecord(agent, row)),
+      );
     };
     liveAgentStateProbe.current = (agent) =>
       resolveLiveAgentState(agent, screenObservationForRecord(agent));
+    /**
+     * AIDEV-NOTE (F1b round 2): the FORCING probe. `cachedScan()` is
+     * deliberately evidence-free once it is 2000ms old, and nothing on the
+     * `wait_for` path refreshes it -- so a wait that only read the cache
+     * degraded straight back to the poisoned record. This reads ONE surface on
+     * demand (`scanTarget`, not a fleet `scan`), applies the same binding rule,
+     * and returns null on a failed read or an unbound surface: no evidence,
+     * which leaves the record unchallenged rather than inventing a state.
+     */
+    const freshLiveAgentStateProbe = async (
+      agent: AgentRecord,
+    ): Promise<LiveAgentState | null> => {
+      try {
+        const row = await discovery.scanTarget({
+          surface_id: agent.surface_id,
+          surface_uuid: agent.surface_uuid ?? null,
+        });
+        if (!row || !rowBindsToRecord(agent, row)) return null;
+        const observation = observationFromRow(row);
+        return observation ? resolveLiveAgentState(agent, observation) : null;
+      } catch {
+        // A failed or racing scan is not evidence of anything.
+        return null;
+      }
+    };
     const awaitLifecycleStart = async (): Promise<void> => {
       if (context.lifecycleStartPromise) {
         await context.lifecycleStartPromise;
@@ -11170,6 +11217,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // F1: closure, harvestability and the health report all resolve state
     // through the same live probe the caller/delivery paths use.
     engine.setLiveStateResolver(liveAgentStateProbe.current);
+    engine.setFreshLiveStateProbe(freshLiveAgentStateProbe);
 
     server.tool(
       "arm_watch",
