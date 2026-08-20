@@ -7231,26 +7231,26 @@ export class AgentEngine {
           Date.now() >= Date.parse(receipt.queue_deadline_at)
         ) {
           // AIDEV-NOTE (#500): an unchanged screen proves a retry stall, not
-          // that the payload failed. Freeze the queued receipt in an explicit
-          // attention state instead of converting missing outcome evidence
-          // into a terminal `failed_confirmed` verdict.
+          // that the payload failed. Keep the explicit attention state and
+          // start a fresh bounded retry epoch instead of either inventing a
+          // terminal verdict or freezing a receipt that still says `queued`.
+          // The existing capped backoff below keeps attempts slow, while a
+          // later-cleared composer can still recover and deliver the payload.
           if (receipt.needs_attention === true) {
-            if (receipt.next_attempt_at !== null) {
-              receipt.next_attempt_at = null;
-              this.persistDeliveryReceipts();
-            }
+            receipt.queue_deadline_at = null;
+            this.persistDeliveryReceipts();
+          } else {
+            const gateReason = receipt.error ?? "no gate reason recorded";
+            receipt.delivery_state = "failed_confirmed";
+            receipt.terminal = true;
+            receipt.submit_verified = false;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.next_attempt_at = null;
+            receipt.error = `queue_deadline_elapsed after ${receipt.retry_count} retryable refusals; last gate reason: ${gateReason}`;
+            this.persistDeliveryReceipts();
+            this.appendDeliveryReceiptEventBestEffort(receipt);
             continue;
           }
-          const gateReason = receipt.error ?? "no gate reason recorded";
-          receipt.delivery_state = "failed_confirmed";
-          receipt.terminal = true;
-          receipt.submit_verified = false;
-          receipt.resolved_at = new Date().toISOString();
-          receipt.next_attempt_at = null;
-          receipt.error = `queue_deadline_elapsed after ${receipt.retry_count} retryable refusals; last gate reason: ${gateReason}`;
-          this.persistDeliveryReceipts();
-          this.appendDeliveryReceiptEventBestEffort(receipt);
-          continue;
         }
         if (
           receipt.next_attempt_at &&

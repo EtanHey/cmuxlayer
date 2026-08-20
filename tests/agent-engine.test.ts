@@ -14100,6 +14100,7 @@ Session ID: ${sessionId}`,
     it("surfaces repeated refusals on a byte-identical screen as nonterminal attention", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-08-20T07:30:00.000Z"));
+      let recovered = false;
       try {
         stateMgr.writeState(
           makeRecord({
@@ -14120,6 +14121,9 @@ Session ID: ${sessionId}`,
           };
         });
         engine.setDeliverySubmitter(async () => {
+          if (recovered) {
+            return { retry_count: 0, submit_verified: true };
+          }
           throw new RetryableDeliveryError(
             "target composer already holds text this delivery did not write",
           );
@@ -14152,11 +14156,23 @@ Session ID: ${sessionId}`,
 
         vi.setSystemTime(Date.parse(attention.queue_deadline_at!) + 1);
         await engine.drainDeliveryQueue();
-        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        const postDeadline = engine.getDeliveryReceipt(receipt.delivery_id)!;
+        expect(postDeadline).toMatchObject({
           delivery_state: "queued",
           terminal: false,
           needs_attention: true,
+          retry_count: 4,
           resolved_at: null,
+        });
+
+        recovered = true;
+        vi.setSystemTime(Date.parse(postDeadline.next_attempt_at!));
+        await engine.drainDeliveryQueue();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "submitted",
+          terminal: true,
+          needs_attention: false,
+          submit_verified: true,
         });
       } finally {
         vi.useRealTimers();

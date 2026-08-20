@@ -2378,12 +2378,14 @@ function matchLegacyClaudePromptLine(
 }
 
 /**
- * Codex renders empty-composer hints as dim text, but cmux read-screen exposes
- * only flattened terminal text here -- no cell styling survives the client
- * boundary. Keep the observed rotating hints in one anchored pattern so they
- * cannot be mistaken for arbitrary human prose. These are exact rendered
- * placeholders, not templates: expanding their variable-looking segments
- * would swallow real drafts such as `Write tests for @server.ts`.
+ * Codex renders empty-composer hints as dim text. The `surface.read_text`
+ * frame used by this path is flattened, but styling is available separately
+ * through `terminal.replay`'s `render_grid` capability. Until that richer
+ * frame is wired into delivery classification, keep the observed hints in one
+ * anchored pattern so they cannot be mistaken for arbitrary human prose.
+ * These are exact rendered placeholders, not templates: expanding their
+ * variable-looking segments would swallow real drafts such as
+ * `Write tests for @server.ts`. Richer style detection is tracked in #505.
  *
  * Observed on 2026-08-20: `Implement {feature}`,
  * `Ask Codex to do anything`, and `Write tests for @filename`.
