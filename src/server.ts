@@ -5386,6 +5386,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_attempted: submitAttempted,
         submit_verified: verification.submit_verified,
         retry_count: 0,
+        ...(submitAttempted && verification.submit_verified === null
+          ? {
+              WARNING:
+                "SUBMIT NOT VERIFIED — the key was dispatched, but no " +
+                "observable prompt/composer transition confirmed submission. " +
+                "Do not treat ok:true as submission confirmation.",
+            }
+          : {}),
       });
       if (opts.source_event) {
         appendDeliveryEvent({

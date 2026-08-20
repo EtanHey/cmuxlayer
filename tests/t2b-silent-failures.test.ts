@@ -271,6 +271,8 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     expect(data.ok).toBe(true);
     expect(data.submit_verified).toBeNull();
     expect(data.submit_verification_reason).toBe("submit_evidence_absent");
+    expect(data.WARNING).toMatch(/submit not verified/i);
+    expect(data.WARNING).toMatch(/do not treat.*submission confirmation/i);
   });
 
   it("does not treat unchanged working state as submit evidence", async () => {
