@@ -38,7 +38,6 @@ import {
 import type { CmuxClient } from "../src/cmux-client.js";
 import {
   MAX_CHILDREN,
-  MAX_RESPAWN_ATTEMPTS,
   type AgentRecord,
   type AgentRoute,
   type CloseForensicsEvent,
@@ -162,8 +161,6 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
-    crash_recover: false,
-    respawn_attempts: 0,
     user_killed: false,
     ...overrides,
   };
@@ -3771,7 +3768,6 @@ describe("AgentEngine", () => {
             model: "gpt-5.4",
             cli: "codex",
             cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-            crash_recover: true,
           }),
         );
         liveSurfaces = [
@@ -3812,7 +3808,7 @@ describe("AgentEngine", () => {
       },
     );
 
-    it("does not recover foreign or unowned crash records in a scoped observer", async () => {
+    it("does not act on foreign or unowned errored rows in a scoped observer", async () => {
       engine.dispose();
       const scopedRegistry = new AgentRegistry(
         stateMgr,
@@ -3835,7 +3831,6 @@ describe("AgentEngine", () => {
             surface_uuid: `uuid-${agentId}`,
             surface_observer_id: surfaceObserverId,
             cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-            crash_recover: true,
             error: `Surface surface:${agentId} disappeared`,
           }),
         );
@@ -3857,11 +3852,9 @@ describe("AgentEngine", () => {
       expect(mockClient.send).not.toHaveBeenCalled();
       expect(engine.getAgentState("foreign-crash")).toMatchObject({
         state: "error",
-        respawn_attempts: 0,
       });
       expect(engine.getAgentState("legacy-crash")).toMatchObject({
         state: "error",
-        respawn_attempts: 0,
       });
     });
 
@@ -3874,7 +3867,6 @@ describe("AgentEngine", () => {
           repo: "brainlayer",
           cli: "codex",
           cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-          crash_recover: true,
           error: "Surface surface:42 disappeared",
         }),
       );
@@ -8769,41 +8761,6 @@ Session ID: ${sessionId}`,
       );
     });
 
-    it("does not route an active failed auto-revive through legacy crash recovery", async () => {
-      stateMgr.writeState(
-        makeRecord({
-          agent_id: "cmuxlayerCodex-auto-revive-no-legacy-overlap",
-          state: "error",
-          surface_id: "surface:cli-auto-revive-no-legacy-overlap",
-          surface_provenance: "cmuxlayer_spawn",
-          cli_session_id: "019faccc-2020-7333-8444-555566667777",
-          crash_recover: true,
-          auto_revive: true,
-          revive_attempts: 1,
-          revive_last_outcome: "failed",
-          revive_last_error: "agent disappeared during guarded resume",
-          revive_next_attempt_at: "2099-08-13T07:00:00.000Z",
-          error:
-            'Auto-revive attempt 1 failed: Agent "child" disappeared during agent launch',
-        }),
-      );
-      liveSurfaces = [
-        makeSurface("surface:cli-auto-revive-no-legacy-overlap"),
-      ];
-      await engine.getRegistry().reconstitute();
-
-      await engine.runSweep();
-
-      expect(mockClient.newSplit).not.toHaveBeenCalled();
-      expect(
-        engine.getAgentState("cmuxlayerCodex-auto-revive-no-legacy-overlap"),
-      ).toMatchObject({
-        state: "error",
-        revive_attempts: 1,
-        revive_last_outcome: "failed",
-      });
-    });
-
     it("notifies the parent about a CLI death and revives nothing (#492)", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -8844,7 +8801,6 @@ Session ID: ${sessionId}`,
           parent_agent_id: "cmuxlayerClaude",
           spawn_depth: 1,
           cli_session_id: "019faccc",
-          auto_revive: true,
         }),
       );
       liveSurfaces = [makeSurface("surface:cli-auto-revive-invalid-session")];
@@ -8865,9 +8821,6 @@ Session ID: ${sessionId}`,
       ).toMatchObject({
         state: "error",
       });
-      expect(
-        engine.getAgentState("cmuxlayerCodex-auto-revive-invalid-session"),
-      ).not.toHaveProperty("revive_last_outcome");
       expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
         expect.objectContaining({ tag: "agent_cli_exit" }),
       ]);
@@ -12204,7 +12157,6 @@ Session ID: ${sessionId}`,
           state: "working",
           surface_id: "surface:42",
           surface_provenance: "cmuxlayer_spawn",
-          auto_revive: true,
           cli_session_id: "019faccc-3030-7444-8555-666677778888",
         }),
       );

@@ -38,8 +38,6 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
-    crash_recover: false,
-    respawn_attempts: 0,
     user_killed: false,
     ...overrides,
   };
@@ -209,21 +207,6 @@ describe("agent facade projections", () => {
     });
   });
 
-  it("keeps auto-revive progress in the full agent-state payload", () => {
-    const projected = toAgentStatePayload(
-      makeRecord({
-        revive_attempts: 3,
-        revive_last_outcome: "failed",
-        revive_next_attempt_at: "2026-08-13T08:00:08.000Z",
-      }),
-    );
-
-    expect(projected).toMatchObject({
-      revive_attempts: 3,
-      revive_last_outcome: "failed",
-      revive_next_attempt_at: "2026-08-13T08:00:08.000Z",
-    });
-  });
 });
 
 describe("agent route table", () => {

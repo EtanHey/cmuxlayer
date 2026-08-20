@@ -217,10 +217,16 @@ export interface AgentRoute {
   resume_command?: string;
 }
 
+export const CLI_EXIT_ERROR =
+  "Agent CLI exited to shell without done evidence";
+
 export function hasRecoverableCrashError(error: string | null): boolean {
   if (!error) return false;
   return (
-    error.includes("disappeared") || error.startsWith("Crash recovery failed:")
+    error.includes("disappeared") ||
+    // Preserve resumability for legacy rows written by the deleted crash-recovery path.
+    error.startsWith("Crash recovery failed:") ||
+    error === CLI_EXIT_ERROR
   );
 }
 

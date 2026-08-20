@@ -279,6 +279,29 @@ describe("revive on purpose (#492)", () => {
     expect(state?.error).toContain("CLI exited");
   });
 
+  it("keeps a CLI death resumable by id after its pane is closed", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(makeRecord({ workspace_id: "ws:1" }));
+    liveSurfaces = [
+      { ...makeSurface("surface:revive"), workspace_ref: "ws:1" },
+    ];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    await engine.runSweep();
+    expect(engine.getAgentState("cmuxlayerCodex-revive")).toMatchObject({
+      state: "error",
+      error: "Agent CLI exited to shell without done evidence",
+    });
+
+    liveSurfaces = [{ ...makeSurface("surface:other"), workspace_ref: "ws:1" }];
+    await runConfirmedSurfaceAbsenceSweep();
+
+    const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
+    expect(resumed.agent_id).toBe("cmuxlayerCodex-revive");
+    expect(resumed.surface_id).toBe("surface:new");
+  });
+
   it("explicit resume by agent id works when the session artifact exists", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(

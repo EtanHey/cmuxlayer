@@ -94,6 +94,7 @@ import {
 } from "./delivery-failure-tickets.js";
 import {
   generateAgentId,
+  CLI_EXIT_ERROR,
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   resolveBootPromptText,
@@ -757,7 +758,6 @@ const BOOT_READY_TIMEOUT_MS = 45_000;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
 const CLI_EXIT_SHELL_CONFIRMATION_SWEEPS = 2;
-const CLI_EXIT_ERROR = "Agent CLI exited to shell without done evidence";
 const DEFAULT_HALT_AWAITING_INPUT_DWELL_MS = 120_000;
 const DEFAULT_HALT_IDLE_WITHOUT_DONE_DWELL_MS = 15 * 60_000;
 const DEFAULT_HALT_WEDGED_DWELL_MS = 120_000;
