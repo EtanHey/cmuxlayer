@@ -50,6 +50,18 @@ const WORKING_AND_CLEARED_CLAUDE_SCREEN =
 // unsent in its composer. Status and composer disagree, and the composer wins.
 const WORKING_AND_POPULATED_CLAUDE_SCREEN =
   "Claude Code\n✻ Working (3s · esc to interrupt)\n> lead: please pick up lane T4";
+const CODEX_PERMISSION_PROMPT_SCREEN = [
+  ">_ OpenAI Codex",
+  "Do you want to allow this command?",
+  "[y/n]",
+  "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+].join("\n");
+const CODEX_BUSY_AFTER_PERMISSION_SCREEN = [
+  ">_ OpenAI Codex",
+  "Working (3s • esc to interrupt)",
+  "› Review this repository",
+  "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+].join("\n");
 
 /**
  * Minimal cmux CLI mock. `screen` is a live box so a test can change what the
@@ -227,21 +239,41 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     expect(data.submit_verification_reason).toBeNull();
   });
 
-  it("fails instead of returning ok:true when the composer still holds the unsent text", async () => {
-    // The exact #484 shape: a lead typed a message, it sat unsent, and the
-    // documented mode:"key" recovery reported success while the pane never moved.
+  it("verifies Return when a Codex permission prompt is dismissed", async () => {
+    let approved = false;
+    const exec = makeExec({
+      screen: () =>
+        approved
+          ? CODEX_BUSY_AFTER_PERMISSION_SCREEN
+          : CODEX_PERMISSION_PROMPT_SCREEN,
+      onSendKey: () => {
+        approved = true;
+      },
+    });
+
+    const result = await sendKey(makeServer(exec), "return");
+
+    const data = payload(result);
+    expect(result.isError).toBeUndefined();
+    expect(data.submit_verified).toBe(true);
+    expect(data.submit_verification_reason).toBeNull();
+  });
+
+  it("does not infer key failure from a composer that remains populated", async () => {
+    // The exact #484 shape: a lead typed a message and it sat unsent. Key mode
+    // did not write that payload, so unchanged contents are absence of evidence.
     const exec = makeExec({ screen: () => POPULATED_CLAUDE_SCREEN });
 
     const result = await sendKey(makeServer(exec), "return");
 
     const data = payload(result);
-    expect(result.isError).toBe(true);
-    expect(data.ok).toBe(false);
-    expect(data.submit_verified).toBe(false);
-    expect(data.submit_verification_reason).toBe("composer_still_populated");
+    expect(result.isError).toBeUndefined();
+    expect(data.ok).toBe(true);
+    expect(data.submit_verified).toBeNull();
+    expect(data.submit_verification_reason).toBe("submit_evidence_absent");
   });
 
-  it("lets a populated composer veto a working status instead of losing the race to it", async () => {
+  it("does not treat unchanged working state as submit evidence", async () => {
     // The reported target was BUSY: working on its previous turn while the
     // relayed message sat unsent. Reading "working" as proof of submit reported
     // submit_verified:true for a message still visible on screen — worse than
@@ -254,10 +286,10 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     const result = await sendKey(makeServer(exec), "return");
 
     const data = payload(result);
-    expect(result.isError).toBe(true);
-    expect(data.ok).toBe(false);
-    expect(data.submit_verified).toBe(false);
-    expect(data.submit_verification_reason).toBe("composer_still_populated");
+    expect(result.isError).toBeUndefined();
+    expect(data.ok).toBe(true);
+    expect(data.submit_verified).toBeNull();
+    expect(data.submit_verification_reason).toBe("submit_evidence_absent");
   });
 
   it("will not treat a working status as proof when the composer cannot be read", async () => {

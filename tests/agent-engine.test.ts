@@ -14097,6 +14097,66 @@ Session ID: ${sessionId}`,
       }
     });
 
+    it("surfaces repeated refusals on a byte-identical screen as nonterminal attention", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-20T07:30:00.000Z"));
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "unchanged-composer-delivery",
+            state: "idle",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await engine.getRegistry().reconstitute();
+        engine.setDeliverySnapshotReader(async () => ({
+          text: ">_ OpenAI Codex\n› a human draft remains here",
+        }));
+        engine.setDeliverySubmitter(async () => {
+          throw new RetryableDeliveryError(
+            "target composer already holds text this delivery did not write",
+          );
+        });
+        const receipt = engine.queueDelivery({
+          agent_id: "unchanged-composer-delivery",
+          text: "lead request",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          await engine.drainDeliveryQueue();
+          const current = engine.getDeliveryReceipt(receipt.delivery_id)!;
+          if (attempt < 3) {
+            expect(current.needs_attention).not.toBe(true);
+          }
+          vi.setSystemTime(Date.parse(current.next_attempt_at!));
+        }
+
+        const attention = engine.getDeliveryReceipt(receipt.delivery_id)!;
+        expect(attention).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+          retry_count: 3,
+          unchanged_screen_retry_count: 3,
+          needs_attention: true,
+          attention_reason: expect.stringMatching(/3.*byte-identical/i),
+        });
+
+        vi.setSystemTime(Date.parse(attention.queue_deadline_at!) + 1);
+        await engine.drainDeliveryQueue();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+          needs_attention: true,
+          resolved_at: null,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("terminalizes a retryable requeue once its bounded queue lifetime elapses (#467)", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));
