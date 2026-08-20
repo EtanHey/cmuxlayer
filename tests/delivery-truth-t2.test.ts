@@ -9,6 +9,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
+import { CLI_READY_PATTERNS } from "../src/pattern-registry.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 let testDir = "";
@@ -533,6 +534,7 @@ describe("T2 delivery truth — CLI-fallback hang guard (#450)", () => {
 
 function makeBootSplitExec(postReturnScreen: string): ExecFn {
   let promptSent = false;
+  let returnPressed = false;
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("new-split")) {
       return {
@@ -588,12 +590,18 @@ function makeBootSplitExec(postReturnScreen: string): ExecFn {
       promptSent = true;
       return { stdout: "{}", stderr: "" };
     }
+    if (args.includes("send-key") && args.includes("return")) {
+      returnPressed = true;
+      return { stdout: "{}", stderr: "" };
+    }
     if (args.includes("read-screen")) {
       return {
         stdout: JSON.stringify({
           surface: "surface:2",
           text: promptSent
-            ? postReturnScreen
+            ? returnPressed
+              ? postReturnScreen
+              : "Claude Code\n> Read and follow the brief"
             : "previous shell output: bun install\nClaude Code\n> ",
           lines: 80,
           scrollback_used: false,
@@ -650,13 +658,15 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
     );
     const parsed = parseToolResult(result);
 
-    // The spawn reports the truth instead of a fully-verified receipt for a
-    // prompt the agent never consumed.
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).not.toBe(true);
-    expect(parsed.delivered).not.toBe(true);
-    expect(parsed.boot_prompt_delivered).not.toBe(true);
-    expect(parsed.error).toMatch(/boot prompt submit evidence/i);
+    // The spawn reports the truth as a nonterminal receipt for a prompt the
+    // agent never consumed; callers may verify later without respawning.
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+    });
   }, 20_000);
 
   it("still verifies a boot prompt once the CLI has consumed tokens", async () => {
@@ -665,7 +675,7 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
       [
         "Claude Code",
         "> ",
-        "  1.2k tokens",
+        "  1,200 tokens",
         "  Opus 5 | $0.03 | 1m",
         "Working (1s - esc to interrupt)",
       ].join("\n"),
@@ -687,5 +697,382 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
 
     expect(parsed.boot_prompt_receipt.submit_verified).toBe(true);
     expect(parsed.boot_prompt_receipt.delivered).toBe(true);
+  }, 20_000);
+});
+
+describe("boot-submit readiness and attributable evidence", () => {
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-boot-readiness-"));
+  });
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  const codexReady = [
+    ">_ OpenAI Codex",
+    "› Ask Codex to do anything",
+    "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+  ].join("\n");
+
+  const writeBootPrompt = () => {
+    const promptPath = join(testDir, "boot.md");
+    writeFileSync(promptPath, "Read and follow the brief", "utf8");
+    return promptPath;
+  };
+
+  function makeCodexBootExec(opts: {
+    payloadAppears: boolean;
+    submitAfterReturn?: number | null;
+    staleReadyAfterReturn?: boolean;
+    cli?: "codex" | "claude";
+  }): { exec: ExecFn; returnPresses: () => number } {
+    let promptSent = false;
+    let returnPresses = 0;
+    const exec: ExecFn = vi.fn().mockImplementation(
+      async (_cmd, args: string[]) => {
+        if (args.includes("new-split")) {
+          const cli = opts.cli ?? "codex";
+          return {
+            stdout: JSON.stringify({
+              workspace: "workspace:1",
+              surface: "surface:2",
+              pane: "pane:1",
+              title: cli === "claude" ? "cmuxlayerClaude" : "cmuxlayerCodex",
+              type: "terminal",
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-panes")) {
+          return {
+            stdout: JSON.stringify({
+              workspace_ref: "workspace:1",
+              window_ref: "window:1",
+              panes: [
+                {
+                  ref: "pane:1",
+                  index: 0,
+                  focused: true,
+                  surface_count: 1,
+                  surface_refs: ["surface:2"],
+                  selected_surface_ref: "surface:2",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-pane-surfaces")) {
+          return {
+            stdout: JSON.stringify({
+              workspace_ref: "workspace:1",
+              window_ref: "window:1",
+              pane_ref: "pane:1",
+              surfaces: [
+                {
+                  ref: "surface:2",
+                  title: "cmuxlayerCodex",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("send") && !args.includes("send-key")) {
+          promptSent = true;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (args.includes("send-key") && args.includes("return")) {
+          returnPresses += 1;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (args.includes("read-screen")) {
+          const cli = opts.cli ?? "codex";
+          const readyScreen =
+            cli === "claude"
+              ? ["Claude Code", "What can I help you with?", "❯"].join("\n")
+              : codexReady;
+          const submitted =
+            opts.submitAfterReturn !== null &&
+            opts.submitAfterReturn !== undefined &&
+            returnPresses >= opts.submitAfterReturn;
+          const text = !promptSent
+            ? readyScreen
+            : opts.staleReadyAfterReturn && returnPresses > 0
+              ? readyScreen
+            : submitted
+              ? cli === "claude"
+                ? [
+                    "Claude Code",
+                    "Read and follow the brief",
+                    "Working",
+                    "❯",
+                  ].join("\n")
+                : [
+                    ">_ OpenAI Codex",
+                    "• Read and follow the brief",
+                    "Working (1s • esc to interrupt)",
+                    "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+                  ].join("\n")
+              : opts.payloadAppears
+                ? cli === "claude"
+                  ? ["Claude Code", "❯ Read and follow the brief"].join("\n")
+                  : [
+                      ">_ OpenAI Codex",
+                      "» Read and follow the brief",
+                      "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+                    ].join("\n")
+                : cli === "claude"
+                  ? ["Claude Code", "Working", "❯"].join("\n")
+                  : [
+                      ">_ OpenAI Codex",
+                      "› Ask Codex to do anything",
+                      "Working (1s • esc to interrupt)",
+                      "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+                    ].join("\n");
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:2",
+              text,
+              lines: 80,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return { stdout: "{}", stderr: "" };
+      },
+    );
+    return { exec, returnPresses: () => returnPresses };
+  }
+
+  it("correlates the complete multi-paragraph Codex composer including blank lines and the » glyph", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const submitted = [
+      "Read and follow /tmp/brief.md",
+      "",
+      "cmuxlayer contract for agent-1: Read and follow /tmp/contract.md",
+    ].join("\n");
+    const screen = [
+      ">_ OpenAI Codex",
+      "» Read and follow /tmp/brief.md",
+      "",
+      "  cmuxlayer contract for agent-1: Read and follow /tmp/contract.md",
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+    ].join("\n");
+
+    expect(
+      __submitEvidenceTestHooks.extractComposerInputRegion(screen, submitted),
+    ).toContain("cmuxlayer contract for agent-1");
+    expect(
+      __submitEvidenceTestHooks.screenShowsCompletePendingInput(
+        screen,
+        submitted,
+      ),
+    ).toBe(true);
+    expect(
+      __submitEvidenceTestHooks.screenShowsCompletePendingInput(
+        screen.replace("» Read and follow /tmp/brief.md", "» unrelated tail"),
+        submitted,
+      ),
+    ).toBe(false);
+  });
+
+  it("requires multiple boot observations for a modern Codex ready composer without changing the global registry", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    expect(CLI_READY_PATTERNS.codex.consecutive).toBe(1);
+    expect(
+      (__submitEvidenceTestHooks as any).requiredBootReadyObservations(
+        "codex",
+        codexReady,
+      ),
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not treat the combined Codex queue/context footer as composer content", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const screen = [
+      ">_ OpenAI Codex",
+      "› Ask Codex to do anything",
+      "",
+      "  tab to queue message                                      100% context left",
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+    ].join("\n");
+
+    expect(
+      __submitEvidenceTestHooks.extractComposerInputRegion(screen),
+    ).toBe("");
+  });
+
+  it("does not press Return or certify status plus token_count:null before observing the payload", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: false,
+      submitAfterReturn: null,
+    });
+    const server = createServer({
+      exec: harness.exec,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 500,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+      retry_count: 0,
+    });
+    expect(harness.returnPresses()).toBe(0);
+  }, 20_000);
+
+  it("requires attributable pre-Return payload evidence for non-Codex boot prompts too", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      cli: "claude",
+      payloadAppears: false,
+      submitAfterReturn: null,
+    });
+    const server = createServer({
+      exec: harness.exec,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        cli: "claude",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 500,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+      retry_count: 0,
+    });
+    expect(harness.returnPresses()).toBe(0);
+  }, 20_000);
+
+  it("does not certify a stale pre-type ready frame after Return", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: null,
+      staleReadyAfterReturn: true,
+    });
+    const server = createServer({
+      exec: harness.exec,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 750,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+      retry_count: 0,
+    });
+    expect(harness.returnPresses()).toBe(1);
+  }, 20_000);
+
+  it("uses one bounded recovery Return after the observed payload survives the first Return", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: 2,
+    });
+    const server = createServer({
+      exec: harness.exec,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 1_500,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: true,
+      delivered: true,
+      delivery_state: "submitted",
+      submit_verified: true,
+      retry_count: 1,
+    });
+    expect(harness.returnPresses()).toBe(2);
+  }, 20_000);
+
+  it("returns nonterminal pending_verify when one recovery Return still leaves the observed payload pending", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: null,
+    });
+    const server = createServer({
+      exec: harness.exec,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 1_500,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+      retry_count: 1,
+    });
+    expect(harness.returnPresses()).toBe(2);
   }, 20_000);
 });

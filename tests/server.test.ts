@@ -145,6 +145,21 @@ function createServerWithoutCallerContext(
   return server;
 }
 
+const codexComposerFrame = (text: string): string =>
+  [
+    "OpenAI Codex",
+    `» ${text}`,
+    "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+  ].join("\n");
+
+const codexSubmittedFrame = (text: string): string =>
+  [
+    "OpenAI Codex",
+    `• ${text}`,
+    "Working (1s • esc to interrupt)",
+    "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+  ].join("\n");
+
 afterEach(async () => {
   for (const server of [...openServers]) {
     await server.close();
@@ -1316,8 +1331,8 @@ describe("tool handler integration", () => {
   it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
     const calls: string[] = [];
     let surfaceIndex = 0;
-    const pendingBootContracts = new Set<string>();
-    const submittedBootContracts = new Set<string>();
+    const pendingBootContracts = new Map<string, string>();
+    const submittedBootContracts = new Map<string, string>();
     const launchedSurfaces = new Set<string>();
     const mockClient = {
       createWorkspace: vi.fn().mockImplementation(async (title: string) => {
@@ -1356,7 +1371,7 @@ describe("tool handler integration", () => {
       focusSurface: vi.fn().mockResolvedValue(undefined),
       send: vi.fn().mockImplementation(async (surface: string, text: string) => {
         if (text.includes("cmuxlayer contract for")) {
-          pendingBootContracts.add(surface);
+          pendingBootContracts.set(surface, text);
         } else {
           launchedSurfaces.add(surface);
         }
@@ -1364,27 +1379,36 @@ describe("tool handler integration", () => {
       pasteText: vi.fn().mockImplementation(
         async (surface: string, text: string) => {
           if (text.includes("cmuxlayer contract for")) {
-            pendingBootContracts.add(surface);
+            pendingBootContracts.set(surface, text);
           }
         },
       ),
       sendKey: vi.fn().mockImplementation(async (surface: string, key: string) => {
-        if (key === "return" && pendingBootContracts.delete(surface)) {
-          submittedBootContracts.add(surface);
+        if (key === "return" && pendingBootContracts.has(surface)) {
+          const pending = pendingBootContracts.get(surface) ?? "";
+          pendingBootContracts.delete(surface);
+          submittedBootContracts.set(surface, pending);
         }
       }),
-      readScreen: vi.fn().mockImplementation(async (surface: string) => ({
-        surface,
-        text: submittedBootContracts.has(surface)
-          ? "Working (1s - esc to interrupt)"
-          : !launchedSurfaces.has(surface)
-            ? "$ "
-            : surface === "surface:2"
-              ? "OpenAI Codex\nmodel: gpt-5.4\n\n›"
-              : "Claude Code\n>",
-        lines: 1,
-        scrollback_used: false,
-      })),
+      readScreen: vi.fn().mockImplementation(async (surface: string) => {
+        const pending = pendingBootContracts.get(surface);
+        return {
+          surface,
+          text: submittedBootContracts.has(surface)
+            ? `• ${submittedBootContracts.get(surface)}\nWorking (1s - esc to interrupt)`
+            : pending
+              ? surface === "surface:2"
+                ? `OpenAI Codex\n» ${pending}\ngpt-5.4 high · ~/Gits/cmuxlayer`
+                : `Claude Code\n❯ ${pending}`
+              : !launchedSurfaces.has(surface)
+                ? "$ "
+                : surface === "surface:2"
+                  ? "OpenAI Codex\nmodel: gpt-5.4\n\n›"
+                  : "Claude Code\n>",
+          lines: 80,
+          scrollback_used: false,
+        };
+      }),
       log: vi.fn().mockResolvedValue(undefined),
       setStatus: vi.fn().mockResolvedValue(undefined),
       clearStatus: vi.fn().mockResolvedValue(undefined),
@@ -3614,13 +3638,16 @@ describe("tool handler integration", () => {
     const pointer = `Read and follow ${promptPath}`;
     writeFileSync(promptPath, bootPrompt, "utf8");
     let promptSent = false;
+    let promptSubmitted = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
             surface: "surface:1",
             text: promptSent
-              ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+              ? promptSubmitted
+                ? `• ${pointer}\nWorking (1s • esc to interrupt)\ngpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`
+                : `OpenAI Codex\n» ${pointer}\ngpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`
               : "codex> ",
             lines: 20,
             scrollback_used: false,
@@ -3630,6 +3657,13 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send") && args.at(-1) === pointer) {
         promptSent = true;
+      }
+      if (
+        args.includes("send-key") &&
+        args.at(-1) === "return" &&
+        promptSent
+      ) {
+        promptSubmitted = true;
       }
       return { stdout: "{}", stderr: "" };
     });
@@ -3739,12 +3773,17 @@ describe("tool handler integration", () => {
     writeFileSync(promptPath, "boot prompt", "utf8");
     let promptSent = false;
     let returnPresses = 0;
+    let promptSubmitted = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
             surface: "surface:1",
-            text: "Claude Code\nWhat can I help you with?\n>",
+            text: !promptSent
+              ? "Claude Code\nWhat can I help you with?\n>"
+              : !promptSubmitted
+                ? "Claude Code\n❯ boot prompt"
+                : "Claude Code\n• boot prompt\nWhat can I help you with?\n❯",
             lines: 20,
             scrollback_used: false,
           }),
@@ -3753,6 +3792,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send-key") && args.includes("return")) {
         returnPresses += 1;
+        if (promptSent) promptSubmitted = true;
       }
       if (
         args.includes("send") &&
@@ -3830,9 +3870,14 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+    });
     expect(promptSent).toBe(true);
   }, 10_000);
 
@@ -3841,13 +3886,16 @@ describe("tool handler integration", () => {
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot prompt", "utf8");
     let promptSent = false;
+    let promptSubmitted = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
             surface: "surface:1",
             text: promptSent
-              ? "Claude Code\n❯ boot prompt\n\nWhat can I help you with?\n❯"
+              ? promptSubmitted
+                ? "Claude Code\n❯ boot prompt\n\nWhat can I help you with?\n❯"
+                : "Claude Code\n❯ boot prompt"
               : "Claude Code\nWhat can I help you with?\n>",
             lines: 20,
             scrollback_used: false,
@@ -3860,6 +3908,9 @@ describe("tool handler integration", () => {
         String(args.at(-1) ?? "") === "boot prompt"
       ) {
         promptSent = true;
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (promptSent) promptSubmitted = true;
       }
       return { stdout: "{}", stderr: "" };
     });
@@ -3904,12 +3955,7 @@ describe("tool handler integration", () => {
                   "› still typed here",
                   "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
                 ].join("\n")
-              : [
-                  "OpenAI Codex",
-                  "Model: gpt-5.5 xhigh",
-                  "›",
-                  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
-                ].join("\n"),
+              : "codex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -3939,9 +3985,13 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivery_state: "pending_verify",
+      submit_verified: null,
+      terminal: false,
+    });
     expect(promptSent).toBe(true);
   }, 10_000);
 
@@ -3950,19 +4000,22 @@ describe("tool handler integration", () => {
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot prompt", "utf8");
     let promptSent = false;
+    let promptSubmitted = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
             surface: "surface:1",
-            text: promptSent
+            text: promptSent && promptSubmitted
               ? [
                   "Claude Code",
                   "What can I help you with?",
                   "❯",
                   "  ⎇ cmuxlayer/fix-submit | 🔧 13",
                 ].join("\n")
-              : "Claude Code\nWhat can I help you with?\n❯",
+              : promptSent
+                ? "Claude Code\n❯ boot prompt"
+                : "Claude Code\nWhat can I help you with?\n❯",
             lines: 20,
             scrollback_used: false,
           }),
@@ -3974,6 +4027,9 @@ describe("tool handler integration", () => {
         String(args.at(-1) ?? "") === "boot prompt"
       ) {
         promptSent = true;
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (promptSent) promptSubmitted = true;
       }
       return { stdout: "{}", stderr: "" };
     });
@@ -4006,14 +4062,17 @@ describe("tool handler integration", () => {
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot prompt", "utf8");
     let promptSent = false;
+    let promptSubmitted = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
             surface: "surface:1",
-            text: promptSent
+            text: promptSent && promptSubmitted
               ? REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN
-              : REAL_CLAUDE_READY_BASELINE_SCREEN,
+              : promptSent
+                ? "Claude Code\n❯ boot prompt"
+                : REAL_CLAUDE_READY_BASELINE_SCREEN,
             lines: 30,
             scrollback_used: false,
           }),
@@ -4025,6 +4084,9 @@ describe("tool handler integration", () => {
         String(args.at(-1) ?? "") === "boot prompt"
       ) {
         promptSent = true;
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (promptSent) promptSubmitted = true;
       }
       return { stdout: "{}", stderr: "" };
     });
@@ -4094,9 +4156,14 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+    });
     expect(promptSent).toBe(true);
   }, 10_000);
 
@@ -4143,9 +4210,14 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      terminal: false,
+      delivered: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+    });
     expect(promptSent).toBe(true);
   }, 10_000);
 
@@ -4166,12 +4238,7 @@ describe("tool handler integration", () => {
                   "› Use 500 tokens and budget $5.00",
                   "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
                 ].join("\n")
-              : [
-                  "OpenAI Codex",
-                  "Model: gpt-5.5 xhigh",
-                  "›",
-                  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
-                ].join("\n"),
+              : "codex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -4201,9 +4268,13 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivery_state: "pending_verify",
+      submit_verified: null,
+      terminal: false,
+    });
     expect(promptSent).toBe(true);
   }, 10_000);
 
@@ -4302,6 +4373,7 @@ describe("tool handler integration", () => {
     let reads = 0;
     let readsWhenBootPromptSent: number | null = null;
     let promptSent = false;
+    let promptSubmitted = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         reads += 1;
@@ -4309,7 +4381,9 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:1",
             text: promptSent
-              ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+              ? promptSubmitted
+                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                : "Gemini CLI\n> boot prompt"
               : reads === 1
                 ? "Gemini CLI\nbooting\n>"
                 : "Gemini CLI\nready\n>",
@@ -4325,6 +4399,9 @@ describe("tool handler integration", () => {
       ) {
         readsWhenBootPromptSent = reads;
         promptSent = true;
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (promptSent) promptSubmitted = true;
       }
       return { stdout: "{}", stderr: "" };
     });
@@ -4344,9 +4421,9 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     // Two readiness matches, launch-command preflight, boot-prompt preflight,
-    // then post-submit verification.
+    // complete composer observation, then post-submit verification.
     expect(readsWhenBootPromptSent).toBe(4);
-    expect(reads).toBe(5);
+    expect(reads).toBe(7);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
@@ -8435,6 +8512,8 @@ describe("tool handler integration", () => {
 
       let launcherSends = 0;
       let promptSent = false;
+      let pendingBootText = "";
+      let bootPromptSubmitted = false;
       let returnPresses = 0;
       let readsAfterFirstLaunch = 0;
       let surfaceCreated = false;
@@ -8484,6 +8563,7 @@ describe("tool handler integration", () => {
         }
         if (args.includes("send-key") && args.includes("return")) {
           returnPresses += 1;
+          if (promptSent) bootPromptSubmitted = true;
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("send")) {
@@ -8499,13 +8579,17 @@ describe("tool handler integration", () => {
             launcherSends += 1;
           } else if (text.includes(prompt)) {
             promptSent = true;
+            pendingBootText = text;
           }
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("set-buffer")) {
           const text = String(args.at(-1) ?? "");
           sentTexts.push(text);
-          if (text.includes(prompt)) promptSent = true;
+          if (text.includes(prompt)) {
+            promptSent = true;
+            pendingBootText = text;
+          }
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("read-screen")) {
@@ -8529,7 +8613,9 @@ describe("tool handler integration", () => {
           } else if (launcherSends >= 2 && !promptSent) {
             text = fixture.screens.ready;
           } else if (promptSent) {
-            text = fixture.screens.working;
+            text = bootPromptSubmitted
+              ? codexSubmittedFrame(pendingBootText)
+              : codexComposerFrame(pendingBootText);
           }
           return {
             stdout: JSON.stringify({
@@ -8629,6 +8715,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let readsAfterLaunch = 0;
     let launcherReturnPresses = 0;
+    let bootPromptSubmitted = false;
     let composer = "";
     const submittedCommands: string[] = [];
 
@@ -8640,6 +8727,7 @@ describe("tool handler integration", () => {
           composer += text;
         } else if (text === "boot after stranded launcher") {
           promptSent = true;
+          composer = text;
         }
         return { stdout: "{}", stderr: "" };
       }
@@ -8664,14 +8752,18 @@ describe("tool handler integration", () => {
               throw new Error("socket closed before receiving response");
             }
           }
+        } else if (key === "return" && promptSent) {
+          bootPromptSubmitted = true;
+          composer = "";
         }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("read-screen")) {
         let text = "$ ";
         if (promptSent) {
-          text =
-            "gpt-5.6-sol high · ~/Gits/cmuxlayer.wt/spawn-reliability-3head\nWorking (1s • esc to interrupt)";
+          text = bootPromptSubmitted
+            ? codexSubmittedFrame("boot after stranded launcher")
+            : codexComposerFrame(composer);
         } else if (launcherSends > 0) {
           readsAfterLaunch += 1;
           if (submittedCommands.length > 0) {
@@ -8806,12 +8898,14 @@ describe("tool handler integration", () => {
       if (args.includes("read-screen")) {
         const submitted = submittedCommands.at(-1);
         const text =
-          submitted === fixture.corrupted_command
+          composer.includes("cmuxlayer contract for")
+            ? codexComposerFrame(composer)
+            : submitted === fixture.corrupted_command
             ? fixture.screen
             : submitted === fixture.launcher_command
               ? "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›"
               : submitted?.includes("cmuxlayer contract for")
-                ? "OpenAI Codex\nWorking (1s - esc to interrupt)"
+                ? codexSubmittedFrame(submitted)
               : composer
                 ? `etanheyman ~/Gits/brainlayer [main] $ ${composer}`
                 : "etanheyman ~/Gits/brainlayer [main] $";
@@ -8976,8 +9070,10 @@ describe("tool handler integration", () => {
       }
       if (args.includes("read-screen")) {
         let text = fixture.replay.stale_probe_screen;
-        if (submittedCommands.at(-1)?.includes("cmuxlayer contract for")) {
-          text = "OpenAI Codex\nWorking (1s - esc to interrupt)";
+        if (composer.includes("cmuxlayer contract for")) {
+          text = codexComposerFrame(composer);
+        } else if (submittedCommands.at(-1)?.includes("cmuxlayer contract for")) {
+          text = codexSubmittedFrame(submittedCommands.at(-1) ?? "");
         } else if (submittedCommands.length > 0) {
           text = "OpenAI Codex\nmodel: gpt-5.6-sol xhigh\n\n›";
         } else if (launcherWriteBecameAmbiguous) {
@@ -9083,6 +9179,8 @@ describe("tool handler integration", () => {
     let launcherSends = 0;
     let updateAccepted = false;
     let promptSent = false;
+    let pendingBootText = "";
+    let bootPromptSubmitted = false;
     let readsAfterFirstLaunch = 0;
     let updateReads = 0;
     let updateMenuSeen = false;
@@ -9136,6 +9234,9 @@ describe("tool handler integration", () => {
       if (args.includes("send-key")) {
         const key = String(args.at(-1) ?? "");
         sentKeys.push(key);
+        if (key === "return" && promptSent) {
+          bootPromptSubmitted = true;
+        }
         if (updateMenuSeen && !updateAccepted) {
           updateMenuKeys.push(key);
           if (
@@ -9157,13 +9258,17 @@ describe("tool handler integration", () => {
           launcherSends += 1;
         } else if (text.includes(prompt)) {
           promptSent = true;
+          pendingBootText = text;
         }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("set-buffer")) {
         const text = String(args.at(-1) ?? "");
         sentTexts.push(text);
-        if (text.includes(prompt)) promptSent = true;
+        if (text.includes(prompt)) {
+          promptSent = true;
+          pendingBootText = text;
+        }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("read-screen")) {
@@ -9185,7 +9290,9 @@ describe("tool handler integration", () => {
         } else if (launcherSends >= 2 && !promptSent) {
           text = fixture.screens.ready;
         } else if (promptSent) {
-          text = fixture.screens.working;
+          text = bootPromptSubmitted
+            ? codexSubmittedFrame(pendingBootText)
+            : codexComposerFrame(pendingBootText);
         }
         return {
           stdout: JSON.stringify({
@@ -9281,6 +9388,8 @@ describe("tool handler integration", () => {
     let updateMenuAccepted = false;
     let updateMenuSeen = false;
     let promptSent = false;
+    let pendingBootText = "";
+    let bootPromptSubmitted = false;
     let postDismissMenuReads = 0;
     let surfaceCreated = false;
     const sentTexts: string[] = [];
@@ -9331,6 +9440,9 @@ describe("tool handler integration", () => {
       if (args.includes("send-key")) {
         const key = String(args.at(-1) ?? "");
         sentKeys.push(key);
+        if (key === "return" && promptSent) {
+          bootPromptSubmitted = true;
+        }
         if (key === "return" && updateMenuSeen) {
           updateMenuAccepted = true;
         }
@@ -9346,13 +9458,17 @@ describe("tool handler integration", () => {
           launcherSent = true;
         } else if (text.includes(prompt)) {
           promptSent = true;
+          pendingBootText = text;
         }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("set-buffer")) {
         const text = String(args.at(-1) ?? "");
         sentTexts.push(text);
-        if (text.includes(prompt)) promptSent = true;
+        if (text.includes(prompt)) {
+          promptSent = true;
+          pendingBootText = text;
+        }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("read-screen")) {
@@ -9364,8 +9480,9 @@ describe("tool handler integration", () => {
           postDismissMenuReads += 1;
           text = postDismissMenuReads === 1 ? updateMenu : "codex> ";
         } else if (promptSent) {
-          text =
-            "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
+          text = bootPromptSubmitted
+            ? codexSubmittedFrame(pendingBootText)
+            : codexComposerFrame(pendingBootText);
         }
         return {
           stdout: JSON.stringify({
@@ -9662,6 +9779,7 @@ describe("tool handler integration", () => {
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, prompt, "utf8");
     let promptSent = false;
+    let promptSubmitted = false;
     let returnPresses = 0;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
@@ -9721,6 +9839,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send-key") && args.includes("return")) {
         returnPresses += 1;
+        if (promptSent) promptSubmitted = true;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("read-screen")) {
@@ -9728,7 +9847,9 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:2",
             text: promptSent
-              ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+              ? promptSubmitted
+                ? codexSubmittedFrame(prompt)
+                : codexComposerFrame(prompt)
               : "previous shell output: bun install\ncodex> ",
             lines: 80,
             scrollback_used: false,
@@ -9778,6 +9899,7 @@ describe("tool handler integration", () => {
     let returnPresses = 0;
     let reads = 0;
     let lineCleared = false;
+    let promptSubmitted = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -9840,7 +9962,10 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send-key")) {
         if (args.includes("ctrl-c")) lineCleared = true;
-        if (args.includes("return")) returnPresses += 1;
+        if (args.includes("return")) {
+          returnPresses += 1;
+          if (promptSent) promptSubmitted = true;
+        }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -9862,7 +9987,9 @@ describe("tool handler integration", () => {
             : launcherSends === 0 && reads === 2
               ? "Please restart Codex\netan@mac % "
               : promptSent
-                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                ? promptSubmitted
+                  ? codexSubmittedFrame(prompt)
+                  : codexComposerFrame(prompt)
                 : "codex> ";
         return {
           stdout: JSON.stringify({
@@ -9913,6 +10040,7 @@ describe("tool handler integration", () => {
     let returnPresses = 0;
     let reads = 0;
     let lineCleared = false;
+    let promptSubmitted = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -9975,7 +10103,10 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send-key")) {
         if (args.includes("ctrl-c")) lineCleared = true;
-        if (args.includes("return")) returnPresses += 1;
+        if (args.includes("return")) {
+          returnPresses += 1;
+          if (promptSent) promptSubmitted = true;
+        }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -9997,7 +10128,9 @@ describe("tool handler integration", () => {
             : launcherSends === 0 && reads === 2
               ? "Please restart Gemini\netan@mac % "
               : promptSent
-                ? "Gemini CLI\n✦ Working..."
+                ? promptSubmitted
+                  ? `Gemini CLI\n• ${prompt}\n✦ Working...`
+                  : `Gemini CLI\n❯ ${prompt}`
                 : "Gemini CLI\n>\n";
         return {
           stdout: JSON.stringify({
@@ -10052,6 +10185,7 @@ describe("tool handler integration", () => {
     let returnPresses = 0;
     let reads = 0;
     let lineCleared = false;
+    let promptSubmitted = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       const placementResult = defaultPanePlacementResult(args);
@@ -10070,7 +10204,10 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send-key")) {
         if (args.includes("ctrl-c")) lineCleared = true;
-        if (args.includes("return")) returnPresses += 1;
+        if (args.includes("return")) {
+          returnPresses += 1;
+          if (promptSent) promptSubmitted = true;
+        }
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -10092,7 +10229,9 @@ describe("tool handler integration", () => {
             : launcherSends === 0 && reads === 2
               ? "Please restart Codex\netan@mac % "
               : promptSent
-                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                ? promptSubmitted
+                  ? codexSubmittedFrame(prompt)
+                  : codexComposerFrame(prompt)
                 : "codex> ";
         return {
           stdout: JSON.stringify({
@@ -10164,9 +10303,11 @@ describe("tool handler integration", () => {
       }
       if (args.includes("read-screen")) {
         const text =
-          promptSent && returnPresses >= 2
-            ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
-            : "codex> ";
+          !promptSent
+            ? "codex> "
+            : returnPresses >= 1
+              ? codexSubmittedFrame(prompt)
+              : codexComposerFrame(prompt);
         return {
           stdout: JSON.stringify({
             surface: "surface:2",
@@ -10238,7 +10379,7 @@ describe("tool handler integration", () => {
         return {
           stdout: JSON.stringify({
             surface: "surface:2",
-            text: "codex> ",
+            text: promptSent ? codexComposerFrame(prompt) : "codex> ",
             lines: 30,
             scrollback_used: false,
           }),
@@ -10312,9 +10453,9 @@ describe("tool handler integration", () => {
             surface: "surface:2",
             text:
               promptSent && returnPresses >= 1
-                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                ? codexSubmittedFrame(prompt)
                 : promptSent
-                  ? `codex> ${prompt}`
+                  ? codexComposerFrame(prompt)
                   : "codex> ",
             lines: 30,
             scrollback_used: false,
@@ -10345,7 +10486,7 @@ describe("tool handler integration", () => {
     expect(transientFailureThrown).toBe(true);
   }, 10_000);
 
-  it("new_split fails when the boot prompt clears without agent identity", async () => {
+  it("new_split leaves boot submission pending when the prompt clears without attributable evidence", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-idle-after-clear.md");
     const prompt = "short boot prompt";
@@ -10384,7 +10525,7 @@ describe("tool handler integration", () => {
                 ? "codex> "
                 : returnPresses >= 1
                   ? "> "
-                  : `> ${prompt}`,
+                  : codexComposerFrame(prompt),
             lines: 80,
             scrollback_used: false,
           }),
@@ -10408,15 +10549,18 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Timed out");
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.submit_verification_reason).toBe(
-      "working_status_not_observed",
-    );
-    expect(parsed.retry_safe).toBe(false);
-    expect(parsed.boot_prompt_delivered).not.toBe(true);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(false);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivered: false,
+      terminal: false,
+      typed: true,
+      submit_attempted: true,
+      submit_verified: null,
+      delivery_state: "pending_verify",
+      retry_count: 0,
+    });
     expect(returnPresses).toBe(1);
   }, 10_000);
 
@@ -10453,9 +10597,7 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:2",
             text:
-              promptSent && returnPresses > 0
-                ? `codex> ${prompt}`
-                : "codex> ",
+              promptSent ? codexComposerFrame(prompt) : "codex> ",
             lines: 30,
             scrollback_used: false,
           }),
@@ -10482,25 +10624,19 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Boot prompt delivery failed");
-    expect(parsed.error).toContain("Enter submit could not be verified");
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.submit_verification_reason).toBe("input_still_pending");
-    expect(parsed.retry_safe).toBe(false);
-    expect(parsed.boot_prompt_delivered).not.toBe(true);
-    expect(parsed).toMatchObject({
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(false);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
       delivered: false,
       terminal: false,
       typed: true,
       submit_attempted: true,
-      submit_verified: false,
-      retry_count: 0,
+      submit_verified: null,
+      delivery_state: "pending_verify",
+      retry_count: 1,
     });
-    expect(parsed).not.toHaveProperty("delivery");
-    expect(parsed).not.toHaveProperty("delivery_state");
-    expect(returnPresses).toBe(1);
+    expect(returnPresses).toBe(2);
   }, 10_000);
 
   it("new_split reports a short boot prompt delivered after submit verification succeeds", async () => {
@@ -10510,6 +10646,7 @@ describe("tool handler integration", () => {
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, prompt, "utf8");
     let returnPresses = 0;
+    let promptSent = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("new-split")) {
         return {
@@ -10527,14 +10664,20 @@ describe("tool handler integration", () => {
         returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
+      if (args.includes("send") || args.includes("set-buffer")) {
+        promptSent = true;
+        return { stdout: "{}", stderr: "" };
+      }
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
             surface: "surface:2",
             text:
-              returnPresses > 0
-                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
-                : "codex> ",
+              !promptSent
+                ? "codex> "
+                : returnPresses > 0
+                  ? codexSubmittedFrame(prompt)
+                  : codexComposerFrame(prompt),
             lines: 30,
             scrollback_used: false,
           }),
@@ -10562,7 +10705,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(1);
   }, 10_000);
 
-  it("new_split keeps verifying long boot prompts without retrying Return", async () => {
+  it("new_split leaves a long boot prompt pending when only generic Working appears", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-long-retry.md");
     const prompt = "long boot prompt ".repeat(40);
@@ -10605,7 +10748,7 @@ describe("tool handler integration", () => {
                 ? "codex> "
                 : returnPresses >= 1
                   ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
-                  : `codex> ${typedText.slice(-100)}`,
+                  : codexComposerFrame(typedText),
             lines: 30,
             scrollback_used: false,
           }),
@@ -10629,7 +10772,16 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(false);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivered: false,
+      terminal: false,
+      typed: true,
+      submit_attempted: true,
+      submit_verified: null,
+      delivery_state: "pending_verify",
+      retry_count: 0,
+    });
     expect(sendCalls).toHaveLength(1);
     expect(sendCalls.join("")).toBe(prompt);
     expect(returnPresses).toBe(1);
