@@ -121,6 +121,7 @@ describe("revive on purpose (#492)", () => {
   let stateMgr: StateManager;
   let mockClient: CmuxClient;
   let engine: AgentEngine;
+  let registry: AgentRegistry;
   let liveSurfaces: CmuxSurface[];
   let harnessHome: string;
   let previousHarnessHome: string | undefined;
@@ -196,7 +197,7 @@ describe("revive on purpose (#492)", () => {
         };
       },
     );
-    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
@@ -359,5 +360,80 @@ describe("revive on purpose (#492)", () => {
     );
     expect(inferAgentRole({ title: leadTitle })).toBe("orchestrator");
     expect(inferAgentRole({ title: workerTitle })).toBe("worker");
+  });
+
+  it("refuses a resume rename after the surface observer epoch changes", async () => {
+    engine.dispose();
+    const observerId = "cmux:/tmp/cmux.sock";
+    let observerEpoch = `${observerId}@socket:1`;
+    registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+      observerIdProvider: () => observerId,
+      observerEpochProvider: () => observerEpoch,
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts: { baseDir: TEST_DIR },
+    });
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        workspace_id: "ws:1",
+        surface_id: "surface:old",
+      }),
+    );
+    await registry.reconstitute();
+    const updateRecord = stateMgr.updateRecord.bind(stateMgr);
+    vi.spyOn(stateMgr, "updateRecord").mockImplementation((agentId, patch) => {
+      const updated = updateRecord(agentId, patch);
+      if (patch.surface_id === "surface:new") {
+        observerEpoch = `${observerId}@socket:2`;
+      }
+      return updated;
+    });
+
+    await expect(engine.resumeAgent("cmuxlayerCodex-revive")).rejects.toThrow(
+      /surface observer changed.*resume rename/i,
+    );
+    expect(mockClient.renameTab).not.toHaveBeenCalled();
+    expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps a recoverable terminal row when its stale process is gone", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "error",
+        error: "Surface surface:revive disappeared",
+        pid: 424242,
+      }),
+    );
+    await registry.reconstitute();
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+    });
+
+    expect(engine.evictDeadProcessAgents()).toEqual([]);
+    expect(stateMgr.readState("cmuxlayerCodex-revive")).not.toBeNull();
+    killSpy.mockRestore();
+  });
+
+  it("keeps a recoverable legacy row during startup purge without surface ownership", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "error",
+        error: "Surface surface:revive disappeared",
+        surface_observer_id: null,
+      }),
+    );
+    registry = new AgentRegistry(stateMgr, async () => [], {
+      observerId: "cmux:/tmp/prod.sock",
+    });
+    await registry.reconstitute();
+
+    expect(registry.purgeAllTerminal()).toEqual([]);
+    expect(stateMgr.readState("cmuxlayerCodex-revive")).not.toBeNull();
   });
 });

@@ -97,6 +97,7 @@ import {
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   resolveBootPromptText,
+  shouldRetainForExplicitResume,
   summarizeTaskSummary,
   type AgentRoute,
   isValidTransition,
@@ -7658,6 +7659,10 @@ export class AgentEngine {
       });
       this.registry.set(agent.agent_id, rebound);
       surfaceBound = true;
+      this.assertSurfaceObserverEpochCurrent(
+        surface.observerEpoch,
+        "explicit agent resume rename",
+      );
       // A resumed pane is the same agent; it must say so, like the spawn path.
       await this.client.renameTab(
         surface.surface,
@@ -8378,6 +8383,9 @@ export class AgentEngine {
         agent.pid !== null &&
         agent.pid !== undefined &&
         this.processLiveness(agent.pid) === "gone";
+      if (shouldRetainForExplicitResume(agent)) {
+        continue;
+      }
       if (!this.isTerminalDeadRegistryGhost(agent) && !processGone) {
         continue;
       }

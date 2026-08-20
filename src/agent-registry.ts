@@ -2525,10 +2525,7 @@ export class AgentRegistry {
       if (agent.blocked_on_prompt === true) {
         continue;
       }
-      if (
-        shouldRetainForExplicitResume(agent) &&
-        this.canControlSurface(agent)
-      ) {
+      if (shouldRetainForExplicitResume(agent)) {
         continue;
       }
       if (!this.canPurgeAtStartup(agent)) {
