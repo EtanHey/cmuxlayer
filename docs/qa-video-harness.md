@@ -78,7 +78,8 @@ For each entry in `questions.json`, dispatch one sub-agent with:
   `{"id": ..., "verdict": "YES"|"NO"|"NOT_OBSERVABLE", "frame": ..., "note": ...}`.
 
 `questions.json` contains no receipt claim or expected answer. Do not give the adjudicator
-`expectations.json`; the split makes independence structural rather than relying on prompt prose.
+`expectations.json`, `run.json`, or permission to inspect parent/sibling paths outside the listed
+`frame_dir`; the split keeps receipt claims out of the adjudication inputs.
 
 Collect the verdicts into a JSON array and render the report:
 

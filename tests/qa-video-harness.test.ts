@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// @ts-expect-error -- plain .mjs helper module shared with the harness script
 import {
   DRY_RUN_SPEC,
   OUTCOMES,
@@ -21,9 +20,9 @@ import {
   reconcile,
   splitAdjudicationManifest,
   wallToVideoSeconds,
+// @ts-expect-error -- plain .mjs helper module shared with the harness script
 } from "../scripts/qa-video-lib.mjs";
 
-// @ts-expect-error -- executable .mjs module also exports testable runner seams
 import {
   Recorder,
   assertOptIn,
@@ -38,6 +37,7 @@ import {
   readExtractedFrameMapping,
   rectsIntersect,
   sterileEnv,
+// @ts-expect-error -- executable .mjs module also exports testable runner seams
 } from "../scripts/qa-video-harness.mjs";
 
 function sendStep(delivery: string | undefined, overrides: Record<string, unknown> = {}) {
@@ -256,6 +256,17 @@ describe("adjudicator independence", () => {
     expect(expectations.expectations[0]).toHaveProperty("receipt_claim");
     expect(combineAdjudicationArtifacts(questions, expectations)).toEqual(manifest);
   });
+
+  it("rejects questions and expectations from different QA video runs", () => {
+    const runA = buildAdjudicationManifest({ ...runFixture([sendStep("submitted")]), runId: "run-a" });
+    const runB = buildAdjudicationManifest({ ...runFixture([sendStep("submitted")]), runId: "run-b" });
+    const { questions } = splitAdjudicationManifest(runA);
+    const { expectations } = splitAdjudicationManifest(runB);
+
+    expect(() => combineAdjudicationArtifacts(questions, expectations)).toThrow(
+      /different QA video runs/,
+    );
+  });
 });
 
 describe("frame storage controls", () => {
@@ -279,7 +290,7 @@ describe("frame storage controls", () => {
     }
   });
 
-  it("prunes old completed runs while preserving the newest configured runs", async () => {
+  it("prunes old completed runs while preserving the newest configured run and incomplete runs", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-video-retention-"));
     try {
       const runs = [
@@ -292,8 +303,15 @@ describe("frame storage controls", () => {
         await writeFile(join(root, name, "run.json"), "{}\n");
         await utimes(join(root, name), seconds, seconds);
       }
-      expect(await pruneRunDirectories(root, { keep: 2 })).toEqual(["full-2026-08-18"]);
-      expect((await readdir(root)).sort()).toEqual(["dry-run-2026-08-20", "full-2026-08-19"]);
+      await mkdir(join(root, "full-in-progress"));
+      await writeFile(join(root, "full-in-progress", "video.mov"), "partial");
+      await utimes(join(root, "full-in-progress"), 0, 0);
+
+      expect(await pruneRunDirectories(root, { keep: 1 })).toEqual([
+        "full-2026-08-19",
+        "full-2026-08-18",
+      ]);
+      expect((await readdir(root)).sort()).toEqual(["dry-run-2026-08-20", "full-in-progress"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -490,9 +508,11 @@ describe("harness runner behaviour", () => {
     const started = recorder.start();
     child.stdout.emit("data", "out_time_us=1\n");
     await started;
-    expect(invocation?.command).toBe("ffmpeg");
-    expect(invocation?.args).toContain("avfoundation");
-    expect(invocation?.args.join(" ")).toContain("crop=3:4:1:2");
-    expect(invocation?.args.join(" ")).not.toContain("screencapture");
+    expect(invocation).not.toBeNull();
+    const ffmpegInvocation = invocation as unknown as { command: string; args: string[] };
+    expect(ffmpegInvocation.command).toBe("ffmpeg");
+    expect(ffmpegInvocation.args).toContain("avfoundation");
+    expect(ffmpegInvocation.args.join(" ")).toContain("crop=3:4:1:2");
+    expect(ffmpegInvocation.args.join(" ")).not.toContain("screencapture");
   });
 });
