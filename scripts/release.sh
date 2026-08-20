@@ -6,6 +6,7 @@
 #   scripts/release.sh 0.3.0 --yes               # no confirmation prompt
 #   scripts/release.sh 0.3.0 --dry-run           # print every step, change nothing
 #   scripts/release.sh 0.3.0 --require-contract  # a skipped real-cmux gate aborts the release
+#   scripts/release.sh 0.3.0 --require-ci        # a non-green CI on HEAD aborts the release
 #
 # Steps: clean-tree + green build/tests gate → bump package.json → commit +
 # push main → tag vX.Y.Z + push tag → update formula url+sha256 in the
@@ -30,11 +31,15 @@ VERSION="${1:-}"
 YES=0
 DRY=0
 REQUIRE_CONTRACT=0
+REQUIRE_CI=0
+CI_CONCLUSION="unknown"
+CI_COMMIT_LABEL="HEAD"
 for arg in "${@:2}"; do
   case "$arg" in
     --yes) YES=1 ;;
     --dry-run) DRY=1 ;;
     --require-contract) REQUIRE_CONTRACT=1 ;;
+    --require-ci) REQUIRE_CI=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -50,6 +55,19 @@ trap cleanup EXIT
 
 die() { echo "release: $*" >&2; exit 1; }
 run() { if [ "$DRY" -eq 1 ]; then printf 'DRY  %s\n' "$*"; else eval "$@"; fi; }
+
+# In-place sed that works on BSD *and* GNU. `sed -i ''` is BSD-only: GNU sed
+# reads the '' as the script and the expression as a filename, exits 2, and
+# takes this script down with it — which is why every Linux CI run of the
+# release-receipt tests failed while the same tests passed on a Mac.
+# Writes back through the ORIGINAL file rather than mv-ing the tmpfile over it:
+# mv would hand the target the tmpfile's 0600 and owner, a mode change `sed -i`
+# never makes.
+sed_inplace() {
+  local expression="$1" file="$2" tmp
+  tmp="$(mktemp)"
+  sed -E "$expression" "$file" >"$tmp" && cat "$tmp" >"$file" && rm -f "$tmp"
+}
 
 # Receipt writes are never allowed to fail a release: the ledger records the
 # release, it does not gate it.
@@ -84,6 +102,37 @@ if [ "$DRY" -ne 1 ]; then
   receipt init "$VERSION"
   RECEIPT_PATH="$(node "$RECEIPT_CLI" path "$VERSION" 2>/dev/null || true)"
   receipt_record "gates.require_contract" "$([ "$REQUIRE_CONTRACT" -eq 1 ] && echo true || echo false)"
+fi
+
+# --- CI status of the commit being released (#490) -------------------------
+# Six tagged releases shipped while publish.yml failed on every single run and
+# cmuxlayer never reached npm at all. Nothing in the release said so. The receipt
+# now carries CI's verdict on the released commit, and the banner prints it, so
+# "the release looked clean" can never again mean "nobody opened the log".
+if [ "$DRY" -eq 1 ]; then
+  printf 'DRY  %s\n' "read CI status for HEAD"
+else
+  # `gh run list --commit` needs the FULL sha; an abbreviated one matches nothing
+  # and would read as `unknown`. Never loosen this to a short sha.
+  RELEASE_COMMIT="$(git rev-parse HEAD)"
+  CI_COMMIT_LABEL="$RELEASE_COMMIT"
+  # An unusable gh -- absent, unauthenticated, offline -- reads as unknown.
+  # Only a real `success` from a real run is allowed to look green.
+  CI_CONCLUSION="$(gh run list --commit "$RELEASE_COMMIT" --workflow ci.yml \
+    --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || true)"
+  [ -n "$CI_CONCLUSION" ] || CI_CONCLUSION="unknown"
+  receipt_record "gates.ci" "$CI_CONCLUSION"
+  # Name the commit the verdict is ABOUT. The read happens before the version
+  # bump, so this is the commit the release was cut from -- not the tag's commit.
+  # In the one file whose purpose is that a release cannot look cleaner than it
+  # is, "which commit" cannot be left to inference.
+  receipt_record "gates.ci_commit" "$RELEASE_COMMIT"
+  if [ "$CI_CONCLUSION" != "success" ]; then
+    if [ "$REQUIRE_CI" -eq 1 ]; then
+      die "--require-ci: CI for $RELEASE_COMMIT is $CI_CONCLUSION, not success"
+    fi
+    echo "release: WARNING — CI for $RELEASE_COMMIT is $CI_CONCLUSION; recorded in the receipt"
+  fi
 fi
 
 echo "release: gating on typecheck + tests…"
@@ -159,7 +208,7 @@ if [ "$YES" -ne 1 ] && [ "$DRY" -ne 1 ]; then
 fi
 
 # --- bump + commit + tag (cmuxlayer) --------------------------------------
-run "sed -i '' -E 's/^(  \"version\": \")[^\"]+(\",)\$/\\1$VERSION\\2/' package.json"
+run "sed_inplace 's/^(  \"version\": \")[^\"]+(\",)\$/\\1$VERSION\\2/' package.json"
 run "git commit -aqm 'chore: release $TAG'"
 run "git push origin main"
 run "git tag -a '$TAG' -m 'cmuxlayer $TAG'"
@@ -189,8 +238,8 @@ receipt_record "artifact.url" "$URL"
 receipt_record "artifact.sha256" "$SHA"
 
 # --- bump formula (homebrew-layers) ---------------------------------------
-run "sed -i '' -E 's|archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|archive/refs/tags/$TAG.tar.gz|' '$FORMULA'"
-run "sed -i '' -E 's|^  sha256 \"[0-9a-f]{64}\"|  sha256 \"$SHA\"|' '$FORMULA'"
+run "sed_inplace 's|archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|archive/refs/tags/$TAG.tar.gz|' '$FORMULA'"
+run "sed_inplace 's|^  sha256 \"[0-9a-f]{64}\"|  sha256 \"$SHA\"|' '$FORMULA'"
 run "brew audit etanhey/layers/cmuxlayer || true"
 run "git -C '$TAP_DIR' commit -aqm 'cmuxlayer $TAG'"
 run "git -C '$TAP_DIR' push origin main"
@@ -246,6 +295,7 @@ fi
 cat <<EOF
 
 release: done — cmuxlayer $TAG is tagged and the formula is bumped.
+CI: $CI_CONCLUSION (ci.yml on $CI_COMMIT_LABEL — the commit this release was cut from)
 Receipt: $RECEIPT_LABEL
 Next (on EACH Mac — each run appends its own install evidence to the receipt):
   $REPO_DIR/scripts/release-verify.sh "$VERSION"

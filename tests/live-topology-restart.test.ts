@@ -23,12 +23,16 @@ const SERVERS = new Set<{
   sockets: Set<net.Socket>;
 }>();
 
+// This hook compiles the whole project so the live daemon under test is the
+// real build. That is a minute's work on a loaded CI runner and ~3s on a warm
+// Mac -- vitest's 10s hook default made the file pass locally and time out in
+// CI, which is the same green-only-on-one-machine failure this lane exists for.
 beforeAll(() => {
   execFileSync(resolve("node_modules", ".bin", "tsc"), ["-p", "tsconfig.json"], {
     cwd: process.cwd(),
     stdio: "pipe",
   });
-});
+}, 300_000);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

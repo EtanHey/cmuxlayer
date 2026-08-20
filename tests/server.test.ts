@@ -315,7 +315,16 @@ async function runWithFakeTimers<T>(
   let elapsed = 0;
   let idleTurns = 0;
   const maxIdleTurns = 10_000;
-  while (!settled && elapsed < advanceMs && idleTurns < maxIdleTurns) {
+  // AIDEV-NOTE: advanceMs is how much SIMULATED time the operation is expected
+  // to need. It used to be the loop's only stop condition, which made it a
+  // machine budget rather than a semantic one: a turn that advances the clock
+  // without the handler progressing still spends it, and a loaded CI runner
+  // interleaves more of those than a warm laptop. Calls that are green here
+  // failed in CI at `elapsed=3000, idleTurns=0` — out of simulated budget, not
+  // stuck. Allow a generous multiple; idleTurns is what actually catches an
+  // operation that never progresses, and it is unaffected by machine speed.
+  const fakeTimeBudget = Math.max(advanceMs * 10, 30_000);
+  while (!settled && elapsed < fakeTimeBudget && idleTurns < maxIdleTurns) {
     // A handler can cross real I/O/event-loop boundaries before scheduling its
     // next poll. Do not spend its fake-time budget until that timer exists.
     await new Promise<void>((resolve) => REAL_SET_IMMEDIATE(resolve));
@@ -327,7 +336,7 @@ async function runWithFakeTimers<T>(
       idleTurns += 1;
       continue;
     }
-    const step = Math.min(50, advanceMs - elapsed);
+    const step = Math.min(50, fakeTimeBudget - elapsed);
     await advanceTimers(step);
     elapsed += step;
     idleTurns = 0;

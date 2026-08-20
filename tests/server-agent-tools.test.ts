@@ -3048,6 +3048,10 @@ describe("agent lifecycle tool handlers", () => {
       cli: "claude",
       role: "orchestrator",
       task_done_detected_at: "2026-08-18T00:00:00Z",
+      // #468: a managed seat carries this observer's stamp -- spawn writes it.
+      // The ref-only caller tier now requires it, because a ref stamped by a
+      // dead generation (or never stamped) cannot prove who occupies it now.
+      surface_observer_id: "cmux:/tmp/cmuxlayer-test.sock",
     });
     engine.stateMgr.writeState(staleLead);
     engine.getRegistry().set(staleLead.agent_id, staleLead);
@@ -3091,6 +3095,8 @@ describe("agent lifecycle tool handlers", () => {
       cli: "codex",
       role: "worker",
       task_done_detected_at: "2026-08-18T00:00:00Z",
+      // #468: see the note on the stale-lead fixture above.
+      surface_observer_id: "cmux:/tmp/cmuxlayer-test.sock",
     });
     engine.stateMgr.writeState(staleWorker);
     engine.getRegistry().set(staleWorker.agent_id, staleWorker);
@@ -7537,7 +7543,19 @@ describe("agent lifecycle tool handlers", () => {
       cli_session_id: "claude-session",
       task_summary: "(auto-discovered)",
     });
-    const server = await createUuidRouteServer(routeClient, record);
+    // The repaired id is the SEAT, not the launcher, so this test states the
+    // seat registry it repairs against. Reading the host's ~/.golems/config.yaml
+    // instead is what made this assertion green on one Mac and red in CI.
+    const server = await createUuidRouteServer(routeClient, record, {
+      seatRegistry: {
+        brainClaude: {
+          repo: "brainlayer",
+          lane: "brainlayer",
+          role: "lead",
+          launchers: { claude: "brainlayerClaude" },
+        },
+      },
+    });
     const listResult = await registeredTestTool(server, "list_agents").handler(
       {},
       {} as any,

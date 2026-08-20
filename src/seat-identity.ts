@@ -112,7 +112,16 @@ export function parseSeatRegistryConfig(raw: string): SeatRegistry {
   );
 }
 
-export function defaultSeatRegistryPath(): string {
+/**
+ * The seat registry is a MACHINE file: it says which seats this operator runs.
+ * `CMUXLAYER_SEAT_REGISTRY_PATH` lets a caller — a test, a sandbox, a second
+ * fleet — state its own registry instead of inheriting whatever the host has.
+ */
+export function defaultSeatRegistryPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const override = env.CMUXLAYER_SEAT_REGISTRY_PATH?.trim();
+  if (override) return override;
   return join(homedir(), ".golems", "config.yaml");
 }
 

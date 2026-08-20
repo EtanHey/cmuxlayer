@@ -136,7 +136,7 @@ The other 30 definitions, including `interact`, are interim ToolSearch-deferred 
 
 **Terminal control** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
 
-**Agent lifecycle** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `resync_agents` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast`
+**Agent lifecycle** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast`
 
 **Metacomm (agent inbox)** — `dispatch_to_agent` `inbox_check`
 
@@ -183,7 +183,6 @@ The other 30 definitions, including `interact`, are interim ToolSearch-deferred 
 | `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
 | `new_worktree_split` | Deprecated one-release alias; use `spawn_agent(worktree:true, placement:"worker")` |
 | `spawn_in_workspace` | Deprecated one-release alias; create/reuse a workspace and call `spawn_agent` for each managed agent |
-| `resync_agents` | Re-sync the agent registry from live surfaces |
 | `dispatch_to_agent` | Append a task to an agent's inbox file (deterministic write channel) |
 | `send_to` | Send by agent ID or raw surface using `mode:"agent"|"surface"|"command"|"key"` |
 | `send_to_agent` | Deprecated one-release alias for `send_to(mode:"agent")` |
