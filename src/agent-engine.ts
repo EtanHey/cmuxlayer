@@ -1842,43 +1842,6 @@ export class AgentEngine {
     return live.state;
   }
 
-  /**
-   * Positive evidence the task ENDED: a done signal seen on the screen or in
-   * the harness transcript. Deliberately NOT "the record says done" -- that is
-   * the thing #408 fabricates.
-   */
-  private hasPositiveDoneEvidence(agent: AgentRecord): boolean {
-    if (agent.task_done_detected_at) return true;
-    return this.loadGroundTruthSession(agent)?.state.done === true;
-  }
-
-  /**
-   * The state CLOSURE reasons about, and the one rule a response may use.
-   *
-   * AIDEV-NOTE (F1b round 3): a list_agents row published its `state` from
-   * `agent-health`'s reconciled state (the raw screen verdict) while its
-   * `closure` came from `isLiveActive(live) ? live.state : agent.state` -- so
-   * a fresh agent at a `ready` prompt whose record had flipped to `done`
-   * rendered `state:"ready"` beside `closure:"artifact_missing"`. One row, two
-   * state rules, and the alarming one won. Five such specimens were observed
-   * live, one spawned two minutes earlier.
-   *
-   * This is that same rule, in one place, with two carve-outs that are about
-   * EVIDENCE rather than about which field is being rendered:
-   *   1. Activity always wins (F1): a screen showing work in progress overturns
-   *      any record.
-   *   2. A `done` the agent EARNED survives a ready prompt -- a finished worker
-   *      sits at one too, and its deadlock signal has to keep working. What
-   *      does not survive is a `done` with nothing behind it.
-   */
-  private closureStateOf(agent: AgentRecord, live: LiveAgentState): AgentState {
-    if (isLiveActive(live)) return live.state;
-    if (agent.state === "done" && this.hasPositiveDoneEvidence(agent)) {
-      return "done";
-    }
-    return live.screen_state ?? agent.state;
-  }
-
   /** Live state for one record, or the record's own state when unprobed. */
   liveStateOf(agent: AgentRecord): LiveAgentState {
     const memo = this.freshLiveStates.get(agent.agent_id);

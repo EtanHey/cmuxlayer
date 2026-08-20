@@ -213,7 +213,6 @@ describe("P11 closure state (Constraint 3: no bare boolean at default detail)", 
     expect(
       resolveClosureState({
         contractIssued: false,
-        doneEvidence: true,
         state: "done",
         closureArtifactVerified: null,
         doneEvidence: true,
