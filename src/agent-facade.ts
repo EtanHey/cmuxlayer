@@ -13,6 +13,10 @@ import {
   rawResumeNeedsCwd,
   rawResumeSupported,
 } from "./agent-command.js";
+import {
+  resumeArtifactStatus,
+  type ResumeArtifactStatus,
+} from "./resume-verification.js";
 
 export type AgentStatePayload = AgentRecord & {
   resumable: boolean;
@@ -56,6 +60,19 @@ export function resumeInvocationForAgent(
 ): { command: string; reason: null } | { command: null; reason: string } {
   if (!record.cli_session_id) {
     return { command: null, reason: "no CLI session has been captured" };
+  }
+  // #482: a formattable id is not a resumable agent. A seat that survived a
+  // restart keeps the OLD id, so the command would open a fresh session
+  // wearing the seat's name. Refuse on proof of absence only -- an
+  // unverifiable store leaves the claim standing.
+  if (resumeArtifactStatus(record.cli, record.cli_session_id) === "missing") {
+    return {
+      command: null,
+      reason:
+        `captured ${record.cli} session ${record.cli_session_id} is not in ` +
+        `the harness session store; resuming it would start a NEW session ` +
+        `under this agent's name, not restore it`,
+    };
   }
   const cwd = resumeCwdForAgent(record);
   if (!record.launcher_name) {
@@ -147,6 +164,13 @@ export function toObservedPublicAgent(
   const registryObservedAtMs = derivedAtMs;
   const resumeCommand = resumeCommandForAgent(record);
   const resumable = !!resumeCommand;
+  // #482 provenance: `disk` means a session artifact was looked for and
+  // found (or proven absent). `registry` means the claim is unverified.
+  const artifactStatus: ResumeArtifactStatus = record.cli_session_id
+    ? resumeArtifactStatus(record.cli, record.cli_session_id)
+    : "unverifiable";
+  const resumableSource: ObservationSource =
+    artifactStatus === "unverifiable" ? "registry" : "disk";
   const hasScreenModelObservation =
     opts.screenObservedAtMs !== undefined && opts.screenModel != null;
   const model = hasScreenModelObservation
@@ -178,7 +202,7 @@ export function toObservedPublicAgent(
       "registry",
       registryObservedAtMs,
     ),
-    resumable: observed(resumable, "registry", registryObservedAtMs),
+    resumable: observed(resumable, resumableSource, registryObservedAtMs),
     submit_verified: observed(
       record.submit_verified ?? null,
       "registry",
