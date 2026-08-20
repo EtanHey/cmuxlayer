@@ -42,30 +42,43 @@ bun run build                       # the harness talks to dist/index.js
 CMUX_QA_VIDEO=1 npm run qa:video -- --cli cursor --repo cmuxlayer
 ```
 
-Useful flags: `--capture-fps`, `--frame-fps`, `--scale-width`, `--keep-window`, `--root <dir>`,
-`--server-command`/`--server-arg`, `--skip-preflight` (don't).
+Useful flags: `--capture-fps`, `--frame-fps`, `--scale-width`, `--max-frames` (default 750),
+`--keep-runs` (default 5), `--keep-window`, `--root <dir>`, `--server-command`/`--server-arg`,
+`--skip-preflight` (don't).
 
 Output under `results/qa-video/<runId>/` (gitignored):
 
 - `video.mov` — the recording, cropped to the probe window
 - `run.json` — every probe step, every tool receipt verbatim, every mark on the recording clock
-- `manifest.json` — the adjudication questions, each with its own densely-sampled frames
-- `frames/<questionId>/f-NNNN.png`
+- `questions.json` — the receipt-free adjudicator payload, with each narrow question and its frames
+- `expectations.json` — receipt claims and expected verdicts, held back until report generation
+- `frames/<questionId>/f-<PTS>.jpg` — JPEG frames named with ffmpeg's real filtered-frame PTS
+
+The harness refuses extraction when the planned questions exceed `--max-frames`, prints the total
+artifact size on completion, and automatically retains only the newest `--keep-runs` completed runs
+under the default gitignored output path. Custom `--root` paths are never pruned automatically. To
+remove older default-output artifacts by age instead:
+
+```bash
+find results/qa-video -mindepth 1 -maxdepth 1 -type d -mtime +7 -print -exec rm -rf -- {} +
+```
 
 ## Adjudicating
 
 Sub-agents are **Sonnet** — cheap vision, high frame density — and they run **in-process**, not as
 cmux panes. Each answers exactly one question and returns the frame it used.
 
-For each entry in `manifest.json`, dispatch one sub-agent with:
+For each entry in `questions.json`, dispatch one sub-agent with:
 
 - the `question` text verbatim,
-- the absolute path to its `frame_dir` and the `frame_times` mapping (frame `f-000N` is at
-  `frame_window.start + (N-1)/frame_window.fps` seconds),
+- the absolute path to its `frame_dir` and the `frame_times` mapping. These times are read from the
+  `-frame_pts 1` JPEG filenames after extraction, so a missing frame leaves a timestamp gap instead
+  of shifting every later image,
 - the instruction to return only
   `{"id": ..., "verdict": "YES"|"NO"|"NOT_OBSERVABLE", "frame": ..., "note": ...}`.
 
-Never show a sub-agent the receipt. It must not know what answer would be convenient.
+`questions.json` contains no receipt claim or expected answer. Do not give the adjudicator
+`expectations.json`; the split makes independence structural rather than relying on prompt prose.
 
 Collect the verdicts into a JSON array and render the report:
 
@@ -131,15 +144,17 @@ agent's surface — the first full run died on `refusing terminal I/O`. They are
 server is spawned. `CMUX_SOCKET_PATH` is kept: it addresses the daemon, it does not identify anyone.
 
 **Recorder: ffmpeg + avfoundation**, not `screencapture -v`. Not because ffmpeg records better, but
-because `-progress` makes it report its own clock. That first progress block with a real `out_time_us`
-is the anchor that maps wall-clock instants onto recording seconds; without it, frames could only be
-aligned by eye. The recording is verified with `ffprobe` (non-empty, real duration, decodable frames)
-before anything is derived from it.
+because `-progress` makes it report its own clock. The first progress block with a real `out_time_us`
+is captured exactly once as the immutable anchor that maps wall-clock instants onto recording
+seconds; later progress blocks cannot move it. The recording is verified with `ffprobe` (non-empty,
+real duration, decodable frames) before anything is derived from it.
 
 **Frames are sampled densely at transitions, not uniformly.** Each question gets its own window
 around its own mark, at 10 fps. The window reaches well past the mark because a mark is the instant
 of the tool *call* and the pixels lag it — a dry-run measured that lag at ~1.7s for a plain
-`cmux send`, so a tight window would simply miss the event it exists to catch.
+`cmux send`, so a tight window would simply miss the event it exists to catch. Frames are JPEG rather
+than PNG because terminal-text adjudication does not need archival losslessness; `-q:v 2` now applies
+to the actual encoder instead of being ignored.
 
 **The dry-run is a clock test, not just a smoke test.** It prints a unique nonce into the probe pane
 at a known instant and asks a sub-agent whether that nonce is visible in the frames the harness

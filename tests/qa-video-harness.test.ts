@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { mkdtemp, mkdir, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -8,17 +10,35 @@ import {
   OUTCOMES,
   PROBE_SPECS,
   VERDICTS,
+  assertFrameBudget,
   buildAdjudicationManifest,
   buildReportMarkdown,
+  combineAdjudicationArtifacts,
   describeReceiptClaim,
   planFrameWindow,
   receiptOk,
   receiptSubmitted,
   reconcile,
+  splitAdjudicationManifest,
   wallToVideoSeconds,
 } from "../scripts/qa-video-lib.mjs";
 
-const repoRoot = join(__dirname, "..");
+// @ts-expect-error -- executable .mjs module also exports testable runner seams
+import {
+  Recorder,
+  assertOptIn,
+  assertPreflightReady,
+  assertVideoUsable,
+  destroyProbeWindow,
+  displayContaining,
+  installSignalHandlers,
+  parseArgs,
+  probeWindowGeometryFromState,
+  pruneRunDirectories,
+  readExtractedFrameMapping,
+  rectsIntersect,
+  sterileEnv,
+} from "../scripts/qa-video-harness.mjs";
 
 function sendStep(delivery: string | undefined, overrides: Record<string, unknown> = {}) {
   return {
@@ -95,6 +115,46 @@ describe("recording clock", () => {
   it("refuses to guess when the recorder never anchored", () => {
     expect(() => wallToVideoSeconds({ t0VideoS: 0 }, 1)).toThrow(/t0WallMs/);
   });
+
+  it("keeps the first recorder progress block as the stable clock anchor", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      stdin: { write: () => void };
+      kill: () => void;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { write: () => undefined };
+    child.kill = () => undefined;
+    let wallMs = 10_000;
+    const recorder = new Recorder({
+      path: "/tmp/qa-video-test.mov",
+      captureFps: 15,
+      scaleWidth: 0,
+      crop: null,
+      deviceIndex: "1",
+      spawnFn: () => child,
+      now: () => wallMs,
+      anchorTimeoutMs: 100,
+    });
+
+    const started = recorder.start();
+    child.stdout.emit("data", "out_time_us=250000\nprogress=continue\n");
+    await started;
+    expect({ t0WallMs: recorder.t0WallMs, t0VideoS: recorder.t0VideoS }).toEqual({
+      t0WallMs: 10_000,
+      t0VideoS: 0.25,
+    });
+
+    wallMs = 20_000;
+    child.stdout.emit("data", "out_time_us=10250000\nprogress=continue\n");
+    expect({ t0WallMs: recorder.t0WallMs, t0VideoS: recorder.t0VideoS }).toEqual({
+      t0WallMs: 10_000,
+      t0VideoS: 0.25,
+    });
+    expect(recorder.secondsAt(12_000)).toBe(2.25);
+  });
 });
 
 describe("frame planning", () => {
@@ -107,9 +167,9 @@ describe("frame planning", () => {
     });
     expect(plan?.start).toBe(11.4);
     expect(plan?.end).toBe(14.4);
-    expect(plan?.count).toBe(31);
+    expect(plan?.count).toBe(30);
     expect(plan?.times[0]).toBe(11.4);
-    expect(plan?.times.at(-1)).toBeCloseTo(14.4, 3);
+    expect(plan?.times.at(-1)).toBeCloseTo(14.3, 3);
   });
 
   it("clamps to the recording instead of planning frames that do not exist", () => {
@@ -152,7 +212,7 @@ describe("adjudication manifest", () => {
     ]);
     const typed = manifest.questions[0];
     expect(typed.frames.length).toBe(typed.frame_times.length);
-    expect(typed.frames[0]).toBe("frames/busy-send.typed/f-0001.png");
+    expect(typed.frames[0]).toBe("frames/busy-send.typed/f-0001.jpg");
     expect(typed.question).toContain("QAV-BUSY-AB12");
     expect(manifest.allowed_verdicts).toEqual(VERDICTS);
   });
@@ -182,6 +242,61 @@ describe("adjudication manifest", () => {
     const manifest = buildAdjudicationManifest(runFixture([broken]));
     expect(manifest.questions[0].frames).toEqual([]);
     expect(manifest.questions[0].unadjudicable_reason).toContain("spawn failed");
+  });
+});
+
+describe("adjudicator independence", () => {
+  it("keeps receipt claims structurally absent from the adjudicator questions file", () => {
+    const manifest = buildAdjudicationManifest(runFixture([sendStep("submitted")]), { fps: 10 });
+    const { questions, expectations } = splitAdjudicationManifest(manifest);
+    const adjudicatorPayload = JSON.stringify(questions);
+    expect(adjudicatorPayload).not.toContain("receipt_claim");
+    expect(adjudicatorPayload).not.toContain("expected_if_receipt_true");
+    expect(adjudicatorPayload).not.toContain('delivery=\\"submitted\\"');
+    expect(expectations.expectations[0]).toHaveProperty("receipt_claim");
+    expect(combineAdjudicationArtifacts(questions, expectations)).toEqual(manifest);
+  });
+});
+
+describe("frame storage controls", () => {
+  it("rejects a run whose planned extraction exceeds the configured frame cap", () => {
+    const manifest = buildAdjudicationManifest(runFixture([sendStep("submitted")]), { fps: 10 });
+    expect(() => assertFrameBudget(manifest, 10)).toThrow(/frame cap/i);
+    expect(() => assertFrameBudget(manifest, 100)).not.toThrow();
+  });
+
+  it("reads timestamp gaps from frame PTS filenames instead of relabelling by array index", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-video-frame-map-"));
+    try {
+      await writeFile(join(root, "f-0000000000.jpg"), "a");
+      await writeFile(join(root, "f-0000000002.jpg"), "b");
+      expect(await readExtractedFrameMapping(root, { relativeDir: "frames/q", start: 11.4, fps: 10 })).toEqual([
+        { frame: "frames/q/f-0000000000.jpg", timeS: 11.4 },
+        { frame: "frames/q/f-0000000002.jpg", timeS: 11.6 },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prunes old completed runs while preserving the newest configured runs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-video-retention-"));
+    try {
+      const runs = [
+        ["full-2026-08-18", 1],
+        ["full-2026-08-19", 2],
+        ["dry-run-2026-08-20", 3],
+      ] as const;
+      for (const [name, seconds] of runs) {
+        await mkdir(join(root, name));
+        await writeFile(join(root, name, "run.json"), "{}\n");
+        await utimes(join(root, name), seconds, seconds);
+      }
+      expect(await pruneRunDirectories(root, { keep: 2 })).toEqual(["full-2026-08-18"]);
+      expect((await readdir(root)).sort()).toEqual(["dry-run-2026-08-20", "full-2026-08-19"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -248,71 +363,136 @@ describe("report", () => {
   });
 });
 
-describe("harness script wiring", () => {
-  const source = readFileSync(join(repoRoot, "scripts", "qa-video-harness.mjs"), "utf8");
-
+describe("harness runner behaviour", () => {
   it("refuses to run without an explicit live opt-in", () => {
-    expect(source).toContain("CMUX_QA_VIDEO");
-    expect(source).toContain("Refusing to run the QA video harness");
+    expect(() => assertOptIn({})).toThrow(/Refusing to run the QA video harness/);
+    expect(() => assertOptIn({ CMUX_QA_VIDEO: "1" })).not.toThrow();
   });
 
-  it("runs the recorder self-test before touching live panes", () => {
-    expect(source).toContain("Preflight produced no frames");
-    expect(source).toContain("Refusing to run the full harness against live panes");
+  it("refuses a full run when the recorder preflight produced no frames", () => {
+    expect(() => assertPreflightReady({ extracted: 0 })).toThrow(
+      /Refusing to run the full harness against live panes/,
+    );
+    expect(() => assertPreflightReady({ extracted: 1 })).not.toThrow();
   });
 
-  it("never closes a window it did not create", () => {
-    expect(source).toContain("Refusing to close pre-existing window");
-    expect(source).toContain("refusing to proceed");
+  it("never closes a window that existed before the run", async () => {
+    let closeCalls = 0;
+    await destroyProbeWindow(
+      { windowId: "window-1", preExisting: new Set(["window-1"]) },
+      { cmuxFn: async () => { closeCalls += 1; }, stderr: { write: () => undefined } },
+    );
+    expect(closeCalls).toBe(0);
   });
 
-  it("runs the MCP server without the operator pane's caller identity", () => {
-    // Inheriting it made cmuxlayer treat the harness as the operator's own agent
-    // and refuse terminal I/O to its surface.
-    expect(source).toContain("CMUX_SURFACE_ID");
-    expect(source).toContain("sterileEnv");
-    expect(source).not.toContain("env: process.env });");
+  it("strips caller identity while preserving the cmux socket address", () => {
+    expect(
+      sterileEnv({
+        CMUX_WORKSPACE_ID: "workspace-1",
+        CMUX_TAB_ID: "tab-1",
+        CMUX_SURFACE_ID: "surface-1",
+        CMUX_PANEL_ID: "panel-1",
+        CMUX_TERMINAL_LIFECYCLE_ID: "lifecycle-1",
+        CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+        PATH: "/usr/bin",
+      }),
+    ).toEqual({ CMUX_SOCKET_PATH: "/tmp/cmux.sock", PATH: "/usr/bin" });
   });
 
-  it("records the display the probe window is actually on", () => {
-    // cmux does not always open its new window on the main display; earlier runs
-    // recorded display 0 while the probe window sat on display 1.
-    expect(source).toContain("screenDeviceIndexFor(geometry.display.index)");
-    expect(source).toContain("Capture screen");
+  it("selects the display containing the probe window centre", () => {
+    const displays = [
+      { index: 0, main: true, bounds: { x: 0, y: 0, w: 100, h: 100 } },
+      { index: 1, main: false, bounds: { x: 100, y: 0, w: 100, h: 100 } },
+    ];
+    expect(displayContaining(displays, { x: 120, y: 20, w: 40, h: 40 })?.index).toBe(1);
   });
 
-  it("resolves geometry and occlusion through CoreGraphics, not AppleScript", () => {
-    expect(source).toContain("qa-video-windows.py");
-    expect(source).toContain("clear: occluders.length === 0");
-    expect(source).not.toContain("first process whose frontmost is true");
+  it("detects rectangle overlap without treating edge contact as occlusion", () => {
+    expect(rectsIntersect({ x: 0, y: 0, w: 10, h: 10 }, { x: 9, y: 9, w: 2, h: 2 })).toBe(true);
+    expect(rectsIntersect({ x: 0, y: 0, w: 10, h: 10 }, { x: 10, y: 0, w: 2, h: 2 })).toBe(false);
   });
 
-  it("keeps the rejected window-capture approach documented so it is not retried", () => {
-    // screencapture -l is occlusion-proof but returns a blank content area for
-    // cmux's Metal-rendered terminals.
-    expect(source).toContain("REJECTED");
-    expect(source).toContain("Metal");
+  it("derives capture geometry and occlusion from a window-server snapshot", () => {
+    const state = {
+      displays: [{ index: 1, main: true, scale: 2, bounds: { x: 100, y: 50, w: 500, h: 400 } }],
+      windows: [
+        { id: 9, owner: "Browser", name: "cover", layer: 0, bounds: { x: 140, y: 90, w: 50, h: 50 } },
+        { id: 7, owner: "cmux", name: "QAV-test", layer: 0, bounds: { x: 120, y: 70, w: 100, h: 250 } },
+      ],
+    };
+    expect(probeWindowGeometryFromState(state, "QAV-test")).toMatchObject({
+      id: 7,
+      clear: false,
+      occluders: ["Browser: cover"],
+      crop: { x: 40, y: 40, width: 200, height: 500 },
+      display: { index: 1 },
+    });
   });
 
-  it("tears the isolated window down even when the harness is killed", () => {
-    expect(source).toContain('process.once("SIGINT", onSignal)');
-    expect(source).toContain('process.once("SIGTERM", onSignal)');
+  it("closes the isolated window on SIGINT and SIGTERM", () => {
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      const signalSource = new EventEmitter();
+      const calls: unknown[][] = [];
+      const exits: number[] = [];
+      const remove = installSignalHandlers(
+        { windowId: "window-2" },
+        {
+          signalSource,
+          execFileFn: (...args: unknown[]) => {
+            calls.push(args);
+            const callback = args.at(-1);
+            if (typeof callback === "function") callback();
+          },
+          exit: (code: number) => { exits.push(code); },
+        },
+      );
+      signalSource.emit(signal);
+      expect(calls[0]?.slice(0, 2)).toEqual(["cmux", ["close-window", "--window", "window-2"]]);
+      expect(exits).toEqual([130]);
+      remove();
+    }
   });
 
   it("verifies the recording is real before deriving anything from it", () => {
-    expect(source).toContain("has no decodable frames");
-    expect(source).toContain("assertVideoUsable");
+    expect(() => assertVideoUsable({ bytes: 1, durationS: 1, frames: 0 }, "video.mov")).toThrow(
+      /no decodable frames/,
+    );
+    expect(() => assertVideoUsable({ bytes: 1, durationS: 1, frames: 1 }, "video.mov")).not.toThrow();
   });
 
-  it("ships the CoreGraphics window helper it depends on", () => {
-    const helper = readFileSync(join(repoRoot, "scripts", "qa-video-windows.py"), "utf8");
-    expect(helper).toContain("CGWindowListCopyWindowInfo");
-    expect(helper).toContain("CGGetActiveDisplayList");
+  it("parses runner options and validates every numeric capture setting", () => {
+    expect(parseArgs(["--capture-fps", "20", "--frame-fps", "5", "--scale-width", "1920"])).toMatchObject({
+      captureFps: 20,
+      frameFps: 5,
+      scaleWidth: 1920,
+    });
+    expect(() => parseArgs(["--scale-width", "abc"])).toThrow(/scaleWidth/);
   });
 
-  it("is exposed through package.json", () => {
-    const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
-    expect(pkg.scripts["qa:video"]).toBe("node scripts/qa-video-harness.mjs");
-    expect(pkg.scripts["qa:video:dry-run"]).toBe("node scripts/qa-video-harness.mjs --dry-run");
+  it("records through ffmpeg avfoundation instead of blank window capture", async () => {
+    const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    let invocation: { command: string; args: string[] } | null = null;
+    const recorder = new Recorder({
+      path: "/tmp/qa-video-test.mov",
+      captureFps: 15,
+      scaleWidth: 0,
+      crop: { x: 1, y: 2, width: 3, height: 4 },
+      deviceIndex: "2",
+      spawnFn: (command: string, args: string[]) => {
+        invocation = { command, args };
+        return child;
+      },
+      now: () => 1,
+      anchorTimeoutMs: 100,
+    });
+    const started = recorder.start();
+    child.stdout.emit("data", "out_time_us=1\n");
+    await started;
+    expect(invocation?.command).toBe("ffmpeg");
+    expect(invocation?.args).toContain("avfoundation");
+    expect(invocation?.args.join(" ")).toContain("crop=3:4:1:2");
+    expect(invocation?.args.join(" ")).not.toContain("screencapture");
   });
 });

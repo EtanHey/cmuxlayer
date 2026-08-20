@@ -19,12 +19,20 @@
 
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { DRY_RUN_SPEC, PROBE_SPECS, buildAdjudicationManifest } from "./qa-video-lib.mjs";
+import {
+  DRY_RUN_SPEC,
+  PROBE_SPECS,
+  assertFrameBudget,
+  buildAdjudicationManifest,
+  combineAdjudicationArtifacts,
+  splitAdjudicationManifest,
+  wallToVideoSeconds,
+} from "./qa-video-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -37,6 +45,8 @@ const DEFAULTS = {
   captureFps: 15,
   scaleWidth: 0,
   frameFps: 10,
+  maxFrames: 750,
+  keepRuns: 5,
   waitTimeoutMs: 8_000,
   agentReadyTimeoutMs: 180_000,
   root: "",
@@ -58,6 +68,8 @@ Options:
   --capture-fps <n>         Screen capture framerate (default: ${DEFAULTS.captureFps})
   --scale-width <px>        Downscale the recording to this width (default: native)
   --frame-fps <n>           Frame extraction density around each mark (default: ${DEFAULTS.frameFps})
+  --max-frames <n>          Hard cap across all extracted question frames (default: ${DEFAULTS.maxFrames})
+  --keep-runs <n>           Retain this many completed default-output runs (default: ${DEFAULTS.keepRuns})
   --wait-timeout-ms <ms>    Timeout for the wait_for probe (default: ${DEFAULTS.waitTimeoutMs})
   --root <dir>              Output dir (default: results/qa-video/<runId>)
   --server-command <cmd>    MCP server executable
@@ -68,7 +80,7 @@ Options:
 `);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = { ...DEFAULTS };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -95,6 +107,12 @@ function parseArgs(argv) {
         break;
       case "--frame-fps":
         options.frameFps = Number(argv[++index]);
+        break;
+      case "--max-frames":
+        options.maxFrames = Number(argv[++index]);
+        break;
+      case "--keep-runs":
+        options.keepRuns = Number(argv[++index]);
         break;
       case "--wait-timeout-ms":
         options.waitTimeoutMs = Number(argv[++index]);
@@ -123,13 +141,21 @@ function parseArgs(argv) {
       throw new Error(`--${key} must be a positive number`);
     }
   }
+  if (!Number.isFinite(options.scaleWidth) || options.scaleWidth < 0) {
+    throw new Error("--scaleWidth must be zero or a positive number");
+  }
+  for (const key of ["maxFrames", "keepRuns"]) {
+    if (!Number.isSafeInteger(options[key]) || options[key] <= 0) {
+      throw new Error(`--${key} must be a positive integer`);
+    }
+  }
   if (!["claude", "codex", "cursor", "gemini", "kiro"].includes(options.cli)) {
     throw new Error("--cli must be one of: claude, codex, cursor, gemini, kiro");
   }
   return options;
 }
 
-function assertOptIn(env = process.env) {
+export function assertOptIn(env = process.env) {
   if (env.CMUX_QA_VIDEO === "1") return;
   throw new Error(
     "Refusing to run the QA video harness: it drives a live cmux and records the screen. Set CMUX_QA_VIDEO=1 to opt in.",
@@ -189,11 +215,11 @@ async function readWindowState() {
   return parsed;
 }
 
-function rectsIntersect(a, b) {
+export function rectsIntersect(a, b) {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
-function displayContaining(displays, bounds) {
+export function displayContaining(displays, bounds) {
   const centre = { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h / 2 };
   return (
     displays.find(
@@ -234,6 +260,10 @@ async function probeWindowGeometry(title, { attempts = 3, gapMs = 400 } = {}) {
  */
 async function probeWindowGeometryOnce(title) {
   const state = await readWindowState();
+  return probeWindowGeometryFromState(state, title);
+}
+
+export function probeWindowGeometryFromState(state, title) {
   const cmuxWindows = state.windows.filter((window) => window.owner === "cmux");
   // The short sibling window is cmux's tab strip, not the window we mean.
   const probe = cmuxWindows.find((window) => window.name === title && window.bounds.h > 200);
@@ -465,13 +495,25 @@ async function screenDeviceIndexFor(displayIndex = 0) {
  * be the frontmost thing on that region, which is what the CoreGraphics
  * occlusion check above is for, and what every mark's `frontmost` flag records.
  */
-class Recorder {
-  constructor({ path, captureFps, scaleWidth, crop, deviceIndex }) {
+export class Recorder {
+  constructor({
+    path,
+    captureFps,
+    scaleWidth,
+    crop,
+    deviceIndex,
+    spawnFn = spawn,
+    now = nowMs,
+    anchorTimeoutMs = 30_000,
+  }) {
     this.path = path;
     this.captureFps = captureFps;
     this.scaleWidth = scaleWidth;
     this.crop = crop;
     this.deviceIndex = deviceIndex;
+    this.spawnFn = spawnFn;
+    this.now = now;
+    this.anchorTimeoutMs = anchorTimeoutMs;
     this.child = null;
     this.t0WallMs = null;
     this.t0VideoS = null;
@@ -515,7 +557,7 @@ class Recorder {
       "pipe:1",
       this.path,
     ];
-    this.child = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.child = this.spawnFn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
     this.child.stderr.on("data", (chunk) => {
       this.stderr += chunk.toString();
     });
@@ -526,29 +568,36 @@ class Recorder {
       let buffer = "";
       const timer = setTimeout(
         () => fail(new Error(`recorder never reported progress:\n${this.stderr}`)),
-        30_000,
+        this.anchorTimeoutMs,
       );
       const onExit = () =>
         fail(new Error(`recorder exited before producing frames:\n${this.stderr}`));
       this.child.once("close", onExit);
-      this.child.stdout.on("data", (chunk) => {
+      const onProgress = (chunk) => {
         buffer += chunk.toString();
-        const match = [...buffer.matchAll(/out_time_us=(\d+)/g)].pop();
+        const match = [...buffer.matchAll(/out_time_us=(\d+)/g)].find(
+          (candidate) => Number(candidate[1]) > 0,
+        );
         if (!match) return;
         const micros = Number(match[1]);
         if (!Number.isFinite(micros) || micros <= 0) return;
-        this.t0WallMs = nowMs();
+        this.t0WallMs = this.now();
         this.t0VideoS = micros / 1_000_000;
         clearTimeout(timer);
         this.child.off("close", onExit);
+        this.child.stdout.off("data", onProgress);
         done();
-      });
+      };
+      this.child.stdout.on("data", onProgress);
     });
   }
 
   /** Seconds from the recording's anchor for a wall-clock instant. */
   secondsAt(wallMs) {
-    return Math.round((this.t0VideoS + (wallMs - this.t0WallMs) / 1000) * 1000) / 1000;
+    return wallToVideoSeconds(
+      { t0WallMs: this.t0WallMs, t0VideoS: this.t0VideoS },
+      wallMs,
+    );
   }
 
   async stop() {
@@ -587,14 +636,39 @@ async function probeVideo(path) {
   };
 }
 
-function assertVideoUsable(info, path) {
+export function assertVideoUsable(info, path) {
   if (info.bytes <= 0) throw new Error(`recording ${path} is empty`);
   if (!(info.durationS > 0)) throw new Error(`recording ${path} has no duration`);
   if (!(info.frames > 0)) throw new Error(`recording ${path} has no decodable frames`);
 }
 
-/** Accurate-seek extraction so frame k really is at start + k/fps. */
-async function extractFrames({ video, outDir, start, end, fps }) {
+/** Read actual ffmpeg frame PTS values from `-frame_pts 1` filenames. */
+export async function readExtractedFrameMapping(
+  outDir,
+  { relativeDir, start, fps },
+) {
+  const entries = await readdir(outDir, { withFileTypes: true });
+  const frames = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const match = entry.name.match(/^f-(\d+)\.jpg$/);
+    if (!match) continue;
+    const info = await stat(join(outDir, entry.name));
+    if (info.size <= 0) continue;
+    frames.push({
+      pts: Number(match[1]),
+      frame: join(relativeDir, entry.name),
+    });
+  }
+  frames.sort((a, b) => a.pts - b.pts);
+  return frames.map(({ pts, frame }) => ({
+    frame,
+    timeS: Math.round((start + pts / fps) * 1000) / 1000,
+  }));
+}
+
+/** Accurate-seek extraction whose filenames carry the actual filtered frame PTS. */
+async function extractFrames({ video, outDir, relativeDir, start, end, fps }) {
   await mkdir(outDir, { recursive: true });
   await execFileAsync("ffmpeg", [
     "-hide_banner",
@@ -609,10 +683,13 @@ async function extractFrames({ video, outDir, start, end, fps }) {
     String(end),
     "-vf",
     `fps=${fps}`,
+    "-frame_pts",
+    "1",
     "-q:v",
     "2",
-    join(outDir, "f-%04d.png"),
+    join(outDir, "f-%010d.jpg"),
   ]);
+  return readExtractedFrameMapping(outDir, { relativeDir, start, fps });
 }
 
 // ---------------------------------------------------------------------------
@@ -637,7 +714,7 @@ const CALLER_IDENTITY_ENV = [
   "CMUX_TERMINAL_LIFECYCLE_ID",
 ];
 
-function sterileEnv(env = process.env) {
+export function sterileEnv(env = process.env) {
   const copy = { ...env };
   for (const key of CALLER_IDENTITY_ENV) delete copy[key];
   return copy;
@@ -900,16 +977,19 @@ async function createProbeWindow(runId) {
   };
 }
 
-async function destroyProbeWindow(probeWindow) {
+export async function destroyProbeWindow(
+  probeWindow,
+  { cmuxFn = cmux, stderr = process.stderr } = {},
+) {
   if (!probeWindow) return;
   if (probeWindow.preExisting.has(probeWindow.windowId)) {
-    process.stderr.write(`Refusing to close pre-existing window ${probeWindow.windowId}\n`);
+    stderr.write(`Refusing to close pre-existing window ${probeWindow.windowId}\n`);
     return;
   }
   try {
-    await cmux(["close-window", "--window", probeWindow.windowId]);
+    await cmuxFn(["close-window", "--window", probeWindow.windowId]);
   } catch (error) {
-    process.stderr.write(`Teardown warning: ${error instanceof Error ? error.message : error}\n`);
+    stderr.write(`Teardown warning: ${error instanceof Error ? error.message : error}\n`);
   }
 }
 
@@ -1137,6 +1217,77 @@ async function runDryRunProbe({ log, probeWindow }) {
 // Main
 // ---------------------------------------------------------------------------
 
+export function installSignalHandlers(
+  probeWindow,
+  {
+    signalSource = process,
+    execFileFn = execFile,
+    exit = (code) => process.exit(code),
+  } = {},
+) {
+  const onSignal = () => {
+    try {
+      execFileFn("cmux", ["close-window", "--window", probeWindow.windowId], () => exit(130));
+    } catch {
+      exit(130);
+    }
+  };
+  signalSource.once("SIGINT", onSignal);
+  signalSource.once("SIGTERM", onSignal);
+  return () => {
+    signalSource.off("SIGINT", onSignal);
+    signalSource.off("SIGTERM", onSignal);
+  };
+}
+
+export function assertPreflightReady(preflight) {
+  if (preflight.extracted > 0) return;
+  throw new Error(
+    "Preflight produced no frames. Refusing to run the full harness against live panes.",
+  );
+}
+
+async function directorySizeBytes(root) {
+  let total = 0;
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) total += await directorySizeBytes(path);
+    else if (entry.isFile()) total += (await stat(path)).size;
+  }
+  return total;
+}
+
+export function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+}
+
+/** Retain only the newest completed default-output runs. Partial runs are untouched. */
+export async function pruneRunDirectories(baseDir, { keep = DEFAULTS.keepRuns } = {}) {
+  let entries;
+  try {
+    entries = await readdir(baseDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  const completed = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (!existsSync(join(baseDir, entry.name, "run.json"))) continue;
+    const info = await stat(join(baseDir, entry.name));
+    completed.push({ name: entry.name, mtimeMs: info.mtimeMs });
+  }
+  completed.sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
+  const pruned = completed.slice(keep).map((entry) => entry.name);
+  for (const name of pruned) {
+    await rm(join(baseDir, name), { recursive: true, force: true });
+  }
+  return pruned;
+}
+
 async function runOnce(options, { runId, root }) {
   await mkdir(root, { recursive: true });
   const videoPath = join(root, "video.mov");
@@ -1144,15 +1295,7 @@ async function runOnce(options, { runId, root }) {
   const probeWindow = await createProbeWindow(runId);
   // A killed harness must not leak an isolated window onto the operator's
   // desktop. This is the only teardown path that survives Ctrl-C / SIGTERM.
-  const onSignal = () => {
-    try {
-      execFile("cmux", ["close-window", "--window", probeWindow.windowId], () => process.exit(130));
-    } catch {
-      process.exit(130);
-    }
-  };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
+  const removeSignalHandlers = installSignalHandlers(probeWindow);
   let recorder = null;
   let log = null;
   let geometry = null;
@@ -1198,8 +1341,7 @@ async function runOnce(options, { runId, root }) {
     // the receipts rather than letting the frames read as trustworthy.
     occlusionRisk = !(await probeWindowIsFrontmost(probeWindow.title));
   } finally {
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
+    removeSignalHandlers();
     if (recorder) await recorder.stop();
     if (!options.keepWindow) await destroyProbeWindow(probeWindow);
   }
@@ -1235,37 +1377,34 @@ async function runOnce(options, { runId, root }) {
   };
 
   const manifest = buildAdjudicationManifest(run, { fps: options.frameFps });
+  const plannedFrames = assertFrameBudget(manifest, options.maxFrames);
   let extracted = 0;
   for (const question of manifest.questions) {
     if (!question.frame_window) continue;
-    await extractFrames({
+    const mapping = await extractFrames({
       video: videoPath,
       outDir: join(root, question.frame_dir),
+      relativeDir: question.frame_dir,
       start: question.frame_window.start,
       end: question.frame_window.end,
       fps: question.frame_window.fps,
     });
-    const present = [];
-    for (const frame of question.frames) {
-      try {
-        const info = await stat(join(root, frame));
-        if (info.size > 0) present.push(frame);
-      } catch {
-        /* ffmpeg produced fewer frames than the plan predicted */
-      }
-    }
-    question.frames = present;
-    question.frame_times = question.frame_times.slice(0, present.length);
-    if (present.length === 0) {
+    question.frames = mapping.map((entry) => entry.frame);
+    question.frame_times = mapping.map((entry) => entry.timeS);
+    if (mapping.length === 0) {
       question.unadjudicable_reason = "frame extraction produced no images for this window";
     }
-    extracted += present.length;
+    extracted += mapping.length;
   }
   manifest.extracted_frames = extracted;
+  manifest.planned_frames = plannedFrames;
+  const { questions, expectations } = splitAdjudicationManifest(manifest);
 
   await writeFile(join(root, "run.json"), `${JSON.stringify(run, null, 2)}\n`, "utf8");
-  await writeFile(join(root, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  return { run, manifest, root, extracted };
+  await writeFile(join(root, "questions.json"), `${JSON.stringify(questions, null, 2)}\n`, "utf8");
+  await writeFile(join(root, "expectations.json"), `${JSON.stringify(expectations, null, 2)}\n`, "utf8");
+  const artifactBytes = await directorySizeBytes(root);
+  return { run, manifest, root, extracted, plannedFrames, artifactBytes };
 }
 
 
@@ -1282,24 +1421,27 @@ async function main() {
       { ...options, mode: "dry-run", keepWindow: false },
       { runId: `${baseRunId}-preflight`, root: join(baseRoot, "preflight") },
     );
-    if (preflight.extracted === 0) {
-      throw new Error(
-        "Preflight produced no frames. Refusing to run the full harness against live panes.",
-      );
-    }
+    assertPreflightReady(preflight);
     process.stdout.write(
       `[qa-video] preflight ok: ${preflight.run.video.frames} recorded frames, ${preflight.extracted} extracted.\n` +
-        `[qa-video] VISUAL confirmation is still required: adjudicate ${join(preflight.root, "manifest.json")} before trusting the full run.\n`,
+        `[qa-video] VISUAL confirmation is still required: adjudicate ${join(preflight.root, "questions.json")} before trusting the full run.\n`,
     );
   }
 
   const result = await runOnce(options, { runId: baseRunId, root: baseRoot });
+  const prunedRuns = options.root
+    ? []
+    : await pruneRunDirectories(join(REPO_ROOT, "results", "qa-video"), {
+        keep: options.keepRuns,
+      });
   process.stdout.write(
     [
       `[qa-video] run: ${result.run.runId}`,
       `[qa-video] video: ${join(result.root, "video.mov")} (${result.run.video.durationS}s, ${result.run.video.frames} frames, ${result.run.video.width}x${result.run.video.height}, display ${result.run.window.display?.index})`,
       `[qa-video] receipts: ${join(result.root, "run.json")}`,
-      `[qa-video] manifest: ${join(result.root, "manifest.json")} (${result.manifest.questions.length} questions, ${result.extracted} frames)`,
+      `[qa-video] questions: ${join(result.root, "questions.json")} (${result.manifest.questions.length} questions, ${result.extracted}/${result.plannedFrames} frames)`,
+      `[qa-video] expectations: ${join(result.root, "expectations.json")}`,
+      `[qa-video] artifacts: ${formatBytes(result.artifactBytes)}; retention pruned ${prunedRuns.length} old run(s)`,
       `[qa-video] next: adjudicate with Sonnet sub-agents, then render the report (docs/qa-video-harness.md)`,
       "",
     ].join("\n"),
@@ -1311,7 +1453,9 @@ async function main() {
 async function report(runDir, verdictsPath, outPath) {
   const { buildReportMarkdown } = await import("./qa-video-lib.mjs");
   const run = JSON.parse(await readFile(join(runDir, "run.json"), "utf8"));
-  const manifest = JSON.parse(await readFile(join(runDir, "manifest.json"), "utf8"));
+  const questions = JSON.parse(await readFile(join(runDir, "questions.json"), "utf8"));
+  const expectations = JSON.parse(await readFile(join(runDir, "expectations.json"), "utf8"));
+  const manifest = combineAdjudicationArtifacts(questions, expectations);
   const verdicts = JSON.parse(await readFile(verdictsPath, "utf8"));
   const markdown = buildReportMarkdown(run, manifest, Array.isArray(verdicts) ? verdicts : verdicts.verdicts, {
     now: new Date().toISOString(),
@@ -1321,20 +1465,26 @@ async function report(runDir, verdictsPath, outPath) {
   process.stdout.write(`[qa-video] report written: ${outPath}\n`);
 }
 
-const [, , maybeSubcommand] = process.argv;
-if (maybeSubcommand === "report") {
-  const [runDir, verdictsPath, outPath] = process.argv.slice(3);
-  if (!runDir || !verdictsPath || !outPath) {
-    process.stderr.write("Usage: qa-video-harness.mjs report <runDir> <verdicts.json> <out.md>\n");
-    process.exit(2);
+function isMainModule(metaUrl, argvEntry = process.argv[1]) {
+  return Boolean(argvEntry) && metaUrl === pathToFileURL(argvEntry).href;
+}
+
+if (isMainModule(import.meta.url)) {
+  const [, , maybeSubcommand] = process.argv;
+  if (maybeSubcommand === "report") {
+    const [runDir, verdictsPath, outPath] = process.argv.slice(3);
+    if (!runDir || !verdictsPath || !outPath) {
+      process.stderr.write("Usage: qa-video-harness.mjs report <runDir> <verdicts.json> <out.md>\n");
+      process.exit(2);
+    }
+    report(resolve(runDir), resolve(verdictsPath), resolve(outPath)).catch((error) => {
+      process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+      process.exit(1);
+    });
+  } else {
+    main().catch((error) => {
+      process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+      process.exit(1);
+    });
   }
-  report(resolve(runDir), resolve(verdictsPath), resolve(outPath)).catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-    process.exit(1);
-  });
-} else {
-  main().catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-    process.exit(1);
-  });
 }

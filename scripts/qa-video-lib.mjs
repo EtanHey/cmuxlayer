@@ -265,7 +265,7 @@ export function planFrameWindow({ markSeconds, window: win, fps, durationS }) {
   const rawEnd = round(markSeconds + win.after);
   const end = typeof durationS === "number" ? Math.min(rawEnd, round(durationS)) : rawEnd;
   if (end <= start) return null;
-  const count = Math.max(1, Math.floor((end - start) * fps) + 1);
+  const count = Math.max(1, Math.round((end - start) * fps));
   const times = [];
   for (let index = 0; index < count; index += 1) {
     times.push(round(start + index / fps));
@@ -348,9 +348,11 @@ export function buildAdjudicationManifest(run, { fps = 10 } = {}) {
         receipt_claim: claim,
         expected_if_receipt_true: safeExpected(question, step),
         frame_dir: `frames/${id}`,
-        frame_window: plan ? { start: plan.start, end: plan.end, fps: plan.fps } : null,
+        frame_window: plan
+          ? { start: plan.start, end: plan.end, fps: plan.fps, count: plan.count }
+          : null,
         frames: plan
-          ? plan.times.map((_, index) => `frames/${id}/f-${String(index + 1).padStart(4, "0")}.png`)
+          ? plan.times.map((_, index) => `frames/${id}/f-${String(index + 1).padStart(4, "0")}.jpg`)
           : [],
         frame_times: plan ? plan.times : [],
         unadjudicable_reason: plan ? null : "mark falls outside the recorded video",
@@ -364,6 +366,66 @@ export function buildAdjudicationManifest(run, { fps = 10 } = {}) {
     allowed_verdicts: VERDICTS,
     questions,
   };
+}
+
+/**
+ * Keep the adjudicator's payload structurally independent from receipt claims.
+ * The questions document may be handed to a vision worker; the expectations
+ * document is held back until report generation.
+ */
+export function splitAdjudicationManifest(manifest) {
+  const questions = {
+    ...manifest,
+    questions: (manifest?.questions ?? []).map(
+      ({ receipt_claim: _claim, expected_if_receipt_true: _expected, ...question }) => question,
+    ),
+  };
+  const expectations = {
+    run_id: manifest?.run_id ?? null,
+    expectations: (manifest?.questions ?? []).map((question) => ({
+      id: question.id,
+      receipt_claim: question.receipt_claim,
+      expected_if_receipt_true: question.expected_if_receipt_true,
+    })),
+  };
+  return { questions, expectations };
+}
+
+/** Rejoin the two trusted inputs only inside report generation. */
+export function combineAdjudicationArtifacts(questions, expectations) {
+  if ((questions?.run_id ?? null) !== (expectations?.run_id ?? null)) {
+    throw new Error("questions and expectations belong to different QA video runs");
+  }
+  const byId = new Map(
+    (expectations?.expectations ?? []).map((entry) => [entry.id, entry]),
+  );
+  return {
+    ...questions,
+    questions: (questions?.questions ?? []).map((question) => {
+      const expectation = byId.get(question.id);
+      if (!expectation) {
+        throw new Error(`missing expectation for adjudication question ${question.id}`);
+      }
+      return { ...question, ...expectation };
+    }),
+  };
+}
+
+/** Fail before extraction can create an unbounded frame set. */
+export function assertFrameBudget(manifest, maxFrames) {
+  if (!Number.isSafeInteger(maxFrames) || maxFrames <= 0) {
+    throw new Error("frame cap must be a positive integer");
+  }
+  const planned = (manifest?.questions ?? []).reduce(
+    (total, question) => total + (question.frame_window?.count ?? 0),
+    0,
+  );
+  if (planned > maxFrames) {
+    throw new Error(
+      `planned extraction requires ${planned} frames, exceeding the ${maxFrames}-frame cap`,
+    );
+  }
+  return planned;
 }
 
 function safeText(question, step) {
