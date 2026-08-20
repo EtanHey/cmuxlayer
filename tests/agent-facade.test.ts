@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildRouteTable,
   resolveAgentRoute,
@@ -7,6 +7,13 @@ import {
   toPublicAgent,
 } from "../src/agent-facade.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { useHarnessHome } from "./helpers/harness-home.js";
+
+const SESSION = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+
+/** Every record here claims this session, so give it a transcript (#482). */
+const harnessHome = useHarnessHome();
+beforeEach(() => harnessHome.give("claude", SESSION));
 
 function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
   return {
@@ -31,8 +38,6 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
-    crash_recover: false,
-    respawn_attempts: 0,
     user_killed: false,
     ...overrides,
   };
@@ -163,6 +168,7 @@ describe("agent facade projections", () => {
   });
 
   it("still advertises codex, whose session store is not cwd-keyed", () => {
+    harnessHome.give("codex", SESSION);
     const projected = toPublicAgent(
       makeRecord({ cli: "codex", launcher_name: null, launch_cwd: null }),
     );
@@ -201,21 +207,6 @@ describe("agent facade projections", () => {
     });
   });
 
-  it("keeps auto-revive progress in the full agent-state payload", () => {
-    const projected = toAgentStatePayload(
-      makeRecord({
-        revive_attempts: 3,
-        revive_last_outcome: "failed",
-        revive_next_attempt_at: "2026-08-13T08:00:08.000Z",
-      }),
-    );
-
-    expect(projected).toMatchObject({
-      revive_attempts: 3,
-      revive_last_outcome: "failed",
-      revive_next_attempt_at: "2026-08-13T08:00:08.000Z",
-    });
-  });
 });
 
 describe("agent route table", () => {

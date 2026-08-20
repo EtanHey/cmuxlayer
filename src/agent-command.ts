@@ -137,7 +137,7 @@ export interface ResumeCommandOptions {
  *
  * AIDEV-NOTE (issue #392): the old fallback guessed `${repo}${Suffix}` — a
  * binary that does not exist on a machine without repoGolem, so fresh
- * installs (and crash recovery, which reuses this) got an uncallable command.
+ * installs (and explicit resume, which reuses this) got an uncallable command.
  * Absence of a launcher now means "raw CLI", never "guess a launcher".
  */
 export function buildResumeCommand(
@@ -224,60 +224,3 @@ export function buildRawResumeCommand(
   }
 }
 
-/**
- * Command forms a PREVIOUSLY typed raw resume may appear as on screen.
- *
- * Distinct from `buildRawResumeCommand`, which answers "what do we send". This
- * answers "what would a resume attempt look like in this scrollback", and so
- * it must include forms we no longer emit:
- *   - the pre-#453 forms without an approval bypass, still echoed on surfaces
- *     resumed by an older cmuxlayer;
- *   - the gemini `--resume <uuid>` form, which we now refuse to send but which
- *     older builds did type (and whose failure is exactly what the stale-screen
- *     guards look for).
- *
- * AIDEV-NOTE: keep every retired form here. Dropping one silently disables the
- * guard that stops a failed resume being finalized as a healthy revival.
- */
-export function rawResumeEchoCandidates(
-  cli: CliType,
-  repo: string,
-  sessionId: string,
-  opts?: ResumeCommandOptions,
-): string[] {
-  if (!FULL_SESSION_UUID_RE.test(sessionId)) return [];
-  const cwd = opts?.cwd?.trim();
-  const cd = cwd ? `cd ${shellQuote(cwd)} && ` : "";
-  const skip = RAW_SKIP_APPROVALS[cli];
-  const forms: string[] = [];
-  switch (cli) {
-    case "claude":
-      forms.push(
-        `${cd}${AGENT_ENV} claude ${skip} --resume ${sessionId}`,
-        `${cd}${AGENT_ENV} claude --resume ${sessionId}`,
-      );
-      break;
-    case "codex":
-      forms.push(
-        `${cd}codex ${skip} resume ${sessionId}`,
-        `${cd}codex resume ${sessionId}`,
-      );
-      break;
-    case "cursor":
-      forms.push(
-        `${cd}cursor agent ${skip} --resume ${sessionId}`,
-        `${cd}cursor agent --resume ${sessionId}`,
-      );
-      break;
-    case "gemini":
-      // Never emitted any more (takes an index, not a UUID) -- recognized only.
-      forms.push(`${cd}${AGENT_ENV} gemini --resume ${sessionId}`);
-      break;
-    case "kiro": {
-      const kiroCd = cd || defaultKiroCd(repo);
-      forms.push(`${kiroCd}${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`);
-      break;
-    }
-  }
-  return [...new Set(forms)];
-}

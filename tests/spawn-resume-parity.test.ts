@@ -27,6 +27,7 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient, CmuxNewSplitResult } from "../src/cmux-client.js";
 import type { CliType } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
+import { useHarnessHome } from "./helpers/harness-home.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-parity-registry-optional");
 const REPO = "parityrepo";
@@ -183,8 +184,14 @@ describe.each<LauncherPath>(["registry", "raw"])(
     let liveSurfaces: CmuxSurface[];
     /** True when this lane read the HOST's registry instead of a stubbed one. */
     let registryIsAmbient = false;
+    // Resume is only advertised for a session that EXISTS (#482), so every
+    // harness whose resume this matrix exercises gets a transcript.
+    const harnessHome = useHarnessHome();
 
     beforeEach(() => {
+      for (const cli of ["claude", "codex", "cursor"] as const) {
+        harnessHome.give(cli, SESSION);
+      }
       rmSync(TEST_DIR, { recursive: true, force: true });
       mkdirSync(TEST_DIR, { recursive: true });
       registryIsAmbient = false;
@@ -282,10 +289,10 @@ describe.each<LauncherPath>(["registry", "raw"])(
         .calls[0];
       expect(launchCmd).toBe(expectedLaunch(cli, path, repoRoot));
 
-      // The tab title is a discovery contract and must NOT vary by lane.
+      // The tab title names the AGENT (#492), and must not vary by lane.
       expect(client.renameTab).toHaveBeenCalledWith(
         "surface:new",
-        `${EXPECTED_LAUNCHER_NAME[cli]} [surface:new]`,
+        `${result.agent_id} [surface:new]`,
         expect.anything(),
       );
     });
@@ -363,7 +370,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
     );
 
     it.each(RAW_RESUME_UNSUPPORTED)(
-      "refuses to fabricate a raw %s resume rather than sending a bogus one",
+      "handles %s resume according to launcher availability",
       async (cli) => {
         const spawned = await engine.spawnAgent({
           repo: REPO,
@@ -383,15 +390,18 @@ describe.each<LauncherPath>(["registry", "raw"])(
             /no runnable resume command/i,
           );
           expect(client.send).not.toHaveBeenCalled();
-          expect(
-            engine.resolveAgentRoute(spawned.agent_id).resumable,
-          ).toBe(false);
-        } else {
-          await engine.resumeAgent(spawned.agent_id);
-          const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
-            .calls[0];
-          expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
+          expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(
+            false,
+          );
+          return;
         }
+
+        // The registered launcher has a UUID resume form. Main's #486 policy
+        // refuses only on proof of absence; an unreadable Gemini store leaves
+        // the registry claim standing instead of fabricating a disk verdict.
+        await engine.resumeAgent(spawned.agent_id);
+        expect(client.send).toHaveBeenCalled();
+        expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(true);
       },
     );
 

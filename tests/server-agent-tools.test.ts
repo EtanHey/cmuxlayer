@@ -3,6 +3,7 @@
  * Tests tool registration and handler dispatch with mocked cmux client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { useHarnessHome } from "./helpers/harness-home.js";
 import {
   existsSync,
   mkdirSync,
@@ -52,6 +53,21 @@ import { MODEL_OVERRIDE_ENV } from "../src/model-policy.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
+
+// #482/#492: `resumable` now asks whether the transcript is on disk, so these
+// tests own a throwaway harness home and put the sessions they claim into it.
+const harnessHome = useHarnessHome();
+const FIXTURE_SESSIONS = [
+  "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+  "019ec0e6-1111-2222-3333-444455556666",
+];
+beforeEach(() => {
+  for (const session of FIXTURE_SESSIONS) {
+    for (const cli of ["claude", "codex", "cursor"] as const) {
+      harnessHome.give(cli, session);
+    }
+  }
+});
 const hermeticSpawnStateDirs: string[] = [];
 let hermeticSpawnFixtureSequence = 0;
 const originalLauncherRegistryPath =
@@ -6850,37 +6866,6 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
-  it("spawn_agent persists crash_recover=true in agent state", async () => {
-    const server = createLifecycleServer(mockExec);
-    const spawn = (server as any)._registeredTools["spawn_agent"];
-    const getState = (server as any)._registeredTools["get_agent_state"];
-
-    const spawnResult = await spawn.handler(
-      {
-        repo: "brainlayer",
-        model: "sonnet",
-        cli: "claude",
-        role: "implementor",
-        authority: "lead",
-        prompt: "fix gap F",
-        crash_recover: true,
-      },
-      {} as any,
-    );
-    const agentId = (
-      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
-    ).agent_id;
-
-    const stateResult = await getState.handler(
-      { agent_id: agentId },
-      {} as any,
-    );
-    const state =
-      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-
-    expect(state.crash_recover).toBe(true);
-  });
-
   it("spawn_agent defaults managed agents to lifecycle escalation and persists explicit opt-outs", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -6892,7 +6877,7 @@ describe("agent lifecycle tool handlers", () => {
       cli: "codex",
       role: "implementor",
       authority: "worker",
-      prompt: "default auto revive",
+      prompt: "default escalation",
     });
     const optedOutArgs = spawn.inputSchema.parse({
       repo: "cmuxlayer",
@@ -6901,7 +6886,6 @@ describe("agent lifecycle tool handlers", () => {
       role: "implementor",
       authority: "worker",
       prompt: "debug CLI death",
-      auto_revive: false,
       halt_escalation: false,
       force_new: true,
     });
@@ -6931,13 +6915,11 @@ describe("agent lifecycle tool handlers", () => {
       optedOutStateResult.structuredContent ??
       JSON.parse(optedOutStateResult.content[0].text);
 
-    expect(defaultState.auto_revive).toBe(true);
     expect(defaultState.halt_escalation).toBe(true);
-    expect(optedOutState.auto_revive).toBe(false);
     expect(optedOutState.halt_escalation).toBe(false);
   });
 
-  it("lifecycle crash recovery refuses placement in a manual workspace", async () => {
+  it("#492: a disappeared surface is never respawned, in any workspace mode", async () => {
     const routeClient = makeUuidRouteClient([
       {
         ref: "surface:witness",
@@ -6964,7 +6946,6 @@ describe("agent lifecycle tool handlers", () => {
       surface_observer_id: "cmux:/tmp/current.sock",
       workspace_id: "workspace:manual",
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-      crash_recover: true,
       error: "Surface surface:dead-manual disappeared",
       role: "orchestrator",
     });
@@ -6976,73 +6957,16 @@ describe("agent lifecycle tool handlers", () => {
 
     await engine.runSweep();
 
-    expect(routeClient.client.listStatus).toHaveBeenCalledWith({
-      workspace: "workspace:manual",
-    });
+    // cmuxlayer no longer respawns anything on its own: the pane that vanished
+    // stays gone and the row keeps its honest terminal state, which is the
+    // handle an explicit spawn_agent({resume_agent_id}) resumes from.
     expect(routeClient.client.newSplit).not.toHaveBeenCalled();
     expect(routeClient.client.send).not.toHaveBeenCalled();
     expect(engine.getAgentState(record.agent_id)).toMatchObject({
       state: "error",
       surface_id: "surface:dead-manual",
+      error: "Surface surface:dead-manual disappeared",
     });
-    expect(engine.getAgentState(record.agent_id)?.error).toMatch(
-      /manual mode/i,
-    );
-  });
-
-  it("spawn_agent defaults crash_recover to true for orchestrators", async () => {
-    const server = createLifecycleServer(mockExec);
-    const spawn = (server as any)._registeredTools["spawn_agent"];
-    const getState = (server as any)._registeredTools["get_agent_state"];
-
-    const spawnArgs = spawn.inputSchema.parse({
-      repo: "brainlayer",
-      model: "sonnet",
-      cli: "claude",
-      role: "implementor",
-      authority: "lead",
-      prompt: "fix gap F",
-    });
-    const spawnResult = await spawn.handler(spawnArgs, {} as any);
-    const agentId = (
-      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
-    ).agent_id;
-
-    const stateResult = await getState.handler(
-      { agent_id: agentId },
-      {} as any,
-    );
-    const state =
-      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-
-    expect(state.crash_recover).toBe(true);
-  });
-
-  it("spawn_agent keeps worker crash_recover default off", async () => {
-    const server = createLifecycleServer(mockExec);
-    const spawn = (server as any)._registeredTools["spawn_agent"];
-    const getState = (server as any)._registeredTools["get_agent_state"];
-
-    const spawnArgs = spawn.inputSchema.parse({
-      repo: "cmuxlayer",
-      model: "gpt-5.4",
-      cli: "codex",
-      prompt: "fix gap F",
-      role: "worker",
-    });
-    const spawnResult = await spawn.handler(spawnArgs, {} as any);
-    const agentId = (
-      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
-    ).agent_id;
-
-    const stateResult = await getState.handler(
-      { agent_id: agentId },
-      {} as any,
-    );
-    const state =
-      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-
-    expect(state.crash_recover).toBe(false);
   });
 
   it("list_agents returns agents after spawn", async () => {
@@ -7440,6 +7364,7 @@ describe("agent lifecycle tool handlers", () => {
       repo: "brainlayerClaude [surface:199]",
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
     });
+    harnessHome.give(corrupt.cli, corrupt.cli_session_id!);
     for (const record of [healthy, corrupt]) {
       engine.stateMgr.writeState(record);
       engine.getRegistry().set(record.agent_id, record);

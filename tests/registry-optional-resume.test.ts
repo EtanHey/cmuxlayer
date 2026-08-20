@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildRawResumeCommand,
   buildResumeCommand,
@@ -7,6 +7,7 @@ import {
   resumeCommandForAgent,
   resumeInvocationForAgent,
 } from "../src/agent-facade.js";
+import { useHarnessHome } from "./helpers/harness-home.js";
 
 const SESSION = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
 
@@ -144,6 +145,8 @@ describe("buildResumeCommand falls back to the raw CLI, never a guessed launcher
 });
 
 describe("resumeCommandForAgent (public agent payload)", () => {
+  const harnessHome = useHarnessHome();
+  beforeEach(() => harnessHome.give("claude", SESSION));
   const base = {
     cli: "claude" as const,
     repo: "brainlayer",
@@ -180,6 +183,8 @@ describe("resumeCommandForAgent (public agent payload)", () => {
 });
 
 describe("advertised resumability and actual resume never disagree", () => {
+  const harnessHome = useHarnessHome();
+  beforeEach(() => harnessHome.give("claude", SESSION));
   const base = {
     cli: "claude" as const,
     repo: "brainlayer",
