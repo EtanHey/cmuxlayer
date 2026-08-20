@@ -535,7 +535,7 @@ const SendToArgsSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Key name for mode="key". Submit aliases (return, enter, KPEnter, ctrl-m, a raw CR) are normalized to "return" and verified: the receipt reports key_dispatched, and a submit that leaves the composer populated fails instead of returning ok.',
+      'Key name for mode="key". Submit aliases (return, enter, KPEnter, ctrl-m, a raw CR) are normalized to "return" and verified from observed prompt/composer transitions; unchanged composer contents alone are not treated as failure.',
     ),
   workspace: z.string().optional(),
   chunk_size: z.number().int().min(1).optional().default(200),
@@ -614,6 +614,8 @@ const DeliveryOutputShape = {
   submit_verified: z.boolean().nullable().optional(),
   delivery_id: z.string().optional(),
   duplicate_of: z.string().optional(),
+  needs_attention: z.boolean().optional(),
+  attention_reason: z.string().optional(),
 };
 const DeliveryReceiptOutputSchema = z
   .object({
@@ -909,6 +911,8 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
   "submit_attempted",
   "submit_verified",
   "retry_count",
+  "needs_attention",
+  "attention_reason",
 ] as const;
 
 type PublicDeliveryState =
@@ -930,6 +934,8 @@ export interface PublicDeliveryReceipt {
   delivery_state?: PublicDeliveryState;
   delivery_id?: string;
   duplicate_of?: string;
+  needs_attention?: boolean;
+  attention_reason?: string;
   WARNING?: string;
 }
 
@@ -945,6 +951,8 @@ export function buildPublicDeliveryReceipt(input: {
   submit_attempted: boolean;
   submit_verified: boolean | null;
   retry_count: number;
+  needs_attention?: boolean;
+  attention_reason?: string | null;
   WARNING?: string;
 }): PublicDeliveryReceipt {
   const evidencedState =
@@ -973,6 +981,14 @@ export function buildPublicDeliveryReceipt(input: {
       ? { delivery: evidencedState, delivery_state: evidencedState }
       : {}),
     ...(input.delivery_id ? { delivery_id: input.delivery_id } : {}),
+    ...(input.needs_attention === true
+      ? {
+          needs_attention: true,
+          ...(input.attention_reason
+            ? { attention_reason: input.attention_reason }
+            : {}),
+        }
+      : {}),
     ...(warning ? { WARNING: warning } : {}),
   };
 }
@@ -1089,11 +1105,11 @@ type SubmitVerificationFailureReason =
 /**
  * Why a bare submit-key dispatch could not be confirmed. A key send carries no
  * text, so the text path's evidence (does the screen still show what we typed?)
- * does not apply; the composer region itself is the evidence.
+ * does not apply; prompt-state transitions and an emptied composer are the
+ * available positive evidence.
  */
 type SubmitKeyVerificationReason =
   | "surface_read_unavailable"
-  | "composer_still_populated"
   | "submit_evidence_absent";
 
 class SubmitVerificationError extends Error {
@@ -2361,6 +2377,22 @@ function matchLegacyClaudePromptLine(
   return match ? { input: match[1] ?? "" } : null;
 }
 
+/**
+ * Codex renders empty-composer hints as dim text. The `surface.read_text`
+ * frame used by this path is flattened, but styling is available separately
+ * through `terminal.replay`'s `render_grid` capability. Until that richer
+ * frame is wired into delivery classification, keep the observed hints in one
+ * anchored pattern so they cannot be mistaken for arbitrary human prose.
+ * These are exact rendered placeholders, not templates: expanding their
+ * variable-looking segments would swallow real drafts such as
+ * `Write tests for @server.ts`. Richer style detection is tracked in #504.
+ *
+ * Observed on 2026-08-20: `Implement {feature}`,
+ * `Ask Codex to do anything`, and `Write tests for @filename`.
+ */
+const CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE =
+  /^(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)$/;
+
 function normalizeKnownPlaceholderComposerInput(
   cli: CliType | null,
   input: string,
@@ -2372,7 +2404,8 @@ function normalizeKnownPlaceholderComposerInput(
     .join("\n")
     .trim();
   if (
-    (cli === "codex" && withoutCursorBorders === "Implement {feature}") ||
+    (cli === "codex" &&
+      CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE.test(withoutCursorBorders)) ||
     (cli === "cursor" &&
       (withoutCursorBorders === "Plan, search, build anything" ||
         CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(withoutCursorBorders)))
@@ -5237,24 +5270,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   /**
-   * AIDEV-NOTE (#484): a bare submit key used to return ok:true with
-   * submit_verified:null and no evidence of any kind -- the documented
-   * "type, then press Return" recovery reported success for a no-op and two
-   * leads silently stopped being able to talk to each other. A submit key now
-   * has to answer the only question that matters: did the composer let go of
-   * its contents? Positive evidence either way is reported; absence of
-   * evidence is reported as absence, never as success.
+   * AIDEV-NOTE (#484/#500): key mode writes no payload, so post-key composer
+   * contents cannot prove whether this key landed. Positive evidence comes
+   * from an observed state transition (especially permission_prompt being
+   * dismissed) or a composer that visibly clears; otherwise the result stays
+   * unknown rather than inventing `composer_still_populated`.
    */
   const verifySubmitKeyOutcome = async (opts: {
     surface: string;
     workspace?: string;
+    baseline: { text: string; parsed: ParsedScreenResult } | null;
   }): Promise<{
     submit_verified: boolean | null;
     submit_verification_reason: SubmitKeyVerificationReason | null;
   }> => {
     const startedAt = Date.now();
     let sawReadableScreen = false;
-    let composerStillPopulated = false;
 
     while (Date.now() - startedAt < SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS) {
       const snapshot = await readParsedSurface(opts.surface, opts.workspace);
@@ -5263,26 +5294,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         continue;
       }
       sawReadableScreen = true;
-      const composerInput = extractComposerInputRegion(snapshot.text);
-      composerStillPopulated =
-        composerInput !== null && composerInput.trim() !== "";
-
-      // AIDEV-NOTE (#484 review): a populated composer VETOES every other
-      // signal. A busy target is the reported scenario -- the recipient was
-      // working on its previous turn while the relayed message sat unsent in
-      // its composer -- so reading "working" as proof of submit reported
-      // submit_verified:true for a message still visible on screen. That is
-      // worse than the null it replaced: null admits ignorance, true asserts
-      // an observation contradicted by the pane. The text path already gets
-      // this right by gating the same status branch on !hasPendingSubmitEvidence.
-      if (composerStillPopulated) {
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
-        continue;
+      if (
+        opts.baseline?.parsed.control_state === "permission_prompt" &&
+        snapshot.parsed.control_state !== "permission_prompt"
+      ) {
+        return { submit_verified: true, submit_verification_reason: null };
       }
-      if (composerInput !== null) {
+      const composerInput = extractComposerInputRegion(snapshot.text);
+      if (composerInput !== null && composerInput.trim() === "") {
         // The composer is readable and empty: it let go of its contents. This
-        // is the ONLY positive proof available to a key send. A "working"
-        // status deliberately does not count: the reported target was already
+        // is positive proof for a composer submit. A "working" status alone
+        // deliberately does not count: the reported target was already
         // working on its previous turn, so status cannot distinguish "my
         // submit started a turn" from "a turn was already running" -- and a
         // composer that renders boxed reads as unreadable here, so accepting
@@ -5296,14 +5318,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return {
         submit_verified: null,
         submit_verification_reason: "surface_read_unavailable",
-      };
-    }
-    if (composerStillPopulated) {
-      // The key reached the pane and the composer still holds its contents:
-      // that is a submit that did not land, not a submit we failed to observe.
-      return {
-        submit_verified: false,
-        submit_verification_reason: "composer_still_populated",
       };
     }
     return {
@@ -5346,6 +5360,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
+      const submitAttempted = isSubmitKey(key);
+      const submitBaseline =
+        submitAttempted && opts.verify_submit
+          ? await readParsedSurface(opts.surface, opts.workspace)
+          : null;
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
       await sendKeyWithRetry(
@@ -5354,12 +5373,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         opts.workspace,
         opts.beforeMutation,
       );
-      const submitAttempted = isSubmitKey(key);
       const verification =
         submitAttempted && opts.verify_submit
           ? await verifySubmitKeyOutcome({
               surface: opts.surface,
               workspace: opts.workspace,
+              baseline: submitBaseline,
             })
           : { submit_verified: null, submit_verification_reason: null };
       const receipt = buildPublicDeliveryReceipt({
@@ -5367,6 +5386,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_attempted: submitAttempted,
         submit_verified: verification.submit_verified,
         retry_count: 0,
+        ...(submitAttempted && verification.submit_verified === null
+          ? {
+              WARNING:
+                "SUBMIT NOT VERIFIED — the key was dispatched, but no " +
+                "observable prompt/composer transition confirmed submission. " +
+                "Do not treat ok:true as submission confirmation.",
+            }
+          : {}),
       });
       if (opts.source_event) {
         appendDeliveryEvent({
@@ -13726,6 +13753,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               terminal: receipt.terminal,
               submit_verified: receipt.submit_verified,
               agent_id: receipt.agent_id,
+              retry_count: receipt.retry_count,
+              ...(receipt.needs_attention === true
+                ? {
+                    needs_attention: true,
+                    attention_reason: receipt.attention_reason,
+                  }
+                : {}),
               ...(receipt.timed_out ? { timed_out: true } : {}),
             };
             return okFormatted(formatOk("wait_for", data), data);
@@ -14157,6 +14191,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     terminal: receipt.terminal,
                     created_at: receipt.created_at,
                     resolved_at: receipt.resolved_at,
+                    retry_count: receipt.retry_count,
+                    ...(receipt.needs_attention === true
+                      ? {
+                          needs_attention: true,
+                          attention_reason: receipt.attention_reason,
+                        }
+                      : {}),
                   })),
                 }
               : {}),
@@ -15050,6 +15091,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_attempted: false,
                     submit_verified: duplicate.submit_verified,
                     retry_count: duplicate.retry_count,
+                    needs_attention: duplicate.needs_attention,
+                    attention_reason: duplicate.attention_reason,
                   }),
                   accepted: true,
                 });
@@ -15285,6 +15328,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 submit_attempted: false,
                 submit_verified: duplicate.submit_verified,
                 retry_count: duplicate.retry_count,
+                needs_attention: duplicate.needs_attention,
+                attention_reason: duplicate.attention_reason,
               }),
             };
             return okFormatted(

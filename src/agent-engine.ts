@@ -3,7 +3,7 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
   existsSync,
@@ -292,11 +292,20 @@ export interface AgentDeliveryReceipt {
   verify_miss_count?: number;
   /** Last time background verify actually read the target surface. */
   verify_last_attempt_at?: string | null;
+  /** A nonterminal retry stall that now requires a human to inspect the pane. */
+  needs_attention?: boolean;
+  /** Evidence-backed explanation for the attention state. */
+  attention_reason?: string | null;
+  /** Consecutive retryable refusals observed on the same byte-identical screen. */
+  unchanged_screen_retry_count?: number;
+  /** Internal digest for comparing retry snapshots without persisting screen text. */
+  retry_screen_fingerprint?: string | null;
 }
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
 export const DEFAULT_DELIVERY_QUEUE_DEADLINE_MS = 10 * 60 * 1000;
 export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
+export const DELIVERY_UNCHANGED_SCREEN_ATTENTION_ATTEMPTS = 3;
 const DELIVERY_WAIT_POLL_MS = 100;
 
 export type DeliveryVerifySnapshot = {
@@ -6887,6 +6896,10 @@ export class AgentEngine {
       submission_started_at: null,
       next_attempt_at: null,
       verify_deadline_at: null,
+      needs_attention: false,
+      attention_reason: null,
+      unchanged_screen_retry_count: 0,
+      retry_screen_fingerprint: null,
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -7356,16 +7369,27 @@ export class AgentEngine {
           receipt.queue_deadline_at &&
           Date.now() >= Date.parse(receipt.queue_deadline_at)
         ) {
-          const gateReason = receipt.error ?? "no gate reason recorded";
-          receipt.delivery_state = "failed_confirmed";
-          receipt.terminal = true;
-          receipt.submit_verified = false;
-          receipt.resolved_at = new Date().toISOString();
-          receipt.next_attempt_at = null;
-          receipt.error = `queue_deadline_elapsed after ${receipt.retry_count} retryable refusals; last gate reason: ${gateReason}`;
-          this.persistDeliveryReceipts();
-          this.appendDeliveryReceiptEventBestEffort(receipt);
-          continue;
+          // AIDEV-NOTE (#500): an unchanged screen proves a retry stall, not
+          // that the payload failed. Keep the explicit attention state and
+          // start a fresh bounded retry epoch instead of either inventing a
+          // terminal verdict or freezing a receipt that still says `queued`.
+          // The existing capped backoff below keeps attempts slow, while a
+          // later-cleared composer can still recover and deliver the payload.
+          if (receipt.needs_attention === true) {
+            receipt.queue_deadline_at = null;
+            this.persistDeliveryReceipts();
+          } else {
+            const gateReason = receipt.error ?? "no gate reason recorded";
+            receipt.delivery_state = "failed_confirmed";
+            receipt.terminal = true;
+            receipt.submit_verified = false;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.next_attempt_at = null;
+            receipt.error = `queue_deadline_elapsed after ${receipt.retry_count} retryable refusals; last gate reason: ${gateReason}`;
+            this.persistDeliveryReceipts();
+            this.appendDeliveryReceiptEventBestEffort(receipt);
+            continue;
+          }
         }
         if (
           receipt.next_attempt_at &&
@@ -7398,6 +7422,10 @@ export class AgentEngine {
           receipt.retry_count += result.retry_count;
           receipt.error = null;
           receipt.next_attempt_at = null;
+          receipt.needs_attention = false;
+          receipt.attention_reason = null;
+          receipt.unchanged_screen_retry_count = 0;
+          receipt.retry_screen_fingerprint = null;
           if (
             result.delivery === "queued" ||
             result.delivery === "queued_followup"
@@ -7432,6 +7460,12 @@ export class AgentEngine {
           if (error instanceof RetryableDeliveryError) {
             receipt.submission_started_at = null;
             receipt.retry_count += 1;
+            // The submitter proved that no mutation occurred. Persist that
+            // replay-safe boundary before the diagnostic snapshot awaits so a
+            // crash cannot resurrect the old "submission started" marker and
+            // terminalize a delivery that is safe to retry.
+            this.persistDeliveryReceipts();
+            await this.recordRetryScreenAttention(receipt);
             receipt.queue_deadline_at ??= new Date(
               Date.now() + this.deliveryQueueDeadlineMs,
             ).toISOString();
@@ -7460,6 +7494,40 @@ export class AgentEngine {
       }
     } finally {
       this.deliveryDrainInFlight = false;
+    }
+  }
+
+  private async recordRetryScreenAttention(
+    receipt: AgentDeliveryReceipt,
+  ): Promise<void> {
+    if (!this.deliverySnapshotReader) return;
+    const snapshot = await this.withDeliveryVerifyTimeout(
+      this.deliverySnapshotReader(receipt),
+      "Delivery retry snapshot read",
+    ).catch(() => null);
+    if (!snapshot) return;
+
+    const fingerprint = createHash("sha256")
+      .update(snapshot.text, "utf8")
+      .digest("hex");
+    if (receipt.retry_screen_fingerprint === fingerprint) {
+      receipt.unchanged_screen_retry_count =
+        (receipt.unchanged_screen_retry_count ?? 0) + 1;
+    } else {
+      receipt.retry_screen_fingerprint = fingerprint;
+      receipt.unchanged_screen_retry_count = 1;
+      receipt.needs_attention = false;
+      receipt.attention_reason = null;
+    }
+
+    if (
+      receipt.unchanged_screen_retry_count >=
+      DELIVERY_UNCHANGED_SCREEN_ATTENTION_ATTEMPTS
+    ) {
+      receipt.needs_attention = true;
+      receipt.attention_reason =
+        `Delivery remains queued after ${receipt.unchanged_screen_retry_count} ` +
+        "retryable refusals on a byte-identical target screen; human inspection required";
     }
   }
 

@@ -14097,6 +14097,88 @@ Session ID: ${sessionId}`,
       }
     });
 
+    it("surfaces repeated refusals on a byte-identical screen as nonterminal attention", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-20T07:30:00.000Z"));
+      let recovered = false;
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "unchanged-composer-delivery",
+            state: "idle",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await engine.getRegistry().reconstitute();
+        engine.setDeliverySnapshotReader(async () => {
+          const persisted = JSON.parse(
+            readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"),
+          );
+          expect(persisted[0].submission_started_at).toBeNull();
+          return {
+            text: ">_ OpenAI Codex\n› a human draft remains here",
+          };
+        });
+        engine.setDeliverySubmitter(async () => {
+          if (recovered) {
+            return { retry_count: 0, submit_verified: true };
+          }
+          throw new RetryableDeliveryError(
+            "target composer already holds text this delivery did not write",
+          );
+        });
+        const receipt = engine.queueDelivery({
+          agent_id: "unchanged-composer-delivery",
+          text: "lead request",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          await engine.drainDeliveryQueue();
+          const current = engine.getDeliveryReceipt(receipt.delivery_id)!;
+          if (attempt < 3) {
+            expect(current.needs_attention).not.toBe(true);
+          }
+          vi.setSystemTime(Date.parse(current.next_attempt_at!));
+        }
+
+        const attention = engine.getDeliveryReceipt(receipt.delivery_id)!;
+        expect(attention).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+          retry_count: 3,
+          unchanged_screen_retry_count: 3,
+          needs_attention: true,
+          attention_reason: expect.stringMatching(/3.*byte-identical/i),
+        });
+
+        vi.setSystemTime(Date.parse(attention.queue_deadline_at!) + 1);
+        await engine.drainDeliveryQueue();
+        const postDeadline = engine.getDeliveryReceipt(receipt.delivery_id)!;
+        expect(postDeadline).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+          needs_attention: true,
+          retry_count: 4,
+          resolved_at: null,
+        });
+
+        recovered = true;
+        vi.setSystemTime(Date.parse(postDeadline.next_attempt_at!));
+        await engine.drainDeliveryQueue();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "submitted",
+          terminal: true,
+          needs_attention: false,
+          submit_verified: true,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("terminalizes a retryable requeue once its bounded queue lifetime elapses (#467)", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));

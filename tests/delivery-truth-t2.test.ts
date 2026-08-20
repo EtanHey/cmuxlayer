@@ -34,13 +34,16 @@ function parseToolResult(result: any) {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
-async function spawnReadyAgent(server: any) {
+async function spawnReadyAgent(
+  server: any,
+  cli: "claude" | "codex" = "claude",
+) {
   const spawn = server._registeredTools["spawn_agent"];
   const spawnResult = await spawn.handler(
     {
       repo: "brainlayer",
       model: "sonnet",
-      cli: "claude",
+      cli,
       workspace: "workspace:1",
       boot_prompt_timeout_ms: 100,
     },
@@ -209,6 +212,74 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     expect(mutatedPane(mockExec)).toBe(true);
     context.dispose();
   });
+
+  it("send_to delivers through a rotating Codex placeholder", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText =
+      ">_ OpenAI Codex\n› Implement {feature}\n" +
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer\n";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server, "codex");
+
+    screenText =
+      ">_ OpenAI Codex\n› Ask Codex to do anything\n" +
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      { agent_id: agentId, text: "fleet message", press_enter: true },
+      {} as any,
+    );
+
+    expect(parseToolResult(result)).toMatchObject({
+      ok: true,
+      delivered: true,
+      delivery_state: "submitted",
+    });
+    expect(mutatedPane(mockExec)).toBe(true);
+    context.dispose();
+  }, 20_000);
+
+  it("does not mistake a Codex-shaped human draft for a placeholder", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText =
+      ">_ OpenAI Codex\n› Implement {feature}\n" +
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer\n";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server, "codex");
+
+    screenText =
+      ">_ OpenAI Codex\n› Write tests for @server.ts\n" +
+      "gpt-5.6-sol high · ~/Gits/cmuxlayer\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      { agent_id: agentId, text: "fleet message", press_enter: true },
+      {} as any,
+    );
+
+    expect(parseToolResult(result)).toMatchObject({
+      delivered: false,
+      terminal: false,
+      delivery_state: "queued",
+    });
+    expect(mutatedPane(mockExec)).toBe(false);
+    context.dispose();
+  }, 20_000);
 });
 
 describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () => {
@@ -405,6 +476,28 @@ describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
         WARNING: pausedTargetWarning("registry"),
       }).WARNING,
     ).toBe(pausedTargetWarning("registry"));
+  });
+
+  it("keeps nonterminal retry attention visible in public receipts", async () => {
+    const { buildPublicDeliveryReceipt } = await loadServerModule();
+    expect(
+      buildPublicDeliveryReceipt({
+        delivery_state: "queued",
+        delivery_id: "d-attention",
+        typed: false,
+        submit_attempted: false,
+        submit_verified: null,
+        retry_count: 3,
+        needs_attention: true,
+        attention_reason:
+          "Delivery remains queued after 3 retryable refusals on a byte-identical target screen",
+      }),
+    ).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+      needs_attention: true,
+      attention_reason: expect.stringMatching(/byte-identical/i),
+    });
   });
 });
 
