@@ -127,6 +127,7 @@ function makeLifecycleExec(opts?: {
   let readyText = "What can I help you with?\n>";
   let surfaceLive = true;
   let promptPending = false;
+  let pendingText = "";
   let activeCli: "claude" | "codex" | "cursor" = "claude";
   let createdSurfaceCount = 0;
   let currentSurface = "surface:new";
@@ -147,9 +148,9 @@ function makeLifecycleExec(opts?: {
       return "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)";
     }
     if (activeCli === "cursor") {
-      return "cursor> \nWorking (1s • esc to interrupt)";
+      return "Cursor Agent\nWorking (1s • esc to interrupt)\ncursor> ";
     }
-    return "Claude Code\n✻ Working\n";
+    return "Claude Code\n✻ Working\n❯";
   };
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("new-split") || args.includes("new-surface")) {
@@ -168,8 +169,14 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        readyText = workingText();
+        readyText =
+          activeCli === "codex"
+            ? `${pendingText}\n${workingText()}`
+            : activeCli === "cursor"
+              ? `Cursor Agent\n${pendingText}\nWorking (1s • esc to interrupt)\ncursor> `
+            : workingText();
         promptPending = false;
+        pendingText = "";
       }
       return { stdout: "{}", stderr: "" };
     }
@@ -194,6 +201,18 @@ function makeLifecycleExec(opts?: {
         )
       ) {
         promptPending = true;
+        pendingText = text;
+        if (activeCli === "codex") {
+          readyText = [
+            ">_ OpenAI Codex",
+            `› ${text}`,
+            "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+          ].join("\n");
+        } else if (activeCli === "cursor") {
+          readyText = `Cursor Agent\ncursor> ${text}\nAuto`;
+        } else {
+          readyText = `Claude Code\n❯ ${text}`;
+        }
       }
     }
 
@@ -2539,6 +2558,9 @@ describe("agent lifecycle tool handlers", () => {
 
   it("spawn_agent uses the repo workspace before the selected workspace when caller env is absent", async () => {
     const calls: string[] = [];
+    let launchSent = false;
+    let pendingBootText = "";
+    let bootSubmitted = false;
     const mockClient = {
       createWorkspace: vi.fn(),
       selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
@@ -2583,14 +2605,23 @@ describe("agent lifecycle tool handlers", () => {
       }),
       newSurface: vi.fn(),
       focusSurface: vi.fn().mockResolvedValue(undefined),
-      send: vi.fn().mockResolvedValue(undefined),
-      sendKey: vi.fn().mockResolvedValue(undefined),
-      readScreen: vi.fn().mockResolvedValue({
-        surface: "surface:inherit",
-        text: "OpenAI Codex\ncodex> ",
-        lines: 1,
-        scrollback_used: false,
+      send: vi.fn().mockImplementation(async (_surface, text: string) => {
+        if (!launchSent) launchSent = true;
+        else pendingBootText += text;
       }),
+      sendKey: vi.fn().mockImplementation(async (_surface, key: string) => {
+        if (key === "return" && pendingBootText) bootSubmitted = true;
+      }),
+      readScreen: vi.fn().mockImplementation(async () => ({
+        surface: "surface:inherit",
+        text: !pendingBootText
+          ? "OpenAI Codex\ncodex> "
+          : bootSubmitted
+            ? `${pendingBootText}\nOpenAI Codex\nWorking (1s)`
+            : `OpenAI Codex\n› ${pendingBootText}\ngpt-5.5 high · ~/repo`,
+        lines: 20,
+        scrollback_used: false,
+      })),
       log: vi.fn().mockResolvedValue(undefined),
       setStatus: vi.fn().mockResolvedValue(undefined),
       clearStatus: vi.fn().mockResolvedValue(undefined),
@@ -2645,6 +2676,9 @@ describe("agent lifecycle tool handlers", () => {
 
     try {
       const calls: string[] = [];
+      let launchSent = false;
+      let pendingBootText = "";
+      let bootSubmitted = false;
       const mockClient = {
         createWorkspace: vi.fn(),
         selectWorkspace: vi
@@ -2693,14 +2727,23 @@ describe("agent lifecycle tool handlers", () => {
         }),
         newSurface: vi.fn(),
         focusSurface: vi.fn().mockResolvedValue(undefined),
-        send: vi.fn().mockResolvedValue(undefined),
-        sendKey: vi.fn().mockResolvedValue(undefined),
-        readScreen: vi.fn().mockResolvedValue({
-          surface: "surface:caller",
-          text: "OpenAI Codex\ncodex> ",
-          lines: 1,
-          scrollback_used: false,
+        send: vi.fn().mockImplementation(async (_surface, text: string) => {
+          if (!launchSent) launchSent = true;
+          else pendingBootText += text;
         }),
+        sendKey: vi.fn().mockImplementation(async (_surface, key: string) => {
+          if (key === "return" && pendingBootText) bootSubmitted = true;
+        }),
+        readScreen: vi.fn().mockImplementation(async () => ({
+          surface: "surface:caller",
+          text: !pendingBootText
+            ? "OpenAI Codex\ncodex> "
+            : bootSubmitted
+              ? `${pendingBootText}\nOpenAI Codex\nWorking (1s)`
+              : `OpenAI Codex\n› ${pendingBootText}\ngpt-5.5 high · ~/repo`,
+          lines: 20,
+          scrollback_used: false,
+        })),
         log: vi.fn().mockResolvedValue(undefined),
         setStatus: vi.fn().mockResolvedValue(undefined),
         clearStatus: vi.fn().mockResolvedValue(undefined),
@@ -3656,6 +3699,7 @@ describe("agent lifecycle tool handlers", () => {
     const buffers = new Map<string, string>();
     let promptPasted = false;
     let promptSubmitted = false;
+    let pastedPrompt = "";
     mockExec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (args.includes("set-buffer")) {
         const chunk = String(args.at(-1) ?? "");
@@ -3669,6 +3713,9 @@ describe("agent lifecycle tool handlers", () => {
       }
       if (args.includes("paste-buffer")) {
         promptPasted = true;
+        const nameIndex = args.indexOf("--name");
+        const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
+        pastedPrompt = buffers.get(name) ?? "";
         return { stdout: "{}", stderr: "" };
       }
       if (
@@ -3679,11 +3726,17 @@ describe("agent lifecycle tool handlers", () => {
         promptSubmitted = true;
         return { stdout: "{}", stderr: "" };
       }
-      if (args.includes("read-screen") && promptSubmitted) {
+      if (args.includes("read-screen") && promptPasted) {
         return {
           stdout: JSON.stringify({
             surface: "surface:new",
-            text: "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)",
+            text: promptSubmitted
+              ? `${pastedPrompt}\ngpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)`
+              : [
+                  ">_ OpenAI Codex",
+                  `› ${pastedPrompt}`,
+                  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+                ].join("\n"),
             lines: 20,
             scrollback_used: false,
           }),
@@ -6641,7 +6694,7 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
-  it("new_worktree_split reports the created identity when boot prompt verification fails", async () => {
+  it("new_worktree_split reports pending verification when boot prompt evidence is unreadable", async () => {
     vi.useFakeTimers();
     try {
       const gitsDir = join(TEST_DIR, "Gits");
@@ -6697,14 +6750,19 @@ describe("agent lifecycle tool handlers", () => {
       const result = await resultPromise;
       const parsed = parseToolResult(result);
 
-      expect(parsed.ok).toBe(false);
+      expect(parsed.ok).toBe(true);
       expect(parsed.agent_id).toEqual(expect.any(String));
       expect(parsed.surface_id).toBe("surface:new");
       expect(parsed.workspace_id).toBe("workspace:1");
-      expect(parsed.submit_verification_reason).toBe(
-        "surface_read_unavailable",
-      );
-      expect(parsed.retry_safe).toBe(false);
+      expect(parsed.boot_prompt_receipt).toMatchObject({
+        delivered: false,
+        terminal: false,
+        typed: true,
+        submit_attempted: true,
+        submit_verified: null,
+        delivery_state: "pending_verify",
+        retry_count: 0,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -9687,6 +9745,9 @@ I cannot commit, push, or open a PR without explicit permission, so I am waiting
 codex>
 `;
     let blockerSurfaceLive = false;
+    let launchSent = false;
+    let pendingBootText = "";
+    let bootSubmitted = false;
     const mockClient = {
       createWorkspace: vi.fn(),
       selectWorkspace: vi.fn().mockResolvedValue(undefined),
@@ -9744,14 +9805,24 @@ codex>
       }),
       newSurface: vi.fn(),
       focusSurface: vi.fn().mockResolvedValue(undefined),
-      send: vi.fn().mockResolvedValue(undefined),
-      sendKey: vi.fn().mockResolvedValue(undefined),
-      readScreen: vi.fn().mockResolvedValue({
+      send: vi.fn().mockImplementation(async (_surface, text: string) => {
+        if (!launchSent) launchSent = true;
+        else pendingBootText += text;
+      }),
+      sendKey: vi.fn().mockImplementation(async (_surface, key: string) => {
+        if (key === "return" && pendingBootText) bootSubmitted = true;
+      }),
+      readScreen: vi.fn().mockImplementation(async () => ({
         surface: "surface:blocker",
-        text: blockerScreen,
+        text:
+          pendingBootText && !bootSubmitted
+            ? `OpenAI Codex\n› ${pendingBootText}\ngpt-5.5 high · ~/repo`
+            : bootSubmitted
+              ? `OpenAI Codex\n• ${pendingBootText}\nWorking\n${blockerScreen}`
+            : blockerScreen,
         lines: 20,
         scrollback_used: false,
-      }),
+      })),
       log: vi.fn().mockResolvedValue(undefined),
       setStatus: vi.fn().mockResolvedValue(undefined),
       clearStatus: vi.fn().mockResolvedValue(undefined),

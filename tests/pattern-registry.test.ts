@@ -61,6 +61,7 @@ describe("CLI_INPUT_PROMPT_PREFIXES", () => {
   it("recognizes typed composer lines for each supported CLI", () => {
     expect(lineStartsWithCliInputPrompt("claude", "❯ Do the task")).toBe(true);
     expect(lineStartsWithCliInputPrompt("codex", "› Do the task")).toBe(true);
+    expect(lineStartsWithCliInputPrompt("codex", "» Do the task")).toBe(true);
     expect(lineStartsWithCliInputPrompt("cursor", "cursor> Do the task")).toBe(
       true,
     );
@@ -258,6 +259,47 @@ gpt-5.5 xhigh · ~/Gits/brainlayer
 `,
     );
     expect(result.matched).toBe(true);
+  });
+
+  it.each([
+    [
+      "MCP startup",
+      [
+        "Starting MCP servers (6/9): codex_apps, exa, openaiDeveloperDocs",
+        "",
+        "› Ask Codex to do anything",
+        "",
+        "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+      ].join("\n"),
+    ],
+    [
+      "model loading",
+      [
+        "╭──────────────────────────╮",
+        "│ OpenAI Codex             │",
+        "│ model: loading           │",
+        "╰──────────────────────────╯",
+        "",
+        "› Ask Codex to do anything",
+        "",
+        "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+      ].join("\n"),
+    ],
+  ])("does not match Codex %s frames as ready", (_label, screen) => {
+    expect(matchReadyPattern("codex", screen).matched).toBe(false);
+  });
+
+  it("matches the current Codex » ready composer", () => {
+    expect(
+      matchReadyPattern(
+        "codex",
+        [
+          ">_ OpenAI Codex",
+          "» Ask Codex to do anything",
+          "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+        ].join("\n"),
+      ).matched,
+    ).toBe(true);
   });
 
   it("does not treat bare active Codex status lines as ready", () => {

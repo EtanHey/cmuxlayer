@@ -446,6 +446,10 @@ const SEND_INPUT_RETRY_DELAY_MS = 25;
 const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
 const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
+// Pre-Return correlation is a safety gate, not the full submit-verification
+// window. Keep it independently bounded so a surface that never paints typed
+// composer text cannot hold an entire spawn on the 5s verification timeout.
+const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 250;
 function parsePositiveIntegerMs(
   value: string | undefined,
   fallback: number,
@@ -2175,6 +2179,17 @@ function readyPatternCandidates(cli?: CliType): CliType[] {
   return cli ? [cli] : READY_PATTERN_CLIS;
 }
 
+function requiredBootReadyObservations(
+  cli: CliType,
+  screenText: string,
+): number {
+  const registryRequirement = matchReadyPattern(cli, screenText).consecutive;
+  if (cli !== "codex" || /(?:^|\n)\s*codex>(?:\s|$)/im.test(screenText)) {
+    return registryRequirement;
+  }
+  return Math.max(2, registryRequirement);
+}
+
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2345,10 +2360,14 @@ function isComposerFooterOrChromeLine(line: string): boolean {
     /^[✻✢✳✶]\s+Cogitated\s+for\s+\d+s\b/i.test(trimmed) ||
     /^CLAUDE_COUNTER:/i.test(trimmed) ||
     /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*/i.test(trimmed) ||
+    /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?$/i.test(trimmed) ||
     /^\d+(?:\.\d+)?%\s+(?:context\s+)?left\b/i.test(trimmed) ||
     /^\/ commands\b/i.test(trimmed) ||
     /^(?:Auto|Agent)(?:\s*·|$)/i.test(trimmed) ||
     /^ctrl\+c to stop\b/i.test(trimmed) ||
+    /\btab to queue message\b.*\b\d+(?:\.\d+)?%\s+context left\b/i.test(
+      trimmed,
+    ) ||
     CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE.test(trimmed) ||
     /^bypass permissions on\b/i.test(trimmed) ||
     /^⬡\s+Idle\b/i.test(trimmed) ||
@@ -2437,7 +2456,21 @@ function extractComposerInputRegion(
     }
 
     const inputLines = [match.input];
-    for (const line of lines.slice(index + 1, end)) {
+    const remainingLines = lines.slice(index + 1, end);
+    for (const [offset, line] of remainingLines.entries()) {
+      if (!line.trim()) {
+        const nextContentLine = remainingLines
+          .slice(offset + 1)
+          .find((candidate) => candidate.trim());
+        if (
+          nextContentLine === undefined ||
+          isComposerFooterOrChromeLine(nextContentLine)
+        ) {
+          break;
+        }
+        inputLines.push("");
+        continue;
+      }
       if (isComposerFooterOrChromeLine(line)) {
         break;
       }
@@ -2458,7 +2491,21 @@ function extractComposerInputRegion(
     }
 
     const inputLines = [match.input];
-    for (const line of lines.slice(index + 1, end)) {
+    const remainingLines = lines.slice(index + 1, end);
+    for (const [offset, line] of remainingLines.entries()) {
+      if (!line.trim()) {
+        const nextContentLine = remainingLines
+          .slice(offset + 1)
+          .find((candidate) => candidate.trim());
+        if (
+          nextContentLine === undefined ||
+          isComposerFooterOrChromeLine(nextContentLine)
+        ) {
+          break;
+        }
+        inputLines.push("");
+        continue;
+      }
       if (isComposerFooterOrChromeLine(line)) {
         break;
       }
@@ -2489,14 +2536,55 @@ function screenShowsPendingInput(
     return false;
   }
 
-  const tail = trimmed.slice(-Math.min(80, trimmed.length));
-  const compactTail = tail.replace(/\s+/g, "");
   const composerInput = extractComposerInputRegion(screenText, submittedText);
+  if (composerInput === null) {
+    return false;
+  }
+  const normalizedComposer = normalizeTerminalText(composerInput).trim();
+  const visibleTail = trimmed.slice(-Math.min(80, trimmed.length));
+  const compactVisibleTail = visibleTail.replace(/\s+/g, "");
   return (
-    composerInput !== null &&
-    (composerInput.includes(tail) ||
-      (compactTail.length > 0 &&
-        composerInput.replace(/\s+/g, "").includes(compactTail)))
+    normalizedComposer.includes(visibleTail) ||
+    (compactVisibleTail.length > 0 &&
+      normalizedComposer.replace(/\s+/g, "").includes(compactVisibleTail))
+  );
+}
+
+function screenShowsCompletePendingInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const trimmed = normalizeTerminalText(submittedText).trim();
+  if (!trimmed) {
+    return false;
+  }
+  const composerInput = extractComposerInputRegion(screenText, submittedText);
+  if (composerInput === null) {
+    return false;
+  }
+  const normalizedComposer = normalizeTerminalText(composerInput).trim();
+  const compactSubmitted = trimmed.replace(/\s+/g, "");
+  return (
+    normalizedComposer.includes(trimmed) ||
+    (compactSubmitted.length > 0 &&
+      normalizedComposer.replace(/\s+/g, "").includes(compactSubmitted))
+  );
+}
+
+function screenContainsCompleteSubmittedText(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const trimmed = normalizeTerminalText(submittedText).trim();
+  if (!trimmed) {
+    return false;
+  }
+  const normalizedScreen = normalizeTerminalText(screenText);
+  const compactSubmitted = trimmed.replace(/\s+/g, "");
+  return (
+    normalizedScreen.includes(trimmed) ||
+    (compactSubmitted.length > 0 &&
+      normalizedScreen.replace(/\s+/g, "").includes(compactSubmitted))
   );
 }
 
@@ -2934,10 +3022,23 @@ function parseRawSubmitEvidenceMetrics(
   return { tokenCount, cost };
 }
 
+function parseSubmitEvidenceMetrics(
+  screenText: string,
+  parsed: ParsedScreenResult = parseScreen(screenText),
+): RawSubmitEvidenceMetrics {
+  const raw = parseRawSubmitEvidenceMetrics(screenText);
+  return {
+    tokenCount: raw.tokenCount ?? parsed.token_count,
+    cost: raw.cost ?? parsed.cost,
+  };
+}
+
 export const __submitEvidenceTestHooks = {
   extractComposerInputRegion,
   screenShowsPendingInput,
+  screenShowsCompletePendingInput,
   composerHoldsForeignDraft,
+  requiredBootReadyObservations,
 };
 
 function hasRawSubmitEvidenceIncrease(
@@ -4962,6 +5063,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   };
 
+  const waitForCompletePayloadInComposer = async (opts: {
+    surface: string;
+    workspace?: string;
+    text: string;
+    timeout_ms: number;
+    beforeRead?: () => Promise<void>;
+  }): Promise<{
+    screenText: string;
+    metrics: RawSubmitEvidenceMetrics;
+  } | null> => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < opts.timeout_ms) {
+      await opts.beforeRead?.();
+      const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
+        throwOnSurfaceGone: true,
+      });
+      if (
+        snapshot &&
+        screenShowsCompletePendingInput(snapshot.text, opts.text)
+      ) {
+        return {
+          screenText: snapshot.text,
+          metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
+        };
+      }
+      const remaining = opts.timeout_ms - (Date.now() - startedAt);
+      if (remaining <= 0) {
+        break;
+      }
+      await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remaining));
+    }
+    return null;
+  };
+
   const verifySubmitAfterEnter = async (opts: {
     surface: string;
     workspace?: string;
@@ -4971,9 +5106,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_agent?: string | null;
     verify_submit: boolean;
     require_working_status?: boolean;
+    require_attributable_submit_evidence?: boolean;
     allow_recovery_enter_retry?: boolean;
     timeout_ms?: number;
     cursor_response_baseline: readonly string[] | null;
+    pre_type_screen?: string | null;
+    pre_return_screen?: string | null;
+    pre_return_metrics?: RawSubmitEvidenceMetrics | null;
     beforeMutation?: () => Promise<void>;
   }): Promise<{
     submit_verified: boolean | null;
@@ -5010,14 +5149,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let sawReadableScreen = false;
     let sawBlankScreen = false;
     let lastBootConsumptionRefuted = false;
-    const screenIncludesSubmittedText = (screenText: string): boolean => {
-      const trimmed = opts.text.trim();
-      if (!trimmed) {
-        return false;
-      }
-      const tail = trimmed.slice(-Math.min(80, trimmed.length));
-      return normalizeTerminalText(screenText).includes(tail);
-    };
+    const screenIncludesSubmittedText = (screenText: string): boolean =>
+      screenContainsCompleteSubmittedText(screenText, opts.text);
 
     while (Date.now() - startedAt < timeoutMs) {
       await opts.beforeMutation?.();
@@ -5036,7 +5169,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       sawReadableScreen = true;
 
-      const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
+      const hasPendingInput =
+        opts.require_attributable_submit_evidence === true
+          ? screenShowsCompletePendingInput(snapshot.text, opts.text)
+          : screenShowsPendingInput(snapshot.text, opts.text);
       const hasQueuedAgentInput = screenShowsQueuedAgentInput(
         snapshot.text,
         opts.text,
@@ -5096,10 +5232,46 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         hasPendingInput && !cursorShowsSubmittedResponse;
       lastHasPendingSubmitEvidence = hasPendingSubmitEvidence;
       const composerInput = extractComposerInputRegion(snapshot.text);
+      const preReturnComposerInput =
+        opts.pre_return_screen === null || opts.pre_return_screen === undefined
+          ? null
+          : extractComposerInputRegion(opts.pre_return_screen);
+      const bootFrameAdvanced =
+        opts.require_attributable_submit_evidence === true &&
+        opts.pre_return_screen !== null &&
+        opts.pre_return_screen !== undefined &&
+        normalizeTerminalText(snapshot.text) !==
+          normalizeTerminalText(opts.pre_return_screen);
+      const bootComposerAdvanced =
+        opts.require_attributable_submit_evidence === true &&
+        preReturnComposerInput !== null &&
+        composerInput !== null &&
+        normalizeTerminalText(composerInput) !==
+          normalizeTerminalText(preReturnComposerInput);
+      const bootFrameIsMonotonic =
+        bootComposerAdvanced &&
+        (opts.pre_type_screen === null ||
+          opts.pre_type_screen === undefined ||
+          normalizeTerminalText(snapshot.text) !==
+            normalizeTerminalText(opts.pre_type_screen));
+      const bootHasTokenOrCostDelta =
+        opts.require_attributable_submit_evidence === true &&
+        hasRawSubmitEvidenceIncrease(
+          parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
+          opts.pre_return_metrics,
+        );
+      const bootHasTranscriptEcho =
+        opts.require_attributable_submit_evidence === true &&
+        bootFrameAdvanced &&
+        !hasPendingSubmitEvidence &&
+        screenIncludesSubmittedText(snapshot.text);
       if (
         !hasPendingSubmitEvidence &&
         !bootConsumptionRefuted &&
-        (isSubmitVerifiedStatus(snapshot.parsed.status) ||
+        ((opts.require_attributable_submit_evidence !== true &&
+          isSubmitVerifiedStatus(snapshot.parsed.status)) ||
+          bootHasTokenOrCostDelta ||
+          bootHasTranscriptEcho ||
           cursorShowsSubmittedResponse)
       ) {
         return {
@@ -5114,6 +5286,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         composerInput.trim() === "" &&
         !hasPendingSubmitEvidence &&
         !bootConsumptionRefuted &&
+        (opts.require_attributable_submit_evidence !== true ||
+          bootFrameIsMonotonic) &&
         screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
       if (hasClearedAgentComposer) {
         sawClearedComposerEvidence = true;
@@ -5144,7 +5318,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const codexRetryEligiblePendingInput =
         opts.allow_recovery_enter_retry !== false &&
         (opts.source_event === "send_to" ||
-          opts.source_event === "dispatch_nudge") &&
+          opts.source_event === "dispatch_nudge" ||
+          opts.source_event === "boot_prompt") &&
         hasPendingSubmitEvidence &&
         screenCli === "codex";
       const cursorFollowupRetryEligiblePendingInput =
@@ -5216,7 +5391,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           retry_count: retryCount,
           delivery:
             opts.source_event === "send_to" ||
-            opts.source_event === "dispatch_nudge"
+            opts.source_event === "dispatch_nudge" ||
+            opts.require_attributable_submit_evidence === true
               ? "pending_verify"
               : "submitted",
         };
@@ -5252,7 +5428,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
         : null;
     const allowPendingVerify =
-      opts.source_event === "send_to" || opts.source_event === "dispatch_nudge";
+      opts.source_event === "send_to" ||
+      opts.source_event === "dispatch_nudge" ||
+      opts.require_attributable_submit_evidence === true;
     if (allowPendingVerify && submitVerified === false) {
       return {
         submit_verified: null,
@@ -5341,6 +5519,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     delivery_id?: string;
     verify_submit?: boolean;
     allow_recovery_enter_retry?: boolean;
+    require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
     stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
@@ -5472,68 +5651,99 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
-      if (
-        opts.verify_submit &&
-        deliverySafetySnapshot &&
-        inferComposerCli(
-          deliverySafetySnapshot.text,
-          deliverySafetySnapshot.parsed,
-        ) === "cursor"
-      ) {
-        await opts.beforeMutation?.();
-        const preReturnSnapshot = await readParsedSurface(
-          opts.surface,
-          opts.workspace,
-          { throwOnSurfaceGone: true },
-        );
-        cursorResponseBaseline = preReturnSnapshot
-          ? cursorSubmittedResponseEvidenceSignatures(
-              preReturnSnapshot.text,
-              submittedText,
-            )
+      const preReturnBootEvidence =
+        opts.require_observed_payload_before_enter === true &&
+        (opts.verify_submit ?? false)
+          ? await waitForCompletePayloadInComposer({
+              surface: opts.surface,
+              workspace: opts.workspace,
+              text: submittedText,
+              timeout_ms:
+                Math.min(
+                  opts.submit_verify_timeout_ms ??
+                    SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+                  BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
+                ),
+              beforeRead: opts.beforeMutation,
+            })
           : null;
-      }
-      await delay(computeEnterDelayMs(bytes, opts.chunks.length));
-      await sendKeyWithRetry(
-        opts.surface,
-        "return",
-        opts.workspace,
-        opts.beforeMutation,
-      );
-      appendDeliveryEvent({
-        event_type: "press_enter",
-        source_agent: opts.source_agent ?? null,
-        target_surface: opts.surface,
-        bytes,
-        press_enter: true,
-        submit_verified: null,
-        retry_count,
-      });
-
-      const verification = await verifySubmitAfterEnter({
-        surface: opts.surface,
-        workspace: opts.workspace,
-        text: submittedText,
-        bytes,
-        source_event: opts.source_event ?? "send_command",
-        source_agent: opts.source_agent,
-        verify_submit: opts.verify_submit ?? false,
-        allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
-        timeout_ms: opts.submit_verify_timeout_ms,
-        cursor_response_baseline: cursorResponseBaseline,
-        require_working_status: opts.source_event === "boot_prompt",
-        beforeMutation: opts.beforeMutation,
-      });
-      submit_verified = verification.submit_verified;
-      submit_verification_reason = verification.submit_verification_reason;
-      retry_count = verification.retry_count;
-      deliveryOutcome = verification.delivery;
       if (
-        deliveryOutcome === "pending_verify" ||
-        deliveryOutcome === "queued_followup"
+        opts.require_observed_payload_before_enter === true &&
+        (opts.verify_submit ?? false) &&
+        preReturnBootEvidence === null
       ) {
         submit_verified = null;
         submit_verification_reason = null;
+        deliveryOutcome = "pending_verify";
+      } else {
+        if (
+          opts.verify_submit &&
+          deliverySafetySnapshot &&
+          inferComposerCli(
+            deliverySafetySnapshot.text,
+            deliverySafetySnapshot.parsed,
+          ) === "cursor"
+        ) {
+          await opts.beforeMutation?.();
+          const preReturnSnapshot = await readParsedSurface(
+            opts.surface,
+            opts.workspace,
+            { throwOnSurfaceGone: true },
+          );
+          cursorResponseBaseline = preReturnSnapshot
+            ? cursorSubmittedResponseEvidenceSignatures(
+                preReturnSnapshot.text,
+                submittedText,
+              )
+            : null;
+        }
+        await delay(computeEnterDelayMs(bytes, opts.chunks.length));
+        await sendKeyWithRetry(
+          opts.surface,
+          "return",
+          opts.workspace,
+          opts.beforeMutation,
+        );
+        appendDeliveryEvent({
+          event_type: "press_enter",
+          source_agent: opts.source_agent ?? null,
+          target_surface: opts.surface,
+          bytes,
+          press_enter: true,
+          submit_verified: null,
+          retry_count,
+        });
+
+        const verification = await verifySubmitAfterEnter({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          text: submittedText,
+          bytes,
+          source_event: opts.source_event ?? "send_command",
+          source_agent: opts.source_agent,
+          verify_submit: opts.verify_submit ?? false,
+          allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+          timeout_ms: opts.submit_verify_timeout_ms,
+          cursor_response_baseline: cursorResponseBaseline,
+          pre_type_screen: deliverySafetySnapshot?.text,
+          pre_return_screen: preReturnBootEvidence?.screenText,
+          pre_return_metrics: preReturnBootEvidence?.metrics,
+          require_attributable_submit_evidence:
+            opts.require_observed_payload_before_enter === true,
+          require_working_status: opts.source_event === "boot_prompt",
+          beforeMutation: opts.beforeMutation,
+        });
+        submit_verified = verification.submit_verified;
+        submit_verification_reason = verification.submit_verification_reason;
+        retry_count = verification.retry_count;
+        deliveryOutcome = verification.delivery;
+        if (
+          deliveryOutcome === "pending_verify" ||
+          deliveryOutcome === "queued_followup"
+        ) {
+          submit_verified = null;
+          submit_verification_reason = null;
+        }
       }
     }
 
@@ -5619,6 +5829,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   }): Promise<{
     metrics: RawSubmitEvidenceMetrics | null;
     route: { surface: string; workspace?: string };
+    cli: CliType;
   }> => {
     let deadline = Date.now() + opts.timeout_ms;
     let lastText = "";
@@ -5784,10 +5995,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? (consecutiveMatches.get(candidate) ?? 0) + 1
             : 0;
           consecutiveMatches.set(candidate, count);
-          if (count >= match.consecutive) {
+          if (
+            count >= requiredBootReadyObservations(candidate, screen.text)
+          ) {
             return {
-              metrics: parseRawSubmitEvidenceMetrics(screen.text),
+              metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
               route: target,
+              cli: candidate,
             };
           }
         }
@@ -5838,7 +6052,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
       if (snapshot) {
         lastText = snapshot.text;
-        const metrics = parseRawSubmitEvidenceMetrics(snapshot.text);
+        const metrics = parseSubmitEvidenceMetrics(
+          snapshot.text,
+          snapshot.parsed,
+        );
         // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative -- an agent
         // handed a prompt that has consumed nothing did not receive it. A slow
         // boot (MCP servers still connecting, banner mid-render) can present a
@@ -6555,6 +6772,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               sentChunks = count;
             },
             verify_submit: true,
+            // Submission evidence is a boot-delivery invariant. CLI-specific
+            // readiness patterns decide when typing may begin; no CLI may turn
+            // status alone into proof that cmuxlayer's payload was submitted.
+            require_observed_payload_before_enter: true,
             submit_verify_timeout_ms: opts.timeout_ms
               ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
               : undefined,

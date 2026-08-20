@@ -71,14 +71,16 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
   let readyText =
     typeof initialReadyText === "function" ? initialReadyText() : initialReadyText;
   let promptPending = false;
+  let pendingText = "";
   let submissionObservationPending = false;
 
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
         readyText =
-          "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
+          `${pendingText}\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)`;
         promptPending = false;
+        pendingText = "";
         submissionObservationPending = true;
       }
       return { stdout: "{}", stderr: "" };
@@ -91,12 +93,32 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
         (text.includes("cmuxlayer contract for") || !/Codex\b/.test(text))
       ) {
         promptPending = true;
+        pendingText = text;
+        if (typeof initialReadyText !== "function") {
+          readyText = [
+            ">_ OpenAI Codex",
+            `› ${text}`,
+            "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+          ].join("\n");
+        }
       }
+      return { stdout: "{}", stderr: "" };
+    }
+
+    if (args.includes("set-buffer")) {
+      pendingText = String(args.at(-1) ?? "");
       return { stdout: "{}", stderr: "" };
     }
 
     if (args.includes("paste-buffer")) {
       promptPending = true;
+      if (typeof initialReadyText !== "function") {
+        readyText = [
+          ">_ OpenAI Codex",
+          `› ${pendingText}`,
+          "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+        ].join("\n");
+      }
       return { stdout: "{}", stderr: "" };
     }
 

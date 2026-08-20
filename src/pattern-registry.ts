@@ -22,7 +22,7 @@ export interface PatternMatch {
 
 export const CLI_INPUT_PROMPT_PREFIXES: Record<CliType, readonly string[]> = {
   claude: ["❯"],
-  codex: ["codex>", "›", "❯"],
+  codex: ["codex>", "›", "»", "❯"],
   cursor: ["cursor>", "→"],
   gemini: ["gemini>"],
   kiro: ["kiro>"],
@@ -54,13 +54,15 @@ const CURSOR_READY_RE = new RegExp(
 const CODEX_READY_RE = new RegExp(
   [
     String.raw`codex>`,
-    String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)\s*›[^\n]*(?:\n|$)[\s\S]*\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[^\n]+`,
-    String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*gpt-\d[\w.-]*(?:\s+\w+)?\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)\s*›[^\n]*(?:\n|$)`,
+    String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)\s*(?:›|»)[^\n]*(?:\n|$)[\s\S]*\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[^\n]+`,
+    String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*gpt-\d[\w.-]*(?:\s+\w+)?\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)\s*(?:›|»)[^\n]*(?:\n|$)`,
   ].join("|"),
   "im",
 );
 const CODEX_ACTIVE_RE =
   /(?:^|\n)\s*(?:•\s*)?(?:Working|Waiting|Thinking)\b|Working\s*\(/i;
+const CODEX_UNSTABLE_LAUNCH_RE =
+  /(?:^|\n).*Starting MCP servers\b|\bmodel\s*:\s*loading\b/i;
 const GEMINI_ACTIVE_RE =
   /(?:^|\n)\s*(?:✦\s*)?(?:Working|Thinking)(?:\.\.\.|…)?\s*$/im;
 const GEMINI_ACTIVE_LINE_RE = /^(?:✦\s*)?(?:Working|Thinking)(?:\.\.\.|…)?$/i;
@@ -106,7 +108,9 @@ export function matchReadyPattern(
     matched:
       entry.pattern.test(screenContent) &&
       (cli !== "claude" || !CLAUDE_ACTIVE_RE.test(screenContent)) &&
-      (cli !== "codex" || !CODEX_ACTIVE_RE.test(screenContent)) &&
+      (cli !== "codex" ||
+        (!CODEX_ACTIVE_RE.test(screenContent) &&
+          !CODEX_UNSTABLE_LAUNCH_RE.test(screenContent))) &&
       (cli !== "gemini" ||
         !hasGeminiActiveMarkerAfterLastPrompt(screenContent)) &&
       (cli !== "cursor" || !CURSOR_ACTIVE_RE.test(screenContent)),

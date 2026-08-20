@@ -63,6 +63,8 @@ function makeExec(
 ): ExecFn {
   let promptPending = false;
   let pastePending = false;
+  let pendingText = "";
+  let pasteText = "";
   let currentScreenText = screenText;
   const surfaces: TestSurface[] = [
     {
@@ -154,18 +156,25 @@ function makeExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        setScreenText("Claude Code\n✻ Working\n");
+        setScreenText(`Claude Code\n• ${pendingText}\n✻ Working\n❯`);
         promptPending = false;
+        pendingText = "";
       }
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("set-buffer")) {
-      pastePending = String(args.at(-1) ?? "").trim().length > 0;
+      pasteText = String(args.at(-1) ?? "");
+      pastePending = pasteText.trim().length > 0;
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("paste-buffer")) {
-      if (pastePending) promptPending = true;
+      if (pastePending) {
+        promptPending = true;
+        pendingText = pasteText;
+        setScreenText(`Claude Code\n❯ ${pendingText}`);
+      }
       pastePending = false;
+      pasteText = "";
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("send")) {
@@ -176,6 +185,8 @@ function makeExec(
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
+        pendingText = text;
+        setScreenText(`Claude Code\n❯ ${pendingText}`);
       }
     }
     return {
