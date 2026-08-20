@@ -7543,7 +7543,19 @@ describe("agent lifecycle tool handlers", () => {
       cli_session_id: "claude-session",
       task_summary: "(auto-discovered)",
     });
-    const server = await createUuidRouteServer(routeClient, record);
+    // The repaired id is the SEAT, not the launcher, so this test states the
+    // seat registry it repairs against. Reading the host's ~/.golems/config.yaml
+    // instead is what made this assertion green on one Mac and red in CI.
+    const server = await createUuidRouteServer(routeClient, record, {
+      seatRegistry: {
+        brainClaude: {
+          repo: "brainlayer",
+          lane: "brainlayer",
+          role: "lead",
+          launchers: { claude: "brainlayerClaude" },
+        },
+      },
+    });
     const listResult = await registeredTestTool(server, "list_agents").handler(
       {},
       {} as any,
