@@ -2385,7 +2385,7 @@ function matchLegacyClaudePromptLine(
  * anchored pattern so they cannot be mistaken for arbitrary human prose.
  * These are exact rendered placeholders, not templates: expanding their
  * variable-looking segments would swallow real drafts such as
- * `Write tests for @server.ts`. Richer style detection is tracked in #505.
+ * `Write tests for @server.ts`. Richer style detection is tracked in #504.
  *
  * Observed on 2026-08-20: `Implement {feature}`,
  * `Ask Codex to do anything`, and `Write tests for @filename`.
