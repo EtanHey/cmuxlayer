@@ -16,9 +16,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
+
+      # The suite spawns `bun` (tests/fleet-sidebar.test.ts) and release.sh
+      # shells out to `bun run`. Without it this job fails on toolchain, not code.
+      - uses: oven-sh/setup-bun@v2
 
       - run: npm install --no-package-lock
       - run: npm run typecheck

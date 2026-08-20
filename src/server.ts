@@ -105,10 +105,8 @@ import {
   toObservedPublicAgent,
 } from "./agent-facade.js";
 import {
-  DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
   evaluateAgentHealth,
   type AgentHealth,
-  type AgentHealthIssueCode,
 } from "./agent-health.js";
 import {
   AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
@@ -140,7 +138,6 @@ import {
   formatAgentState,
   formatOk,
   formatDelivery,
-  formatResync,
 } from "./format.js";
 import {
   cleanScreenText,
@@ -210,7 +207,7 @@ import type {
   ControlMode,
   ParsedScreenResult,
 } from "./types.js";
-import { normalizeKeyName } from "./key-names.js";
+import { isSubmitKey, normalizeKeyName } from "./key-names.js";
 import { currentCallerContext, type CallerContext } from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
@@ -474,6 +471,10 @@ export const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
   DEFAULT_SEND_INPUT_MAX_INLINE_CHARS,
 );
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
+// A bare submit key either takes effect on the next render or it did not take
+// effect at all -- there is no chunked typing to wait out, so the key path uses
+// a much shorter verification window than the text path (#484).
+const SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS = 1500;
 // Busy relays are interjections into an already-running UI. Observe several
 // repaint frames, accept a correlated TUI queue, and bound exact-composer
 // recovery so fleet fan-out does not inherit the general 5s timeout.
@@ -530,7 +531,12 @@ const SendToArgsSchema = z.object({
   surface: z.string().optional(),
   text: z.string().optional(),
   command: z.string().optional(),
-  key: z.string().optional(),
+  key: z
+    .string()
+    .optional()
+    .describe(
+      'Key name for mode="key". Submit aliases (return, enter, KPEnter, ctrl-m, a raw CR) are normalized to "return" and verified: the receipt reports key_dispatched, and a submit that leaves the composer populated fails instead of returning ok.',
+    ),
   workspace: z.string().optional(),
   chunk_size: z.number().int().min(1).optional().default(200),
   background: z.boolean().optional().default(false),
@@ -955,6 +961,7 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "submitted" ||
     evidencedState === "failed" ||
     evidencedState === "failed_confirmed";
+  const warning = input.WARNING ?? defaultNonDeliveryWarning(evidencedState);
   return {
     delivered: evidencedState === "submitted",
     terminal,
@@ -966,8 +973,40 @@ export function buildPublicDeliveryReceipt(input: {
       ? { delivery: evidencedState, delivery_state: evidencedState }
       : {}),
     ...(input.delivery_id ? { delivery_id: input.delivery_id } : {}),
-    ...(input.WARNING ? { WARNING: input.WARNING } : {}),
+    ...(warning ? { WARNING: warning } : {}),
   };
+}
+
+/**
+ * One plain-language line a caller cannot honestly quote as "sent".
+ *
+ * AIDEV-NOTE (T2 #445): `ok:true` with `delivered:false` was routinely read as
+ * success -- a lead's own words: "I treated the first as evidence of the
+ * second." The booleans two levels down were correct and still misread, so the
+ * receipt now says it in words at the top level. Explicit callers keep their
+ * own WARNING (the paused-target line is more specific than this default).
+ */
+function defaultNonDeliveryWarning(
+  state: PublicDeliveryState | undefined,
+): string | undefined {
+  switch (state) {
+    case "pending_verify":
+    case "queued":
+    case "queued_followup":
+      return (
+        `NOT DELIVERED YET — state ${state}: the message has not been observed ` +
+        "to land. It resolves in the background; do not relay as sent. " +
+        "Query wait_for({delivery_id}) for the terminal outcome."
+      );
+    case "failed":
+    case "failed_confirmed":
+      return (
+        `NOT DELIVERED — terminal failure (${state}). The message did not ` +
+        "land and will not be retried; do not relay as sent."
+      );
+    default:
+      return undefined;
+  }
 }
 
 export function pausedTargetWarning(source: string): string {
@@ -1016,11 +1055,45 @@ class DeliveryError extends Error {
   }
 }
 
+/**
+ * Why a submit could not be verified. This is the sentence a receipt shows the
+ * fleet when a delivery did not land, so it is spelled out rather than nested:
+ * the order is "what we saw" before "what we required", most specific first.
+ */
+function resolveSubmitVerificationFailureReason(observed: {
+  sawPendingInput: boolean;
+  sawReadableScreen: boolean;
+  sawBlankScreen: boolean;
+  bootConsumptionRefuted: boolean;
+  requireWorkingStatus: boolean;
+}): SubmitVerificationFailureReason {
+  if (observed.sawPendingInput) return "input_still_pending";
+  if (!observed.sawReadableScreen) {
+    return observed.sawBlankScreen
+      ? "surface_screen_empty"
+      : "surface_read_unavailable";
+  }
+  if (observed.bootConsumptionRefuted) return "consumption_not_observed";
+  if (observed.requireWorkingStatus) return "working_status_not_observed";
+  return "submit_evidence_absent";
+}
+
 type SubmitVerificationFailureReason =
   | "surface_read_unavailable"
   | "surface_screen_empty"
   | "input_still_pending"
   | "working_status_not_observed"
+  | "consumption_not_observed"
+  | "submit_evidence_absent";
+
+/**
+ * Why a bare submit-key dispatch could not be confirmed. A key send carries no
+ * text, so the text path's evidence (does the screen still show what we typed?)
+ * does not apply; the composer region itself is the evidence.
+ */
+type SubmitKeyVerificationReason =
+  | "surface_read_unavailable"
+  | "composer_still_populated"
   | "submit_evidence_absent";
 
 class SubmitVerificationError extends Error {
@@ -2394,6 +2467,81 @@ function screenShowsPendingInput(
   );
 }
 
+/**
+ * The text sitting on the composer's OWN input line, or null when no composer
+ * prompt line is on screen.
+ *
+ * AIDEV-NOTE (T2 #442/B1): deliberately NOT `extractComposerInputRegion`. That
+ * one appends every following line until it recognises a chrome line, so any
+ * footer missing from `isComposerFooterOrChromeLine` -- `? for shortcuts`,
+ * `accept edits on`, `Working (2s * esc to interrupt)` -- reads as composer
+ * content. That is fine for its own callers, which ask "is the composer
+ * CLEAR", where a false non-empty just withholds submit evidence. It is not
+ * fine for the draft guard, where a false non-empty REFUSES a ready pane. So
+ * the guard reads only the prompt line: a human draft always begins there,
+ * and chrome never does. Widening the chrome whitelist instead is what put
+ * this hole in the first place.
+ */
+function composerPromptLineInput(screenText: string): string | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  const cli = inferComposerCli(screenText);
+  const start = currentComposerRegionStart(cli, lines);
+  let end = lines.length;
+  while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
+    end -= 1;
+  }
+
+  for (let index = end - 1; index >= start; index -= 1) {
+    const line = lines[index] ?? "";
+    const match =
+      matchComposerPromptLine(line) ?? matchLegacyClaudePromptLine(cli, line);
+    if (match) {
+      return normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
+    }
+  }
+  return null;
+}
+
+/**
+ * True when the target composer holds text that this delivery did not put
+ * there -- a human's half-written draft, or an earlier message still unflushed.
+ *
+ * AIDEV-NOTE (T2 #442): a partially-typed payload (chunk 1 landed, chunk 2
+ * pending) IS ours and must stay deliverable, so the line content is compared
+ * whitespace-insensitively against the payload rather than required to be
+ * empty.
+ */
+function composerHoldsForeignDraft(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  // AIDEV-NOTE (T2 #442): Cursor is deliberately exempt. Its composer RETAINS
+  // the accepted text after a submit (the "retained composer" state #441/#449
+  // built evidence rules around), so a non-empty Cursor composer is the normal
+  // post-send screen, not an unsent draft -- and nothing on that screen
+  // distinguishes the two. Guarding it would refuse every legitimate second
+  // send to a Cursor pane. Claude and Codex clear on submit, so there a
+  // non-empty composer really does mean somebody's text is sitting unsent.
+  if (inferComposerCli(screenText) === "cursor") {
+    return false;
+  }
+  // No recognisable composer prompt line (bare shell, unreadable frame). The
+  // pre-existing gates own those cases; do not invent a refusal here.
+  const promptLine = composerPromptLineInput(screenText);
+  if (promptLine === null) {
+    return false;
+  }
+  const compactDraft = promptLine.replace(/\s+/g, "");
+  if (!compactDraft) {
+    return false;
+  }
+  const compactPayload = submittedText.replace(/\s+/g, "");
+  if (compactPayload.length === 0) {
+    return true;
+  }
+  return !compactPayload.includes(compactDraft);
+}
+
 function stripCodexQueueGutter(line: string): string {
   return line.replace(/^\s*[│┃║┆┊]\s?/, "").trimEnd();
 }
@@ -2756,6 +2904,7 @@ function parseRawSubmitEvidenceMetrics(
 export const __submitEvidenceTestHooks = {
   extractComposerInputRegion,
   screenShowsPendingInput,
+  composerHoldsForeignDraft,
 };
 
 function hasRawSubmitEvidenceIncrease(
@@ -3621,23 +3770,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // is the best available caller identity even when the record is stale --
     // the call itself is the liveness evidence. The live-first ordering still
     // lets a genuinely live record win a recycled surface (#378 MEDIUM-A).
-    // AIDEV-TODO (F1 review, finding 2): the LAST tier below matches a terminal
-    // record by `surface_id`, and `surface_id` is a RECYCLABLE ref -- a dead
-    // worker's record whose ref got reused can claim to be the caller, and #378
-    // then forces the new pane's children to worker/right off a corpse. The
-    // obvious guard -- compare the live pane's CLI to the record's, as
+    // AIDEV-NOTE (#468): the LAST tier matches a TERMINAL record by
+    // `surface_id`, and `surface_id` is a RECYCLABLE ref -- a dead worker's
+    // record whose ref got reused could claim to be the caller, and #378 then
+    // forced the new pane's children to worker/right off a corpse. The obvious
+    // guard -- compare the live pane's CLI to the record's, as
     // deliverAgentInput does -- does NOT work here: `registry.listMerged`
     // rewrites `record.cli` from the live pane, so by the time caller
     // resolution runs, a recycled record already claims the new occupant's CLI.
-    // Needs a signal the merge does not overwrite. Tiers 1 and 3 (UUID) are
-    // unaffected. Tracked in #468.
+    //
+    // `surface_observer_id` IS a signal the merge does not overwrite: it is
+    // stamped when this observer binds the surface and only ever replaced by
+    // another binding. A ref stamped by a dead socket generation (or never
+    // stamped at all) proves nothing about who occupies that ref now, so those
+    // records are refused at the ref-only tier. Tiers 1 and 3 (UUID) are
+    // unaffected -- a UUID is not recyclable -- and a record this observer owns
+    // still resolves, which is what keeps U6 working for #408-poisoned rows.
+    //
+    // Cost, stated plainly: a caller whose record predates observer identity
+    // gets no attribution and sees an explicit refusal instead of a wrong
+    // parent. That is the trade this repo already makes everywhere else
+    // absence is ambiguous.
+    const observerOwnerId = context.surfaceObserverId?.trim() || null;
+    const ownsRefBinding = (agent: AgentRecord): boolean =>
+      Boolean(
+        observerOwnerId && agent.surface_observer_id === observerOwnerId,
+      );
     const live = (agent: AgentRecord): boolean =>
       !isLiveTerminal(liveStateFor(agent));
     return (
       records.find((agent) => matchesUuid(agent) && live(agent)) ??
       records.find((agent) => matchesSurfaceId(agent) && live(agent)) ??
       records.find(matchesUuid) ??
-      records.find(matchesSurfaceId) ??
+      records.find(
+        (agent) => matchesSurfaceId(agent) && ownsRefBinding(agent),
+      ) ??
       null
     );
   };
@@ -4674,11 +4841,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  const assertDeliveryTargetIsSafe = async (
-    surface: string,
-    workspace?: string,
-    cli?: CliType,
-  ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
+  const assertDeliveryTargetIsSafe = async (opts: {
+    surface: string;
+    workspace?: string;
+    cli?: CliType;
+    /** When set, also refuse a composer already holding someone else's text. */
+    draftGuardText?: string;
+  }): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
+    const { surface, workspace, cli } = opts;
     const snapshot = await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
     });
@@ -4697,6 +4867,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       throw new DeliverySafetyGateError(
         "blocked_by_interactive_prompt",
         snapshot.parsed,
+      );
+    }
+
+    // AIDEV-NOTE (T2 #442): a composer that already holds text nobody in this
+    // delivery wrote is a human (or another agent) mid-draft. Typing into it
+    // concatenates, and the Return that follows SUBMITS their words. The
+    // picker/permission gates above never covered this: the screen is a
+    // perfectly ordinary ready composer, it just is not empty. Refuse before
+    // the first keystroke -- a refused send is recoverable, a submitted draft
+    // is not.
+    //
+    // RETRYABLE, not terminal (T2 B1a): the same screen is produced by this
+    // delivery's OWN unflushed prior message (the queued_followup shape), and
+    // the guard cannot tell that from a human draft. For both, the right
+    // answer is "wait for the composer to flush", which the v2 queue already
+    // expresses -- and #467's bounded queue lifetime guarantees the caller
+    // still gets a terminal answer if it never does. A terminal `failed` here
+    // would be this PR's own disease: a verdict the engine did not observe.
+    if (
+      opts.draftGuardText !== undefined &&
+      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
+    ) {
+      throw new RetryableDeliveryError(
+        "target composer already holds text this delivery did not write; " +
+          "refused to type (typing + Return would submit or mutate it). " +
+          "Delivery stays queued until the composer is clear.",
       );
     }
 
@@ -4780,6 +4976,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let retriedAt: number | null = null;
     let sawReadableScreen = false;
     let sawBlankScreen = false;
+    let lastBootConsumptionRefuted = false;
     const screenIncludesSubmittedText = (screenText: string): boolean => {
       const trimmed = opts.text.trim();
       if (!trimmed) {
@@ -4842,6 +5039,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery: "queued_followup",
         };
       }
+      // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative. An agent
+      // handed a prompt that has consumed nothing did not receive it, whatever
+      // the composer looks like -- a slow boot can render a working-looking
+      // banner while the CLI is still initialising, and that race produced
+      // `submit_verified: true` receipts for prompts that never left the
+      // composer. A NULL token count stays inconclusive on purpose: several
+      // CLIs never report one, and treating unknown as zero would turn this
+      // guard into a fleet-wide false negative.
+      const bootConsumptionRefuted =
+        opts.require_working_status === true &&
+        snapshot.parsed.token_count === 0;
+      lastBootConsumptionRefuted = bootConsumptionRefuted;
       const screenCli = inferComposerCli(snapshot.text, snapshot.parsed);
       const cursorShowsSubmittedResponse =
         screenCli === "cursor" &&
@@ -4856,6 +5065,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const composerInput = extractComposerInputRegion(snapshot.text);
       if (
         !hasPendingSubmitEvidence &&
+        !bootConsumptionRefuted &&
         (isSubmitVerifiedStatus(snapshot.parsed.status) ||
           cursorShowsSubmittedResponse)
       ) {
@@ -4870,6 +5080,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         composerInput !== null &&
         composerInput.trim() === "" &&
         !hasPendingSubmitEvidence &&
+        !bootConsumptionRefuted &&
         screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
       if (hasClearedAgentComposer) {
         sawClearedComposerEvidence = true;
@@ -4997,17 +5208,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ? false
         : noSubmitEvidenceResult;
     const failureReason: SubmitVerificationFailureReason | null =
-      submitVerified !== false
-        ? null
-        : lastHasPendingSubmitEvidence || lastRetryEligiblePendingInput
-          ? "input_still_pending"
-          : !sawReadableScreen
-            ? sawBlankScreen
-              ? "surface_screen_empty"
-              : "surface_read_unavailable"
-            : opts.require_working_status
-              ? "working_status_not_observed"
-              : "submit_evidence_absent";
+      submitVerified === false
+        ? resolveSubmitVerificationFailureReason({
+            sawPendingInput:
+              lastHasPendingSubmitEvidence || lastRetryEligiblePendingInput,
+            sawReadableScreen,
+            sawBlankScreen,
+            bootConsumptionRefuted: lastBootConsumptionRefuted,
+            requireWorkingStatus: opts.require_working_status === true,
+          })
+        : null;
     const allowPendingVerify =
       opts.source_event === "send_to" || opts.source_event === "dispatch_nudge";
     if (allowPendingVerify && submitVerified === false) {
@@ -5023,6 +5233,82 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verification_reason: failureReason,
       retry_count: retryCount,
       delivery: "submitted",
+    };
+  };
+
+  /**
+   * AIDEV-NOTE (#484): a bare submit key used to return ok:true with
+   * submit_verified:null and no evidence of any kind -- the documented
+   * "type, then press Return" recovery reported success for a no-op and two
+   * leads silently stopped being able to talk to each other. A submit key now
+   * has to answer the only question that matters: did the composer let go of
+   * its contents? Positive evidence either way is reported; absence of
+   * evidence is reported as absence, never as success.
+   */
+  const verifySubmitKeyOutcome = async (opts: {
+    surface: string;
+    workspace?: string;
+  }): Promise<{
+    submit_verified: boolean | null;
+    submit_verification_reason: SubmitKeyVerificationReason | null;
+  }> => {
+    const startedAt = Date.now();
+    let sawReadableScreen = false;
+    let composerStillPopulated = false;
+
+    while (Date.now() - startedAt < SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS) {
+      const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+      if (!snapshot || !snapshot.text.trim()) {
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        continue;
+      }
+      sawReadableScreen = true;
+      const composerInput = extractComposerInputRegion(snapshot.text);
+      composerStillPopulated =
+        composerInput !== null && composerInput.trim() !== "";
+
+      // AIDEV-NOTE (#484 review): a populated composer VETOES every other
+      // signal. A busy target is the reported scenario -- the recipient was
+      // working on its previous turn while the relayed message sat unsent in
+      // its composer -- so reading "working" as proof of submit reported
+      // submit_verified:true for a message still visible on screen. That is
+      // worse than the null it replaced: null admits ignorance, true asserts
+      // an observation contradicted by the pane. The text path already gets
+      // this right by gating the same status branch on !hasPendingSubmitEvidence.
+      if (composerStillPopulated) {
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        continue;
+      }
+      if (composerInput !== null) {
+        // The composer is readable and empty: it let go of its contents. This
+        // is the ONLY positive proof available to a key send. A "working"
+        // status deliberately does not count: the reported target was already
+        // working on its previous turn, so status cannot distinguish "my
+        // submit started a turn" from "a turn was already running" -- and a
+        // composer that renders boxed reads as unreadable here, so accepting
+        // status would resurrect the same false-true through a blind spot.
+        return { submit_verified: true, submit_verification_reason: null };
+      }
+      await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+    }
+
+    if (!sawReadableScreen) {
+      return {
+        submit_verified: null,
+        submit_verification_reason: "surface_read_unavailable",
+      };
+    }
+    if (composerStillPopulated) {
+      // The key reached the pane and the composer still holds its contents:
+      // that is a submit that did not land, not a submit we failed to observe.
+      return {
+        submit_verified: false,
+        submit_verification_reason: "composer_still_populated",
+      };
+    }
+    return {
+      submit_verified: null,
+      submit_verification_reason: "submit_evidence_absent",
     };
   };
 
@@ -5044,7 +5330,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verify_timeout_ms?: number;
     stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
-  }): Promise<PublicDeliveryReceipt & { bytes: number }> => {
+  }): Promise<
+    PublicDeliveryReceipt & {
+      bytes: number;
+      /** Present only on the key path: the key really reached the pane. */
+      key_dispatched?: boolean;
+      submit_verification_reason?: SubmitKeyVerificationReason | null;
+    }
+  > => {
     await opts.beforeMutation?.();
     if (opts.key !== undefined) {
       if (opts.chunks.length > 0 || opts.press_enter) {
@@ -5053,16 +5346,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
+      // sendKeyWithRetry throws when nothing reached the pane, so reaching the
+      // next line is the dispatch evidence the receipt was missing (#484).
       await sendKeyWithRetry(
         opts.surface,
         key,
         opts.workspace,
         opts.beforeMutation,
       );
+      const submitAttempted = isSubmitKey(key);
+      const verification =
+        submitAttempted && opts.verify_submit
+          ? await verifySubmitKeyOutcome({
+              surface: opts.surface,
+              workspace: opts.workspace,
+            })
+          : { submit_verified: null, submit_verification_reason: null };
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
-        submit_attempted: key === "return",
-        submit_verified: null,
+        submit_attempted: submitAttempted,
+        submit_verified: verification.submit_verified,
         retry_count: 0,
       });
       if (opts.source_event) {
@@ -5071,17 +5374,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes: 0,
-          press_enter: key === "return",
-          submit_verified: null,
+          press_enter: submitAttempted,
+          submit_verified: verification.submit_verified,
           retry_count: 0,
         });
       }
-      return { ...receipt, bytes: 0 };
+      return {
+        ...receipt,
+        key_dispatched: true,
+        submit_verification_reason: verification.submit_verification_reason,
+        bytes: 0,
+      };
     }
-    const deliverySafetySnapshot = await assertDeliveryTargetIsSafe(
-      opts.surface,
-      opts.workspace,
-    );
+    // AIDEV-NOTE (T2 #442): the draft guard covers the caller-initiated relay
+    // paths, where refusing is cheap and a foreign draft is a live risk. Boot
+    // and cwd delivery run against a pane cmuxlayer just launched, where the
+    // only text on screen is the launcher's own echo -- refusing there would
+    // break spawn, not protect a human.
+    const draftGuardedEvent =
+      opts.source_event === "send_to" ||
+      opts.source_event === "send_to_agent" ||
+      opts.source_event === "send_input" ||
+      opts.source_event === "dispatch_nudge";
+    const draftGuardText = opts.chunks.join("");
+    const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
+      surface: opts.surface,
+      workspace: opts.workspace,
+      ...(draftGuardedEvent && draftGuardText.trim().length > 0
+        ? { draftGuardText }
+        : {}),
+    });
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,
@@ -5489,7 +5811,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
       if (snapshot) {
         lastText = snapshot.text;
-        if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
+        const metrics = parseRawSubmitEvidenceMetrics(snapshot.text);
+        // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative -- an agent
+        // handed a prompt that has consumed nothing did not receive it. A slow
+        // boot (MCP servers still connecting, banner mid-render) can present a
+        // working-looking status while the prompt is still sitting in the
+        // composer, and accepting that status produced fully-verified receipts
+        // for workers that sat at `0 tokens` with their entire brief unsent.
+        // A NULL count stays inconclusive on purpose: several CLIs never
+        // report one, and reading unknown as zero would break every boot.
+        const consumptionRefuted = metrics.tokenCount === 0;
+        if (!consumptionRefuted && isSubmitVerifiedStatus(snapshot.parsed.status)) {
           return;
         }
 
@@ -5501,10 +5833,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (
           composerInput !== null &&
           !hasPendingInput &&
-          hasRawSubmitEvidenceIncrease(
-            parseRawSubmitEvidenceMetrics(snapshot.text),
-            opts.baseline_metrics,
-          )
+          hasRawSubmitEvidenceIncrease(metrics, opts.baseline_metrics)
         ) {
           return;
         }
@@ -5515,6 +5844,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !hasPendingInput;
         if (
           composerCleared &&
+          !consumptionRefuted &&
           screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed)
         ) {
           if (composerInput === lastClearedComposerInput) {
@@ -7212,6 +7542,56 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       : parsed;
 
+  /**
+   * AIDEV-NOTE (T1b/#488): ONE screen observation for a response that emits
+   * `closure` and `state`/health together. `list_agents` threads its own scan;
+   * `get_agent_state` and `wait_for` have no scan, so they read the surface ONCE
+   * here and hand the same observation to both consumers -- the health block via
+   * the screen_* overrides it already accepts (which stop it re-reading), and
+   * closure via `assessHarvestability(agent, { live })`. Without this, closure
+   * fell back to `cachedScan()`, null past 2000ms, and the same response could
+   * say `working` and `artifact_missing` at once. Read count is unchanged: the
+   * read moves out of the health call, it is not added to it.
+   */
+  const observeAgentOnce = async (
+    agent: AgentRecord,
+    topology: SurfaceTopologySnapshot | null,
+  ): Promise<{
+    screenOverrides: AgentHealthInputOverrides;
+    live: LiveAgentState;
+  }> => {
+    const binding = resolveAuthorizedAgentSurfaceBinding(agent, topology);
+    if (!binding) {
+      // No authorized surface is no evidence -- the same answer the health path
+      // reaches on its own, and `resolveLiveAgentState` records it as
+      // `source: "registry"` rather than passing the record off as observed.
+      return { screenOverrides: {}, live: resolveLiveAgentState(agent, null) };
+    }
+    const parsed = await readParsedSurface(
+      binding.surfaceRef,
+      binding.workspaceId ?? undefined,
+      { agent },
+    );
+    return {
+      screenOverrides: {
+        screen_status: parsed?.parsed.status ?? null,
+        screen_agent_type: parsed?.parsed.agent_type ?? null,
+        screen_control_state: parsed?.parsed.control_state ?? null,
+        screen_actions: parsed?.parsed.actions ?? null,
+      },
+      live: resolveLiveAgentState(
+        agent,
+        parsed
+          ? {
+              status: parsed.parsed.status,
+              agent_type: parsed.parsed.agent_type,
+              control_state: parsed.parsed.control_state,
+            }
+          : null,
+      ),
+    };
+  };
+
   const evaluateServerAgentHealth = async (
     agent: AgentRecord,
     overrides?: AgentHealthInputOverrides,
@@ -7328,65 +7708,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     result: { workspace_id?: string },
     fallback?: string,
   ): string | undefined => result.workspace_id || fallback;
-
-  const isLeadLikeSurfaceTitle = (title: string): boolean =>
-    /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
-
-  const buildOrphanSurfaceHealth = (surface: DiscoveredAgent) => {
-    const issueCodes: AgentHealthIssueCode[] = [];
-    const issues: string[] = [];
-    if (surface.has_agent) {
-      issueCodes.push("auto_discovered_agent");
-      issues.push(
-        "live agent surface has no managed registry seat; repair/register the seat or leave it visible as an unresolved orphan",
-      );
-    }
-    if (isLeadLikeSurfaceTitle(surface.surface_title)) {
-      issueCodes.push("missing_managed_lead_agent_id");
-      issues.push(
-        "lead/coordinator surface has no managed agent_id; recover/register or replace with a managed lead",
-      );
-    }
-
-    const title = surface.surface_title.trim().toLowerCase();
-    if (
-      title === "" ||
-      title === "gits" ||
-      title === "git" ||
-      title === "repos" ||
-      title === "projects" ||
-      title === "workspace"
-    ) {
-      issueCodes.push("ambiguous_repo_cwd_label");
-      issues.push(
-        "orphan terminal surface has an ambiguous repo/cwd label; tab title is not lane ownership",
-      );
-    }
-
-    const issueSeverities = Object.fromEntries(
-      issueCodes.map((code) => [
-        code,
-        DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code],
-      ]),
-    );
-    const hasBlockingIssue = issueCodes.some(
-      (code) => DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code] === "blocking",
-    );
-    return {
-      surface_id: surface.surface_id,
-      surface_title: surface.surface_title,
-      workspace_id: surface.workspace_id ?? null,
-      status:
-        issueCodes.length === 0
-          ? "unknown"
-          : hasBlockingIssue
-            ? "unhealthy"
-            : "degraded",
-      issue_codes: issueCodes,
-      issues,
-      ...(issueCodes.length > 0 ? { issue_severities: issueSeverities } : {}),
-    };
-  };
 
   const collectDeliveryEvidence = async (agentId: string) => {
     const agent = context.lifecycleSweepEngine?.getAgentState(agentId) ?? null;
@@ -8988,6 +9309,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               chunk_size: 0,
               chunk_delay_ms: 0,
               press_enter: false,
+              // A submit key is the documented recovery for a typed-but-unsent
+              // message. It has to prove it landed rather than assert it.
+              verify_submit: true,
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: "send_key",
               beforeMutation: route.assertCurrent,
@@ -9006,6 +9330,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ...delivery,
           ...remapFields(route),
         };
+        if (delivery.submit_verified === false) {
+          return err(
+            new Error(
+              `send_key ${key} reached ${route.surface} but the submit did not land (${delivery.submit_verification_reason}). The composer still holds its unsent contents — nothing was delivered. Read the surface and resolve the pending input before relaying this as sent.`,
+            ),
+            data,
+          );
+        }
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
         return err(e);
@@ -9469,7 +9801,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 10. close_surface
   server.tool(
     "close_surface",
-    "Close one surface, managed agent, or workspace with live-agent guards.",
+    "Close one surface, managed agent, or workspace with live-agent guards. scope=\"agent\" stops the agent AND closes its pane, and reports the two halves separately (agent_stopped, surface_closed) so a pane that survives is never reported as closed. The pane close obeys the same live-agent guard as scope=\"surface\": without force:true a still-live agent keeps its pane, and the receipt says so.",
     {
       scope: z
         .enum(["surface", "agent", "workspace"])
@@ -9496,17 +9828,119 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const handler = toolHandlersByName.get("stop_agent");
           if (!handler)
             throw new Error("Internal agent close adapter unavailable");
+          // AIDEV-NOTE (#485): this used to stop the agent and hand back
+          // stop_agent's receipt verbatim -- ok:true, state:"done" -- for a
+          // tool named close_surface, while the pane stayed open. A lead
+          // harvesting panes got success and kept every one of them. Resolve
+          // the bound surface BEFORE stopping (the stop can evict the record),
+          // stop, then close the pane for real and say which halves happened.
+          const boundAgent = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+          const boundSurface = boundAgent?.surface_id?.trim() || null;
+          const boundWorkspace = boundAgent?.workspace_id ?? undefined;
           const result = await handler(
             { agent_id: args.agent_id, force: args.force },
             {},
           );
-          return {
-            ...result,
-            structuredContent: {
-              ...(result.structuredContent ?? {}),
+          const agentStopped = result.isError !== true;
+          const rawStopContent = (result.structuredContent ?? {}) as Record<
+            string,
+            unknown
+          >;
+          // Drop the stop receipt's own envelope fields; this response owns
+          // ok/error, and letting stop_agent's ok:true through was exactly how
+          // a half-done close reported success.
+          const { ok: _stopOk, error: _stopError, ...stopContent } =
+            rawStopContent;
+          if (!agentStopped) {
+            // The stop itself failed: keep its verbatim ok:false/error and add
+            // the surface half, which was never attempted.
+            return {
+              ...result,
+              structuredContent: {
+                ...rawStopContent,
+                scope: "agent",
+                agent_stopped: false,
+                surface_closed: false,
+                surface_close_skipped: "agent_stop_failed",
+              },
+            };
+          }
+          if (!boundSurface) {
+            const data = {
+              ...stopContent,
               scope: "agent",
+              agent_stopped: true,
+              surface_closed: false,
+              surface_close_skipped: "no_surface_bound",
+            };
+            return okFormatted(
+              `close_surface scope=agent — agent ${args.agent_id} stopped; no surface was bound, so no pane was closed`,
+              data,
+            );
+          }
+          const closeHandler = toolHandlersByName.get("close_surface");
+          if (!closeHandler) {
+            throw new Error("Internal surface close adapter unavailable");
+          }
+          const closeResult = await closeHandler(
+            {
+              scope: "surface",
+              surface: boundSurface,
+              workspace: boundWorkspace,
+              // AIDEV-NOTE (#485 review): pass the caller's own force through
+              // rather than forcing unconditionally. stop_agent has no liveness
+              // refusal of its own, so forcing here would let an unforced
+              // close_surface(scope:"agent") tear down a still-live agent's
+              // pane through a guard that could never fire for this scope --
+              // a silent escalation of destructiveness. If the guard refuses,
+              // the receipt says the agent stopped and the pane did not close.
+              force: args.force ?? false,
             },
+            {},
+          );
+          const closeContent = (closeResult.structuredContent ?? {}) as Record<
+            string,
+            unknown
+          >;
+          if (closeResult.isError === true) {
+            const reason =
+              typeof closeContent.error === "string"
+                ? closeContent.error
+                : "close failed";
+            return err(
+              new Error(
+                `close_surface scope=agent: agent ${args.agent_id} was stopped but surface ${boundSurface} is still open — ${reason}`,
+              ),
+              {
+                ...stopContent,
+                scope: "agent",
+                agent_stopped: true,
+                surface: boundSurface,
+                surface_closed: false,
+                surface_close_error: reason,
+              },
+            );
+          }
+          // Forward the surface path's OBSERVATION of whether the pane is
+          // gone; never restate a returned call as a completed close.
+          const surfaceClosed = closeContent.surface_closed === true;
+          const data = {
+            ...stopContent,
+            scope: "agent",
+            agent_stopped: true,
+            surface: boundSurface,
+            surface_closed: surfaceClosed,
+            ...(closeContent.WARNING ? { WARNING: closeContent.WARNING } : {}),
+            ...(closeContent.collapse_pane !== undefined
+              ? { collapse_pane: closeContent.collapse_pane }
+              : {}),
           };
+          return okFormatted(
+            surfaceClosed
+              ? `close_surface scope=agent — agent ${args.agent_id} stopped and surface ${boundSurface} closed`
+              : `close_surface scope=agent — agent ${args.agent_id} stopped, but surface ${boundSurface} is STILL LISTED — not closed`,
+            data,
+          );
         }
         if (args.scope === "workspace") {
           if (!args.workspace) {
@@ -9520,11 +9954,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             { workspace: args.workspace, force: args.force },
             {},
           );
+          // Cross-check for the #485 class: unlike scope=agent, this delegate
+          // really does perform the action the scope names -- delete_workspace
+          // tears the tab and its panes down and surfaces its own failures.
+          // State the outcome explicitly rather than leaving the caller to
+          // infer it from a bolted-on scope field.
           return {
             ...result,
             structuredContent: {
               ...(result.structuredContent ?? {}),
               scope: "workspace",
+              workspace_deleted: result.isError !== true,
             },
           };
         }
@@ -9761,6 +10201,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: route.stableSurfaceIdentity,
           },
         );
+        // AIDEV-NOTE (#485): confirm the pane is actually gone rather than
+        // inferring it from the CLI returning. One observation, no waiting --
+        // the "eventually consistent" theory was withdrawn once the mechanism
+        // turned out to be the scope argument, so there is no window to sit
+        // through. If cmux still lists the surface, the receipt says so.
+        const surfaceStillPresent =
+          (await findSurfaceByRef(route.surface, route.workspace)) !== null;
         for (const record of stateMgr.listStates()) {
           // Stable identity wins whenever cmux exposes it. On a ref-only or
           // unavailable observation, preserve the explicit close intent by
@@ -9780,6 +10227,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               user_killed: true,
             });
             context.lifecycleRegistry?.set(record.agent_id, terminal);
+            // AIDEV-NOTE (#485 reframe): marking user_killed left the RECORD's
+            // state untouched, so list_agents kept reporting a closed agent as
+            // "working" after its close was acknowledged -- reported live by
+            // golemsClaude, and independent of which scope was used.
+            // An acknowledged close means this agent is not running any more;
+            // say so in the same breath as accepting the close.
+            if (!TERMINAL_AGENT_STATES.has(terminal.state)) {
+              const stopped = stateMgr.transition(record.agent_id, "done");
+              context.lifecycleRegistry?.set(record.agent_id, stopped);
+            }
           } catch (error) {
             if (
               error instanceof Error &&
@@ -9804,9 +10261,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           surface: route.surface,
           pane: closePolicy?.pane ?? undefined,
           collapse_pane: collapsePane,
+          surface_closed: !surfaceStillPresent,
           stale_registry_done_consolidated: staleRegistryDoneConsolidated,
+          ...(surfaceStillPresent
+            ? {
+                WARNING: `cmux accepted the close but ${route.surface} is STILL listed. Do not relay this as closed.`,
+              }
+            : {}),
         };
-        return okFormatted(formatOk("close_surface", data), data);
+        return okFormatted(
+          surfaceStillPresent
+            ? `close_surface accepted — ${route.surface} is still listed; NOT closed`
+            : formatOk("close_surface", data),
+          data,
+        );
       } catch (e) {
         return err(e);
       }
@@ -10960,7 +11428,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw new Error(
             `Agent "${args.agent_id}" no longer maps to a live surface ` +
               `(stale surface ref); its pane likely closed or was recycled. ` +
-              `Run resync_agents and retry.`,
+              `Call list_agents for a refreshed live view and retry.`,
           );
         }
         route = reresolved;
@@ -11015,7 +11483,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw new Error(
               `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
                 `surface ${route.surface_id} — it now hosts a ${freshOccupant?.cli} ` +
-                `agent (surface recycled). Run resync_agents and retry.`,
+                `agent (surface recycled). Call list_agents for a refreshed ` +
+                `live view and retry.`,
             );
           }
         }
@@ -13255,23 +13724,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const resultAgent = result.agent
                   ? engine.getAgentState(result.agent.agent_id)
                   : null;
-                const health = resultAgent
-                  ? await evaluateServerAgentHealth(
-                      resultAgent,
-                      {
-                        ...healthTopologyOverrides(resultAgent, topology),
-                      },
-                      topology,
-                    )
-                  : undefined;
+                // T1b (#488): one observation feeds this reply's health block
+                // AND its closure, so the two cannot contradict each other.
+                const observed = resultAgent
+                  ? await observeAgentOnce(resultAgent, topology)
+                  : null;
                 // P11 Contract B: a lead that BLOCKS on its children gets the
                 // closure state in the reply it was already waiting for -- the
                 // completion signal surfaces where the parent actually looks,
                 // with no new carrier (#414: a carrier without a reader is not
                 // a carrier).
                 const harvest = resultAgent
-                  ? engine.assessHarvestability(resultAgent)
+                  ? engine.assessHarvestability(resultAgent, {
+                      live: observed?.live ?? null,
+                    })
                   : null;
+                const health = resultAgent
+                  ? await evaluateServerAgentHealth(
+                      resultAgent,
+                      {
+                        ...healthTopologyOverrides(resultAgent, topology),
+                        ...(observed?.screenOverrides ?? {}),
+                        ...(harvest ? { harvestability: harvest } : {}),
+                      },
+                      topology,
+                    )
+                  : undefined;
                 return {
                   ...result,
                   health,
@@ -13440,7 +13918,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!state)
             return err(new Error(`Agent not found: ${args.agent_id}`));
           const topology = await collectSurfaceTopology();
-          const harvestability = engine.assessHarvestability(state);
+          // T1b (#488): the screen this response reports on is the screen its
+          // closure is resolved from. Read once, used by both.
+          const observed = await observeAgentOnce(state, topology);
+          const harvestability = engine.assessHarvestability(state, {
+            live: observed.live,
+          });
           const authorizedBinding = resolveAuthorizedAgentSurfaceBinding(
             state,
             topology,
@@ -13450,6 +13933,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               state,
               {
                 ...healthTopologyOverrides(state, topology),
+                ...observed.screenOverrides,
                 harvestability,
               },
               topology,
@@ -13637,7 +14121,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return okFormatted(formatted, data);
         };
         const buildListAgentsResponse = async (
-          records: AgentRecord[],
+          // `listMerged` hands back MergedAgent rows; the merge-only fields are
+          // optional so cached/registry-only callers still type-check.
+          records: Array<AgentRecord & { parsed_cli_mismatch?: boolean }>,
           topology: SurfaceTopologySnapshot | null,
           topologySignature: string,
           liveDiscovery?: {
@@ -13669,6 +14155,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   observedSurface && !observedSurface.read_error
                     ? observedSurface
                     : null;
+                // AIDEV-NOTE (T1b/#488): ONE observation per row. `closure`
+                // used to re-resolve live state through the discovery cache
+                // (`cachedScan()`, null past 2000ms) while `state` below used
+                // THIS call's own scan -- so a cold cache made one row read
+                // `working` and `artifact_missing` at the same time, and flap
+                // as the cache aged. Same evidence, resolved once, passed to
+                // the health block AND to closure. Costs zero extra screen
+                // reads: the scan already happened at the top of this call.
+                const rowLiveState = resolveLiveAgentState(
+                  agent,
+                  trustedScreenObservation
+                    ? {
+                        status: trustedScreenObservation.parsed_status,
+                        agent_type:
+                          trustedScreenObservation.cli === "kiro"
+                            ? "unknown"
+                            : trustedScreenObservation.cli,
+                        control_state: trustedScreenObservation.control_state,
+                      }
+                    : null,
+                );
+                const rowHarvestability = engine.assessHarvestability(agent, {
+                  live: rowLiveState,
+                });
                 const health = await evaluateServerAgentHealth(
                   agent,
                   {
@@ -13686,6 +14196,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             trustedScreenObservation.actions ?? [],
                         }
                       : {}),
+                    // Without this the health block re-derived harvestability
+                    // through the probe (buildAgentHealthInput's
+                    // `deps.assessHarvestability`), putting a THIRD resolution
+                    // in the same row: `closure_without_artifact` could fire
+                    // beside `closure: "pending"`.
+                    harvestability: rowHarvestability,
                   },
                   topology,
                 );
@@ -13728,11 +14244,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     }),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
+                    // #481: computed on every listMerged, read only by the
+                    // removed resync tool's dead body -- so a pane whose
+                    // observed CLI disagreed with its record was silently
+                    // un-surfaced. Sparse on purpose: agreement is the normal
+                    // case and must cost no payload.
+                    ...(agent.parsed_cli_mismatch === true
+                      ? { parsed_cli_mismatch: true }
+                      : {}),
                     // P11 Constraint 3: at DEFAULT detail, so a lead can tell a
                     // deadlocked child (done, no artifact -> act) from a busy one
                     // (pending -> wait) WITHOUT a second full-detail call. A bare
                     // boolean made both of those `false`; that was the S3 bug.
-                    closure: engine.assessHarvestability(agent).closure,
+                    closure: rowHarvestability.closure,
                     ...(args.detail === "full"
                       ? {
                           health: {
@@ -13743,7 +14267,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           },
                           detail: {
                             ...toAgentStatePayload(agent),
-                            harvestability: engine.assessHarvestability(agent),
+                            harvestability: rowHarvestability,
                           },
                         }
                       : {}),
@@ -13804,6 +14328,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             registry.repairFromDiscovery(discovered, {
               seatRegistry,
               orphansOnly: true,
+            });
+            // #481: `createLiveSeatDiscoveryProof` had exactly one call site --
+            // inside the removed resync tool's unreachable body -- so
+            // `hasLiveManagedSeatSibling` returned false unconditionally and
+            // every crash-recovery-eligible ghost was retained forever. This is
+            // the live path that already holds a same-cycle, observer-pinned
+            // scan, so the proof belongs here.
+            // #480: it is also the only reconciliation callers actually
+            // trigger. Without an eviction here `list_agents` was the one
+            // reader that never dropped a row: 17 agents against 13 surfaces.
+            const liveSeatProof = registry.createLiveSeatDiscoveryProof(
+              discovered,
+              {
+                seatRegistry,
+                expectedObserverId: registry.getObserverId(),
+                expectedObserverEpoch: registry.getObserverEpoch(),
+              },
+            );
+            await registry.evictSurfaceless({
+              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+              now: observedAtMs,
+              liveSeatProof,
             });
             const merged = await registry.listMerged(discovery, {
               filter,
@@ -14080,582 +14626,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "resync_agents",
-      "Removed compatibility stub. Agent discovery and reconciliation now happen automatically on list_agents; callers must not resync manually.",
+      "Removed. Reconciliation runs automatically on list_agents: fresh discovery, orphan repair, and ghost eviction carrying a same-cycle live-seat proof. Role reflow runs on the periodic sweep. Call list_agents.",
       {},
       ANNOTATIONS.readOnly,
-      async () => {
-        const compatibilityStubRemoved: boolean = true;
-        if (compatibilityStubRemoved) {
-          return err(
-            new Error(
-              "resync_agents was removed; call list_agents for an automatically refreshed live view",
-            ),
-          );
-        }
-        /* c8 ignore start -- retained for one release as unreachable rollback reference */
-        await awaitLifecycleStart();
-        return engine.runLifecycleMutation(async () => {
-          try {
-            const beforeIds = new Set(
-              registry.list().map((agent) => agent.agent_id),
-            );
-            const surfaceAbsenceConfirmation = {
-              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
-            };
-            await registry.reconcile(surfaceAbsenceConfirmation);
-            for (const agent of registry.list()) {
-              beforeIds.add(agent.agent_id);
-            }
-            discovery.invalidate();
-            const discoveredBeforeRepair = await discovery.scan(true);
-            const repair = registry.repairFromDiscovery(
-              discoveredBeforeRepair,
-              {
-                seatRegistry,
-              },
-            );
-            const liveSeatProofObserverId = registry.getObserverId();
-            const liveSeatProofObserverEpoch = registry.getObserverEpoch();
-            discovery.invalidate();
-            const discoveredAfterRepair = await discovery.scan(true);
-            const liveSeatProof = registry.createLiveSeatDiscoveryProof(
-              discoveredAfterRepair,
-              {
-                seatRegistry,
-                expectedObserverId: liveSeatProofObserverId,
-                expectedObserverEpoch: liveSeatProofObserverEpoch,
-              },
-            );
-            await registry.listMerged(discovery, {
-              force: true,
-              discovered: discoveredAfterRepair,
-            });
-            const surfacelessEvicted = await registry.evictSurfaceless({
-              ...surfaceAbsenceConfirmation,
-              liveSeatProof,
-            });
-            engine.evictDeadProcessAgents();
-            discovery.invalidate();
-            let after = await registry.listMerged(discovery, { force: true });
-            const reflowObserverEpoch = captureObserverEpoch(
-              surfaceObserverEpochProvider(),
-            );
-            const topologyBeforeReflow = await collectSurfaceTopology();
-            const topologyIsCoherent = (
-              topology: SurfaceTopologySnapshot | null,
-            ): topology is SurfaceTopologySnapshot => {
-              const surfaceCount = topology?.workspaceBySurface.size ?? 0;
-              const uuidCount = topology?.surfaceIdByRef.size ?? 0;
-              return (
-                topology?.complete === true &&
-                surfaceCount > 0 &&
-                (uuidCount === 0 || uuidCount === surfaceCount)
-              );
-            };
-            const topologyBeforeReflowIsCoherent =
-              topologyIsCoherent(topologyBeforeReflow);
-            const reflowed: Array<{
-              agent_id: string;
-              surface_id: string;
-              from_column: number;
-              to_column: number;
-              pane: string;
-            }> = [];
-            type ReflowOperation =
-              "new_split" | "move_surface" | "verify_reflow" | "close_surface";
-            const reflowSkipped: Array<{
-              agent_id: string;
-              surface_id: string;
-              operation: ReflowOperation;
-              reason: string;
-            }> = [];
-            const recordReflowSkip = (
-              agent: AgentRecord,
-              surfaceId: string,
-              operation: ReflowOperation,
-              error: unknown,
-            ): void => {
-              reflowSkipped.push({
-                agent_id: agent.agent_id,
-                surface_id: surfaceId,
-                operation,
-                reason: error instanceof Error ? error.message : String(error),
-              });
-            };
-            const assertCurrentReflowAuthority = (
-              agent: AgentRecord,
-              expectedWorkspace: string,
-              operation: ReflowOperation,
-            ): AgentRecord => {
-              const currentAgent =
-                registry.get(agent.agent_id) ??
-                stateMgr.readState(agent.agent_id);
-              const expectedUuid = agent.surface_uuid?.trim().toLowerCase();
-              const currentUuid = currentAgent?.surface_uuid
-                ?.trim()
-                .toLowerCase();
-              if (
-                !currentAgent ||
-                currentAgent.surface_provenance !== "cmuxlayer_spawn" ||
-                inferRecordRoleOrNull(currentAgent) !== "worker" ||
-                (currentAgent.state !== "idle" &&
-                  !TERMINAL_AGENT_STATES.has(currentAgent.state)) ||
-                !expectedUuid ||
-                currentUuid !== expectedUuid ||
-                (currentAgent.workspace_id ?? null) !== expectedWorkspace
-              ) {
-                throw new Error(
-                  `Agent ${agent.agent_id} provenance, role, state, or stable ` +
-                    `binding changed before ${operation}; refusing to move a busy or unowned pane.`,
-                );
-              }
-              return currentAgent;
-            };
-            const resolveFreshReflowBinding = async (
-              agent: AgentRecord,
-              expectedSurfaceRef: string,
-              expectedWorkspace: string,
-              operation: ReflowOperation,
-            ) => {
-              assertCurrentReflowAuthority(agent, expectedWorkspace, operation);
-              assertSurfaceObserverEpochCurrent(
-                reflowObserverEpoch,
-                `resync_agents ${operation}`,
-              );
-              const topology = await collectSurfaceTopology();
-              assertSurfaceObserverEpochCurrent(
-                reflowObserverEpoch,
-                `resync_agents ${operation}`,
-              );
-              if (!topologyIsCoherent(topology)) {
-                throw new Error(
-                  `Fresh topology is incomplete before ${operation}; refusing reflow mutation.`,
-                );
-              }
-              const currentAgent = assertCurrentReflowAuthority(
-                agent,
-                expectedWorkspace,
-                operation,
-              );
-              const binding = resolveAgentSurfaceBinding(
-                currentAgent,
-                topology,
-              );
-              if (!binding) {
-                throw new Error(
-                  `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} is not uniquely bound before ${operation}; refusing reflow mutation.`,
-                );
-              }
-              const observedUuid =
-                topology.surfaceIdByRef.get(binding.surfaceRef) ?? null;
-              if (!registry.canUseObservedBinding(currentAgent, observedUuid)) {
-                throw new Error(
-                  `Fresh binding ${binding.surfaceRef} is not owned by the current observer before ${operation}; refusing reflow mutation.`,
-                );
-              }
-              const workspace =
-                topology.workspaceBySurface.get(binding.surfaceRef) ??
-                binding.workspaceId;
-              if (
-                binding.surfaceRef !== expectedSurfaceRef ||
-                workspace !== expectedWorkspace
-              ) {
-                throw new Error(
-                  `Surface binding changed before ${operation} ` +
-                    `(${expectedSurfaceRef}@${expectedWorkspace} -> ` +
-                    `${binding.surfaceRef}@${workspace ?? "unknown"}); refusing to mutate a recycled ref.`,
-                );
-              }
-              const current = topology.topologyBySurface.get(
-                binding.surfaceRef,
-              );
-              if (current?.column !== 0) {
-                throw new Error(
-                  `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} no longer needs left-column reflow before ${operation}.`,
-                );
-              }
-              return { binding, current, topology, workspace };
-            };
-
-            if (topologyBeforeReflow && topologyBeforeReflowIsCoherent) {
-              const panesByWorkspace = new Map<
-                string,
-                Awaited<ReturnType<typeof client.listPanes>>
-              >();
-
-              for (const agent of after) {
-                if (inferRecordRoleOrNull(agent) !== "worker") continue;
-                if (agent.surface_provenance !== "cmuxlayer_spawn") continue;
-                if (
-                  agent.state !== "idle" &&
-                  !TERMINAL_AGENT_STATES.has(agent.state)
-                ) {
-                  continue;
-                }
-                const binding = resolveAgentSurfaceBinding(
-                  agent,
-                  topologyBeforeReflow,
-                );
-                if (!binding) continue;
-                const observedUuid =
-                  topologyBeforeReflow.surfaceIdByRef.get(binding.surfaceRef) ??
-                  null;
-                if (!registry.canUseObservedBinding(agent, observedUuid)) {
-                  continue;
-                }
-                const liveSurfaceRef = binding.surfaceRef;
-                const current =
-                  topologyBeforeReflow.topologyBySurface.get(liveSurfaceRef);
-                if (current?.column !== 0) continue;
-
-                let seededSurface: string | null = null;
-                let seededSurfaceUuid: string | null = null;
-                let workspace: string | null = null;
-                let attemptedOperation: ReflowOperation =
-                  (current.column_count ?? 0) < 2
-                    ? "new_split"
-                    : "move_surface";
-                try {
-                  workspace =
-                    topologyBeforeReflow.workspaceBySurface.get(
-                      liveSurfaceRef,
-                    ) ??
-                    agent.workspace_id ??
-                    null;
-                  if (!workspace) continue;
-
-                  let targetPane: string | null = null;
-                  if ((current.column_count ?? 0) < 2) {
-                    attemptedOperation = "new_split";
-                    await resolveFreshReflowBinding(
-                      agent,
-                      liveSurfaceRef,
-                      workspace,
-                      attemptedOperation,
-                    );
-                    await assertWorkspaceMutationAllowed(
-                      "new_split",
-                      workspace,
-                    );
-                    await withSurfaceWrite(
-                      liveSurfaceRef,
-                      async () => {
-                        const immediate = await resolveFreshReflowBinding(
-                          agent,
-                          liveSurfaceRef,
-                          workspace!,
-                          attemptedOperation,
-                        );
-                        await assertWorkspaceMutationAllowed(
-                          "new_split",
-                          immediate.workspace ?? workspace!,
-                        );
-                        assertSurfaceObserverEpochCurrent(
-                          reflowObserverEpoch,
-                          "resync_agents new_split",
-                        );
-                        assertCurrentReflowAuthority(
-                          agent,
-                          immediate.workspace ?? workspace!,
-                          attemptedOperation,
-                        );
-                        const seed = await client.newSplit("right", {
-                          workspace: immediate.workspace,
-                          surface: immediate.binding.surfaceRef,
-                          type: "terminal",
-                        });
-                        seededSurface = seed.surface;
-                        seededSurfaceUuid = seed.surface_id ?? null;
-                        targetPane = seed.pane;
-                        assertSurfaceObserverEpochCurrent(
-                          reflowObserverEpoch,
-                          "resync_agents new_split",
-                        );
-                      },
-                      {
-                        owner: `resync-reflow:new_split:${agent.agent_id}`,
-                        stableSurfaceIdentity: agent.surface_uuid,
-                      },
-                    );
-                    panesByWorkspace.delete(workspace);
-                  } else {
-                    assertSurfaceObserverEpochCurrent(
-                      reflowObserverEpoch,
-                      "resync_agents move_surface pane selection",
-                    );
-                    let panes = panesByWorkspace.get(workspace);
-                    if (!panes) {
-                      panes = await client.listPanes({ workspace });
-                      panesByWorkspace.set(workspace, panes);
-                    }
-                    assertSurfaceObserverEpochCurrent(
-                      reflowObserverEpoch,
-                      "resync_agents move_surface pane selection",
-                    );
-                    targetPane =
-                      topPaneInRoleColumn(panes.panes, "worker")?.ref ?? null;
-                  }
-                  if (!targetPane) continue;
-
-                  attemptedOperation = "move_surface";
-                  const freshBeforeMove = await resolveFreshReflowBinding(
-                    agent,
-                    liveSurfaceRef,
-                    workspace,
-                    attemptedOperation,
-                  );
-                  await withSurfaceWrite(
-                    freshBeforeMove.binding.surfaceRef,
-                    async () => {
-                      const immediate = await resolveFreshReflowBinding(
-                        agent,
-                        liveSurfaceRef,
-                        workspace!,
-                        attemptedOperation,
-                      );
-                      await assertSurfaceMutationAllowed(
-                        "move_surface",
-                        immediate.binding.surfaceRef,
-                        immediate.workspace ?? workspace!,
-                      );
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents move_surface",
-                      );
-                      assertCurrentReflowAuthority(
-                        agent,
-                        immediate.workspace ?? workspace!,
-                        attemptedOperation,
-                      );
-                      await client.moveSurface({
-                        surface: immediate.binding.surfaceRef,
-                        pane: targetPane!,
-                        workspace: immediate.workspace,
-                        focus: false,
-                      });
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents move_surface",
-                      );
-                    },
-                    {
-                      toolName: "move_surface",
-                      workspace: freshBeforeMove.workspace ?? workspace,
-                      owner: `resync-reflow:move_surface:${agent.agent_id}`,
-                      stableSurfaceIdentity: agent.surface_uuid,
-                    },
-                  );
-                  panesByWorkspace.delete(workspace);
-
-                  attemptedOperation = "verify_reflow";
-                  const topologyAfterMove =
-                    await collectSurfaceTopology(workspace);
-                  assertSurfaceObserverEpochCurrent(
-                    reflowObserverEpoch,
-                    "resync_agents verify_reflow",
-                  );
-                  if (!topologyIsCoherent(topologyAfterMove)) {
-                    throw new Error(
-                      "Post-move topology is incomplete; reflow could not be verified.",
-                    );
-                  }
-                  const bindingAfterMove = resolveAgentSurfaceBinding(
-                    agent,
-                    topologyAfterMove,
-                  );
-                  if (!bindingAfterMove) {
-                    throw new Error(
-                      "Post-move stable UUID binding is unavailable; reflow could not be verified.",
-                    );
-                  }
-                  const actual = topologyAfterMove.topologyBySurface.get(
-                    bindingAfterMove.surfaceRef,
-                  );
-                  if (actual?.column !== 1) {
-                    throw new Error(
-                      "Post-move topology does not place the worker in canonical column 1.",
-                    );
-                  }
-
-                  reflowed.push({
-                    agent_id: agent.agent_id,
-                    surface_id: bindingAfterMove.surfaceRef,
-                    from_column: current.column,
-                    to_column: actual.column,
-                    pane: targetPane,
-                  });
-                } catch (error) {
-                  // Reflow is self-healing best effort. One stale workspace, pane,
-                  // or topology read must not abort the registry-wide resync.
-                  recordReflowSkip(
-                    agent,
-                    liveSurfaceRef,
-                    attemptedOperation,
-                    error,
-                  );
-                } finally {
-                  if (seededSurface) {
-                    try {
-                      const cleanupSeedUuid = seededSurfaceUuid as
-                        string | null;
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents close_surface",
-                      );
-                      if (!cleanupSeedUuid) {
-                        throw new Error(
-                          `Seed ${seededSurface} has no stable UUID; refusing cleanup by mutable ref.`,
-                        );
-                      }
-                      const cleanupTopology = await collectSurfaceTopology();
-                      assertSurfaceObserverEpochCurrent(
-                        reflowObserverEpoch,
-                        "resync_agents close_surface",
-                      );
-                      if (!topologyIsCoherent(cleanupTopology)) {
-                        throw new Error(
-                          "Fresh topology is incomplete before seed cleanup; refusing close_surface.",
-                        );
-                      }
-                      const seedUuidKey = cleanupSeedUuid.toLowerCase();
-                      const freshSeedRef = [
-                        ...cleanupTopology.surfaceRefById,
-                      ].find(
-                        ([surfaceUuid]) =>
-                          surfaceUuid.toLowerCase() === seedUuidKey,
-                      )?.[1];
-                      if (!freshSeedRef) {
-                        throw new Error(
-                          `Seed UUID ${cleanupSeedUuid} is no longer uniquely bound; refusing close_surface.`,
-                        );
-                      }
-                      const cleanupWorkspace =
-                        cleanupTopology.workspaceBySurface.get(freshSeedRef) ??
-                        workspace ??
-                        undefined;
-                      await withSurfaceWrite(
-                        freshSeedRef,
-                        async () => {
-                          const immediateTopology =
-                            await collectSurfaceTopology();
-                          assertSurfaceObserverEpochCurrent(
-                            reflowObserverEpoch,
-                            "resync_agents close_surface",
-                          );
-                          if (!topologyIsCoherent(immediateTopology)) {
-                            throw new Error(
-                              "Immediate topology is incomplete before seed cleanup; refusing close_surface.",
-                            );
-                          }
-                          const immediateSeedRef = [
-                            ...immediateTopology.surfaceRefById,
-                          ].find(
-                            ([surfaceUuid]) =>
-                              surfaceUuid.toLowerCase() === seedUuidKey,
-                          )?.[1];
-                          if (immediateSeedRef !== freshSeedRef) {
-                            throw new Error(
-                              `Seed binding changed before close_surface (${freshSeedRef} -> ${immediateSeedRef ?? "missing"}); refusing to close a recycled ref.`,
-                            );
-                          }
-                          const immediateCleanupWorkspace =
-                            immediateTopology.workspaceBySurface.get(
-                              freshSeedRef,
-                            ) ?? cleanupWorkspace;
-                          await assertSurfaceMutationAllowed(
-                            "close_surface",
-                            freshSeedRef,
-                            immediateCleanupWorkspace,
-                          );
-                          assertSurfaceObserverEpochCurrent(
-                            reflowObserverEpoch,
-                            "resync_agents close_surface",
-                          );
-                          await client.closeSurface(freshSeedRef, {
-                            ...(immediateCleanupWorkspace
-                              ? { workspace: immediateCleanupWorkspace }
-                              : {}),
-                          });
-                          assertSurfaceObserverEpochCurrent(
-                            reflowObserverEpoch,
-                            "resync_agents close_surface",
-                          );
-                        },
-                        {
-                          toolName: "close_surface",
-                          workspace: cleanupWorkspace,
-                          owner: `resync-reflow:close_surface:${agent.agent_id}`,
-                          stableSurfaceIdentity: cleanupSeedUuid,
-                        },
-                      );
-                    } catch (error) {
-                      // A seed cleanup race is isolated to this worker as well.
-                      recordReflowSkip(
-                        agent,
-                        seededSurface,
-                        "close_surface",
-                        error,
-                      );
-                    }
-                  }
-                }
-              }
-            }
-
-            if (reflowed.length > 0) {
-              discovery.invalidate();
-              after = await registry.listMerged(discovery, { force: true });
-            }
-            const discovered = await discovery.scan();
-            const afterIds = new Set(after.map((agent) => agent.agent_id));
-            const managedSurfaceIds = new Set(
-              registry
-                .list()
-                .filter((agent) => !agent.agent_id.startsWith("auto-"))
-                .map((agent) => agent.surface_id),
-            );
-            const orphanedSurfaces = discovered.filter(
-              (surface) =>
-                !surface.read_error &&
-                !managedSurfaceIds.has(surface.surface_id),
-            );
-            const orphanedHealth = orphanedSurfaces.map(
-              buildOrphanSurfaceHealth,
-            );
-            const evicted = [
-              ...new Set([
-                ...repair.evicted,
-                ...surfacelessEvicted,
-                ...[...beforeIds].filter((id) => !afterIds.has(id)),
-              ]),
-            ];
-            const diff = {
-              added: [...afterIds].filter((id) => !beforeIds.has(id)),
-              evicted,
-              repaired: repair.repaired,
-              repair_skipped: repair.skipped,
-              reflowed,
-              reflow_skipped: reflowSkipped,
-              mismatches: after
-                .filter((agent) => agent.parsed_cli_mismatch)
-                .map((agent) => agent.agent_id),
-              orphaned: orphanedSurfaces.map((surface) => surface.surface_id),
-              orphaned_health: orphanedHealth,
-              health_failures: orphanedHealth.filter(
-                (health) => health.status === "unhealthy",
-              ),
-            };
-
-            return okFormatted(formatResync(diff), {
-              diff,
-              count: after.length,
-            });
-          } catch (e) {
-            return err(e);
-          }
-        });
-        /* c8 ignore stop */
-      },
+      // AIDEV-NOTE (#481): the original body was kept here behind an early
+      // return as an unreachable rollback reference, which made three
+      // capabilities look covered while their only producer/consumer sat in
+      // dead code. It is deleted; `liveSeatProof` and `parsed_cli_mismatch`
+      // now run on the live list_agents path, and orphan surfaces are already
+      // visible there as auto-discovered rows.
+      async () =>
+        err(
+          new Error(
+            "resync_agents was removed; call list_agents for an automatically refreshed live view",
+          ),
+        ),
     );
 
     // 16. stop_agent

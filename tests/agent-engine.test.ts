@@ -3247,6 +3247,50 @@ describe("AgentEngine", () => {
       }
     });
 
+    // T1b (#488): the sweep is the third emitter of closure -- its assessment
+    // feeds the health input, this row's `report=`/`health=` text and the done
+    // notification, beside a state it derives from the screen it reads. It used
+    // to take closure from the discovery-cache probe, which is cold on this
+    // path too, so a live-working agent whose record #408 had flipped rendered
+    // the blocking `closure_without_artifact` here as well.
+    it("sweep row closure follows the screen it read, at no extra read", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-sweep-live-closure",
+          state: "done",
+          surface_id: "surface:sweep-live-closure",
+          workspace_id: "workspace:brainlayer",
+          cli: "codex",
+          role: "worker",
+          task_done_detected_at: "2026-05-25T12:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:sweep-live-closure"),
+          workspace_ref: "workspace:brainlayer",
+        },
+      ];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:sweep-live-closure",
+        text: "codex\n• Working (12s • esc to interrupt)\ncodex> ",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockClear();
+
+      await engine.runSweep();
+
+      const row = (mockClient.setStatus as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[1] as string | undefined;
+      expect(row, JSON.stringify((mockClient.setStatus as any).mock.calls)).toBeTruthy();
+      expect(row).not.toContain("closure_without_artifact");
+      // The pre-read shares `sweepCtx` with the health input's own read, so
+      // resolving closure from the screen costs nothing extra.
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(1);
+    });
+
     it("does not rewrite TASK_DONE candidate metadata while the sweep stamps liveness", async () => {
       vi.useFakeTimers();
       try {
@@ -14049,6 +14093,80 @@ Session ID: ${sessionId}`,
           previousAttemptAt = nextAttemptAt;
         }
       } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("terminalizes a retryable requeue once its bounded queue lifetime elapses (#467)", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));
+      const boundedEngine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          deliveryQueueDeadlineMs: 60_000,
+        },
+      );
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "stuck-booting-delivery",
+            state: "booting",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await boundedEngine.getRegistry().reconstitute();
+        boundedEngine.setDeliverySubmitter(async () => {
+          throw new RetryableDeliveryError(
+            'Agent "stuck-booting-delivery" is not in an interactive state (current: booting)',
+          );
+        });
+        const receipt = boundedEngine.queueDelivery({
+          agent_id: "stuck-booting-delivery",
+          text: "a lead is waiting on this",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        await boundedEngine.drainDeliveryQueue();
+        const deferred = boundedEngine.getDeliveryReceipt(
+          receipt.delivery_id,
+        )!;
+        expect(deferred).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+        });
+        // The requeue now carries a stated lifetime instead of retrying forever.
+        expect(deferred.queue_deadline_at).toBe("2026-08-11T18:01:00.000Z");
+
+        // Retries inside the lifetime stay nonterminal.
+        vi.setSystemTime(new Date("2026-08-11T18:00:30.000Z"));
+        await boundedEngine.drainDeliveryQueue();
+        expect(
+          boundedEngine.getDeliveryReceipt(receipt.delivery_id),
+        ).toMatchObject({ delivery_state: "queued", terminal: false });
+
+        // Past the lifetime the lead gets an answer, citing the gate reason.
+        vi.setSystemTime(new Date("2026-08-11T18:01:00.001Z"));
+        await boundedEngine.drainDeliveryQueue();
+        expect(
+          boundedEngine.getDeliveryReceipt(receipt.delivery_id),
+        ).toMatchObject({
+          delivery_state: "failed_confirmed",
+          terminal: true,
+          submit_verified: false,
+          resolved_at: expect.any(String),
+          error: expect.stringMatching(
+            /queue_deadline_elapsed.*not in an interactive state.*booting/s,
+          ),
+        });
+      } finally {
+        boundedEngine.dispose();
         vi.useRealTimers();
       }
     });

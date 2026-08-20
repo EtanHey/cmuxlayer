@@ -124,3 +124,22 @@ describe("pre-PR script ladder", () => {
     expect(script).toContain("exec bun run pre-pr");
   });
 });
+
+describe("release scripts run where CI runs", () => {
+  // `sed -i ''` is BSD-only. GNU sed reads the '' as the script and the real
+  // expression as a filename, exits 2, and takes release.sh down with it — the
+  // reason every Linux run of the release-receipt tests failed while the same
+  // tests passed on the maintainer's Mac.
+  it("keeps release scripts free of the BSD-only in-place sed form", () => {
+    for (const script of ["release.sh", "release-verify.sh"]) {
+      const code = readFileSync(join(repoRoot, "scripts", script), "utf8")
+        .split("\n")
+        .filter((line) => !/^\s*#/.test(line))
+        .join("\n");
+
+      expect(code, `${script} uses BSD-only sed -i ''`).not.toMatch(
+        /sed\s+-i\s+(''|"")/,
+      );
+    }
+  });
+});

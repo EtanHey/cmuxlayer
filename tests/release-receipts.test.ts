@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,6 +75,8 @@ function makeReleaseFixture(
     withBrew?: boolean;
     withBrewTapClone?: boolean;
     withNode?: boolean;
+    /** What the stubbed `gh` reports for the released commit; "" = no gh. */
+    ciConclusion?: string;
   } = {},
 ): Fixture {
   const {
@@ -82,6 +85,7 @@ function makeReleaseFixture(
     withBrew = true,
     withBrewTapClone = true,
     withNode = true,
+    ciConclusion = "success",
   } = opts;
 
   const root = makeRoot("cmuxlayer-release-receipts-");
@@ -208,6 +212,17 @@ exit 0
     );
   }
 
+  writeExecutable(
+    join(binDir, "gh"),
+    `#!/usr/bin/env bash
+printf 'gh %s\\n' "$*" >>"$STUB_LOG"
+# An unusable gh (absent, unauthenticated, offline) must read as "unknown",
+# never as "clean" -- so this stub fails the way the real one does.
+[ -n "$STUB_CI_CONCLUSION" ] || exit 1
+printf '%s\\n' "$STUB_CI_CONCLUSION"
+`,
+  );
+
   if (!withNode) {
     writeExecutable(
       join(binDir, "node"),
@@ -227,6 +242,7 @@ exit 127
     STUB_BREW_REPO: brewRepo,
     STUB_INSTALLED_VERSION: installedVersion ?? "",
     STUB_CONTRACT_OUTPUT: contractOutput,
+    STUB_CI_CONCLUSION: ciConclusion,
     CMUXLAYER_TAP_DIR: tapDir,
     CMUXLAYER_RELEASE_RECEIPTS_DIR: receiptsDir,
     CMUXLAYER_RECEIPT_HOST: "test-mac",
@@ -409,7 +425,9 @@ describe("release receipt ledger CLI", () => {
   });
 });
 
-describe("release.sh receipts", () => {
+// These run the real release scripts end to end through stubbed binaries, so
+// vitest's 5s default is the wrong budget and flakes under full-suite load.
+describe("release.sh receipts", { timeout: 30_000 }, () => {
   it("writes a release receipt with version, sha256, commit and gate results", () => {
     const fixture = makeReleaseFixture();
     const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
@@ -430,6 +448,70 @@ describe("release.sh receipts", () => {
     expect(result.stdout).toContain(
       join(fixture.receiptsDir, "release-0.4.1.json"),
     );
+  });
+
+  // #490: publish.yml failed on 105 consecutive runs and cmuxlayer never reached
+  // npm, because a release's own receipt said nothing about CI. It does now.
+  it("records the CI verdict for the commit being released", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    const receipt = readReceipt(fixture, "0.4.1");
+    expect(receipt.gates.ci).toBe("success");
+    // The verdict names the commit it is ABOUT. The read happens before the
+    // version bump, so it is the commit the release was cut from, not the tag's.
+    expect(receipt.gates.ci_commit).toBe("1".repeat(40));
+    // `gh run list --commit` matches nothing on an abbreviated sha, so a short
+    // one would silently read as "unknown". Keep the full form.
+    expect(result.log).toContain(`gh run list --commit ${"1".repeat(40)}`);
+    expect(result.stdout).toContain(
+      `CI: success (ci.yml on ${"1".repeat(40)} — the commit this release was cut from)`,
+    );
+  });
+
+  it("bumps package.json without changing its file mode", () => {
+    const fixture = makeReleaseFixture();
+    const manifest = join(fixture.repoDir, "package.json");
+    chmodSync(manifest, 0o640);
+
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(statSync(manifest).mode & 0o777).toBe(0o640);
+  });
+
+  it("never lets a release read as clean while its CI is red", () => {
+    const fixture = makeReleaseFixture({ ciConclusion: "failure" });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(readReceipt(fixture, "0.4.1").gates.ci).toBe("failure");
+    expect(result.stdout).toContain("WARNING");
+    expect(result.stdout).toContain("CI: failure");
+  });
+
+  it("records an unusable gh as unknown rather than as a pass", () => {
+    const fixture = makeReleaseFixture({ ciConclusion: "" });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(readReceipt(fixture, "0.4.1").gates.ci).toBe("unknown");
+    expect(result.stdout).toContain("WARNING");
+  });
+
+  it("refuses to release on a non-green CI under --require-ci", () => {
+    const fixture = makeReleaseFixture({ ciConclusion: "failure" });
+    const result = runScript(fixture, "release.sh", [
+      "0.4.1",
+      "--yes",
+      "--require-ci",
+    ]);
+
+    expect(result.status).not.toBe(0);
+    // The die message, not `unknown flag: --require-ci`.
+    expect(result.stderr).toContain("release: --require-ci");
+    expect(result.log).not.toContain("git push origin main");
   });
 
   it("preserves the happy-path release commands (receipts stay additive)", () => {
@@ -595,7 +677,7 @@ describe("release.sh receipts", () => {
   });
 });
 
-describe("release-verify.sh", () => {
+describe("release-verify.sh", { timeout: 30_000 }, () => {
   it("verify-only never upgrades and never resets Homebrew's tap clone", () => {
     const fixture = makeReleaseFixture({ installedVersion: "0.4.1" });
     const result = runScript(fixture, "release-verify.sh", [
