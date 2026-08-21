@@ -458,15 +458,16 @@ describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
   it("leaves a verified submitted receipt unwarned and keeps an explicit WARNING", async () => {
     const { buildPublicDeliveryReceipt, pausedTargetWarning } =
       await loadServerModule();
-    expect(
-      buildPublicDeliveryReceipt({
-        delivery_state: "submitted",
-        typed: true,
-        submit_attempted: true,
-        submit_verified: true,
-        retry_count: 0,
-      }).WARNING,
-    ).toBeUndefined();
+    const submitted = buildPublicDeliveryReceipt({
+      delivery_state: "submitted",
+      typed: true,
+      submit_attempted: true,
+      submit_verified: true,
+      submit_evidence: "status_only",
+      retry_count: 0,
+    });
+    expect(submitted.WARNING).toBeUndefined();
+    expect(submitted.submit_evidence).toBe("status_only");
     expect(
       buildPublicDeliveryReceipt({
         delivery_state: "queued",
@@ -696,6 +697,7 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
     const parsed = parseToolResult(result);
 
     expect(parsed.boot_prompt_receipt.submit_verified).toBe(true);
+    expect(parsed.boot_prompt_receipt.submit_evidence).toBe("token_delta");
     expect(parsed.boot_prompt_receipt.delivered).toBe(true);
   }, 20_000);
 });
@@ -1038,6 +1040,7 @@ describe("boot-submit readiness and attributable evidence", () => {
       delivered: true,
       delivery_state: "submitted",
       submit_verified: true,
+      submit_evidence: "transcript_echo",
       retry_count: 1,
     });
     expect(harness.returnPresses()).toBe(2);

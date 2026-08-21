@@ -8275,7 +8275,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await registeredTestTool(server, "send_to").handler(
       {
         text: "Review the P6 receipt set",
-        press_enter: false,
+        press_enter: true,
         targeting: {
           role: "reviewer",
           workspace: "workspace:one",
@@ -8299,7 +8299,7 @@ describe("agent lifecycle tool handlers", () => {
       },
       target_count: 3,
       resolved_target_count: 1,
-      delivered_count: 0,
+      delivered_count: 1,
       failed_count: 0,
       skipped_count: 2,
       receipts: expect.arrayContaining([
@@ -8307,9 +8307,11 @@ describe("agent lifecycle tool handlers", () => {
           requested_agent_id: "reviewer-a",
           agent_id: "reviewer-a",
           resolution: "resolved",
-          delivered: false,
+          delivered: true,
           typed: true,
-          terminal: false,
+          terminal: true,
+          submit_verified: true,
+          submit_evidence: "status_only",
         }),
         expect.objectContaining({
           requested_agent_id: "reviewer-excluded",

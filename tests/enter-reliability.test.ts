@@ -654,6 +654,7 @@ describe("enter reliability", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.delivery).toBe("submitted");
     expect(parsed.submit_verified).toBe(true);
+    expect(parsed.submit_evidence).toBe("cleared_composer");
     expect(parsed.retry_count).toBe(1);
     expect(client.sendCalls.join("")).toHaveLength(2000);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
@@ -691,6 +692,7 @@ describe("enter reliability", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
+    expect(parsed.submit_evidence).toBe("cleared_composer");
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,

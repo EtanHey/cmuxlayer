@@ -616,6 +616,15 @@ const DeliveryOutputShape = {
   typed: z.boolean().optional(),
   submit_attempted: z.boolean().optional(),
   submit_verified: z.boolean().nullable().optional(),
+  submit_evidence: z
+    .enum([
+      "token_delta",
+      "transcript_echo",
+      "cleared_composer",
+      "status_only",
+    ])
+    .nullable()
+    .optional(),
   delivery_id: z.string().optional(),
   duplicate_of: z.string().optional(),
   needs_attention: z.boolean().optional(),
@@ -914,10 +923,17 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
   "typed",
   "submit_attempted",
   "submit_verified",
+  "submit_evidence",
   "retry_count",
   "needs_attention",
   "attention_reason",
 ] as const;
+
+export type SubmitEvidence =
+  | "token_delta"
+  | "transcript_echo"
+  | "cleared_composer"
+  | "status_only";
 
 type PublicDeliveryState =
   | "submitted"
@@ -933,6 +949,7 @@ export interface PublicDeliveryReceipt {
   typed: boolean;
   submit_attempted: boolean;
   submit_verified: boolean | null;
+  submit_evidence?: SubmitEvidence | null;
   retry_count: number;
   delivery?: PublicDeliveryState;
   delivery_state?: PublicDeliveryState;
@@ -954,6 +971,7 @@ export function buildPublicDeliveryReceipt(input: {
   typed: boolean;
   submit_attempted: boolean;
   submit_verified: boolean | null;
+  submit_evidence?: SubmitEvidence | null;
   retry_count: number;
   needs_attention?: boolean;
   attention_reason?: string | null;
@@ -980,6 +998,9 @@ export function buildPublicDeliveryReceipt(input: {
     typed: input.typed,
     submit_attempted: input.submit_attempted,
     submit_verified: input.submit_verified,
+    ...(input.submit_verified !== null
+      ? { submit_evidence: input.submit_evidence ?? null }
+      : {}),
     retry_count: input.retry_count,
     ...(evidencedState
       ? { delivery: evidencedState, delivery_state: evidencedState }
@@ -5116,6 +5137,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     beforeMutation?: () => Promise<void>;
   }): Promise<{
     submit_verified: boolean | null;
+    submit_evidence: SubmitEvidence | null;
     submit_verification_reason: SubmitVerificationFailureReason | null;
     retry_count: number;
     delivery: "submitted" | "queued" | "queued_followup" | "pending_verify";
@@ -5125,6 +5147,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // command was at or below SEND_INPUT_CHUNK_THRESHOLD; it is not a failure.
       return {
         submit_verified: null,
+        submit_evidence: null,
         submit_verification_reason: null,
         retry_count: 0,
         delivery: "submitted",
@@ -5184,6 +5207,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ) {
           return {
             submit_verified: false,
+            submit_evidence: null,
             submit_verification_reason: "input_still_pending",
             retry_count: retryCount,
             delivery: "submitted",
@@ -5191,6 +5215,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         return {
           submit_verified: null,
+          submit_evidence: null,
           submit_verification_reason: null,
           retry_count: retryCount,
           delivery: "queued",
@@ -5203,6 +5228,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ) {
         return {
           submit_verified: null,
+          submit_evidence: null,
           submit_verification_reason: null,
           retry_count: retryCount,
           delivery: "queued_followup",
@@ -5274,8 +5300,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           bootHasTranscriptEcho ||
           cursorShowsSubmittedResponse)
       ) {
+        const submitEvidence: SubmitEvidence = bootHasTokenOrCostDelta
+          ? "token_delta"
+          : bootHasTranscriptEcho || cursorShowsSubmittedResponse
+            ? "transcript_echo"
+            : "status_only";
         return {
           submit_verified: true,
+          submit_evidence: submitEvidence,
           submit_verification_reason: null,
           retry_count: retryCount,
           delivery: "submitted",
@@ -5298,6 +5330,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sawAllowedClearedComposerEvidence = true;
           return {
             submit_verified: true,
+            submit_evidence: "cleared_composer",
             submit_verification_reason: null,
             retry_count: retryCount,
             delivery: "submitted",
@@ -5387,6 +5420,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ) {
         return {
           submit_verified: false,
+          submit_evidence: null,
           submit_verification_reason: "input_still_pending",
           retry_count: retryCount,
           delivery:
@@ -5403,6 +5437,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (sawClearedComposerEvidence && sawAllowedClearedComposerEvidence) {
       return {
         submit_verified: true,
+        submit_evidence: "cleared_composer",
         submit_verification_reason: null,
         retry_count: retryCount,
         delivery: "submitted",
@@ -5434,6 +5469,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (allowPendingVerify && submitVerified === false) {
       return {
         submit_verified: null,
+        submit_evidence: null,
         submit_verification_reason: null,
         retry_count: retryCount,
         delivery: "pending_verify",
@@ -5441,6 +5477,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
     return {
       submit_verified: submitVerified,
+      submit_evidence: null,
       submit_verification_reason: failureReason,
       retry_count: retryCount,
       delivery: "submitted",
@@ -5642,6 +5679,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
     const submittedText = opts.chunks.join("");
     let submit_verified: boolean | null = null;
+    let submit_evidence: SubmitEvidence | null = null;
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
     let retry_count = 0;
@@ -5734,6 +5772,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           beforeMutation: opts.beforeMutation,
         });
         submit_verified = verification.submit_verified;
+        submit_evidence = verification.submit_evidence;
         submit_verification_reason = verification.submit_verification_reason;
         retry_count = verification.retry_count;
         deliveryOutcome = verification.delivery;
@@ -5742,6 +5781,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           deliveryOutcome === "queued_followup"
         ) {
           submit_verified = null;
+          submit_evidence = null;
           submit_verification_reason = null;
         }
       }
@@ -5797,6 +5837,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       typed: bytes > 0,
       submit_attempted: Boolean(opts.press_enter),
       submit_verified,
+      submit_evidence,
       retry_count,
     });
 
@@ -6039,7 +6080,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     timeout_ms: number;
     baseline_metrics?: RawSubmitEvidenceMetrics | null;
     beforeRead?: () => Promise<void>;
-  }): Promise<void> => {
+  }): Promise<SubmitEvidence> => {
     const start = Date.now();
     let lastText = "";
     let lastClearedComposerInput: string | null = null;
@@ -6065,8 +6106,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // A NULL count stays inconclusive on purpose: several CLIs never
         // report one, and reading unknown as zero would break every boot.
         const consumptionRefuted = metrics.tokenCount === 0;
-        if (!consumptionRefuted && isSubmitVerifiedStatus(snapshot.parsed.status)) {
-          return;
+        if (
+          !consumptionRefuted &&
+          isSubmitVerifiedStatus(snapshot.parsed.status)
+        ) {
+          return "status_only";
         }
 
         const composerInput = extractComposerInputRegion(snapshot.text);
@@ -6079,7 +6123,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !hasPendingInput &&
           hasRawSubmitEvidenceIncrease(metrics, opts.baseline_metrics)
         ) {
-          return;
+          return "token_delta";
         }
 
         const composerCleared =
@@ -6099,7 +6143,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           if (stableClearedComposerPolls >= 2) {
-            return;
+            return "cleared_composer";
           }
         } else {
           lastClearedComposerInput = null;
@@ -6807,8 +6851,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !snapshot ||
           !screenShowsPendingInput(snapshot.text, sanitizedText)
         ) {
+          let submitEvidence: SubmitEvidence;
           try {
-            await waitForBootPromptSubmitEvidence({
+            submitEvidence = await waitForBootPromptSubmitEvidence({
               surface: deliveryRoute.surface,
               workspace: deliveryRoute.workspace,
               text: sanitizedText,
@@ -6839,6 +6884,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               typed: true,
               submit_attempted: true,
               submit_verified: true,
+              submit_evidence: submitEvidence,
               retry_count: error.retry_count,
             }),
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
@@ -15395,6 +15441,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     typed: delivery.typed,
                     submit_attempted: delivery.submit_attempted,
                     submit_verified: delivery.submit_verified,
+                    submit_evidence: delivery.submit_evidence,
                     retry_count: delivery.retry_count,
                   }),
                   accepted: true,
@@ -15713,6 +15760,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             typed: delivery.typed,
             submit_attempted: delivery.submit_attempted,
             submit_verified: delivery.submit_verified,
+            submit_evidence: delivery.submit_evidence,
             retry_count: delivery.retry_count,
           });
           failedReceiptPayload = { ...publicReceipt };
