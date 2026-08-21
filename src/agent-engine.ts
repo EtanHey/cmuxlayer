@@ -44,6 +44,7 @@ import {
 } from "./agent-registry.js";
 import type { AgentDiscovery } from "./agent-discovery.js";
 import {
+  INTERACTIVE_AGENT_STATES,
   isLiveActive,
   resolveLiveAgentState,
   type LiveAgentState,
@@ -2443,7 +2444,10 @@ export class AgentEngine {
     targetState: AgentState,
     effectiveState: AgentState = agent.state,
   ): Promise<TargetStateEvidenceSource | null> {
-    if (effectiveState !== targetState) return null;
+    const restingStateMatch =
+      INTERACTIVE_AGENT_STATES.has(targetState) &&
+      INTERACTIVE_AGENT_STATES.has(effectiveState);
+    if (effectiveState !== targetState && !restingStateMatch) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
     if (await this.hasGroundTruthDone(agent)) return "transcript";
     return this.hasRecordedOutputDoneEvidence(agent) ||
@@ -7892,7 +7896,10 @@ export class AgentEngine {
         const elapsed = Date.now() - start;
         if (elapsed >= timeoutMs) {
           clearInterval(checkInterval);
-          const current = this.registry.get(agentId);
+          await this.registry.reconcile({
+            confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+          });
+          let current = this.registry.get(agentId);
           // The timeout answer is the one a lead acts on, and it lands after
           // the memo from the last cadence refresh has expired -- so buy one
           // final observation rather than reporting the record by default.
@@ -7901,12 +7908,47 @@ export class AgentEngine {
           const timeoutLive = current
             ? await this.refreshLiveState(current)
             : null;
+          let timeoutState =
+            current && timeoutLive
+              ? this.terminationStateOf(current, timeoutLive)
+              : "error";
+          let refreshedSource: RefreshedTargetStateEvidenceSource | undefined;
+          if (current && targetState === "idle") {
+            const refreshed = await this.refreshTargetStateEvidence(
+              current,
+              targetState,
+              waitForReadyPatternMatches,
+              timeoutState,
+            );
+            current = refreshed.agent;
+            refreshedSource = refreshed.source;
+            timeoutState =
+              refreshed.source === "screen"
+                ? current.state
+                : this.terminationStateOf(current, this.liveStateOf(current));
+          }
+          const timeoutEvidence = current && targetState === "idle"
+            ? await this.getTargetStateEvidenceSource(
+                current,
+                targetState,
+                timeoutState,
+              )
+            : null;
+          if (current && timeoutEvidence) {
+            finish({
+              matched: true,
+              state: timeoutState,
+              elapsed,
+              source:
+                refreshedSource ??
+                (timeoutEvidence === "state" ? "sweep" : timeoutEvidence),
+              agent: toPublicAgent({ ...current, state: timeoutState }),
+            });
+            return;
+          }
           finish({
             matched: false,
-            state:
-              current && timeoutLive
-                ? this.terminationStateOf(current, timeoutLive)
-                : "error",
+            state: timeoutState,
             elapsed,
             source: "timeout",
             agent: current ? toPublicAgent(current) : null,
