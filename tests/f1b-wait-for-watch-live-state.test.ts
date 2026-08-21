@@ -270,6 +270,50 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.elapsed).toBeLessThan(1_000);
   });
 
+  it("attributes a cross-resting match to the screen and aligns the embedded state", async () => {
+    stateMgr.writeState(makeRecord({ state: "working", cli: "codex" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(restingCodexProbe);
+
+    const result = await engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      20_000,
+    );
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("ready");
+    expect(result.source).toBe("screen");
+    expect(result.agent?.state).toBe("ready");
+  });
+
+  it("resolves a bounded failure when final timeout reconciliation throws", async () => {
+    vi.useFakeTimers();
+    stateMgr.writeState(makeRecord({ state: "working" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(workingScreenProbe);
+    vi.spyOn(engine.getRegistry(), "reconcile").mockRejectedValueOnce(
+      new Error("state disk unavailable"),
+    );
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      500,
+    );
+    const hung = new Promise<"hung">((resolve) => {
+      setTimeout(() => resolve("hung"), 2_500);
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await Promise.race([pending, hung]);
+
+    expect(result).not.toBe("hung");
+    if (result === "hung") return;
+    expect(result.matched).toBe(false);
+    expect(result.source).toBe("timeout");
+    expect(result.error).toContain("state disk unavailable");
+  });
+
   it("matches final resting evidence instead of timing out beside an idle observation", async () => {
     vi.useFakeTimers();
     engine.dispose();

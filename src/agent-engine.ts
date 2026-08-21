@@ -7846,12 +7846,19 @@ export class AgentEngine {
       initialState,
     );
     if (initialEvidence) {
+      const stateEstablishedByScreen =
+        initialLive?.source === "screen" && initialState !== initial.state;
       return {
         matched: true,
         state: initialState,
         elapsed: Date.now() - start,
-        source: initialEvidence === "state" ? "immediate" : initialEvidence,
-        agent: toPublicAgent(initial),
+        source:
+          initialEvidence === "state"
+            ? stateEstablishedByScreen
+              ? "screen"
+              : "immediate"
+            : initialEvidence,
+        agent: toPublicAgent({ ...initial, state: initialState }),
       };
     }
 
@@ -7895,9 +7902,31 @@ export class AgentEngine {
         const elapsed = Date.now() - start;
         if (elapsed >= timeoutMs) {
           clearInterval(checkInterval);
-          await this.registry.reconcile({
-            confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
-          });
+          try {
+            await this.registry.reconcile({
+              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+            });
+          } catch (error) {
+            const current = this.registry.get(agentId);
+            const failureState = current
+              ? this.terminationStateOf(current, this.liveStateOf(current))
+              : "error";
+            const detail =
+              error instanceof Error ? error.message : String(error);
+            finish({
+              matched: false,
+              state: failureState,
+              elapsed,
+              source: "timeout",
+              agent: current
+                ? toPublicAgent({ ...current, state: failureState })
+                : null,
+              error:
+                `Timed out after ${timeoutMs}ms waiting for state "${targetState}"; ` +
+                `final reconciliation failed: ${detail}`,
+            });
+            return;
+          }
           let current = this.registry.get(agentId);
           // The timeout answer is the one a lead acts on, and it lands after
           // the memo from the last cadence refresh has expired -- so buy one
