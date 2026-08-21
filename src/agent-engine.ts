@@ -735,7 +735,6 @@ export interface RolePlacementReconcileSummary {
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
 
-const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
 /** One retry: a watch observation must not read a transient failure as absence. */
@@ -7951,7 +7950,9 @@ export class AgentEngine {
             state: timeoutState,
             elapsed,
             source: "timeout",
-            agent: current ? toPublicAgent(current) : null,
+            agent: current
+              ? toPublicAgent({ ...current, state: timeoutState })
+              : null,
             error: `Timed out after ${timeoutMs}ms waiting for state "${targetState}"`,
           });
           return;
@@ -8918,10 +8919,10 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    if (!INTERACTIVE_STATES.has(agent.state)) {
+    if (!INTERACTIVE_AGENT_STATES.has(agent.state)) {
       throw new Error(
         `Agent "${agentId}" is not in an interactive state (current: ${agent.state}). ` +
-          `Must be in: ${[...INTERACTIVE_STATES].join(", ")}`,
+          `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}`,
       );
     }
 

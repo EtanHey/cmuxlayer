@@ -518,6 +518,7 @@ describe("F1b round 2 — the wait buys its own evidence instead of hoping the c
     expect(result.source).toBe("timeout");
     expect(result.elapsed).toBeGreaterThanOrEqual(1_500);
     expect(result.state).toBe("working");
+    expect(result.agent?.state).toBe("working");
     expect(result.error).not.toBe("Agent has already completed");
   });
 
