@@ -7941,7 +7941,15 @@ export class AgentEngine {
               ? this.terminationStateOf(current, timeoutLive)
               : "error";
           let refreshedSource: RefreshedTargetStateEvidenceSource | undefined;
-          if (current && targetState === "idle") {
+          const finalReadyNeedsAnotherConsecutiveObservation =
+            current !== null &&
+            targetState === "ready" &&
+            matchReadyPattern(current.cli, "").consecutive > 1;
+          if (
+            current &&
+            INTERACTIVE_AGENT_STATES.has(targetState) &&
+            !finalReadyNeedsAnotherConsecutiveObservation
+          ) {
             const refreshed = await this.refreshTargetStateEvidence(
               current,
               targetState,
@@ -7955,7 +7963,24 @@ export class AgentEngine {
                 ? current.state
                 : this.terminationStateOf(current, this.liveStateOf(current));
           }
-          const timeoutEvidence = current && targetState === "idle"
+          const timeoutStateEstablishedByScreen =
+            current !== null &&
+            timeoutLive?.source === "screen" &&
+            timeoutState !== current.state;
+          const singleObservationReadyIsSafe =
+            current !== null &&
+            targetState === "ready" &&
+            timeoutStateEstablishedByScreen &&
+            matchReadyPattern(current.cli, "").consecutive === 1;
+          const timeoutInteractiveEvidenceIsGated =
+            targetState === "idle" ||
+            refreshedSource !== undefined ||
+            (current !== null && INTERACTIVE_AGENT_STATES.has(current.state)) ||
+            singleObservationReadyIsSafe;
+          const timeoutEvidence =
+            current &&
+            INTERACTIVE_AGENT_STATES.has(targetState) &&
+            timeoutInteractiveEvidenceIsGated
             ? await this.getTargetStateEvidenceSource(
                 current,
                 targetState,
@@ -7969,7 +7994,11 @@ export class AgentEngine {
               elapsed,
               source:
                 refreshedSource ??
-                (timeoutEvidence === "state" ? "sweep" : timeoutEvidence),
+                (timeoutEvidence === "state"
+                  ? timeoutStateEstablishedByScreen
+                    ? "screen"
+                    : "sweep"
+                  : timeoutEvidence),
               agent: toPublicAgent({ ...current, state: timeoutState }),
             });
             return;
@@ -8038,6 +8067,8 @@ export class AgentEngine {
           liveState,
         );
         if (evidenceSource) {
+          const stateEstablishedByScreen =
+            live?.source === "screen" && liveState !== current.state;
           clearInterval(checkInterval);
           finish({
             matched: true,
@@ -8045,8 +8076,12 @@ export class AgentEngine {
             elapsed,
             source:
               refreshed.source ??
-              (evidenceSource === "state" ? "sweep" : evidenceSource),
-            agent: toPublicAgent(current),
+              (evidenceSource === "state"
+                ? stateEstablishedByScreen
+                  ? "screen"
+                  : "sweep"
+                : evidenceSource),
+            agent: toPublicAgent({ ...current, state: liveState }),
           });
           return;
         }

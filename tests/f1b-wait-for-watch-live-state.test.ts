@@ -314,6 +314,79 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.error).toContain("state disk unavailable");
   });
 
+  it("matches a ready target from gated final screen evidence", async () => {
+    vi.useFakeTimers();
+    engine.dispose();
+    buildEngine(
+      makeMockClient({
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:worker",
+          text: RESTING_CODEX_SCREEN,
+          lines: 30,
+          scrollback_used: false,
+        }),
+      } as Partial<CmuxClient>),
+    );
+    stateMgr.writeState(makeRecord({ state: "booting", cli: "codex" }));
+    await engine.getRegistry().reconstitute();
+    const freshProbe = vi
+      .fn()
+      .mockImplementationOnce(async (agent: AgentRecord) =>
+        workingScreenProbe(agent),
+      )
+      .mockImplementation(async (agent: AgentRecord) =>
+        restingCodexProbe(agent),
+      );
+    engine.setFreshLiveStateProbe(freshProbe);
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "ready",
+      500,
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const result = await pending;
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("ready");
+    expect(result.source).toBe("screen");
+    expect(result.agent?.state).toBe("ready");
+  });
+
+  it("preserves screen provenance and state on a polling cross-rest match", async () => {
+    vi.useFakeTimers();
+    engine.dispose();
+    buildEngine(
+      makeMockClient({
+        readScreen: vi.fn().mockRejectedValue(new Error("screen write race")),
+      } as Partial<CmuxClient>),
+    );
+    stateMgr.writeState(makeRecord({ state: "working", cli: "codex" }));
+    await engine.getRegistry().reconstitute();
+    const freshProbe = vi
+      .fn()
+      .mockImplementationOnce(async (agent: AgentRecord) =>
+        workingScreenProbe(agent),
+      )
+      .mockImplementation(async (agent: AgentRecord) =>
+        restingCodexProbe(agent),
+      );
+    engine.setFreshLiveStateProbe(freshProbe);
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      5_000,
+    );
+    await vi.advanceTimersByTimeAsync(2_500);
+    const result = await pending;
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("ready");
+    expect(result.source).toBe("screen");
+    expect(result.agent?.state).toBe("ready");
+  });
+
   it("matches final resting evidence instead of timing out beside an idle observation", async () => {
     vi.useFakeTimers();
     engine.dispose();
