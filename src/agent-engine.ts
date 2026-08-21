@@ -44,6 +44,7 @@ import {
 } from "./agent-registry.js";
 import type { AgentDiscovery } from "./agent-discovery.js";
 import {
+  INTERACTIVE_AGENT_STATES,
   isLiveActive,
   resolveLiveAgentState,
   type LiveAgentState,
@@ -734,7 +735,6 @@ export interface RolePlacementReconcileSummary {
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
 
-const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
 /** One retry: a watch observation must not read a transient failure as absence. */
@@ -2443,7 +2443,10 @@ export class AgentEngine {
     targetState: AgentState,
     effectiveState: AgentState = agent.state,
   ): Promise<TargetStateEvidenceSource | null> {
-    if (effectiveState !== targetState) return null;
+    const restingStateMatch =
+      INTERACTIVE_AGENT_STATES.has(targetState) &&
+      INTERACTIVE_AGENT_STATES.has(effectiveState);
+    if (effectiveState !== targetState && !restingStateMatch) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
     if (await this.hasGroundTruthDone(agent)) return "transcript";
     return this.hasRecordedOutputDoneEvidence(agent) ||
@@ -7843,12 +7846,19 @@ export class AgentEngine {
       initialState,
     );
     if (initialEvidence) {
+      const stateEstablishedByScreen =
+        initialLive?.source === "screen" && initialState !== initial.state;
       return {
         matched: true,
         state: initialState,
         elapsed: Date.now() - start,
-        source: initialEvidence === "state" ? "immediate" : initialEvidence,
-        agent: toPublicAgent(initial),
+        source:
+          initialEvidence === "state"
+            ? stateEstablishedByScreen
+              ? "screen"
+              : "immediate"
+            : initialEvidence,
+        agent: toPublicAgent({ ...initial, state: initialState }),
       };
     }
 
@@ -7892,7 +7902,32 @@ export class AgentEngine {
         const elapsed = Date.now() - start;
         if (elapsed >= timeoutMs) {
           clearInterval(checkInterval);
-          const current = this.registry.get(agentId);
+          try {
+            await this.registry.reconcile({
+              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+            });
+          } catch (error) {
+            const current = this.registry.get(agentId);
+            const failureState = current
+              ? this.terminationStateOf(current, this.liveStateOf(current))
+              : "error";
+            const detail =
+              error instanceof Error ? error.message : String(error);
+            finish({
+              matched: false,
+              state: failureState,
+              elapsed,
+              source: "timeout",
+              agent: current
+                ? toPublicAgent({ ...current, state: failureState })
+                : null,
+              error:
+                `Timed out after ${timeoutMs}ms waiting for state "${targetState}"; ` +
+                `final reconciliation failed: ${detail}`,
+            });
+            return;
+          }
+          let current = this.registry.get(agentId);
           // The timeout answer is the one a lead acts on, and it lands after
           // the memo from the last cadence refresh has expired -- so buy one
           // final observation rather than reporting the record by default.
@@ -7901,15 +7936,81 @@ export class AgentEngine {
           const timeoutLive = current
             ? await this.refreshLiveState(current)
             : null;
+          let timeoutState =
+            current && timeoutLive
+              ? this.terminationStateOf(current, timeoutLive)
+              : "error";
+          let refreshedSource: RefreshedTargetStateEvidenceSource | undefined;
+          const finalReadyNeedsAnotherConsecutiveObservation =
+            current !== null &&
+            targetState === "ready" &&
+            matchReadyPattern(current.cli, "").consecutive > 1;
+          if (
+            current &&
+            INTERACTIVE_AGENT_STATES.has(targetState) &&
+            !finalReadyNeedsAnotherConsecutiveObservation
+          ) {
+            const refreshed = await this.refreshTargetStateEvidence(
+              current,
+              targetState,
+              waitForReadyPatternMatches,
+              timeoutState,
+            );
+            current = refreshed.agent;
+            refreshedSource = refreshed.source;
+            timeoutState =
+              refreshed.source === "screen"
+                ? current.state
+                : this.terminationStateOf(current, this.liveStateOf(current));
+          }
+          const timeoutStateEstablishedByScreen =
+            current !== null &&
+            timeoutLive?.source === "screen" &&
+            timeoutState !== current.state;
+          const singleObservationReadyIsSafe =
+            current !== null &&
+            targetState === "ready" &&
+            timeoutStateEstablishedByScreen &&
+            matchReadyPattern(current.cli, "").consecutive === 1;
+          const timeoutInteractiveEvidenceIsGated =
+            targetState === "idle" ||
+            refreshedSource !== undefined ||
+            (current !== null && INTERACTIVE_AGENT_STATES.has(current.state)) ||
+            singleObservationReadyIsSafe;
+          const timeoutEvidence =
+            current &&
+            INTERACTIVE_AGENT_STATES.has(targetState) &&
+            timeoutInteractiveEvidenceIsGated
+            ? await this.getTargetStateEvidenceSource(
+                current,
+                targetState,
+                timeoutState,
+              )
+            : null;
+          if (current && timeoutEvidence) {
+            finish({
+              matched: true,
+              state: timeoutState,
+              elapsed,
+              source:
+                refreshedSource ??
+                (timeoutEvidence === "state"
+                  ? timeoutStateEstablishedByScreen
+                    ? "screen"
+                    : "sweep"
+                  : timeoutEvidence),
+              agent: toPublicAgent({ ...current, state: timeoutState }),
+            });
+            return;
+          }
           finish({
             matched: false,
-            state:
-              current && timeoutLive
-                ? this.terminationStateOf(current, timeoutLive)
-                : "error",
+            state: timeoutState,
             elapsed,
             source: "timeout",
-            agent: current ? toPublicAgent(current) : null,
+            agent: current
+              ? toPublicAgent({ ...current, state: timeoutState })
+              : null,
             error: `Timed out after ${timeoutMs}ms waiting for state "${targetState}"`,
           });
           return;
@@ -7966,6 +8067,8 @@ export class AgentEngine {
           liveState,
         );
         if (evidenceSource) {
+          const stateEstablishedByScreen =
+            live?.source === "screen" && liveState !== current.state;
           clearInterval(checkInterval);
           finish({
             matched: true,
@@ -7973,8 +8076,12 @@ export class AgentEngine {
             elapsed,
             source:
               refreshed.source ??
-              (evidenceSource === "state" ? "sweep" : evidenceSource),
-            agent: toPublicAgent(current),
+              (evidenceSource === "state"
+                ? stateEstablishedByScreen
+                  ? "screen"
+                  : "sweep"
+                : evidenceSource),
+            agent: toPublicAgent({ ...current, state: liveState }),
           });
           return;
         }
@@ -8876,10 +8983,10 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    if (!INTERACTIVE_STATES.has(agent.state)) {
+    if (!INTERACTIVE_AGENT_STATES.has(agent.state)) {
       throw new Error(
         `Agent "${agentId}" is not in an interactive state (current: ${agent.state}). ` +
-          `Must be in: ${[...INTERACTIVE_STATES].join(", ")}`,
+          `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}`,
       );
     }
 
