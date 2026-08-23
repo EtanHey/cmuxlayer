@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 const spawnMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
+const execFileSyncMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
   execFile: execFileMock,
+  execFileSync: execFileSyncMock,
 }));
 
 import {
@@ -47,6 +49,7 @@ import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 import { dispatch, readInbox, writeHeartbeat } from "../src/inbox.js";
 import { readWatchRegistry } from "../src/watch-spec.js";
 import { useHarnessHome } from "./helpers/harness-home.js";
+import { persistProductionProcessRecord } from "./helpers/production-process-record.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
 // #482/#492: `resumable` reads the transcript store, so these tests own a
@@ -3697,6 +3700,128 @@ describe("AgentEngine", () => {
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe("booting");
     });
 
+    it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
+      const agentId = "agent-live-pid-must-not-resume";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry: engine.getRegistry(),
+        registeredAtMs: Date.parse("2026-08-23T11:00:05.000Z"),
+        record: makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:live-process",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "claude",
+          cli_session_id: sessionId,
+          launcher_name: "brainlayerClaude",
+          pid: null,
+        }),
+      });
+      harnessHome.give("claude", sessionId);
+      execFileSyncMock.mockReturnValueOnce("Sun Aug 23 11:00:02 2026\n");
+
+      // D1 -> D4 -> D2 is one chain: an unsafe close leaves a live process in
+      // terminal registry state, and terminal registry state is currently the
+      // only resume guard. Process liveness must close that duplication path.
+      expect(() => process.kill(process.pid, 0)).not.toThrow();
+      await expect(engine.resumeAgent(agentId)).rejects.toThrow(
+        new RegExp(
+          `(?:alive|live).*${process.pid}|${process.pid}.*(?:alive|live)`,
+          "i",
+        ),
+      );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("refuses a forced resume when the recorded pid is definitely alive", async () => {
+      const agentId = "agent-live-pid-force-must-not-resume";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry: engine.getRegistry(),
+        registeredAtMs: Date.parse("2026-08-23T11:00:05.000Z"),
+        record: makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:live-force-process",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "claude",
+          cli_session_id: sessionId,
+          launcher_name: "brainlayerClaude",
+          pid: null,
+        }),
+      });
+      harnessHome.give("claude", sessionId);
+      execFileSyncMock.mockReturnValueOnce("Sun Aug 23 11:00:02 2026\n");
+
+      await expect(
+        engine.resumeAgent(agentId, { force: true }),
+      ).rejects.toThrow(/still alive/i);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("allows an explicit forced resume when pid liveness is unprobeable", async () => {
+      const agentId = "agent-unknown-pid-force-resume";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:old-unknown-process",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "codex",
+          cli_session_id: sessionId,
+          launcher_name: "brainlayerCodex",
+          pid: 34567,
+        }),
+      );
+      harnessHome.give("codex", sessionId);
+      await engine.getRegistry().reconstitute();
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          if (pid === 34567 && signal === 0) {
+            throw Object.assign(new Error("operation not permitted"), {
+              code: "EPERM",
+            });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        const resumed = await engine.resumeAgent(agentId, { force: true });
+
+        expect(resumed.agent_id).toBe(agentId);
+        expect(resumed.surface_id).toBe("surface:new");
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
+    it("reports non-terminal state before consulting pid liveness on resume", async () => {
+      const agentId = "agent-working-pid-resume";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "working",
+          surface_id: "surface:working",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          pid: process.pid,
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await expect(engine.resumeAgent(agentId)).rejects.toThrow(
+        /is working.*requires a terminal agent/i,
+      );
+    });
+
     it("explicitly resumes a launcher-less agent through the raw CLI", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -4083,6 +4208,52 @@ describe("AgentEngine", () => {
       expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toBeNull();
     });
 
+    it("does not backfill Codex pid evidence from self-registration", async () => {
+      const agentId = "cmuxlayerCodex-existing-session";
+      const sessionId = "019fec96-588d-7000-8000-000000000000";
+      const selfRegistrationResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: null,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: selfRegistrationResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          repo: "cmuxlayer",
+          cli: "codex",
+          state: "working",
+          surface_id: "surface:codex-existing-session",
+          surface_uuid: "11111111-2222-4333-8444-555555555555",
+          cli_session_id: sessionId,
+          cli_session_path: "/durable/codex/rollout.jsonl",
+          pid: null,
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:codex-existing-session"),
+          id: "11111111-2222-4333-8444-555555555555",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.captureBootSessionId(agentId);
+
+      expect(selfRegistrationResolver).not.toHaveBeenCalled();
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        pid: null,
+        cli_session_path: "/durable/codex/rollout.jsonl",
+      });
+    });
+
     it("does not advertise an unrunnable legacy session route", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -4251,6 +4422,126 @@ Session ID: ${sessionId}`,
       });
       expect(stateMgr.readState(stableAgentId)?.agent_id).toBe(stableAgentId);
       expect(existsSync(stableMarker)).toBe(true);
+    });
+
+    it("preserves a durable transcript path while backfilling pid-only registration evidence", async () => {
+      const agentId = "cmuxlayerClaude-durable-path";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const sessionPath = "/durable/claude/session.jsonl";
+      const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: () => ({
+          session_id: sessionId,
+          path: null,
+          pid: process.pid,
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:durable-path",
+          surface_uuid: surfaceUuid,
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: sessionId,
+          cli_session_path: sessionPath,
+          pid: null,
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:durable-path"),
+          id: surfaceUuid,
+          workspace_ref: "ws:durable-path",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.captureBootSessionId(agentId);
+
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      });
+    });
+
+    it("keeps captured pid evidence when a pending row converges on an existing final session", async () => {
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const finalAgentId = "cmuxlayerClaude-019d9aa5";
+      const pendingAgentId = "cmuxlayerClaude-pending-pid-merge";
+      const surfaceUuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: () => ({
+          session_id: sessionId,
+          path: null,
+          pid: process.pid,
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: finalAgentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:existing-final",
+          surface_uuid: surfaceUuid,
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: sessionId,
+          cli_session_path: "/durable/claude/existing.jsonl",
+          pid: null,
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: pendingAgentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "booting",
+          surface_id: "surface:existing-final",
+          surface_uuid: surfaceUuid,
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: null,
+          cli_session_path: null,
+          pid: null,
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:existing-final"),
+          id: surfaceUuid,
+          workspace_ref: "ws:existing-final",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.captureBootSessionId(pendingAgentId);
+
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        cli_session_id: sessionId,
+        cli_session_path: "/durable/claude/existing.jsonl",
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      });
+      expect(engine.getAgentState(pendingAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      });
+      expect(stateMgr.readState(pendingAgentId)).toBeNull();
     });
 
     it("periodically reaps only old pending markers absent from registry and state", async () => {
@@ -10758,6 +11049,53 @@ Session ID: ${sessionId}`,
       return record;
     }
 
+    it("P0 D1 never declares a stable surface UUID dead while the agent pid is alive", async () => {
+      const stableUuid = "11111111-2222-4333-8444-555555555555";
+      const record = installLegacyAgent(
+        {
+          agent_id: "live-pid-stale-surface-root",
+          cli: "claude",
+          state: "error",
+          pid: null,
+          surface_id: "surface:recently-observed",
+          surface_uuid: stableUuid,
+          error: `Surface surface:recently-observed disappeared`,
+        },
+        [
+          {
+            ...makeSurface("surface:witness"),
+            id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            workspace_ref: "workspace:witness",
+          },
+        ],
+      );
+      const productionRecord = await persistProductionProcessRecord({
+        stateMgr,
+        registry: engine.getRegistry(),
+        record,
+      });
+
+      expect(productionRecord).toMatchObject({
+        cli: "claude",
+        pid: process.pid,
+      });
+      expect(() => process.kill(process.pid, 0)).not.toThrow();
+      let routeError: unknown = null;
+      try {
+        await engine.resolveAgentIoRoute(productionRecord.agent_id);
+      } catch (error) {
+        routeError = error;
+      }
+
+      expect(routeError).toBeInstanceOf(Error);
+      expect((routeError as Error).message).toMatch(
+        new RegExp(`live recorded pid ${process.pid}`, "i"),
+      );
+      expect((routeError as Error).message).not.toMatch(
+        /stable surface UUID.*(?:not live|no longer live)/i,
+      );
+    });
+
     it("refuses an owned UUID-less route when fresh all-ref topology lacks its ref", async () => {
       const record = installLegacyAgent({}, [makeSurface("surface:witness")]);
 
@@ -10962,6 +11300,57 @@ Session ID: ${sessionId}`,
         "c-c",
         expect.anything(),
       );
+    });
+
+    it("refuses socketless teardown when another record claims the same stable UUID", async () => {
+      engine.dispose();
+      const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => liveSurfaces,
+        {
+          observerIdProvider: () => null,
+          observerEpochProvider: () => null,
+        },
+      );
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        stopPostConditionTimeoutMs: 20,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stop-stale-duplicate",
+          state: "working",
+          surface_id: "surface:stale-ref",
+          surface_uuid: surfaceUuid,
+          workspace_id: "ws:1",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stop-canonical-owner",
+          state: "ready",
+          surface_id: "surface:canonical",
+          surface_uuid: surfaceUuid,
+          workspace_id: "ws:1",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:canonical"),
+          id: surfaceUuid,
+          workspace_ref: "ws:1",
+        },
+      ];
+      await registry.reconstitute();
+
+      await expect(
+        engine.stopAgent("agent-stop-stale-duplicate"),
+      ).rejects.toThrow(/same stable surface UUID|claimed by.*canonical-owner/i);
+
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
     });
 
     it("guards a freshly re-resolved moved UUID immediately before stop I/O", async () => {

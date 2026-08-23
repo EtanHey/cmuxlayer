@@ -36,6 +36,7 @@ import { validateSurfaceIdentityBijection } from "./surface-topology.js";
 import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
 import { inferRepoFromDirectory } from "./repo-workspace.js";
 import { resumeArtifactStatus } from "./resume-verification.js";
+import { agentProcessMayBeAlive } from "./process-liveness.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
@@ -840,6 +841,16 @@ export class AgentRegistry {
       }
 
       if (TERMINAL_STATES.has(agent.state)) continue;
+
+      // A topology miss cannot overrule a process that still exists. The live
+      // incident that motivated this guard removed an engine-issued id 10 ms
+      // after one missing-surface observation, then discovery re-minted the
+      // pane under its bare seat name. Retain the canonical row and all of its
+      // parent/provenance metadata until the recorded pid is proven gone.
+      if (agentProcessMayBeAlive(agent)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
 
       if (
         this.isSurfacelessConfirmed(
@@ -1741,6 +1752,11 @@ export class AgentRegistry {
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
         continue;
       }
+      if (agentProcessMayBeAlive(agent)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        this.unclaimedAbsenceObservations.delete(agent.agent_id);
+        continue;
+      }
       if (this.matchingLiveSurface(agent, surfaces)) {
         this.surfacelessObservations.delete(agent.agent_id);
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
@@ -2050,25 +2066,42 @@ export class AgentRegistry {
       evicted.add(removed);
     }
 
-    for (const entry of discovered) {
-      if (entry.read_error) continue;
-      if (opts?.orphansOnly) {
-        const surfaceRecords = [...this.agents.values()].filter(
-          (record) => record.surface_id === entry.surface_id,
-        );
-        const needsRepair =
-          surfaceRecords.length === 0 ||
-          surfaceRecords.some(
-            (record) =>
-              isAutoAgentId(record.agent_id) ||
-              isPendingAgentId(record.agent_id),
-          );
-        if (!needsRepair) continue;
-      }
-      const candidate = this.repairCandidateForDiscovery(
-        entry,
-        opts?.seatRegistry,
+    const repairEligible = discovered.map((entry) => {
+      if (entry.read_error) return false;
+      if (!opts?.orphansOnly) return true;
+      const surfaceRecords = [...this.agents.values()].filter(
+        (record) => record.surface_id === entry.surface_id,
       );
+      return (
+        surfaceRecords.length === 0 ||
+        surfaceRecords.some(
+          (record) =>
+            isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id),
+        )
+      );
+    });
+    const candidates = discovered.map((entry, index) =>
+      repairEligible[index]
+        ? this.repairCandidateForDiscovery(entry, opts?.seatRegistry)
+        : null,
+    );
+    const candidateCounts = new Map<string, number>();
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      candidateCounts.set(
+        candidate.agentId,
+        (candidateCounts.get(candidate.agentId) ?? 0) + 1,
+      );
+    }
+    for (const [agentId, count] of candidateCounts) {
+      if (count > 1) {
+        this.aliases.delete(agentId);
+      }
+    }
+
+    for (const [entryIndex, entry] of discovered.entries()) {
+      if (!repairEligible[entryIndex]) continue;
+      const candidate = candidates[entryIndex];
       if (!candidate) continue;
 
       try {
@@ -2077,6 +2110,7 @@ export class AgentRegistry {
           candidate,
           evicted,
           liveSurfaceRefs,
+          candidateCounts.get(candidate.agentId) === 1,
         );
         if (repair) {
           repaired.push(repair);
@@ -2159,6 +2193,7 @@ export class AgentRegistry {
     candidate: RegistryRepairCandidate,
     evicted: Set<string>,
     liveSurfaceRefs: ReadonlySet<string>,
+    candidateAliasIsUnique: boolean,
   ): RegistryRepairEntry | null {
     const recordsForSurface = [...this.agents.values()].filter(
       (agent) => agent.surface_id === discovered.surface_id,
@@ -2188,6 +2223,12 @@ export class AgentRegistry {
     );
 
     if (managedRecord) {
+      const existingAliasTarget = this.get(candidate.agentId);
+      const shouldPublishCandidateAlias =
+        candidateAliasIsUnique &&
+        candidate.agentId !== managedRecord.agent_id &&
+        (!existingAliasTarget ||
+          existingAliasTarget.agent_id === managedRecord.agent_id);
       for (const duplicate of recordsForSurface) {
         if (
           !isAutoAgentId(duplicate.agent_id) ||
@@ -2208,6 +2249,9 @@ export class AgentRegistry {
         discovered,
         candidate,
       );
+      if (updated && shouldPublishCandidateAlias) {
+        this.aliases.set(candidate.agentId, managedRecord.agent_id);
+      }
       return updated
         ? this.repairEntry(updated, discovered, candidate, "updated")
         : null;
@@ -2296,7 +2340,7 @@ export class AgentRegistry {
       patch.surface_observer_id = observerId;
     }
     if (Object.keys(patch).length === 0) {
-      return null;
+      return record;
     }
 
     let updated: AgentRecord;
@@ -2528,6 +2572,9 @@ export class AgentRegistry {
       if (shouldRetainForExplicitResume(agent)) {
         continue;
       }
+      if (agentProcessMayBeAlive(agent)) {
+        continue;
+      }
       if (!this.canPurgeAtStartup(agent)) {
         continue;
       }
@@ -2584,6 +2631,10 @@ export class AgentRegistry {
         continue;
       }
       if (shouldRetainForExplicitResume(agent)) {
+        continue;
+      }
+      if (agentProcessMayBeAlive(agent)) {
+        this.surfacelessObservations.delete(agent.agent_id);
         continue;
       }
       const role = inferRecordRoleOrNull(agent);

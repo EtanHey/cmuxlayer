@@ -87,6 +87,8 @@ export interface AgentRecord {
    */
   boot_prompt_text?: string | null;
   pid: number | null;
+  /** Hook registration time that binds `pid` to this launch generation. */
+  pid_registered_at?: string | null;
   version: number;
   created_at: string;
   updated_at: string;

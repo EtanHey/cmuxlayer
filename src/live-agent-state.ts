@@ -157,19 +157,12 @@ export function isLiveInteractive(live: LiveAgentState): boolean {
  * says `done`. Gating this on the record is what returned `delivery:"failed"`,
  * `terminal:true` to an agent sitting at a live prompt (ledger row 4).
  *
- * Deliberately only ever WIDENS what the record allowed. A false refusal to a
- * live agent is the harm this lane exists to kill; the other direction already
- * has `allow_busy` and the bare-shell refusal ahead of it.
+ * A target-scoped live ready prompt is authoritative for this question even
+ * when the registry still says `working`: the prompt proves the composer can
+ * accept input, while the record only describes an earlier turn. The
+ * bare-shell and picker/overlay guards run before this decision.
  */
 export function isLiveDeliverable(live: LiveAgentState): boolean {
   if (INTERACTIVE_AGENT_STATES.has(live.registry_state)) return true;
-  // A live agent prompt overrides a TERMINAL record — that, and only that, is
-  // the #408 poisoning case. Every other record state keeps its gate: a
-  // `booting` pane may still be receiving its launcher line, and a `working`
-  // one is mid-turn, where a momentarily-ready parse must not be read as
-  // permission to type (that is what `allow_busy` is for).
-  return (
-    live.screen_state === "ready" &&
-    TERMINAL_AGENT_STATES.has(live.registry_state)
-  );
+  return live.registry_state !== "booting" && live.screen_state === "ready";
 }

@@ -261,6 +261,33 @@ describe("F1 — live state, not the stale registry record", () => {
     // separate state-machine decision, not part of this gate fix.
   });
 
+  it("P1 D8 submits to a screen-idle agent even when its registry record says working", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-bff10108",
+        surface_id: client.idleSurface,
+        state: "working",
+      }),
+    );
+
+    const result = await callTool(server, "send_to", {
+      mode: "agent",
+      agent_id: "cmuxlayerCodex-bff10108",
+      text: "Phase 1 now",
+    });
+    const parsed = parseResult(result);
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.accepted ?? parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.delivered, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.submit_verified, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.delivery_state ?? parsed.delivery).not.toBe("queued");
+    expect(client.sendCalls).toContain(
+      `${client.idleSurface}:Phase 1 now`,
+    );
+  });
+
   it("send_to still refuses when the live screen agrees the surface is dead", async () => {
     client.screens["surface:idle"] = "$ ";
     registerAgent(
@@ -354,6 +381,45 @@ describe("F1 — live state, not the stale registry record", () => {
     expect(parsed.agents.map((agent: any) => agent.agent_id)).toEqual([
       "cmuxlayerCodex-childoflive",
     ]);
+  });
+
+  it("P0 D3 keeps a lead's mine=true children visible in list_surfaces", async () => {
+    const lead = registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerClaude-p0-lead",
+        surface_id: client.idleSurface,
+        state: "ready",
+      }),
+    );
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-p0-child",
+        surface_id: client.workingSurface,
+        state: "working",
+        parent_agent_id: lead.agent_id,
+      }),
+    );
+
+    const mine = await runWithCallerContext(
+      { workspaceId: client.workspace, surfaceId: lead.surface_id },
+      async () =>
+        parseResult(await callTool(server, "list_agents", { mine: true })),
+    );
+    const listed = parseResult(
+      await callTool(server, "list_surfaces", { workspace: client.workspace }),
+    );
+    const surfaceRefs = new Set(
+      (listed.surfaces ?? []).map((surface: { ref?: string }) => surface.ref),
+    );
+
+    expect(mine.agents.map((agent: any) => agent.agent_id)).toEqual([
+      "cmuxlayerCodex-p0-child",
+    ]);
+    for (const child of mine.agents) {
+      expect(surfaceRefs).toContain(child.surface_id);
+    }
   });
 
   it("#468: a terminal record from a prior observer cannot claim a recycled ref", async () => {

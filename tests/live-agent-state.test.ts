@@ -112,6 +112,18 @@ describe("resolveLiveAgentState — live truth, registry as fallback provenance"
     expect(isLiveDeliverable(resolved)).toBe(true);
   });
 
+  it("does not deliver into a ready composer while boot-prompt delivery still owns the pane", () => {
+    const resolved = resolveLiveAgentState(record({ state: "booting" }), {
+      status: "idle",
+      agent_type: "claude",
+      control_state: "ready",
+    });
+
+    expect(resolved.registry_state).toBe("booting");
+    expect(resolved.screen_state).toBe("ready");
+    expect(isLiveDeliverable(resolved)).toBe(false);
+  });
+
   it("lets a ready prompt clear a stale error record", () => {
     const resolved = resolveLiveAgentState(record({ state: "error" }), {
       status: "idle",

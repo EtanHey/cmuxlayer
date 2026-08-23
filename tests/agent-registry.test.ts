@@ -12,6 +12,7 @@ import type { AgentRecord, AgentState } from "../src/agent-types.js";
 import type { DiscoveredAgent } from "../src/agent-discovery.js";
 import type { SeatRegistry } from "../src/seat-identity.js";
 import type { CmuxSurface } from "../src/types.js";
+import { persistProductionProcessRecord } from "./helpers/production-process-record.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-registry");
 const DEAD_CODEX_SHELL_SCREEN = (
@@ -1758,6 +1759,332 @@ describe("AgentRegistry", () => {
   });
 
   describe("repairFromDiscovery", () => {
+    it("skips healthy surfaces before candidate inference in orphans-only repair", () => {
+      const healthy = makeRecord({
+        agent_id: "healthy-managed-agent",
+        surface_id: "surface:healthy",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+      });
+      stateMgr.writeState(healthy);
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        explicitRoleProvider: (entry) => {
+          if (entry.surface_id === healthy.surface_id) {
+            throw new Error("healthy surface role inference must be skipped");
+          }
+          return "worker";
+        },
+      });
+      registry.set(healthy.agent_id, healthy);
+
+      expect(() =>
+        registry.repairFromDiscovery(
+          [
+            makeDiscovered({
+              surface_id: healthy.surface_id,
+              surface_uuid: healthy.surface_uuid,
+              surface_title: "publish 24h dashboard",
+              cli: "codex",
+            }),
+            makeDiscovered({
+              surface_id: "surface:orphan",
+              surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              surface_title: "golemsCodex",
+              cli: "codex",
+            }),
+          ],
+          { seatRegistry: REPAIR_SEATS, orphansOnly: true },
+        ),
+      ).not.toThrow();
+      expect(registry.get(healthy.agent_id)).toMatchObject({
+        agent_id: healthy.agent_id,
+      });
+      expect(registry.get("golemsCodex")).toMatchObject({
+        surface_id: "surface:orphan",
+      });
+    });
+
+    it("withholds a launcher alias shared by multiple live managed workers", () => {
+      const first = makeRecord({
+        agent_id: "cmuxlayerCodex-worker-one",
+        surface_id: "surface:worker-one",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      const second = makeRecord({
+        agent_id: "cmuxlayerCodex-worker-two",
+        surface_id: "surface:worker-two",
+        surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      stateMgr.writeState(first);
+      stateMgr.writeState(second);
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      registry.set(first.agent_id, first);
+      registry.set(second.agent_id, second);
+
+      registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: first.surface_id,
+            surface_uuid: first.surface_uuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+          makeDiscovered({
+            surface_id: second.surface_id,
+            surface_uuid: second.surface_uuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+        ],
+        {
+          seatRegistry: {
+            ...REPAIR_SEATS,
+            cmuxlayerCodex: {
+              repo: "cmuxlayer",
+              launchers: { codex: "cmuxlayerCodex" },
+              lane: "cmuxlayer-worker",
+              role: "worker",
+            },
+          },
+        },
+      );
+
+      expect(registry.get(first.agent_id)).toMatchObject({
+        agent_id: first.agent_id,
+      });
+      expect(registry.get(second.agent_id)).toMatchObject({
+        agent_id: second.agent_id,
+      });
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
+    it("keeps the engine-issued id addressable across a transient missing-surface scan", async () => {
+      const surfaceUuid = "e9072772-a6ab-47ea-af04-b561d75ae6e2";
+      const engineId = "cmuxlayerClaude-bff10108";
+      const parentId = "cmuxlayerClaude-b0a43f90";
+      let surfaces = [
+        {
+          ...makeSurface("surface:871"),
+          id: surfaceUuid,
+        },
+      ];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces);
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
+          agent_id: engineId,
+          surface_id: "surface:871",
+          surface_uuid: surfaceUuid,
+          state: "ready",
+          repo: "cmuxlayer",
+          cli: "claude",
+          launcher_name: "cmuxlayerClaude",
+          pid: null,
+          parent_agent_id: parentId,
+          surface_provenance: "cmuxlayer_spawn",
+        }),
+      });
+
+      surfaces = [
+        {
+          ...makeSurface("surface:witness"),
+          id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        },
+      ];
+      await registry.reconcile({ confirmationMs: 0 });
+      await registry.purgeTerminal({ confirmationMs: 0 });
+
+      surfaces = [
+        {
+          ...makeSurface("surface:871"),
+          id: surfaceUuid,
+        },
+      ];
+      registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:871",
+            surface_uuid: surfaceUuid,
+            surface_title: "cmuxlayerClaude",
+            cli: "claude",
+          }),
+        ],
+        {
+          seatRegistry: {
+            ...REPAIR_SEATS,
+            cmuxlayerClaude: {
+              repo: "cmuxlayer",
+              launchers: { claude: "cmuxlayerClaude" },
+              lane: "cmuxlayer-worker",
+              role: "worker",
+            },
+          },
+        },
+      );
+
+      expect(registry.get(engineId)).toMatchObject({
+        agent_id: engineId,
+        parent_agent_id: parentId,
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      expect(registry.get("cmuxlayerClaude")).toBe(registry.get(engineId));
+      expect(stateMgr.readState("cmuxlayerClaude")).toBeNull();
+    });
+
+    it("removes a failed managed repair without leaving a resolvable alias", async () => {
+      const engineId = "cmuxlayerCodex-bff10108";
+      const surfaceUuid = "e9072772-a6ab-47ea-af04-b561d75ae6e2";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: engineId,
+          surface_id: "surface:871",
+          surface_uuid: surfaceUuid,
+          repo: "cmuxlayer",
+          cli: "codex",
+          launcher_name: "cmuxlayerCodex",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      await registry.reconstitute();
+      stateMgr.removeState(engineId);
+
+      const result = registry.repairFromDiscovery(
+          [
+            makeDiscovered({
+              surface_id: "surface:871",
+              surface_uuid: surfaceUuid,
+              surface_title: "cmuxlayerCodex",
+              cli: "codex",
+            }),
+          ],
+          {
+            seatRegistry: {
+              ...REPAIR_SEATS,
+              cmuxlayerCodex: {
+                repo: "cmuxlayer",
+                launchers: { codex: "cmuxlayerCodex" },
+                lane: "cmuxlayer-worker",
+                role: "worker",
+              },
+            },
+          },
+        );
+      expect(result.skipped).toMatchObject([
+        { agent_id: engineId, reason: `Agent not found: ${engineId}` },
+      ]);
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
+    it("does not publish a seat alias when observer ownership disappears during repair", () => {
+      const engineId = "cmuxlayerCodex-bff10108";
+      const surfaceUuid = "e9072772-a6ab-47ea-af04-b561d75ae6e2";
+      const record = makeRecord({
+        agent_id: engineId,
+        surface_id: "surface:871",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: "cmux:observer-a",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      stateMgr.writeState(record);
+      let observerReads = 0;
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        observerIdProvider: () => {
+          observerReads += 1;
+          return observerReads === 1 ? "cmux:observer-a" : null;
+        },
+      });
+      registry.set(engineId, record);
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:871",
+            surface_uuid: surfaceUuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+        ],
+        {
+          seatRegistry: {
+            ...REPAIR_SEATS,
+            cmuxlayerCodex: {
+              repo: "cmuxlayer",
+              launchers: { codex: "cmuxlayerCodex" },
+              lane: "cmuxlayer-worker",
+              role: "worker",
+            },
+          },
+        },
+      );
+
+      expect(result.repaired).toEqual([]);
+      expect(registry.get(engineId)).toBe(record);
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
+    it("keeps two live same-repo workers addressable only by their engine-issued ids", async () => {
+      const firstId = "cmuxlayerCodex-aaaaaaaa";
+      const secondId = "cmuxlayerCodex-bbbbbbbb";
+      const firstUuid = "11111111-2222-4333-8444-555555555555";
+      const secondUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      for (const [agentId, surfaceId, surfaceUuid] of [
+        [firstId, "surface:871", firstUuid],
+        [secondId, "surface:872", secondUuid],
+      ] as const) {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: agentId,
+            surface_id: surfaceId,
+            surface_uuid: surfaceUuid,
+            repo: "cmuxlayer",
+            cli: "codex",
+            launcher_name: "cmuxlayerCodex",
+          }),
+        );
+      }
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      await registry.reconstitute();
+      const seatRegistry = {
+        ...REPAIR_SEATS,
+        cmuxlayerCodex: {
+          repo: "cmuxlayer",
+          launchers: { codex: "cmuxlayerCodex" },
+          lane: "cmuxlayer-worker",
+          role: "worker" as const,
+        },
+      };
+
+      registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:871",
+            surface_uuid: firstUuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+          makeDiscovered({
+            surface_id: "surface:872",
+            surface_uuid: secondUuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+        ],
+        { seatRegistry },
+      );
+
+      expect(registry.get(firstId)?.agent_id).toBe(firstId);
+      expect(registry.get(secondId)?.agent_id).toBe(secondId);
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
     it.each([
       ["gemini", "golemsGemini"],
       ["kiro", "golemsKiro"],
@@ -3107,9 +3434,51 @@ describe("AgentRegistry", () => {
       expect(stateMgr.readState("local-terminal")).toBeNull();
       expect(stateMgr.readState("foreign-terminal")).not.toBeNull();
     });
+
+    it("startup purge retains a terminal row whose process may still be alive", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
+          agent_id: "live-pid-terminal",
+          cli: "claude",
+          state: "error",
+          surface_id: "surface:missing",
+          pid: null,
+        }),
+      });
+
+      expect(registry.purgeAllTerminal()).toEqual([]);
+      expect(registry.get("live-pid-terminal")).toMatchObject({
+        pid: process.pid,
+      });
+    });
   });
 
   describe("purgeTerminal", () => {
+    it("retains a terminal worker whose production-captured process is live", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
+          agent_id: "live-process-periodic-terminal",
+          cli: "claude",
+          state: "done",
+          role: "worker",
+          surface_id: "surface:missing-periodic",
+          pid: null,
+        }),
+      });
+
+      await expect(registry.purgeTerminal({ confirmationMs: 0 })).resolves.toBe(0);
+      expect(registry.get("live-process-periodic-terminal")).not.toBeNull();
+    });
     it("does not purge terminal workers when surface enumeration is empty", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -3243,6 +3612,30 @@ describe("AgentRegistry", () => {
   });
 
   describe("evictSurfaceless confirmation", () => {
+    it("retains a surfaceless row whose process may still be alive", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
+          agent_id: "live-pid-surfaceless",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:missing",
+          pid: null,
+        }),
+      });
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      expect(registry.get("live-pid-surfaceless")).toMatchObject({
+        pid: process.pid,
+      });
+    });
+
     it("retains deferred transcript captures through normal absence cleanup", async () => {
       stateMgr.writeState(
         makeRecord({

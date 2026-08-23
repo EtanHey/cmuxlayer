@@ -569,7 +569,7 @@ describe("send_to v2 background verify", () => {
     expect(client.sendCalls.length).toBe(typedAfterFirst);
   });
 
-  it("suppresses an identical send while the engine queue still holds the first delivery", async () => {
+  it("suppresses an identical send while screen-ready delivery verification is pending", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
     registerAgent(server, { state: "working" });
@@ -581,7 +581,7 @@ describe("send_to v2 background verify", () => {
         press_enter: true,
       }),
     );
-    expect(first.delivery_state).toBe("queued");
+    expect(first.delivery_state).toBe("pending_verify");
 
     const second = parseResult(
       await callTool(server, "send_to", {
@@ -593,7 +593,7 @@ describe("send_to v2 background verify", () => {
 
     expect(second.delivery_id).toBe(first.delivery_id);
     expect(second.duplicate_of).toBe(first.delivery_id);
-    expect(client.sendCalls).toEqual([]);
+    expect(client.sendCalls).toEqual(["queued once"]);
   });
 
   it("confirms failure after the verify deadline and writes a local evidence ticket", async () => {

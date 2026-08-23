@@ -37,6 +37,9 @@ function payload(result: ToolCallResult): Record<string, unknown> {
 }
 
 const SURFACE = "surface:89";
+const SURFACE_UUID = "80A5FA59-16D7-41A0-93D4-596423BFB3E3";
+const WITNESS_SURFACE = "surface:witness";
+const WITNESS_UUID = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE";
 
 const IDLE_CLAUDE_SCREEN = "Claude Code\nWhat can I help you with?\n> ";
 const POPULATED_CLAUDE_SCREEN =
@@ -75,6 +78,10 @@ function makeExec(opts?: {
   closeSurfaceFails?: boolean;
   /** Model a cmux that accepts close-surface but keeps listing the pane. */
   closeLeavesSurfaceListed?: boolean;
+  /** Keep a second surface so absence of the target is authoritative. */
+  witnessSurface?: boolean;
+  /** Model transient topology failure while verifying agent-scope closure. */
+  surfaceEnumerationFails?: boolean;
 }): ExecFn & { calls: string[][] } {
   const calls: string[][] = [];
   let surfaceLive = true;
@@ -97,6 +104,17 @@ function makeExec(opts?: {
       };
     }
     if (args.includes("list-panes")) {
+      if (opts?.surfaceEnumerationFails) {
+        throw new Error("cmux list-panes: transient enumeration failure");
+      }
+      const surfaceRefs = [
+        ...(surfaceLive ? [SURFACE] : []),
+        ...(opts?.witnessSurface ? [WITNESS_SURFACE] : []),
+      ];
+      const surfaceIds = [
+        ...(surfaceLive ? [SURFACE_UUID] : []),
+        ...(opts?.witnessSurface ? [WITNESS_UUID] : []),
+      ];
       return {
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
@@ -106,8 +124,9 @@ function makeExec(opts?: {
               ref: "pane:1",
               workspace: "workspace:1",
               focused: true,
-              surface_count: surfaceLive ? 1 : 0,
-              surface_refs: surfaceLive ? [SURFACE] : [],
+              surface_count: surfaceRefs.length,
+              surface_refs: surfaceRefs,
+              ...(opts?.witnessSurface ? { surface_ids: surfaceIds } : {}),
             },
           ],
         }),
@@ -119,18 +138,34 @@ function makeExec(opts?: {
         stdout: JSON.stringify({
           pane_ref: "pane:1",
           workspace_ref: "workspace:1",
-          surfaces: surfaceLive
-            ? [
-                {
-                  ref: SURFACE,
-                  pane: "pane:1",
-                  workspace: "workspace:1",
-                  title: "golemsClaude",
-                  type: "terminal",
-                  selected: true,
-                },
-              ]
-            : [],
+          surfaces: [
+            ...(surfaceLive
+              ? [
+                  {
+                    ...(opts?.witnessSurface ? { id: SURFACE_UUID } : {}),
+                    ref: SURFACE,
+                    pane: "pane:1",
+                    workspace: "workspace:1",
+                    title: "golemsClaude",
+                    type: "terminal",
+                    selected: true,
+                  },
+                ]
+              : []),
+            ...(opts?.witnessSurface
+              ? [
+                  {
+                    id: WITNESS_UUID,
+                    ref: WITNESS_SURFACE,
+                    pane: "pane:1",
+                    workspace: "workspace:1",
+                    title: "witness shell",
+                    type: "terminal",
+                    selected: !surfaceLive,
+                  },
+                ]
+              : []),
+          ],
         }),
         stderr: "",
       };
@@ -182,6 +217,19 @@ function makeServer(exec: ExecFn) {
     disableSpawnPreflight: true,
     controlHealthIntervalMs: 0,
     sessionIdentityResolver: () => null,
+    selfRegistrationSessionResolver: (agent) =>
+      agent.cli_session_id
+        ? {
+            session_id: agent.cli_session_id,
+            path: agent.cli_session_path ?? null,
+            pid: process.pid,
+            pid_registered_at: new Date().toISOString(),
+          }
+        : null,
+    // Model CI/fresh-clone CLI mode explicitly. Ambient access to a developer's
+    // real cmux socket must not decide whether teardown receipts are truthful.
+    surfaceObserverOwnerIdProvider: () => null,
+    surfaceObserverEpochProvider: () => null,
   }) as unknown;
 }
 
@@ -368,6 +416,32 @@ function seedAgent(server: unknown, overrides: Partial<AgentRecord> = {}) {
   return record;
 }
 
+async function seedProductionLiveProcess(
+  server: unknown,
+  overrides: Partial<AgentRecord> = {},
+): Promise<AgentRecord> {
+  const seeded = seedAgent(server, {
+    state: "working",
+    cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    surface_uuid: SURFACE_UUID,
+    surface_provenance: "cmuxlayer_spawn",
+    pid: null,
+    ...overrides,
+  });
+  const engine = getEngine(server) as unknown as {
+    captureBootSessionId(id: string): Promise<AgentRecord | null>;
+    stateMgr: {
+      transition(id: string, state: string): AgentRecord;
+    };
+    getRegistry(): { set(id: string, record: AgentRecord): unknown };
+  };
+  const captured = await engine.captureBootSessionId(seeded.agent_id);
+  if (!captured?.pid) throw new Error("production PID capture failed");
+  const done = engine.stateMgr.transition(seeded.agent_id, "done");
+  engine.getRegistry().set(done.agent_id, done);
+  return done;
+}
+
 async function listSurfaceRefs(server: unknown): Promise<string[]> {
   const result = (await getTool(server, "list_surfaces").handler(
     {},
@@ -479,6 +553,27 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     expect(await listSurfaceRefs(server)).toContain(SURFACE);
   });
 
+  it("does not report a surface closed when topology enumeration failed", async () => {
+    const exec = makeExec({
+      screen: () => IDLE_CLAUDE_SCREEN,
+      surfaceEnumerationFails: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server);
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    const data = payload(result);
+    expect(result.isError).toBe(true);
+    expect(data.agent_stopped).toBe(true);
+    expect(data.surface_closed).toBe(false);
+    expect(String(data.error)).toMatch(/enumerat|verify.*surface/i);
+    expect(exec.calls.some((args) => args.includes("close-surface"))).toBe(false);
+  });
+
   it("states plainly that there was no surface to close rather than implying one closed", async () => {
     const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN });
     const server = makeServer(exec);
@@ -515,6 +610,124 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     const data = payload(result);
     expect(data.surface_closed).toBe(false);
     expect(await listSurfaceRefs(server)).toContain(SURFACE);
+  });
+
+  it("P0 D4a an unforced agent close leaves both the live agent and its pane alone", async () => {
+    // The agent-scope liveness check and the surface-scope cross-record check
+    // remain independent; neither escalates an unforced request.
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = await seedProductionLiveProcess(server);
+
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    const data = payload(result);
+    expect(result.isError).toBe(true);
+    expect(data.ok).toBe(false);
+    expect(data.agent_stopped).toBe(false);
+    expect(data.surface_closed).toBe(false);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
+  });
+
+  it("does not let agent scope bypass a different live record backing the surface", async () => {
+    const exec = makeExec({ screen: () => WORKING_CLAUDE_SCREEN });
+    const server = makeServer(exec);
+    const target = seedAgent(server, {
+      agent_id: "golemsClaude-terminal-target",
+      state: "done",
+      surface_uuid: null,
+    });
+    seedAgent(server, {
+      agent_id: "golemsClaude-live-backing-record",
+      state: "working",
+      surface_uuid: null,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: target.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    expect(result.isError).toBe(true);
+    expect(String(payload(result).error)).toContain(
+      "golemsClaude-live-backing-record",
+    );
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
+  });
+
+  it("P0 D4b does not call a just-observed stable UUID stale after stopping the agent", async () => {
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server, {
+      state: "working",
+      surface_uuid: SURFACE_UUID,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+    const data = payload(result);
+
+    expect(String(data.error ?? data.surface_close_error ?? "")).not.toMatch(
+      /stable surface UUID.*(?:not live|no longer live)/i,
+    );
+  });
+
+  it("P0 D4c reports the surface closed when an immediate listing proves it is gone", async () => {
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server, {
+      state: "working",
+      surface_uuid: SURFACE_UUID,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+    const data = payload(result);
+
+    expect(await listSurfaceRefs(server)).not.toContain(SURFACE);
+    expect(data.surface_closed).toBe(true);
+  });
+
+  it("refuses socketless teardown of a surface owned by a different observer", async () => {
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server, {
+      state: "working",
+      surface_uuid: SURFACE_UUID,
+      surface_observer_id: "cmux:/tmp/observer-b.sock",
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    expect(result.isError).toBe(true);
+    expect(String(payload(result).error)).toMatch(/observer|ownership/i);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
+    expect(exec.calls.some((args) => args.includes("close-surface"))).toBe(false);
   });
 
   it("cross-checks scope=workspace: the delegate really deletes, and says so", async () => {
