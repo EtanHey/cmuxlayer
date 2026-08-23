@@ -8348,6 +8348,61 @@ export class AgentEngine {
     return this.resolveAgentRoute(agent.agent_id);
   }
 
+  /**
+   * Stop/close must remain usable in socketless CLI mode. When observer
+   * identity is unavailable, require a complete fresh topology to prove the
+   * record's exact stable UUID instead of trusting its mutable surface ref.
+   * This fallback is deliberately scoped to teardown; other terminal I/O
+   * keeps the observer-ownership gate.
+   */
+  private async resolveAgentStopIoRoute(agentId: string): Promise<AgentRoute> {
+    if (
+      !this.registry.isObserverOwnershipEnforced() ||
+      this.registry.getObserverEpoch()
+    ) {
+      return this.resolveAgentIoRoute(agentId);
+    }
+
+    let agent = this.registry.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (!agent.surface_uuid) {
+      return this.resolveAgentIoRoute(agentId);
+    }
+
+    const topology = await collectSurfaceTopology(this.client);
+    const binding = resolveAgentSurfaceBinding(agent, topology);
+    if (
+      topology?.complete !== true ||
+      !binding ||
+      binding.provenance !== "uuid" ||
+      topology.surfaceIdByRef.get(binding.surfaceRef)?.trim().toLowerCase() !==
+        agent.surface_uuid.trim().toLowerCase()
+    ) {
+      throw new Error(
+        `Observer identity is unavailable and fresh complete topology did not ` +
+          `prove stable surface UUID ${agent.surface_uuid} for agent ` +
+          `"${agent.agent_id}"; refusing teardown through mutable ref ` +
+          `${agent.surface_id}.`,
+      );
+    }
+
+    const workspaceId = binding.workspaceId ?? agent.workspace_id ?? null;
+    const patch: Partial<AgentRecord> = {};
+    if (agent.surface_id !== binding.surfaceRef) {
+      patch.surface_id = binding.surfaceRef;
+    }
+    if ((agent.workspace_id ?? null) !== workspaceId) {
+      patch.workspace_id = workspaceId;
+    }
+    if (Object.keys(patch).length > 0) {
+      agent = this.stateMgr.updateRecord(agent.agent_id, patch);
+      this.registry.set(agent.agent_id, agent);
+    }
+    return this.resolveAgentRoute(agent.agent_id);
+  }
+
   private async resolvePaneForSurface(
     surfaceId: string,
     workspaceId?: string | null,
@@ -8521,6 +8576,21 @@ export class AgentEngine {
     return route;
   }
 
+  private async resolveUnchangedAgentStopIoRoute(
+    agentId: string,
+    expectedRoute: AgentRoute,
+    operation: string,
+  ): Promise<AgentRoute> {
+    const route = await this.resolveAgentStopIoRoute(agentId);
+    if (!this.sameSurfaceRoute(expectedRoute, route)) {
+      throw new Error(
+        `Agent "${agentId}" surface route changed during ${operation}; ` +
+          `refusing stale terminal evidence or mutation.`,
+      );
+    }
+    return route;
+  }
+
   private processLiveness(pid: number | null | undefined): ProcessLiveness {
     return processLiveness(pid);
   }
@@ -8595,12 +8665,18 @@ export class AgentEngine {
     }
 
     try {
-      if (!this.registry.canControlSurface(agent)) return false;
-      const topology = await this.collectObservedSurfaceTopology();
+      const observerOwnsRecord = this.registry.canControlSurface(agent);
+      if (!observerOwnsRecord && this.registry.getObserverEpoch()) {
+        // A known but different observer cannot prove this record absent.
+        return false;
+      }
+      const topology = observerOwnsRecord
+        ? await this.collectObservedSurfaceTopology()
+        : await collectSurfaceTopology(this.client);
       if (
         topology?.complete !== true ||
         topology.workspaceBySurface.size === 0 ||
-        !this.registry.canControlSurface(agent)
+        (observerOwnsRecord && !this.registry.canControlSurface(agent))
       ) {
         return false;
       }
@@ -8728,7 +8804,7 @@ export class AgentEngine {
       return; // Already stopped
     }
 
-    let route = await this.resolveAgentIoRoute(canonicalAgentId);
+    let route = await this.resolveAgentStopIoRoute(canonicalAgentId);
     agent = this.registry.get(canonicalAgentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
@@ -8738,13 +8814,13 @@ export class AgentEngine {
       route.surface_id,
       route.workspace_id,
     );
-    let finalRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+    let finalRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
     if (!this.sameSurfaceRoute(route, finalRoute)) {
       stopClosePolicy = await this.resolveStopSurfaceClosePolicy(
         finalRoute.surface_id,
         finalRoute.workspace_id,
       );
-      const confirmedRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+      const confirmedRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
       if (!this.sameSurfaceRoute(finalRoute, confirmedRoute)) {
         throw new Error(
           `Agent "${canonicalAgentId}" surface route changed repeatedly while ` +
@@ -8759,7 +8835,7 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
     await opts?.beforeSurfaceMutation?.(route);
-    const mutationRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+    const mutationRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
     if (!this.sameSurfaceRoute(route, mutationRoute)) {
       throw new Error(
         `Agent "${canonicalAgentId}" surface route changed during the ` +
@@ -8772,7 +8848,7 @@ export class AgentEngine {
         route.surface_id,
         route.workspace_id,
       );
-      const closeRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+      const closeRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
       if (!this.sameSurfaceRoute(route, closeRoute)) {
         throw new Error(
           `Agent "${canonicalAgentId}" surface route changed while refreshing ` +
@@ -8819,7 +8895,7 @@ export class AgentEngine {
     } else {
       // Graceful: send Ctrl+C
       const assertSignalRouteCurrent = async (): Promise<void> => {
-        await this.resolveUnchangedAgentIoRoute(
+        await this.resolveUnchangedAgentStopIoRoute(
           canonicalAgentId,
           route,
           "Ctrl+C",
@@ -8842,7 +8918,7 @@ export class AgentEngine {
     // after the signal so a recycled ref is never closed by mistake.
     let closeRoute: AgentRoute | null = null;
     try {
-      closeRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+      closeRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
     } catch (error) {
       if (!(await this.isAgentSurfaceGone(agent))) {
         throw error;
@@ -8856,14 +8932,14 @@ export class AgentEngine {
         closeRoute.workspace_id,
       );
       let confirmedCloseRoute =
-        await this.resolveAgentIoRoute(canonicalAgentId);
+        await this.resolveAgentStopIoRoute(canonicalAgentId);
       if (!this.sameSurfaceRoute(closeRoute, confirmedCloseRoute)) {
         closeRoute = confirmedCloseRoute;
         stopClosePolicy = await this.resolveStopSurfaceClosePolicy(
           closeRoute.surface_id,
           closeRoute.workspace_id,
         );
-        confirmedCloseRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+        confirmedCloseRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
         if (!this.sameSurfaceRoute(closeRoute, confirmedCloseRoute)) {
           throw new Error(
             `Agent "${canonicalAgentId}" surface route changed repeatedly while ` +
@@ -8878,7 +8954,7 @@ export class AgentEngine {
       }
 
       const assertCloseRouteCurrent = async (): Promise<void> => {
-        await this.resolveUnchangedAgentIoRoute(
+        await this.resolveUnchangedAgentStopIoRoute(
           canonicalAgentId,
           route,
           "surface close",

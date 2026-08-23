@@ -212,6 +212,10 @@ function makeServer(exec: ExecFn) {
     disableSpawnPreflight: true,
     controlHealthIntervalMs: 0,
     sessionIdentityResolver: () => null,
+    // Model CI/fresh-clone CLI mode explicitly. Ambient access to a developer's
+    // real cmux socket must not decide whether teardown receipts are truthful.
+    surfaceObserverOwnerIdProvider: () => null,
+    surfaceObserverEpochProvider: () => null,
   }) as unknown;
 }
 
