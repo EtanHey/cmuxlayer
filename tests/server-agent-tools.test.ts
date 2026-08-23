@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useHarnessHome } from "./helpers/harness-home.js";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -50,6 +51,11 @@ import {
   runWithCallerContext,
 } from "../src/caller-context.js";
 import { MODEL_OVERRIDE_ENV } from "../src/model-policy.js";
+import {
+  armWatch,
+  readWatchRegistry,
+  sweepWatches,
+} from "../src/watch-spec.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -2021,7 +2027,7 @@ describe("agent lifecycle tool registration", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(44);
+    expect(Object.keys(registeredTools)).toHaveLength(45);
   });
 
   it("keeps resync_agents only as a removed compatibility stub", async () => {
@@ -2391,8 +2397,20 @@ describe("agent lifecycle tool handlers", () => {
     // for was the one case where a lead could not even see where its worker
     // should report.
     const agentId = "cmuxlayerCodex-stable-resume-contract";
+    const parentId = "cmuxlayerClaude-resume-parent";
     const resumeInboxDir = mkdtempSync(join(tmpdir(), "p11b-resume-inbox-"));
+    const watchRegistryPath = join(resumeInboxDir, "watch-specs.json");
     const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeServerAgentRecord({
+        agent_id: parentId,
+        repo: "cmuxlayer",
+        cli: "claude",
+        role: "orchestrator",
+        state: "ready",
+        surface_id: "surface:parent",
+      }),
+    );
     stateMgr.writeState(
       makeServerAgentRecord({
         agent_id: agentId,
@@ -2401,8 +2419,34 @@ describe("agent lifecycle tool handlers", () => {
         state: "done",
         surface_id: "surface:old",
         cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        parent_agent_id: parentId,
+        spawn_depth: 1,
       }),
     );
+    const expected = issueCoordinationContract(agentId, {
+      baseDir: resumeInboxDir,
+    });
+    mkdirSync(join(resumeInboxDir, agentId), { recursive: true });
+    writeFileSync(expected.report_path, "", "utf8");
+    const oldWatch = await armWatch(
+      {
+        owner: parentId,
+        target: expected.report_path,
+        marker: expected.done_marker,
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: watchRegistryPath },
+    );
+    appendFileSync(expected.report_path, `${expected.done_marker}\n`, "utf8");
+    await sweepWatches({
+      registryPath: watchRegistryPath,
+      notify: async () => true,
+    });
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
+        (watch) => watch.watch_id === oldWatch.watch_id,
+      )?.state,
+    ).toBe("fired");
     const exec = makeLifecycleExec();
     const server = createTrackedServer({
       exec,
@@ -2410,6 +2454,7 @@ describe("agent lifecycle tool handlers", () => {
       disableSpawnPreflight: true,
       sessionIdentityResolver: () => null,
       inboxBaseDir: resumeInboxDir,
+      watchRegistryPath,
     });
     await serverContexts.at(-1)?.lifecycleStartPromise;
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -2422,9 +2467,6 @@ describe("agent lifecycle tool handlers", () => {
 
       // Byte-identical to what the original spawn issued -- both strings derive
       // from agent_id alone, which is why refreshing is safe and idempotent.
-      const expected = issueCoordinationContract(agentId, {
-        baseDir: resumeInboxDir,
-      });
       expect(parsed.report_path).toBe(expected.report_path);
       expect(parsed.done_marker).toBe(expected.done_marker);
       expect(parsed.contract_path).toBe(
@@ -2448,6 +2490,23 @@ describe("agent lifecycle tool handlers", () => {
       ) as Record<string, unknown>;
       expect(detail.report_path).toBe(expected.report_path);
       expect(detail.done_marker).toBe(expected.done_marker);
+      expect(
+        readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            watch_id: oldWatch.watch_id,
+            state: "fired",
+          }),
+          expect.objectContaining({
+            owner: parentId,
+            target: expected.report_path,
+            marker: expected.done_marker,
+            watermark: 1,
+            state: "armed",
+          }),
+        ]),
+      );
     } finally {
       rmSync(resumeInboxDir, { recursive: true, force: true });
     }

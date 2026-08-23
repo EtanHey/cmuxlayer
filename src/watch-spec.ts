@@ -70,6 +70,7 @@ export interface WatchNotification {
   watch_id: string;
   owner: string;
   target: string;
+  target_kind: "file" | "agent";
   reason: WatchNotificationReason;
   observed_at_ms: number;
   watermark?: number;
@@ -539,6 +540,7 @@ function notificationFor(
     watch_id: record.watch_id,
     owner: record.owner,
     target: record.target,
+    target_kind: record.target_kind,
     reason,
     observed_at_ms: observedAt,
     ...(record.watermark !== undefined ? { watermark: record.watermark } : {}),

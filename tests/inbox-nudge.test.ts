@@ -43,6 +43,7 @@ import {
   withTestSurfaceObserver,
 } from "./helpers/test-surface-observer.js";
 import { runWithCallerContext } from "../src/caller-context.js";
+import type { AgentRecord } from "../src/agent-types.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-inbox-nudge");
 const PRIMARY_SURFACE_UUID = "11111111-1111-4111-8111-111111111111";
@@ -239,6 +240,48 @@ async function spawnTestAgent(server: any): Promise<string> {
   const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
   expect(parsed.ok).toBe(true);
   return parsed.agent_id as string;
+}
+
+function hierarchyRecord(input: {
+  agentId: string;
+  surfaceId: string;
+  surfaceUuid: string;
+  parentAgentId: string | null;
+  state?: AgentRecord["state"];
+}): AgentRecord {
+  return {
+    agent_id: input.agentId,
+    surface_id: input.surfaceId,
+    surface_uuid: input.surfaceUuid,
+    workspace_id: "workspace:1",
+    state: input.state ?? "ready",
+    repo: "cmuxlayer",
+    model: "claude-sonnet-4-5",
+    cli: "claude",
+    cli_session_id: null,
+    cli_session_path: null,
+    task_summary: "hierarchy fixture",
+    pid: null,
+    version: 1,
+    created_at: "2026-08-23T00:00:00.000Z",
+    updated_at: "2026-08-23T00:00:00.000Z",
+    error: null,
+    parent_agent_id: input.parentAgentId,
+    spawn_depth: input.parentAgentId ? 1 : 0,
+    role: input.parentAgentId ? "worker" : "orchestrator",
+    auto_archive_on_done: false,
+    deletion_intent: false,
+    quality: "unknown",
+    max_cost_per_agent: null,
+    crash_recover: true,
+    respawn_attempts: 0,
+    user_killed: false,
+    boot_prompt_pending: false,
+    launch_cwd: null,
+    mcp_profile: null,
+    worktree_path: null,
+    worktree_branch: null,
+  };
 }
 
 describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
@@ -1111,5 +1154,324 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
       issue_codes: expect.arrayContaining(["inbox_channel_dir_deleted"]),
     });
     expect(parsed.health.issue_codes).not.toContain("inbox_monitor_not_alive");
+  });
+});
+
+describe("report_to_parent hierarchy-bound escalation", () => {
+  let inboxDir: string;
+  let exec: ExecFn;
+  let server: any;
+
+  const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const childTwoUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+  beforeEach(() => {
+    rmSync(STATE_DIR, { recursive: true, force: true });
+    mkdirSync(STATE_DIR, { recursive: true });
+    inboxDir = mkdtempSync(join(tmpdir(), "cmux-report-parent-"));
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+        {
+          id: childTwoUuid,
+          ref: "surface:child-two",
+          title: "child-two-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createInboxServer(exec, inboxDir);
+  });
+
+  afterEach(async () => {
+    await server.close();
+    rmSync(STATE_DIR, { recursive: true, force: true });
+    rmSync(inboxDir, { recursive: true, force: true });
+  });
+
+  function register(...records: AgentRecord[]) {
+    const engine = server._registeredTools["interact"]._engine;
+    for (const record of records) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+  }
+
+  it("routes only to the caller's registry parent and actively wakes it", async () => {
+    const parent = hierarchyRecord({
+      agentId: "lead-parent",
+      surfaceId: "surface:new",
+      surfaceUuid: parentUuid,
+      parentAgentId: null,
+    });
+    const child = hierarchyRecord({
+      agentId: "worker-child",
+      surfaceId: "surface:child",
+      surfaceUuid: childUuid,
+      parentAgentId: parent.agent_id,
+    });
+    register(parent, child);
+
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
+      server._registeredTools.report_to_parent.handler(
+        { blocker: "Blocked on the signed release fixture" },
+        {} as any,
+      ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      child_agent_id: child.agent_id,
+      parent_agent_id: parent.agent_id,
+      notified_agent_id: parent.agent_id,
+      route: "direct",
+      durable: true,
+      delivery: "submitted",
+    });
+    expect(readInbox(parent.agent_id, { baseDir: inboxDir })).toHaveLength(1);
+    expect(readInbox(parent.agent_id, { baseDir: inboxDir })[0]).toMatchObject({
+      from: child.agent_id,
+      reply_to: child.agent_id,
+      to: parent.agent_id,
+      tag: "parent_blocker",
+      task: "Blocked on the signed release fixture",
+    });
+    expect(sendCalls(exec).at(-1)?.join(" ")).toContain("surface:new");
+  });
+
+  it("keeps a parent blocker durable without typing into a foreign draft", async () => {
+    await server.close();
+    exec = makeExec(
+      "Claude Code\n❯ do not submit this existing draft",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createInboxServer(exec, inboxDir);
+    const parent = hierarchyRecord({
+      agentId: "lead-parent",
+      surfaceId: "surface:new",
+      surfaceUuid: parentUuid,
+      parentAgentId: null,
+    });
+    const child = hierarchyRecord({
+      agentId: "worker-child",
+      surfaceId: "surface:child",
+      surfaceUuid: childUuid,
+      parentAgentId: parent.agent_id,
+    });
+    register(parent, child);
+    const before = sendCalls(exec).length;
+
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
+      server._registeredTools.report_to_parent.handler(
+        { blocker: "Blocked while parent is composing" },
+        {} as any,
+      ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      route: "direct",
+      delivery: "queued",
+      durable: true,
+    });
+    expect(sendCalls(exec)).toHaveLength(before);
+    expect(readInbox(parent.agent_id, { baseDir: inboxDir })[0]?.task).toBe(
+      "Blocked while parent is composing",
+    );
+  });
+
+  it("refuses a root caller with no registry parent", async () => {
+    const root = hierarchyRecord({
+      agentId: "orc-root",
+      surfaceId: "surface:child",
+      surfaceUuid: childUuid,
+      parentAgentId: null,
+    });
+    register(root);
+
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
+      server._registeredTools.report_to_parent.handler(
+        { blocker: "No parent exists" },
+        {} as any,
+      ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "report_parent_missing",
+      child_agent_id: root.agent_id,
+    });
+  });
+
+  it("escalates the wake failure to the nearest reachable grandparent", async () => {
+    await server.close();
+    const grandparentUuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "grandparent-pane",
+      undefined,
+      [
+        {
+          id: parentUuid,
+          ref: "surface:dead-parent",
+          title: "dead-parent-pane",
+          text: "$ ",
+        },
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      grandparentUuid,
+    );
+    server = createInboxServer(exec, inboxDir);
+    const grandparent = hierarchyRecord({
+      agentId: "orc-grandparent",
+      surfaceId: "surface:new",
+      surfaceUuid: grandparentUuid,
+      parentAgentId: null,
+    });
+    const parent = hierarchyRecord({
+      agentId: "dead-lead",
+      surfaceId: "surface:dead-parent",
+      surfaceUuid: parentUuid,
+      parentAgentId: grandparent.agent_id,
+      state: "error",
+    });
+    const child = hierarchyRecord({
+      agentId: "worker-child",
+      surfaceId: "surface:child",
+      surfaceUuid: childUuid,
+      parentAgentId: parent.agent_id,
+    });
+    register(grandparent, parent, child);
+
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
+      server._registeredTools.report_to_parent.handler(
+        { blocker: "Parent pane died during release validation" },
+        {} as any,
+      ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      parent_agent_id: parent.agent_id,
+      notified_agent_id: grandparent.agent_id,
+      route: "fallback",
+      durable: true,
+      delivery: "submitted",
+    });
+    expect(readInbox(parent.agent_id, { baseDir: inboxDir })[0]?.tag).toBe(
+      "parent_blocker",
+    );
+    expect(
+      readInbox(grandparent.agent_id, { baseDir: inboxDir })[0],
+    ).toMatchObject({
+      tag: "parent_delivery_failed",
+      task: expect.stringContaining("Parent pane died during release validation"),
+    });
+  });
+
+  it("returns a loud failure when the recorded parent is unreachable", async () => {
+    const child = hierarchyRecord({
+      agentId: "orphaned-worker",
+      surfaceId: "surface:child",
+      surfaceUuid: childUuid,
+      parentAgentId: "missing-parent",
+    });
+    register(child);
+
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
+      server._registeredTools.report_to_parent.handler(
+        { blocker: "Cannot reach the dependency owner" },
+        {} as any,
+      ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "report_parent_unreachable",
+      child_agent_id: child.agent_id,
+      parent_agent_id: "missing-parent",
+      durable: true,
+    });
+  });
+
+  it("keeps simultaneous child escalations as distinct durable messages", async () => {
+    const parent = hierarchyRecord({
+      agentId: "lead-parent",
+      surfaceId: "surface:new",
+      surfaceUuid: parentUuid,
+      parentAgentId: null,
+    });
+    const first = hierarchyRecord({
+      agentId: "worker-one",
+      surfaceId: "surface:child",
+      surfaceUuid: childUuid,
+      parentAgentId: parent.agent_id,
+    });
+    const second = hierarchyRecord({
+      agentId: "worker-two",
+      surfaceId: "surface:child-two",
+      surfaceUuid: childTwoUuid,
+      parentAgentId: parent.agent_id,
+    });
+    register(parent, first, second);
+
+    const [one, two] = await Promise.all([
+      runWithCallerContext({ surfaceId: childUuid }, () =>
+        server._registeredTools.report_to_parent.handler(
+          { blocker: "First blocker" },
+          {} as any,
+        ),
+      ),
+      runWithCallerContext({ surfaceId: childTwoUuid }, () =>
+        server._registeredTools.report_to_parent.handler(
+          { blocker: "Second blocker" },
+          {} as any,
+        ),
+      ),
+    ]);
+
+    expect(one.isError).not.toBe(true);
+    expect(two.isError, JSON.stringify(two.structuredContent)).not.toBe(true);
+    const messages = readInbox(parent.agent_id, { baseDir: inboxDir });
+    expect(messages.map((message) => message.task).sort()).toEqual([
+      "First blocker",
+      "Second blocker",
+    ]);
+    expect(new Set(messages.map((message) => message.id))).toHaveLength(2);
   });
 });

@@ -176,4 +176,57 @@ describe("WatchSpec MCP contract", () => {
     });
     expect(notify).toHaveBeenCalledOnce();
   });
+
+  it("D14 emits MCP progress before a long wait hits the harness silence cutoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = createWatchServer() as any;
+      const engine = server._registeredTools.interact._engine;
+      let resolveWait!: (value: unknown) => void;
+      vi.spyOn(engine, "waitForWatch").mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveWait = resolve;
+          }),
+      );
+      const sendNotification = vi.fn().mockResolvedValue(undefined);
+      const pending = server._registeredTools.wait_for.handler(
+        {
+          watch: {
+            owner: "lead-a",
+            target: join(TEST_DIR, "long-wait.md"),
+            marker: "DONE",
+            deadline: Date.now() + 300_000,
+          },
+          timeout_ms: 300_000,
+        },
+        {
+          _meta: { progressToken: "wait-progress-1" },
+          sendNotification,
+        } as any,
+      );
+
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: "notifications/progress",
+        params: {
+          progressToken: "wait-progress-1",
+          progress: 1,
+          message: "wait_for still waiting",
+        },
+      });
+
+      resolveWait({
+        matched: true,
+        elapsed: 45_000,
+        watch: { watch_id: "watch-1", state: "fired" },
+      });
+      await pending;
+      const delivered = sendNotification.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(sendNotification).toHaveBeenCalledTimes(delivered);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

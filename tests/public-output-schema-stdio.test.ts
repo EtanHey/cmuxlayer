@@ -20,6 +20,7 @@ afterEach(() => {
 
 const validArguments: Record<string, Record<string, unknown>> = {
   spawn_agent: { type: "terminal" },
+  report_to_parent: { blocker: "schema probe" },
   send_to: {
     mode: "surface",
     surface: "surface:test",
@@ -40,7 +41,7 @@ const validArguments: Record<string, Record<string, unknown>> = {
 };
 
 describe("public tool output schemas over stdio", () => {
-  it("accepts passthrough receipts from all nine tools after listTools caches Ajv validators", async () => {
+  it("accepts passthrough receipts from all ten tools after listTools caches Ajv validators", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-output-schema-"));
     testDirs.push(testDir);
     const transport = new StdioClientTransport({
@@ -72,6 +73,16 @@ describe("public tool output schemas over stdio", () => {
       }
       const declaredFields: Record<string, string[]> = {
         spawn_agent: ["type", "cwd", "title", "cwd_receipt"],
+        report_to_parent: [
+          "child_agent_id",
+          "parent_agent_id",
+          "notified_agent_id",
+          "route",
+          "durable",
+          "delivery",
+          "delivery_id",
+          "error_code",
+        ],
         send_to: [
           "command",
           "title",
