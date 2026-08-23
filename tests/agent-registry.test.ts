@@ -1759,9 +1759,69 @@ describe("AgentRegistry", () => {
   });
 
   describe("repairFromDiscovery", () => {
+    it("withholds a launcher alias shared by multiple live managed workers", () => {
+      const first = makeRecord({
+        agent_id: "cmuxlayerCodex-worker-one",
+        surface_id: "surface:worker-one",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      const second = makeRecord({
+        agent_id: "cmuxlayerCodex-worker-two",
+        surface_id: "surface:worker-two",
+        surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      stateMgr.writeState(first);
+      stateMgr.writeState(second);
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      registry.set(first.agent_id, first);
+      registry.set(second.agent_id, second);
+
+      registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: first.surface_id,
+            surface_uuid: first.surface_uuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+          makeDiscovered({
+            surface_id: second.surface_id,
+            surface_uuid: second.surface_uuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+        ],
+        {
+          seatRegistry: {
+            ...REPAIR_SEATS,
+            cmuxlayerCodex: {
+              repo: "cmuxlayer",
+              launchers: { codex: "cmuxlayerCodex" },
+              lane: "cmuxlayer-worker",
+              role: "worker",
+            },
+          },
+        },
+      );
+
+      expect(registry.get(first.agent_id)).toMatchObject({
+        agent_id: first.agent_id,
+      });
+      expect(registry.get(second.agent_id)).toMatchObject({
+        agent_id: second.agent_id,
+      });
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
     it("keeps the engine-issued id addressable across a transient missing-surface scan", async () => {
       const surfaceUuid = "e9072772-a6ab-47ea-af04-b561d75ae6e2";
-      const engineId = "cmuxlayerCodex-bff10108";
+      const engineId = "cmuxlayerClaude-bff10108";
       const parentId = "cmuxlayerClaude-b0a43f90";
       let surfaces = [
         {
@@ -1779,8 +1839,8 @@ describe("AgentRegistry", () => {
           surface_uuid: surfaceUuid,
           state: "ready",
           repo: "cmuxlayer",
-          cli: "codex",
-          launcher_name: "cmuxlayerCodex",
+          cli: "claude",
+          launcher_name: "cmuxlayerClaude",
           pid: null,
           parent_agent_id: parentId,
           surface_provenance: "cmuxlayer_spawn",
@@ -1807,16 +1867,16 @@ describe("AgentRegistry", () => {
           makeDiscovered({
             surface_id: "surface:871",
             surface_uuid: surfaceUuid,
-            surface_title: "cmuxlayerCodex",
-            cli: "codex",
+            surface_title: "cmuxlayerClaude",
+            cli: "claude",
           }),
         ],
         {
           seatRegistry: {
             ...REPAIR_SEATS,
-            cmuxlayerCodex: {
+            cmuxlayerClaude: {
               repo: "cmuxlayer",
-              launchers: { codex: "cmuxlayerCodex" },
+              launchers: { claude: "cmuxlayerClaude" },
               lane: "cmuxlayer-worker",
               role: "worker",
             },
@@ -1829,8 +1889,8 @@ describe("AgentRegistry", () => {
         parent_agent_id: parentId,
         surface_provenance: "cmuxlayer_spawn",
       });
-      expect(registry.get("cmuxlayerCodex")).toBe(registry.get(engineId));
-      expect(stateMgr.readState("cmuxlayerCodex")).toBeNull();
+      expect(registry.get("cmuxlayerClaude")).toBe(registry.get(engineId));
+      expect(stateMgr.readState("cmuxlayerClaude")).toBeNull();
     });
 
     it("removes a failed managed repair without leaving a resolvable alias", async () => {
@@ -1978,8 +2038,7 @@ describe("AgentRegistry", () => {
 
       expect(registry.get(firstId)?.agent_id).toBe(firstId);
       expect(registry.get(secondId)?.agent_id).toBe(secondId);
-      expect(registry.get("cmuxlayerCodex")?.agent_id).toBe(firstId);
-      expect(registry.get("cmuxlayerCodex")?.agent_id).not.toBe(secondId);
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
     });
 
     it.each([
@@ -3341,6 +3400,7 @@ describe("AgentRegistry", () => {
         registry,
         record: makeRecord({
           agent_id: "live-pid-terminal",
+          cli: "claude",
           state: "error",
           surface_id: "surface:missing",
           pid: null,
@@ -3364,6 +3424,7 @@ describe("AgentRegistry", () => {
         registry,
         record: makeRecord({
           agent_id: "live-process-periodic-terminal",
+          cli: "claude",
           state: "done",
           role: "worker",
           surface_id: "surface:missing-periodic",
@@ -3516,6 +3577,7 @@ describe("AgentRegistry", () => {
         registry,
         record: makeRecord({
           agent_id: "live-pid-surfaceless",
+          cli: "claude",
           state: "working",
           surface_id: "surface:missing",
           pid: null,

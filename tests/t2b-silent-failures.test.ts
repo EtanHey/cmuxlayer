@@ -630,6 +630,8 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     )) as ToolCallResult;
 
     const data = payload(result);
+    expect(result.isError).toBe(true);
+    expect(data.ok).toBe(false);
     expect(data.agent_stopped).toBe(false);
     expect(data.surface_closed).toBe(false);
     expect(await listSurfaceRefs(server)).toContain(SURFACE);

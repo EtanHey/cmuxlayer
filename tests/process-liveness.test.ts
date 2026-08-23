@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+const execFileSyncMock = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", () => ({
+  execFileSync: execFileSyncMock,
+}));
 import type { AgentRecord } from "../src/agent-types.js";
-import { qualifyAgentProcessLiveness } from "../src/process-liveness.js";
+import {
+  processStartedAtMs,
+  qualifyAgentProcessLiveness,
+} from "../src/process-liveness.js";
 
 function processRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
@@ -28,6 +36,18 @@ function processRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 describe("qualified agent process liveness", () => {
+  it("bounds the synchronous ps identity probe", () => {
+    execFileSyncMock.mockReturnValueOnce("Sat Aug 23 11:00:02 2026\n");
+
+    processStartedAtMs(43210);
+
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      "ps",
+      ["-o", "lstart=", "-p", "43210"],
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
+  });
+
   it("accepts a process started inside the production creation-registration window", () => {
     expect(
       qualifyAgentProcessLiveness(

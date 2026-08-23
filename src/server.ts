@@ -10135,9 +10135,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const boundSurface = boundAgent?.surface_id?.trim() || null;
           const boundWorkspace = boundAgent?.workspace_id ?? undefined;
           if (!args.force && boundAgent && agentProcessMayBeAlive(boundAgent)) {
-            return okFormatted(
-              `close_surface scope=agent refused — agent ${args.agent_id} still has live recorded pid ${boundAgent?.pid}`,
+            return err(
+              new Error(
+                `close_surface scope=agent refused — agent ${args.agent_id} still has live recorded pid ${boundAgent?.pid}`,
+              ),
               {
+                refused: true,
                 scope: "agent",
                 agent_id: args.agent_id,
                 pid: boundAgent?.pid,

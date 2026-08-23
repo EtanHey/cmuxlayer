@@ -1317,13 +1317,12 @@ describe("AgentEngine self-registration wiring", () => {
     engine.dispose();
   });
 
-  it("persists production self-registration process evidence for an existing Codex session", async () => {
-    const registeredAt = "2026-08-23T11:00:05.000Z";
+  it("does not use Claude-only self-registration process evidence for an existing Codex session", async () => {
     const selfRegistrationSessionResolver = vi.fn(() => ({
       session_id: "sid-codex-existing",
       path: "/rollout/codex.jsonl",
       pid: 43210,
-      pid_registered_at: registeredAt,
+      pid_registered_at: "2026-08-23T11:00:05.000Z",
     }));
     const { engine, stateMgr, registry } = makeEngineHarness(
       selfRegistrationSessionResolver,
@@ -1343,10 +1342,9 @@ describe("AgentEngine self-registration wiring", () => {
 
     expect(captured).toMatchObject({
       cli_session_id: "sid-codex-existing",
-      pid: 43210,
-      pid_registered_at: registeredAt,
+      pid: null,
     });
-    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
+    expect(selfRegistrationSessionResolver).not.toHaveBeenCalled();
     engine.dispose();
   });
 });

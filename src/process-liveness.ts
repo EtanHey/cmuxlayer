@@ -3,6 +3,8 @@ import type { AgentRecord } from "./agent-types.js";
 
 export type ProcessLiveness = "alive" | "gone" | "unknown";
 
+const PROCESS_START_PROBE_TIMEOUT_MS = 250;
+
 const PROCESS_START_SKEW_MS = 5_000;
 
 type AgentProcessRecord = Pick<
@@ -47,6 +49,7 @@ export function processStartedAtMs(pid: number): number | null {
     const output = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: PROCESS_START_PROBE_TIMEOUT_MS,
     }).trim();
     if (!output) return null;
     const parsed = Date.parse(output);

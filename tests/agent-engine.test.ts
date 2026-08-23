@@ -3706,19 +3706,21 @@ describe("AgentEngine", () => {
       await persistProductionProcessRecord({
         stateMgr,
         registry: engine.getRegistry(),
+        registeredAtMs: Date.parse("2026-08-23T11:00:05.000Z"),
         record: makeRecord({
           agent_id: agentId,
           state: "done",
           surface_id: "surface:live-process",
           workspace_id: "ws:1",
           repo: "brainlayer",
-          cli: "codex",
+          cli: "claude",
           cli_session_id: sessionId,
-          launcher_name: "brainlayerCodex",
+          launcher_name: "brainlayerClaude",
           pid: null,
         }),
       });
-      harnessHome.give("codex", sessionId);
+      harnessHome.give("claude", sessionId);
+      execFileSyncMock.mockReturnValueOnce("Sun Aug 23 11:00:02 2026\n");
 
       // D1 -> D4 -> D2 is one chain: an unsafe close leaves a live process in
       // terminal registry state, and terminal registry state is currently the
@@ -3730,6 +3732,35 @@ describe("AgentEngine", () => {
           "i",
         ),
       );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("refuses a forced resume when the recorded pid is definitely alive", async () => {
+      const agentId = "agent-live-pid-force-must-not-resume";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry: engine.getRegistry(),
+        registeredAtMs: Date.parse("2026-08-23T11:00:05.000Z"),
+        record: makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:live-force-process",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "claude",
+          cli_session_id: sessionId,
+          launcher_name: "brainlayerClaude",
+          pid: null,
+        }),
+      });
+      harnessHome.give("claude", sessionId);
+      execFileSyncMock.mockReturnValueOnce("Sun Aug 23 11:00:02 2026\n");
+
+      await expect(
+        engine.resumeAgent(agentId, { force: true }),
+      ).rejects.toThrow(/still alive/i);
       expect(mockClient.newSplit).not.toHaveBeenCalled();
       expect(mockClient.newSurface).not.toHaveBeenCalled();
     });
@@ -4175,6 +4206,52 @@ describe("AgentEngine", () => {
         cli_session_path: rolloutPath,
       });
       expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toBeNull();
+    });
+
+    it("does not backfill Codex pid evidence from self-registration", async () => {
+      const agentId = "cmuxlayerCodex-existing-session";
+      const sessionId = "019fec96-588d-7000-8000-000000000000";
+      const selfRegistrationResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: null,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: selfRegistrationResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          repo: "cmuxlayer",
+          cli: "codex",
+          state: "working",
+          surface_id: "surface:codex-existing-session",
+          surface_uuid: "11111111-2222-4333-8444-555555555555",
+          cli_session_id: sessionId,
+          cli_session_path: "/durable/codex/rollout.jsonl",
+          pid: null,
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:codex-existing-session"),
+          id: "11111111-2222-4333-8444-555555555555",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.captureBootSessionId(agentId);
+
+      expect(selfRegistrationResolver).not.toHaveBeenCalled();
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        pid: null,
+        cli_session_path: "/durable/codex/rollout.jsonl",
+      });
     });
 
     it("does not advertise an unrunnable legacy session route", async () => {
@@ -10977,6 +11054,7 @@ Session ID: ${sessionId}`,
       const record = installLegacyAgent(
         {
           agent_id: "live-pid-stale-surface-root",
+          cli: "claude",
           state: "error",
           pid: null,
           surface_id: "surface:recently-observed",
@@ -10997,6 +11075,10 @@ Session ID: ${sessionId}`,
         record,
       });
 
+      expect(productionRecord).toMatchObject({
+        cli: "claude",
+        pid: process.pid,
+      });
       expect(() => process.kill(process.pid, 0)).not.toThrow();
       let routeError: unknown = null;
       try {
@@ -11006,6 +11088,9 @@ Session ID: ${sessionId}`,
       }
 
       expect(routeError).toBeInstanceOf(Error);
+      expect((routeError as Error).message).toMatch(
+        new RegExp(`live recorded pid ${process.pid}`, "i"),
+      );
       expect((routeError as Error).message).not.toMatch(
         /stable surface UUID.*(?:not live|no longer live)/i,
       );

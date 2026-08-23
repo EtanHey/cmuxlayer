@@ -68,21 +68,18 @@ export async function persistProductionProcessRecord(input: {
     captured = input.stateMgr.transition(captured!.agent_id, state);
     input.registry.set(captured!.agent_id, captured!);
   };
-  if (targetState === "ready") advance("ready");
-  if (targetState === "working") {
-    advance("ready");
-    advance("working");
+  const paths: Partial<Record<AgentState, AgentState[]>> = {
+    booting: [],
+    ready: ["ready"],
+    working: ["ready", "working"],
+    idle: ["ready", "working", "idle"],
+    done: ["ready", "working", "done"],
+    error: ["error"],
+  };
+  const path = paths[targetState];
+  if (!path) {
+    throw new Error(`unsupported production record state: ${targetState}`);
   }
-  if (targetState === "idle") {
-    advance("ready");
-    advance("working");
-    advance("idle");
-  }
-  if (targetState === "done") {
-    advance("ready");
-    advance("working");
-    advance("done");
-  }
-  if (targetState === "error") advance("error");
+  for (const state of path) advance(state);
   return captured;
 }

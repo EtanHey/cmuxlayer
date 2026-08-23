@@ -2061,12 +2061,30 @@ export class AgentRegistry {
     const liveSurfaceRefs = new Set(
       discovered.map((entry) => entry.surface_id),
     );
+    const candidates = discovered.map((entry) =>
+      entry.read_error
+        ? null
+        : this.repairCandidateForDiscovery(entry, opts?.seatRegistry),
+    );
+    const candidateCounts = new Map<string, number>();
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      candidateCounts.set(
+        candidate.agentId,
+        (candidateCounts.get(candidate.agentId) ?? 0) + 1,
+      );
+    }
+    for (const [agentId, count] of candidateCounts) {
+      if (count > 1) {
+        this.aliases.delete(agentId);
+      }
+    }
 
     for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
       evicted.add(removed);
     }
 
-    for (const entry of discovered) {
+    for (const [entryIndex, entry] of discovered.entries()) {
       if (entry.read_error) continue;
       if (opts?.orphansOnly) {
         const surfaceRecords = [...this.agents.values()].filter(
@@ -2081,10 +2099,7 @@ export class AgentRegistry {
           );
         if (!needsRepair) continue;
       }
-      const candidate = this.repairCandidateForDiscovery(
-        entry,
-        opts?.seatRegistry,
-      );
+      const candidate = candidates[entryIndex];
       if (!candidate) continue;
 
       try {
@@ -2093,6 +2108,7 @@ export class AgentRegistry {
           candidate,
           evicted,
           liveSurfaceRefs,
+          candidateCounts.get(candidate.agentId) === 1,
         );
         if (repair) {
           repaired.push(repair);
@@ -2175,6 +2191,7 @@ export class AgentRegistry {
     candidate: RegistryRepairCandidate,
     evicted: Set<string>,
     liveSurfaceRefs: ReadonlySet<string>,
+    candidateAliasIsUnique: boolean,
   ): RegistryRepairEntry | null {
     const recordsForSurface = [...this.agents.values()].filter(
       (agent) => agent.surface_id === discovered.surface_id,
@@ -2206,6 +2223,7 @@ export class AgentRegistry {
     if (managedRecord) {
       const existingAliasTarget = this.get(candidate.agentId);
       const shouldPublishCandidateAlias =
+        candidateAliasIsUnique &&
         candidate.agentId !== managedRecord.agent_id &&
         (!existingAliasTarget ||
           existingAliasTarget.agent_id === managedRecord.agent_id);

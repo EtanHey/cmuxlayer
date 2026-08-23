@@ -245,6 +245,7 @@ import {
   type FleetSidebarPublisherLike,
 } from "./fleet-sidebar.js";
 import {
+  agentProcessLiveness,
   agentProcessMayBeAlive,
   processLiveness,
   type ProcessLiveness,
@@ -3441,15 +3442,9 @@ export class AgentEngine {
     opts: { resolveTranscript?: boolean } = {},
   ): Promise<AgentRecord> {
     if (agent.cli_session_id) {
-      if (
-        !agent.pid &&
-        this.selfRegistrationSessionResolver &&
-        TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state) &&
-        JSONL_HARNESSES.has(agent.cli) &&
-        agent.surface_uuid?.trim()
-      ) {
+      if (!agent.pid && this.canUseSelfRegistrationSessionResolver(agent)) {
         try {
-          const registered = this.selfRegistrationSessionResolver(agent);
+          const registered = this.selfRegistrationSessionResolver?.(agent);
           if (registered) {
             const identity = this.normalizeCapturedSessionIdentity(registered);
             if (
@@ -7721,7 +7716,11 @@ export class AgentEngine {
         `Agent "${agent.agent_id}" is ${agent.state}; explicit resume requires a terminal agent`,
       );
     }
-    if (!opts?.force && agentProcessMayBeAlive(agent)) {
+    const recordedProcessLiveness = agentProcessLiveness(agent);
+    if (
+      recordedProcessLiveness === "alive" ||
+      (recordedProcessLiveness === "unknown" && !opts?.force)
+    ) {
       throw new Error(
         `Agent "${agent.agent_id}" cannot resume while recorded pid ` +
           `${agent.pid} is still alive or cannot be proven gone`,
