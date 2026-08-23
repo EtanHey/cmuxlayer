@@ -198,6 +198,44 @@ function sentText(exec: ExecFn): string {
     .join("\n");
 }
 
+function parentRecord(
+  surfaceUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+): AgentRecord {
+  return {
+    agent_id: "lead-parent",
+    surface_id: "surface:new",
+    surface_uuid: surfaceUuid,
+    workspace_id: "workspace:1",
+    state: "ready",
+    repo: "cmuxlayer",
+    model: "claude-sonnet-4-5",
+    cli: "claude",
+    cli_session_id: null,
+    cli_session_path: null,
+    task_summary: "parent fixture",
+    pid: null,
+    version: 1,
+    created_at: "2026-08-23T00:00:00.000Z",
+    updated_at: "2026-08-23T00:00:00.000Z",
+    error: null,
+    parent_agent_id: null,
+    spawn_depth: 0,
+    role: "orchestrator",
+    auto_archive_on_done: false,
+    deletion_intent: false,
+    quality: "unknown",
+    max_cost_per_agent: null,
+    crash_recover: true,
+    respawn_attempts: 0,
+    user_killed: false,
+    boot_prompt_pending: false,
+    launch_cwd: null,
+    mcp_profile: null,
+    worktree_path: null,
+    worktree_branch: null,
+  };
+}
+
 describe("P11 spawn_agent issues the coordination contract", () => {
   let inboxDir: string;
   let exec: ExecFn;
@@ -307,39 +345,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     let engine = server._registeredTools.interact._engine;
-    const parent = {
-      agent_id: "lead-parent",
-      surface_id: "surface:new",
-      surface_uuid: parentUuid,
-      workspace_id: "workspace:1",
-      state: "ready",
-      repo: "cmuxlayer",
-      model: "claude-sonnet-4-5",
-      cli: "claude",
-      cli_session_id: null,
-      cli_session_path: null,
-      task_summary: "parent fixture",
-      pid: null,
-      version: 1,
-      created_at: "2026-08-23T00:00:00.000Z",
-      updated_at: "2026-08-23T00:00:00.000Z",
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      role: "orchestrator",
-      auto_archive_on_done: false,
-      deletion_intent: false,
-      quality: "unknown",
-      max_cost_per_agent: null,
-      crash_recover: true,
-      respawn_attempts: 0,
-      user_killed: false,
-      boot_prompt_pending: false,
-      launch_cwd: null,
-      mcp_profile: null,
-      worktree_path: null,
-      worktree_branch: null,
-    } satisfies AgentRecord;
+    const parent = parentRecord(parentUuid);
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
     const child = await spawn({ parent_agent_id: parent.agent_id });
@@ -395,6 +401,120 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         (watch) => watch.watch_id === rearmed.watch_id,
       )?.state,
     ).toBe("armed");
+  });
+
+  it("does not describe a missing report target as a done marker and preserves the reason-aware notifier", async () => {
+    await server.close();
+    const externalNotify = vi.fn().mockResolvedValue(true);
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchNotify: externalNotify,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const reportPath = join(inboxDir, "reaped-child", "report.md");
+    mkdirSync(join(inboxDir, "reaped-child"), { recursive: true });
+    writeFileSync(reportPath, "", "utf8");
+    await engine.armWatch({
+      owner: parent.agent_id,
+      target: reportPath,
+      marker: "DONE_REAPED_CHILD",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    rmSync(reportPath);
+    await engine.sweepWatchesBestEffort();
+
+    expect(sentText(exec)).not.toContain("done marker observed");
+    expect(sentText(exec)).toContain("target missing");
+    expect(externalNotify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: parent.agent_id,
+        target: reportPath,
+        target_kind: "file",
+        reason: "target_missing",
+      }),
+    );
+  });
+
+  it("keeps an already-created child spawn successful when its report watch cannot be armed", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const baseExec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:child",
+            surface_id: childUuid,
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const blockingFile = join(inboxDir, "not-a-directory");
+    writeFileSync(blockingFile, "blocks mkdir", "utf8");
+
+    const child = await spawn({
+      parent_agent_id: parent.agent_id,
+      report_path: join(blockingFile, "report.md"),
+    });
+
+    expect(child.ok, JSON.stringify(child)).toBe(true);
+    expect(child.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/report watch was not armed/i),
+      ]),
+    );
+    expect(engine.getAgentState(child.agent_id)).not.toBeNull();
   });
 
   // -------------------------------------------------------------------------

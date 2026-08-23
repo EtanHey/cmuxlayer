@@ -11492,27 +11492,54 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
+            let externalDelivered = true;
+            if (event.reason !== "predicate_matched" && opts?.watchNotify) {
+              try {
+                externalDelivered = (await opts.watchNotify(event)) !== false;
+              } catch {
+                externalDelivered = false;
+              }
+            }
             const owner =
               registry.get(event.owner) ?? stateMgr.readState(event.owner);
             if (owner && lifecycleAgentInputDeliverer) {
+              const text = (() => {
+                if (event.reason === "predicate_matched") {
+                  return event.target_kind === "file"
+                    ? `[report] done marker observed — read ${event.target}`
+                    : `[watch] agent predicate matched — inspect ${event.target}`;
+                }
+                if (event.reason === "target_missing") {
+                  return `[watch] target missing — expected file ${event.target}`;
+                }
+                if (event.reason === "deadline_elapsed") {
+                  return event.target_kind === "file"
+                    ? `[watch] deadline elapsed before marker — inspect ${event.target}`
+                    : `[watch] deadline elapsed before predicate — inspect agent ${event.target}`;
+                }
+                return `[watch] target agent ended before predicate — inspect ${event.target}`;
+              })();
               try {
                 const delivery = await lifecycleAgentInputDeliverer({
                   agent_id: owner.agent_id,
-                  text: `[report] done marker observed — read ${event.target}`,
+                  text,
                   press_enter: true,
                   allow_busy: true,
                   source_event: "report_to_parent",
                   delivery_id: randomUUID(),
                 });
-                return (
+                const ownerDelivered =
                   delivery.delivery === "submitted" ||
-                  delivery.delivery === "queued"
-                );
+                  delivery.delivery === "queued";
+                return ownerDelivered && externalDelivered;
               } catch {
                 // Keep notification_pending=true. A later lifecycle sweep uses
                 // the parent's refreshed route after a session restart.
                 return false;
               }
+            }
+            if (event.reason !== "predicate_matched") {
+              return opts?.watchNotify ? externalDelivered : false;
             }
             return opts?.watchNotify
               ? (await opts.watchNotify(event)) !== false
@@ -12144,6 +12171,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return { delivery: delivered.delivery, delivery_id: deliveryId };
     };
 
+    const armParentReportWatch = async (
+      parentAgentId: string,
+      coordination: { report_path: string; done_marker: string },
+    ): Promise<string | null> => {
+      try {
+        await mkdir(dirname(coordination.report_path), { recursive: true });
+        await appendFile(coordination.report_path, "", "utf8");
+        await engine.armWatch({
+          owner: parentAgentId,
+          target: coordination.report_path,
+          marker: coordination.done_marker,
+          deadline: Number.MAX_SAFE_INTEGER,
+        });
+        return null;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return `Report watch was not armed for ${coordination.report_path}: ${detail}`;
+      }
+    };
+
     server.tool(
       "report_to_parent",
       "Raise a short blocker to this managed agent's registry parent. cmuxlayer chooses the parent; callers cannot address arbitrary agents. The blocker is durably appended to the parent's inbox and its pointer is actively delivered. If that wake fails, cmuxlayer alerts the nearest reachable ancestor and returns fallback provenance. A root agent has no parent and receives an error.",
@@ -12680,16 +12727,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // Receipt already carries the contract; a registry write failure
               // must not fail an otherwise-successful resume.
             }
+            const reportWatchWarning = result.parent_agent_id
+              ? await armParentReportWatch(
+                  result.parent_agent_id,
+                  resumeCoordination,
+                )
+              : null;
+            const resumeWarnings = [
+              ...(result.warnings ?? []),
+              ...(reportWatchWarning ? [reportWatchWarning] : []),
+              ...(focusRestoreWarning ? [focusRestoreWarning] : []),
+            ];
             const resumed = {
               version: 1,
               type: "agent",
               resumed: true,
               ...result,
               role: inferRecordRoleOrNull(existing) ?? "worker",
-              ...(focusRestoreWarning
+              ...(resumeWarnings.length > 0
                 ? {
-                    warning: focusRestoreWarning,
-                    warnings: [focusRestoreWarning],
+                    warning: resumeWarnings.join(" | "),
+                    warnings: resumeWarnings,
                   }
                 : {}),
             };
@@ -13129,14 +13187,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // must not fail an otherwise-successful spawn.
           }
           if (result.parent_agent_id) {
-            await mkdir(dirname(coordination.report_path), { recursive: true });
-            await appendFile(coordination.report_path, "", "utf8");
-            await engine.armWatch({
-              owner: result.parent_agent_id,
-              target: coordination.report_path,
-              marker: coordination.done_marker,
-              deadline: Number.MAX_SAFE_INTEGER,
-            });
+            const reportWatchWarning = await armParentReportWatch(
+              result.parent_agent_id,
+              coordination,
+            );
+            if (reportWatchWarning) {
+              result.warnings = [
+                ...(result.warnings ?? []),
+                reportWatchWarning,
+              ];
+            }
           }
           const spawnedBinding = engine.getAgentState(result.agent_id);
           appendStaleBuildWarning(result);
