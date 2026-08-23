@@ -1877,6 +1877,55 @@ describe("AgentRegistry", () => {
       expect(registry.get("cmuxlayerCodex")).toBeNull();
     });
 
+    it("does not publish a seat alias when observer ownership disappears during repair", () => {
+      const engineId = "cmuxlayerCodex-bff10108";
+      const surfaceUuid = "e9072772-a6ab-47ea-af04-b561d75ae6e2";
+      const record = makeRecord({
+        agent_id: engineId,
+        surface_id: "surface:871",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: "cmux:observer-a",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      stateMgr.writeState(record);
+      let observerReads = 0;
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        observerIdProvider: () => {
+          observerReads += 1;
+          return observerReads === 1 ? "cmux:observer-a" : null;
+        },
+      });
+      registry.set(engineId, record);
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:871",
+            surface_uuid: surfaceUuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+        ],
+        {
+          seatRegistry: {
+            ...REPAIR_SEATS,
+            cmuxlayerCodex: {
+              repo: "cmuxlayer",
+              launchers: { codex: "cmuxlayerCodex" },
+              lane: "cmuxlayer-worker",
+              role: "worker",
+            },
+          },
+        },
+      );
+
+      expect(result.repaired).toEqual([]);
+      expect(registry.get(engineId)).toBe(record);
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
     it("keeps two live same-repo workers addressable only by their engine-issued ids", async () => {
       const firstId = "cmuxlayerCodex-aaaaaaaa";
       const secondId = "cmuxlayerCodex-bbbbbbbb";

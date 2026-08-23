@@ -80,6 +80,8 @@ function makeExec(opts?: {
   closeLeavesSurfaceListed?: boolean;
   /** Keep a second surface so absence of the target is authoritative. */
   witnessSurface?: boolean;
+  /** Model transient topology failure while verifying agent-scope closure. */
+  surfaceEnumerationFails?: boolean;
 }): ExecFn & { calls: string[][] } {
   const calls: string[][] = [];
   let surfaceLive = true;
@@ -102,6 +104,9 @@ function makeExec(opts?: {
       };
     }
     if (args.includes("list-panes")) {
+      if (opts?.surfaceEnumerationFails) {
+        throw new Error("cmux list-panes: transient enumeration failure");
+      }
       const surfaceRefs = [
         ...(surfaceLive ? [SURFACE] : []),
         ...(opts?.witnessSurface ? [WITNESS_SURFACE] : []),
@@ -546,6 +551,27 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     expect(data.surface_closed).toBe(false);
     expect(String(data.error)).toMatch(/surface/i);
     expect(await listSurfaceRefs(server)).toContain(SURFACE);
+  });
+
+  it("does not report a surface closed when topology enumeration failed", async () => {
+    const exec = makeExec({
+      screen: () => IDLE_CLAUDE_SCREEN,
+      surfaceEnumerationFails: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server);
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    const data = payload(result);
+    expect(result.isError).toBe(true);
+    expect(data.agent_stopped).toBe(true);
+    expect(data.surface_closed).toBe(false);
+    expect(String(data.error)).toMatch(/enumerat|verify.*surface/i);
+    expect(exec.calls.some((args) => args.includes("close-surface"))).toBe(false);
   });
 
   it("states plainly that there was no surface to close rather than implying one closed", async () => {

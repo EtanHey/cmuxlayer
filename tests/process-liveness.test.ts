@@ -48,6 +48,18 @@ describe("qualified agent process liveness", () => {
     ).toBe("gone");
   });
 
+  it("fails closed when second-granular ps time cannot distinguish same-second pid reuse", () => {
+    expect(
+      qualifyAgentProcessLiveness(
+        processRecord({
+          pid_registered_at: "2026-08-23T11:00:05.900Z",
+        }),
+        "alive",
+        Date.parse("2026-08-23T11:00:05.000Z"),
+      ),
+    ).toBe("unknown");
+  });
+
   it("fails closed when a live pid lacks production registration provenance", () => {
     expect(
       qualifyAgentProcessLiveness(

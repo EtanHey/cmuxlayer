@@ -4347,6 +4347,126 @@ Session ID: ${sessionId}`,
       expect(existsSync(stableMarker)).toBe(true);
     });
 
+    it("preserves a durable transcript path while backfilling pid-only registration evidence", async () => {
+      const agentId = "cmuxlayerClaude-durable-path";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const sessionPath = "/durable/claude/session.jsonl";
+      const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: () => ({
+          session_id: sessionId,
+          path: null,
+          pid: process.pid,
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:durable-path",
+          surface_uuid: surfaceUuid,
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: sessionId,
+          cli_session_path: sessionPath,
+          pid: null,
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:durable-path"),
+          id: surfaceUuid,
+          workspace_ref: "ws:durable-path",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.captureBootSessionId(agentId);
+
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      });
+    });
+
+    it("keeps captured pid evidence when a pending row converges on an existing final session", async () => {
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const finalAgentId = "cmuxlayerClaude-019d9aa5";
+      const pendingAgentId = "cmuxlayerClaude-pending-pid-merge";
+      const surfaceUuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: () => ({
+          session_id: sessionId,
+          path: null,
+          pid: process.pid,
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: finalAgentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:existing-final",
+          surface_uuid: surfaceUuid,
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: sessionId,
+          cli_session_path: "/durable/claude/existing.jsonl",
+          pid: null,
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: pendingAgentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "booting",
+          surface_id: "surface:existing-final",
+          surface_uuid: surfaceUuid,
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: null,
+          cli_session_path: null,
+          pid: null,
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:existing-final"),
+          id: surfaceUuid,
+          workspace_ref: "ws:existing-final",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.captureBootSessionId(pendingAgentId);
+
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        cli_session_id: sessionId,
+        cli_session_path: "/durable/claude/existing.jsonl",
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      });
+      expect(engine.getAgentState(pendingAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
+      });
+      expect(stateMgr.readState(pendingAgentId)).toBeNull();
+    });
+
     it("periodically reaps only old pending markers absent from registry and state", async () => {
       vi.setSystemTime(new Date("2026-08-03T12:00:00.000Z"));
       const nowSeconds = Math.floor(Date.now() / 1_000);
@@ -11095,6 +11215,57 @@ Session ID: ${sessionId}`,
         "c-c",
         expect.anything(),
       );
+    });
+
+    it("refuses socketless teardown when another record claims the same stable UUID", async () => {
+      engine.dispose();
+      const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => liveSurfaces,
+        {
+          observerIdProvider: () => null,
+          observerEpochProvider: () => null,
+        },
+      );
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        stopPostConditionTimeoutMs: 20,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stop-stale-duplicate",
+          state: "working",
+          surface_id: "surface:stale-ref",
+          surface_uuid: surfaceUuid,
+          workspace_id: "ws:1",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stop-canonical-owner",
+          state: "ready",
+          surface_id: "surface:canonical",
+          surface_uuid: surfaceUuid,
+          workspace_id: "ws:1",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:canonical"),
+          id: surfaceUuid,
+          workspace_ref: "ws:1",
+        },
+      ];
+      await registry.reconstitute();
+
+      await expect(
+        engine.stopAgent("agent-stop-stale-duplicate"),
+      ).rejects.toThrow(/same stable surface UUID|claimed by.*canonical-owner/i);
+
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
     });
 
     it("guards a freshly re-resolved moved UUID immediately before stop I/O", async () => {

@@ -7353,6 +7353,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const findSurfaceByRef = async (
     surfaceRef: string,
     workspace?: string,
+    opts?: { throwOnError?: boolean },
   ): Promise<CmuxSurface | null> => {
     try {
       const workspaceRefs = workspace
@@ -7374,7 +7375,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
       }
-    } catch {
+    } catch (error) {
+      if (opts?.throwOnError) throw error;
       return null;
     }
 
@@ -10194,9 +10196,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // through a now-stale UUID/ref and turn an observed success into a
           // stale-route failure. Terminal agents take the path below because
           // stop_agent is then a no-op and their pane still needs closing.
-          if (
-            (await findSurfaceByRef(boundSurface, boundWorkspace)) === null
-          ) {
+          let boundSurfaceAfterStop: CmuxSurface | null;
+          try {
+            boundSurfaceAfterStop = await findSurfaceByRef(
+              boundSurface,
+              boundWorkspace,
+              { throwOnError: true },
+            );
+          } catch (error) {
+            const reason =
+              error instanceof Error ? error.message : String(error);
+            return err(
+              new Error(
+                `close_surface scope=agent: agent ${args.agent_id} was stopped ` +
+                  `but surface ${boundSurface} closure could not be verified — ${reason}`,
+              ),
+              {
+                ...stopContent,
+                scope: "agent",
+                agent_stopped: true,
+                surface: boundSurface,
+                surface_closed: false,
+                surface_close_error: reason,
+              },
+            );
+          }
+          if (boundSurfaceAfterStop === null) {
             const data = {
               ...stopContent,
               scope: "agent",

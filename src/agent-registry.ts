@@ -2229,7 +2229,7 @@ export class AgentRegistry {
         discovered,
         candidate,
       );
-      if (shouldPublishCandidateAlias) {
+      if (updated && shouldPublishCandidateAlias) {
         this.aliases.set(candidate.agentId, managedRecord.agent_id);
       }
       return updated
@@ -2320,7 +2320,7 @@ export class AgentRegistry {
       patch.surface_observer_id = observerId;
     }
     if (Object.keys(patch).length === 0) {
-      return null;
+      return record;
     }
 
     let updated: AgentRecord;

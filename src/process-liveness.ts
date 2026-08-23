@@ -82,6 +82,15 @@ export function qualifyAgentProcessLiveness(
   ) {
     return "gone";
   }
+  if (
+    Math.floor(startedAtMs / 1_000) === Math.floor(registeredAtMs / 1_000)
+  ) {
+    // macOS `ps lstart` has only whole-second precision. A process launched
+    // after registration within this same displayed second is indistinguishable
+    // from the original process, so retain/refuse fail-closed rather than call
+    // either identity proven.
+    return "unknown";
+  }
   return "alive";
 }
 

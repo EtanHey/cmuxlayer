@@ -3262,17 +3262,21 @@ export class AgentEngine {
     capturedIdentity: CapturedSessionIdentity | string,
   ): AgentRecord {
     const identity = this.normalizeCapturedSessionIdentity(capturedIdentity);
+    const hasCapturedProcessEvidence = Boolean(
+      agent.surface_provenance === "cmuxlayer_spawn" &&
+        identity.pid &&
+        identity.pid_registered_at,
+    );
+    const capturedProcessEvidence = hasCapturedProcessEvidence
+      ? {
+          pid: identity.pid!,
+          pid_registered_at: identity.pid_registered_at!,
+        }
+      : {};
     let updated = this.stateMgr.updateRecord(agent.agent_id, {
       cli_session_id: identity.session_id,
-      cli_session_path: identity.path,
-      ...(agent.surface_provenance === "cmuxlayer_spawn" &&
-      identity.pid &&
-      identity.pid_registered_at
-        ? {
-            pid: identity.pid,
-            pid_registered_at: identity.pid_registered_at,
-          }
-        : {}),
+      cli_session_path: identity.path ?? agent.cli_session_path ?? null,
+      ...capturedProcessEvidence,
       transcript_session_capture_deferred: false,
       transcript_session_capture_attempts: 0,
     });
@@ -3317,15 +3321,21 @@ export class AgentEngine {
       }
       const sessionPath =
         identity.path ?? existingFinal.cli_session_path ?? null;
+      const processEvidenceMatches =
+        !hasCapturedProcessEvidence ||
+        (existingFinal.pid === identity.pid &&
+          existingFinal.pid_registered_at === identity.pid_registered_at);
       const canonicalFinal =
         existingFinal.cli_session_id === identity.session_id &&
         existingFinal.cli_session_path === sessionPath &&
+        processEvidenceMatches &&
         existingFinal.transcript_session_capture_deferred !== true &&
         (existingFinal.transcript_session_capture_attempts ?? 0) === 0
           ? existingFinal
           : this.stateMgr.updateRecord(finalAgentId, {
               cli_session_id: identity.session_id,
               cli_session_path: sessionPath,
+              ...capturedProcessEvidence,
               transcript_session_capture_deferred: false,
               transcript_session_capture_attempts: 0,
             });
@@ -8417,6 +8427,20 @@ export class AgentEngine {
         `Observer identity is unavailable and agent "${agent.agent_id}" is ` +
           `owned by ${agent.surface_observer_id}; refusing socketless teardown ` +
           `without matching observer ownership.`,
+      );
+    }
+    const normalizedSurfaceUuid = agent.surface_uuid.trim().toLowerCase();
+    const routedAgentId = agent.agent_id;
+    const competingRecord = this.registry.list().find(
+      (candidate) =>
+        candidate.agent_id !== routedAgentId &&
+        candidate.surface_uuid?.trim().toLowerCase() === normalizedSurfaceUuid,
+    );
+    if (competingRecord) {
+      throw new Error(
+        `Agent "${agent.agent_id}" cannot use socketless teardown because ` +
+          `stable surface UUID ${agent.surface_uuid} is also claimed by ` +
+          `agent "${competingRecord.agent_id}".`,
       );
     }
 
