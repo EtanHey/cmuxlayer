@@ -2926,8 +2926,19 @@ export class AgentEngine {
   }
 
   private canUseSelfRegistrationSessionResolver(agent: AgentRecord): boolean {
-    return Boolean(
+    return (
       agent.cli !== "codex" &&
+      this.canUseSelfRegistrationProcessEvidence(agent)
+    );
+  }
+
+  /**
+   * A Codex rollout remains authoritative for session identity. Once that
+   * identity is durable, an exact-session self-registration match may supply
+   * only the process evidence used by lifecycle guards.
+   */
+  private canUseSelfRegistrationProcessEvidence(agent: AgentRecord): boolean {
+    return Boolean(
       this.selfRegistrationSessionResolver &&
       TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state) &&
       JSONL_HARNESSES.has(agent.cli) &&
@@ -3443,7 +3454,7 @@ export class AgentEngine {
   ): Promise<AgentRecord> {
     if (agent.cli_session_id) {
       const canResolveSelfRegistration =
-        this.canUseSelfRegistrationSessionResolver(agent);
+        this.canUseSelfRegistrationProcessEvidence(agent);
       const recordedProcessGone =
         canResolveSelfRegistration &&
         Boolean(agent.pid) &&
@@ -3462,10 +3473,13 @@ export class AgentEngine {
             const replacementRegisteredAtMs = Date.parse(
               identity.pid_registered_at ?? "",
             );
+            const replacementHasFiniteTimestamp = Number.isFinite(
+              replacementRegisteredAtMs,
+            );
             const replacementIsNewer =
-              !agent.pid ||
-              (Number.isFinite(previousRegisteredAtMs) &&
-                Number.isFinite(replacementRegisteredAtMs) &&
+              replacementHasFiniteTimestamp &&
+              (!agent.pid ||
+                !Number.isFinite(previousRegisteredAtMs) ||
                 replacementRegisteredAtMs > previousRegisteredAtMs);
             if (
               identity.session_id === agent.cli_session_id &&

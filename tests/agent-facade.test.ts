@@ -174,7 +174,7 @@ describe("agent facade projections", () => {
     );
 
     expect(projected.resume_command).toBe(
-      "codex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 

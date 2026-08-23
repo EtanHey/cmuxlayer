@@ -38,6 +38,7 @@
   "files": [
     "dist",
     "assets/sidebars/fleet.swift",
+    "assets/hooks",
     "scripts/install-fleet-sidebar.mjs",
     "scripts/install-fleet-sidebar-dev.mjs",
     "LICENSE",

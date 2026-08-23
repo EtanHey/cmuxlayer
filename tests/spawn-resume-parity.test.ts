@@ -106,7 +106,7 @@ const AGENT_ENV = "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
  */
 const RAW_BYPASS: Record<string, string> = {
   claude: " --dangerously-skip-permissions",
-  codex: " --dangerously-bypass-approvals-and-sandbox",
+  codex: " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
   cursor: " --force",
   gemini: " -y",
 };
@@ -121,7 +121,7 @@ const RESUME_BYPASS: Record<LauncherPath, Record<string, string>> = {
   // ...but the codex launcher's resume form spells it out in full.
   registry: {
     claude: " -s",
-    codex: " --dangerously-bypass-approvals-and-sandbox",
+    codex: " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
     cursor: " -s",
     gemini: " -s",
   },
@@ -145,7 +145,7 @@ function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string 
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions`;
     case "codex":
-      return `${cd}codex --dangerously-bypass-approvals-and-sandbox`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`;
     case "cursor":
       return `${cd}cursor agent --force`;
     case "gemini":
@@ -158,7 +158,7 @@ function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string 
 function expectedResume(cli: CliType, path: LauncherPath, root: string): string {
   if (path === "registry") {
     return cli === "codex"
-      ? `${EXPECTED_LAUNCHER_NAME[cli]} --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`
+      ? `${EXPECTED_LAUNCHER_NAME[cli]} --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`
       : `${EXPECTED_LAUNCHER_NAME[cli]} -s --resume ${SESSION}`;
   }
   const cd = `cd '${root}' && `;
@@ -166,7 +166,7 @@ function expectedResume(cli: CliType, path: LauncherPath, root: string): string 
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions --resume ${SESSION}`;
     case "codex":
-      return `${cd}codex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`;
     case "cursor":
       return `${cd}cursor agent --force --resume ${SESSION}`;
     default:

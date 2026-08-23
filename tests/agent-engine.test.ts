@@ -3695,7 +3695,7 @@ describe("AgentEngine", () => {
       expect(resumed.surface_id).toBe("surface:new");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe("booting");
@@ -4209,7 +4209,7 @@ describe("AgentEngine", () => {
       expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toBeNull();
     });
 
-    it("does not backfill Codex pid evidence from self-registration", async () => {
+    it("backfills Codex pid evidence only after rollout identity is durable", async () => {
       const agentId = "cmuxlayerCodex-existing-session";
       const sessionId = "019fec96-588d-7000-8000-000000000000";
       const selfRegistrationResolver = vi.fn(() => ({
@@ -4233,6 +4233,7 @@ describe("AgentEngine", () => {
           state: "working",
           surface_id: "surface:codex-existing-session",
           surface_uuid: "11111111-2222-4333-8444-555555555555",
+          surface_provenance: "cmuxlayer_spawn",
           cli_session_id: sessionId,
           cli_session_path: "/durable/codex/rollout.jsonl",
           pid: null,
@@ -4248,9 +4249,10 @@ describe("AgentEngine", () => {
 
       await engine.captureBootSessionId(agentId);
 
-      expect(selfRegistrationResolver).not.toHaveBeenCalled();
+      expect(selfRegistrationResolver).toHaveBeenCalledTimes(1);
       expect(engine.getAgentState(agentId)).toMatchObject({
-        pid: null,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
         cli_session_path: "/durable/codex/rollout.jsonl",
       });
     });
@@ -4512,6 +4514,68 @@ Session ID: ${sessionId}`,
         {
           ...makeSurface("surface:replaced-process"),
           id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+        },
+      ];
+      await registry.reconstitute();
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          if (pid === oldPid && signal === 0) {
+            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        await engine.captureBootSessionId(agentId);
+
+        expect(selfRegistrationResolver).toHaveBeenCalledTimes(1);
+        expect(engine.getAgentState(agentId)).toMatchObject({
+          pid: replacementPid,
+          pid_registered_at: "2026-08-23T11:05:00.000Z",
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
+    it("replaces gone legacy pid evidence when its registration time is missing", async () => {
+      const agentId = "cmuxlayerClaude-legacy-process-time";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const oldPid = 32001;
+      const replacementPid = 32002;
+      const selfRegistrationResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: null,
+        pid: replacementPid,
+        pid_registered_at: "2026-08-23T11:05:00.000Z",
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: selfRegistrationResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:legacy-process-time",
+          surface_uuid: "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb",
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: sessionId,
+          pid: oldPid,
+          pid_registered_at: null,
+          created_at: "2026-08-23T11:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:legacy-process-time"),
+          id: "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb",
         },
       ];
       await registry.reconstitute();
@@ -5578,7 +5642,7 @@ Session ID: ${sessionId}`,
         session_id: sessionId,
         resumable: true,
         resume_command:
-          "cmuxlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019fec96-588d-7000-8000-000000000000",
+          "cmuxlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fec96-588d-7000-8000-000000000000",
       });
       vi.unstubAllEnvs();
     });
@@ -9843,7 +9907,7 @@ Session ID: ${sessionId}`,
           to: parent.agent_id,
           tag: "agent_halt_awaiting_input",
           task: expect.stringMatching(
-            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_key\(surface: "surface:halt-awaiting", key: "return"\).*codex --dangerously-bypass-approvals-and-sandbox resume 019fad12-1111-7222-8333-444455556666/s,
+            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_key\(surface: "surface:halt-awaiting", key: "return"\).*codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fad12-1111-7222-8333-444455556666/s,
           ),
         }),
       ]);
@@ -13683,7 +13747,7 @@ describe("buildResumeCommand", () => {
 
   it("builds raw harness resume commands for engine-owned same-surface revival", () => {
     expect(buildRawResumeCommand("codex", "brainlayer", sessionId)).toBe(
-      `codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`,
+      `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${sessionId}`,
     );
     expect(buildRawResumeCommand("claude", "brainlayer", sessionId)).toBe(
       `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume ${sessionId}`,
@@ -13713,7 +13777,7 @@ describe("buildResumeCommand", () => {
     expect(
       buildResumeCommand("codex", "brainlayer", sessionId, "brainlayerCodex"),
     ).toBe(
-      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(
       buildResumeCommand("cursor", "brainlayer", sessionId, "brainlayerCursor"),
@@ -13758,7 +13822,7 @@ describe("buildResumeCommand", () => {
         "brainlayerCodex [surface:606]",
       ),
     ).toBe(
-      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 
@@ -13766,7 +13830,7 @@ describe("buildResumeCommand", () => {
     expect(
       buildResumeCommand("codex", "matchmat", sessionId, "mm-worker"),
     ).toBe(
-      "mm-worker --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "mm-worker --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 

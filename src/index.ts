@@ -15,6 +15,7 @@ import { isMainModule } from "./is-main.js";
 import { writeInboxCursor } from "./inbox.js";
 import { runInitCli } from "./init-cli.js";
 import { loadCmuxlayerConfigFile } from "./config-file.js";
+import { installSessionHooks } from "./self-registration-hooks-installer.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -34,6 +35,9 @@ Usage:
                        standard §0/§1/§3/§6) and exit. Read-only; no mutation.
                        Add --json for machine-readable output. Exits 0 when
                        healthy.
+  cmuxlayer install-session-hooks
+                       Install the Claude and Codex SessionStart registry hooks.
+                       Existing hook configuration is merged and backed up.
   cmuxlayer fleet-sidebar <collapse|expand|toggle> <lane>
                        Persist an independent Fleet lane state. Supported lanes:
                        orc, golems, voicelayer, skillCreator, cmuxlayer, other.
@@ -92,6 +96,13 @@ async function main() {
       (json ? renderDoctorJson(report) : renderDoctorText(report)) + "\n",
     );
     process.exitCode = report.healthy ? 0 : 1;
+    return;
+  }
+  if (arg === "install-session-hooks") {
+    const result = await installSessionHooks();
+    for (const path of result.changed) process.stdout.write(`updated ${path}\n`);
+    for (const path of result.backups) process.stdout.write(`backup ${path}\n`);
+    if (result.changed.length === 0) process.stdout.write("already installed\n");
     return;
   }
   if (arg === "fleet-sidebar") {

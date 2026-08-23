@@ -25,7 +25,7 @@ describe("raw resume commands carry a working directory", () => {
       buildRawResumeCommand("codex", "brainlayer", SESSION, {
         cwd: "/srv/repos/brainlayer",
       }),
-    ).toBe(`cd '/srv/repos/brainlayer' && codex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`);
+    ).toBe(`cd '/srv/repos/brainlayer' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
     expect(
       buildRawResumeCommand("cursor", "brainlayer", SESSION, {
         cwd: "/srv/repos/brainlayer",
@@ -38,7 +38,7 @@ describe("raw resume commands carry a working directory", () => {
       buildRawResumeCommand("codex", "brainlayer", SESSION, {
         cwd: "/tmp/a b'c",
       }),
-    ).toBe(`cd '/tmp/a b'\\''c' && codex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`);
+    ).toBe(`cd '/tmp/a b'\\''c' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
   });
 
   it("lets an explicit cwd override the kiro ~/Gits assumption", () => {
@@ -57,7 +57,7 @@ describe("raw resume commands carry a working directory", () => {
       `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume ${SESSION}`,
     );
     expect(buildRawResumeCommand("codex", "brainlayer", SESSION)).toBe(
-      `codex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`,
+      `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`,
     );
   });
 });
@@ -71,7 +71,7 @@ describe("buildResumeCommand falls back to the raw CLI, never a guessed launcher
     ).toBe(`brainlayerClaude -s --resume ${SESSION}`);
     expect(
       buildResumeCommand("codex", "matchmat", SESSION, "mmCodex"),
-    ).toBe(`mmCodex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`);
+    ).toBe(`mmCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
   });
 
   it("emits raw CLI resume when no launcher was recorded (fresh install)", () => {
@@ -79,7 +79,7 @@ describe("buildResumeCommand falls back to the raw CLI, never a guessed launcher
       `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume ${SESSION}`,
     );
     expect(buildResumeCommand("codex", "brainlayer", SESSION)).toBe(
-      `codex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`,
+      `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`,
     );
     expect(buildResumeCommand("cursor", "brainlayer", SESSION)).toBe(
       `cursor agent --force --resume ${SESSION}`,
@@ -100,7 +100,7 @@ describe("buildResumeCommand falls back to the raw CLI, never a guessed launcher
   it("falls back to raw when the recorded launcher name is unusable", () => {
     expect(
       buildResumeCommand("codex", "brainlayer", SESSION, "not a launcher!"),
-    ).toBe(`codex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`);
+    ).toBe(`codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
   });
 
   it("never emits a nonexistent ${repo}${Suffix} binary", () => {
@@ -118,7 +118,7 @@ describe("buildResumeCommand falls back to the raw CLI, never a guessed launcher
       "--dangerously-skip-permissions",
     );
     expect(buildResumeCommand("codex", "brainlayer", SESSION)).toContain(
-      "--dangerously-bypass-approvals-and-sandbox",
+      "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
     );
     expect(buildResumeCommand("cursor", "brainlayer", SESSION)).toContain(
       "--force",

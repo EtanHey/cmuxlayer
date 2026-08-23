@@ -25,6 +25,24 @@ or `npm install -g cmuxlayer`. Both provide the `cmuxlayer` command.
 cmuxlayer init
 ```
 
+Then install the lifecycle hooks that let Claude and Codex sessions register
+their stable cmux surface identity and live process evidence:
+
+```bash
+cmuxlayer install-session-hooks
+```
+
+The installer adds one `SessionStart` command without replacing other hooks,
+backs up each existing JSON config before changing it, and is safe to run again.
+Codex hooks are enabled by default. Unattended cmuxlayer launches pass
+`--dangerously-bypass-hook-trust` after the packaged script has been vetted;
+prompting-mode or manually launched Codex sessions require a one-time `/hooks`
+review whenever the exact hook definition changes. If `[features] hooks = false`
+is set in `~/.codex/config.toml`, enable it before relying on registration.
+Cursor hook wiring is not installed because its lifecycle payload is not
+contract-compatible with the Claude/Codex scripts. Gemini and Kiro are outside
+cmuxlayer's JSONL session-harness set.
+
 The wizard asks three things.
 
 **Which repositories?** Give the absolute path to each checkout you want to be

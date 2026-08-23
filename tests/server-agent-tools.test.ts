@@ -7443,7 +7443,7 @@ describe("agent lifecycle tool handlers", () => {
     };
 
     expect(parsed.ok).toBe(true);
-    // Issue #392: `codex --dangerously-bypass-approvals-and-sandbox resume <uuid>` reads a global session store, so a
+    // Issue #392: `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume <uuid>` reads a global session store, so a
     // corrupt repo LABEL no longer blocks recovery -- the raw form is real and
     // runnable. Previously this row advertised nothing at all.
     expect(parsed.agents).toEqual([
@@ -7451,7 +7451,7 @@ describe("agent lifecycle tool handlers", () => {
       expect.objectContaining({
         agent_id: "corrupt-agent",
         resumable: expect.objectContaining({ value: true }),
-        resume_command: "codex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
+        resume_command: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
       }),
     ]);
     expect(parsed.skipped_agents).toBeUndefined();
@@ -9964,7 +9964,7 @@ codex>
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.resume_command).toBe(
-      "golemsCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "golemsCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 

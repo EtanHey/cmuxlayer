@@ -31,7 +31,7 @@ Raw flags, verified against each CLI's `--help`:
 | cli | binary | skip flag | model flag | resume |
 |---|---|---|---|---|
 | claude | `claude` | `--dangerously-skip-permissions` | `--model` | `--resume <uuid>` |
-| codex | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m` | `resume <uuid>` (global flags precede the subcommand) |
+| codex | `codex` | `--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust` | `-m` | `resume <uuid>` (global flags precede the subcommand) |
 | cursor | `cursor agent` | `--force` | `--model` | `--resume <uuid>` |
 | gemini | `gemini` | `-y` | `--model` | **none** — see below |
 
@@ -117,7 +117,7 @@ background pane that stops on its first tool call reads as a hung pane. An
 install that would rather be asked sets
 `CMUXLAYER_SPAWN_PERMISSION_MODE=default` (what `cmuxlayer init --permissions
 ask` writes), and then **neither** lane carries a bypass: the raw lane drops
-`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`
+`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`
 / `--force` / `-y`, and the launcher lane drops `-s`. Launch and resume move
 together, so a resumed agent comes back in the mode it was spawned in.
 
