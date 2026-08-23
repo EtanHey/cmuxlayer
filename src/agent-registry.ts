@@ -2061,10 +2061,29 @@ export class AgentRegistry {
     const liveSurfaceRefs = new Set(
       discovered.map((entry) => entry.surface_id),
     );
-    const candidates = discovered.map((entry) =>
-      entry.read_error
-        ? null
-        : this.repairCandidateForDiscovery(entry, opts?.seatRegistry),
+
+    for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
+      evicted.add(removed);
+    }
+
+    const repairEligible = discovered.map((entry) => {
+      if (entry.read_error) return false;
+      if (!opts?.orphansOnly) return true;
+      const surfaceRecords = [...this.agents.values()].filter(
+        (record) => record.surface_id === entry.surface_id,
+      );
+      return (
+        surfaceRecords.length === 0 ||
+        surfaceRecords.some(
+          (record) =>
+            isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id),
+        )
+      );
+    });
+    const candidates = discovered.map((entry, index) =>
+      repairEligible[index]
+        ? this.repairCandidateForDiscovery(entry, opts?.seatRegistry)
+        : null,
     );
     const candidateCounts = new Map<string, number>();
     for (const candidate of candidates) {
@@ -2080,25 +2099,8 @@ export class AgentRegistry {
       }
     }
 
-    for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
-      evicted.add(removed);
-    }
-
     for (const [entryIndex, entry] of discovered.entries()) {
-      if (entry.read_error) continue;
-      if (opts?.orphansOnly) {
-        const surfaceRecords = [...this.agents.values()].filter(
-          (record) => record.surface_id === entry.surface_id,
-        );
-        const needsRepair =
-          surfaceRecords.length === 0 ||
-          surfaceRecords.some(
-            (record) =>
-              isAutoAgentId(record.agent_id) ||
-              isPendingAgentId(record.agent_id),
-          );
-        if (!needsRepair) continue;
-      }
+      if (!repairEligible[entryIndex]) continue;
       const candidate = candidates[entryIndex];
       if (!candidate) continue;
 

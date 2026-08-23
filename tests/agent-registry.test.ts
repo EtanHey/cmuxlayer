@@ -1759,6 +1759,50 @@ describe("AgentRegistry", () => {
   });
 
   describe("repairFromDiscovery", () => {
+    it("skips healthy surfaces before candidate inference in orphans-only repair", () => {
+      const healthy = makeRecord({
+        agent_id: "healthy-managed-agent",
+        surface_id: "surface:healthy",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+      });
+      stateMgr.writeState(healthy);
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        explicitRoleProvider: (entry) => {
+          if (entry.surface_id === healthy.surface_id) {
+            throw new Error("healthy surface role inference must be skipped");
+          }
+          return "worker";
+        },
+      });
+      registry.set(healthy.agent_id, healthy);
+
+      expect(() =>
+        registry.repairFromDiscovery(
+          [
+            makeDiscovered({
+              surface_id: healthy.surface_id,
+              surface_uuid: healthy.surface_uuid,
+              surface_title: "publish 24h dashboard",
+              cli: "codex",
+            }),
+            makeDiscovered({
+              surface_id: "surface:orphan",
+              surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              surface_title: "golemsCodex",
+              cli: "codex",
+            }),
+          ],
+          { seatRegistry: REPAIR_SEATS, orphansOnly: true },
+        ),
+      ).not.toThrow();
+      expect(registry.get(healthy.agent_id)).toMatchObject({
+        agent_id: healthy.agent_id,
+      });
+      expect(registry.get("golemsCodex")).toMatchObject({
+        surface_id: "surface:orphan",
+      });
+    });
+
     it("withholds a launcher alias shared by multiple live managed workers", () => {
       const first = makeRecord({
         agent_id: "cmuxlayerCodex-worker-one",
