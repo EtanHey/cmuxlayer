@@ -5218,7 +5218,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (hasQueuedAgentInput) {
         if (
           opts.source_event !== "send_to" &&
-          opts.source_event !== "dispatch_nudge"
+          opts.source_event !== "dispatch_nudge" &&
+          opts.source_event !== "report_to_parent"
         ) {
           return {
             submit_verified: false,
@@ -5238,7 +5239,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       if (
         (opts.source_event === "send_to" ||
-          opts.source_event === "dispatch_nudge") &&
+          opts.source_event === "dispatch_nudge" ||
+          opts.source_event === "report_to_parent") &&
         screenShowsQueuedCursorFollowup(snapshot.text, opts.text)
       ) {
         return {
@@ -5367,13 +5369,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         opts.allow_recovery_enter_retry !== false &&
         (opts.source_event === "send_to" ||
           opts.source_event === "dispatch_nudge" ||
+          opts.source_event === "report_to_parent" ||
           opts.source_event === "boot_prompt") &&
         hasPendingSubmitEvidence &&
         screenCli === "codex";
       const cursorFollowupRetryEligiblePendingInput =
         opts.allow_recovery_enter_retry !== false &&
         (opts.source_event === "send_to" ||
-          opts.source_event === "dispatch_nudge") &&
+          opts.source_event === "dispatch_nudge" ||
+          opts.source_event === "report_to_parent") &&
         hasPendingSubmitEvidence &&
         screenCli === "cursor" &&
         screenShowsCursorFollowupNeedsEnter(snapshot.text);
@@ -5441,6 +5445,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery:
             opts.source_event === "send_to" ||
             opts.source_event === "dispatch_nudge" ||
+            opts.source_event === "report_to_parent" ||
             opts.require_attributable_submit_evidence === true
               ? "pending_verify"
               : "submitted",
@@ -5480,6 +5485,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const allowPendingVerify =
       opts.source_event === "send_to" ||
       opts.source_event === "dispatch_nudge" ||
+      opts.source_event === "report_to_parent" ||
       opts.require_attributable_submit_evidence === true;
     if (allowPendingVerify && submitVerified === false) {
       return {
@@ -5653,7 +5659,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "send_to" ||
       opts.source_event === "send_to_agent" ||
       opts.source_event === "send_input" ||
-      opts.source_event === "dispatch_nudge";
+      opts.source_event === "dispatch_nudge" ||
+      opts.source_event === "report_to_parent";
     const draftGuardText = opts.chunks.join("");
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
@@ -12051,7 +12058,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // retain their stricter no-retry evidence semantics.
             allow_recovery_enter_retry:
               args.source_event === "send_to" ||
-              args.source_event === "dispatch_nudge",
+              args.source_event === "dispatch_nudge" ||
+              args.source_event === "report_to_parent",
             submit_verify_timeout_ms: args.allow_busy
               ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
               : undefined,
@@ -12097,7 +12105,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const deliverReportInboxPointer = async (
       recipient: AgentRecord,
       message: ReturnType<typeof dispatch>,
-    ): Promise<{ delivery: "submitted" | "queued"; delivery_id?: string }> => {
+    ): Promise<{
+      delivery: "submitted" | "queued" | "queued_followup" | "pending_verify";
+      delivery_id?: string;
+    }> => {
       const pointer = formatInboxPing(
         message,
         inboxPath(recipient.agent_id, inboxOpts),
@@ -12118,14 +12129,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           agent_id: recipient.agent_id,
           text: pointer,
           press_enter: true,
-          allow_busy: true,
+          allow_busy: false,
           source_event: "report_to_parent",
           delivery_id: deliveryId,
         });
       } catch (error) {
         if (
-          error instanceof Error &&
-          /\bis busy\b/.test(error.message)
+          error instanceof RetryableDeliveryError ||
+          (error instanceof Error && /\bis busy\b/.test(error.message))
         ) {
           const queued = engine.queueDelivery({
             agent_id: recipient.agent_id,
@@ -12139,14 +12150,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       if (
         delivered.delivery !== "submitted" &&
-        delivered.delivery !== "queued"
+        delivered.delivery !== "queued" &&
+        delivered.delivery !== "queued_followup" &&
+        delivered.delivery !== "pending_verify"
       ) {
         throw new Error(
           "parent blocker wake produced no evidence-backed delivery state",
         );
       }
-      if (delivered.delivery === "queued") {
+      if (
+        delivered.delivery === "queued" ||
+        delivered.delivery === "queued_followup"
+      ) {
         engine.acceptComposerQueue({
+          delivery_id: deliveryId,
+          agent_id: recipient.agent_id,
+          text: pointer,
+          press_enter: true,
+          source_event: "report_to_parent",
+          retry_count: delivered.retry_count,
+          delivery_state: delivered.delivery,
+        });
+      } else if (delivered.delivery === "pending_verify") {
+        engine.acceptPendingVerify({
           delivery_id: deliveryId,
           agent_id: recipient.agent_id,
           text: pointer,

@@ -1251,6 +1251,59 @@ describe("report_to_parent hierarchy-bound escalation", () => {
     expect(sendCalls(exec).at(-1)?.join(" ")).toContain("surface:new");
   });
 
+  it("keeps a parent blocker durable without typing into a foreign draft", async () => {
+    await server.close();
+    exec = makeExec(
+      "Claude Code\n❯ do not submit this existing draft",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createInboxServer(exec, inboxDir);
+    const parent = hierarchyRecord({
+      agentId: "lead-parent",
+      surfaceId: "surface:new",
+      surfaceUuid: parentUuid,
+      parentAgentId: null,
+    });
+    const child = hierarchyRecord({
+      agentId: "worker-child",
+      surfaceId: "surface:child",
+      surfaceUuid: childUuid,
+      parentAgentId: parent.agent_id,
+    });
+    register(parent, child);
+    const before = sendCalls(exec).length;
+
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
+      server._registeredTools.report_to_parent.handler(
+        { blocker: "Blocked while parent is composing" },
+        {} as any,
+      ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      route: "direct",
+      delivery: "queued",
+      durable: true,
+    });
+    expect(sendCalls(exec)).toHaveLength(before);
+    expect(readInbox(parent.agent_id, { baseDir: inboxDir })[0]?.task).toBe(
+      "Blocked while parent is composing",
+    );
+  });
+
   it("refuses a root caller with no registry parent", async () => {
     const root = hierarchyRecord({
       agentId: "orc-root",
