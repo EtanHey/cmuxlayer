@@ -12462,7 +12462,7 @@ Session ID: ${sessionId}`,
         );
         liveSurfaces = [makeSurface("surface:force-live")];
         await engine.getRegistry().reconstitute();
-        execFileSyncMock.mockReturnValue("Sun Aug 23 14:00:02 2026\n");
+        execFileSyncMock.mockReturnValue("2026-08-23T11:00:02.000Z\n");
 
         await expect(engine.stopAgent("agent-force-live", true)).rejects.toThrow(
           /post-condition/i,
@@ -12554,7 +12554,7 @@ Session ID: ${sessionId}`,
         );
         liveSurfaces = [makeSurface("surface:force-eperm")];
         await engine.getRegistry().reconstitute();
-        execFileSyncMock.mockReturnValue("Sun Aug 23 14:00:02 2026\n");
+        execFileSyncMock.mockReturnValue("2026-08-23T11:00:02.000Z\n");
 
         await expect(engine.stopAgent("agent-force-eperm", true)).rejects.toThrow(
           /process still alive/i,
