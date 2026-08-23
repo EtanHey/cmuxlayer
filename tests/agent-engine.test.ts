@@ -3695,7 +3695,7 @@ describe("AgentEngine", () => {
       expect(resumed.surface_id).toBe("surface:new");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe("booting");
@@ -5580,7 +5580,7 @@ Session ID: ${sessionId}`,
         session_id: sessionId,
         resumable: true,
         resume_command:
-          "cmuxlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019fec96-588d-7000-8000-000000000000",
+          "cmuxlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fec96-588d-7000-8000-000000000000",
       });
       vi.unstubAllEnvs();
     });
@@ -9845,7 +9845,7 @@ Session ID: ${sessionId}`,
           to: parent.agent_id,
           tag: "agent_halt_awaiting_input",
           task: expect.stringMatching(
-            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_key\(surface: "surface:halt-awaiting", key: "return"\).*codex --dangerously-bypass-approvals-and-sandbox resume 019fad12-1111-7222-8333-444455556666/s,
+            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_key\(surface: "surface:halt-awaiting", key: "return"\).*codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fad12-1111-7222-8333-444455556666/s,
           ),
         }),
       ]);
@@ -13685,7 +13685,7 @@ describe("buildResumeCommand", () => {
 
   it("builds raw harness resume commands for engine-owned same-surface revival", () => {
     expect(buildRawResumeCommand("codex", "brainlayer", sessionId)).toBe(
-      `codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`,
+      `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${sessionId}`,
     );
     expect(buildRawResumeCommand("claude", "brainlayer", sessionId)).toBe(
       `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume ${sessionId}`,
@@ -13715,7 +13715,7 @@ describe("buildResumeCommand", () => {
     expect(
       buildResumeCommand("codex", "brainlayer", sessionId, "brainlayerCodex"),
     ).toBe(
-      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(
       buildResumeCommand("cursor", "brainlayer", sessionId, "brainlayerCursor"),
@@ -13760,7 +13760,7 @@ describe("buildResumeCommand", () => {
         "brainlayerCodex [surface:606]",
       ),
     ).toBe(
-      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 
@@ -13768,7 +13768,7 @@ describe("buildResumeCommand", () => {
     expect(
       buildResumeCommand("codex", "matchmat", sessionId, "mm-worker"),
     ).toBe(
-      "mm-worker --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "mm-worker --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 

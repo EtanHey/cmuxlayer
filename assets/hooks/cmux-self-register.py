@@ -30,8 +30,9 @@ def main():
         payload = {}
 
     session_id = payload.get("session_id") or ""
-    if not session_id:
-        return  # never fabricate an id
+    surface_uuid = os.environ.get("CMUX_SURFACE_ID") or ""
+    if not session_id or not surface_uuid:
+        return  # never fabricate either identity field
 
     entry = {
         "session_id": session_id,
@@ -39,7 +40,7 @@ def main():
         # pane; cmuxlayer already keys on agent.surface_uuid. pid/cwd proved
         # unreliable in prod (AgentRecord.pid != CLI pid; launch_cwd = shell-home
         # or null), so surface_uuid is the information-theoretic join.
-        "surface_uuid": os.environ.get("CMUX_SURFACE_ID") or "",
+        "surface_uuid": surface_uuid,
         "cwd": payload.get("cwd") or os.getcwd(),  # optional secondary validator
         "pid": os.getppid(),  # telemetry only (Claude proc; no longer a join key)
         "cli": "claude",  # SessionStart fires for Claude only

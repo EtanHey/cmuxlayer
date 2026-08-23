@@ -34,11 +34,14 @@ cmuxlayer install-session-hooks
 
 The installer adds one `SessionStart` command without replacing other hooks,
 backs up each existing JSON config before changing it, and is safe to run again.
-Codex may ask you to review the new user hook with `/hooks`; unattended
-cmuxlayer launches use Codex's hook-trust bypass after the packaged script has
-already been vetted. Cursor hook wiring is not installed because its lifecycle
-payload is not contract-compatible with the Claude/Codex scripts. Gemini and
-Kiro are outside cmuxlayer's JSONL session-harness set.
+Codex hooks are enabled by default. Unattended cmuxlayer launches pass
+`--dangerously-bypass-hook-trust` after the packaged script has been vetted;
+prompting-mode or manually launched Codex sessions require a one-time `/hooks`
+review whenever the exact hook definition changes. If `[features] hooks = false`
+is set in `~/.codex/config.toml`, enable it before relying on registration.
+Cursor hook wiring is not installed because its lifecycle payload is not
+contract-compatible with the Claude/Codex scripts. Gemini and Kiro are outside
+cmuxlayer's JSONL session-harness set.
 
 The wizard asks three things.
 

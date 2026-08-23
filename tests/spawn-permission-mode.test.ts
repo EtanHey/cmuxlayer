@@ -49,10 +49,25 @@ describe("raw launch honours the permission mode", () => {
     ).toContain("--dangerously-skip-permissions");
   });
 
+  it("carries Codex hook-trust bypass alongside the unattended approval bypass", () => {
+    const command = buildLaunchCommand("codex", "alpha", undefined, undefined, {
+      cwd: "/code/alpha",
+      launchMode: "raw",
+    });
+
+    expect(command).toContain(
+      "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+    );
+    expect(command).toContain("--dangerously-bypass-hook-trust");
+  });
+
   it("drops the bypass for every raw CLI in default mode", () => {
     const cases: Array<[Parameters<typeof buildLaunchCommand>[0], string]> = [
       ["claude", "--dangerously-skip-permissions"],
-      ["codex", "--dangerously-bypass-approvals-and-sandbox"],
+      [
+        "codex",
+        "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+      ],
       ["cursor", "--force"],
       ["gemini", "-y"],
     ];
@@ -63,6 +78,9 @@ describe("raw launch honours the permission mode", () => {
         permissionMode: "default",
       });
       expect(command).not.toContain(flag);
+      if (cli === "codex") {
+        expect(command).not.toContain("--dangerously-bypass-hook-trust");
+      }
       expect(command).toContain("cd '/code/alpha'");
     }
   });

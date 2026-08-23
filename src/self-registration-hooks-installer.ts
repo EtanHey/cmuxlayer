@@ -91,7 +91,7 @@ function mergeClaudeSettings(config: JsonObject, path: string, hookPath: string)
         {
           type: "command",
           command: `python3 ${shellQuote(hookPath)}`,
-          timeout: 5000,
+          timeout: 5,
           async: true,
         },
       ],

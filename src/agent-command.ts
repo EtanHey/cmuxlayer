@@ -70,7 +70,8 @@ export function rawResumeNeedsCwd(cli: CliType): boolean {
 /**
  * Raw skip-approval flags, the CLI-level equivalent of the repoGolem launcher
  * `-s`. Verified against each installed CLI's `--help`:
- *   claude --dangerously-skip-permissions   codex --dangerously-bypass-approvals-and-sandbox
+ *   claude --dangerously-skip-permissions
+ *   codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust
  *   cursor agent --force                    gemini -y
  *
  * AIDEV-NOTE: these belong on the RESUME command too, not just spawn. A
@@ -79,7 +80,8 @@ export function rawResumeNeedsCwd(cli: CliType): boolean {
  */
 export const RAW_SKIP_APPROVALS: Partial<Record<CliType, string>> = {
   claude: "--dangerously-skip-permissions",
-  codex: "--dangerously-bypass-approvals-and-sandbox",
+  codex:
+    "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
   cursor: "--force",
   gemini: "-y",
 };
@@ -163,7 +165,9 @@ export function buildResumeCommand(
       return `${launcher}${skipArg} --resume ${sessionId}`;
     case "codex":
       return `${launcher}${
-        bypass ? " --dangerously-bypass-approvals-and-sandbox" : ""
+        bypass
+          ? " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+          : ""
       } resume ${sessionId}`;
     case "gemini":
       return `${launcher}${skipArg} --resume ${sessionId}`;
@@ -223,4 +227,3 @@ export function buildRawResumeCommand(
       throw new Error("unreachable: gemini raw resume is refused above");
   }
 }
-

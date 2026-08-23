@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -25,11 +24,15 @@ function tempDir(prefix: string): string {
   return path;
 }
 
-async function runCodexHook(input: string, env: Record<string, string>) {
+async function runHook(
+  hook: string,
+  input: string,
+  env: Record<string, string>,
+) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = execFile(
       "python3",
-      [codexHook],
+      [hook],
       { env: { ...process.env, ...env } },
       (error, stdout, stderr) => {
         if (error) reject(error);
@@ -38,6 +41,10 @@ async function runCodexHook(input: string, env: Record<string, string>) {
     );
     child.stdin!.end(input);
   });
+}
+
+function runCodexHook(input: string, env: Record<string, string>) {
+  return runHook(codexHook, input, env);
 }
 
 afterEach(() => {
@@ -101,13 +108,16 @@ describe("Codex self-registration hook", () => {
       stderr: "",
     });
     await expect(
-      runCodexHook(JSON.stringify({ session_id: "session-without-surface" }), baseEnv),
+      runCodexHook(
+        JSON.stringify({ session_id: "session-without-surface" }),
+        baseEnv,
+      ),
     ).resolves.toEqual({ stdout: "", stderr: "" });
     await expect(
-      runCodexHook(
-        JSON.stringify({ cwd: root }),
-        { ...baseEnv, CMUX_SURFACE_ID: "surface-without-session" },
-      ),
+      runCodexHook(JSON.stringify({ cwd: root }), {
+        ...baseEnv,
+        CMUX_SURFACE_ID: "surface-without-session",
+      }),
     ).resolves.toEqual({ stdout: "", stderr: "" });
 
     expect(existsSync(registry)).toBe(false);
@@ -128,14 +138,22 @@ describe("Codex self-registration hook", () => {
 });
 
 describe("shipped self-registration hooks", () => {
-  it("vendors the existing Claude hook byte-for-byte", () => {
-    const digest = createHash("sha256")
-      .update(readFileSync(claudeHook))
-      .digest("hex");
+  it("writes no Claude row when the required surface identity is absent", async () => {
+    const root = tempDir("cmux-claude-hook-open-");
+    const registry = join(root, "registry.jsonl");
 
-    expect(digest).toBe(
-      "572018302b2c50801b9940a98958ac694b35d5264420c06b76df5396cf116792",
-    );
+    await expect(
+      runHook(
+        claudeHook,
+        JSON.stringify({ session_id: "session-without-surface", cwd: root }),
+        {
+          CMUXLAYER_SESSION_REGISTRY: registry,
+          CMUX_SURFACE_ID: "",
+        },
+      ),
+    ).resolves.toEqual({ stdout: "", stderr: "" });
+
+    expect(existsSync(registry)).toBe(false);
   });
 });
 
@@ -170,7 +188,10 @@ describe("installSessionHooks", () => {
       },
     };
     const originalToml = 'notify = ["existing", "turn-ended"]\n';
-    writeFileSync(claudeSettings, JSON.stringify(originalClaude, null, 2) + "\n");
+    writeFileSync(
+      claudeSettings,
+      JSON.stringify(originalClaude, null, 2) + "\n",
+    );
     writeFileSync(codexHooks, JSON.stringify(originalCodex, null, 2) + "\n");
     writeFileSync(codexConfig, originalToml);
 
@@ -192,6 +213,7 @@ describe("installSessionHooks", () => {
         expect.objectContaining({
           type: "command",
           command: expect.stringContaining("cmux-self-register.py"),
+          timeout: 5,
         }),
       ]),
     );
@@ -206,6 +228,7 @@ describe("installSessionHooks", () => {
           expect.objectContaining({
             type: "command",
             command: expect.stringContaining("codex-cmux-self-register.py"),
+            timeout: 5,
           }),
         ],
       }),
@@ -221,7 +244,10 @@ describe("installSessionHooks", () => {
       expect.arrayContaining([claudeSettings, codexHooks]),
     );
 
-    const second = await installSessionHooks({ homeDir, assetsDir: hookAssets });
+    const second = await installSessionHooks({
+      homeDir,
+      assetsDir: hookAssets,
+    });
     expect(second.changed).toEqual([]);
     expect(readFileSync(claudeSettings, "utf8")).toBe(firstClaudeText);
     expect(readFileSync(codexHooks, "utf8")).toBe(firstCodexText);
