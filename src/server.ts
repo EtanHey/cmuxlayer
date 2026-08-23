@@ -12505,7 +12505,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Human label for the pane. For type=agent the tab is titled `<agent_id> · <title> [surface:N]` -- the agent id is always there, so five workers in one repo are still distinguishable when you omit this (#479/#492).",
+            "The caller-supplied agent pane title is applied verbatim (for example `cmuxlayer-WORKER · run1 name-the-tabs`); when omitted, the existing agent-id/surface fallback is retained (#479/#492).",
           ),
         prompt: z
           .string()

@@ -1267,6 +1267,15 @@ describe("lean spawn tool responses", () => {
     }
   });
 
+  it("documents caller-supplied agent pane titles as verbatim", () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    expect(spawn.inputSchema.shape.title.description).toContain(
+      "caller-supplied agent pane title is applied verbatim",
+    );
+  });
+
   it("spawn_agent rejects launcher-incompatible effort before creating a worktree or surface", async () => {
     const repoRoot = join(TEST_DIR, "Gits", "cmuxlayer");
     const registryPath = join(TEST_DIR, "launchers-effort-preflight.zsh");

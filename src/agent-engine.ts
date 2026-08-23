@@ -497,20 +497,17 @@ export type SessionIdentityResolver = (
 ) => CapturedSessionIdentity | string | null;
 
 /**
- * The title of a managed pane (#492 / #479). The operator has to be able to
- * look at a pane and know it is the right one to close, and `<launcher>
- * [surface:N]` made five workers in one repo indistinguishable. The AGENT ID
- * leads -- it begins with the launcher name, so agent-discovery still parses
- * repo and cli back out of it, but it also carries the per-worker suffix that
- * tells them apart. The caller's own label follows when one was given.
+ * The title of a managed pane (#492 / #479). A caller-supplied title is already
+ * the complete human-facing label, including its role/task convention, so the
+ * engine must not compose launcher, surface, or agent-id text around it. Legacy
+ * callers that omit a title retain the existing agent-id/surface fallback.
  */
 export function managedPaneTitle(
   agentId: string,
   surface: string,
   title?: string | null,
 ): string {
-  const label = title?.trim();
-  return buildTitle(`${agentId} [${surface}]`, label);
+  return title ?? buildTitle(`${agentId} [${surface}]`);
 }
 
 function sessionCollisionSuffix(sessionId: string): string {
