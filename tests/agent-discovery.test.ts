@@ -17,6 +17,40 @@ const deadCodexShellFixture = JSON.parse(
 ) as { lines_80: string };
 
 describe("AgentDiscovery", () => {
+  it("uses managed registry identity instead of parsing a role-first display title", async () => {
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [
+        {
+          ref: "surface:managed",
+          title: "run1 name-the-tabs",
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+      ],
+      managedIdentityProvider: () => ({
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+      }),
+      readScreen: async (surface) => ({
+        surface,
+        text: "Select an action:\n> 1. Continue\n  2. Cancel\n",
+        lines: 3,
+        scrollback_used: false,
+      }),
+    });
+
+    const [managed] = await discovery.scan(true);
+
+    expect(managed).toMatchObject({
+      cli: "codex",
+      managed_repo: "cmuxlayer",
+      managed_role: "worker",
+    });
+    expect(inferRepoFromDiscovery(managed!)).toBe("cmuxlayer");
+  });
+
   it("keeps a frozen discovered agent non-terminal while it waits for input", () => {
     expect(discoveredStatusToAgentState("frozen")).toBe("error");
   });

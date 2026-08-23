@@ -500,14 +500,16 @@ export type SessionIdentityResolver = (
  * The title of a managed pane (#492 / #479). A caller-supplied title is already
  * the complete human-facing label, including its role/task convention, so the
  * engine must not compose launcher, surface, or agent-id text around it. Legacy
- * callers that omit a title retain the existing agent-id/surface fallback.
+ * callers that omit or blank a title retain the existing agent-id/surface
+ * fallback. Managed repo/CLI/role identity stays in AgentRecord and discovery
+ * reads that registry state; the display title is never the identity source.
  */
 export function managedPaneTitle(
   agentId: string,
   surface: string,
   title?: string | null,
 ): string {
-  return title ?? buildTitle(`${agentId} [${surface}]`);
+  return title?.trim() ? title : buildTitle(`${agentId} [${surface}]`);
 }
 
 function sessionCollisionSuffix(sessionId: string): string {
@@ -7534,6 +7536,7 @@ export class AgentEngine {
       cli_session_id: null,
       cli_session_path: null,
       launcher_name: preflight?.launcherName ?? null,
+      tab_name: spawnParams.title?.trim() ? spawnParams.title : null,
       launch_mode: launchMode,
       model_pin: modelPin.pin,
       seat_id: seatIdentity.seat_id,
@@ -7829,7 +7832,7 @@ export class AgentEngine {
       // A resumed pane is the same agent; it must say so, like the spawn path.
       await this.client.renameTab(
         surface.surface,
-        managedPaneTitle(agent.agent_id, surface.surface),
+        managedPaneTitle(agent.agent_id, surface.surface, agent.tab_name),
         { workspace },
       );
       const booting = this.stateMgr.transition(agent.agent_id, "booting", {

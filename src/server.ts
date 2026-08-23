@@ -11175,6 +11175,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const discovery = new AgentDiscovery({
       observerIdProvider: () => context.surfaceObserverEpoch,
       listSurfaces: surfaceProvider,
+      managedIdentityProvider: (surface) =>
+        registry?.managedIdentityForSurface(surface) ?? null,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
     });
     // AIDEV-NOTE (F1): from here on, every consumer that used to read
@@ -12505,7 +12507,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "The caller-supplied agent pane title is applied verbatim (for example `cmuxlayer-WORKER · run1 name-the-tabs`); when omitted, the existing agent-id/surface fallback is retained (#479/#492).",
+            "The caller-supplied agent pane title is applied verbatim (for example `cmuxlayer-WORKER · run1 name-the-tabs`); when omitted or blank, the existing agent-id/surface fallback is retained. Managed identity comes from the agent registry, not this display title (#479/#492).",
           ),
         prompt: z
           .string()

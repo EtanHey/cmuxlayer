@@ -1,5 +1,5 @@
 import { parseScreen } from "./screen-parser.js";
-import type { AgentState, CliType } from "./agent-types.js";
+import type { AgentRole, AgentState, CliType } from "./agent-types.js";
 import type {
   CmuxReadScreenResult,
   CmuxSurface,
@@ -17,6 +17,9 @@ export interface DiscoveredAgent {
   workspace_id?: string | null;
   current_directory?: string | null;
   working_directory_source?: SurfaceWorkingDirectorySource;
+  /** Persisted identity for a registry-managed surface; display titles are not identity. */
+  managed_repo?: string | null;
+  managed_role?: AgentRole | null;
   cli: CliType | "unknown";
   control_state: ParsedControlPlaneState;
   parsed_status: ParsedScreenStatus | null;
@@ -34,6 +37,9 @@ export interface DiscoveryDeps {
   /** Resolve the cmux topology identity that produced a discovery snapshot. */
   observerIdProvider?: () => string | null | undefined;
   listSurfaces: () => Promise<CmuxSurface[]>;
+  managedIdentityProvider?: (
+    surface: Pick<CmuxSurface, "ref" | "id">,
+  ) => { repo: string; cli: CliType; role?: AgentRole | null } | null;
   readScreen: (
     surface: string,
     opts: { lines: number; workspace?: string },
@@ -65,9 +71,13 @@ function inferCliFromLauncherTitle(
 export function inferRepoFromDiscovery(
   discovered: Pick<
     DiscoveredAgent,
-    "current_directory" | "working_directory_source" | "surface_title"
+    | "current_directory"
+    | "working_directory_source"
+    | "surface_title"
+    | "managed_repo"
   >,
 ): string {
+  if (discovered.managed_repo?.trim()) return discovered.managed_repo.trim();
   const titleRepo = inferRepoFromTitle(discovered.surface_title);
   const trustedCwd =
     discovered.working_directory_source === "terminal_metadata" ||
@@ -153,13 +163,17 @@ export class AgentDiscovery {
         workspace: workspaceId ?? undefined,
       });
       const parsed = parseScreen(screen.text);
-      const titleCli = inferCliFromLauncherTitle(surface.title);
+      const managedIdentity = this.deps.managedIdentityProvider?.(surface);
+      // Registry state owns managed identity. Launcher-title parsing remains a
+      // compatibility fallback only for surfaces with no managed record.
+      const fallbackCli =
+        managedIdentity?.cli ?? inferCliFromLauncherTitle(surface.title);
       const cli =
         parsed.agent_type === "unknown"
           ? (parsed.control_state === "permission_prompt" ||
-              parsed.control_state === "interactive_overlay") &&
-            titleCli !== "unknown"
-            ? titleCli
+                parsed.control_state === "interactive_overlay") &&
+              fallbackCli !== "unknown"
+            ? fallbackCli
             : "unknown"
           : (parsed.agent_type as CliType);
 
@@ -175,6 +189,8 @@ export class AgentDiscovery {
           surface.requested_working_directory ??
           null,
         working_directory_source: surface.working_directory_source,
+        managed_repo: managedIdentity?.repo ?? null,
+        managed_role: managedIdentity?.role ?? null,
         cli,
         control_state: parsed.control_state,
         parsed_status: parsed.status,

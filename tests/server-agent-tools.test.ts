@@ -1274,6 +1274,12 @@ describe("lean spawn tool responses", () => {
     expect(spawn.inputSchema.shape.title.description).toContain(
       "caller-supplied agent pane title is applied verbatim",
     );
+    expect(spawn.inputSchema.shape.title.description).toContain(
+      "when omitted or blank",
+    );
+    expect(spawn.inputSchema.shape.title.description).toContain(
+      "identity comes from the agent registry, not this display title",
+    );
   });
 
   it("spawn_agent rejects launcher-incompatible effort before creating a worktree or surface", async () => {

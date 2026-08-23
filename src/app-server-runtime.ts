@@ -268,6 +268,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     this.discovery = new AgentDiscovery({
       observerIdProvider: () => this.getSurfaceObserverEpoch(),
       listSurfaces: surfaceProvider,
+      managedIdentityProvider: (surface) =>
+        this.registry.managedIdentityForSurface(surface),
       readScreen: (surface, readOpts) =>
         this.client.readScreen(surface, readOpts),
     });
