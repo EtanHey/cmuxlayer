@@ -37,6 +37,9 @@ function payload(result: ToolCallResult): Record<string, unknown> {
 }
 
 const SURFACE = "surface:89";
+const SURFACE_UUID = "80A5FA59-16D7-41A0-93D4-596423BFB3E3";
+const WITNESS_SURFACE = "surface:witness";
+const WITNESS_UUID = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE";
 
 const IDLE_CLAUDE_SCREEN = "Claude Code\nWhat can I help you with?\n> ";
 const POPULATED_CLAUDE_SCREEN =
@@ -75,6 +78,8 @@ function makeExec(opts?: {
   closeSurfaceFails?: boolean;
   /** Model a cmux that accepts close-surface but keeps listing the pane. */
   closeLeavesSurfaceListed?: boolean;
+  /** Keep a second surface so absence of the target is authoritative. */
+  witnessSurface?: boolean;
 }): ExecFn & { calls: string[][] } {
   const calls: string[][] = [];
   let surfaceLive = true;
@@ -97,6 +102,14 @@ function makeExec(opts?: {
       };
     }
     if (args.includes("list-panes")) {
+      const surfaceRefs = [
+        ...(surfaceLive ? [SURFACE] : []),
+        ...(opts?.witnessSurface ? [WITNESS_SURFACE] : []),
+      ];
+      const surfaceIds = [
+        ...(surfaceLive ? [SURFACE_UUID] : []),
+        ...(opts?.witnessSurface ? [WITNESS_UUID] : []),
+      ];
       return {
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
@@ -106,8 +119,9 @@ function makeExec(opts?: {
               ref: "pane:1",
               workspace: "workspace:1",
               focused: true,
-              surface_count: surfaceLive ? 1 : 0,
-              surface_refs: surfaceLive ? [SURFACE] : [],
+              surface_count: surfaceRefs.length,
+              surface_refs: surfaceRefs,
+              ...(opts?.witnessSurface ? { surface_ids: surfaceIds } : {}),
             },
           ],
         }),
@@ -119,18 +133,34 @@ function makeExec(opts?: {
         stdout: JSON.stringify({
           pane_ref: "pane:1",
           workspace_ref: "workspace:1",
-          surfaces: surfaceLive
-            ? [
-                {
-                  ref: SURFACE,
-                  pane: "pane:1",
-                  workspace: "workspace:1",
-                  title: "golemsClaude",
-                  type: "terminal",
-                  selected: true,
-                },
-              ]
-            : [],
+          surfaces: [
+            ...(surfaceLive
+              ? [
+                  {
+                    ...(opts?.witnessSurface ? { id: SURFACE_UUID } : {}),
+                    ref: SURFACE,
+                    pane: "pane:1",
+                    workspace: "workspace:1",
+                    title: "golemsClaude",
+                    type: "terminal",
+                    selected: true,
+                  },
+                ]
+              : []),
+            ...(opts?.witnessSurface
+              ? [
+                  {
+                    id: WITNESS_UUID,
+                    ref: WITNESS_SURFACE,
+                    pane: "pane:1",
+                    workspace: "workspace:1",
+                    title: "witness shell",
+                    type: "terminal",
+                    selected: !surfaceLive,
+                  },
+                ]
+              : []),
+          ],
         }),
         stderr: "",
       };
@@ -515,6 +545,79 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     const data = payload(result);
     expect(data.surface_closed).toBe(false);
     expect(await listSurfaceRefs(server)).toContain(SURFACE);
+  });
+
+  it("P0 D4a an unforced agent close leaves both the live agent and its pane alone", async () => {
+    // Reviewer catch: stop_agent has no liveness refusal of its own, so forcing
+    // the inner close unconditionally would let an UNFORCED close_surface tear
+    // down a still-live agent's pane through a guard that could never fire for
+    // this scope. The caller's own force is passed through instead.
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server, {
+      state: "done",
+      pid: process.pid,
+      surface_uuid: SURFACE_UUID,
+    });
+
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    const data = payload(result);
+    expect(data.agent_stopped).toBe(false);
+    expect(data.surface_closed).toBe(false);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
+  });
+
+  it("P0 D4b does not call a just-observed stable UUID stale after stopping the agent", async () => {
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server, {
+      state: "working",
+      surface_uuid: SURFACE_UUID,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+    const data = payload(result);
+
+    expect(String(data.error ?? data.surface_close_error ?? "")).not.toMatch(
+      /stable surface UUID.*(?:not live|no longer live)/i,
+    );
+  });
+
+  it("P0 D4c reports the surface closed when an immediate listing proves it is gone", async () => {
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server, {
+      state: "working",
+      surface_uuid: SURFACE_UUID,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+    const data = payload(result);
+
+    expect(await listSurfaceRefs(server)).not.toContain(SURFACE);
+    expect(data.surface_closed).toBe(true);
   });
 
   it("cross-checks scope=workspace: the delegate really deletes, and says so", async () => {

@@ -3697,6 +3697,39 @@ describe("AgentEngine", () => {
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe("booting");
     });
 
+    it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
+      const agentId = "agent-live-pid-must-not-resume";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:live-process",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "codex",
+          cli_session_id: sessionId,
+          launcher_name: "brainlayerCodex",
+          pid: process.pid,
+        }),
+      );
+      harnessHome.give("codex", sessionId);
+      await engine.getRegistry().reconstitute();
+
+      // D1 -> D4 -> D2 is one chain: an unsafe close leaves a live process in
+      // terminal registry state, and terminal registry state is currently the
+      // only resume guard. Process liveness must close that duplication path.
+      expect(() => process.kill(process.pid, 0)).not.toThrow();
+      await expect(engine.resumeAgent(agentId)).rejects.toThrow(
+        new RegExp(
+          `(?:alive|live).*${process.pid}|${process.pid}.*(?:alive|live)`,
+          "i",
+        ),
+      );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
     it("explicitly resumes a launcher-less agent through the raw CLI", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -10757,6 +10790,40 @@ Session ID: ${sessionId}`,
       registry.set(record.agent_id, record);
       return record;
     }
+
+    it("P0 D1 never declares a stable surface UUID dead while the agent pid is alive", async () => {
+      const stableUuid = "11111111-2222-4333-8444-555555555555";
+      const record = installLegacyAgent(
+        {
+          agent_id: "live-pid-stale-surface-root",
+          state: "error",
+          pid: process.pid,
+          surface_id: "surface:recently-observed",
+          surface_uuid: stableUuid,
+          error: `Surface surface:recently-observed disappeared`,
+        },
+        [
+          {
+            ...makeSurface("surface:witness"),
+            id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            workspace_ref: "workspace:witness",
+          },
+        ],
+      );
+
+      expect(() => process.kill(process.pid, 0)).not.toThrow();
+      let routeError: unknown = null;
+      try {
+        await engine.resolveAgentIoRoute(record.agent_id);
+      } catch (error) {
+        routeError = error;
+      }
+
+      expect(routeError).toBeInstanceOf(Error);
+      expect((routeError as Error).message).not.toMatch(
+        /stable surface UUID.*(?:not live|no longer live)/i,
+      );
+    });
 
     it("refuses an owned UUID-less route when fresh all-ref topology lacks its ref", async () => {
       const record = installLegacyAgent({}, [makeSurface("surface:witness")]);
