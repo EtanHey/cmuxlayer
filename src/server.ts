@@ -31,7 +31,7 @@ import {
 import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
-import { processMayBeAlive } from "./process-liveness.js";
+import { agentProcessMayBeAlive } from "./process-liveness.js";
 import {
   currentTransportRetryCount,
   withTransportRetryTracking,
@@ -10132,7 +10132,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const boundAgent = context.lifecycleRegistry?.get(args.agent_id) ?? null;
           const boundSurface = boundAgent?.surface_id?.trim() || null;
           const boundWorkspace = boundAgent?.workspace_id ?? undefined;
-          if (!args.force && processMayBeAlive(boundAgent?.pid)) {
+          if (!args.force && boundAgent && agentProcessMayBeAlive(boundAgent)) {
             return okFormatted(
               `close_surface scope=agent refused — agent ${args.agent_id} still has live recorded pid ${boundAgent?.pid}`,
               {
@@ -10218,12 +10218,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               scope: "surface",
               surface: boundSurface,
               workspace: boundWorkspace,
-              // The outer agent-scope path now refuses an unforced close when
-              // its recorded process is live. After stop_agent succeeds, the
-              // remaining surface may still have a transient auto-discovery
-              // row; force the surface half so that duplicate cannot veto the
-              // teardown that this same agent-scope call already authorized.
-              force: true,
+              // Preserve the surface path's cross-record guard. The outer
+              // process check protects this record; it does not authorize
+              // tearing down a surface another nonterminal record owns.
+              force: args.force ?? false,
             },
             {},
           );
@@ -12123,6 +12121,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "THE way to revive an agent: resume this captured session on a fresh surface, keeping its public agent ID and re-issuing its coordination contract. cmuxlayer never revives a pane by itself (#492) -- a pane you close stays closed -- so a lead that wants an agent back asks here, by id. Refused with a reason when the session transcript is not on disk, rather than opening an empty pane. Mutually exclusive with new-spawn fields.",
           ),
+        force: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "With resume_agent_id only: override inconclusive recorded-process liveness after the caller deliberately verifies the old agent is gone. Does not bypass session or terminal-state requirements.",
+          ),
         repo: z
           .string()
           .optional()
@@ -12333,6 +12338,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
             const result = await engine.resumeAgent(args.resume_agent_id, {
               workspace,
+              force: args.force,
             });
             creation.record({
               agent_id: result.agent_id,

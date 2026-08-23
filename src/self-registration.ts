@@ -228,9 +228,9 @@ function parseSelfRegistrationBufferLines(
 /**
  * Choose the winning entry among records for one stable surface UUID.
  *
- * AgentRecord.pid is not a CLI process pid: production record creation,
- * recovery, repair, and auto-discovery paths all leave it null. It therefore
- * cannot soundly participate in identity selection. When launch_cwd is known
+ * AgentRecord.pid is deliberately irrelevant to session identity selection:
+ * records begin with it null and later capture it as qualified process
+ * evidence. When launch_cwd is known
  * and at least one candidate matches it exactly, that subset is preferred as
  * an optional validator. The winner is then the newest `ts` (epoch ms); on an
  * exact tie the later (last-appended) record wins.
@@ -453,9 +453,8 @@ function makeIncrementalEntryIndexReader(
  * against the reader clock so a row from before a backward clock correction
  * cannot dominate. A row with explicit `cli` metadata must match the agent;
  * missing CLI remains compatible with older writers. AgentRecord pid is
- * deliberately ignored because production does not populate it with the CLI
- * process pid. Returns
- * `{ session_id, path }` or `null`. NO filesystem scan of session dirs; a
+ * deliberately ignored for candidate selection. Returns captured session and
+ * hook process evidence, or `null`. NO filesystem scan of session dirs; a
  * missing/unreadable/empty registry, an agent without a stable surface UUID, or
  * no UUID match all return `null` (the caller then falls back to the scan).
  */
@@ -515,6 +514,12 @@ export function makeSelfRegistrationSessionResolver(
     return {
       session_id: chosen.session_id,
       path: chosen.session_path ?? null,
+      ...(chosen.pid && chosen.pid > 0 && chosen.ts !== null
+        ? {
+            pid: chosen.pid,
+            pid_registered_at: new Date(chosen.ts).toISOString(),
+          }
+        : {}),
     };
   };
 }

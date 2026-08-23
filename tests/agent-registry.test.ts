@@ -12,6 +12,7 @@ import type { AgentRecord, AgentState } from "../src/agent-types.js";
 import type { DiscoveredAgent } from "../src/agent-discovery.js";
 import type { SeatRegistry } from "../src/seat-identity.js";
 import type { CmuxSurface } from "../src/types.js";
+import { persistProductionProcessRecord } from "./helpers/production-process-record.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-registry");
 const DEAD_CODEX_SHELL_SCREEN = (
@@ -1768,8 +1769,11 @@ describe("AgentRegistry", () => {
           id: surfaceUuid,
         },
       ];
-      stateMgr.writeState(
-        makeRecord({
+      const registry = new AgentRegistry(stateMgr, async () => surfaces);
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
           agent_id: engineId,
           surface_id: "surface:871",
           surface_uuid: surfaceUuid,
@@ -1777,13 +1781,11 @@ describe("AgentRegistry", () => {
           repo: "cmuxlayer",
           cli: "codex",
           launcher_name: "cmuxlayerCodex",
-          pid: process.pid,
+          pid: null,
           parent_agent_id: parentId,
           surface_provenance: "cmuxlayer_spawn",
         }),
-      );
-      const registry = new AgentRegistry(stateMgr, async () => surfaces);
-      await registry.reconstitute();
+      });
 
       surfaces = [
         {
@@ -1831,7 +1833,7 @@ describe("AgentRegistry", () => {
       expect(stateMgr.readState("cmuxlayerCodex")).toBeNull();
     });
 
-    it("does not publish a bare-seat alias when managed repair fails", async () => {
+    it("removes a failed managed repair without leaving a resolvable alias", async () => {
       const engineId = "cmuxlayerCodex-bff10108";
       const surfaceUuid = "e9072772-a6ab-47ea-af04-b561d75ae6e2";
       stateMgr.writeState(
@@ -1873,6 +1875,62 @@ describe("AgentRegistry", () => {
         { agent_id: engineId, reason: `Agent not found: ${engineId}` },
       ]);
       expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
+    it("keeps two live same-repo workers addressable only by their engine-issued ids", async () => {
+      const firstId = "cmuxlayerCodex-aaaaaaaa";
+      const secondId = "cmuxlayerCodex-bbbbbbbb";
+      const firstUuid = "11111111-2222-4333-8444-555555555555";
+      const secondUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      for (const [agentId, surfaceId, surfaceUuid] of [
+        [firstId, "surface:871", firstUuid],
+        [secondId, "surface:872", secondUuid],
+      ] as const) {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: agentId,
+            surface_id: surfaceId,
+            surface_uuid: surfaceUuid,
+            repo: "cmuxlayer",
+            cli: "codex",
+            launcher_name: "cmuxlayerCodex",
+          }),
+        );
+      }
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      await registry.reconstitute();
+      const seatRegistry = {
+        ...REPAIR_SEATS,
+        cmuxlayerCodex: {
+          repo: "cmuxlayer",
+          launchers: { codex: "cmuxlayerCodex" },
+          lane: "cmuxlayer-worker",
+          role: "worker" as const,
+        },
+      };
+
+      registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:871",
+            surface_uuid: firstUuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+          makeDiscovered({
+            surface_id: "surface:872",
+            surface_uuid: secondUuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+        ],
+        { seatRegistry },
+      );
+
+      expect(registry.get(firstId)?.agent_id).toBe(firstId);
+      expect(registry.get(secondId)?.agent_id).toBe(secondId);
+      expect(registry.get("cmuxlayerCodex")?.agent_id).toBe(firstId);
+      expect(registry.get("cmuxlayerCodex")?.agent_id).not.toBe(secondId);
     });
 
     it.each([
@@ -3226,18 +3284,19 @@ describe("AgentRegistry", () => {
     });
 
     it("startup purge retains a terminal row whose process may still be alive", async () => {
-      stateMgr.writeState(
-        makeRecord({
-          agent_id: "live-pid-terminal",
-          state: "error",
-          surface_id: "surface:missing",
-          pid: process.pid,
-        }),
-      );
       const registry = new AgentRegistry(stateMgr, async () => [
         makeSurface("surface:witness"),
       ]);
-      await registry.reconstitute();
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
+          agent_id: "live-pid-terminal",
+          state: "error",
+          surface_id: "surface:missing",
+          pid: null,
+        }),
+      });
 
       expect(registry.purgeAllTerminal()).toEqual([]);
       expect(registry.get("live-pid-terminal")).toMatchObject({
@@ -3247,6 +3306,25 @@ describe("AgentRegistry", () => {
   });
 
   describe("purgeTerminal", () => {
+    it("retains a terminal worker whose production-captured process is live", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
+          agent_id: "live-process-periodic-terminal",
+          state: "done",
+          role: "worker",
+          surface_id: "surface:missing-periodic",
+          pid: null,
+        }),
+      });
+
+      await expect(registry.purgeTerminal({ confirmationMs: 0 })).resolves.toBe(0);
+      expect(registry.get("live-process-periodic-terminal")).not.toBeNull();
+    });
     it("does not purge terminal workers when surface enumeration is empty", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -3381,18 +3459,19 @@ describe("AgentRegistry", () => {
 
   describe("evictSurfaceless confirmation", () => {
     it("retains a surfaceless row whose process may still be alive", async () => {
-      stateMgr.writeState(
-        makeRecord({
-          agent_id: "live-pid-surfaceless",
-          state: "working",
-          surface_id: "surface:missing",
-          pid: process.pid,
-        }),
-      );
       const registry = new AgentRegistry(stateMgr, async () => [
         makeSurface("surface:witness"),
       ]);
-      await registry.reconstitute();
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry,
+        record: makeRecord({
+          agent_id: "live-pid-surfaceless",
+          state: "working",
+          surface_id: "surface:missing",
+          pid: null,
+        }),
+      });
 
       await expect(
         registry.evictSurfaceless({ confirmationMs: 0 }),

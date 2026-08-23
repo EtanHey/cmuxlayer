@@ -36,7 +36,7 @@ import { validateSurfaceIdentityBijection } from "./surface-topology.js";
 import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
 import { inferRepoFromDirectory } from "./repo-workspace.js";
 import { resumeArtifactStatus } from "./resume-verification.js";
-import { processMayBeAlive } from "./process-liveness.js";
+import { agentProcessMayBeAlive } from "./process-liveness.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
@@ -847,7 +847,7 @@ export class AgentRegistry {
       // after one missing-surface observation, then discovery re-minted the
       // pane under its bare seat name. Retain the canonical row and all of its
       // parent/provenance metadata until the recorded pid is proven gone.
-      if (processMayBeAlive(agent.pid)) {
+      if (agentProcessMayBeAlive(agent)) {
         this.surfacelessObservations.delete(agent.agent_id);
         continue;
       }
@@ -1752,7 +1752,7 @@ export class AgentRegistry {
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
         continue;
       }
-      if (processMayBeAlive(agent.pid)) {
+      if (agentProcessMayBeAlive(agent)) {
         this.surfacelessObservations.delete(agent.agent_id);
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
         continue;
@@ -2552,7 +2552,7 @@ export class AgentRegistry {
       if (shouldRetainForExplicitResume(agent)) {
         continue;
       }
-      if (processMayBeAlive(agent.pid)) {
+      if (agentProcessMayBeAlive(agent)) {
         continue;
       }
       if (!this.canPurgeAtStartup(agent)) {
@@ -2613,7 +2613,7 @@ export class AgentRegistry {
       if (shouldRetainForExplicitResume(agent)) {
         continue;
       }
-      if (processMayBeAlive(agent.pid)) {
+      if (agentProcessMayBeAlive(agent)) {
         this.surfacelessObservations.delete(agent.agent_id);
         continue;
       }

@@ -245,8 +245,8 @@ import {
   type FleetSidebarPublisherLike,
 } from "./fleet-sidebar.js";
 import {
+  agentProcessMayBeAlive,
   processLiveness,
-  processMayBeAlive,
   type ProcessLiveness,
 } from "./process-liveness.js";
 
@@ -487,6 +487,8 @@ type CreatedAgentSurface = AgentSurfacePlacement & {
 export interface CapturedSessionIdentity {
   session_id: string;
   path?: string | null;
+  pid?: number | null;
+  pid_registered_at?: string | null;
 }
 
 export type SessionIdentityResolver = (
@@ -3154,7 +3156,16 @@ export class AgentEngine {
     if (typeof identity === "string") {
       return { session_id: identity, path: null };
     }
-    return { session_id: identity.session_id, path: identity.path ?? null };
+    return {
+      session_id: identity.session_id,
+      path: identity.path ?? null,
+      ...(identity.pid && identity.pid > 0 && identity.pid_registered_at
+        ? {
+            pid: identity.pid,
+            pid_registered_at: identity.pid_registered_at,
+          }
+        : {}),
+    };
   }
 
   private rekeyAgentMapEntry<T>(
@@ -3254,6 +3265,14 @@ export class AgentEngine {
     let updated = this.stateMgr.updateRecord(agent.agent_id, {
       cli_session_id: identity.session_id,
       cli_session_path: identity.path,
+      ...(agent.surface_provenance === "cmuxlayer_spawn" &&
+      identity.pid &&
+      identity.pid_registered_at
+        ? {
+            pid: identity.pid,
+            pid_registered_at: identity.pid_registered_at,
+          }
+        : {}),
       transcript_session_capture_deferred: false,
       transcript_session_capture_attempts: 0,
     });
@@ -3412,6 +3431,29 @@ export class AgentEngine {
     opts: { resolveTranscript?: boolean } = {},
   ): Promise<AgentRecord> {
     if (agent.cli_session_id) {
+      if (
+        !agent.pid &&
+        this.selfRegistrationSessionResolver &&
+        TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state) &&
+        JSONL_HARNESSES.has(agent.cli) &&
+        agent.surface_uuid?.trim()
+      ) {
+        try {
+          const registered = this.selfRegistrationSessionResolver(agent);
+          if (registered) {
+            const identity = this.normalizeCapturedSessionIdentity(registered);
+            if (
+              identity.session_id === agent.cli_session_id &&
+              identity.pid &&
+              identity.pid_registered_at
+            ) {
+              agent = this.finalizeCapturedSession(agent, identity);
+            }
+          }
+        } catch {
+          // Session identity is already durable; retry process evidence later.
+        }
+      }
       if (
         agent.transcript_session_capture_deferred === true ||
         (agent.transcript_session_capture_attempts ?? 0) > 0
@@ -7657,22 +7699,22 @@ export class AgentEngine {
    */
   async resumeAgent(
     agentId: string,
-    opts?: { workspace?: string },
+    opts?: { workspace?: string; force?: boolean },
   ): Promise<SpawnAgentResult> {
     const agent =
       this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
-    if (processMayBeAlive(agent.pid)) {
-      throw new Error(
-        `Agent "${agent.agent_id}" cannot resume while recorded pid ` +
-          `${agent.pid} is still alive or cannot be proven gone`,
-      );
-    }
     if (!TERMINAL_STATES.has(agent.state)) {
       throw new Error(
         `Agent "${agent.agent_id}" is ${agent.state}; explicit resume requires a terminal agent`,
+      );
+    }
+    if (!opts?.force && agentProcessMayBeAlive(agent)) {
+      throw new Error(
+        `Agent "${agent.agent_id}" cannot resume while recorded pid ` +
+          `${agent.pid} is still alive or cannot be proven gone`,
       );
     }
     if (!agent.cli_session_id) {
@@ -8300,7 +8342,7 @@ export class AgentEngine {
     const topology = await this.collectObservedSurfaceTopology();
     const binding = resolveAgentSurfaceBinding(agent, topology);
     if (!binding || binding.provenance !== "uuid") {
-      if (processMayBeAlive(agent.pid)) {
+      if (agentProcessMayBeAlive(agent)) {
         throw new Error(
           `Agent "${agent.agent_id}" still has live recorded pid ${agent.pid}; ` +
             `the current topology did not prove its surface route, so its ` +
@@ -8369,6 +8411,13 @@ export class AgentEngine {
     }
     if (!agent.surface_uuid) {
       return this.resolveAgentIoRoute(agentId);
+    }
+    if (agent.surface_observer_id) {
+      throw new Error(
+        `Observer identity is unavailable and agent "${agent.agent_id}" is ` +
+          `owned by ${agent.surface_observer_id}; refusing socketless teardown ` +
+          `without matching observer ownership.`,
+      );
     }
 
     const topology = await collectSurfaceTopology(this.client);
@@ -8668,6 +8717,9 @@ export class AgentEngine {
       const observerOwnsRecord = this.registry.canControlSurface(agent);
       if (!observerOwnsRecord && this.registry.getObserverEpoch()) {
         // A known but different observer cannot prove this record absent.
+        return false;
+      }
+      if (!observerOwnsRecord && agent.surface_observer_id) {
         return false;
       }
       const topology = observerOwnsRecord

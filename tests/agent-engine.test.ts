@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 const spawnMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
+const execFileSyncMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
   execFile: execFileMock,
+  execFileSync: execFileSyncMock,
 }));
 
 import {
@@ -47,6 +49,7 @@ import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 import { dispatch, readInbox, writeHeartbeat } from "../src/inbox.js";
 import { readWatchRegistry } from "../src/watch-spec.js";
 import { useHarnessHome } from "./helpers/harness-home.js";
+import { persistProductionProcessRecord } from "./helpers/production-process-record.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
 // #482/#492: `resumable` reads the transcript store, so these tests own a
@@ -3700,8 +3703,10 @@ describe("AgentEngine", () => {
     it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
       const agentId = "agent-live-pid-must-not-resume";
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
-      stateMgr.writeState(
-        makeRecord({
+      await persistProductionProcessRecord({
+        stateMgr,
+        registry: engine.getRegistry(),
+        record: makeRecord({
           agent_id: agentId,
           state: "done",
           surface_id: "surface:live-process",
@@ -3710,11 +3715,10 @@ describe("AgentEngine", () => {
           cli: "codex",
           cli_session_id: sessionId,
           launcher_name: "brainlayerCodex",
-          pid: process.pid,
+          pid: null,
         }),
-      );
+      });
       harnessHome.give("codex", sessionId);
-      await engine.getRegistry().reconstitute();
 
       // D1 -> D4 -> D2 is one chain: an unsafe close leaves a live process in
       // terminal registry state, and terminal registry state is currently the
@@ -3728,6 +3732,63 @@ describe("AgentEngine", () => {
       );
       expect(mockClient.newSplit).not.toHaveBeenCalled();
       expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("allows an explicit forced resume when pid liveness is unprobeable", async () => {
+      const agentId = "agent-unknown-pid-force-resume";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:old-unknown-process",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "codex",
+          cli_session_id: sessionId,
+          launcher_name: "brainlayerCodex",
+          pid: 34567,
+        }),
+      );
+      harnessHome.give("codex", sessionId);
+      await engine.getRegistry().reconstitute();
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          if (pid === 34567 && signal === 0) {
+            throw Object.assign(new Error("operation not permitted"), {
+              code: "EPERM",
+            });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        const resumed = await engine.resumeAgent(agentId, { force: true });
+
+        expect(resumed.agent_id).toBe(agentId);
+        expect(resumed.surface_id).toBe("surface:new");
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
+    it("reports non-terminal state before consulting pid liveness on resume", async () => {
+      const agentId = "agent-working-pid-resume";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "working",
+          surface_id: "surface:working",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          pid: process.pid,
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await expect(engine.resumeAgent(agentId)).rejects.toThrow(
+        /is working.*requires a terminal agent/i,
+      );
     });
 
     it("explicitly resumes a launcher-less agent through the raw CLI", async () => {
@@ -10797,7 +10858,7 @@ Session ID: ${sessionId}`,
         {
           agent_id: "live-pid-stale-surface-root",
           state: "error",
-          pid: process.pid,
+          pid: null,
           surface_id: "surface:recently-observed",
           surface_uuid: stableUuid,
           error: `Surface surface:recently-observed disappeared`,
@@ -10810,11 +10871,16 @@ Session ID: ${sessionId}`,
           },
         ],
       );
+      const productionRecord = await persistProductionProcessRecord({
+        stateMgr,
+        registry: engine.getRegistry(),
+        record,
+      });
 
       expect(() => process.kill(process.pid, 0)).not.toThrow();
       let routeError: unknown = null;
       try {
-        await engine.resolveAgentIoRoute(record.agent_id);
+        await engine.resolveAgentIoRoute(productionRecord.agent_id);
       } catch (error) {
         routeError = error;
       }

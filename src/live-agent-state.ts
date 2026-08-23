@@ -164,5 +164,5 @@ export function isLiveInteractive(live: LiveAgentState): boolean {
  */
 export function isLiveDeliverable(live: LiveAgentState): boolean {
   if (INTERACTIVE_AGENT_STATES.has(live.registry_state)) return true;
-  return live.screen_state === "ready";
+  return live.registry_state !== "booting" && live.screen_state === "ready";
 }

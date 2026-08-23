@@ -196,6 +196,35 @@ describe("parseSelfRegistrationLines", () => {
     });
   });
 
+  it("returns the hook pid with its registration timestamp", () => {
+    const registeredAt = Date.parse("2026-08-23T11:00:05.000Z");
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      readFile: () =>
+        jsonl({
+          session_id: "sid-with-process",
+          cwd: "/w",
+          pid: 43210,
+          ts: registeredAt,
+        }),
+      now: () => registeredAt,
+    });
+
+    expect(
+      resolve(
+        agent({
+          launch_cwd: "/w",
+          created_at: "2026-08-23T11:00:00.000Z",
+        }),
+      ),
+    ).toEqual({
+      session_id: "sid-with-process",
+      path: null,
+      pid: 43210,
+      pid_registered_at: "2026-08-23T11:00:05.000Z",
+    });
+  });
+
   it("does not use fractional pid or timestamp values as integer identity metadata", () => {
     const entries = parseSelfRegistrationLines(
       jsonl({
@@ -709,6 +738,8 @@ describe("makeSelfRegistrationSessionResolver", () => {
     expect(resolve(agent({ launch_cwd: "/Users/e/Gits/cmuxlayer" }))).toEqual({
       session_id: "sid-exact",
       path: "/rollout/exact.jsonl",
+      pid: 111,
+      pid_registered_at: "1970-01-01T00:00:05.000Z",
     });
   });
 
@@ -719,6 +750,8 @@ describe("makeSelfRegistrationSessionResolver", () => {
     expect(resolve(agent({ launch_cwd: "/w" }))).toEqual({
       session_id: "sid-1",
       path: null,
+      pid: 1,
+      pid_registered_at: "1970-01-01T00:00:00.001Z",
     });
   });
 
@@ -1281,6 +1314,39 @@ describe("AgentEngine self-registration wiring", () => {
     expect(captured.cli_session_id).toBe("sid-first-connect");
     expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
     expect(scanSpy).not.toHaveBeenCalled();
+    engine.dispose();
+  });
+
+  it("persists production self-registration process evidence for an existing Codex session", async () => {
+    const registeredAt = "2026-08-23T11:00:05.000Z";
+    const selfRegistrationSessionResolver = vi.fn(() => ({
+      session_id: "sid-codex-existing",
+      path: "/rollout/codex.jsonl",
+      pid: 43210,
+      pid_registered_at: registeredAt,
+    }));
+    const { engine, stateMgr, registry } = makeEngineHarness(
+      selfRegistrationSessionResolver,
+    );
+    const codexAgent = agent({
+      agent_id: "cmuxlayerCodex-existing",
+      cli: "codex",
+      state: "booting",
+      cli_session_id: "sid-codex-existing",
+      pid: null,
+      surface_provenance: "cmuxlayer_spawn",
+    });
+    stateMgr.writeState(codexAgent);
+    registry.set(codexAgent.agent_id, codexAgent);
+
+    const captured = await engine.captureBootSessionId(codexAgent.agent_id);
+
+    expect(captured).toMatchObject({
+      cli_session_id: "sid-codex-existing",
+      pid: 43210,
+      pid_registered_at: registeredAt,
+    });
+    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
     engine.dispose();
   });
 });

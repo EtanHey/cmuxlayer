@@ -212,6 +212,15 @@ function makeServer(exec: ExecFn) {
     disableSpawnPreflight: true,
     controlHealthIntervalMs: 0,
     sessionIdentityResolver: () => null,
+    selfRegistrationSessionResolver: (agent) =>
+      agent.cli_session_id
+        ? {
+            session_id: agent.cli_session_id,
+            path: agent.cli_session_path ?? null,
+            pid: process.pid,
+            pid_registered_at: new Date().toISOString(),
+          }
+        : null,
     // Model CI/fresh-clone CLI mode explicitly. Ambient access to a developer's
     // real cmux socket must not decide whether teardown receipts are truthful.
     surfaceObserverOwnerIdProvider: () => null,
@@ -402,6 +411,32 @@ function seedAgent(server: unknown, overrides: Partial<AgentRecord> = {}) {
   return record;
 }
 
+async function seedProductionLiveProcess(
+  server: unknown,
+  overrides: Partial<AgentRecord> = {},
+): Promise<AgentRecord> {
+  const seeded = seedAgent(server, {
+    state: "working",
+    cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    surface_uuid: SURFACE_UUID,
+    surface_provenance: "cmuxlayer_spawn",
+    pid: null,
+    ...overrides,
+  });
+  const engine = getEngine(server) as unknown as {
+    captureBootSessionId(id: string): Promise<AgentRecord | null>;
+    stateMgr: {
+      transition(id: string, state: string): AgentRecord;
+    };
+    getRegistry(): { set(id: string, record: AgentRecord): unknown };
+  };
+  const captured = await engine.captureBootSessionId(seeded.agent_id);
+  if (!captured?.pid) throw new Error("production PID capture failed");
+  const done = engine.stateMgr.transition(seeded.agent_id, "done");
+  engine.getRegistry().set(done.agent_id, done);
+  return done;
+}
+
 async function listSurfaceRefs(server: unknown): Promise<string[]> {
   const result = (await getTool(server, "list_surfaces").handler(
     {},
@@ -552,20 +587,14 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
   });
 
   it("P0 D4a an unforced agent close leaves both the live agent and its pane alone", async () => {
-    // Reviewer catch: stop_agent has no liveness refusal of its own, so forcing
-    // the inner close unconditionally would let an UNFORCED close_surface tear
-    // down a still-live agent's pane through a guard that could never fire for
-    // this scope. The caller's own force is passed through instead.
+    // The agent-scope liveness check and the surface-scope cross-record check
+    // remain independent; neither escalates an unforced request.
     const exec = makeExec({
       screen: () => WORKING_CLAUDE_SCREEN,
       witnessSurface: true,
     });
     const server = makeServer(exec);
-    const record = seedAgent(server, {
-      state: "done",
-      pid: process.pid,
-      surface_uuid: SURFACE_UUID,
-    });
+    const record = await seedProductionLiveProcess(server);
 
     expect(() => process.kill(process.pid, 0)).not.toThrow();
 
@@ -579,6 +608,32 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     expect(data.surface_closed).toBe(false);
     expect(await listSurfaceRefs(server)).toContain(SURFACE);
     expect(() => process.kill(process.pid, 0)).not.toThrow();
+  });
+
+  it("does not let agent scope bypass a different live record backing the surface", async () => {
+    const exec = makeExec({ screen: () => WORKING_CLAUDE_SCREEN });
+    const server = makeServer(exec);
+    const target = seedAgent(server, {
+      agent_id: "golemsClaude-terminal-target",
+      state: "done",
+      surface_uuid: null,
+    });
+    seedAgent(server, {
+      agent_id: "golemsClaude-live-backing-record",
+      state: "working",
+      surface_uuid: null,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: target.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    expect(result.isError).toBe(true);
+    expect(String(payload(result).error)).toContain(
+      "golemsClaude-live-backing-record",
+    );
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
   });
 
   it("P0 D4b does not call a just-observed stable UUID stale after stopping the agent", async () => {
@@ -622,6 +677,29 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
 
     expect(await listSurfaceRefs(server)).not.toContain(SURFACE);
     expect(data.surface_closed).toBe(true);
+  });
+
+  it("refuses socketless teardown of a surface owned by a different observer", async () => {
+    const exec = makeExec({
+      screen: () => WORKING_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const record = seedAgent(server, {
+      state: "working",
+      surface_uuid: SURFACE_UUID,
+      surface_observer_id: "cmux:/tmp/observer-b.sock",
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    expect(result.isError).toBe(true);
+    expect(String(payload(result).error)).toMatch(/observer|ownership/i);
+    expect(await listSurfaceRefs(server)).toContain(SURFACE);
+    expect(exec.calls.some((args) => args.includes("close-surface"))).toBe(false);
   });
 
   it("cross-checks scope=workspace: the delegate really deletes, and says so", async () => {
