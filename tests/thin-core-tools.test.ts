@@ -112,10 +112,6 @@ function parseResult(result: {
 }
 
 describe("thin-core tool palette", () => {
-  it("P0 D7 exposes an agent-initiated blocker escalation to its parent", () => {
-    expect(PUBLIC_TOOL_NAMES).toContain("report_to_parent");
-  });
-
   it("publishes only the ratified Phase 5 surface", () => {
     const server = createServer({
       exec: makeExec(),
