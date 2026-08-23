@@ -597,7 +597,11 @@ export class AgentRegistry {
   }
 
   private explicitRoleFor(discovered: DiscoveredAgent): AgentRole | null {
-    return this.explicitRoleProvider?.(discovered) ?? null;
+    return (
+      discovered.managed_role ??
+      this.explicitRoleProvider?.(discovered) ??
+      null
+    );
   }
 
   /** Capture persisted owner and transient epoch before an awaited scan. */
@@ -973,6 +977,30 @@ export class AgentRegistry {
 
   get(agentId: string): AgentRecord | null {
     return this.agents.get(this.resolveAlias(agentId)) ?? null;
+  }
+
+  /** Resolve managed identity from the durable surface binding, never its title. */
+  managedIdentityForSurface(
+    surface: Pick<CmuxSurface, "ref" | "id">,
+  ): Pick<AgentRecord, "repo" | "cli" | "role"> | null {
+    const observedUuid = surfaceUuidKey(surface.id);
+    const matches = this.list().filter((record) => {
+      const persistedUuid = surfaceUuidKey(record.surface_uuid);
+      const stableMatch = Boolean(
+        observedUuid && persistedUuid && observedUuid === persistedUuid,
+      );
+      // A UUID-backed row must never fall back to a mutable ref on one
+      // identity-free observation. That fallback is only safe when a complete
+      // topology scan proves the entire transport is operating in ref-only
+      // compatibility mode, which this per-surface lookup cannot establish.
+      const refMatch =
+        !persistedUuid && !observedUuid && record.surface_id === surface.ref;
+      return (
+        (stableMatch || refMatch) &&
+        this.canUseObservedBinding(record, surface.id)
+      );
+    });
+    return matches.length === 1 ? matches[0]! : null;
   }
 
   list(filter?: AgentFilter): AgentRecord[] {

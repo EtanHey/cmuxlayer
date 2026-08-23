@@ -18,7 +18,6 @@ import {
 import type { CmuxClient } from "../src/cmux-client.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
-import { inferAgentRole } from "../src/layout-policy.js";
 import { resetResumeArtifactResolver } from "../src/resume-verification.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-revive-on-purpose");
@@ -323,6 +322,27 @@ describe("revive on purpose (#492)", () => {
     expect(sends.some((text) => text.includes(CODEX_SESSION))).toBe(true);
   });
 
+  it("restores the persisted caller title when resuming an agent", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        workspace_id: "ws:1",
+        surface_id: "surface:old",
+        tab_name: "cmuxlayer-WORKER · golden-path",
+      }),
+    );
+    await engine.getRegistry().reconstitute();
+
+    await engine.resumeAgent("cmuxlayerCodex-revive");
+
+    expect(mockClient.renameTab).toHaveBeenCalledWith(
+      "surface:new",
+      "cmuxlayer-WORKER · golden-path",
+      { workspace: "ws:1" },
+    );
+  });
+
   it("refuses to resume into a session that is not on disk, and opens no pane", async () => {
     mkdirSync(join(harnessHome, ".codex", "sessions"), { recursive: true });
     stateMgr.writeState(
@@ -341,7 +361,7 @@ describe("revive on purpose (#492)", () => {
     expect(mockClient.newSurface).not.toHaveBeenCalled();
   });
 
-  it("titles a managed pane with the agent id so a close is unambiguous", async () => {
+  it("uses the caller's role-first title verbatim", async () => {
     (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       workspace: "ws:1",
       surface: "surface:worker-a",
@@ -350,39 +370,83 @@ describe("revive on purpose (#492)", () => {
       type: "terminal",
     });
 
-    const spawned = await engine.spawnAgent({
+    await engine.spawnAgent({
       repo: "cmuxlayer",
       cli: "codex",
       prompt: "lane work",
+      title: "cmuxlayer-WORKER · golden-path",
     });
 
     expect(mockClient.renameTab).toHaveBeenCalledWith(
       "surface:worker-a",
-      expect.stringContaining(spawned.agent_id),
+      "cmuxlayer-WORKER · golden-path",
       { workspace: "ws:1" },
+    );
+    expect(stateMgr.listStates()[0]?.tab_name).toBe(
+      "cmuxlayer-WORKER · golden-path",
     );
   });
 
-  it("keeps caller labels outside the launcher prefix used for role inference", () => {
+  it("keeps the existing agent-id fallback when the caller omits a title", () => {
+    expect(
+      managedPaneTitle(
+        "cmuxlayerCodex-99887766",
+        "surface:9",
+      ),
+    ).toBe("cmuxlayerCodex-99887766 [surface:9]");
+  });
+
+  it("uses the identifiable fallback when the caller supplies a blank title", () => {
+    expect(
+      managedPaneTitle("cmuxlayerCodex-99887766", "surface:9", ""),
+    ).toBe("cmuxlayerCodex-99887766 [surface:9]");
+    expect(
+      managedPaneTitle("cmuxlayerCodex-99887766", "surface:9", "   "),
+    ).toBe("cmuxlayerCodex-99887766 [surface:9]");
+  });
+
+  it("binds managed identity by UUID instead of a mutable ref or display title", async () => {
+    const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    stateMgr.writeState(
+      makeRecord({
+        surface_id: "surface:managed",
+        surface_uuid: surfaceUuid,
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+      }),
+    );
+    await registry.reconstitute();
+
+    expect(
+      registry.managedIdentityForSurface({ ref: "surface:managed" }),
+    ).toBeNull();
+    expect(
+      registry.managedIdentityForSurface({
+        ref: "surface:renumbered",
+        id: surfaceUuid,
+      }),
+    ).toMatchObject({ repo: "cmuxlayer", cli: "codex", role: "worker" });
+  });
+
+  it("does not compose caller-supplied role-first titles", () => {
     const leadTitle = managedPaneTitle(
       "brainlayerClaude-ab12cd34",
       "surface:3",
-      "review Codex output",
+      "cmuxlayer-LEAD · review Codex output",
     );
     const workerTitle = managedPaneTitle(
       "cmuxlayerCodex-99887766",
       "surface:9",
-      "pair with Claude",
+      "  cmuxlayer-WORKER · pair with Claude  ",
     );
 
     expect(leadTitle).toBe(
-      "brainlayerClaude-ab12cd34 [surface:3]: review Codex output",
+      "cmuxlayer-LEAD · review Codex output",
     );
     expect(workerTitle).toBe(
-      "cmuxlayerCodex-99887766 [surface:9]: pair with Claude",
+      "  cmuxlayer-WORKER · pair with Claude  ",
     );
-    expect(inferAgentRole({ title: leadTitle })).toBe("orchestrator");
-    expect(inferAgentRole({ title: workerTitle })).toBe("worker");
   });
 
   it("refuses a resume rename after the surface observer epoch changes", async () => {
