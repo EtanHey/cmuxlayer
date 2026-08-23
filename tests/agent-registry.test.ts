@@ -1863,6 +1863,66 @@ describe("AgentRegistry", () => {
       expect(registry.get("cmuxlayerCodex")).toBeNull();
     });
 
+    it("counts healthy workers when withholding an orphans-only repair alias", () => {
+      const healthy = makeRecord({
+        agent_id: "cmuxlayerCodex-worker-healthy",
+        surface_id: "surface:worker-healthy",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      const repairTarget = makeRecord({
+        agent_id: "cmuxlayerCodex-worker-repair",
+        surface_id: "surface:worker-repair",
+        surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      const repairEligibilityDuplicate = makeRecord({
+        agent_id: "auto-cmuxlayer-worker-repair",
+        surface_id: repairTarget.surface_id,
+        surface_uuid: repairTarget.surface_uuid,
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      for (const record of [healthy, repairTarget, repairEligibilityDuplicate]) {
+        stateMgr.writeState(record);
+      }
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      for (const record of [healthy, repairTarget, repairEligibilityDuplicate]) {
+        registry.set(record.agent_id, record);
+      }
+
+      registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: healthy.surface_id,
+            surface_uuid: healthy.surface_uuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+          makeDiscovered({
+            surface_id: repairTarget.surface_id,
+            surface_uuid: repairTarget.surface_uuid,
+            surface_title: "cmuxlayerCodex",
+            cli: "codex",
+          }),
+        ],
+        { orphansOnly: true },
+      );
+
+      expect(registry.get(healthy.agent_id)).toMatchObject({
+        agent_id: healthy.agent_id,
+      });
+      expect(registry.get(repairTarget.agent_id)).toMatchObject({
+        agent_id: repairTarget.agent_id,
+      });
+      expect(registry.get("cmuxlayerCodex")).toBeNull();
+    });
+
     it("keeps the engine-issued id addressable across a transient missing-surface scan", async () => {
       const surfaceUuid = "e9072772-a6ab-47ea-af04-b561d75ae6e2";
       const engineId = "cmuxlayerClaude-bff10108";

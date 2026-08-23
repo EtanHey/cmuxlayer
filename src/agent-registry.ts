@@ -375,6 +375,21 @@ function repairCandidateForSurface(
   };
 }
 
+function repairCandidateAgentIdForSurface(
+  discovered: DiscoveredAgent,
+  registry?: SeatRegistry | null,
+): string | null {
+  const launcher = inferRepairLauncher(discovered, registry);
+  if (!launcher) return null;
+  const seat = assertSeatIdentity({
+    repo: launcher.repo,
+    cli: launcher.cli,
+    launcherName: launcher.launcherName,
+    registry,
+  });
+  return seat.seat_id ?? launcher.launcherName;
+}
+
 function recordIdentityKeys(record: AgentRecord): string[] {
   return [
     record.seat_id ? `seat:${record.seat_id}` : null,
@@ -2085,12 +2100,17 @@ export class AgentRegistry {
         ? this.repairCandidateForDiscovery(entry, opts?.seatRegistry)
         : null,
     );
+    const candidateAgentIds = discovered.map((entry) =>
+      entry.read_error
+        ? null
+        : repairCandidateAgentIdForSurface(entry, opts?.seatRegistry),
+    );
     const candidateCounts = new Map<string, number>();
-    for (const candidate of candidates) {
-      if (!candidate) continue;
+    for (const agentId of candidateAgentIds) {
+      if (!agentId) continue;
       candidateCounts.set(
-        candidate.agentId,
-        (candidateCounts.get(candidate.agentId) ?? 0) + 1,
+        agentId,
+        (candidateCounts.get(agentId) ?? 0) + 1,
       );
     }
     for (const [agentId, count] of candidateCounts) {

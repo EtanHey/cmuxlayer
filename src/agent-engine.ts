@@ -3442,15 +3442,36 @@ export class AgentEngine {
     opts: { resolveTranscript?: boolean } = {},
   ): Promise<AgentRecord> {
     if (agent.cli_session_id) {
-      if (!agent.pid && this.canUseSelfRegistrationSessionResolver(agent)) {
+      const canResolveSelfRegistration =
+        this.canUseSelfRegistrationSessionResolver(agent);
+      const recordedProcessGone =
+        canResolveSelfRegistration &&
+        Boolean(agent.pid) &&
+        agentProcessLiveness(agent) === "gone";
+      if (
+        canResolveSelfRegistration &&
+        (!agent.pid || recordedProcessGone)
+      ) {
         try {
           const registered = this.selfRegistrationSessionResolver?.(agent);
           if (registered) {
             const identity = this.normalizeCapturedSessionIdentity(registered);
+            const previousRegisteredAtMs = Date.parse(
+              agent.pid_registered_at ?? "",
+            );
+            const replacementRegisteredAtMs = Date.parse(
+              identity.pid_registered_at ?? "",
+            );
+            const replacementIsNewer =
+              !agent.pid ||
+              (Number.isFinite(previousRegisteredAtMs) &&
+                Number.isFinite(replacementRegisteredAtMs) &&
+                replacementRegisteredAtMs > previousRegisteredAtMs);
             if (
               identity.session_id === agent.cli_session_id &&
               identity.pid &&
-              identity.pid_registered_at
+              identity.pid_registered_at &&
+              replacementIsNewer
             ) {
               agent = this.finalizeCapturedSession(agent, identity);
             }
@@ -8959,13 +8980,24 @@ export class AgentEngine {
 
     let forceSignalAccepted = force === true && !agent.pid;
     if (force && agent.pid) {
-      try {
-        process.kill(agent.pid, "SIGKILL");
+      const processIdentity = agentProcessLiveness(agent);
+      if (processIdentity === "gone") {
         forceSignalAccepted = true;
-      } catch (error) {
-        forceSignalAccepted = this.isProcessMissingError(error);
-        if (!forceSignalAccepted) rollbackUnacceptedStopIntent();
-        // Process may already be dead; other failures must preserve tracking.
+      } else if (processIdentity === "unknown") {
+        rollbackUnacceptedStopIntent();
+        throw new Error(
+          `Force stop refused for ${agent.agent_id}: recorded pid ${agent.pid} ` +
+            `identity is unknown; refusing SIGKILL.`,
+        );
+      } else {
+        try {
+          process.kill(agent.pid, "SIGKILL");
+          forceSignalAccepted = true;
+        } catch (error) {
+          forceSignalAccepted = this.isProcessMissingError(error);
+          if (!forceSignalAccepted) rollbackUnacceptedStopIntent();
+          // Process may already be dead; other failures must preserve tracking.
+        }
       }
     } else {
       // Graceful: send Ctrl+C

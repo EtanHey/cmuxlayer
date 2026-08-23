@@ -10134,7 +10134,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const boundAgent = context.lifecycleRegistry?.get(args.agent_id) ?? null;
           const boundSurface = boundAgent?.surface_id?.trim() || null;
           const boundWorkspace = boundAgent?.workspace_id ?? undefined;
-          if (!args.force && boundAgent && agentProcessMayBeAlive(boundAgent)) {
+          if (
+            !args.force &&
+            boundAgent &&
+            !TERMINAL_AGENT_STATES.has(boundAgent.state) &&
+            agentProcessMayBeAlive(boundAgent)
+          ) {
             return err(
               new Error(
                 `close_surface scope=agent refused — agent ${args.agent_id} still has live recorded pid ${boundAgent?.pid}`,

@@ -4474,6 +4474,68 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("replaces stale pid evidence when the recorded process is proven gone", async () => {
+      const agentId = "cmuxlayerClaude-replaced-process";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const oldPid = 31001;
+      const replacementPid = 31002;
+      const selfRegistrationResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: null,
+        pid: replacementPid,
+        pid_registered_at: "2026-08-23T11:05:00.000Z",
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: selfRegistrationResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:replaced-process",
+          surface_uuid: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: sessionId,
+          pid: oldPid,
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+          created_at: "2026-08-23T11:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:replaced-process"),
+          id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+        },
+      ];
+      await registry.reconstitute();
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          if (pid === oldPid && signal === 0) {
+            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        await engine.captureBootSessionId(agentId);
+
+        expect(selfRegistrationResolver).toHaveBeenCalledTimes(1);
+        expect(engine.getAgentState(agentId)).toMatchObject({
+          pid: replacementPid,
+          pid_registered_at: "2026-08-23T11:05:00.000Z",
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
     it("keeps captured pid evidence when a pending row converges on an existing final session", async () => {
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
       const finalAgentId = "cmuxlayerClaude-019d9aa5";
@@ -12277,6 +12339,57 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("agent-force")).toBeNull();
     });
 
+    it("does not SIGKILL a recycled pid from production registration evidence", async () => {
+      const pid = 45678;
+      const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
+      let zeroProbeCount = 0;
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((targetPid: number, signal?: NodeJS.Signals | 0) => {
+          killCalls.push([targetPid, signal ?? 0]);
+          if (targetPid === pid && (signal ?? 0) === 0) {
+            zeroProbeCount += 1;
+            if (zeroProbeCount > 1) {
+              throw Object.assign(new Error("no such process"), {
+                code: "ESRCH",
+              });
+            }
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        await persistProductionProcessRecord({
+          stateMgr,
+          registry: engine.getRegistry(),
+          pid,
+          registeredAtMs: Date.parse("2026-08-23T11:00:05.000Z"),
+          record: makeRecord({
+            agent_id: "agent-force-recycled-pid",
+            state: "working",
+            surface_id: "surface:force-recycled-pid",
+            repo: "cmuxlayer",
+            cli: "claude",
+            created_at: "2026-08-23T11:00:00.000Z",
+          }),
+        });
+        liveSurfaces = [
+          {
+            ...makeSurface("surface:force-recycled-pid"),
+            id: "11111111-2222-4333-8444-555555555555",
+          },
+        ];
+        execFileSyncMock.mockReturnValue("Sun Aug 23 11:10:00 2026\n");
+
+        await engine.stopAgent("agent-force-recycled-pid", true);
+
+        expect(killCalls).toContainEqual([pid, 0]);
+        expect(killCalls).not.toContainEqual([pid, "SIGKILL"]);
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
     it("force-removes a terminal ghost without resolving surface I/O", async () => {
       engine.dispose();
       const scopedRegistry = new AgentRegistry(
@@ -12343,10 +12456,13 @@ Session ID: ${sessionId}`,
             state: "working",
             surface_id: "surface:force-live",
             pid: 12345,
+            created_at: "2026-08-23T11:00:00.000Z",
+            pid_registered_at: "2026-08-23T11:00:05.000Z",
           }),
         );
         liveSurfaces = [makeSurface("surface:force-live")];
         await engine.getRegistry().reconstitute();
+        execFileSyncMock.mockReturnValue("Sun Aug 23 14:00:02 2026\n");
 
         await expect(engine.stopAgent("agent-force-live", true)).rejects.toThrow(
           /post-condition/i,
@@ -12359,7 +12475,7 @@ Session ID: ${sessionId}`,
       }
     });
 
-    it("does not treat kill(0) permission errors as proof the process is still alive", async () => {
+    it("does not SIGKILL when process identity qualification is unknown", async () => {
       const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
       const killSpy = vi
         .spyOn(process, "kill")
@@ -12385,12 +12501,20 @@ Session ID: ${sessionId}`,
         liveSurfaces = [makeSurface("surface:force-unknown")];
         await engine.getRegistry().reconstitute();
 
-        await engine.stopAgent("agent-force-unknown", true);
+        await expect(
+          engine.stopAgent("agent-force-unknown", true),
+        ).rejects.toThrow(/unknown|qualif|identity|refus/i);
 
-        expect(killCalls).toContainEqual([23456, "SIGKILL"]);
         expect(killCalls).toContainEqual([23456, 0]);
-        expect(stateMgr.readState("agent-force-unknown")).toBeNull();
-        expect(engine.getAgentState("agent-force-unknown")).toBeNull();
+        expect(killCalls).not.toContainEqual([23456, "SIGKILL"]);
+        expect(stateMgr.readState("agent-force-unknown")).toMatchObject({
+          state: "working",
+          pid: 23456,
+        });
+        expect(engine.getAgentState("agent-force-unknown")).toMatchObject({
+          state: "working",
+          pid: 23456,
+        });
       } finally {
         killSpy.mockRestore();
       }
@@ -12409,9 +12533,12 @@ Session ID: ${sessionId}`,
         .spyOn(process, "kill")
         .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
           killCalls.push([pid, signal ?? 0]);
-          throw Object.assign(new Error("operation not permitted"), {
-            code: "EPERM",
-          });
+          if (signal === "SIGKILL") {
+            throw Object.assign(new Error("operation not permitted"), {
+              code: "EPERM",
+            });
+          }
+          return true;
         }) as typeof process.kill);
 
       try {
@@ -12421,10 +12548,13 @@ Session ID: ${sessionId}`,
             state: "working",
             surface_id: "surface:force-eperm",
             pid: 56789,
+            created_at: "2026-08-23T11:00:00.000Z",
+            pid_registered_at: "2026-08-23T11:00:05.000Z",
           }),
         );
         liveSurfaces = [makeSurface("surface:force-eperm")];
         await engine.getRegistry().reconstitute();
+        execFileSyncMock.mockReturnValue("Sun Aug 23 14:00:02 2026\n");
 
         await expect(engine.stopAgent("agent-force-eperm", true)).rejects.toThrow(
           /process still alive/i,
