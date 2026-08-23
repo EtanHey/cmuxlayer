@@ -1317,7 +1317,7 @@ describe("AgentEngine self-registration wiring", () => {
     engine.dispose();
   });
 
-  it("does not use Claude-only self-registration process evidence for an existing Codex session", async () => {
+  it("backfills Codex process evidence when the hook matches the rollout session", async () => {
     const selfRegistrationSessionResolver = vi.fn(() => ({
       session_id: "sid-codex-existing",
       path: "/rollout/codex.jsonl",
@@ -1342,9 +1342,10 @@ describe("AgentEngine self-registration wiring", () => {
 
     expect(captured).toMatchObject({
       cli_session_id: "sid-codex-existing",
-      pid: null,
+      pid: 43210,
+      pid_registered_at: "2026-08-23T11:00:05.000Z",
     });
-    expect(selfRegistrationSessionResolver).not.toHaveBeenCalled();
+    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
     engine.dispose();
   });
 });

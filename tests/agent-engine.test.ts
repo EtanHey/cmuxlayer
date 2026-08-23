@@ -4209,7 +4209,7 @@ describe("AgentEngine", () => {
       expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toBeNull();
     });
 
-    it("does not backfill Codex pid evidence from self-registration", async () => {
+    it("backfills Codex pid evidence only after rollout identity is durable", async () => {
       const agentId = "cmuxlayerCodex-existing-session";
       const sessionId = "019fec96-588d-7000-8000-000000000000";
       const selfRegistrationResolver = vi.fn(() => ({
@@ -4233,6 +4233,7 @@ describe("AgentEngine", () => {
           state: "working",
           surface_id: "surface:codex-existing-session",
           surface_uuid: "11111111-2222-4333-8444-555555555555",
+          surface_provenance: "cmuxlayer_spawn",
           cli_session_id: sessionId,
           cli_session_path: "/durable/codex/rollout.jsonl",
           pid: null,
@@ -4248,9 +4249,10 @@ describe("AgentEngine", () => {
 
       await engine.captureBootSessionId(agentId);
 
-      expect(selfRegistrationResolver).not.toHaveBeenCalled();
+      expect(selfRegistrationResolver).toHaveBeenCalledTimes(1);
       expect(engine.getAgentState(agentId)).toMatchObject({
-        pid: null,
+        pid: process.pid,
+        pid_registered_at: "2026-08-23T11:00:05.000Z",
         cli_session_path: "/durable/codex/rollout.jsonl",
       });
     });
