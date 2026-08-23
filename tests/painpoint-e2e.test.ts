@@ -703,7 +703,7 @@ describe("Phase 10 painpoint e2e replay", () => {
     }
   });
 
-  it("candidate 19: public stop_agent force treats kill(0) EPERM as unknown/gone after SIGKILL", async () => {
+  it("candidate 19: public stop_agent force refuses unknown identity without SIGKILL", async () => {
     const dir = tempDir("candidate-19");
     new StateManager(dir).writeState(
       makeRecord({
@@ -734,18 +734,23 @@ describe("Phase 10 painpoint e2e replay", () => {
     try {
       const engine = getEngine(server);
       await engine.getRegistry().reconstitute();
-      const stopped = parseToolResult<{ state: AgentState }>(
-        await getTool(server, "stop_agent").handler(
-          { agent_id: "agent-force-unknown", force: true },
-          {},
-        ),
+      const result = await getTool(server, "stop_agent").handler(
+        { agent_id: "agent-force-unknown", force: true },
+        {},
       );
 
-      expect(stopped.state).toBe("done");
-      expect(killCalls).toContainEqual([23_456, "SIGKILL"]);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/unknown.*refusing SIGKILL/i),
+      });
       expect(killCalls).toContainEqual([23_456, 0]);
-      expect(closeCalls).toEqual(["surface:force-unknown"]);
-      expect(new StateManager(dir).readState("agent-force-unknown")).toBeNull();
+      expect(killCalls).not.toContainEqual([23_456, "SIGKILL"]);
+      expect(closeCalls).toEqual([]);
+      expect(new StateManager(dir).readState("agent-force-unknown")).toMatchObject({
+        state: "working",
+        pid: 23_456,
+      });
     } finally {
       killSpy.mockRestore();
       await closeServer(server);

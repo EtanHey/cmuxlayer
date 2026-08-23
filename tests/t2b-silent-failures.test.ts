@@ -420,13 +420,14 @@ async function seedProductionLiveProcess(
   server: unknown,
   overrides: Partial<AgentRecord> = {},
 ): Promise<AgentRecord> {
+  const targetState = overrides.state ?? "working";
   const seeded = seedAgent(server, {
-    state: "working",
     cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     surface_uuid: SURFACE_UUID,
     surface_provenance: "cmuxlayer_spawn",
     pid: null,
     ...overrides,
+    state: "working",
   });
   const engine = getEngine(server) as unknown as {
     captureBootSessionId(id: string): Promise<AgentRecord | null>;
@@ -437,9 +438,10 @@ async function seedProductionLiveProcess(
   };
   const captured = await engine.captureBootSessionId(seeded.agent_id);
   if (!captured?.pid) throw new Error("production PID capture failed");
-  const done = engine.stateMgr.transition(seeded.agent_id, "done");
-  engine.getRegistry().set(done.agent_id, done);
-  return done;
+  if (captured.state === targetState) return captured;
+  const transitioned = engine.stateMgr.transition(seeded.agent_id, targetState);
+  engine.getRegistry().set(transitioned.agent_id, transitioned);
+  return transitioned;
 }
 
 async function listSurfaceRefs(server: unknown): Promise<string[]> {
@@ -635,6 +637,41 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     expect(data.agent_stopped).toBe(false);
     expect(data.surface_closed).toBe(false);
     expect(await listSurfaceRefs(server)).toContain(SURFACE);
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
+  });
+
+  it("harvests a terminal agent pane without signalling its intentionally live process", async () => {
+    const exec = makeExec({
+      screen: () => IDLE_CLAUDE_SCREEN,
+      witnessSurface: true,
+    });
+    const server = makeServer(exec);
+    const productionRecord = await seedProductionLiveProcess(server, {
+      state: "done",
+    });
+    const engine = getEngine(server) as unknown as {
+      stateMgr: {
+        updateRecord(id: string, patch: Partial<AgentRecord>): AgentRecord;
+      };
+      getRegistry(): { set(id: string, record: AgentRecord): unknown };
+    };
+    const record = engine.stateMgr.updateRecord(productionRecord.agent_id, {
+      surface_uuid: null,
+    });
+    engine.getRegistry().set(record.agent_id, record);
+
+    expect(record).toMatchObject({ state: "done", pid: process.pid });
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id },
+      {},
+    )) as ToolCallResult;
+
+    expect(result.isError).toBeUndefined();
+    expect(payload(result)).toMatchObject({
+      agent_stopped: true,
+      surface_closed: true,
+    });
+    expect(await listSurfaceRefs(server)).not.toContain(SURFACE);
     expect(() => process.kill(process.pid, 0)).not.toThrow();
   });
 
