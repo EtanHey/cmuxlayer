@@ -3,6 +3,7 @@ export const CMUXLAYER_DEFAULT_PALETTE_ENV =
 
 export const REGISTERED_TOOL_NAMES = [
   "spawn_agent",
+  "report_to_parent",
   "send_to",
   "read_screen",
   "list_agents",

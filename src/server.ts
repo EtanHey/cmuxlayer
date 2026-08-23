@@ -6,9 +6,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -575,6 +575,7 @@ const SendToArgsSchema = z.object({
 
 export const PUBLIC_TOOL_NAMES = [
   "spawn_agent",
+  "report_to_parent",
   "send_to",
   "read_screen",
   "list_agents",
@@ -663,6 +664,19 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       coordination_footer_delivered: z.boolean().optional(),
       coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
+    })
+    .passthrough(),
+  report_to_parent: z
+    .object({
+      ...BaseOutputShape,
+      child_agent_id: z.string().optional(),
+      parent_agent_id: z.string().optional(),
+      notified_agent_id: z.string().optional(),
+      route: z.enum(["direct", "fallback"]).optional(),
+      durable: z.boolean().optional(),
+      delivery: z.enum(["submitted", "queued"]).optional(),
+      delivery_id: z.string().optional(),
+      error_code: z.string().optional(),
     })
     .passthrough(),
   send_to: z
@@ -11474,9 +11488,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           monitorRegistryPath: opts?.monitorRegistryPath,
           monitorRegistryNow: opts?.monitorRegistryNow,
           monitorRegistryNotify: opts?.monitorRegistryNotify,
-          watchRegistryPath: opts?.watchRegistryPath,
+          watchRegistryPath:
+            opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
           watchRegistryNow: opts?.watchRegistryNow,
-          watchNotify: opts?.watchNotify,
+          watchNotify: async (event) => {
+            const owner =
+              registry.get(event.owner) ?? stateMgr.readState(event.owner);
+            if (owner && lifecycleAgentInputDeliverer) {
+              try {
+                const delivery = await lifecycleAgentInputDeliverer({
+                  agent_id: owner.agent_id,
+                  text: `[report] done marker observed — read ${event.target}`,
+                  press_enter: true,
+                  allow_busy: true,
+                  source_event: "report_to_parent",
+                  delivery_id: randomUUID(),
+                });
+                return (
+                  delivery.delivery === "submitted" ||
+                  delivery.delivery === "queued"
+                );
+              } catch {
+                // Keep notification_pending=true. A later lifecycle sweep uses
+                // the parent's refreshed route after a session restart.
+                return false;
+              }
+            }
+            return opts?.watchNotify
+              ? (await opts.watchNotify(event)) !== false
+              : false;
+          },
           closeForensicsRunner: opts?.enableCloseForensics
             ? createDefaultCloseForensicsRunner({
                 stateMgr,
@@ -12025,6 +12066,208 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : {}),
       };
     });
+
+    const deliverReportInboxPointer = async (
+      recipient: AgentRecord,
+      message: ReturnType<typeof dispatch>,
+    ): Promise<{ delivery: "submitted" | "queued"; delivery_id?: string }> => {
+      const pointer = formatInboxPing(
+        message,
+        inboxPath(recipient.agent_id, inboxOpts),
+      );
+      if (recipient.state === "working") {
+        const queued = engine.queueDelivery({
+          agent_id: recipient.agent_id,
+          text: pointer,
+          press_enter: true,
+          source_event: "report_to_parent",
+        });
+        return { delivery: "queued", delivery_id: queued.delivery_id };
+      }
+      const deliveryId = randomUUID();
+      let delivered: Awaited<ReturnType<typeof deliverAgentInput>>;
+      try {
+        delivered = await deliverAgentInput({
+          agent_id: recipient.agent_id,
+          text: pointer,
+          press_enter: true,
+          allow_busy: true,
+          source_event: "report_to_parent",
+          delivery_id: deliveryId,
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          /\bis busy\b/.test(error.message)
+        ) {
+          const queued = engine.queueDelivery({
+            agent_id: recipient.agent_id,
+            text: pointer,
+            press_enter: true,
+            source_event: "report_to_parent",
+          });
+          return { delivery: "queued", delivery_id: queued.delivery_id };
+        }
+        throw error;
+      }
+      if (
+        delivered.delivery !== "submitted" &&
+        delivered.delivery !== "queued"
+      ) {
+        throw new Error(
+          "parent blocker wake produced no evidence-backed delivery state",
+        );
+      }
+      if (delivered.delivery === "queued") {
+        engine.acceptComposerQueue({
+          delivery_id: deliveryId,
+          agent_id: recipient.agent_id,
+          text: pointer,
+          press_enter: true,
+          source_event: "report_to_parent",
+          retry_count: delivered.retry_count,
+        });
+      } else {
+        engine.resolveDelivery({
+          delivery_id: deliveryId,
+          agent_id: recipient.agent_id,
+          text: pointer,
+          press_enter: true,
+          source_event: "report_to_parent",
+          delivery_state: "submitted",
+          terminal: true,
+          retry_count: delivered.retry_count,
+          submit_verified: delivered.submit_verified,
+          error: null,
+        });
+      }
+      return { delivery: delivered.delivery, delivery_id: deliveryId };
+    };
+
+    server.tool(
+      "report_to_parent",
+      "Raise a short blocker to this managed agent's registry parent. cmuxlayer chooses the parent; callers cannot address arbitrary agents. The blocker is durably appended to the parent's inbox and its pointer is actively delivered. If that wake fails, cmuxlayer alerts the nearest reachable ancestor and returns fallback provenance. A root agent has no parent and receives an error.",
+      {
+        blocker: z
+          .string()
+          .trim()
+          .min(1)
+          .max(500)
+          .describe(
+            "Short blocker pointer, capped at 500 characters; put detailed evidence in a report file",
+          ),
+      },
+      ANNOTATIONS.mutating,
+      async (args) => {
+        await awaitLifecycleStart();
+        const child = resolveCurrentCallerAgent();
+        if (!child) {
+          return err("report_to_parent requires a managed calling agent", {
+            error_code: "report_caller_unmanaged",
+          });
+        }
+        if (!child.parent_agent_id) {
+          return err(`Agent ${child.agent_id} has no parent`, {
+            error_code: "report_parent_missing",
+            child_agent_id: child.agent_id,
+          });
+        }
+
+        const intendedParentId = child.parent_agent_id;
+        const directMessage = dispatch(
+          intendedParentId,
+          {
+            from: child.agent_id,
+            reply_to: child.agent_id,
+            via: child.surface_id,
+            observed_at: new Date().toISOString(),
+            to: intendedParentId,
+            tag: "parent_blocker",
+            task: args.blocker,
+          },
+          inboxOpts,
+        );
+        context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
+
+        const parent =
+          registry.get(intendedParentId) ?? stateMgr.readState(intendedParentId);
+        let directError = "parent is absent from the lifecycle registry";
+        if (parent) {
+          try {
+            const wake = await deliverReportInboxPointer(parent, directMessage);
+            return okFormatted(
+              `report_to_parent ${parent.agent_id}: ${wake.delivery}`,
+              {
+                child_agent_id: child.agent_id,
+                parent_agent_id: intendedParentId,
+                notified_agent_id: parent.agent_id,
+                route: "direct",
+                durable: true,
+                ...wake,
+              },
+            );
+          } catch (error) {
+            directError = error instanceof Error ? error.message : String(error);
+          }
+        }
+
+        const visited = new Set<string>([child.agent_id, intendedParentId]);
+        let ancestorId = parent?.parent_agent_id ?? null;
+        while (ancestorId && !visited.has(ancestorId)) {
+          visited.add(ancestorId);
+          const ancestor =
+            registry.get(ancestorId) ?? stateMgr.readState(ancestorId);
+          if (!ancestor) break;
+          const prefix =
+            `Delivery to parent ${intendedParentId} failed (${directError}). ` +
+            `Child ${child.agent_id} reports: `;
+          const fallbackTask = `${prefix}${args.blocker}`.slice(0, 500);
+          const fallbackMessage = dispatch(
+            ancestor.agent_id,
+            {
+              from: child.agent_id,
+              reply_to: child.agent_id,
+              via: child.surface_id,
+              observed_at: new Date().toISOString(),
+              to: ancestor.agent_id,
+              tag: "parent_delivery_failed",
+              task: fallbackTask,
+            },
+            inboxOpts,
+          );
+          try {
+            const wake = await deliverReportInboxPointer(
+              ancestor,
+              fallbackMessage,
+            );
+            return okFormatted(
+              `report_to_parent ${intendedParentId}: fallback ${ancestor.agent_id} ${wake.delivery}`,
+              {
+                child_agent_id: child.agent_id,
+                parent_agent_id: intendedParentId,
+                notified_agent_id: ancestor.agent_id,
+                route: "fallback",
+                durable: true,
+                ...wake,
+              },
+            );
+          } catch (error) {
+            directError = error instanceof Error ? error.message : String(error);
+            ancestorId = ancestor.parent_agent_id;
+          }
+        }
+
+        return err(
+          `Blocker was written to ${intendedParentId}'s inbox, but no parent or ancestor could be woken: ${directError}`,
+          {
+            error_code: "report_parent_unreachable",
+            child_agent_id: child.agent_id,
+            parent_agent_id: intendedParentId,
+            durable: true,
+          },
+        );
+      },
+    );
     engine.setDeliverySnapshotReader(async (receipt: AgentDeliveryReceipt) => {
       const agent = engine.getAgentState(receipt.agent_id);
       if (!agent) return null;
@@ -12884,6 +13127,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } catch {
             // Receipt already carries the contract; a registry write failure
             // must not fail an otherwise-successful spawn.
+          }
+          if (result.parent_agent_id) {
+            await mkdir(dirname(coordination.report_path), { recursive: true });
+            await appendFile(coordination.report_path, "", "utf8");
+            await engine.armWatch({
+              owner: result.parent_agent_id,
+              target: coordination.report_path,
+              marker: coordination.done_marker,
+              deadline: Number.MAX_SAFE_INTEGER,
+            });
           }
           const spawnedBinding = engine.getAgentState(result.agent_id);
           appendStaleBuildWarning(result);
@@ -14024,7 +14277,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Timeout in milliseconds (default: 5 minutes)"),
       },
       ANNOTATIONS.mutating,
-      async (args) => {
+      async (args, extra) => {
+        const progressToken = extra._meta?.progressToken;
+        let progress = 0;
+        const progressTimer =
+          progressToken !== undefined
+            ? setInterval(() => {
+                progress += 1;
+                void extra
+                  .sendNotification({
+                    method: "notifications/progress",
+                    params: {
+                      progressToken,
+                      progress,
+                      message: "wait_for still waiting",
+                    },
+                  })
+                  .catch(() => {});
+              }, 45_000)
+            : null;
+        progressTimer?.unref?.();
         try {
           if (args.watch) {
             if (args.agent_id || args.ids || args.mine || args.delivery_id) {
@@ -14219,6 +14491,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           }
           return err(e);
+        } finally {
+          if (progressTimer) clearInterval(progressTimer);
         }
       },
     );

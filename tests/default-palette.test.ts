@@ -13,6 +13,7 @@ const RATIFIED_TOOL_SURFACE = [
   "list_agents",
   "list_surfaces",
   "read_screen",
+  "report_to_parent",
   "send_to",
   "spawn_agent",
   "update_surface",

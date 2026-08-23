@@ -2021,7 +2021,7 @@ describe("agent lifecycle tool registration", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(44);
+    expect(Object.keys(registeredTools)).toHaveLength(45);
   });
 
   it("keeps resync_agents only as a removed compatibility stub", async () => {

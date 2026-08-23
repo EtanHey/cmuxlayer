@@ -10,8 +10,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  appendFileSync,
   mkdirSync,
   mkdtempSync,
+  existsSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -31,6 +33,8 @@ import {
   issueCoordinationContract,
 } from "../src/coordination-paths.js";
 import { recommendedMonitorCommand } from "../src/inbox.js";
+import { readWatchRegistry } from "../src/watch-spec.js";
+import type { AgentRecord } from "../src/agent-types.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -49,6 +53,7 @@ function makeExec(
   primarySurfaceUuid?: string,
 ): ExecFn {
   let promptPending = false;
+  let promptSurface = "surface:new";
   let pastePending = false;
   let currentScreenText = screenText;
   const surfaces: TestSurface[] = [
@@ -60,9 +65,13 @@ function makeExec(
     },
     ...additionalSurfaces,
   ];
-  const setScreenText = (text: string) => {
-    currentScreenText = text;
-    if (mutableScreen) mutableScreen.text = text;
+  const setScreenText = (text: string, surfaceRef = "surface:new") => {
+    const surface = surfaces.find(({ ref }) => ref === surfaceRef);
+    if (surface) surface.text = text;
+    if (surfaceRef === "surface:new") {
+      currentScreenText = text;
+      if (mutableScreen) mutableScreen.text = text;
+    }
   };
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-workspaces")) {
@@ -141,7 +150,7 @@ function makeExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        setScreenText("Claude Code\n✻ Working\n");
+        setScreenText("Claude Code\n✻ Working\n", promptSurface);
         promptPending = false;
       }
       return { stdout: "{}", stderr: "" };
@@ -163,6 +172,9 @@ function makeExec(
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
+        promptSurface =
+          surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
+        setScreenText(`Claude Code\n❯ ${text}`, promptSurface);
       }
     }
     return {
@@ -190,11 +202,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   let inboxDir: string;
   let exec: ExecFn;
   let server: any;
+  let watchRegistryPath: string;
 
   beforeEach(() => {
     rmSync(STATE_DIR, { recursive: true, force: true });
     mkdirSync(STATE_DIR, { recursive: true });
     inboxDir = mkdtempSync(join(tmpdir(), "p11-inbox-"));
+    watchRegistryPath = join(inboxDir, "watch-specs.json");
     exec = makeExec();
     server = createServer(
       withTestSurfaceObserver({
@@ -202,6 +216,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         stateDir: STATE_DIR,
         disableSpawnPreflight: true,
         inboxBaseDir: inboxDir,
+        watchRegistryPath,
       }),
     );
   });
@@ -246,6 +261,140 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const detail = state.structuredContent ?? JSON.parse(state.content[0].text);
     expect(detail.report_path).toBe(parsed.report_path);
     expect(detail.done_marker).toBe(parsed.done_marker);
+  });
+
+  it("automatically arms the parent's persistent watch on the child report", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const baseExec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:child",
+            surface_id: childUuid,
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    let engine = server._registeredTools.interact._engine;
+    const parent = {
+      agent_id: "lead-parent",
+      surface_id: "surface:new",
+      surface_uuid: parentUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      model: "claude-sonnet-4-5",
+      cli: "claude",
+      cli_session_id: null,
+      cli_session_path: null,
+      task_summary: "parent fixture",
+      pid: null,
+      version: 1,
+      created_at: "2026-08-23T00:00:00.000Z",
+      updated_at: "2026-08-23T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "orchestrator",
+      auto_archive_on_done: false,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: true,
+      respawn_attempts: 0,
+      user_killed: false,
+      boot_prompt_pending: false,
+      launch_cwd: null,
+      mcp_profile: null,
+      worktree_path: null,
+      worktree_branch: null,
+    } satisfies AgentRecord;
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id });
+
+    expect(child.ok, JSON.stringify(child)).toBe(true);
+    expect(child.parent_agent_id).toBe(parent.agent_id);
+    expect(existsSync(child.report_path)).toBe(true);
+    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches).toEqual([
+      expect.objectContaining({
+        owner: parent.agent_id,
+        target: child.report_path,
+        marker: child.done_marker,
+        watermark: 0,
+        state: "armed",
+      }),
+    ]);
+
+    await server.close();
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as any);
+    engine = server._registeredTools.interact._engine;
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    appendFileSync(child.report_path, `${child.done_marker}\n`, "utf8");
+    await engine.sweepWatchesBestEffort();
+    const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    expect(
+      afterCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) =>
+            arg.includes("[report]") && arg.includes(child.report_path),
+        ),
+      ),
+    ).toBe(true);
+
+    const rearmed = await engine.armWatch({
+      owner: parent.agent_id,
+      target: child.report_path,
+      marker: child.done_marker,
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    expect(rearmed.watermark).toBe(1);
+    await engine.sweepWatchesBestEffort();
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
+        (watch) => watch.watch_id === rearmed.watch_id,
+      )?.state,
+    ).toBe("armed");
   });
 
   // -------------------------------------------------------------------------

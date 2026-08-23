@@ -272,6 +272,7 @@ export type DeliveryEventType =
   | "supersede_agent_goal"
   | "interact"
   | "press_enter"
+  | "report_to_parent"
   | "dispatch_nudge";
 
 export interface DeliveryTelemetryEvent {
