@@ -32,7 +32,18 @@ const WORKING_SCREEN = [
   "╰──────────────────────────────────────────────╯",
 ].join("\n");
 
-function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
+const RESTING_CODEX_SCREEN = [
+  ">_ OpenAI Codex",
+  "› Ask Codex to do anything",
+  "",
+  "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+].join("\n");
+
+type TestEngineClient = CmuxClient & {
+  notifyLifecycleEvent: ReturnType<typeof vi.fn>;
+};
+
+function makeMockClient(overrides?: Partial<CmuxClient>): TestEngineClient {
   return {
     newSplit: vi.fn(),
     newSurface: vi.fn(),
@@ -96,8 +107,9 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     identify: vi.fn().mockResolvedValue({}),
     browser: vi.fn().mockResolvedValue({}),
     log: vi.fn(),
+    notifyLifecycleEvent: vi.fn().mockResolvedValue(undefined),
     ...overrides,
-  } as unknown as CmuxClient;
+  } as unknown as TestEngineClient;
 }
 
 function makeSurface(ref: string): CmuxSurface {
@@ -125,9 +137,6 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
-    crash_recover: false,
-    respawn_attempts: 0,
-    user_killed: false,
     ...overrides,
   };
 }
@@ -140,12 +149,20 @@ const workingScreenProbe = (agent: AgentRecord) =>
     control_state: "busy",
   });
 
+/** A Codex pane at rest: the screen says idle while live state normalises ready. */
+const restingCodexProbe = (agent: AgentRecord) =>
+  resolveLiveAgentState(agent, {
+    status: "idle",
+    agent_type: "codex",
+    control_state: "ready",
+  });
+
 describe("F1b #473 — wait_for terminates on live state, never on a contradicted record", () => {
   let stateMgr: StateManager;
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
 
-  const buildEngine = (client?: CmuxClient): void => {
+  const buildEngine = (client?: TestEngineClient): void => {
     stateMgr = new StateManager(TEST_DIR);
     liveSurfaces = [makeSurface("surface:worker")];
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -235,6 +252,185 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.matched).toBe(false);
     expect(result.state).toBe("working");
   });
+
+  it("matches target idle immediately when a Codex agent is already resting at ready", async () => {
+    stateMgr.writeState(makeRecord({ state: "ready", cli: "codex" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(restingCodexProbe);
+
+    const result = await engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      20_000,
+    );
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("ready");
+    expect(result.source).toBe("immediate");
+    expect(result.elapsed).toBeLessThan(1_000);
+  });
+
+  it("attributes a cross-resting match to the screen and aligns the embedded state", async () => {
+    stateMgr.writeState(makeRecord({ state: "working", cli: "codex" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(restingCodexProbe);
+
+    const result = await engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      20_000,
+    );
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("ready");
+    expect(result.source).toBe("screen");
+    expect(result.agent?.state).toBe("ready");
+  });
+
+  it("resolves a bounded failure when final timeout reconciliation throws", async () => {
+    vi.useFakeTimers();
+    stateMgr.writeState(makeRecord({ state: "working" }));
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(workingScreenProbe);
+    vi.spyOn(engine.getRegistry(), "reconcile").mockRejectedValueOnce(
+      new Error("state disk unavailable"),
+    );
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      500,
+    );
+    const hung = new Promise<"hung">((resolve) => {
+      setTimeout(() => resolve("hung"), 2_500);
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await Promise.race([pending, hung]);
+
+    expect(result).not.toBe("hung");
+    if (result === "hung") return;
+    expect(result.matched).toBe(false);
+    expect(result.source).toBe("timeout");
+    expect(result.error).toContain("state disk unavailable");
+  });
+
+  it("matches a ready target from gated final screen evidence", async () => {
+    vi.useFakeTimers();
+    engine.dispose();
+    buildEngine(
+      makeMockClient({
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:worker",
+          text: RESTING_CODEX_SCREEN,
+          lines: 30,
+          scrollback_used: false,
+        }),
+      } as Partial<CmuxClient>),
+    );
+    stateMgr.writeState(makeRecord({ state: "booting", cli: "codex" }));
+    await engine.getRegistry().reconstitute();
+    const freshProbe = vi
+      .fn()
+      .mockImplementationOnce(async (agent: AgentRecord) =>
+        workingScreenProbe(agent),
+      )
+      .mockImplementation(async (agent: AgentRecord) =>
+        restingCodexProbe(agent),
+      );
+    engine.setFreshLiveStateProbe(freshProbe);
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "ready",
+      500,
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const result = await pending;
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("ready");
+    expect(result.source).toBe("screen");
+    expect(result.agent?.state).toBe("ready");
+  });
+
+  it("preserves screen provenance and state on a polling cross-rest match", async () => {
+    vi.useFakeTimers();
+    engine.dispose();
+    buildEngine(
+      makeMockClient({
+        readScreen: vi.fn().mockRejectedValue(new Error("screen write race")),
+      } as Partial<CmuxClient>),
+    );
+    stateMgr.writeState(makeRecord({ state: "working", cli: "codex" }));
+    await engine.getRegistry().reconstitute();
+    const freshProbe = vi
+      .fn()
+      .mockImplementationOnce(async (agent: AgentRecord) =>
+        workingScreenProbe(agent),
+      )
+      .mockImplementation(async (agent: AgentRecord) =>
+        restingCodexProbe(agent),
+      );
+    engine.setFreshLiveStateProbe(freshProbe);
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      5_000,
+    );
+    await vi.advanceTimersByTimeAsync(2_500);
+    const result = await pending;
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("ready");
+    expect(result.source).toBe("screen");
+    expect(result.agent?.state).toBe("ready");
+  });
+
+  it("matches final resting evidence instead of timing out beside an idle observation", async () => {
+    vi.useFakeTimers();
+    engine.dispose();
+    buildEngine(
+      makeMockClient({
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:worker",
+          text: RESTING_CODEX_SCREEN,
+          lines: 30,
+          scrollback_used: false,
+        }),
+      } as Partial<CmuxClient>),
+    );
+    liveSurfaces = [{ ...makeSurface("surface:worker"), id: "uuid-worker" }];
+    stateMgr.writeState(
+      makeRecord({
+        state: "working",
+        cli: "codex",
+        surface_uuid: "uuid-worker",
+      }),
+    );
+    await engine.getRegistry().reconstitute();
+    engine.setLiveStateResolver(workingScreenProbe);
+    // The live resolver remains stale-working even after the final direct
+    // screen read sees rest. The screen-backed transition must win.
+    const freshProbe = vi.fn(async (agent: AgentRecord) =>
+      workingScreenProbe(agent),
+    );
+    engine.setFreshLiveStateProbe(freshProbe);
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      500,
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const result = await pending;
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("idle");
+    expect(result.source).toBe("screen");
+    expect(result.agent?.state).toBe("idle");
+    expect(result.error).toBeUndefined();
+  });
 });
 
 describe("F1b #472 — a watch arms on any observable agent", () => {
@@ -242,7 +438,7 @@ describe("F1b #472 — a watch arms on any observable agent", () => {
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
 
-  const buildEngine = (client?: CmuxClient): void => {
+  const buildEngine = (client?: TestEngineClient): void => {
     stateMgr = new StateManager(TEST_DIR);
     liveSurfaces = [makeSurface("surface:worker")];
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -349,7 +545,13 @@ describe("F1b #472 — a watch arms on any observable agent", () => {
       name: "WatchArmError",
       code: "watch_target_missing",
     });
-    const error = await engine.armWatch(spec("idle")).catch((e) => e as WatchArmError);
+    let error: WatchArmError | null = null;
+    try {
+      await engine.armWatch(spec("idle"));
+    } catch (caught) {
+      error = caught as WatchArmError;
+    }
+    if (!error) throw new Error("Expected watch arm to fail");
     expect(error.message).not.toContain("does not exist");
     expect(error.message).toContain("voicelayerClaude-2ac0d960");
     expect(error.message).toMatch(/no registry or state record/i);
@@ -394,7 +596,7 @@ describe("F1b round 2 — the wait buys its own evidence instead of hoping the c
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
 
-  const buildEngine = (client?: CmuxClient): void => {
+  const buildEngine = (client?: TestEngineClient): void => {
     stateMgr = new StateManager(TEST_DIR);
     liveSurfaces = [makeSurface("surface:worker")];
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -433,6 +635,7 @@ describe("F1b round 2 — the wait buys its own evidence instead of hoping the c
     expect(result.source).toBe("timeout");
     expect(result.elapsed).toBeGreaterThanOrEqual(1_500);
     expect(result.state).toBe("working");
+    expect(result.agent?.state).toBe("working");
     expect(result.error).not.toBe("Agent has already completed");
   });
 
