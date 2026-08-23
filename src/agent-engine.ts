@@ -8697,13 +8697,13 @@ export class AgentEngine {
     );
   }
 
-  private isProcessGone(pid: number | null | undefined): boolean {
-    const liveness = this.processLiveness(pid);
+  private isProcessGone(agent: AgentRecord): boolean {
+    const liveness = agentProcessLiveness(agent);
     return liveness === "gone" || liveness === "unknown";
   }
 
-  private isProcessConfirmedGone(pid: number | null | undefined): boolean {
-    return this.processLiveness(pid) === "gone";
+  private isProcessConfirmedGone(agent: AgentRecord): boolean {
+    return agentProcessLiveness(agent) === "gone";
   }
 
   /**
@@ -8803,8 +8803,8 @@ export class AgentEngine {
     treatUnknownProcessAsGone: boolean,
   ): Promise<StopPostConditionResult> {
     const processGone = treatUnknownProcessAsGone
-      ? this.isProcessGone(agent.pid)
-      : this.isProcessConfirmedGone(agent.pid);
+      ? this.isProcessGone(agent)
+      : this.isProcessConfirmedGone(agent);
     const [surfaceGone, paneGone] = await Promise.all([
       this.isAgentSurfaceGone(agent),
       this.isPaneGone(paneRef, agent.workspace_id),

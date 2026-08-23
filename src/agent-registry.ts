@@ -2101,9 +2101,7 @@ export class AgentRegistry {
         : null,
     );
     const candidateAgentIds = discovered.map((entry) =>
-      entry.read_error
-        ? null
-        : repairCandidateAgentIdForSurface(entry, opts?.seatRegistry),
+      repairCandidateAgentIdForSurface(entry, opts?.seatRegistry),
     );
     const candidateCounts = new Map<string, number>();
     for (const agentId of candidateAgentIds) {

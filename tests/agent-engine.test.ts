@@ -206,6 +206,7 @@ describe("AgentEngine", () => {
     mkdirSync(TEST_DIR, { recursive: true });
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => mockSpawnExit(1));
+    execFileSyncMock.mockReset();
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
@@ -12339,56 +12340,62 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("agent-force")).toBeNull();
     });
 
-    it("does not SIGKILL a recycled pid from production registration evidence", async () => {
-      const pid = 45678;
-      const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
-      let zeroProbeCount = 0;
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((targetPid: number, signal?: NodeJS.Signals | 0) => {
-          killCalls.push([targetPid, signal ?? 0]);
-          if (targetPid === pid && (signal ?? 0) === 0) {
-            zeroProbeCount += 1;
-            if (zeroProbeCount > 1) {
-              throw Object.assign(new Error("no such process"), {
-                code: "ESRCH",
-              });
-            }
+    it.each([false, true])(
+      "tears down a recycled pid that stays live without sending SIGKILL (force=%s)",
+      async (force) => {
+        const pid = 45678;
+        const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
+        const killSpy = vi
+          .spyOn(process, "kill")
+          .mockImplementation(((
+            targetPid: number,
+            signal?: NodeJS.Signals | 0,
+          ) => {
+            killCalls.push([targetPid, signal ?? 0]);
+            return true;
+          }) as typeof process.kill);
+
+        try {
+          await persistProductionProcessRecord({
+            stateMgr,
+            registry: engine.getRegistry(),
+            pid,
+            registeredAtMs: Date.parse("2026-08-23T11:00:05.000Z"),
+            record: makeRecord({
+              agent_id: "agent-force-recycled-pid",
+              state: "working",
+              surface_id: "surface:force-recycled-pid",
+              repo: "cmuxlayer",
+              cli: "claude",
+              created_at: "2026-08-23T11:00:00.000Z",
+            }),
+          });
+          liveSurfaces = [
+            {
+              ...makeSurface("surface:force-recycled-pid"),
+              id: "11111111-2222-4333-8444-555555555555",
+            },
+          ];
+          execFileSyncMock.mockReturnValue("Sun Aug 23 11:10:00 2026\n");
+
+          await engine.stopAgent("agent-force-recycled-pid", force);
+
+          expect(killCalls).toContainEqual([pid, 0]);
+          expect(killCalls).not.toContainEqual([pid, "SIGKILL"]);
+          if (force) {
+            expect(stateMgr.readState("agent-force-recycled-pid")).toBeNull();
+            expect(engine.getAgentState("agent-force-recycled-pid")).toBeNull();
+          } else {
+            expect(stateMgr.readState("agent-force-recycled-pid")).toMatchObject({
+              state: "done",
+              user_killed: true,
+            });
           }
-          return true;
-        }) as typeof process.kill);
-
-      try {
-        await persistProductionProcessRecord({
-          stateMgr,
-          registry: engine.getRegistry(),
-          pid,
-          registeredAtMs: Date.parse("2026-08-23T11:00:05.000Z"),
-          record: makeRecord({
-            agent_id: "agent-force-recycled-pid",
-            state: "working",
-            surface_id: "surface:force-recycled-pid",
-            repo: "cmuxlayer",
-            cli: "claude",
-            created_at: "2026-08-23T11:00:00.000Z",
-          }),
-        });
-        liveSurfaces = [
-          {
-            ...makeSurface("surface:force-recycled-pid"),
-            id: "11111111-2222-4333-8444-555555555555",
-          },
-        ];
-        execFileSyncMock.mockReturnValue("Sun Aug 23 11:10:00 2026\n");
-
-        await engine.stopAgent("agent-force-recycled-pid", true);
-
-        expect(killCalls).toContainEqual([pid, 0]);
-        expect(killCalls).not.toContainEqual([pid, "SIGKILL"]);
-      } finally {
-        killSpy.mockRestore();
-      }
-    });
+        } finally {
+          killSpy.mockRestore();
+        }
+      },
+    );
 
     it("force-removes a terminal ghost without resolving surface I/O", async () => {
       engine.dispose();
@@ -12510,6 +12517,7 @@ Session ID: ${sessionId}`,
         expect(stateMgr.readState("agent-force-unknown")).toMatchObject({
           state: "working",
           pid: 23456,
+          user_killed: false,
         });
         expect(engine.getAgentState("agent-force-unknown")).toMatchObject({
           state: "working",
