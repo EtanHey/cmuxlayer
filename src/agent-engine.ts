@@ -244,8 +244,11 @@ import {
   type FleetSidebarCandidate,
   type FleetSidebarPublisherLike,
 } from "./fleet-sidebar.js";
-
-type ProcessLiveness = "alive" | "gone" | "unknown";
+import {
+  processLiveness,
+  processMayBeAlive,
+  type ProcessLiveness,
+} from "./process-liveness.js";
 
 export type AgentDeliveryState =
   | "submitted"
@@ -7661,6 +7664,12 @@ export class AgentEngine {
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
+    if (processMayBeAlive(agent.pid)) {
+      throw new Error(
+        `Agent "${agent.agent_id}" cannot resume while recorded pid ` +
+          `${agent.pid} is still alive or cannot be proven gone`,
+      );
+    }
     if (!TERMINAL_STATES.has(agent.state)) {
       throw new Error(
         `Agent "${agent.agent_id}" is ${agent.state}; explicit resume requires a terminal agent`,
@@ -8291,6 +8300,13 @@ export class AgentEngine {
     const topology = await this.collectObservedSurfaceTopology();
     const binding = resolveAgentSurfaceBinding(agent, topology);
     if (!binding || binding.provenance !== "uuid") {
+      if (processMayBeAlive(agent.pid)) {
+        throw new Error(
+          `Agent "${agent.agent_id}" still has live recorded pid ${agent.pid}; ` +
+            `the current topology did not prove its surface route, so its ` +
+            `engine-issued identity is retained and terminal I/O is deferred.`,
+        );
+      }
       throw new Error(
         `Stable surface UUID ${agent.surface_uuid} for agent ` +
           `"${agent.agent_id}" is not live or uniquely resolvable in a ` +
@@ -8506,21 +8522,7 @@ export class AgentEngine {
   }
 
   private processLiveness(pid: number | null | undefined): ProcessLiveness {
-    if (!pid) return "gone";
-    try {
-      process.kill(pid, 0);
-      return "alive";
-    } catch (error) {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        (error as { code?: unknown }).code === "ESRCH"
-      ) {
-        return "gone";
-      }
-      return "unknown";
-    }
+    return processLiveness(pid);
   }
 
   private isProcessMissingError(error: unknown): boolean {

@@ -36,6 +36,7 @@ import { validateSurfaceIdentityBijection } from "./surface-topology.js";
 import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
 import { inferRepoFromDirectory } from "./repo-workspace.js";
 import { resumeArtifactStatus } from "./resume-verification.js";
+import { processMayBeAlive } from "./process-liveness.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
@@ -840,6 +841,16 @@ export class AgentRegistry {
       }
 
       if (TERMINAL_STATES.has(agent.state)) continue;
+
+      // A topology miss cannot overrule a process that still exists. The live
+      // incident that motivated this guard removed an engine-issued id 10 ms
+      // after one missing-surface observation, then discovery re-minted the
+      // pane under its bare seat name. Retain the canonical row and all of its
+      // parent/provenance metadata until the recorded pid is proven gone.
+      if (processMayBeAlive(agent.pid)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
 
       if (
         this.isSurfacelessConfirmed(
@@ -1741,6 +1752,11 @@ export class AgentRegistry {
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
         continue;
       }
+      if (processMayBeAlive(agent.pid)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        this.unclaimedAbsenceObservations.delete(agent.agent_id);
+        continue;
+      }
       if (this.matchingLiveSurface(agent, surfaces)) {
         this.surfacelessObservations.delete(agent.agent_id);
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
@@ -2188,6 +2204,11 @@ export class AgentRegistry {
     );
 
     if (managedRecord) {
+      const existingAliasTarget = this.get(candidate.agentId);
+      const shouldPublishCandidateAlias =
+        candidate.agentId !== managedRecord.agent_id &&
+        (!existingAliasTarget ||
+          existingAliasTarget.agent_id === managedRecord.agent_id);
       for (const duplicate of recordsForSurface) {
         if (
           !isAutoAgentId(duplicate.agent_id) ||
@@ -2208,6 +2229,9 @@ export class AgentRegistry {
         discovered,
         candidate,
       );
+      if (shouldPublishCandidateAlias) {
+        this.aliases.set(candidate.agentId, managedRecord.agent_id);
+      }
       return updated
         ? this.repairEntry(updated, discovered, candidate, "updated")
         : null;
@@ -2528,6 +2552,9 @@ export class AgentRegistry {
       if (shouldRetainForExplicitResume(agent)) {
         continue;
       }
+      if (processMayBeAlive(agent.pid)) {
+        continue;
+      }
       if (!this.canPurgeAtStartup(agent)) {
         continue;
       }
@@ -2584,6 +2611,10 @@ export class AgentRegistry {
         continue;
       }
       if (shouldRetainForExplicitResume(agent)) {
+        continue;
+      }
+      if (processMayBeAlive(agent.pid)) {
+        this.surfacelessObservations.delete(agent.agent_id);
         continue;
       }
       const role = inferRecordRoleOrNull(agent);

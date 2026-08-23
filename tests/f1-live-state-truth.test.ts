@@ -261,6 +261,33 @@ describe("F1 — live state, not the stale registry record", () => {
     // separate state-machine decision, not part of this gate fix.
   });
 
+  it("P1 D8 submits to a screen-idle agent even when its registry record says working", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "cmuxlayerCodex-bff10108",
+        surface_id: client.idleSurface,
+        state: "working",
+      }),
+    );
+
+    const result = await callTool(server, "send_to", {
+      mode: "agent",
+      agent_id: "cmuxlayerCodex-bff10108",
+      text: "Phase 1 now",
+    });
+    const parsed = parseResult(result);
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.accepted ?? parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.delivered, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.submit_verified, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.delivery_state ?? parsed.delivery).not.toBe("queued");
+    expect(client.sendCalls).toContain(
+      `${client.idleSurface}:Phase 1 now`,
+    );
+  });
+
   it("send_to still refuses when the live screen agrees the surface is dead", async () => {
     client.screens["surface:idle"] = "$ ";
     registerAgent(

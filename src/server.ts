@@ -31,6 +31,7 @@ import {
 import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
+import { processMayBeAlive } from "./process-liveness.js";
 import {
   currentTransportRetryCount,
   withTransportRetryTracking,
@@ -10131,6 +10132,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const boundAgent = context.lifecycleRegistry?.get(args.agent_id) ?? null;
           const boundSurface = boundAgent?.surface_id?.trim() || null;
           const boundWorkspace = boundAgent?.workspace_id ?? undefined;
+          if (!args.force && processMayBeAlive(boundAgent?.pid)) {
+            return okFormatted(
+              `close_surface scope=agent refused — agent ${args.agent_id} still has live recorded pid ${boundAgent?.pid}`,
+              {
+                scope: "agent",
+                agent_id: args.agent_id,
+                pid: boundAgent?.pid,
+                agent_stopped: false,
+                surface: boundSurface,
+                surface_closed: false,
+                surface_close_skipped: "live_process",
+                WARNING:
+                  `Live process ${boundAgent?.pid} was not stopped and its surface was not closed; pass force:true for deliberate teardown.`,
+              },
+            );
+          }
           const result = await handler(
             { agent_id: args.agent_id, force: args.force },
             {},
@@ -10172,6 +10189,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               data,
             );
           }
+          // stop_agent owns teardown for a nonterminal agent and may already
+          // have closed the exact bound surface. Do not run a second raw close
+          // through a now-stale UUID/ref and turn an observed success into a
+          // stale-route failure. Terminal agents take the path below because
+          // stop_agent is then a no-op and their pane still needs closing.
+          if (
+            (await findSurfaceByRef(boundSurface, boundWorkspace)) === null
+          ) {
+            const data = {
+              ...stopContent,
+              scope: "agent",
+              agent_stopped: true,
+              surface: boundSurface,
+              surface_closed: true,
+            };
+            return okFormatted(
+              `close_surface scope=agent — agent ${args.agent_id} stopped and surface ${boundSurface} closed`,
+              data,
+            );
+          }
           const closeHandler = toolHandlersByName.get("close_surface");
           if (!closeHandler) {
             throw new Error("Internal surface close adapter unavailable");
@@ -10181,14 +10218,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               scope: "surface",
               surface: boundSurface,
               workspace: boundWorkspace,
-              // AIDEV-NOTE (#485 review): pass the caller's own force through
-              // rather than forcing unconditionally. stop_agent has no liveness
-              // refusal of its own, so forcing here would let an unforced
-              // close_surface(scope:"agent") tear down a still-live agent's
-              // pane through a guard that could never fire for this scope --
-              // a silent escalation of destructiveness. If the guard refuses,
-              // the receipt says the agent stopped and the pane did not close.
-              force: args.force ?? false,
+              // The outer agent-scope path now refuses an unforced close when
+              // its recorded process is live. After stop_agent succeeds, the
+              // remaining surface may still have a transient auto-discovery
+              // row; force the surface half so that duplicate cannot veto the
+              // teardown that this same agent-scope call already authorized.
+              force: true,
             },
             {},
           );
@@ -15365,29 +15400,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
                 continue;
               }
-              if (!args.allow_busy && agent.state === "working") {
-                const queued = engine.queueDelivery({
-                  delivery_id: deliveryId,
-                  agent_id: agent.agent_id,
-                  text: args.text,
-                  press_enter: args.press_enter,
-                  source_event: "send_to",
-                });
-                mutableReceipts.push({
-                  ...resolutionMetadata,
-                  agent_id: agent.agent_id,
-                  ...buildPublicDeliveryReceipt({
-                    delivery_state: "queued",
-                    delivery_id: queued.delivery_id,
-                    typed: false,
-                    submit_attempted: false,
-                    submit_verified: queued.submit_verified,
-                    retry_count: queued.retry_count,
-                  }),
-                  accepted: true,
-                });
-                continue;
-              }
               try {
                 const delivery = await deliverAgentInput({
                   agent_id: agent.agent_id,
@@ -15447,6 +15459,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   accepted: true,
                 });
               } catch (error) {
+                if (error instanceof RetryableDeliveryError) {
+                  const queued = engine.queueDelivery({
+                    delivery_id: deliveryId,
+                    agent_id: agent.agent_id,
+                    text: args.text,
+                    press_enter: args.press_enter,
+                    source_event: "send_to",
+                  });
+                  mutableReceipts.push({
+                    ...resolutionMetadata,
+                    agent_id: agent.agent_id,
+                    ...buildPublicDeliveryReceipt({
+                      delivery_state: "queued",
+                      delivery_id: queued.delivery_id,
+                      typed: false,
+                      submit_attempted: false,
+                      submit_verified: queued.submit_verified,
+                      retry_count: queued.retry_count,
+                      WARNING: `Delivery is queued for retry, not delivered yet: ${error.message}`,
+                    }),
+                    accepted: true,
+                  });
+                  continue;
+                }
                 const failed = engine.resolveDelivery(
                   {
                     delivery_id: deliveryId,
@@ -15604,31 +15640,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
             return okFormatted(
               `WARNING — send_to queued; paused target ${agentId} cannot act`,
-              data,
-            );
-          }
-          if (!args.allow_busy && targetAgent?.state === "working") {
-            const receipt = engine.queueDelivery({
-              delivery_id: deliveryId,
-              agent_id: agentId,
-              text: args.text,
-              press_enter: args.press_enter,
-              source_event: "send_to",
-            });
-            const data = {
-              accepted: true,
-              agent_id: agentId,
-              ...buildPublicDeliveryReceipt({
-                delivery_state: "queued",
-                delivery_id: receipt.delivery_id,
-                typed: false,
-                submit_attempted: false,
-                submit_verified: receipt.submit_verified,
-                retry_count: receipt.retry_count,
-              }),
-            };
-            return okFormatted(
-              `send_to accepted — delivery ${receipt.delivery_id} queued`,
               data,
             );
           }
