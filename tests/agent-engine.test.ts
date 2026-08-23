@@ -4539,6 +4539,68 @@ Session ID: ${sessionId}`,
       }
     });
 
+    it("replaces gone legacy pid evidence when its registration time is missing", async () => {
+      const agentId = "cmuxlayerClaude-legacy-process-time";
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const oldPid = 32001;
+      const replacementPid = 32002;
+      const selfRegistrationResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: null,
+        pid: replacementPid,
+        pid_registered_at: "2026-08-23T11:05:00.000Z",
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: selfRegistrationResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "working",
+          surface_id: "surface:legacy-process-time",
+          surface_uuid: "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb",
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: sessionId,
+          pid: oldPid,
+          pid_registered_at: null,
+          created_at: "2026-08-23T11:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:legacy-process-time"),
+          id: "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb",
+        },
+      ];
+      await registry.reconstitute();
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          if (pid === oldPid && signal === 0) {
+            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        await engine.captureBootSessionId(agentId);
+
+        expect(selfRegistrationResolver).toHaveBeenCalledTimes(1);
+        expect(engine.getAgentState(agentId)).toMatchObject({
+          pid: replacementPid,
+          pid_registered_at: "2026-08-23T11:05:00.000Z",
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
     it("keeps captured pid evidence when a pending row converges on an existing final session", async () => {
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
       const finalAgentId = "cmuxlayerClaude-019d9aa5";

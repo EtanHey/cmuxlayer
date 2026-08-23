@@ -2,9 +2,12 @@ import {
   access,
   chmod,
   copyFile,
+  lstat,
   mkdir,
   readFile,
+  realpath,
   rename,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -67,7 +70,7 @@ function sessionStartGroups(config: JsonObject, path: string): JsonObject[] {
   return groups;
 }
 
-function hasCommand(groups: JsonObject[], installedPath: string): boolean {
+function hasCommand(groups: JsonObject[], expectedCommand: string): boolean {
   return groups.some((group) => {
     const handlers = group.hooks;
     return (
@@ -76,7 +79,7 @@ function hasCommand(groups: JsonObject[], installedPath: string): boolean {
         (handler) =>
           isObject(handler) &&
           typeof handler.command === "string" &&
-          handler.command.includes(installedPath),
+          handler.command === expectedCommand,
       )
     );
   });
@@ -84,13 +87,14 @@ function hasCommand(groups: JsonObject[], installedPath: string): boolean {
 
 function mergeClaudeSettings(config: JsonObject, path: string, hookPath: string) {
   const groups = sessionStartGroups(config, path);
-  if (!hasCommand(groups, hookPath)) {
+  const command = `exec python3 ${shellQuote(hookPath)}`;
+  if (!hasCommand(groups, command)) {
     groups.push({
       matcher: ".*",
       hooks: [
         {
           type: "command",
-          command: `python3 ${shellQuote(hookPath)}`,
+          command,
           timeout: 5,
           async: true,
         },
@@ -101,13 +105,14 @@ function mergeClaudeSettings(config: JsonObject, path: string, hookPath: string)
 
 function mergeCodexHooks(config: JsonObject, path: string, hookPath: string) {
   const groups = sessionStartGroups(config, path);
-  if (!hasCommand(groups, hookPath)) {
+  const command = `exec python3 ${shellQuote(hookPath)}`;
+  if (!hasCommand(groups, command)) {
     groups.push({
       matcher: "startup|resume",
       hooks: [
         {
           type: "command",
-          command: `python3 ${shellQuote(hookPath)}`,
+          command,
           timeout: 5,
           async: true,
         },
@@ -133,22 +138,34 @@ async function writeChangedFile(
   content: string,
   result: InstallSessionHooksResult,
   mode?: number,
+  defaultMode?: number,
 ): Promise<void> {
   const existing = await readOptional(path);
   if (existing === content) {
     if (mode !== undefined) await chmod(path, mode);
     return;
   }
-  await mkdir(dirname(path), { recursive: true });
+  let writePath = path;
+  let writeMode = mode;
   if (existing !== null) {
+    if ((await lstat(path)).isSymbolicLink()) {
+      writePath = await realpath(path);
+    }
+    if (writeMode === undefined) {
+      writeMode = (await stat(writePath)).mode & 0o7777;
+    }
     const backup = await nextBackupPath(path);
     await copyFile(path, backup);
     result.backups.push(backup);
+  } else if (writeMode === undefined) {
+    writeMode = defaultMode;
   }
-  const temporary = `${path}.tmp-${process.pid}`;
-  await writeFile(temporary, content, { encoding: "utf8", mode });
-  if (mode !== undefined) await chmod(temporary, mode);
-  await rename(temporary, path);
+  await mkdir(dirname(writePath), { recursive: true });
+  const temporary = `${writePath}.tmp-${process.pid}`;
+  await writeFile(temporary, content, { encoding: "utf8", mode: writeMode });
+  if (writeMode !== undefined) await chmod(temporary, writeMode);
+  await rename(temporary, writePath);
+  if (writeMode !== undefined) await chmod(writePath, writeMode);
   result.changed.push(path);
 }
 
@@ -194,11 +211,15 @@ export async function installSessionHooks(
     claudeSettingsPath,
     JSON.stringify(claudeConfig, null, 2) + "\n",
     result,
+    undefined,
+    0o600,
   );
   await writeChangedFile(
     codexHooksPath,
     JSON.stringify(codexConfig, null, 2) + "\n",
     result,
+    undefined,
+    0o600,
   );
   return result;
 }

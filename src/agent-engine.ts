@@ -3473,10 +3473,13 @@ export class AgentEngine {
             const replacementRegisteredAtMs = Date.parse(
               identity.pid_registered_at ?? "",
             );
+            const replacementHasFiniteTimestamp = Number.isFinite(
+              replacementRegisteredAtMs,
+            );
             const replacementIsNewer =
-              !agent.pid ||
-              (Number.isFinite(previousRegisteredAtMs) &&
-                Number.isFinite(replacementRegisteredAtMs) &&
+              replacementHasFiniteTimestamp &&
+              (!agent.pid ||
+                !Number.isFinite(previousRegisteredAtMs) ||
                 replacementRegisteredAtMs > previousRegisteredAtMs);
             if (
               identity.session_id === agent.cli_session_id &&

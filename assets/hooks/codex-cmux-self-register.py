@@ -10,8 +10,9 @@ import os
 import sys
 import time
 
-REGISTRY = os.environ.get("CMUXLAYER_SESSION_REGISTRY") or os.path.expanduser(
-    "~/.cmuxlayer/session-registry.jsonl"
+REGISTRY = (
+    os.environ.get("CMUXLAYER_SESSION_REGISTRY", "").strip()
+    or os.path.expanduser("~/.cmuxlayer/session-registry.jsonl")
 )
 
 
@@ -42,7 +43,9 @@ def main():
         "ts": int(time.time() * 1000),
     }
     try:
-        os.makedirs(os.path.dirname(REGISTRY), exist_ok=True)
+        registry_dir = os.path.dirname(REGISTRY)
+        if registry_dir:
+            os.makedirs(registry_dir, exist_ok=True)
         with open(REGISTRY, "a", encoding="utf-8") as registry:
             registry.write(json.dumps(entry) + "\n")
     except Exception:
