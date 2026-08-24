@@ -116,6 +116,13 @@ export interface DaemonChildLike {
   once?(event: string, listener: (...args: any[]) => void): unknown;
   off?(event: string, listener: (...args: any[]) => void): unknown;
   removeListener?(event: string, listener: (...args: any[]) => void): unknown;
+  /**
+   * Settled exit state. A child that died before readiness attached its
+   * listeners will never emit `exit` again, so these fields are the only
+   * evidence of why it is gone (#530 review).
+   */
+  exitCode?: number | null;
+  signalCode?: string | null;
 }
 
 export interface DaemonReadinessOptions {
@@ -163,7 +170,47 @@ export async function awaitDaemonReadiness(
   let aborted = false;
 
   const childFailure = new Promise<never>((_, reject) => {
-    if (!child || typeof child.once !== "function") {
+    if (!child) {
+      return;
+    }
+    // #530 review (Macroscope, src/entry.ts:189): a daemon that dies BEFORE we
+    // attach listeners is already gone — node never replays the missed `exit`,
+    // so the old wiring reported a readiness TIMEOUT after the full deadline
+    // instead of the exit code that actually explains it. Read the settled
+    // fields first.
+    if (child.exitCode !== null && child.exitCode !== undefined) {
+      recordDaemonExit({
+        code: child.exitCode,
+        signal: child.signalCode ?? null,
+        stderrExcerpt: readStderr(),
+      });
+      reject(
+        new DaemonStartupFailedError({
+          socketPath: opts.socketPath,
+          exitCode: child.exitCode,
+          signal: child.signalCode ?? null,
+          stderrExcerpt: readStderr(),
+        }),
+      );
+      return;
+    }
+    if (child.signalCode !== null && child.signalCode !== undefined) {
+      recordDaemonExit({
+        code: null,
+        signal: child.signalCode,
+        stderrExcerpt: readStderr(),
+      });
+      reject(
+        new DaemonStartupFailedError({
+          socketPath: opts.socketPath,
+          exitCode: null,
+          signal: child.signalCode,
+          stderrExcerpt: readStderr(),
+        }),
+      );
+      return;
+    }
+    if (typeof child.once !== "function") {
       return;
     }
     onExit = (code, signal) => {

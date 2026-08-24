@@ -168,6 +168,38 @@ describe("#529 daemon readiness propagation", () => {
     );
   });
 
+  it("reports the exit code of a daemon that died BEFORE readiness attached", async () => {
+    // #530 review (Macroscope): node never replays a missed `exit`, so a child
+    // that failed fast used to surface as a readiness TIMEOUT after the full
+    // deadline instead of the exit code that explains it.
+    const child = Object.assign(new EventEmitter(), {
+      pid: 5150,
+      exitCode: 1,
+      signalCode: null,
+    });
+    const alreadyDead = awaitDaemonReadiness({
+      socketPath: "/tmp/cmux529/died-early.sock",
+      child,
+      readStderr: () =>
+        "[cmuxlayer-daemon] fatal Error: socket is already in use",
+      probeDaemon: async () => false,
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      // A deadline far beyond the test: reaching it would be the bug.
+      timeoutMs: 30_000,
+      pollMs: 5,
+    });
+
+    const error = await alreadyDead.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(DaemonStartupFailedError);
+    expect((error as DaemonStartupFailedError).exitCode).toBe(1);
+    expect((error as DaemonStartupFailedError).stderrExcerpt).toContain(
+      "socket is already in use",
+    );
+  }, 3_000);
+
   it("bounds readiness so a silent daemon never leaves the promise unsettled", async () => {
     const readiness = awaitDaemonReadiness({
       socketPath: "/tmp/cmux529/silent.sock",
