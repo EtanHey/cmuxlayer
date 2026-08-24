@@ -75,6 +75,7 @@ import {
 import {
   DaemonSocketInUseError,
   DaemonSocketPathOccupiedError,
+  recordDaemonLifecycleError,
   recordDaemonSocketInUse,
   recordDaemonSocketReap,
   type DaemonSocketProbe,
@@ -410,9 +411,17 @@ async function restoreSheltered(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "EEXIST") {
-      logger.error(
-        `[cmuxlayer-daemon] not restoring ${shelterPath}: ${path} is owned by someone else now; leaving the sheltered copy in place`,
-      );
+      // #530 (Codex P1): a third racer bound the path while we were sheltering.
+      // We will NOT clobber it, and we cannot terminate the sheltered owner —
+      // killing another daemon mid-drain is worse than either alternative. So
+      // the sheltered owner may keep serving its existing connections while new
+      // clients route to the newer daemon. That residual is accepted (see the
+      // follow-up issue) but it is NOT silent: it is recorded and warned on.
+      const detail =
+        `stranded daemon socket: ${shelterPath} could not be restored to ${path} ` +
+        "because another owner bound it first; two backends may be serving";
+      logger.error(`[cmuxlayer-daemon] ${detail}`);
+      recordDaemonLifecycleError(detail);
       return;
     }
     logger.error(

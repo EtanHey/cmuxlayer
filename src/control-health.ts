@@ -545,6 +545,11 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
       `lifecycle lock was force-released ${lifecycle.lifecycle_lock.forced_releases} time(s); an operation never settled.`,
     );
   }
+  // #530: a stranded/unrestorable socket, or any recorded daemon lifecycle
+  // error, must be visible rather than living only in a log line.
+  if (lifecycle?.last_error) {
+    warnings.push(`daemon lifecycle error: ${lifecycle.last_error}`);
+  }
   if (lifecycle?.lifecycle_start?.error) {
     warnings.push(
       `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
