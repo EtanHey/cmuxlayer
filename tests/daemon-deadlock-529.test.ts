@@ -529,12 +529,39 @@ describe("#530 daemon handoff instead of a competing backend", () => {
       sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
       timeoutMs: 2_000,
       pollMs: 5,
+      isPathClear: async () => false,
       spawnDaemon: vi.fn().mockResolvedValue({ pid: 1 }),
       awaitReady: vi.fn().mockResolvedValue(undefined),
       logger: { error: vi.fn() },
     });
 
     expect(attached).toBe(true);
+  }, 5_000);
+
+  it("defers the respawn until the drainer's placeholder is gone", async () => {
+    // Macroscope (#530): firing the single respawn on the first probe failure
+    // spent it while the placeholder was still present, so that daemon refused
+    // too and nothing started once the path finally cleared.
+    let clearChecks = 0;
+    const spawnDaemon = vi.fn().mockResolvedValue({ pid: 7 });
+
+    const attached = await awaitDaemonHandoff({
+      socketPath: "/tmp/cmux529/deferred.sock",
+      probeDaemon: async () => false,
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      timeoutMs: 2_000,
+      pollMs: 5,
+      // The placeholder survives the first three checks.
+      isPathClear: async () => ++clearChecks > 3,
+      spawnDaemon,
+      awaitReady: vi.fn().mockResolvedValue(undefined),
+      logger: { error: vi.fn() },
+    });
+
+    expect(attached).toBe(true);
+    expect(spawnDaemon).toHaveBeenCalledTimes(1);
+    // Proof it waited rather than firing immediately.
+    expect(clearChecks).toBeGreaterThan(3);
   }, 5_000);
 
   it("gives up on the handoff instead of waiting forever", async () => {
@@ -544,6 +571,7 @@ describe("#530 daemon handoff instead of a competing backend", () => {
       sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
       timeoutMs: 30,
       pollMs: 5,
+      isPathClear: async () => true,
       spawnDaemon: vi.fn().mockRejectedValue(new Error("nope")),
       awaitReady: vi.fn(),
       logger: { error: vi.fn() },

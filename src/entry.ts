@@ -1,4 +1,5 @@
 import net from "node:net";
+import { stat } from "node:fs/promises";
 import type { Readable, Writable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CreateServerOptions } from "./server.js";
@@ -431,6 +432,12 @@ export interface DaemonHandoffOptions {
   awaitReady: (child: unknown) => Promise<void>;
   logger: Pick<Console, "error">;
   now?: () => number;
+  /**
+   * Has the draining owner actually removed its placeholder? Defaults to "the
+   * socket path no longer exists". Respawning before this is true wastes the
+   * attempt on a daemon that will refuse for the same reason (#530).
+   */
+  isPathClear?: () => Promise<boolean>;
 }
 
 /**
@@ -446,6 +453,13 @@ export async function awaitDaemonHandoff(
 ): Promise<boolean> {
   const now = opts.now ?? Date.now;
   const deadline = now() + opts.timeoutMs;
+  const isPathClear =
+    opts.isPathClear ??
+    (() =>
+      stat(opts.socketPath).then(
+        () => false,
+        () => true,
+      ));
   let respawned = false;
 
   for (;;) {
@@ -457,8 +471,11 @@ export async function awaitDaemonHandoff(
     }
     await opts.sleep(opts.pollMs);
 
-    if (!respawned && !(await opts.probeDaemon(opts.socketPath))) {
-      // The drainer may have finished and left the path free for us.
+    // #530 (Macroscope): the respawn must WAIT for the placeholder to go. Firing
+    // it on the first probe failure spent the only attempt on a daemon that
+    // refused for the very reason we are waiting out, so nothing ever started
+    // once the path did clear.
+    if (!respawned && (await isPathClear())) {
       respawned = true;
       try {
         const child = await opts.spawnDaemon();
