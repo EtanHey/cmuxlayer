@@ -16,9 +16,10 @@ import {
 } from "./monitor-registry.js";
 import type { SurfaceWriteLivenessTracker } from "./surface-write-liveness.js";
 import {
-  daemonLifecycleSnapshot,
+  daemonLifecycleSnapshotFor,
   type DaemonLifecycleSnapshot,
 } from "./daemon-lifecycle-state.js";
+import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
 import type { LifecycleLockState } from "./agent-engine.js";
 
 const MAX_SELF_HEAL_DETAILS = 100;
@@ -62,8 +63,13 @@ export interface ControlHealthOptions {
   surfaceIds?: readonly string[];
   panePtyDeadSince?: ReadonlyMap<string, number>;
   monitorRegistryPath?: string;
-  /** #529: daemon spawn/exit/reap facts; defaults to this process's record. */
+  /**
+   * #529: daemon spawn/exit/reap facts. Defaults to this process's record,
+   * falling back to the sidecar written by whichever process spawned the
+   * daemon (#530 — the daemon serves control_health but the PROXY spawns it).
+   */
   daemonLifecycle?: DaemonLifecycleSnapshot;
+  daemonSocketPath?: string;
   lifecycleLock?: LifecycleLockState | null;
   lifecycleStart?: LifecycleStartHealth | null;
 }
@@ -757,7 +763,10 @@ export async function collectControlHealth(
         : undefined,
     }),
     daemon_lifecycle: {
-      ...(opts.daemonLifecycle ?? daemonLifecycleSnapshot()),
+      ...(opts.daemonLifecycle ??
+        daemonLifecycleSnapshotFor(
+          opts.daemonSocketPath ?? defaultDaemonSocketPath(env),
+        )),
       lifecycle_lock: opts.lifecycleLock ?? null,
       lifecycle_start: opts.lifecycleStart ?? null,
     },

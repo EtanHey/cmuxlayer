@@ -11,6 +11,8 @@
  * never be silent again.
  */
 
+import { readFileSync, writeFileSync } from "node:fs";
+
 /**
  * How a connect(2) probe classified the daemon socket path. `superseded` is
  * not a probe verdict: it means the path was replaced between classification
@@ -187,12 +189,75 @@ function emptySnapshot(): DaemonLifecycleSnapshot {
     last_socket_in_use: null,
     last_error: null,
   };
+  persistSidecar();
 }
 
 let state: DaemonLifecycleSnapshot = emptySnapshot();
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * #530 (Codex P2): in the DEFAULT daemon-first topology the proxy process
+ * spawns the daemon and records its exits, while `control_health` is served by
+ * the detached daemon — a different process with its own module-local
+ * snapshot. Without a sidecar the health block reports zeros in exactly the
+ * normal case, which is the observability defect this PR exists to fix.
+ *
+ * The file is best-effort in both directions: never throws, never blocks a
+ * lifecycle decision.
+ */
+export function daemonLifecycleSidecarPath(socketPath: string): string {
+  return `${socketPath}.lifecycle.json`;
+}
+
+function persistSidecar(): void {
+  const socketPath = state.socket_path;
+  if (!socketPath) return;
+  try {
+    writeFileSync(
+      daemonLifecycleSidecarPath(socketPath),
+      JSON.stringify(state),
+      "utf8",
+    );
+  } catch {
+    // Observability must never break the thing it observes.
+  }
+}
+
+export function readDaemonLifecycleSidecar(
+  socketPath: string,
+): DaemonLifecycleSnapshot | null {
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(daemonLifecycleSidecarPath(socketPath), "utf8"),
+    );
+    if (!parsed || typeof parsed !== "object") return null;
+    return { ...emptySnapshot(), ...(parsed as DaemonLifecycleSnapshot) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * This process's record, falling back to the sidecar written by whichever
+ * process actually spawned the daemon.
+ */
+export function daemonLifecycleSnapshotFor(
+  socketPath: string | null | undefined,
+): DaemonLifecycleSnapshot {
+  const local = daemonLifecycleSnapshot();
+  const hasLocalActivity =
+    local.spawn_attempts > 0 ||
+    local.last_exit !== null ||
+    local.last_error !== null ||
+    local.last_socket_reap !== null ||
+    local.last_socket_in_use !== null;
+  if (hasLocalActivity || !socketPath) {
+    return local;
+  }
+  return readDaemonLifecycleSidecar(socketPath) ?? local;
 }
 
 export function recordDaemonSpawnAttempt(opts: {
@@ -245,6 +310,7 @@ export function recordDaemonExit(opts: {
       stderr_excerpt: daemonStderrExcerpt(opts.stderrExcerpt),
     },
   };
+  persistSidecar();
 }
 
 export function recordDaemonSocketReap(opts: {
@@ -255,6 +321,7 @@ export function recordDaemonSocketReap(opts: {
     ...state,
     last_socket_reap: { path: opts.path, reason: opts.reason, at: nowIso() },
   };
+  persistSidecar();
 }
 
 export function recordDaemonSocketInUse(opts: {
@@ -269,10 +336,12 @@ export function recordDaemonSocketInUse(opts: {
       at: nowIso(),
     },
   };
+  persistSidecar();
 }
 
 export function recordDaemonLifecycleError(message: string): void {
   state = { ...state, last_error: message };
+  persistSidecar();
 }
 
 export function daemonLifecycleSnapshot(): DaemonLifecycleSnapshot {

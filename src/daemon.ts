@@ -10,7 +10,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
   Transport,
@@ -47,7 +47,11 @@ import type { ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxServerContext, CreateServerOptions } from "./server.js";
-import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import {
+  DAEMON_SOCKET_FILENAME,
+  NIGHTLY_DAEMON_SOCKET_FILENAME,
+  defaultDaemonSocketPath,
+} from "./daemon-socket-path.js";
 import { ensureNodeMaxOldSpaceEnv, installHeapGuard } from "./heap-guard.js";
 import { JsonRpcLineBuffer } from "./json-rpc-line-buffer.js";
 import {
@@ -648,6 +652,30 @@ export async function probeDaemonSocketPath(
   });
 }
 
+/**
+ * Weak ownership evidence for a receiptless EMPTY file (#530, Macroscope).
+ *
+ * Nothing intrinsic distinguishes cmuxlayer's placeholder from an operator's
+ * empty lock file — that is the honest shape of the problem. The name is the
+ * only signal available, so:
+ *
+ * - cmuxlayer's own canonical filenames always qualify;
+ * - so does any `*.sock`, because a path configured as a SOCKET is a path the
+ *   operator handed to cmuxlayer for that purpose. Custom
+ *   `CMUXLAYER_DAEMON_SOCKET` names are supported and must keep working, and a
+ *   0.4.56 leftover has no receipt to fall back on.
+ *
+ * A mistyped path at a document, config, or `.lock` fails this and is refused.
+ */
+function hasDaemonSocketOwnershipEvidence(path: string): boolean {
+  const name = basename(path);
+  return (
+    name === DAEMON_SOCKET_FILENAME ||
+    name === NIGHTLY_DAEMON_SOCKET_FILENAME ||
+    name.endsWith(".sock")
+  );
+}
+
 export type UnlinkStaleSocketOutcome = "absent" | "reaped";
 
 export interface UnlinkStaleSocketOptions {
@@ -727,6 +755,25 @@ export async function unlinkStaleSocket(
   }
   if (status === "live") {
     refuse(status, readOwnerReceipt(path));
+  }
+
+  // #530 (Macroscope): an EMPTY regular file is cmuxlayer's placeholder shape,
+  // but it is also the shape of an operator's lock/sentinel file. Reaping one
+  // with no receipt is only safe where cmuxlayer owns the NAME. A mistyped
+  // CMUXLAYER_DAEMON_SOCKET pointing at someone's empty file does not match,
+  // and is refused; the canonical filename still reaps, which preserves the
+  // #529 upgrade path from builds that never wrote receipts at all.
+  if (
+    status === "stale" &&
+    observedReceipt === null &&
+    observedIdentity?.kind === "file" &&
+    !hasDaemonSocketOwnershipEvidence(path)
+  ) {
+    throw new DaemonSocketPathOccupiedError({
+      socketPath: path,
+      detail:
+        "an empty file cmuxlayer cannot prove it created (no owner receipt, and the name is not a socket path)",
+    });
   }
 
   const liveOwner = observedReceipt !== null && ownerAlive(observedReceipt);

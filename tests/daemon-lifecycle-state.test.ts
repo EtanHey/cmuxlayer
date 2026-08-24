@@ -7,11 +7,16 @@
  * that actually matters.
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   DaemonReadinessTimeoutError,
   DaemonSocketInUseError,
   DaemonStartupFailedError,
   daemonLifecycleSnapshot,
+  daemonLifecycleSnapshotFor,
+  daemonLifecycleSidecarPath,
   daemonStderrExcerpt,
   recordDaemonExit,
   recordDaemonLifecycleError,
@@ -98,6 +103,41 @@ describe("daemon lifecycle state", () => {
     recordDaemonSpawnAttempt({ socketPath: "/tmp/gen.sock", pid: 200 });
     recordDaemonExit({ code: 1, signal: null, stderrExcerpt: "no pid" });
     expect(daemonLifecycleSnapshot().last_exit?.code).toBe(1);
+  });
+
+  it("crosses the process boundary through the sidecar", () => {
+    // Codex P2 (#530): the PROXY spawns the daemon and records its exits, but
+    // `control_health` is served by the detached DAEMON — a different process
+    // with its own module-local snapshot. Without a sidecar the health block
+    // reported zeros in exactly the normal topology.
+    const dir = mkdtempSync(join(tmpdir(), "cmux530-sidecar-"));
+    const socketPath = join(dir, "cmuxlayer-stated.sock");
+
+    // Proxy side.
+    recordDaemonSpawnAttempt({ socketPath, pid: 4242 });
+    recordDaemonExit({ code: 1, signal: null, pid: 4242, stderrExcerpt: "boom" });
+    expect(existsSync(daemonLifecycleSidecarPath(socketPath))).toBe(true);
+
+    // Daemon side: a fresh process with an empty local record.
+    resetDaemonLifecycleState();
+    expect(daemonLifecycleSnapshot().spawn_attempts).toBe(0);
+
+    const merged = daemonLifecycleSnapshotFor(socketPath);
+    expect(merged.spawn_attempts).toBe(1);
+    expect(merged.last_exit?.code).toBe(1);
+    expect(merged.last_exit?.stderr_excerpt).toBe("boom");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("prefers this process's own record over the sidecar", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cmux530-sidecar2-"));
+    const socketPath = join(dir, "cmuxlayer-stated.sock");
+    recordDaemonSpawnAttempt({ socketPath, pid: 1 });
+    recordDaemonExit({ code: 9, signal: null, pid: 1, stderrExcerpt: "local" });
+    // Local activity exists, so the sidecar must not override it.
+    expect(daemonLifecycleSnapshotFor(socketPath).last_exit?.code).toBe(9);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("keeps reap history across generations", () => {

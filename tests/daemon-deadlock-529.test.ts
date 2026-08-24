@@ -138,6 +138,40 @@ describe("#529 daemon socket path handling", () => {
     expect(readFileSync(path, "utf8")).toBe("important user data\n");
   });
 
+  it("refuses an EMPTY file it cannot prove it created", async () => {
+    // Macroscope (#530): an empty regular file is cmuxlayer's placeholder shape,
+    // but also the shape of an operator's lock or sentinel file. With no owner
+    // receipt AND a non-canonical socket name there is no ownership evidence,
+    // so a mistyped CMUXLAYER_DAEMON_SOCKET must not delete it.
+    const path = join(TEST_ROOT, `operator-lock-${process.pid}.lock`);
+    mkdirSync(TEST_ROOT, { recursive: true });
+    rmSync(path, { force: true });
+    rmSync(`${path}.owner`, { force: true });
+    writeFileSync(path, "");
+    cleanups.push(() => rmSync(path, { force: true }));
+
+    const error = await unlinkStaleSocket(path).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(DaemonSocketPathOccupiedError);
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it("still reaps a receiptless placeholder at the CANONICAL socket name", async () => {
+    // The #529 upgrade path: 0.4.56 never wrote receipts, so a leftover
+    // placeholder at cmuxlayer's own canonical filename must stay reapable.
+    const dir = join(TEST_ROOT, `canon-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "cmuxlayer-stated.sock");
+    rmSync(path, { force: true });
+    writeFileSync(path, "");
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+    await expect(unlinkStaleSocket(path)).resolves.toBe("reaped");
+    expect(existsSync(path)).toBe(false);
+  });
+
   it("F3: refuses a shutdown placeholder whose receipt names a LIVE owner", async () => {
     // Codex P1: closeListener() parks a regular-file placeholder BEFORE
     // waitForDrain(), so a daemon still draining in-flight requests presents a
