@@ -55,6 +55,13 @@ import {
   type StaleBuildResult,
 } from "./version.js";
 import { isMainModule } from "./is-main.js";
+import {
+  DaemonSocketInUseError,
+  DaemonSocketPathOccupiedError,
+  recordDaemonSocketInUse,
+  recordDaemonSocketReap,
+  type DaemonSocketProbe,
+} from "./daemon-lifecycle-state.js";
 import { loadCmuxlayerConfigFile } from "./config-file.js";
 import { FleetSidebarPublisher } from "./fleet-sidebar.js";
 
@@ -331,31 +338,98 @@ function isJsonRpcResponse(
   );
 }
 
-async function unlinkStaleSocket(path: string): Promise<void> {
-  const status = await probeSocket(path);
-  if (status === "live") {
-    throw new Error(`cmuxlayer daemon socket is already in use: ${path}`);
-  }
-  if (status === "missing") {
-    return;
-  }
+const DAEMON_SOCKET_PROBE_TIMEOUT_MS = 250;
 
-  await unlink(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  });
+/**
+ * connect(2) failures meaning NOTHING ANSWERED on the path.
+ *
+ * ENOTSOCK is the reboot shape: `detachOwnedSocketPath()` leaves an empty
+ * regular file at the socket path on every clean shutdown, so a SIGTERM at
+ * logout/reboot leaves a leftover no daemon can own. Re-throwing it is what
+ * made the successor daemon fatal instead of reaping (#529).
+ */
+const NO_LISTENER_CONNECT_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTSOCK",
+  "ENOTCONN",
+  "EPIPE",
+]);
+
+interface DaemonSocketIdentity {
+  dev: number;
+  ino: number;
+  /**
+   * Node type. dev/ino alone cannot identify an object across a
+   * delete-and-recreate — Linux hands the freed inode number straight back, so
+   * a successor's new SOCKET can carry the placeholder's exact dev/ino (#530
+   * CI: green on macOS, red on Linux). The type cannot collide.
+   */
+  kind: "socket" | "file" | "other";
 }
 
-function probeSocket(path: string): Promise<"live" | "missing" | "stale"> {
-  return new Promise((resolve, reject) => {
+/** Identity of the path now, or null when it genuinely does not exist. */
+async function socketIdentity(
+  path: string,
+): Promise<DaemonSocketIdentity | null> {
+  try {
+    const s = await lstat(path);
+    return {
+      dev: s.dev,
+      ino: s.ino,
+      kind: s.isSocket() ? "socket" : s.isFile() ? "file" : "other",
+    };
+  } catch (error) {
+    // Absence is ENOENT ONLY. Any other errno is a real failure, not "gone".
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function sameIdentity(
+  a: DaemonSocketIdentity | null,
+  b: DaemonSocketIdentity | null,
+): boolean {
+  return (
+    a !== null &&
+    b !== null &&
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.kind === b.kind
+  );
+}
+
+/**
+ * Classify the socket path without ever collapsing "someone is listening" into
+ * "something is in the way", and without re-throwing an unexpected errno —
+ * that re-throw is what fataled the daemon in #529.
+ */
+export async function probeDaemonSocketPath(
+  path: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<DaemonSocketProbe> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isSocket()) {
+      // Only cmuxlayer's OWN artifact shape is reapable: the shutdown
+      // placeholder is an EMPTY regular file. Anything with content, or any
+      // other node type, is the operator's data at a mistyped socket path and
+      // must fail loudly rather than be deleted.
+      return stats.isFile() && stats.size === 0 ? "stale" : "occupied";
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return "missing";
+    }
+    // Anything else falls through to the connect probe.
+  }
+
+  return new Promise<DaemonSocketProbe>((resolve) => {
     const socket = net.createConnection(path);
     let settled = false;
     const ignoreLateError = () => {};
-    const settle = (value: "live" | "missing" | "stale") => {
-      if (settled) {
-        return;
-      }
+    const settle = (value: DaemonSocketProbe) => {
+      if (settled) return;
       settled = true;
       socket.removeAllListeners();
       socket.on("error", ignoreLateError);
@@ -363,20 +437,76 @@ function probeSocket(path: string): Promise<"live" | "missing" | "stale"> {
       resolve(value);
     };
 
-    socket.setTimeout(250, () => settle("live"));
+    socket.setTimeout(opts.timeoutMs ?? DAEMON_SOCKET_PROBE_TIMEOUT_MS, () =>
+      settle("unknown"),
+    );
     socket.once("connect", () => settle("live"));
     socket.once("error", (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") {
-        settle("missing");
-        return;
+      if (error.code === "ENOENT") return settle("missing");
+      if (error.code && NO_LISTENER_CONNECT_CODES.has(error.code)) {
+        return settle("stale");
       }
-      if (error.code === "ECONNREFUSED") {
-        settle("stale");
-        return;
-      }
-      reject(error);
+      // Never re-throw out of the probe (#529).
+      settle("unknown");
     });
   });
+}
+
+export type UnlinkStaleSocketOutcome = "absent" | "reaped";
+
+export interface UnlinkStaleSocketOptions {
+  probe?: (path: string) => Promise<DaemonSocketProbe>;
+}
+
+/**
+ * Reap a dead-owner leftover; refuse anything else.
+ *
+ * - `missing`  -> nothing to do.
+ * - `occupied` -> not a daemon artifact. NEVER deleted.
+ * - `live`     -> a daemon is accepting connections. Refuse; the entry layer
+ *                 re-probes and attaches to it (or falls back in-process).
+ * - `unknown`  -> inconclusive. Fail closed: an unanswered probe is not
+ *                 evidence that the path is free.
+ * - `stale`    -> nothing is listening and the object is our own shape. Reap.
+ */
+export async function unlinkStaleSocket(
+  path: string,
+  opts: UnlinkStaleSocketOptions = {},
+): Promise<UnlinkStaleSocketOutcome> {
+  const probe = opts.probe ?? probeDaemonSocketPath;
+
+  const observedIdentity = await socketIdentity(path);
+  const status = await probe(path);
+
+  if (status === "missing") return "absent";
+  if (status === "occupied") {
+    throw new DaemonSocketPathOccupiedError({
+      socketPath: path,
+      detail: "a file cmuxlayer did not create",
+    });
+  }
+  if (status === "live" || status === "unknown") {
+    recordDaemonSocketInUse({ path, ownerPid: null });
+    throw new DaemonSocketInUseError({ socketPath: path, probe: status });
+  }
+
+  // Revalidate immediately before the unlink so a successor that bound the
+  // path while we were classifying does not lose its socket (#530 P2-2).
+  const current = await socketIdentity(path);
+  if (current === null) {
+    recordDaemonSocketReap({ path, reason: "dead-owner-leftover-vanished" });
+    return "reaped";
+  }
+  if (!sameIdentity(current, observedIdentity)) {
+    recordDaemonSocketInUse({ path, ownerPid: null });
+    throw new DaemonSocketInUseError({ socketPath: path, probe: "superseded" });
+  }
+
+  await unlink(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  recordDaemonSocketReap({ path, reason: "dead-owner-leftover" });
+  return "reaped";
 }
 
 function positiveEnvMs(value: string | undefined): number | null {
@@ -1054,7 +1184,9 @@ export class CmuxLayerDaemon {
     });
     if (detachedSocket?.restore) {
       await rename(detachedSocket.path, this.socketPath);
-    } else if (detachedSocket) {
+      return;
+    }
+    if (detachedSocket) {
       await unlink(detachedSocket.path).catch(
         (error: NodeJS.ErrnoException) => {
           if (error.code !== "ENOENT") {
@@ -1062,6 +1194,30 @@ export class CmuxLayerDaemon {
           }
         },
       );
+    }
+    await this.removeOwnedSocketPlaceholder();
+  }
+
+  /**
+   * #529 ROOT CAUSE: `detachOwnedSocketPath()` parks an empty REGULAR FILE at
+   * the socket path so a racing daemon cannot bind mid-shutdown, and nothing
+   * ever removed it. connect(2) answers ENOTSOCK there, which the old probe
+   * re-threw — so every clean shutdown, a reboot's SIGTERM included, left a
+   * leftover the successor daemon could not reap. Remove it once the listener
+   * is closed, and never touch a real socket a successor already bound.
+   */
+  private async removeOwnedSocketPlaceholder(): Promise<void> {
+    if (this.listenFd !== undefined || !this.ownedSocketIdentity) {
+      return;
+    }
+    try {
+      const stats = await lstat(this.socketPath);
+      if (stats.isSocket()) {
+        return;
+      }
+      await unlink(this.socketPath);
+    } catch {
+      // Best effort: a placeholder we cannot remove is reaped by the successor.
     }
   }
 
@@ -1200,6 +1356,10 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   // A GUI-launched client starts the daemon without a login shell, so the
   // config file is read here too rather than only in the CLI entrypoint.
   loadCmuxlayerConfigFile();
+  // The spawning proxy now PIPES daemon stderr so a startup failure can be
+  // reported to its waiters. A piped stderr breaks when that parent exits; an
+  // unhandled EPIPE there would kill an otherwise healthy shared daemon.
+  process.stderr.on("error", () => {});
   runDaemon().catch((error) => {
     console.error("[cmuxlayer-daemon] fatal", error);
     process.exit(1);
