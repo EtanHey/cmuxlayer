@@ -261,22 +261,56 @@ export async function awaitDaemonReadiness(
   // Nothing else may observe this promise until the race below.
   childFailure.catch(() => {});
 
+  const deadline = startedAt + opts.timeoutMs;
+  const timedOut = () =>
+    new DaemonReadinessTimeoutError({
+      socketPath: opts.socketPath,
+      waitedMs: Math.max(0, now() - startedAt),
+      stderrExcerpt: readStderr(),
+    });
+
+  /**
+   * #536 review (Codex P2): the loop used to `await opts.probeDaemon(...)`
+   * directly, so a probe that NEVER settles blocked before the deadline check
+   * and `Promise.race` stayed pending forever — the helper reproduced the very
+   * deadlock it exists to bound. Every await inside the loop is now raced
+   * against a standalone deadline timer, cleared in `finally` so a resolved
+   * wait never leaves a pending handle behind.
+   */
+  const withDeadline = async <T>(work: Promise<T>): Promise<T> => {
+    if (opts.timeoutMs === 0) return work;
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(timedOut()),
+            Math.max(0, deadline - now()),
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
   const polling = (async (): Promise<void> => {
-    const deadline = startedAt + opts.timeoutMs;
     for (;;) {
       if (aborted) return;
-      if (await opts.probeDaemon(opts.socketPath)) {
+      if (await withDeadline(opts.probeDaemon(opts.socketPath))) {
         return;
       }
       if (aborted) return;
       if (opts.timeoutMs === 0 || now() >= deadline) {
-        throw new DaemonReadinessTimeoutError({
-          socketPath: opts.socketPath,
-          waitedMs: Math.max(0, now() - startedAt),
-          stderrExcerpt: readStderr(),
-        });
+        throw timedOut();
       }
-      await opts.sleep(opts.pollMs);
+      // #536 review (Macroscope): cap the sleep to the remaining time, or a
+      // pollMs larger than timeoutMs overshoots the promised hard deadline.
+      await withDeadline(
+        opts.sleep(Math.max(0, Math.min(opts.pollMs, deadline - now()))),
+      );
     }
   })();
 

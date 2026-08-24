@@ -1211,8 +1211,20 @@ export class CmuxLayerDaemon {
       return;
     }
     try {
-      const stats = await lstat(this.socketPath);
-      if (stats.isSocket()) {
+      // #536 review (Macroscope Critical / Codex P1): this used to `lstat` and
+      // then `unlink` BY PATHNAME. A successor that removed the placeholder and
+      // bound its own socket between those two calls lost its live endpoint —
+      // and an operator file that replaced the placeholder was deleted too.
+      // Capture the identity we inspected and prove it is still the same object
+      // immediately before removing it.
+      const observed = await socketIdentity(this.socketPath);
+      if (observed === null || observed.kind === "socket") {
+        // Gone already, or a successor bound a real socket here. Either way it
+        // is not our placeholder to remove.
+        return;
+      }
+      if (!sameIdentity(await socketIdentity(this.socketPath), observed)) {
+        // Replaced between the check and the unlink.
         return;
       }
       await unlink(this.socketPath);

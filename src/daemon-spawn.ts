@@ -188,18 +188,37 @@ export async function spawnDaemonProcess(
       `[cmuxlayer-proxy] spawned daemon failed (pid=${child.pid ?? "unknown"}): ${error.message}`,
     );
   });
-  child.once("close", () => {
-    // #530 (Codex P1): `close` fires only after the stdio streams are done, so
-    // by here the captured excerpt is complete. `exit` alone can beat the pipe.
-    stderrSettled.resolve();
-  });
-  child.once("exit", (code, signal) => {
+  // #536 review (Macroscope): the lifecycle record used to be written from the
+  // `exit` handler, which snapshots `buffer.text` BEFORE the stderr pipe has
+  // drained — so a daemon that printed its fatal and died immediately left an
+  // empty `stderr_excerpt`, losing exactly the evidence #529 needed. `close`
+  // fires only after stdio is complete, so the record is written there.
+  let exitRecorded = false;
+  const recordExitOnce = (
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ) => {
+    if (exitRecorded) return;
+    exitRecorded = true;
     recordDaemonExit({
       code,
       signal,
       pid: child.pid ?? null,
       stderrExcerpt: buffer.text,
     });
+  };
+  child.once("close", (code, signal) => {
+    stderrSettled.resolve();
+    recordExitOnce(code ?? child.exitCode, signal ?? child.signalCode);
+  });
+  child.once("exit", (code, signal) => {
+    // `close` never fires when stderr was inherited rather than piped, so the
+    // exit path still records — bounded, and de-duplicated by the flag above.
+    if (!captureStderr) {
+      recordExitOnce(code, signal);
+    } else {
+      setTimeout(() => recordExitOnce(code, signal), 300).unref?.();
+    }
     opts.logger.error(
       `[cmuxlayer-proxy] spawned daemon exited (pid=${child.pid ?? "unknown"}, code=${code ?? "none"}, signal=${signal ?? "none"})`,
     );
