@@ -17,6 +17,7 @@ import { EventEmitter } from "node:events";
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -30,6 +31,7 @@ import {
 } from "../src/daemon.js";
 import {
   DaemonSocketInUseError,
+  DaemonSocketPathOccupiedError,
   DaemonStartupFailedError,
   DaemonReadinessTimeoutError,
   daemonLifecycleSnapshot,
@@ -115,6 +117,25 @@ describe("#529 daemon socket path handling", () => {
     });
     await daemon.start();
     expect(statSync(path).isSocket()).toBe(true);
+  });
+
+  it("never deletes a non-empty file at the socket path", async () => {
+    // Codex P1: a mistyped CMUXLAYER_DAEMON_SOCKET pointing at real data used to
+    // classify as a stale daemon artifact and get deleted. Only cmuxlayer's own
+    // shape — an EMPTY regular placeholder, or a dead socket — is reapable.
+    const path = testSocketPath("user-data");
+    rmSync(path, { force: true });
+    rmSync(`${path}.owner`, { force: true });
+    writeFileSync(path, "important user data\n");
+    cleanups.push(() => rmSync(path, { force: true }));
+
+    const error = await unlinkStaleSocket(path).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(DaemonSocketPathOccupiedError);
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, "utf8")).toBe("important user data\n");
   });
 
   it("F3: refuses a shutdown placeholder whose receipt names a LIVE owner", async () => {

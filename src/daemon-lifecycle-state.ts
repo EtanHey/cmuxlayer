@@ -17,7 +17,30 @@
  * and reap, so a successor owns it now (#530 review P2-2).
  */
 export type DaemonSocketProbe =
-  "live" | "missing" | "stale" | "unknown" | "superseded";
+  "live" | "missing" | "stale" | "unknown" | "superseded" | "occupied";
+
+export const DAEMON_SOCKET_PATH_OCCUPIED_CODE = "EDAEMONSOCKETPATHOCCUPIED";
+
+/**
+ * The socket path holds something that is NOT a daemon artifact — a regular
+ * file with content, a directory, anything cmuxlayer did not create. Never
+ * reaped: a mistyped `CMUXLAYER_DAEMON_SOCKET` must fail loudly rather than
+ * delete the operator's data (#530, Codex P1).
+ */
+export class DaemonSocketPathOccupiedError extends Error {
+  readonly code = DAEMON_SOCKET_PATH_OCCUPIED_CODE;
+  readonly socketPath: string;
+
+  constructor(opts: { socketPath: string; detail: string }) {
+    super(
+      `cmuxlayer daemon socket path is occupied by ${opts.detail}: ${opts.socketPath}. ` +
+        "Refusing to delete it. Point CMUXLAYER_DAEMON_SOCKET at a free path, " +
+        "or remove that file yourself if it is genuinely disposable.",
+    );
+    this.name = "DaemonSocketPathOccupiedError";
+    this.socketPath = opts.socketPath;
+  }
+}
 
 export const DAEMON_SOCKET_IN_USE_CODE = "EDAEMONSOCKETINUSE";
 export const DAEMON_STARTUP_FAILED_CODE = "EDAEMONSTARTUPFAILED";

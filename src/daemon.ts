@@ -56,6 +56,7 @@ import { isMainModule } from "./is-main.js";
 import { processLiveness, processStartedAtMs } from "./process-liveness.js";
 import {
   DaemonSocketInUseError,
+  DaemonSocketPathOccupiedError,
   recordDaemonSocketInUse,
   recordDaemonSocketReap,
   type DaemonSocketProbe,
@@ -558,7 +559,12 @@ export async function probeDaemonSocketPath(
   try {
     const stats = await lstat(path);
     if (!stats.isSocket()) {
-      return "stale";
+      // #530 (Codex P1): only cmuxlayer's OWN artifact shape is reapable. The
+      // shutdown placeholder is an empty regular file
+      // (`writeFile(path, "", { flag: "wx" })`), so anything with content — or
+      // any other node type — is the operator's data at a mistyped socket path
+      // and must fail loudly instead of being deleted.
+      return stats.isFile() && stats.size === 0 ? "stale" : "occupied";
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -662,6 +668,13 @@ export async function unlinkStaleSocket(
   const status = await probe(path);
   if (status === "missing") {
     return "absent";
+  }
+  if (status === "occupied") {
+    // Not a daemon artifact at all. Never reaped — see the probe's note.
+    throw new DaemonSocketPathOccupiedError({
+      socketPath: path,
+      detail: "a file cmuxlayer did not create",
+    });
   }
   if (status === "live") {
     refuse(status, readOwnerReceipt(path));
