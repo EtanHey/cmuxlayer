@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import net from "node:net";
+import { readFileSync } from "node:fs";
 import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
@@ -25,10 +26,7 @@ import {
   httpNotifyMonitorDeadman,
   reconcileMonitorRegistry,
 } from "./monitor-registry.js";
-import {
-  defaultWatchRegistryPath,
-  httpNotifyWatch,
-} from "./watch-spec.js";
+import { defaultWatchRegistryPath, httpNotifyWatch } from "./watch-spec.js";
 import {
   ackedIds,
   dispatchOnce,
@@ -55,6 +53,13 @@ import {
   type StaleBuildResult,
 } from "./version.js";
 import { isMainModule } from "./is-main.js";
+import { processLiveness } from "./process-liveness.js";
+import {
+  DaemonSocketInUseError,
+  recordDaemonSocketInUse,
+  recordDaemonSocketReap,
+  type DaemonSocketProbe,
+} from "./daemon-lifecycle-state.js";
 import { loadCmuxlayerConfigFile } from "./config-file.js";
 import { FleetSidebarPublisher } from "./fleet-sidebar.js";
 
@@ -331,15 +336,38 @@ function isJsonRpcResponse(
   );
 }
 
-async function unlinkStaleSocket(path: string): Promise<void> {
-  const status = await probeSocket(path);
-  if (status === "live") {
-    throw new Error(`cmuxlayer daemon socket is already in use: ${path}`);
-  }
-  if (status === "missing") {
-    return;
-  }
+const DAEMON_SOCKET_PROBE_TIMEOUT_MS = 250;
 
+/**
+ * connect(2) failures that PROVE nothing is listening on the path any more.
+ * ENOTSOCK is the reboot shape: `detachOwnedSocketPath()` leaves an empty
+ * regular file at the socket path on every clean shutdown, so a SIGTERM at
+ * logout/reboot leaves a leftover that no daemon can ever own (#529).
+ */
+const DEAD_OWNER_CONNECT_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTSOCK",
+  "ENOTCONN",
+  "EPIPE",
+]);
+
+/** Sidecar receipt naming the pid that currently owns the daemon socket. */
+export function daemonSocketOwnerPath(socketPath: string): string {
+  return `${socketPath}.owner`;
+}
+
+export function readDaemonSocketOwnerPid(socketPath: string): number | null {
+  try {
+    const raw = readFileSync(daemonSocketOwnerPath(socketPath), "utf8").trim();
+    const pid = Number.parseInt(raw, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function unlinkIfPresent(path: string): Promise<void> {
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") {
       throw error;
@@ -347,12 +375,34 @@ async function unlinkStaleSocket(path: string): Promise<void> {
   });
 }
 
-function probeSocket(path: string): Promise<"live" | "missing" | "stale"> {
-  return new Promise((resolve, reject) => {
+/**
+ * Classify the daemon socket path WITHOUT ever collapsing "someone is
+ * listening" into "something is in the way". A path that exists but is not a
+ * socket can never have a live owner, so it is stale by construction; an
+ * inconclusive probe stays `unknown` and is resolved against the owner receipt
+ * rather than being guessed either way.
+ */
+export async function probeDaemonSocketPath(
+  path: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<DaemonSocketProbe> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isSocket()) {
+      return "stale";
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return "missing";
+    }
+    // Anything else (EACCES on a parent dir, races) falls through to connect.
+  }
+
+  return new Promise<DaemonSocketProbe>((resolve) => {
     const socket = net.createConnection(path);
     let settled = false;
     const ignoreLateError = () => {};
-    const settle = (value: "live" | "missing" | "stale") => {
+    const settle = (value: DaemonSocketProbe) => {
       if (settled) {
         return;
       }
@@ -363,20 +413,86 @@ function probeSocket(path: string): Promise<"live" | "missing" | "stale"> {
       resolve(value);
     };
 
-    socket.setTimeout(250, () => settle("live"));
+    socket.setTimeout(opts.timeoutMs ?? DAEMON_SOCKET_PROBE_TIMEOUT_MS, () =>
+      settle("unknown"),
+    );
     socket.once("connect", () => settle("live"));
     socket.once("error", (error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") {
         settle("missing");
         return;
       }
-      if (error.code === "ECONNREFUSED") {
+      if (error.code && DEAD_OWNER_CONNECT_CODES.has(error.code)) {
         settle("stale");
         return;
       }
-      reject(error);
+      // Never re-throw out of the probe: an unexpected errno used to reject and
+      // fatal the daemon, which is exactly the silent deadlock this fixes.
+      settle("unknown");
     });
   });
+}
+
+export type UnlinkStaleSocketOutcome = "absent" | "reaped";
+
+export interface UnlinkStaleSocketOptions {
+  probe?: (path: string) => Promise<DaemonSocketProbe>;
+  readOwnerPid?: (path: string) => number | null;
+  ownerAlive?: (pid: number) => boolean;
+}
+
+/**
+ * Reap a genuinely dead-owner leftover; refuse a socket a live daemon owns.
+ *
+ * - `missing`  -> nothing to do.
+ * - `stale`    -> no listener can exist behind it; reap it and its receipt.
+ * - `live`     -> a daemon is accepting connections. Throw
+ *                 `DaemonSocketInUseError` so the caller CONNECTS to it.
+ * - `unknown`  -> inconclusive. The owner receipt decides: a receipt naming a
+ *                 dead pid proves a leftover, anything else fails closed.
+ */
+export async function unlinkStaleSocket(
+  path: string,
+  opts: UnlinkStaleSocketOptions = {},
+): Promise<UnlinkStaleSocketOutcome> {
+  const probe = opts.probe ?? probeDaemonSocketPath;
+  const readOwnerPid = opts.readOwnerPid ?? readDaemonSocketOwnerPid;
+  const ownerAlive =
+    opts.ownerAlive ?? ((pid: number) => processLiveness(pid) !== "gone");
+
+  const status = await probe(path);
+  if (status === "missing") {
+    return "absent";
+  }
+
+  let reason: string;
+  if (status === "live") {
+    const ownerPid = readOwnerPid(path);
+    recordDaemonSocketInUse({ path, ownerPid });
+    throw new DaemonSocketInUseError({
+      socketPath: path,
+      ownerPid,
+      probe: status,
+    });
+  } else if (status === "unknown") {
+    const ownerPid = readOwnerPid(path);
+    if (ownerPid === null || ownerAlive(ownerPid)) {
+      recordDaemonSocketInUse({ path, ownerPid });
+      throw new DaemonSocketInUseError({
+        socketPath: path,
+        ownerPid,
+        probe: status,
+      });
+    }
+    reason = `owner-receipt-pid-${ownerPid}-gone`;
+  } else {
+    reason = "dead-owner-leftover";
+  }
+
+  await unlinkIfPresent(path);
+  await unlinkIfPresent(daemonSocketOwnerPath(path));
+  recordDaemonSocketReap({ path, reason });
+  return "reaped";
 }
 
 function positiveEnvMs(value: string | undefined): number | null {
@@ -471,6 +587,14 @@ export class CmuxLayerDaemon {
       await this.listen(this.socketPath);
       const stats = await lstat(this.socketPath);
       this.ownedSocketIdentity = { dev: stats.dev, ino: stats.ino };
+      // #529: publish the owner pid next to the socket so a successor can tell
+      // "a live daemon owns this" from "a dead process left this behind" even
+      // when the connect probe is inconclusive.
+      await writeFile(
+        daemonSocketOwnerPath(this.socketPath),
+        `${process.pid}\n`,
+        "utf8",
+      ).catch(() => {});
     }
     void this.runMonitorReconcile();
     this.startMonitorReconcileWatcher();
@@ -1054,7 +1178,9 @@ export class CmuxLayerDaemon {
     });
     if (detachedSocket?.restore) {
       await rename(detachedSocket.path, this.socketPath);
-    } else if (detachedSocket) {
+      return;
+    }
+    if (detachedSocket) {
       await unlink(detachedSocket.path).catch(
         (error: NodeJS.ErrnoException) => {
           if (error.code !== "ENOENT") {
@@ -1063,6 +1189,32 @@ export class CmuxLayerDaemon {
         },
       );
     }
+    await this.removeOwnedSocketPlaceholder();
+  }
+
+  /**
+   * #529: `detachOwnedSocketPath()` parks an empty REGULAR FILE at the socket
+   * path so a racing daemon cannot bind mid-shutdown. Nothing ever removed it,
+   * so every clean shutdown (a reboot's SIGTERM included) left a leftover that
+   * connect(2) answers with ENOTSOCK. Remove the placeholder once the listener
+   * is closed, and never touch a real socket some successor already bound.
+   */
+  private async removeOwnedSocketPlaceholder(): Promise<void> {
+    if (this.listenFd !== undefined || !this.ownedSocketIdentity) {
+      return;
+    }
+    try {
+      const stats = await lstat(this.socketPath);
+      if (stats.isSocket()) {
+        return;
+      }
+      await unlink(this.socketPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        return;
+      }
+    }
+    await unlink(daemonSocketOwnerPath(this.socketPath)).catch(() => {});
   }
 
   private async detachOwnedSocketPath(): Promise<{
@@ -1200,6 +1352,10 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   // A GUI-launched client starts the daemon without a login shell, so the
   // config file is read here too rather than only in the CLI entrypoint.
   loadCmuxlayerConfigFile();
+  // #529: the spawning proxy now PIPES daemon stderr so a startup failure can
+  // be reported to its waiters. A piped stderr breaks when that parent exits;
+  // an unhandled EPIPE there would kill an otherwise healthy shared daemon.
+  process.stderr.on("error", () => {});
   runDaemon().catch((error) => {
     console.error("[cmuxlayer-daemon] fatal", error);
     process.exit(1);

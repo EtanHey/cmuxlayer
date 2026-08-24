@@ -694,6 +694,19 @@ export interface AgentEngineOptions {
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
   /** Render-only timeout for a working seat whose transcript/output stops advancing. */
   fleetWorkingNoProgressTimeoutMs?: number;
+  /**
+   * Bound how long a queued lifecycle mutation waits for the lock before it
+   * fails fast with a structured error naming the holder (#529).
+   * Env: CMUXLAYER_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS. 0 disables the bound.
+   */
+  lifecycleLockAcquireTimeoutMs?: number;
+  /**
+   * Bound how long one lifecycle mutation may HOLD the lock before its tail
+   * slot is force-released, so a wedged operation degrades one call instead of
+   * poisoning every later caller (#529).
+   * Env: CMUXLAYER_LIFECYCLE_LOCK_HOLD_TIMEOUT_MS. 0 disables the guard.
+   */
+  lifecycleLockHoldTimeoutMs?: number;
   /** Bound one queued terminal submission so lifecycle sweeps cannot hang forever. */
   deliverySubmitTimeoutMs?: number;
   /** Bound one background verify observation so a hung reader cannot wedge later sweeps. */
@@ -935,6 +948,67 @@ function parsePositiveInteger(
   if (raw === undefined) return fallback;
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * #529: the lifecycle mutex used to be an unbounded chained promise. One hung
+ * holder queued every later caller forever, and an operation that never
+ * settled never ran its `finally`, permanently poisoning the tail for
+ * `list_agents`, `spawn_agent`, `send_to` and the periodic sweep. Both waits
+ * are bounded now, and the tail slot is released no matter what.
+ */
+export const DEFAULT_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS = 120_000;
+export const DEFAULT_LIFECYCLE_LOCK_HOLD_TIMEOUT_MS = 300_000;
+
+export interface LifecycleLockTimeoutRecord {
+  holder: string | null;
+  waiter: string;
+  waited_ms: number;
+  held_for_ms: number | null;
+  queue_depth: number;
+  at: string;
+}
+
+export interface LifecycleLockState {
+  holder: string | null;
+  held_for_ms: number | null;
+  queue_depth: number;
+  acquire_timeout_ms: number;
+  hold_timeout_ms: number;
+  forced_releases: number;
+  timeouts: number;
+  last_timeout: LifecycleLockTimeoutRecord | null;
+}
+
+/** A queued lifecycle mutation gave up instead of waiting forever. */
+export class LifecycleLockTimeoutError extends Error {
+  readonly code = "ELIFECYCLELOCKTIMEOUT";
+  readonly holder: string | null;
+  readonly waiter: string;
+  readonly waitedMs: number;
+  readonly heldForMs: number | null;
+  readonly queueDepth: number;
+
+  constructor(opts: {
+    holder: string | null;
+    waiter: string;
+    waitedMs: number;
+    heldForMs: number | null;
+    queueDepth: number;
+  }) {
+    super(
+      `lifecycle lock acquire timed out after ${opts.waitedMs}ms for "${opts.waiter}"; ` +
+        `holder="${opts.holder ?? "unknown"}" held_for_ms=${
+          opts.heldForMs ?? "unknown"
+        } queue_depth=${opts.queueDepth}`,
+    );
+    this.name = "LifecycleLockTimeoutError";
+    this.holder = opts.holder;
+    this.waiter = opts.waiter;
+    this.waitedMs = opts.waitedMs;
+    this.heldForMs = opts.heldForMs;
+    this.queueDepth = opts.queueDepth;
+  }
 }
 
 export function resolveSweepTiming(
@@ -1521,6 +1595,14 @@ export class AgentEngine {
   private fleetWorkingNoProgressTimeoutMs: number;
   private startupInitializePromise: Promise<void> | null = null;
   private lifecycleMutationTail: Promise<void> = Promise.resolve();
+  private readonly lifecycleLockAcquireTimeoutMs: number;
+  private readonly lifecycleLockHoldTimeoutMs: number;
+  private lifecycleLockHolder: string | null = null;
+  private lifecycleLockAcquiredAtMs: number | null = null;
+  private lifecycleLockQueueDepth = 0;
+  private lifecycleLockForcedReleases = 0;
+  private lifecycleLockTimeouts = 0;
+  private lifecycleLockLastTimeout: LifecycleLockTimeoutRecord | null = null;
   private deliveryReceipts = new Map<string, AgentDeliveryReceipt>();
   private deliveryReceiptsPath: string;
   private deliverySubmitter: DeliverySubmitter | null = null;
@@ -1566,6 +1648,22 @@ export class AgentEngine {
     this.deliveryQueueDeadlineMs = Math.max(
       1,
       opts?.deliveryQueueDeadlineMs ?? DEFAULT_DELIVERY_QUEUE_DEADLINE_MS,
+    );
+    this.lifecycleLockAcquireTimeoutMs = Math.max(
+      0,
+      opts?.lifecycleLockAcquireTimeoutMs ??
+        parseNonNegativeInteger(
+          process.env.CMUXLAYER_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS,
+          DEFAULT_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS,
+        ),
+    );
+    this.lifecycleLockHoldTimeoutMs = Math.max(
+      0,
+      opts?.lifecycleLockHoldTimeoutMs ??
+        parseNonNegativeInteger(
+          process.env.CMUXLAYER_LIFECYCLE_LOCK_HOLD_TIMEOUT_MS,
+          DEFAULT_LIFECYCLE_LOCK_HOLD_TIMEOUT_MS,
+        ),
     );
     this.deliveryTicketDir = opts?.deliveryTicketDir ?? null;
     this.deliveryIssueFiler = opts?.deliveryIssueFiler ?? null;
@@ -2926,8 +3024,7 @@ export class AgentEngine {
 
   private canUseSelfRegistrationSessionResolver(agent: AgentRecord): boolean {
     return (
-      agent.cli !== "codex" &&
-      this.canUseSelfRegistrationProcessEvidence(agent)
+      agent.cli !== "codex" && this.canUseSelfRegistrationProcessEvidence(agent)
     );
   }
 
@@ -3275,8 +3372,8 @@ export class AgentEngine {
     const identity = this.normalizeCapturedSessionIdentity(capturedIdentity);
     const hasCapturedProcessEvidence = Boolean(
       agent.surface_provenance === "cmuxlayer_spawn" &&
-        identity.pid &&
-        identity.pid_registered_at,
+      identity.pid &&
+      identity.pid_registered_at,
     );
     const capturedProcessEvidence = hasCapturedProcessEvidence
       ? {
@@ -3458,10 +3555,7 @@ export class AgentEngine {
         canResolveSelfRegistration &&
         Boolean(agent.pid) &&
         agentProcessLiveness(agent) === "gone";
-      if (
-        canResolveSelfRegistration &&
-        (!agent.pid || recordedProcessGone)
-      ) {
+      if (canResolveSelfRegistration && (!agent.pid || recordedProcessGone)) {
         try {
           const registered = this.selfRegistrationSessionResolver?.(agent);
           if (registered) {
@@ -6063,22 +6157,146 @@ export class AgentEngine {
    * records carried over from the previous cmux session while retaining any
    * records that this startup's own topology scan just marked surfaceless.
    */
-  async runLifecycleMutation<T>(operation: () => Promise<T>): Promise<T> {
+  /**
+   * Serialize a lifecycle mutation behind a BOUNDED mutex.
+   *
+   * #529: both waits used to be unbounded. `await previous` queued every later
+   * caller behind a hung holder forever, and an `operation()` that never
+   * settled never reached its `finally`, so `release()` never fired and the
+   * tail stayed poisoned for the life of the process — `list_agents` and
+   * `spawn_agent` deadlocked from cold. Now the acquire is bounded and fails
+   * fast with a structured error naming the holder, and this call's tail slot
+   * is released unconditionally: on acquire timeout, on operation settle, and
+   * by a hold guard if the operation never settles at all.
+   */
+  async runLifecycleMutation<T>(
+    operation: () => Promise<T>,
+    opts?: { label?: string },
+  ): Promise<T> {
+    const label = opts?.label ?? "lifecycle-mutation";
     const previous = this.lifecycleMutationTail;
-    let release!: () => void;
-    this.lifecycleMutationTail = new Promise<void>((resolve) => {
-      release = resolve;
+    let released = false;
+    let resolveTail!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      resolveTail = resolve;
     });
-    await previous;
+    const release = () => {
+      if (released) return;
+      released = true;
+      resolveTail();
+    };
+    this.lifecycleMutationTail = tail;
+
+    const waitStartedAt = Date.now();
+    this.lifecycleLockQueueDepth += 1;
+    try {
+      await this.awaitLifecycleLock(previous, label, waitStartedAt);
+    } catch (error) {
+      // Never leave our own slot dangling: a waiter that gave up must not
+      // become the next holder's unbounded `previous`.
+      release();
+      throw error;
+    } finally {
+      this.lifecycleLockQueueDepth = Math.max(
+        0,
+        this.lifecycleLockQueueDepth - 1,
+      );
+    }
+
+    this.lifecycleLockHolder = label;
+    this.lifecycleLockAcquiredAtMs = Date.now();
+    const holdGuard =
+      this.lifecycleLockHoldTimeoutMs > 0
+        ? setTimeout(() => {
+            if (released) return;
+            this.lifecycleLockForcedReleases += 1;
+            console.error(
+              `[cmuxlayer] lifecycle lock force-released after ${this.lifecycleLockHoldTimeoutMs}ms; holder="${label}" never settled`,
+            );
+            release();
+          }, this.lifecycleLockHoldTimeoutMs)
+        : null;
+    holdGuard?.unref?.();
+
     try {
       return await operation();
     } finally {
+      if (holdGuard) clearTimeout(holdGuard);
+      if (this.lifecycleLockHolder === label) {
+        this.lifecycleLockHolder = null;
+        this.lifecycleLockAcquiredAtMs = null;
+      }
       release();
     }
   }
 
+  private async awaitLifecycleLock(
+    previous: Promise<void>,
+    waiter: string,
+    waitStartedAt: number,
+  ): Promise<void> {
+    if (this.lifecycleLockAcquireTimeoutMs <= 0) {
+      await previous;
+      return;
+    }
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      await Promise.race([
+        previous,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const record: LifecycleLockTimeoutRecord = {
+              holder: this.lifecycleLockHolder,
+              waiter,
+              waited_ms: Date.now() - waitStartedAt,
+              held_for_ms:
+                this.lifecycleLockAcquiredAtMs === null
+                  ? null
+                  : Date.now() - this.lifecycleLockAcquiredAtMs,
+              queue_depth: this.lifecycleLockQueueDepth,
+              at: new Date().toISOString(),
+            };
+            this.lifecycleLockTimeouts += 1;
+            this.lifecycleLockLastTimeout = record;
+            reject(
+              new LifecycleLockTimeoutError({
+                holder: record.holder,
+                waiter,
+                waitedMs: record.waited_ms,
+                heldForMs: record.held_for_ms,
+                queueDepth: record.queue_depth,
+              }),
+            );
+          }, this.lifecycleLockAcquireTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Lifecycle-lock truth for `control_health` — holder, age, queue depth. */
+  lifecycleLockState(): LifecycleLockState {
+    return {
+      holder: this.lifecycleLockHolder,
+      held_for_ms:
+        this.lifecycleLockAcquiredAtMs === null
+          ? null
+          : Date.now() - this.lifecycleLockAcquiredAtMs,
+      queue_depth: this.lifecycleLockQueueDepth,
+      acquire_timeout_ms: this.lifecycleLockAcquireTimeoutMs,
+      hold_timeout_ms: this.lifecycleLockHoldTimeoutMs,
+      forced_releases: this.lifecycleLockForcedReleases,
+      timeouts: this.lifecycleLockTimeouts,
+      last_timeout: this.lifecycleLockLastTimeout,
+    };
+  }
+
   async runSweep(): Promise<void> {
-    await this.runLifecycleMutation(() => this.runSweepOnce());
+    await this.runLifecycleMutation(() => this.runSweepOnce(), {
+      label: "sweep",
+    });
     await this.drainDeliveryQueue();
     await this.verifyPendingDeliveries();
   }
@@ -6549,9 +6767,7 @@ export class AgentEngine {
    * timers, not a defect. The local evidence ticket is still written either
    * way, so the verdict keeps citing its evidence; only the escalation stops.
    */
-  private deliveryFailureEscalationDecline(
-    reason: string,
-  ): string | null {
+  private deliveryFailureEscalationDecline(reason: string): string | null {
     if (reason === "verify_deadline_elapsed") {
       return (
         "background verify ran out of deadline before observing an outcome; " +
@@ -6869,7 +7085,9 @@ export class AgentEngine {
       void (this.startupInitializePromise ?? Promise.resolve())
         .then(() => {
           if (this.fleetSidebarWakeRepublishTimer !== timer) return;
-          return this.runLifecycleMutation(() => this.syncSidebar());
+          return this.runLifecycleMutation(() => this.syncSidebar(), {
+            label: "sync-sidebar",
+          });
         })
         .catch((error) => {
           console.error(
@@ -7080,7 +7298,11 @@ export class AgentEngine {
 
     let screenText: string | null = null;
     let readError: unknown = null;
-    for (let attempt = 0; attempt < WATCH_OBSERVATION_READ_ATTEMPTS; attempt++) {
+    for (
+      let attempt = 0;
+      attempt < WATCH_OBSERVATION_READ_ATTEMPTS;
+      attempt++
+    ) {
       try {
         const screen = await this.client.readScreen(agent.surface_id, {
           ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
@@ -8076,12 +8298,12 @@ export class AgentEngine {
             current &&
             INTERACTIVE_AGENT_STATES.has(targetState) &&
             timeoutInteractiveEvidenceIsGated
-            ? await this.getTargetStateEvidenceSource(
-                current,
-                targetState,
-                timeoutState,
-              )
-            : null;
+              ? await this.getTargetStateEvidenceSource(
+                  current,
+                  targetState,
+                  timeoutState,
+                )
+              : null;
           if (current && timeoutEvidence) {
             finish({
               matched: true,
@@ -8465,11 +8687,14 @@ export class AgentEngine {
     }
     const normalizedSurfaceUuid = agent.surface_uuid.trim().toLowerCase();
     const routedAgentId = agent.agent_id;
-    const competingRecord = this.registry.list().find(
-      (candidate) =>
-        candidate.agent_id !== routedAgentId &&
-        candidate.surface_uuid?.trim().toLowerCase() === normalizedSurfaceUuid,
-    );
+    const competingRecord = this.registry
+      .list()
+      .find(
+        (candidate) =>
+          candidate.agent_id !== routedAgentId &&
+          candidate.surface_uuid?.trim().toLowerCase() ===
+            normalizedSurfaceUuid,
+      );
     if (competingRecord) {
       throw new Error(
         `Agent "${agent.agent_id}" cannot use socketless teardown because ` +
@@ -8930,7 +9155,8 @@ export class AgentEngine {
         finalRoute.surface_id,
         finalRoute.workspace_id,
       );
-      const confirmedRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
+      const confirmedRoute =
+        await this.resolveAgentStopIoRoute(canonicalAgentId);
       if (!this.sameSurfaceRoute(finalRoute, confirmedRoute)) {
         throw new Error(
           `Agent "${canonicalAgentId}" surface route changed repeatedly while ` +
@@ -9060,7 +9286,8 @@ export class AgentEngine {
           closeRoute.surface_id,
           closeRoute.workspace_id,
         );
-        confirmedCloseRoute = await this.resolveAgentStopIoRoute(canonicalAgentId);
+        confirmedCloseRoute =
+          await this.resolveAgentStopIoRoute(canonicalAgentId);
         if (!this.sameSurfaceRoute(closeRoute, confirmedCloseRoute)) {
           throw new Error(
             `Agent "${canonicalAgentId}" surface route changed repeatedly while ` +

@@ -15,6 +15,11 @@ import {
   type MonitorRegistryOptions,
 } from "./monitor-registry.js";
 import type { SurfaceWriteLivenessTracker } from "./surface-write-liveness.js";
+import {
+  daemonLifecycleSnapshot,
+  type DaemonLifecycleSnapshot,
+} from "./daemon-lifecycle-state.js";
+import type { LifecycleLockState } from "./agent-engine.js";
 
 const MAX_SELF_HEAL_DETAILS = 100;
 const MAX_MONITOR_REGISTRY_BYTES = 1024 * 1024;
@@ -57,6 +62,10 @@ export interface ControlHealthOptions {
   surfaceIds?: readonly string[];
   panePtyDeadSince?: ReadonlyMap<string, number>;
   monitorRegistryPath?: string;
+  /** #529: daemon spawn/exit/reap facts; defaults to this process's record. */
+  daemonLifecycle?: DaemonLifecycleSnapshot;
+  lifecycleLock?: LifecycleLockState | null;
+  lifecycleStart?: LifecycleStartHealth | null;
 }
 
 export interface ControlHealthSelfHeal {
@@ -112,6 +121,23 @@ export interface CmuxInstanceHealth {
   processes: Array<{ pid: number | null; command: string }>;
 }
 
+/**
+ * #529 observability. A dead daemon and a wedged lifecycle lock used to look
+ * exactly like a healthy control plane to every tool that did not need them.
+ */
+export interface LifecycleStartHealth {
+  started: boolean;
+  settled: boolean;
+  waiting_for_ms: number | null;
+  timeout_ms: number;
+  error: string | null;
+}
+
+export interface ControlHealthDaemonLifecycle extends DaemonLifecycleSnapshot {
+  lifecycle_lock: LifecycleLockState | null;
+  lifecycle_start: LifecycleStartHealth | null;
+}
+
 export interface ControlHealth {
   generated_at: string;
   current_process: {
@@ -139,15 +165,18 @@ export interface ControlHealth {
     nightly: CmuxInstanceHealth;
   };
   self_heal: ControlHealthSelfHeal;
+  daemon_lifecycle: ControlHealthDaemonLifecycle;
   warnings: string[];
 }
 
-export function collectSelfHealHealth(opts: {
-  surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
-  surfaceIds?: readonly string[];
-  panePtyDeadSince?: ReadonlyMap<string, number>;
-  monitorRegistry?: MonitorRegistryOptions;
-} = {}): ControlHealthSelfHeal {
+export function collectSelfHealHealth(
+  opts: {
+    surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
+    surfaceIds?: readonly string[];
+    panePtyDeadSince?: ReadonlyMap<string, number>;
+    monitorRegistry?: MonitorRegistryOptions;
+  } = {},
+): ControlHealthSelfHeal {
   const surfaceIds = [...new Set(opts.surfaceIds ?? [])];
   const deadSurfaces: ControlHealthSelfHeal["pane_pty_dead"]["surfaces"] = [];
   let deadSurfaceCount = 0;
@@ -164,9 +193,7 @@ export function collectSelfHealHealth(opts: {
           ...(sinceAt === undefined
             ? {}
             : { since_at: new Date(sinceAt).toISOString() }),
-          last_attempt_at: new Date(
-            observation.last_attempt_at,
-          ).toISOString(),
+          last_attempt_at: new Date(observation.last_attempt_at).toISOString(),
         });
       } catch {
         // One malformed/stale surface observation must not break control_health.
@@ -195,13 +222,9 @@ export function collectSelfHealHealth(opts: {
       ) {
         throw new Error("monitor registry JSON has invalid shape");
       }
-      const registryQuery = queryMonitorRegistryForGates(
-        opts.monitorRegistry,
-      );
+      const registryQuery = queryMonitorRegistryForGates(opts.monitorRegistry);
       if (
-        registryQuery.monitors.some(
-          (monitor) => monitor.liveness === "invalid",
-        )
+        registryQuery.monitors.some((monitor) => monitor.liveness === "invalid")
       ) {
         throw new Error("monitor registry contains invalid records");
       }
@@ -241,7 +264,8 @@ export function collectSelfHealHealth(opts: {
       available: monitorRegistryAvailable,
       ...(monitorRegistryError ? { error: monitorRegistryError } : {}),
       total: monitors.length,
-      rearming: monitors.filter((monitor) => monitor.state === "rearming").length,
+      rearming: monitors.filter((monitor) => monitor.state === "rearming")
+        .length,
       collapsed: collapsedMonitors.length,
       collapsed_monitors: collapsedMonitors.slice(0, MAX_SELF_HEAL_DETAILS),
       truncated: collapsedMonitors.length > MAX_SELF_HEAL_DETAILS,
@@ -488,6 +512,32 @@ function describeClient(client: unknown): ControlHealth["selected_transport"] {
 
 function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   const warnings: string[] = [];
+  // #529: never let a dead daemon or a wedged lifecycle lock stay silent.
+  const lifecycle = health.daemon_lifecycle;
+  if (lifecycle?.last_exit && lifecycle.last_exit.code !== 0) {
+    warnings.push(
+      `cmuxlayer daemon exited with code ${lifecycle.last_exit.code ?? "none"} at ${lifecycle.last_exit.at}; this runtime is not daemon-backed.`,
+    );
+  }
+  if (lifecycle?.lifecycle_lock?.last_timeout) {
+    const timeout = lifecycle.lifecycle_lock.last_timeout;
+    warnings.push(
+      `lifecycle lock acquire timed out for "${timeout.waiter}" after ${timeout.waited_ms}ms (holder "${timeout.holder ?? "unknown"}").`,
+    );
+  }
+  if (
+    lifecycle?.lifecycle_lock &&
+    lifecycle.lifecycle_lock.forced_releases > 0
+  ) {
+    warnings.push(
+      `lifecycle lock was force-released ${lifecycle.lifecycle_lock.forced_releases} time(s); an operation never settled.`,
+    );
+  }
+  if (lifecycle?.lifecycle_start?.error) {
+    warnings.push(
+      `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
+    );
+  }
   const envSocket = health.current_process.env.CMUX_SOCKET_PATH;
   const bundledCli = health.current_process.env.CMUX_BUNDLED_CLI_PATH;
   const firstCmux = health.current_process.cmux_resolution[0];
@@ -687,6 +737,11 @@ export async function collectControlHealth(
         ? { registryPath: opts.monitorRegistryPath }
         : undefined,
     }),
+    daemon_lifecycle: {
+      ...(opts.daemonLifecycle ?? daemonLifecycleSnapshot()),
+      lifecycle_lock: opts.lifecycleLock ?? null,
+      lifecycle_start: opts.lifecycleStart ?? null,
+    },
   };
 
   return { ...base, warnings: buildWarnings(base) };
@@ -709,6 +764,71 @@ function formatInstance(instance: CmuxInstanceHealth): string[] {
     `  app: ${instance.app_binary_path}`,
     `  pids: ${processSummary}`,
   ];
+}
+
+function formatDaemonLifecycle(
+  lifecycle: ControlHealthDaemonLifecycle | undefined,
+): string[] {
+  if (!lifecycle) return [];
+  const lines = [
+    `daemon lifecycle: spawn_attempts=${lifecycle.spawn_attempts}${
+      lifecycle.last_spawn_at ? ` last_spawn_at=${lifecycle.last_spawn_at}` : ""
+    }`,
+  ];
+  if (lifecycle.last_exit) {
+    lines.push(
+      `  last daemon exit: code=${lifecycle.last_exit.code ?? "none"} signal=${
+        lifecycle.last_exit.signal ?? "none"
+      } at=${lifecycle.last_exit.at}`,
+    );
+    for (const line of lifecycle.last_exit.stderr_excerpt
+      .split("\n")
+      .filter((entry) => entry.trim().length > 0)
+      .slice(-5)) {
+      lines.push(`    stderr: ${line}`);
+    }
+  }
+  if (lifecycle.last_socket_reap) {
+    lines.push(
+      `  socket reaped: ${lifecycle.last_socket_reap.path} (${lifecycle.last_socket_reap.reason})`,
+    );
+  }
+  if (lifecycle.last_socket_in_use) {
+    lines.push(
+      `  socket in use: ${lifecycle.last_socket_in_use.path} owner_pid=${
+        lifecycle.last_socket_in_use.owner_pid ?? "unknown"
+      }`,
+    );
+  }
+  if (lifecycle.last_error) {
+    lines.push(`  last daemon error: ${lifecycle.last_error}`);
+  }
+  const lock = lifecycle.lifecycle_lock;
+  if (lock) {
+    lines.push(
+      `lifecycle lock: holder=${lock.holder ?? "none"} held_for_ms=${
+        lock.held_for_ms ?? 0
+      } queue_depth=${lock.queue_depth} timeouts=${lock.timeouts} forced_releases=${lock.forced_releases}`,
+    );
+    if (lock.last_timeout) {
+      lines.push(
+        `  last lock timeout: waiter=${lock.last_timeout.waiter} holder=${
+          lock.last_timeout.holder ?? "unknown"
+        } waited_ms=${lock.last_timeout.waited_ms} at=${lock.last_timeout.at}`,
+      );
+    }
+  }
+  const start = lifecycle.lifecycle_start;
+  if (start) {
+    lines.push(
+      `lifecycle start: started=${start.started} settled=${start.settled}${
+        start.waiting_for_ms === null
+          ? ""
+          : ` waiting_for_ms=${start.waiting_for_ms}`
+      }${start.error ? ` error=${start.error}` : ""}`,
+    );
+  }
+  return lines;
 }
 
 export function formatControlHealth(health: ControlHealth): string {
@@ -758,6 +878,7 @@ export function formatControlHealth(health: ControlHealth): string {
     ...health.self_heal.monitor_registry.collapsed_monitors.map(
       (monitor) => `  ${monitor.monitor_id}: ${monitor.reason}`,
     ),
+    ...formatDaemonLifecycle(health.daemon_lifecycle),
   ];
 
   if (health.current_process.cmux_resolution.length === 0) {
