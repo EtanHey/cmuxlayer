@@ -193,13 +193,22 @@ export async function spawnDaemonProcess(
   // drained — so a daemon that printed its fatal and died immediately left an
   // empty `stderr_excerpt`, losing exactly the evidence #529 needed. `close`
   // fires only after stdio is complete, so the record is written there.
-  let exitRecorded = false;
+  //
+  // #537 review (Codex P2): the fallback below must be PROVISIONAL. If the
+  // child's stream is paused by backpressure, `exit` can fire while `close` is
+  // still pending on unread pipe data — and a fallback that marked the exit
+  // permanently recorded would refuse to let `close` replace a partial excerpt
+  // with the fully drained one, dropping exactly the fatal tail this exists to
+  // keep. `close` always upgrades a provisional record.
+  let exitRecordState: "none" | "provisional" | "final" = "none";
   const recordExitOnce = (
     code: number | null,
     signal: NodeJS.Signals | null,
+    final: boolean,
   ) => {
-    if (exitRecorded) return;
-    exitRecorded = true;
+    if (exitRecordState === "final") return;
+    if (exitRecordState === "provisional" && !final) return;
+    exitRecordState = final ? "final" : "provisional";
     recordDaemonExit({
       code,
       signal,
@@ -209,15 +218,15 @@ export async function spawnDaemonProcess(
   };
   child.once("close", (code, signal) => {
     stderrSettled.resolve();
-    recordExitOnce(code ?? child.exitCode, signal ?? child.signalCode);
+    recordExitOnce(code ?? child.exitCode, signal ?? child.signalCode, true);
   });
   child.once("exit", (code, signal) => {
     // `close` never fires when stderr was inherited rather than piped, so the
     // exit path still records — bounded, and de-duplicated by the flag above.
     if (!captureStderr) {
-      recordExitOnce(code, signal);
+      recordExitOnce(code, signal, true);
     } else {
-      setTimeout(() => recordExitOnce(code, signal), 300).unref?.();
+      setTimeout(() => recordExitOnce(code, signal, false), 300).unref?.();
     }
     opts.logger.error(
       `[cmuxlayer-proxy] spawned daemon exited (pid=${child.pid ?? "unknown"}, code=${code ?? "none"}, signal=${signal ?? "none"})`,
