@@ -144,6 +144,19 @@ export async function spawnDaemonProcess(
     };
     process.stderr.once("error", breakForwarding);
     process.stderr.once("close", breakForwarding);
+    // #530 (CodeRabbit): these fire only on a BROKEN destination, so after a
+    // normal child exit they would stay attached forever. runDaemonFirstEntry
+    // can spawn several times (autostart, handoff respawn, version bump), and
+    // ten spawns would trip MaxListenersExceededWarning on the very stderr
+    // channel that carries daemon diagnostics. Detach when the child's stderr
+    // closes.
+    const detachParentStderrListeners = () => {
+      process.stderr.off("error", breakForwarding);
+      process.stderr.off("close", breakForwarding);
+      process.stderr.off("drain", resumeStderr);
+    };
+    stderrStream.once("close", detachParentStderrListeners);
+    stderrStream.once("end", detachParentStderrListeners);
     const sink =
       opts.stderrSink ??
       ((chunk: string) => {

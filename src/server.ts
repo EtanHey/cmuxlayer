@@ -12379,116 +12379,125 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
-        await awaitLifecycleStart();
-        const child = resolveCurrentCallerAgent();
-        if (!child) {
-          return err("report_to_parent requires a managed calling agent", {
-            error_code: "report_caller_unmanaged",
-          });
-        }
-        if (!child.parent_agent_id) {
-          return err(`Agent ${child.agent_id} has no parent`, {
-            error_code: "report_parent_missing",
-            child_agent_id: child.agent_id,
-          });
-        }
-
-        const intendedParentId = child.parent_agent_id;
-        const directMessage = dispatch(
-          intendedParentId,
-          {
-            from: child.agent_id,
-            reply_to: child.agent_id,
-            via: child.surface_id,
-            observed_at: new Date().toISOString(),
-            to: intendedParentId,
-            tag: "parent_blocker",
-            task: args.blocker,
-          },
-          inboxOpts,
-        );
-        context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
-
-        const parent =
-          registry.get(intendedParentId) ??
-          stateMgr.readState(intendedParentId);
-        let directError = "parent is absent from the lifecycle registry";
-        if (parent) {
-          try {
-            const wake = await deliverReportInboxPointer(parent, directMessage);
-            return okFormatted(
-              `report_to_parent ${parent.agent_id}: ${wake.delivery}`,
-              {
-                child_agent_id: child.agent_id,
-                parent_agent_id: intendedParentId,
-                notified_agent_id: parent.agent_id,
-                route: "direct",
-                durable: true,
-                ...wake,
-              },
-            );
-          } catch (error) {
-            directError =
-              error instanceof Error ? error.message : String(error);
+        try {
+          await awaitLifecycleStart();
+          const child = resolveCurrentCallerAgent();
+          if (!child) {
+            return err("report_to_parent requires a managed calling agent", {
+              error_code: "report_caller_unmanaged",
+            });
           }
-        }
+          if (!child.parent_agent_id) {
+            return err(`Agent ${child.agent_id} has no parent`, {
+              error_code: "report_parent_missing",
+              child_agent_id: child.agent_id,
+            });
+          }
 
-        const visited = new Set<string>([child.agent_id, intendedParentId]);
-        let ancestorId = parent?.parent_agent_id ?? null;
-        while (ancestorId && !visited.has(ancestorId)) {
-          visited.add(ancestorId);
-          const ancestor =
-            registry.get(ancestorId) ?? stateMgr.readState(ancestorId);
-          if (!ancestor) break;
-          const prefix =
-            `Delivery to parent ${intendedParentId} failed (${directError}). ` +
-            `Child ${child.agent_id} reports: `;
-          const fallbackTask = `${prefix}${args.blocker}`.slice(0, 500);
-          const fallbackMessage = dispatch(
-            ancestor.agent_id,
+          const intendedParentId = child.parent_agent_id;
+          const directMessage = dispatch(
+            intendedParentId,
             {
               from: child.agent_id,
               reply_to: child.agent_id,
               via: child.surface_id,
               observed_at: new Date().toISOString(),
-              to: ancestor.agent_id,
-              tag: "parent_delivery_failed",
-              task: fallbackTask,
+              to: intendedParentId,
+              tag: "parent_blocker",
+              task: args.blocker,
             },
             inboxOpts,
           );
-          try {
-            const wake = await deliverReportInboxPointer(
-              ancestor,
-              fallbackMessage,
-            );
-            return okFormatted(
-              `report_to_parent ${intendedParentId}: fallback ${ancestor.agent_id} ${wake.delivery}`,
-              {
-                child_agent_id: child.agent_id,
-                parent_agent_id: intendedParentId,
-                notified_agent_id: ancestor.agent_id,
-                route: "fallback",
-                durable: true,
-                ...wake,
-              },
-            );
-          } catch (error) {
-            directError =
-              error instanceof Error ? error.message : String(error);
-            ancestorId = ancestor.parent_agent_id;
-          }
-        }
+          context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
 
-        return err(
-          `Blocker was written to ${intendedParentId}'s inbox, but no parent or ancestor could be woken: ${directError}`,
-          {
-            error_code: "report_parent_unreachable",
-            child_agent_id: child.agent_id,
-            parent_agent_id: intendedParentId,
-            durable: true,
-          },
-        );
+          const parent =
+            registry.get(intendedParentId) ??
+            stateMgr.readState(intendedParentId);
+          let directError = "parent is absent from the lifecycle registry";
+          if (parent) {
+            try {
+              const wake = await deliverReportInboxPointer(parent, directMessage);
+              return okFormatted(
+                `report_to_parent ${parent.agent_id}: ${wake.delivery}`,
+                {
+                  child_agent_id: child.agent_id,
+                  parent_agent_id: intendedParentId,
+                  notified_agent_id: parent.agent_id,
+                  route: "direct",
+                  durable: true,
+                  ...wake,
+                },
+              );
+            } catch (error) {
+              directError =
+                error instanceof Error ? error.message : String(error);
+            }
+          }
+
+          const visited = new Set<string>([child.agent_id, intendedParentId]);
+          let ancestorId = parent?.parent_agent_id ?? null;
+          while (ancestorId && !visited.has(ancestorId)) {
+            visited.add(ancestorId);
+            const ancestor =
+              registry.get(ancestorId) ?? stateMgr.readState(ancestorId);
+            if (!ancestor) break;
+            const prefix =
+              `Delivery to parent ${intendedParentId} failed (${directError}). ` +
+              `Child ${child.agent_id} reports: `;
+            const fallbackTask = `${prefix}${args.blocker}`.slice(0, 500);
+            const fallbackMessage = dispatch(
+              ancestor.agent_id,
+              {
+                from: child.agent_id,
+                reply_to: child.agent_id,
+                via: child.surface_id,
+                observed_at: new Date().toISOString(),
+                to: ancestor.agent_id,
+                tag: "parent_delivery_failed",
+                task: fallbackTask,
+              },
+              inboxOpts,
+            );
+            try {
+              const wake = await deliverReportInboxPointer(
+                ancestor,
+                fallbackMessage,
+              );
+              return okFormatted(
+                `report_to_parent ${intendedParentId}: fallback ${ancestor.agent_id} ${wake.delivery}`,
+                {
+                  child_agent_id: child.agent_id,
+                  parent_agent_id: intendedParentId,
+                  notified_agent_id: ancestor.agent_id,
+                  route: "fallback",
+                  durable: true,
+                  ...wake,
+                },
+              );
+            } catch (error) {
+              directError =
+                error instanceof Error ? error.message : String(error);
+              ancestorId = ancestor.parent_agent_id;
+            }
+          }
+
+          return err(
+            `Blocker was written to ${intendedParentId}'s inbox, but no parent or ancestor could be woken: ${directError}`,
+            {
+              error_code: "report_parent_unreachable",
+              child_agent_id: child.agent_id,
+              parent_agent_id: intendedParentId,
+              durable: true,
+            },
+          );
+        } catch (error) {
+          // #530 (CodeRabbit): the initial awaitLifecycleStart() used to run
+          // OUTSIDE any error path, so a bounded lifecycle-start timeout escaped
+          // the handler entirely and lost the structured error_code / waited_ms /
+          // retryable payload that err() attaches. Wrapping the whole body also
+          // closes the escaping inbox-write exceptions noted as D36.
+          return err(error);
+        }
       },
     );
     engine.setDeliverySnapshotReader(async (receipt: AgentDeliveryReceipt) => {
