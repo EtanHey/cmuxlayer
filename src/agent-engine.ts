@@ -957,8 +957,13 @@ function parsePositiveInteger(
  * `list_agents`, `spawn_agent`, `send_to` and the periodic sweep. Both waits
  * are bounded now, and the tail slot is released no matter what.
  */
-export const DEFAULT_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS = 120_000;
-export const DEFAULT_LIFECYCLE_LOCK_HOLD_TIMEOUT_MS = 300_000;
+/**
+ * #530 review P2-1: both bounds must land INSIDE the ~120s harness inactivity
+ * window, so a wedged control plane returns a structured error the caller can
+ * still read rather than being cut off mid-wait.
+ */
+export const DEFAULT_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS = 45_000;
+export const DEFAULT_LIFECYCLE_LOCK_HOLD_TIMEOUT_MS = 120_000;
 
 export interface LifecycleLockTimeoutRecord {
   holder: string | null;
@@ -6192,9 +6197,14 @@ export class AgentEngine {
     try {
       await this.awaitLifecycleLock(previous, label, waitStartedAt);
     } catch (error) {
-      // Never leave our own slot dangling: a waiter that gave up must not
-      // become the next holder's unbounded `previous`.
-      release();
+      // #530 review P1-1: resolving our own slot HERE broke mutual exclusion —
+      // the next caller chained off an already-resolved promise and ran
+      // concurrently with the live holder (proven: a concurrent list-agents
+      // evict racing a sweep writeState resurrected a durably deleted agent
+      // dir). Chain the abandoned slot behind `previous` instead, so the queue
+      // still advances but only once the real holder is done. The hold guard
+      // is now the ONLY liveness path past a holder that never settles.
+      void previous.then(release, release);
       throw error;
     } finally {
       this.lifecycleLockQueueDepth = Math.max(

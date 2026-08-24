@@ -3498,6 +3498,9 @@ export interface CmuxServerContext {
   /** #529 observability: when lifecycle init began and whether it settled. */
   lifecycleStartStartedAtMs: number | null;
   lifecycleStartSettledAtMs: number | null;
+  /** #530 review P2-4: callers that gave up on the bounded lifecycle wait. */
+  lifecycleStartTimeouts: number;
+  lifecycleStartLastTimeoutAt: string | null;
   /** Lifecycle-lock truth for `control_health`, published by the live engine. */
   lifecycleLockStateProvider: (() => LifecycleLockState) | null;
   lifecycleSweepEngine: AgentEngine | null;
@@ -3646,6 +3649,8 @@ export function createServerContext(
     lifecycleStartError: null,
     lifecycleStartStartedAtMs: null,
     lifecycleStartSettledAtMs: null,
+    lifecycleStartTimeouts: 0,
+    lifecycleStartLastTimeoutAt: null,
     lifecycleLockStateProvider: null,
     lifecycleSweepEngine: null,
     lifecycleAgentInputDeliverer: null,
@@ -3685,6 +3690,8 @@ export function createServerContext(
       context.lifecycleStartError = null;
       context.lifecycleStartStartedAtMs = null;
       context.lifecycleStartSettledAtMs = null;
+      context.lifecycleStartTimeouts = 0;
+      context.lifecycleStartLastTimeoutAt = null;
       context.lifecycleLockStateProvider = null;
       if (autoVitestStateDir) {
         removeAutoVitestTempDir(autoVitestStateDir);
@@ -4990,6 +4997,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : Date.now() - context.lifecycleStartStartedAtMs,
       timeout_ms: resolveLifecycleStartTimeoutMs(),
       error: context.lifecycleStartError?.message ?? null,
+      timeouts: context.lifecycleStartTimeouts,
+      last_timeout_at: context.lifecycleStartLastTimeoutAt,
     };
   };
 
@@ -11363,10 +11372,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
      */
     const awaitLifecycleStart = async (): Promise<void> => {
       if (context.lifecycleStartPromise) {
-        await awaitBoundedLifecycleStart(
-          context.lifecycleStartPromise,
-          lifecycleStartTimeoutMs,
-        );
+        try {
+          await awaitBoundedLifecycleStart(
+            context.lifecycleStartPromise,
+            lifecycleStartTimeoutMs,
+          );
+        } catch (error) {
+          // #530 review P2-4: record the bound this PR added, so control_health
+          // warns instead of the new timeout being silent in its turn. Do NOT
+          // set lifecycleStartError — init may still be in flight and succeed.
+          if (error instanceof LifecycleStartTimeoutError) {
+            context.lifecycleStartTimeouts += 1;
+            context.lifecycleStartLastTimeoutAt = new Date().toISOString();
+          }
+          throw error;
+        }
       }
       if (context.lifecycleStartError) {
         throw context.lifecycleStartError;

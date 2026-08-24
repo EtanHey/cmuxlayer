@@ -131,6 +131,12 @@ export interface LifecycleStartHealth {
   waiting_for_ms: number | null;
   timeout_ms: number;
   error: string | null;
+  /**
+   * #530 review P2-4: how many callers gave up on the bound this PR added.
+   * Without it the new timeout was itself silent — the exact defect class.
+   */
+  timeouts: number;
+  last_timeout_at: string | null;
 }
 
 export interface ControlHealthDaemonLifecycle extends DaemonLifecycleSnapshot {
@@ -538,6 +544,11 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
       `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
     );
   }
+  if (lifecycle?.lifecycle_start && lifecycle.lifecycle_start.timeouts > 0) {
+    warnings.push(
+      `lifecycle initialization wait timed out ${lifecycle.lifecycle_start.timeouts} time(s) (last at ${lifecycle.lifecycle_start.last_timeout_at ?? "unknown"}); lifecycle-gated tools are degraded.`,
+    );
+  }
   const envSocket = health.current_process.env.CMUX_SOCKET_PATH;
   const bundledCli = health.current_process.env.CMUX_BUNDLED_CLI_PATH;
   const firstCmux = health.current_process.cmux_resolution[0];
@@ -821,7 +832,7 @@ function formatDaemonLifecycle(
   const start = lifecycle.lifecycle_start;
   if (start) {
     lines.push(
-      `lifecycle start: started=${start.started} settled=${start.settled}${
+      `lifecycle start: started=${start.started} settled=${start.settled} timeouts=${start.timeouts}${
         start.waiting_for_ms === null
           ? ""
           : ` waiting_for_ms=${start.waiting_for_ms}`

@@ -11,8 +11,13 @@
  * never be silent again.
  */
 
-/** How a connect(2) probe classified the daemon socket path. */
-export type DaemonSocketProbe = "live" | "missing" | "stale" | "unknown";
+/**
+ * How a connect(2) probe classified the daemon socket path. `superseded` is
+ * not a probe verdict: it means the path was replaced between classification
+ * and reap, so a successor owns it now (#530 review P2-2).
+ */
+export type DaemonSocketProbe =
+  "live" | "missing" | "stale" | "unknown" | "superseded";
 
 export const DAEMON_SOCKET_IN_USE_CODE = "EDAEMONSOCKETINUSE";
 export const DAEMON_STARTUP_FAILED_CODE = "EDAEMONSTARTUPFAILED";
@@ -171,12 +176,19 @@ export function recordDaemonSpawnAttempt(opts: {
   socketPath: string;
   pid?: number | null;
 }): void {
+  // #530 review P2-3: a new spawn starts a new daemon GENERATION. Carrying the
+  // previous generation's exit/error forward made control_health warn "not
+  // daemon-backed" forever, even once a healthy successor was serving. The
+  // cumulative counter and the reap history survive; the failure state does not.
   state = {
     ...state,
     socket_path: opts.socketPath,
     spawn_attempts: state.spawn_attempts + 1,
     last_spawn_at: nowIso(),
     last_spawn_pid: opts.pid ?? null,
+    last_exit: null,
+    last_socket_in_use: null,
+    last_error: null,
   };
 }
 

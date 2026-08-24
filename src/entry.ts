@@ -157,6 +157,10 @@ export async function awaitDaemonReadiness(
     null;
   let onError: ((error: Error) => void) | null = null;
   const child = opts.child;
+  // #530 review P2-7: once childFailure wins the race, the polling loop must
+  // stop. Without this it kept probing and sleeping to the deadline behind an
+  // already-settled promise.
+  let aborted = false;
 
   const childFailure = new Promise<never>((_, reject) => {
     if (!child || typeof child.once !== "function") {
@@ -195,9 +199,11 @@ export async function awaitDaemonReadiness(
   const polling = (async (): Promise<void> => {
     const deadline = startedAt + opts.timeoutMs;
     for (;;) {
+      if (aborted) return;
       if (await opts.probeDaemon(opts.socketPath)) {
         return;
       }
+      if (aborted) return;
       if (opts.timeoutMs === 0 || now() >= deadline) {
         throw new DaemonReadinessTimeoutError({
           socketPath: opts.socketPath,
@@ -212,6 +218,7 @@ export async function awaitDaemonReadiness(
   try {
     await Promise.race([polling, childFailure]);
   } finally {
+    aborted = true;
     polling.catch(() => {});
     const detach =
       child &&

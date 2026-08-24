@@ -375,6 +375,49 @@ async function unlinkIfPresent(path: string): Promise<void> {
   });
 }
 
+interface DaemonSocketIdentity {
+  dev: number;
+  ino: number;
+}
+
+/** dev/ino of the path right now, or null when it does not exist. */
+async function socketIdentity(
+  path: string,
+): Promise<DaemonSocketIdentity | null> {
+  try {
+    const stats = await lstat(path);
+    return { dev: stats.dev, ino: stats.ino };
+  } catch {
+    return null;
+  }
+}
+
+function sameIdentity(
+  a: DaemonSocketIdentity | null,
+  b: DaemonSocketIdentity | null,
+): boolean {
+  return a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
+}
+
+/**
+ * #530 review P2-2: only remove the owner receipt when it still names the pid
+ * we classified. The old unconditional unlink could delete a SUCCESSOR
+ * daemon's receipt written between classification and reap.
+ */
+async function unlinkOwnerReceiptIfUnchanged(
+  path: string,
+  expectedPid: number | null,
+  readOwnerPid: (path: string) => number | null,
+): Promise<void> {
+  if (expectedPid === null) {
+    return;
+  }
+  if (readOwnerPid(path) !== expectedPid) {
+    return;
+  }
+  await unlinkIfPresent(daemonSocketOwnerPath(path));
+}
+
 /**
  * Classify the daemon socket path WITHOUT ever collapsing "someone is
  * listening" into "something is in the way". A path that exists but is not a
@@ -460,6 +503,11 @@ export async function unlinkStaleSocket(
   const ownerAlive =
     opts.ownerAlive ?? ((pid: number) => processLiveness(pid) !== "gone");
 
+  // #530 review P2-2: capture the identity we are about to classify so the
+  // reap can prove it is still deleting THAT file and not a successor's.
+  const observedIdentity = await socketIdentity(path);
+  const observedOwnerPid = readOwnerPid(path);
+
   const status = await probe(path);
   if (status === "missing") {
     return "absent";
@@ -489,8 +537,27 @@ export async function unlinkStaleSocket(
     reason = "dead-owner-leftover";
   }
 
+  const current = await socketIdentity(path);
+  if (current === null) {
+    // It vanished on its own between classification and reap. Nothing left to
+    // delete, and the path is free for us to bind.
+    await unlinkOwnerReceiptIfUnchanged(path, observedOwnerPid, readOwnerPid);
+    recordDaemonSocketReap({ path, reason: `${reason}-vanished` });
+    return "reaped";
+  }
+  if (observedIdentity !== null && !sameIdentity(current, observedIdentity)) {
+    // Something replaced the leftover while we were classifying it. Unlinking
+    // now would steal a successor's socket, so refuse instead.
+    const ownerPid = readOwnerPid(path);
+    recordDaemonSocketInUse({ path, ownerPid });
+    throw new DaemonSocketInUseError({
+      socketPath: path,
+      ownerPid,
+      probe: "superseded",
+    });
+  }
   await unlinkIfPresent(path);
-  await unlinkIfPresent(daemonSocketOwnerPath(path));
+  await unlinkOwnerReceiptIfUnchanged(path, observedOwnerPid, readOwnerPid);
   recordDaemonSocketReap({ path, reason });
   return "reaped";
 }
@@ -1203,18 +1270,37 @@ export class CmuxLayerDaemon {
     if (this.listenFd !== undefined || !this.ownedSocketIdentity) {
       return;
     }
+    // #530 review P2-2: revalidate dev/ino immediately before the unlink, and
+    // never delete an owner receipt a successor may have just written.
+    let observed: DaemonSocketIdentity | null;
     try {
       const stats = await lstat(this.socketPath);
       if (stats.isSocket()) {
+        // A successor already bound a real socket here. Leave it, and leave
+        // its receipt, entirely alone.
         return;
       }
-      await unlink(this.socketPath);
+      observed = { dev: stats.dev, ino: stats.ino };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         return;
       }
+      observed = null;
     }
-    await unlink(daemonSocketOwnerPath(this.socketPath)).catch(() => {});
+
+    if (observed !== null) {
+      if (!sameIdentity(await socketIdentity(this.socketPath), observed)) {
+        // Replaced under us between the check and the unlink.
+        return;
+      }
+      await unlinkIfPresent(this.socketPath).catch(() => {});
+    }
+
+    if (readDaemonSocketOwnerPid(this.socketPath) === process.pid) {
+      await unlinkIfPresent(daemonSocketOwnerPath(this.socketPath)).catch(
+        () => {},
+      );
+    }
   }
 
   private async detachOwnedSocketPath(): Promise<{

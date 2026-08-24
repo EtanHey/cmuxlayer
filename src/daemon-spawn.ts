@@ -33,6 +33,20 @@ export function capturedDaemonStderr(child: unknown): string {
   return daemonStderrExcerpt(capturedStderr.get(child as object)?.text ?? "");
 }
 
+let parentStderrGuardInstalled = false;
+
+/**
+ * Install exactly ONE `error` listener on this process's stderr. Async EPIPE
+ * (the MCP client going away while the daemon is still writing) would
+ * otherwise surface as an unhandled 'error' event and kill the spawner. Guarded
+ * by a module flag so repeated spawns cannot leak listeners.
+ */
+function installParentStderrErrorGuard(): void {
+  if (parentStderrGuardInstalled) return;
+  parentStderrGuardInstalled = true;
+  process.stderr.on("error", () => {});
+}
+
 function defaultDaemonScriptPath(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "daemon.js");
 }
@@ -67,22 +81,33 @@ export async function spawnDaemonProcess(
   const buffer = { text: "" };
   capturedStderr.set(child, buffer);
   if (captureStderr && child.stderr) {
+    const stderrStream = child.stderr;
+    // #530 review P2-5: EPIPE on process.stderr arrives ASYNCHRONOUSLY, so a
+    // try/catch around write() never sees it. Guard the stream itself, once.
+    installParentStderrErrorGuard();
     const sink =
       opts.stderrSink ??
       ((chunk: string) => {
         try {
-          process.stderr.write(chunk);
+          if (!process.stderr.write(chunk)) {
+            // Honor backpressure rather than buffering the daemon's output
+            // without bound: pause the child until the parent drains.
+            stderrStream.pause();
+            process.stderr.once("drain", () => {
+              if (!stderrStream.destroyed) stderrStream.resume();
+            });
+          }
         } catch {
           // A closed stderr must never take the spawning process down.
         }
       });
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
+    stderrStream.setEncoding("utf8");
+    stderrStream.on("data", (chunk: string) => {
       buffer.text = `${buffer.text}${chunk}`.slice(-STDERR_BUFFER_LIMIT);
       sink(chunk);
     });
-    child.stderr.on("error", () => {});
-    (child.stderr as unknown as { unref?: () => void }).unref?.();
+    stderrStream.on("error", () => {});
+    (stderrStream as unknown as { unref?: () => void }).unref?.();
   }
 
   child.once("error", (error) => {
