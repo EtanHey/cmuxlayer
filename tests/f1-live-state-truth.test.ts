@@ -510,8 +510,7 @@ describe("F1 — live state, not the stale registry record", () => {
     );
 
     expect(row, JSON.stringify(parsed)).toBeTruthy();
-    expect(row.state.value).toBe("working");
-    expect(row.state.source).toBe("screen");
+    expect(row.state).toBe("working");
     expect(row.closure).toBe("pending");
   });
 

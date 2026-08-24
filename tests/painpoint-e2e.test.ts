@@ -581,14 +581,14 @@ describe("Phase 10 painpoint e2e replay", () => {
       const listed = parseToolResult<{
         agents: Array<{
           agent_id: string;
-          state: { value: AgentState };
+          state: AgentState;
         }>;
       }>(await getTool(server, "list_agents").handler({}, {}));
 
       expect(listed.agents).toEqual([
         expect.objectContaining({
           agent_id: "terminal-worker-empty-scan",
-          state: expect.objectContaining({ value: "done" }),
+          state: "done",
         }),
       ]);
     } finally {

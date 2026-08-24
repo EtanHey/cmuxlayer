@@ -12640,7 +12640,7 @@ describe("tool handler integration", () => {
     const tool = (server as any)._registeredTools["list_agents"];
 
     try {
-      const result = await tool.handler({}, {} as any);
+      const result = await tool.handler({ detail: "full" }, {} as any);
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
 
@@ -12711,7 +12711,7 @@ describe("tool handler integration", () => {
 
     try {
       await context.lifecycleStartPromise;
-      const result = await tool.handler({}, {} as any);
+      const result = await tool.handler({ detail: "full" }, {} as any);
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
 
@@ -12815,10 +12815,7 @@ describe("tool handler integration", () => {
       expect(parsed.count).toBe(1);
       expect(parsed.agents[0]).toMatchObject({
         agent_id: "prompt-blocked-agent",
-        blocked_on_prompt: {
-          value: true,
-          source: "registry",
-        },
+        blocked_on_prompt: true,
       });
       expect(parsed.agents[0].detail).toBeUndefined();
     } finally {

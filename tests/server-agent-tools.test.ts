@@ -5600,10 +5600,10 @@ describe("agent lifecycle tool handlers", () => {
     const listedAgent = (
       listed.agents as Array<{
         agent_id?: string;
-        state?: { value?: string };
+        state?: string;
       }>
     ).find((agent) => agent.agent_id === parsed.agent_id);
-    expect(listedAgent?.state?.value).toBe("error");
+    expect(listedAgent?.state).toBe("error");
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a healthy booting pane with echoed launcher output", async () => {
@@ -7122,31 +7122,37 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.derived_at).toEqual(expect.any(Number));
     expect(parsed.count).toBe(1);
-    expect(parsed.agents[0].repo).toBe("brainlayer");
-    expect(parsed.agents[0].state).toMatchObject({
-      value: "working",
-      source: expect.stringMatching(/^(screen|registry|process)$/),
-      observed_at_ms: expect.any(Number),
+    expect(Object.keys(parsed.agents[0]).sort()).toEqual(
+      [
+        "agent_id",
+        "blocked_on_prompt",
+        "cli",
+        "closure",
+        "model",
+        "paused",
+        "repo",
+        "resumable",
+        "resume_command",
+        "role",
+        "send_via",
+        "session_id",
+        "state",
+        "surface_id",
+      ].sort(),
+    );
+    expect(parsed.agents[0]).toMatchObject({
+      repo: "brainlayer",
+      cli: "claude",
+      role: "worker",
+      state: "working",
+      model: "sonnet",
+      session_id: null,
+      resumable: false,
+      resume_command: null,
+      paused: false,
+      blocked_on_prompt: false,
+      send_via: "send_to",
     });
-    expect(parsed.agents[0].model).toMatchObject({
-      value: "sonnet",
-      source: "registry",
-      observed_at_ms: expect.any(Number),
-    });
-    expect(parsed.agents[0].session_id).toMatchObject({
-      value: null,
-      source: "registry",
-      observed_at_ms: expect.any(Number),
-    });
-    expect(parsed.agents[0].resumable).toMatchObject({
-      value: false,
-      source: "registry",
-      observed_at_ms: expect.any(Number),
-    });
-    expect(parsed.agents[0].resume_command).toBeUndefined();
-    expect(parsed.agents[0].surface_id).toBeDefined();
-    expect(parsed.agents[0].send_via).toBe("send_to");
-    expect(parsed.agents[0].health).toBeUndefined();
   });
 
   it("list_agents detail=full includes health diagnostics", async () => {
@@ -7216,7 +7222,10 @@ describe("agent lifecycle tool handlers", () => {
     const before = Date.now();
 
     const parsed = parseToolResult(
-      await registeredTestTool(server, "list_agents").handler({}, {}),
+      await registeredTestTool(server, "list_agents").handler(
+        { detail: "full" },
+        {},
+      ),
     );
     const agent = parsed.agents.find(
       (candidate: { agent_id: string }) =>
@@ -7428,11 +7437,11 @@ describe("agent lifecycle tool handlers", () => {
     const list = registeredTestTool(server, "list_agents");
 
     const first = parseToolResult(
-      await list.handler({ max_age_ms: 5_000 }, {}),
+      await list.handler({ max_age_ms: 5_000, detail: "full" }, {}),
     );
     routeClient.client.readScreen.mockClear();
     const cached = parseToolResult(
-      await list.handler({ max_age_ms: 5_000 }, {}),
+      await list.handler({ max_age_ms: 5_000, detail: "full" }, {}),
     );
 
     expect(cached.derived_at).toBe(first.derived_at);
@@ -7446,7 +7455,7 @@ describe("agent lifecycle tool handlers", () => {
       },
     ]);
     const refreshed = parseToolResult(
-      await list.handler({ max_age_ms: 5_000 }, {}),
+      await list.handler({ max_age_ms: 5_000, detail: "full" }, {}),
     );
 
     expect(routeClient.client.readScreen).toHaveBeenCalled();
@@ -7524,7 +7533,7 @@ describe("agent lifecycle tool handlers", () => {
       expect.objectContaining({ agent_id: "healthy-agent" }),
       expect.objectContaining({
         agent_id: "corrupt-agent",
-        resumable: expect.objectContaining({ value: true }),
+        resumable: true,
         resume_command: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
       }),
     ]);
@@ -7572,9 +7581,9 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(parsed.agents[0]).toMatchObject({
       agent_id: "corrupt-claude-agent",
-      resumable: expect.objectContaining({ value: false }),
+      resumable: false,
     });
-    expect(parsed.agents[0]).not.toHaveProperty("resume_command");
+    expect(parsed.agents[0]).toHaveProperty("resume_command", null);
   });
 
   it("send_to keeps repaired registry repo ownership when a title contains a surface suffix", async () => {
@@ -9069,11 +9078,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.agents[0]).toMatchObject({
-      session_id: {
-        value: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-        source: "registry",
-        observed_at_ms: expect.any(Number),
-      },
+      session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       resume_command:
         "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });

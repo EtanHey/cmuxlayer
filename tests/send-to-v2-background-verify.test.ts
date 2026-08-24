@@ -1015,32 +1015,54 @@ describe("send_to v2 background verify", () => {
     });
   });
 
-  it("exposes deliveries on list_agents detail=full", async () => {
+  it("bounds list_agents detail=full deliveries to the last 20 unresolved or attention receipts", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
     registerAgent(server);
 
-    const sent = parseResult(
-      await callTool(server, "send_to", {
+    await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "list me",
+      press_enter: true,
+    });
+
+    const engine = server._registeredTools.interact._engine;
+    const terminal = engine.queueDelivery({
+      delivery_id: "terminal-history",
+      agent_id: "agent-1",
+      text: "old terminal receipt",
+      press_enter: true,
+      source_event: "send_to",
+    });
+    engine.resolveDelivery({
+      ...terminal,
+      delivery_state: "submitted",
+      terminal: true,
+      submit_verified: true,
+    });
+    for (let index = 0; index < 25; index += 1) {
+      engine.queueDelivery({
+        delivery_id: `queued-${index}`,
         agent_id: "agent-1",
-        text: "list me",
+        text: `queued ${index}`,
         press_enter: true,
-      }),
-    );
+        source_event: "send_to",
+      });
+    }
 
     const listed = parseResult(
       await callTool(server, "list_agents", { detail: "full" }),
     );
-    expect(listed.deliveries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          delivery_id: sent.delivery_id,
-          agent_id: "agent-1",
-          delivery_state: "pending_verify",
-          terminal: false,
-        }),
-      ]),
+    expect(listed.deliveries).toHaveLength(20);
+    expect(
+      listed.deliveries.map(
+        (delivery: { delivery_id: string }) => delivery.delivery_id,
+      ),
+    ).toEqual(
+      Array.from({ length: 20 }, (_, index) => `queued-${index + 5}`),
     );
+    expect(listed.deliveries_total).toBe(26);
+    expect(listed.deliveries_truncated).toBe(true);
   });
 
   it("does not fail queued_followup after the verify deadline or file a ticket", async () => {
