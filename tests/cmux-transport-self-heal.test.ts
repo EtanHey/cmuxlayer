@@ -538,6 +538,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       retryAttempts: 1,
       reprobeIntervalMs: 5,
       reprobeCapMs: 5,
+      hardDenialReprobeMs: 5,
       random: () => 0,
       initialDenial: {
         denied_reason: "access-control",
@@ -605,6 +606,36 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       degraded: true,
       denied_reason: "access-control",
     });
+    client.stop();
+  });
+
+  it("uses authoritative initial denial metadata for the slow recovery cadence", async () => {
+    vi.useFakeTimers();
+    const socketPath = join(
+      tmpdir(),
+      `cmux-initial-denial-${process.pid}.sock`,
+    );
+    const probeSocketHealth = vi.fn().mockResolvedValue({
+      usable: false,
+      socketPath,
+      error: "permission rejected",
+      denied_reason: "access-control" as const,
+    });
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath,
+      initialDenial: {
+        denied_reason: "access-control",
+        socketPath,
+        error: "permission rejected",
+      },
+      reprobeIntervalMs: 5,
+      hardDenialReprobeMs: 300_000,
+      probeSocketHealth,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(probeSocketHealth).not.toHaveBeenCalled();
     client.stop();
   });
 
@@ -913,6 +944,40 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining("slow recovery re-probe active"),
     );
+    client.stop();
+  });
+
+  it("latches access-control denial from a forwarded socket operation", async () => {
+    const socketPath = join(
+      tmpdir(),
+      `cmux-forwarded-denial-${process.pid}.sock`,
+    );
+    const cli = new CmuxClient({
+      exec: vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      }),
+      bin: "cmux",
+    });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      listWorkspaces: vi
+        .fn()
+        .mockRejectedValue(new Error(ACCESS_CONTROL_DENIED_TEXT)),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(socket, cli, {
+      socketPath,
+      hardDenialReprobeMs: 300_000,
+    });
+
+    await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "cli",
+      degraded: true,
+      denied_reason: "access-control",
+      last_error: expect.stringContaining(ACCESS_CONTROL_DENIED_TEXT),
+    });
     client.stop();
   });
 

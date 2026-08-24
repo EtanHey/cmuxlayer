@@ -50,6 +50,7 @@ import { dispatch, readInbox, writeHeartbeat } from "../src/inbox.js";
 import { readWatchRegistry } from "../src/watch-spec.js";
 import { useHarnessHome } from "./helpers/harness-home.js";
 import { persistProductionProcessRecord } from "./helpers/production-process-record.js";
+import type { SurfaceTopologySnapshot } from "../src/surface-topology.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
 // #482/#492: `resumable` reads the transcript store, so these tests own a
@@ -11347,6 +11348,55 @@ Session ID: ${sessionId}`,
       expect(stateMgr.readState(record.agent_id)).toMatchObject({
         surface_id: "surface:stale",
         surface_uuid: stableUuid,
+        surface_observer_id: "cmux:/tmp/cmux-primary.sock",
+        workspace_id: "workspace:stale",
+      });
+    });
+
+    it("refuses a sweep topology override after the surface observer changes", async () => {
+      engine.dispose();
+      let currentObserverId = "cmux:/tmp/cmux-primary.sock";
+      const stableUuid = "11111111-2222-4333-8444-555555555555";
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        observerIdProvider: () => currentObserverId,
+      });
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      });
+      const record = makeRecord({
+        agent_id: "stale-sweep-observer-route",
+        surface_id: "surface:stale",
+        surface_uuid: stableUuid,
+        surface_observer_id: currentObserverId,
+        workspace_id: "workspace:stale",
+        state: "working",
+      });
+      stateMgr.writeState(record);
+      registry.set(record.agent_id, record);
+      const topology: SurfaceTopologySnapshot = {
+        observerEpoch: currentObserverId,
+        complete: true,
+        surfaces: [
+          {
+            ...makeSurface("surface:fresh"),
+            id: stableUuid,
+            workspace_ref: "workspace:fresh",
+          },
+        ],
+        workspaceBySurface: new Map([["surface:fresh", "workspace:fresh"]]),
+        titleBySurface: new Map([["surface:fresh", "fresh"]]),
+        topologyBySurface: new Map(),
+        surfaceIdByRef: new Map([["surface:fresh", stableUuid]]),
+        surfaceRefById: new Map([[stableUuid.toLowerCase(), "surface:fresh"]]),
+      };
+      currentObserverId = "cmux:/tmp/cmux-secondary.sock";
+
+      await expect(
+        engine.resolveAgentIoRoute(record.agent_id, topology),
+      ).rejects.toThrow(/surface observer changed|refusing to mutate/i);
+      expect(stateMgr.readState(record.agent_id)).toMatchObject({
+        surface_id: "surface:stale",
         surface_observer_id: "cmux:/tmp/cmux-primary.sock",
         workspace_id: "workspace:stale",
       });

@@ -7175,6 +7175,9 @@ export class AgentEngine {
       topologyIsAuthoritative &&
       transportHealth?.mode === "socket" &&
       transportHealth.degraded === false;
+    if (mutationsAreSafe) {
+      this.sweepSkippedMutations = 0;
+    }
     const observedSurfaces = topologyIsAuthoritative
       ? surfaceTopology.surfaces
       : undefined;
@@ -8667,6 +8670,12 @@ export class AgentEngine {
         topologyOverride === undefined
           ? await this.collectObservedSurfaceTopology()
           : topologyOverride;
+      if (topologyOverride !== undefined) {
+        this.assertSurfaceObserverEpochCurrent(
+          topology?.observerEpoch,
+          "sweep route resolution",
+        );
+      }
       const binding = resolveAgentSurfaceBinding(agent, topology);
       if (
         topology?.complete !== true ||
@@ -8700,6 +8709,12 @@ export class AgentEngine {
       topologyOverride === undefined
         ? await this.collectObservedSurfaceTopology()
         : topologyOverride;
+    if (topologyOverride !== undefined) {
+      this.assertSurfaceObserverEpochCurrent(
+        topology?.observerEpoch,
+        "sweep route resolution",
+      );
+    }
     const binding = resolveAgentSurfaceBinding(agent, topology);
     if (!binding || binding.provenance !== "uuid") {
       if (agentProcessMayBeAlive(agent)) {

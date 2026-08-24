@@ -461,6 +461,15 @@ describe("Sidebar Sync", () => {
     expect(engine.lifecycleLockState()).toMatchObject({
       sweep_skipped_mutations: 2,
     });
+
+    (mockClient as unknown as Record<string, unknown>).getTransportHealth =
+      () => ({ mode: "socket", degraded: false });
+    liveSurfaces = [1, 2, 3].map((index) => makeSurface(`surface:${index}`));
+    await engine.runSweep();
+
+    expect(engine.lifecycleLockState()).toMatchObject({
+      sweep_skipped_mutations: 0,
+    });
   });
 
   it("fails closed when transport health is unknown", async () => {

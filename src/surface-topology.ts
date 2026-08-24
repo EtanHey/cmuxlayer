@@ -13,6 +13,8 @@ import type {
 export type SurfaceTopology = AgentTopologyHealthInput;
 
 export interface SurfaceTopologySnapshot {
+  /** Observer epoch that authorized this completed observation. */
+  observerEpoch?: SurfaceObserverEpoch;
   complete: boolean;
   /** Canonical surface rows captured by this same topology enumeration. */
   surfaces: CmuxSurface[];
@@ -295,6 +297,7 @@ export async function collectSurfaceTopology(
   }
 
   const snapshot: SurfaceTopologySnapshot = {
+    observerEpoch,
     complete: true,
     surfaces: [],
     workspaceBySurface: new Map(),

@@ -266,6 +266,28 @@ describe("collectSurfaceTopology", () => {
     expect(snapshot).toBeNull();
   });
 
+  it("records the observer epoch that authorized a completed snapshot", async () => {
+    const observerId = "cmux:/tmp/cmux-primary.sock";
+    const client = makeTopologyClient(
+      [pane("pane:right", 0, ["surface:1"])],
+      [
+        {
+          workspace_ref: "workspace:1",
+          pane_ref: "pane:right",
+          surfaces: [surface("surface:1")],
+        },
+      ],
+    );
+
+    const snapshot = await collectSurfaceTopology(
+      client,
+      "workspace:1",
+      () => observerId,
+    );
+
+    expect(snapshot?.observerEpoch).toBe(observerId);
+  });
+
   it("resolves a stale ref through the stable UUID from the same topology observation", async () => {
     const surfaceUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
     const panes = [

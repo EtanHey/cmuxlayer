@@ -208,9 +208,8 @@ export class CmuxSelfHealingClient {
     this.socketClient = opts.socket ?? null;
     this.delegate = opts.socket ?? opts.cli;
     this.transportDenial = opts.initialDenial ?? null;
-    this.hardAccessControlDenied = Boolean(
-      opts.initialDenial && isCmuxAccessControlDenied(opts.initialDenial.error),
-    );
+    this.hardAccessControlDenied =
+      opts.initialDenial?.denied_reason === "access-control";
     if (opts.initialDenial) {
       this.upstreamProbeFailures = 1;
       this.upstreamProbeStartedAt = (opts.now ?? Date.now)();
@@ -328,14 +327,7 @@ export class CmuxSelfHealingClient {
       return await fn();
     } catch (error) {
       if (this.shouldDowngrade(error)) {
-        if (isCmuxAccessControlDenied(error) && this.socketClient) {
-          this.recordAccessControlDenial({
-            usable: false,
-            socketPath: this.socketClient.currentSocketPath(),
-            denied_reason: "access-control",
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        this.recordActiveAccessControlDenial(error);
         this.downgradeToCli();
       }
       throw error;
@@ -508,6 +500,7 @@ export class CmuxSelfHealingClient {
       this.socketClient &&
       this.isRecoverableSocketError(error)
     ) {
+      this.recordActiveAccessControlDenial(error);
       this.downgradeToCli();
     }
     if (!this.canRetryPayload(error, method)) {
@@ -741,6 +734,16 @@ export class CmuxSelfHealingClient {
     this.opts.logger?.error(
       `[cmuxlayer] transport denied: access-control (${result.socketPath}): ${this.transportDenial.error}; hard state, daemon must be spawned from inside a cmux pane; slow recovery re-probe active`,
     );
+  }
+
+  private recordActiveAccessControlDenial(error: unknown): void {
+    if (!this.socketClient || !isCmuxAccessControlDenied(error)) return;
+    this.recordAccessControlDenial({
+      usable: false,
+      socketPath: this.socketClient.currentSocketPath(),
+      denied_reason: "access-control",
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   private isDenialClassError(error: unknown): boolean {

@@ -153,10 +153,11 @@ export class CmuxPersistentSocket {
       this.raiseSocketListenerLimit(socket);
 
       socket.setTimeout(this.connectTimeoutMs, () => {
+        const transportPhase = settled ? "response" : "connect";
         const error = new CmuxSocketError(
           `Connect timeout after ${this.connectTimeoutMs}ms`,
           "connection_error",
-          { transportPhase: "connect" },
+          { transportPhase },
         );
         this.connected = false;
         this.connectPromise = null;

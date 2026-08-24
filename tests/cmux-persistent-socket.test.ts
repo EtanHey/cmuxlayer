@@ -123,7 +123,7 @@ describe("CmuxPersistentSocket V1 demux", () => {
       await expect(socket.call("system.ping")).rejects.toMatchObject({
         code: "connection_error",
         message: "Connect timeout after 40ms",
-        transport_phase: "connect",
+        transport_phase: "response",
       });
       expect(Date.now() - startedAt).toBeLessThan(250);
     } finally {
