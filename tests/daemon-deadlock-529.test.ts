@@ -275,6 +275,44 @@ describe("#529 daemon socket path handling", () => {
     expect(statSync(path).isSocket()).toBe(true);
   });
 
+  it("refuses when a successor REUSES the classified inode number", async () => {
+    // #530 CI: this is the real Linux failure, made deterministic.
+    //
+    // dev/ino alone cannot identify an object across delete-and-recreate.
+    // Linux hands the freed inode number straight back, so the successor's new
+    // SOCKET carried the exact dev/ino of the regular-file placeholder we had
+    // classified — `sameIdentity` said "still ours" and the reap deleted a LIVE
+    // socket. macOS allocated a different inode, which is the only reason this
+    // passed locally. Identity now includes the node type, which is stable
+    // across rename(2) and cannot collide.
+    const path = testSocketPath("inode-reuse");
+    rmSync(path, { force: true });
+    rmSync(`${path}.owner`, { force: true });
+    writeFileSync(path, "");
+    cleanups.push(() => rmSync(path, { force: true }));
+
+    let call = 0;
+    const error = await unlinkStaleSocket(path, {
+      probe: async () => "stale",
+      // Same dev AND same ino both times — only the kind differs, exactly as
+      // an inode-reusing filesystem reports it.
+      readIdentity: async () => {
+        call += 1;
+        return call === 1
+          ? { dev: 1, ino: 42, kind: "file" as const }
+          : { dev: 1, ino: 42, kind: "socket" as const };
+      },
+    }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(DaemonSocketInUseError);
+    expect((error as DaemonSocketInUseError).probe).toBe("superseded");
+    // Nothing was deleted.
+    expect(existsSync(path)).toBe(true);
+  });
+
   it("restores, never deletes, a successor's socket grabbed by the reap", async () => {
     // Codex P1: a dev/ino check followed by a separate unlink(2) cannot be made
     // safe — two successors can both validate the old inode and the loser then
@@ -562,6 +600,44 @@ describe("#530 daemon handoff instead of a competing backend", () => {
     expect(spawnDaemon).toHaveBeenCalledTimes(1);
     // Proof it waited rather than firing immediately.
     expect(clearChecks).toBeGreaterThan(3);
+  }, 5_000);
+
+  it("treats only ENOENT as a cleared placeholder", async () => {
+    // Macroscope (#530): every stat() error read as "placeholder gone", so an
+    // EACCES/EIO path burned the single respawn on a daemon that would refuse.
+    const { mkdirSync: mk, rmSync: rm } = await import("node:fs");
+    const dir = join(tmpdir(), `cmux529-perm-${process.pid}`);
+    rm(dir, { recursive: true, force: true });
+    mk(dir, { recursive: true });
+    const guarded = join(dir, "sub", "daemon.sock");
+    mk(join(dir, "sub"), { recursive: true });
+    // Make the parent directory unreadable so stat() fails with EACCES.
+    const { chmodSync } = await import("node:fs");
+    chmodSync(join(dir, "sub"), 0o000);
+    cleanups.push(() => {
+      try {
+        chmodSync(join(dir, "sub"), 0o755);
+      } catch {
+        /* best effort */
+      }
+      rm(dir, { recursive: true, force: true });
+    });
+
+    const spawnDaemon = vi.fn().mockResolvedValue({ pid: 9 });
+    const attached = await awaitDaemonHandoff({
+      socketPath: guarded,
+      probeDaemon: async () => false,
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      timeoutMs: 60,
+      pollMs: 5,
+      spawnDaemon,
+      awaitReady: vi.fn().mockResolvedValue(undefined),
+      logger: { error: vi.fn() },
+    });
+
+    expect(attached).toBe(false);
+    // EACCES is not "cleared", so the respawn attempt was never spent.
+    expect(spawnDaemon).not.toHaveBeenCalled();
   }, 5_000);
 
   it("gives up on the handoff instead of waiting forever", async () => {

@@ -450,6 +450,7 @@ export function daemonSocketOwnerAlive(
 async function reapClassifiedSocket(
   path: string,
   observedIdentity: DaemonSocketIdentity | null,
+  readIdentity: (path: string) => Promise<DaemonSocketIdentity | null>,
 ): Promise<boolean> {
   const reapingPath = `${path}.reaping-${process.pid}-${Date.now()}`;
   try {
@@ -462,8 +463,20 @@ async function reapClassifiedSocket(
     throw error;
   }
 
-  const moved = await socketIdentity(reapingPath).catch(() => null);
-  if (observedIdentity !== null && !sameIdentity(moved, observedIdentity)) {
+  const moved = await readIdentity(reapingPath).catch(() => null);
+  const stillOurs =
+    observedIdentity !== null && sameIdentity(moved, observedIdentity);
+
+  // Last line of defence, independent of identity entirely: a socket that
+  // ANSWERS has a live listener behind it, whatever its dev/ino say. The
+  // listener is bound to the inode, so it still answers on the sheltered name.
+  // This catches the residual socket-to-socket inode-reuse case that the kind
+  // check cannot (#530 CI).
+  const answersNow =
+    moved?.kind === "socket" &&
+    (await probeDaemonSocketPath(reapingPath)) === "live";
+
+  if (!stillOurs || answersNow) {
     // We grabbed something that is NOT what we classified — a successor bound
     // here after our check. Put it back; never delete it.
     await rename(reapingPath, path).catch(() => {});
@@ -482,9 +495,32 @@ async function unlinkIfPresent(path: string): Promise<void> {
   });
 }
 
-interface DaemonSocketIdentity {
+export type DaemonSocketPathKind = "socket" | "file" | "directory" | "other";
+
+export interface DaemonSocketIdentity {
   dev: number;
   ino: number;
+  /**
+   * #530 (CI, Linux): dev/ino ALONE cannot identify an object across a
+   * delete-and-recreate. Linux hands the freed inode number straight back, so a
+   * successor's brand-new SOCKET can carry the exact dev/ino of the
+   * regular-file placeholder we classified — and the reap then deleted a LIVE
+   * socket. macOS happened to allocate a different inode, which is why this
+   * passed on the laptop and failed in CI. The node type is stable across
+   * rename(2) and can never collide, so it is part of identity.
+   */
+  kind: DaemonSocketPathKind;
+}
+
+function statsKind(stats: {
+  isSocket(): boolean;
+  isFile(): boolean;
+  isDirectory(): boolean;
+}): DaemonSocketPathKind {
+  if (stats.isSocket()) return "socket";
+  if (stats.isFile()) return "file";
+  if (stats.isDirectory()) return "directory";
+  return "other";
 }
 
 /**
@@ -500,7 +536,7 @@ async function socketIdentity(
 ): Promise<DaemonSocketIdentity | null> {
   try {
     const stats = await lstat(path);
-    return { dev: stats.dev, ino: stats.ino };
+    return { dev: stats.dev, ino: stats.ino, kind: statsKind(stats) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return null;
@@ -513,7 +549,13 @@ function sameIdentity(
   a: DaemonSocketIdentity | null,
   b: DaemonSocketIdentity | null,
 ): boolean {
-  return a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
+  return (
+    a !== null &&
+    b !== null &&
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.kind === b.kind
+  );
 }
 
 /**
@@ -614,6 +656,12 @@ export interface UnlinkStaleSocketOptions {
   probe?: (path: string) => Promise<DaemonSocketProbe>;
   readOwnerReceipt?: (path: string) => DaemonSocketOwnerReceipt | null;
   ownerAlive?: (receipt: DaemonSocketOwnerReceipt) => boolean;
+  /**
+   * Test seam for path identity, so inode REUSE — which only occurs naturally
+   * on some filesystems — can be reproduced deterministically on any platform
+   * (#530 CI).
+   */
+  readIdentity?: (path: string) => Promise<DaemonSocketIdentity | null>;
 }
 
 /**
@@ -646,6 +694,7 @@ export async function unlinkStaleSocket(
   const readOwnerReceipt =
     opts.readOwnerReceipt ?? readDaemonSocketOwnerReceipt;
   const ownerAlive = opts.ownerAlive ?? daemonSocketOwnerAlive;
+  const readIdentity = opts.readIdentity ?? socketIdentity;
 
   const refuse = (
     observedProbe: DaemonSocketProbe,
@@ -662,7 +711,7 @@ export async function unlinkStaleSocket(
 
   // #530 review P2-2: capture what we are about to classify so the reap can
   // prove it is still deleting THAT object and not a successor's.
-  const observedIdentity = await socketIdentity(path);
+  const observedIdentity = await readIdentity(path);
   const observedReceipt = readOwnerReceipt(path);
 
   const status = await probe(path);
@@ -699,7 +748,7 @@ export async function unlinkStaleSocket(
       ? "dead-owner-leftover"
       : `owner-receipt-pid-${observedReceipt.pid}-gone`;
 
-  const current = await socketIdentity(path);
+  const current = await readIdentity(path);
   if (current === null) {
     // It vanished on its own between classification and reap. Nothing left to
     // delete, and the path is free for us to bind.
@@ -719,7 +768,7 @@ export async function unlinkStaleSocket(
     refuse("superseded", readOwnerReceipt(path));
   }
 
-  if (!(await reapClassifiedSocket(path, observedIdentity))) {
+  if (!(await reapClassifiedSocket(path, observedIdentity, readIdentity))) {
     refuse("superseded", readOwnerReceipt(path));
   }
   await unlinkOwnerReceiptIfUnchanged(path, observedReceipt, readOwnerReceipt);
@@ -1445,7 +1494,7 @@ export class CmuxLayerDaemon {
         // its receipt, entirely alone.
         return;
       }
-      observed = { dev: stats.dev, ino: stats.ino };
+      observed = { dev: stats.dev, ino: stats.ino, kind: statsKind(stats) };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         return;

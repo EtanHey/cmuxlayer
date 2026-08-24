@@ -453,12 +453,16 @@ export async function awaitDaemonHandoff(
 ): Promise<boolean> {
   const now = opts.now ?? Date.now;
   const deadline = now() + opts.timeoutMs;
+  // #530 (Macroscope): only ENOENT means "the placeholder is gone" — the same
+  // rule as F2. Treating EACCES/EIO as cleared would respawn into a path we
+  // cannot even inspect, spending the single attempt on a daemon that will
+  // refuse, and leaving nothing to start once the path really does clear.
   const isPathClear =
     opts.isPathClear ??
     (() =>
       stat(opts.socketPath).then(
         () => false,
-        () => true,
+        (error: NodeJS.ErrnoException) => error?.code === "ENOENT",
       ));
   let respawned = false;
 
