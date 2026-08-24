@@ -50,8 +50,10 @@ import {
   RetryableDeliveryError,
   buildLaunchCommand,
   resolveSweepTiming,
+  LifecycleLockTimeoutError,
   type AgentDeliveryReceipt,
   type AgentLifecycleEvent,
+  type LifecycleLockState,
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
@@ -236,6 +238,7 @@ import {
   collectControlHealth,
   formatControlHealth,
   type ControlHealth,
+  type LifecycleStartHealth,
 } from "./control-health.js";
 import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
@@ -1419,6 +1422,22 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === PLACEMENT_WORKSPACE_UNRESOLVED
       ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
       : {};
+  // #529: the bounded lifecycle timeouts carry a `code` that must reach the
+  // tool payload, or automated callers see only free text and cannot tell a
+  // bounded control-plane wait from any other failure. Both are retryable.
+  const lifecycleTimeoutExtra =
+    error instanceof LifecycleStartTimeoutError
+      ? { error_code: error.code, waited_ms: error.waitedMs, retryable: true }
+      : error instanceof LifecycleLockTimeoutError
+        ? {
+            error_code: error.code,
+            waited_ms: error.waitedMs,
+            lock_holder: error.holder,
+            held_for_ms: error.heldForMs,
+            queue_depth: error.queueDepth,
+            retryable: true,
+          }
+        : {};
   const readinessTimeout = findErrorInChain(
     error,
     (candidate): candidate is BootPromptTimeoutError | LauncherReadinessError =>
@@ -1455,6 +1474,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
+    ...lifecycleTimeoutExtra,
     ...readinessExtra,
     ...extra,
     ...createdIdentityFromError(error),
@@ -3409,6 +3429,60 @@ export type LifecycleAgentInputDeliverer = (args: {
   delivery_id?: string;
 }) => Promise<PublicDeliveryReceipt & { bytes: number }>;
 
+export const DEFAULT_LIFECYCLE_START_TIMEOUT_MS = 60_000;
+
+/** Lifecycle initialization never settled inside its bound (#529). */
+export class LifecycleStartTimeoutError extends Error {
+  readonly code = "ELIFECYCLESTARTTIMEOUT";
+  readonly waitedMs: number;
+
+  constructor(waitedMs: number) {
+    super(
+      `cmuxlayer lifecycle initialization did not complete within ${waitedMs}ms; ` +
+        "the daemon or its startup sweep is wedged. " +
+        "Retry; if it persists, see control_health.daemon_lifecycle.lifecycle_start.",
+    );
+    this.name = "LifecycleStartTimeoutError";
+    this.waitedMs = waitedMs;
+  }
+}
+
+export function resolveLifecycleStartTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.CMUXLAYER_LIFECYCLE_START_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_LIFECYCLE_START_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_LIFECYCLE_START_TIMEOUT_MS;
+}
+
+export async function awaitBoundedLifecycleStart(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  if (timeoutMs <= 0) {
+    await promise;
+    return;
+  }
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new LifecycleStartTimeoutError(timeoutMs)),
+          timeoutMs,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface CmuxServerContext {
   client: CmuxLayerClient;
   /** Persisted stable socket-node owner identity. */
@@ -3452,6 +3526,14 @@ export interface CmuxServerContext {
   lifecycleStarted: boolean;
   lifecycleStartPromise: Promise<void> | null;
   lifecycleStartError: Error | null;
+  /** #529 observability: when lifecycle init began and whether it settled. */
+  lifecycleStartStartedAtMs: number | null;
+  lifecycleStartSettledAtMs: number | null;
+  /** Callers that gave up on the bounded lifecycle wait. */
+  lifecycleStartTimeouts: number;
+  lifecycleStartLastTimeoutAt: string | null;
+  /** Lifecycle-lock truth for `control_health`, published by the live engine. */
+  lifecycleLockStateProvider: (() => LifecycleLockState) | null;
   lifecycleSweepEngine: AgentEngine | null;
   lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null;
   lifecycleAgentInputDelivererReadyListeners: Set<() => void>;
@@ -3596,6 +3678,11 @@ export function createServerContext(
     lifecycleStarted: false,
     lifecycleStartPromise: null,
     lifecycleStartError: null,
+    lifecycleStartStartedAtMs: null,
+    lifecycleStartSettledAtMs: null,
+    lifecycleStartTimeouts: 0,
+    lifecycleStartLastTimeoutAt: null,
+    lifecycleLockStateProvider: null,
     lifecycleSweepEngine: null,
     lifecycleAgentInputDeliverer: null,
     lifecycleAgentInputDelivererReadyListeners: new Set(),
@@ -3632,6 +3719,11 @@ export function createServerContext(
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
       context.lifecycleStartError = null;
+      context.lifecycleStartStartedAtMs = null;
+      context.lifecycleStartSettledAtMs = null;
+      context.lifecycleStartTimeouts = 0;
+      context.lifecycleStartLastTimeoutAt = null;
+      context.lifecycleLockStateProvider = null;
       if (autoVitestStateDir) {
         removeAutoVitestTempDir(autoVitestStateDir);
       }
@@ -4919,10 +5011,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   };
 
+  const describeLifecycleStart = (): LifecycleStartHealth => {
+    const settled =
+      context.lifecycleStartPromise === null ||
+      context.lifecycleStartSettledAtMs !== null;
+    return {
+      started: context.lifecycleStarted,
+      settled,
+      waiting_for_ms:
+        settled || context.lifecycleStartStartedAtMs === null
+          ? null
+          : Date.now() - context.lifecycleStartStartedAtMs,
+      timeout_ms: resolveLifecycleStartTimeoutMs(),
+      error: context.lifecycleStartError?.message ?? null,
+      timeouts: context.lifecycleStartTimeouts,
+      last_timeout_at: context.lifecycleStartLastTimeoutAt,
+    };
+  };
+
   const appendControlHealthSnapshot = async (): Promise<ControlHealth> => {
     const rawHealth = controlHealthCollector
       ? await controlHealthCollector()
-      : await collectControlHealth({ client });
+      : await collectControlHealth({
+          client,
+          lifecycleLock: context.lifecycleLockStateProvider?.() ?? null,
+          lifecycleStart: describeLifecycleStart(),
+        });
     const knownSurfaceIds = [
       ...stateMgr.listStates().map((record) => record.surface_id),
       ...roleSurfaceOverrides.keys(),
@@ -4930,8 +5044,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ...activeSurfaceWrites.keys(),
       ...surfaceWriteLivenessCandidates,
     ];
+    // #529: a dead daemon and a wedged lifecycle lock used to look identical
+    // to a healthy control plane. Publish both, always.
     const healthWithSelfHeal: ControlHealth = {
       ...rawHealth,
+      daemon_lifecycle: {
+        ...rawHealth.daemon_lifecycle,
+        lifecycle_lock: context.lifecycleLockStateProvider?.() ?? null,
+        lifecycle_start: describeLifecycleStart(),
+      },
       self_heal: collectSelfHealHealth({
         surfaceWriteLiveness,
         surfaceIds: knownSurfaceIds,
@@ -11268,9 +11389,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return null;
       }
     };
+    const lifecycleStartTimeoutMs = resolveLifecycleStartTimeoutMs();
+    /**
+     * #529: this used to `await context.lifecycleStartPromise` with no bound.
+     * When the daemon died before ready that promise never settled, so every
+     * tool gated on it deadlocked in silence. The wait is bounded now, and a
+     * timeout is COUNTED so the new bound is not itself invisible. It must NOT
+     * set lifecycleStartError: init may still be in flight and succeed.
+     */
     const awaitLifecycleStart = async (): Promise<void> => {
       if (context.lifecycleStartPromise) {
-        await context.lifecycleStartPromise;
+        try {
+          await awaitBoundedLifecycleStart(
+            context.lifecycleStartPromise,
+            lifecycleStartTimeoutMs,
+          );
+        } catch (error) {
+          if (error instanceof LifecycleStartTimeoutError) {
+            context.lifecycleStartTimeouts += 1;
+            context.lifecycleStartLastTimeoutAt = new Date().toISOString();
+          }
+          throw error;
+        }
       }
       if (context.lifecycleStartError) {
         throw context.lifecycleStartError;
@@ -11660,19 +11800,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     lifecycleEnsureRegistered = async () => {
       await awaitLifecycleStart();
-      await engine.runLifecycleMutation(() =>
-        registry.listMerged(discovery, { force: true }).then(() => undefined),
+      await engine.runLifecycleMutation(
+        () =>
+          registry.listMerged(discovery, { force: true }).then(() => undefined),
+        { label: "lifecycle-ensure-registered" },
       );
     };
     lifecycleRefreshManagedMetadata = async (agentId?: string) => {
       await awaitLifecycleStart();
-      await engine.runLifecycleMutation(() =>
-        registry
-          .refreshManagedSurfaceMetadata(discovery, {
-            agentId,
-            force: true,
-          })
-          .then(() => undefined),
+      await engine.runLifecycleMutation(
+        () =>
+          registry
+            .refreshManagedSurfaceMetadata(discovery, {
+              agentId,
+              force: true,
+            })
+            .then(() => undefined),
+        { label: "lifecycle-refresh-managed-metadata" },
       );
     };
 
@@ -12234,113 +12378,122 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
-        await awaitLifecycleStart();
-        const child = resolveCurrentCallerAgent();
-        if (!child) {
-          return err("report_to_parent requires a managed calling agent", {
-            error_code: "report_caller_unmanaged",
-          });
-        }
-        if (!child.parent_agent_id) {
-          return err(`Agent ${child.agent_id} has no parent`, {
-            error_code: "report_parent_missing",
-            child_agent_id: child.agent_id,
-          });
-        }
-
-        const intendedParentId = child.parent_agent_id;
-        const directMessage = dispatch(
-          intendedParentId,
-          {
-            from: child.agent_id,
-            reply_to: child.agent_id,
-            via: child.surface_id,
-            observed_at: new Date().toISOString(),
-            to: intendedParentId,
-            tag: "parent_blocker",
-            task: args.blocker,
-          },
-          inboxOpts,
-        );
-        context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
-
-        const parent =
-          registry.get(intendedParentId) ?? stateMgr.readState(intendedParentId);
-        let directError = "parent is absent from the lifecycle registry";
-        if (parent) {
-          try {
-            const wake = await deliverReportInboxPointer(parent, directMessage);
-            return okFormatted(
-              `report_to_parent ${parent.agent_id}: ${wake.delivery}`,
-              {
-                child_agent_id: child.agent_id,
-                parent_agent_id: intendedParentId,
-                notified_agent_id: parent.agent_id,
-                route: "direct",
-                durable: true,
-                ...wake,
-              },
-            );
-          } catch (error) {
-            directError = error instanceof Error ? error.message : String(error);
+        try {
+          await awaitLifecycleStart();
+          const child = resolveCurrentCallerAgent();
+          if (!child) {
+            return err("report_to_parent requires a managed calling agent", {
+              error_code: "report_caller_unmanaged",
+            });
           }
-        }
+          if (!child.parent_agent_id) {
+            return err(`Agent ${child.agent_id} has no parent`, {
+              error_code: "report_parent_missing",
+              child_agent_id: child.agent_id,
+            });
+          }
 
-        const visited = new Set<string>([child.agent_id, intendedParentId]);
-        let ancestorId = parent?.parent_agent_id ?? null;
-        while (ancestorId && !visited.has(ancestorId)) {
-          visited.add(ancestorId);
-          const ancestor =
-            registry.get(ancestorId) ?? stateMgr.readState(ancestorId);
-          if (!ancestor) break;
-          const prefix =
-            `Delivery to parent ${intendedParentId} failed (${directError}). ` +
-            `Child ${child.agent_id} reports: `;
-          const fallbackTask = `${prefix}${args.blocker}`.slice(0, 500);
-          const fallbackMessage = dispatch(
-            ancestor.agent_id,
+          const intendedParentId = child.parent_agent_id;
+          const directMessage = dispatch(
+            intendedParentId,
             {
               from: child.agent_id,
               reply_to: child.agent_id,
               via: child.surface_id,
               observed_at: new Date().toISOString(),
-              to: ancestor.agent_id,
-              tag: "parent_delivery_failed",
-              task: fallbackTask,
+              to: intendedParentId,
+              tag: "parent_blocker",
+              task: args.blocker,
             },
             inboxOpts,
           );
-          try {
-            const wake = await deliverReportInboxPointer(
-              ancestor,
-              fallbackMessage,
-            );
-            return okFormatted(
-              `report_to_parent ${intendedParentId}: fallback ${ancestor.agent_id} ${wake.delivery}`,
-              {
-                child_agent_id: child.agent_id,
-                parent_agent_id: intendedParentId,
-                notified_agent_id: ancestor.agent_id,
-                route: "fallback",
-                durable: true,
-                ...wake,
-              },
-            );
-          } catch (error) {
-            directError = error instanceof Error ? error.message : String(error);
-            ancestorId = ancestor.parent_agent_id;
-          }
-        }
+          context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
 
-        return err(
-          `Blocker was written to ${intendedParentId}'s inbox, but no parent or ancestor could be woken: ${directError}`,
-          {
-            error_code: "report_parent_unreachable",
-            child_agent_id: child.agent_id,
-            parent_agent_id: intendedParentId,
-            durable: true,
-          },
-        );
+          const parent =
+            registry.get(intendedParentId) ?? stateMgr.readState(intendedParentId);
+          let directError = "parent is absent from the lifecycle registry";
+          if (parent) {
+            try {
+              const wake = await deliverReportInboxPointer(parent, directMessage);
+              return okFormatted(
+                `report_to_parent ${parent.agent_id}: ${wake.delivery}`,
+                {
+                  child_agent_id: child.agent_id,
+                  parent_agent_id: intendedParentId,
+                  notified_agent_id: parent.agent_id,
+                  route: "direct",
+                  durable: true,
+                  ...wake,
+                },
+              );
+            } catch (error) {
+              directError = error instanceof Error ? error.message : String(error);
+            }
+          }
+
+          const visited = new Set<string>([child.agent_id, intendedParentId]);
+          let ancestorId = parent?.parent_agent_id ?? null;
+          while (ancestorId && !visited.has(ancestorId)) {
+            visited.add(ancestorId);
+            const ancestor =
+              registry.get(ancestorId) ?? stateMgr.readState(ancestorId);
+            if (!ancestor) break;
+            const prefix =
+              `Delivery to parent ${intendedParentId} failed (${directError}). ` +
+              `Child ${child.agent_id} reports: `;
+            const fallbackTask = `${prefix}${args.blocker}`.slice(0, 500);
+            const fallbackMessage = dispatch(
+              ancestor.agent_id,
+              {
+                from: child.agent_id,
+                reply_to: child.agent_id,
+                via: child.surface_id,
+                observed_at: new Date().toISOString(),
+                to: ancestor.agent_id,
+                tag: "parent_delivery_failed",
+                task: fallbackTask,
+              },
+              inboxOpts,
+            );
+            try {
+              const wake = await deliverReportInboxPointer(
+                ancestor,
+                fallbackMessage,
+              );
+              return okFormatted(
+                `report_to_parent ${intendedParentId}: fallback ${ancestor.agent_id} ${wake.delivery}`,
+                {
+                  child_agent_id: child.agent_id,
+                  parent_agent_id: intendedParentId,
+                  notified_agent_id: ancestor.agent_id,
+                  route: "fallback",
+                  durable: true,
+                  ...wake,
+                },
+              );
+            } catch (error) {
+              directError = error instanceof Error ? error.message : String(error);
+              ancestorId = ancestor.parent_agent_id;
+            }
+          }
+
+          return err(
+            `Blocker was written to ${intendedParentId}'s inbox, but no parent or ancestor could be woken: ${directError}`,
+            {
+              error_code: "report_parent_unreachable",
+              child_agent_id: child.agent_id,
+              parent_agent_id: intendedParentId,
+              durable: true,
+            },
+          );
+        } catch (error) {
+          // #530 (CodeRabbit): the initial awaitLifecycleStart() used to run
+          // OUTSIDE any error path, so a bounded lifecycle-start timeout escaped
+          // the handler entirely and lost the structured error_code / waited_ms /
+          // retryable payload that err() attaches. Wrapping the whole body also
+          // closes the escaping inbox-write exceptions noted as D36.
+          return err(error);
+        }
       },
     );
     engine.setDeliverySnapshotReader(async (receipt: AgentDeliveryReceipt) => {
@@ -12416,6 +12569,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (!context.lifecycleStarted) {
       context.lifecycleStarted = true;
       context.lifecycleStartError = null;
+      context.lifecycleStartStartedAtMs = Date.now();
+      context.lifecycleStartSettledAtMs = null;
       const lifecycleInitialization = lifecycleInitializer
         ? Promise.resolve().then(() => lifecycleInitializer())
         : engine.initialize(discovery);
@@ -12429,6 +12584,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         })
         .then(() => {
+          context.lifecycleStartSettledAtMs = Date.now();
           if (
             !context.lifecycleStartError &&
             context.lifecycleStarted &&
@@ -12438,6 +12594,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         });
     }
+    context.lifecycleLockStateProvider = () => engine.lifecycleLockState();
     // The daemon may immediately use this relay for monitor recovery. Publish
     // it only after persisted lifecycle state has been reconstituted so route
     // resolution is ready, then wake any boot-time recovery claim.
@@ -15123,7 +15280,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 (!requestedIds || requestedIds.has(agent.agent_id)),
             );
             return { merged: scoped, discovered, observedAtMs };
-          });
+          }, { label: "list-agents" });
           return await buildListAgentsResponse(
             live.merged,
             topology,
@@ -15239,7 +15396,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             discovery.invalidate();
             return registry.listMerged(discovery, { force: true });
           }
-        });
+        }, { label: "collect-target-records" });
       } catch (e) {
         if (isSurfaceEnumerationError(e)) {
           throw new Error(
@@ -16800,8 +16957,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await awaitLifecycleStart();
-          const merged = await engine.runLifecycleMutation(() =>
-            registry.listMerged(discovery),
+          const merged = await engine.runLifecycleMutation(
+            () => registry.listMerged(discovery),
+            { label: "list-agent-hierarchy" },
           );
           const agents = args.parent_agent_id
             ? (() => {

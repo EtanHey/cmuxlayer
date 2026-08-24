@@ -8,7 +8,18 @@ import {
   type CmuxLayerProxyOptions,
 } from "./proxy.js";
 import { defaultDaemonSocketPath as resolveDefaultDaemonSocketPath } from "./daemon-socket-path.js";
-import { spawnDaemonProcess, type SpawnDaemonOptions } from "./daemon-spawn.js";
+import {
+  awaitDaemonStderrDrained,
+  capturedDaemonStderr,
+  spawnDaemonProcess,
+  type SpawnDaemonOptions,
+} from "./daemon-spawn.js";
+import {
+  DaemonReadinessTimeoutError,
+  DaemonStartupFailedError,
+  recordDaemonExit,
+  recordDaemonLifecycleError,
+} from "./daemon-lifecycle-state.js";
 import { callerContextFromEnv } from "./caller-context.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
@@ -101,27 +112,191 @@ export async function probeDaemonSocket(socketPath: string): Promise<boolean> {
   });
 }
 
-async function waitForDaemon(
-  socketPath: string,
-  opts: Required<
-    Pick<
-      DaemonFirstEntryOptions,
-      "probeDaemon" | "sleep" | "autostartTimeoutMs" | "autostartPollMs"
-    >
-  >,
-): Promise<boolean> {
-  const deadline = Date.now() + opts.autostartTimeoutMs;
-  do {
-    if (await opts.probeDaemon(socketPath)) {
-      return true;
-    }
-    if (opts.autostartTimeoutMs === 0) {
-      return false;
-    }
-    await opts.sleep(opts.autostartPollMs);
-  } while (Date.now() < deadline);
+/** The subset of a spawned daemon child that readiness needs to observe. */
+export interface DaemonChildLike {
+  once?(event: string, listener: (...args: any[]) => void): unknown;
+  off?(event: string, listener: (...args: any[]) => void): unknown;
+  removeListener?(event: string, listener: (...args: any[]) => void): unknown;
+  /**
+   * Settled exit state. A child that died before readiness attached its
+   * listeners will never emit `exit` again, so these fields are the only
+   * evidence of why it is gone (#530 review).
+   */
+  exitCode?: number | null;
+  signalCode?: string | null;
+  /** Generation marker for lifecycle exit recording (#530 F9). */
+  pid?: number | null;
+}
 
-  return opts.probeDaemon(socketPath);
+export interface DaemonReadinessOptions {
+  socketPath: string;
+  probeDaemon: (socketPath: string) => Promise<boolean>;
+  sleep: (ms: number) => Promise<void>;
+  timeoutMs: number;
+  pollMs: number;
+  /** The spawned daemon, when this process is the one that spawned it. */
+  child?: DaemonChildLike | null;
+  /** Bounded excerpt of what the child printed on stderr. */
+  readStderr?: () => string;
+  now?: () => number;
+}
+
+/**
+ * Wait for the daemon to answer on its socket, ALWAYS settling.
+ *
+ * #529: the old poll loop watched only the socket. When the spawned daemon
+ * fataled on a leftover socket file and exited code 1, nothing rejected — the
+ * readiness promise simply never settled and every daemon-dependent tool
+ * deadlocked. The child's `exit`/`error` events are now wired straight into
+ * the rejection path, and the deadline is a hard bound.
+ */
+export async function awaitDaemonReadiness(
+  opts: DaemonReadinessOptions,
+): Promise<void> {
+  const now = opts.now ?? Date.now;
+  const startedAt = now();
+  const readStderr = () => {
+    try {
+      return opts.readStderr?.() ?? "";
+    } catch {
+      return "";
+    }
+  };
+
+  let onExit: ((code: number | null, signal: string | null) => void) | null =
+    null;
+  let onError: ((error: Error) => void) | null = null;
+  const child = opts.child;
+  // #530 review P2-7: once childFailure wins the race, the polling loop must
+  // stop. Without this it kept probing and sleeping to the deadline behind an
+  // already-settled promise.
+  let aborted = false;
+
+  const childFailure = new Promise<never>((_, reject) => {
+    if (!child) {
+      return;
+    }
+    // #530 review (Macroscope, src/entry.ts:189): a daemon that dies BEFORE we
+    // attach listeners is already gone — node never replays the missed `exit`,
+    // so the old wiring reported a readiness TIMEOUT after the full deadline
+    // instead of the exit code that actually explains it. Read the settled
+    // fields first.
+    if (child.exitCode !== null && child.exitCode !== undefined) {
+      recordDaemonExit({
+        code: child.exitCode,
+        signal: child.signalCode ?? null,
+        pid: child.pid ?? null,
+        stderrExcerpt: readStderr(),
+      });
+      reject(
+        new DaemonStartupFailedError({
+          socketPath: opts.socketPath,
+          exitCode: child.exitCode,
+          signal: child.signalCode ?? null,
+          stderrExcerpt: readStderr(),
+        }),
+      );
+      return;
+    }
+    if (child.signalCode !== null && child.signalCode !== undefined) {
+      recordDaemonExit({
+        code: null,
+        signal: child.signalCode,
+        pid: child.pid ?? null,
+        stderrExcerpt: readStderr(),
+      });
+      reject(
+        new DaemonStartupFailedError({
+          socketPath: opts.socketPath,
+          exitCode: null,
+          signal: child.signalCode,
+          stderrExcerpt: readStderr(),
+        }),
+      );
+      return;
+    }
+    if (typeof child.once !== "function") {
+      return;
+    }
+    onExit = (code, signal) => {
+      // #530 (Codex P1): give the piped stderr a bounded moment to finish
+      // arriving before we classify the failure — the daemon prints its refusal
+      // marker and exits immediately, so `exit` can beat the pipe.
+      void awaitDaemonStderrDrained(child).then(() => {
+        rejectWithExit(code, signal);
+      });
+    };
+    const rejectWithExit = (code: number | null, signal: string | null) => {
+      // Record here as well as in the spawner: readiness is the authority on
+      // "the daemon died before it could serve", whoever spawned it.
+      recordDaemonExit({
+        code,
+        signal,
+        pid: child.pid ?? null,
+        stderrExcerpt: readStderr(),
+      });
+      reject(
+        new DaemonStartupFailedError({
+          socketPath: opts.socketPath,
+          exitCode: code,
+          signal,
+          stderrExcerpt: readStderr(),
+        }),
+      );
+    };
+    onError = (error) => {
+      recordDaemonLifecycleError(error.message);
+      reject(
+        new DaemonStartupFailedError({
+          socketPath: opts.socketPath,
+          reason: `spawn failed: ${error.message}`,
+          stderrExcerpt: readStderr(),
+          cause: error,
+        }),
+      );
+    };
+    child.once("exit", onExit);
+    child.once("error", onError);
+  });
+  // Nothing else may observe this promise until the race below.
+  childFailure.catch(() => {});
+
+  const polling = (async (): Promise<void> => {
+    const deadline = startedAt + opts.timeoutMs;
+    for (;;) {
+      if (aborted) return;
+      if (await opts.probeDaemon(opts.socketPath)) {
+        return;
+      }
+      if (aborted) return;
+      if (opts.timeoutMs === 0 || now() >= deadline) {
+        throw new DaemonReadinessTimeoutError({
+          socketPath: opts.socketPath,
+          waitedMs: Math.max(0, now() - startedAt),
+          stderrExcerpt: readStderr(),
+        });
+      }
+      await opts.sleep(opts.pollMs);
+    }
+  })();
+
+  try {
+    await Promise.race([polling, childFailure]);
+  } finally {
+    aborted = true;
+    polling.catch(() => {});
+    const detach =
+      child &&
+      (typeof child.off === "function"
+        ? child.off.bind(child)
+        : typeof child.removeListener === "function"
+          ? child.removeListener.bind(child)
+          : null);
+    if (detach) {
+      if (onExit) detach("exit", onExit);
+      if (onError) detach("error", onError);
+    }
+  }
 }
 
 export async function startInProcessRuntime(
@@ -158,8 +333,7 @@ export async function startInProcessRuntime(
   const explicitStateDir = runtimeEnv.CMUXLAYER_STATE_DIR?.trim();
   const serverOpts: CreateServerOptions = {
     client,
-    safetyCallerContextProvider: () =>
-      callerContextFromEnv(runtimeEnv),
+    safetyCallerContextProvider: () => callerContextFromEnv(runtimeEnv),
     outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,
@@ -317,22 +491,44 @@ export async function runDaemonFirstEntry(
     );
   }
 
-  const available = await waitForDaemon(socketPath, {
-    probeDaemon,
-    sleep,
-    autostartTimeoutMs,
-    autostartPollMs,
-  });
-  if (available) {
+  let readinessError: unknown = null;
+  try {
+    await awaitDaemonReadiness({
+      socketPath,
+      probeDaemon,
+      sleep,
+      timeoutMs: autostartTimeoutMs,
+      pollMs: autostartPollMs,
+      child: spawnedDaemon as DaemonChildLike | null,
+      readStderr: () => capturedDaemonStderr(spawnedDaemon),
+    });
     return startProxy();
+  } catch (error) {
+    readinessError = error;
   }
 
+  // A daemon that came up on the very last tick still wins the race.
   if (await probeDaemon(socketPath)) {
     return startProxy();
   }
 
   terminateSpawnedDaemon(spawnedDaemon, logger);
+  const detail =
+    readinessError instanceof DaemonStartupFailedError
+      ? `daemon exited before ready (code=${readinessError.exitCode ?? "none"}, signal=${
+          readinessError.signal ?? "none"
+        })${
+          readinessError.stderrExcerpt
+            ? `; daemon stderr: ${readinessError.stderrExcerpt}`
+            : ""
+        }`
+      : `daemon autostart timeout${
+          readinessError instanceof DaemonReadinessTimeoutError
+            ? ` after ${readinessError.waitedMs}ms`
+            : ""
+        }`;
+  recordDaemonLifecycleError(detail);
   return fallback(
-    `daemon unavailable; using heavy in-process runtime after daemon autostart timeout at ${socketPath}`,
+    `daemon unavailable; using heavy in-process runtime after ${detail} at ${socketPath}`,
   );
 }
