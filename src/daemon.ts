@@ -551,6 +551,7 @@ export class CmuxLayerDaemon {
   private readonly monitorReconcileIntervalMs: number;
   private readonly logger: Pick<Console, "error">;
   private ownedSocketIdentity: { dev: number; ino: number } | null = null;
+  private ownedPlaceholderIdentity: DaemonSocketIdentity | null = null;
 
   constructor(private readonly opts: CmuxLayerDaemonOptions = {}) {
     this.context = opts.context ?? null;
@@ -1222,23 +1223,47 @@ export class CmuxLayerDaemon {
       // identity checks and was deleted. The placeholder we create is an EMPTY
       // regular file, so require exactly that shape, matching the same size
       // rule `probeDaemonSocketPath` uses.
-      const stats = await lstat(this.socketPath);
-      if (!stats.isFile() || stats.size !== 0) {
+      const created = this.ownedPlaceholderIdentity;
+      if (created === null) {
+        // We never recorded creating one, so there is nothing of ours here.
         return;
       }
-      const observed: DaemonSocketIdentity = {
-        dev: stats.dev,
-        ino: stats.ino,
-        kind: "file",
-      };
-      if (!sameIdentity(await socketIdentity(this.socketPath), observed)) {
+      const stats = await lstat(this.socketPath);
+      if (!stats.isFile() || stats.size !== 0) {
+        // Not the empty-placeholder shape: a socket, or an operator's file.
+        return;
+      }
+      if (
+        !sameIdentity(
+          { dev: stats.dev, ino: stats.ino, kind: "file" },
+          created,
+        )
+      ) {
+        // Something replaced our placeholder. Not ours to delete.
+        return;
+      }
+      if (!sameIdentity(await socketIdentity(this.socketPath), created)) {
         // Replaced between the check and the unlink.
         return;
       }
       await unlink(this.socketPath);
+      this.ownedPlaceholderIdentity = null;
     } catch {
       // Best effort: a placeholder we cannot remove is reaped by the successor.
     }
+  }
+
+  /**
+   * Create the shutdown placeholder AND remember exactly which object we
+   * created (#537 review, CodeRabbit): comparing two later lookups only proves
+   * they agree with each other, not that either is ours. A replacement that
+   * lands before the first lookup satisfies both.
+   */
+  private async writeOwnedSocketPlaceholder(): Promise<void> {
+    await writeFile(this.socketPath, "", { flag: "wx" });
+    this.ownedPlaceholderIdentity = await socketIdentity(this.socketPath).catch(
+      () => null,
+    );
   }
 
   private async detachOwnedSocketPath(): Promise<{
@@ -1254,7 +1279,7 @@ export class CmuxLayerDaemon {
       current = await lstat(this.socketPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        await writeFile(this.socketPath, "", { flag: "wx" });
+        await this.writeOwnedSocketPlaceholder();
         return null;
       }
       throw error;
@@ -1266,13 +1291,13 @@ export class CmuxLayerDaemon {
     ) {
       const shelteredPath = `${this.socketPath}.foreign-${process.pid}-${Date.now()}`;
       await rename(this.socketPath, shelteredPath);
-      await writeFile(this.socketPath, "", { flag: "wx" });
+      await this.writeOwnedSocketPlaceholder();
       return { path: shelteredPath, restore: true };
     }
 
     const detachedPath = `${this.socketPath}.closing-${process.pid}-${Date.now()}`;
     await rename(this.socketPath, detachedPath);
-    await writeFile(this.socketPath, "", { flag: "wx" });
+    await this.writeOwnedSocketPlaceholder();
     return { path: detachedPath, restore: false };
   }
 

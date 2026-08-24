@@ -324,6 +324,7 @@ describe("#536 follow-up: readiness honours always-settles", () => {
     // Codex P2: the loop awaited probeDaemon directly, so a probe that never
     // settled blocked before the deadline check and the whole helper hung —
     // the deadlock it exists to bound, reproduced inside it.
+    const startedAt = Date.now();
     const readiness = awaitDaemonReadiness({
       socketPath: "/tmp/cmux529/never-settles.sock",
       probeDaemon: () => new Promise<boolean>(() => {}),
@@ -332,12 +333,16 @@ describe("#536 follow-up: readiness honours always-settles", () => {
       pollMs: 5,
     });
     await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+    // Near the deadline, not merely before the test timeout: a regression that
+    // rejects after seconds would otherwise still pass (CodeRabbit, #537).
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   }, 3_000);
 
   it("rejects immediately at timeoutMs=0 when the probe never settles", async () => {
     // #537 review (Macroscope): the zero-timeout path bypassed the deadline
     // race entirely, so a hung probe hung forever on the configuration that
     // asks for no waiting at all.
+    const startedAt = Date.now();
     const readiness = awaitDaemonReadiness({
       socketPath: "/tmp/cmux529/zero-timeout.sock",
       probeDaemon: () => new Promise<boolean>(() => {}),
@@ -346,9 +351,11 @@ describe("#536 follow-up: readiness honours always-settles", () => {
       pollMs: 5,
     });
     await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   }, 3_000);
 
   it("rejects at the deadline even when the SLEEP never settles", async () => {
+    const startedAt = Date.now();
     const readiness = awaitDaemonReadiness({
       socketPath: "/tmp/cmux529/sleep-hangs.sock",
       probeDaemon: async () => false,
@@ -357,6 +364,7 @@ describe("#536 follow-up: readiness honours always-settles", () => {
       pollMs: 5,
     });
     await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   }, 3_000);
 
   it("does not overshoot the deadline when pollMs exceeds timeoutMs", async () => {
