@@ -620,7 +620,7 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
     health.selected_transport.transport_error
   ) {
     warnings.push(
-      `cmuxlayer control transport denied: access-control; ${health.selected_transport.transport_error}`,
+      `ERROR: cmuxlayer control transport denied: access-control; ${health.selected_transport.transport_error}. Remedy: daemon must be spawned from inside a cmux pane.`,
     );
   } else if (
     health.selected_transport.transport_degraded === true &&
@@ -834,7 +834,7 @@ function formatDaemonLifecycle(
     lines.push(
       `lifecycle lock: holder=${lock.holder ?? "none"} held_for_ms=${
         lock.held_for_ms ?? 0
-      } queue_depth=${lock.queue_depth} timeouts=${lock.timeouts} forced_releases=${lock.forced_releases}`,
+      } queue_depth=${lock.queue_depth} timeouts=${lock.timeouts} forced_releases=${lock.forced_releases} sweep_skipped_mutations=${lock.sweep_skipped_mutations}`,
     );
     if (lock.last_timeout) {
       lines.push(

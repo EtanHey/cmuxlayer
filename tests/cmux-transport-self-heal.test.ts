@@ -554,6 +554,42 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("treats access-control denial as a hard state without periodic re-probes", async () => {
+    vi.useFakeTimers();
+    const socketPath = join(
+      tmpdir(),
+      `cmux-hard-access-denial-${process.pid}.sock`,
+    );
+    const probeSocketHealth = vi.fn().mockResolvedValue({
+      usable: false,
+      socketPath,
+      error: ACCESS_CONTROL_DENIED_TEXT,
+      denied_reason: "access-control" as const,
+    });
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath,
+      initialDenial: {
+        denied_reason: "access-control",
+        socketPath,
+        error: ACCESS_CONTROL_DENIED_TEXT,
+      },
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      probeSocketHealth,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(probeSocketHealth).not.toHaveBeenCalled();
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "cli",
+      degraded: true,
+      denied_reason: "access-control",
+    });
+    client.stop();
+  });
+
   it("counts upstream probe failures until a usable socket probe resets them", () => {
     const client = wrapCliWithSelfHeal(new CmuxClient(), {
       socketPath: "/tmp/cmux-preserve-denial.sock",

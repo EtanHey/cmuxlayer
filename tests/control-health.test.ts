@@ -714,9 +714,40 @@ describe("control health", () => {
       transport_error: ACCESS_CONTROL_DENIED_TEXT,
     });
     expect(health.warnings).toContain(
-      `cmuxlayer control transport denied: access-control; ${ACCESS_CONTROL_DENIED_TEXT}`,
+      `ERROR: cmuxlayer control transport denied: access-control; ${ACCESS_CONTROL_DENIED_TEXT}. Remedy: daemon must be spawned from inside a cmux pane.`,
     );
-    expect(formatControlHealth(health)).toContain(ACCESS_CONTROL_DENIED_TEXT);
+    expect(formatControlHealth(health)).toContain(
+      "ERROR: cmuxlayer control transport denied",
+    );
+    expect(formatControlHealth(health)).toContain(
+      "daemon must be spawned from inside a cmux pane",
+    );
+  });
+
+  it("reports skipped destructive sweep mutations in control_health", async () => {
+    const health = await collectControlHealth({
+      homeDir: TEST_ROOT,
+      tmpDir: TEST_ROOT,
+      execFile: async () => ({ stdout: "" }),
+      lifecycleLock: {
+        holder: null,
+        held_for_ms: null,
+        queue_depth: 0,
+        acquire_timeout_ms: 45_000,
+        hold_timeout_ms: 120_000,
+        forced_releases: 0,
+        sweep_skipped_mutations: 2,
+        timeouts: 0,
+        last_timeout: null,
+      },
+    });
+
+    expect(
+      health.daemon_lifecycle.lifecycle_lock?.sweep_skipped_mutations,
+    ).toBe(2);
+    expect(formatControlHealth(health)).toContain(
+      "sweep_skipped_mutations=2",
+    );
   });
 
   it("periodically appends control health snapshots without tool invocation", async () => {

@@ -14,6 +14,8 @@ export type SurfaceTopology = AgentTopologyHealthInput;
 
 export interface SurfaceTopologySnapshot {
   complete: boolean;
+  /** Canonical surface rows captured by this same topology enumeration. */
+  surfaces: CmuxSurface[];
   workspaceBySurface: Map<string, string>;
   titleBySurface: Map<string, string>;
   topologyBySurface: Map<string, SurfaceTopology>;
@@ -297,6 +299,7 @@ export async function collectSurfaceTopology(
 
   const snapshot: SurfaceTopologySnapshot = {
     complete: true,
+    surfaces: [],
     workspaceBySurface: new Map(),
     titleBySurface: new Map(),
     topologyBySurface: new Map(),
@@ -381,7 +384,17 @@ export async function collectSurfaceTopology(
           const surfaceId =
             surface.id ??
             (surfaceIndex >= 0 ? pane?.surface_ids?.[surfaceIndex] : undefined);
+          const surfaceWorkspaceRef =
+            group.workspace_ref?.trim() || workspaceRef.trim() || undefined;
           identityPairs.push({ surfaceRef: surface.ref, surfaceId });
+          snapshot.surfaces.push({
+            ...surface,
+            ...(surfaceId ? { id: surfaceId } : {}),
+            ...(surfaceWorkspaceRef
+              ? { workspace_ref: surfaceWorkspaceRef }
+              : { workspace_ref: undefined }),
+            pane_ref: group.pane_ref,
+          });
           snapshot.workspaceBySurface.set(
             surface.ref,
             group.workspace_ref ?? workspaceRef,

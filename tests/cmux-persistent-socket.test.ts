@@ -1,8 +1,8 @@
-import net from "node:net";
+import * as net from "node:net";
 import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CmuxPersistentSocket } from "../src/cmux-persistent-socket.js";
 import { CmuxSocketError } from "../src/cmux-socket-error.js";
 
@@ -56,8 +56,51 @@ async function startLineServer(
 
 describe("CmuxPersistentSocket V1 demux", () => {
   afterEach(async () => {
+    vi.useRealTimers();
     await Promise.allSettled(servers.splice(0).map(stopServer));
     rmSync(TEST_ROOT, { recursive: true, force: true });
+  });
+
+  it("rejects when the connect leg never settles", async () => {
+    vi.useFakeTimers();
+    class HangingConnectSocket extends EventEmitter {
+      setTimeout(ms: number, listener: () => void): this {
+        setTimeout(listener, ms);
+        return this;
+      }
+
+      destroy(): this {
+        return this;
+      }
+    }
+    const hangingSocket = new HangingConnectSocket();
+    const socket = new CmuxPersistentSocket({
+      socketPath: socketPath("hanging-connect"),
+      connectTimeoutMs: 25,
+      timeoutMs: 500,
+      createConnection: () => hangingSocket as unknown as net.Socket,
+    });
+    const call = socket.call("system.ping").then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    const result = Promise.race([
+      call,
+      new Promise<{ status: "still-pending" }>((resolve) =>
+        setTimeout(() => resolve({ status: "still-pending" }), 50),
+      ),
+    ]);
+
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(result).resolves.toMatchObject({
+      status: "rejected",
+      error: {
+        code: "connection_error",
+        message: "Connect timeout after 25ms",
+        transport_phase: "connect",
+      },
+    });
   });
 
   it("rejects a JSON-like malformed frame instead of resolving the pending V1 request", async () => {

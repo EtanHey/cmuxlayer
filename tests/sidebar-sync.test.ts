@@ -421,6 +421,96 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("skips destructive mutations when CLI topology is degraded", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T12:00:00.000Z"));
+    (mockClient as unknown as Record<string, unknown>).getTransportHealth =
+      () => ({
+        mode: "cli",
+        degraded: true,
+        denied_reason: "access-control",
+      });
+    for (let index = 1; index <= 3; index += 1) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: `degraded-agent-${index}`,
+          surface_id: `surface:${index}`,
+          state: "done",
+          role: "worker",
+          cli_session_id: `session-${index}`,
+        }),
+      );
+    }
+    liveSurfaces = [makeSurface("surface:1")];
+    const removeState = vi.spyOn(stateMgr, "removeState");
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    vi.setSystemTime(new Date("2026-08-24T12:01:00.000Z"));
+    await engine.runSweep();
+
+    expect(removeState).not.toHaveBeenCalled();
+    expect(mockClient.readScreen).not.toHaveBeenCalled();
+    expect(engine.getRegistry().list()).toHaveLength(3);
+    expect(engine.lifecycleLockState()).toMatchObject({
+      sweep_skipped_mutations: 2,
+    });
+  });
+
+  it("enumerates topology once per sweep regardless of agent count", async () => {
+    let clientTopologyEnumerations = 0;
+    let registryTopologyEnumerations = 0;
+    (mockClient as unknown as Record<string, unknown>).supportsStableSurfaceReads =
+      true;
+    for (let index = 1; index <= 3; index += 1) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: `topology-agent-${index}`,
+          surface_id: `surface:${index}`,
+          state: "done",
+          role: "worker",
+          cli_session_id: `session-${index}`,
+        }),
+      );
+    }
+    // Keep the rows absent from this authoritative non-empty snapshot so the
+    // test isolates lifecycle/sidebar topology reuse from per-seat screen I/O.
+    liveSurfaces = [makeSurface("surface:live-unmanaged")];
+    const originalListWorkspaces =
+      mockClient.listWorkspaces.getMockImplementation()!;
+    mockClient.listWorkspaces.mockImplementation(async () => {
+      clientTopologyEnumerations += 1;
+      return originalListWorkspaces();
+    });
+    engine.dispose();
+    const registry = new AgentRegistry(stateMgr, async () => {
+      registryTopologyEnumerations += 1;
+      return liveSurfaces;
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    await registry.reconstitute();
+    clientTopologyEnumerations = 0;
+    registryTopologyEnumerations = 0;
+
+    await engine.runSweep();
+
+    expect({
+      clientTopologyEnumerations,
+      registryTopologyEnumerations,
+    }).toEqual({
+      clientTopologyEnumerations: 1,
+      registryTopologyEnumerations: 0,
+    });
+  });
+
   it("publishes the canonical observed UUID when persisted casing differs", async () => {
     const observedUuid = "078D1A5B-A3F4-40A5-8A59-A6C840BAF832";
     const persistedUuid = observedUuid.toLowerCase();
@@ -471,6 +561,8 @@ describe("Sidebar Sync", () => {
 
   it("publishes no mixed row when the stable UUID moves during the screen read", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
+    (mockClient as unknown as Record<string, unknown>).supportsStableSurfaceReads =
+      true;
     stateMgr.writeState(
       makeRecord({
         agent_id: "mid-sweep-move",
@@ -518,9 +610,9 @@ describe("Sidebar Sync", () => {
       return snapshot;
     });
     mockClient.readScreen.mockImplementation(async (surface: string) => ({
-      surface,
+      surface: surface === stableUuid ? "surface:new" : surface,
       text:
-        surface === "surface:new"
+        surface === stableUuid
           ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
           : "Claude Code\nWhat can I help you with?\n> ",
       lines: 20,
@@ -530,7 +622,7 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     expect(mockClient.readScreen).toHaveBeenCalledWith(
-      "surface:new",
+      stableUuid,
       expect.anything(),
     );
     expect(mockClient.setStatus).not.toHaveBeenCalled();

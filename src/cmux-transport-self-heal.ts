@@ -190,6 +190,8 @@ export class CmuxSelfHealingClient {
   private failedPayloadQueue: QueuedFailedPayload[] = [];
   private flushingFailedPayloadQueue: Promise<void> | null = null;
   private transportDenial: TransportDenialSignal | null = null;
+  /** Explicit cmux access-control denial is process-lifetime permanent. */
+  private hardAccessControlDenied = false;
   private completedRetryCount = 0;
   private upstreamProbeFailures = 0;
   private upstreamProbeStartedAt: number | null = null;
@@ -203,6 +205,9 @@ export class CmuxSelfHealingClient {
     this.socketClient = opts.socket ?? null;
     this.delegate = opts.socket ?? opts.cli;
     this.transportDenial = opts.initialDenial ?? null;
+    this.hardAccessControlDenied = Boolean(
+      opts.initialDenial && isCmuxAccessControlDenied(opts.initialDenial.error),
+    );
     if (opts.initialDenial) {
       this.upstreamProbeFailures = 1;
       this.upstreamProbeStartedAt = (opts.now ?? Date.now)();
@@ -216,7 +221,9 @@ export class CmuxSelfHealingClient {
     }
     if (!this.socketClient) {
       opts.logger?.error(
-        "[cmuxlayer] transport degraded: cli (periodic socket re-probe active)",
+        this.hardAccessControlDenied
+          ? "[cmuxlayer] transport denied: access-control (hard state); daemon must be spawned from inside a cmux pane"
+          : "[cmuxlayer] transport degraded: cli (periodic socket re-probe active)",
       );
     }
     this.startReprobe();
@@ -370,7 +377,7 @@ export class CmuxSelfHealingClient {
   }
 
   private startReprobe(): void {
-    if (this.reprobeTimer || this.stopped) {
+    if (this.reprobeTimer || this.stopped || this.hardAccessControlDenied) {
       return;
     }
     const delayMs = this.nextReprobeDelayMs();
@@ -613,9 +620,13 @@ export class CmuxSelfHealingClient {
     this.socketClient = null;
     this.delegate = this.opts.cli;
     this.observerRouteGeneration++;
-    this.transportDenial = null;
+    if (!this.hardAccessControlDenied) {
+      this.transportDenial = null;
+    }
     this.opts.logger?.error(
-      "[cmuxlayer] transport downgraded: socket -> cli (periodic socket re-probe active)",
+      this.hardAccessControlDenied
+        ? "[cmuxlayer] transport downgraded: socket -> cli (access-control hard state; daemon must be spawned from inside a cmux pane)"
+        : "[cmuxlayer] transport downgraded: socket -> cli (periodic socket re-probe active)",
     );
     this.startReprobe();
   }
@@ -678,6 +689,7 @@ export class CmuxSelfHealingClient {
       this.delegate = client;
       this.observerRouteGeneration++;
       this.transportDenial = null;
+      this.hardAccessControlDenied = false;
       this.clearReprobe();
       this.previousReprobeDelayMs = 0;
       this.opts.logger?.error("[cmuxlayer] transport upgraded: cli -> socket");
@@ -715,8 +727,14 @@ export class CmuxSelfHealingClient {
       socketPath: result.socketPath,
       error: result.error ?? "Access denied",
     };
+    this.hardAccessControlDenied =
+      result.denied_reason === "access-control" ||
+      isCmuxAccessControlDenied(result.error ?? "");
+    if (this.hardAccessControlDenied) {
+      this.clearReprobe();
+    }
     this.opts.logger?.error(
-      `[cmuxlayer] transport denied: access-control (${result.socketPath}): ${this.transportDenial.error}`,
+      `[cmuxlayer] transport denied: access-control (${result.socketPath}): ${this.transportDenial.error}; hard state, daemon must be spawned from inside a cmux pane`,
     );
   }
 

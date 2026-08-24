@@ -231,6 +231,10 @@ import {
   type SurfaceTopologySnapshot,
 } from "./surface-topology.js";
 import {
+  getTransportHealth,
+  type TransportHealthSignal,
+} from "./cmux-transport-self-heal.js";
+import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
   dispatchOnce,
   readInbox,
@@ -890,6 +894,7 @@ type SweepTimingInput = number | Partial<SweepTimingOptions>;
 interface SweepAgentContext {
   screen?: Promise<CmuxReadScreenResult>;
   route?: Promise<AgentRoute>;
+  observedRouteMismatch?: boolean;
 }
 
 class PlacementSurfaceBindingError extends Error {}
@@ -981,6 +986,8 @@ export interface LifecycleLockState {
   acquire_timeout_ms: number;
   hold_timeout_ms: number;
   forced_releases: number;
+  /** Sweep ticks that preserved state because topology could not authorize deletion. */
+  sweep_skipped_mutations: number;
   timeouts: number;
   last_timeout: LifecycleLockTimeoutRecord | null;
 }
@@ -1062,6 +1069,9 @@ export function resolveSweepTiming(
 }
 
 interface AgentEngineClient {
+  getTransportHealth?(): TransportHealthSignal | null;
+  /** Native and CLI clients accept a stable UUID as the read-screen target. */
+  supportsStableSurfaceReads?: boolean;
   listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }>;
   log(
     message: string,
@@ -1615,6 +1625,12 @@ export class AgentEngine {
   private lifecycleLockAcquiredAtMs: number | null = null;
   private lifecycleLockQueueDepth = 0;
   private lifecycleLockForcedReleases = 0;
+  private sweepSkippedMutations = 0;
+  /** Authoritative snapshot reused only while one sweep publishes its sidebar. */
+  private currentSweepTopologyOverride:
+    | SurfaceTopologySnapshot
+    | null
+    | undefined;
   private lifecycleLockTimeouts = 0;
   private lifecycleLockLastTimeout: LifecycleLockTimeoutRecord | null = null;
   private deliveryReceipts = new Map<string, AgentDeliveryReceipt>();
@@ -3492,7 +3508,11 @@ export class AgentEngine {
     opts: { lines?: number; scrollback?: boolean } = {},
   ): Promise<CmuxReadScreenResult> {
     const route = await this.resolveAgentIoRoute(agent.agent_id);
-    return this.client.readScreen(route.surface_id, {
+    const readTarget =
+      this.client.supportsStableSurfaceReads && route.surface_uuid
+        ? route.surface_uuid
+        : route.surface_id;
+    return this.client.readScreen(readTarget, {
       ...opts,
       workspace: route.workspace_id ?? undefined,
     });
@@ -3504,10 +3524,24 @@ export class AgentEngine {
   ): Promise<CmuxReadScreenResult> {
     ctx.route ??= this.resolveAgentIoRoute(agent.agent_id);
     ctx.screen ??= ctx.route.then(async (route) => {
-      const screen = await this.client.readScreen(route.surface_id, {
+      const readTarget =
+        this.client.supportsStableSurfaceReads && route.surface_uuid
+          ? route.surface_uuid
+          : route.surface_id;
+      const screen = await this.client.readScreen(readTarget, {
         lines: BOOT_SESSION_CAPTURE_LINES,
         workspace: route.workspace_id ?? undefined,
       });
+      const observedSurface = screen.surface?.trim();
+      if (
+        this.client.supportsStableSurfaceReads &&
+        route.surface_uuid &&
+        observedSurface &&
+        observedSurface !== route.surface_id &&
+        observedSurface.toLowerCase() !== route.surface_uuid.toLowerCase()
+      ) {
+        ctx.observedRouteMismatch = true;
+      }
       await this.resolveUnchangedAgentIoRoute(
         agent.agent_id,
         route,
@@ -3544,6 +3578,7 @@ export class AgentEngine {
     ctx: SweepAgentContext,
     surfaceRef: string,
   ): Promise<boolean> {
+    if (ctx.observedRouteMismatch) return false;
     if (!ctx.route) return true;
     try {
       const readRoute = await ctx.route;
@@ -5167,6 +5202,17 @@ export class AgentEngine {
   }
 
   private collectObservedSurfaceTopology(): Promise<SurfaceTopologySnapshot | null> {
+    if (this.currentSweepTopologyOverride !== undefined) {
+      return Promise.resolve(this.currentSweepTopologyOverride);
+    }
+    return collectSurfaceTopology(
+      this.client,
+      undefined,
+      this.surfaceObserverIdProvider(),
+    );
+  }
+
+  private collectFreshObservedSurfaceTopology(): Promise<SurfaceTopologySnapshot | null> {
     return collectSurfaceTopology(
       this.client,
       undefined,
@@ -5179,12 +5225,16 @@ export class AgentEngine {
    * Logs lifecycle events (spawned, done, error) once each.
    */
   private async syncSidebar(
-    opts: { firstConnect?: boolean } = {},
+    opts: { firstConnect?: boolean; allowRecordRemoval?: boolean } = {},
+    surfaceTopologyOverride?: SurfaceTopologySnapshot | null,
   ): Promise<void> {
     const agents = this.registry.list();
     const total = agents.length;
     const done = agents.filter((a) => a.state === "done").length;
-    const surfaceTopology = await this.collectObservedSurfaceTopology();
+    const surfaceTopology =
+      surfaceTopologyOverride === undefined
+        ? await this.collectObservedSurfaceTopology()
+        : surfaceTopologyOverride;
     const observedLiveSurfaceRefs =
       surfaceTopology?.complete === true
         ? [...surfaceTopology.workspaceBySurface.keys()].sort()
@@ -5513,8 +5563,14 @@ export class AgentEngine {
         this.clearHealthNotificationMemory(agentId);
       }
 
-      const archived = await this.maybeArchiveDoneAgent(agent);
-      const reaped = archived ? false : await this.maybeReapIdleWorker(agent);
+      const allowRecordRemoval = opts.allowRecordRemoval !== false;
+      const archived = allowRecordRemoval
+        ? await this.maybeArchiveDoneAgent(agent)
+        : false;
+      const reaped =
+        allowRecordRemoval && !archived
+          ? await this.maybeReapIdleWorker(agent)
+          : false;
       if (archived || reaped) {
         try {
           await this.client.clearStatus(agentId, {
@@ -5670,7 +5726,9 @@ export class AgentEngine {
       if (
         state !== "booting" &&
         !TERMINAL_STATES.has(state) &&
-        (await this.registry.isSurfaceAlive(agent))
+        (await this.registry.isSurfaceAlive(agent, {
+          surfaces: surfaceTopology?.surfaces,
+        }))
       ) {
         const heartbeat = this.stateMgr.updateRecord(agentId, {});
         this.registry.set(agentId, heartbeat);
@@ -5776,7 +5834,10 @@ export class AgentEngine {
    */
   async reconcileRolePlacements(
     trigger: RolePlacementReconcileTrigger,
-    opts: { agentIds?: ReadonlySet<string> } = {},
+    opts: {
+      agentIds?: ReadonlySet<string>;
+      surfaceTopology?: SurfaceTopologySnapshot | null;
+    } = {},
   ): Promise<RolePlacementReconcileSummary> {
     const summary: RolePlacementReconcileSummary = { moved: [], skipped: [] };
     const eligibleForTrigger = (agent: AgentRecord): boolean => {
@@ -5813,6 +5874,22 @@ export class AgentEngine {
         continue;
       }
 
+      // The sweep already owns one complete topology observation. If it proves
+      // this seat is in the canonical column, avoid enumerating the workspace
+      // again. A misplaced or inconclusive seat still takes the existing fresh
+      // mutation-guard path below.
+      const sweepBinding = resolveAgentSurfaceBinding(
+        agent,
+        opts.surfaceTopology ?? null,
+      );
+      if (
+        sweepBinding?.provenance === "uuid" &&
+        opts.surfaceTopology?.topologyBySurface.get(sweepBinding.surfaceRef)
+          ?.column === targetColumn
+      ) {
+        continue;
+      }
+
       const observerEpoch = this.captureSurfaceObserverEpoch();
       try {
         const assertFreshAgentBinding = async (
@@ -5834,7 +5911,7 @@ export class AgentEngine {
               "agent provenance, state, or stable binding changed before mutation",
             );
           }
-          const topology = await this.collectObservedSurfaceTopology();
+          const topology = await this.collectFreshObservedSurfaceTopology();
           this.assertSurfaceObserverEpochCurrent(observerEpoch, operation);
           if (!topology?.complete) {
             throw new Error("fresh stable UUID topology is incomplete");
@@ -5991,7 +6068,8 @@ export class AgentEngine {
                 "worker-column seed has no stable UUID; refusing cleanup by mutable ref",
               );
             }
-            const seedTopology = await this.collectObservedSurfaceTopology();
+            const seedTopology =
+              await this.collectFreshObservedSurfaceTopology();
             const seedBinding = seedTopology?.complete
               ? resolveAgentSurfaceBinding(
                   {
@@ -6015,7 +6093,7 @@ export class AgentEngine {
                   "role placement seed cleanup",
                 );
                 const freshSeedTopology =
-                  await this.collectObservedSurfaceTopology();
+                  await this.collectFreshObservedSurfaceTopology();
                 this.assertSurfaceObserverEpochCurrent(
                   observerEpoch,
                   "role placement seed cleanup",
@@ -6310,6 +6388,7 @@ export class AgentEngine {
       acquire_timeout_ms: this.lifecycleLockAcquireTimeoutMs,
       hold_timeout_ms: this.lifecycleLockHoldTimeoutMs,
       forced_releases: this.lifecycleLockForcedReleases,
+      sweep_skipped_mutations: this.sweepSkippedMutations,
       timeouts: this.lifecycleLockTimeouts,
       last_timeout: this.lifecycleLockLastTimeout,
     };
@@ -7130,6 +7209,24 @@ export class AgentEngine {
   private async runSweepOnce(): Promise<void> {
     this.currentSweepScreenSignatures = new Map();
     await this.runCloseForensicsBestEffort();
+    const surfaceTopology = await this.collectObservedSurfaceTopology();
+    const reuseSweepTopology = this.client.supportsStableSurfaceReads === true;
+    if (reuseSweepTopology) {
+      this.currentSweepTopologyOverride = surfaceTopology;
+    }
+    try {
+    const transportHealth = getTransportHealth(this.client);
+    const topologyIsAuthoritative =
+      surfaceTopology?.complete === true &&
+      surfaceTopology.surfaces.length > 0;
+    const mutationsAreSafe =
+      transportHealth === null ||
+      (topologyIsAuthoritative &&
+        transportHealth.mode === "socket" &&
+        transportHealth.degraded !== true);
+    const observedSurfaces = topologyIsAuthoritative
+      ? surfaceTopology.surfaces
+      : undefined;
     // Reuse the resync path's authoritative-safe ghost eviction on every sweep,
     // but require one confirmation window after the surface is first observed
     // absent. The same gate also applies to terminal worker cleanup below.
@@ -7139,22 +7236,45 @@ export class AgentEngine {
       confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
       now: Date.now(),
     };
-    await this.registry.reconcile(surfacelessConfirmation);
     await this.reapChannelMarkersBestEffort();
-    await this.registry.evictSurfaceless(surfacelessConfirmation);
-
-    await this.purgeStartupTerminalAgents();
+    if (mutationsAreSafe) {
+      const observed = {
+        ...surfacelessConfirmation,
+        ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
+      };
+      await this.registry.reconcile(observed);
+      await this.registry.evictSurfaceless(observed);
+      await this.purgeStartupTerminalAgents();
+    } else {
+      this.sweepSkippedMutations += 1;
+    }
 
     // Deferred transcript identity does not require a live surface binding.
     // Retry after the one-shot startup purge has retained marked rows, but
     // before normal terminal cleanup can act on a closed pane.
     await this.retryDeferredTranscriptCaptures();
     await this.sweepWatchesBestEffort();
-    await this.registry.purgeTerminal(surfacelessConfirmation);
+    if (mutationsAreSafe) {
+      await this.registry.purgeTerminal({
+        ...surfacelessConfirmation,
+        ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
+      });
+    }
     await this.sweepMonitorRegistryBestEffort();
-    await this.reconcileRolePlacements("idle");
-    await this.syncSidebar();
+    if (mutationsAreSafe) {
+      await this.reconcileRolePlacements("idle", { surfaceTopology });
+    }
+    const sidebarTopology = mutationsAreSafe ? surfaceTopology : null;
+    await this.syncSidebar(
+      { allowRecordRemoval: mutationsAreSafe },
+      sidebarTopology,
+    );
     await this.drainOutboxBestEffort();
+    } finally {
+      if (reuseSweepTopology) {
+      this.currentSweepTopologyOverride = undefined;
+      }
+    }
   }
 
   private async reapChannelMarkersBestEffort(): Promise<void> {
