@@ -582,7 +582,7 @@ describe("T1 #481 — parsed_cli_mismatch reaches a reader again", () => {
     engine.getRegistry().set(record.agent_id, record);
 
     const result = await server._registeredTools["list_agents"].handler(
-      { detail: "full" },
+      {},
       {} as any,
     );
     const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);

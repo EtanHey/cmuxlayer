@@ -1020,13 +1020,11 @@ describe("send_to v2 background verify", () => {
     server = createVerifyServer(client);
     registerAgent(server);
 
-    const sent = parseResult(
-      await callTool(server, "send_to", {
-        agent_id: "agent-1",
-        text: "list me",
-        press_enter: true,
-      }),
-    );
+    await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "list me",
+      press_enter: true,
+    });
 
     const engine = server._registeredTools.interact._engine;
     const terminal = engine.queueDelivery({
@@ -1056,18 +1054,15 @@ describe("send_to v2 background verify", () => {
       await callTool(server, "list_agents", { detail: "full" }),
     );
     expect(listed.deliveries).toHaveLength(20);
-    expect(listed.deliveries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ delivery_id: "queued-24" }),
-      ]),
+    expect(
+      listed.deliveries.map(
+        (delivery: { delivery_id: string }) => delivery.delivery_id,
+      ),
+    ).toEqual(
+      Array.from({ length: 20 }, (_, index) => `queued-${index + 5}`),
     );
-    expect(listed.deliveries).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ delivery_id: sent.delivery_id }),
-        expect.objectContaining({ delivery_id: "terminal-history" }),
-        expect.objectContaining({ delivery_id: "queued-0" }),
-      ]),
-    );
+    expect(listed.deliveries_total).toBe(26);
+    expect(listed.deliveries_truncated).toBe(true);
   });
 
   it("does not fail queued_followup after the verify deadline or file a ticket", async () => {

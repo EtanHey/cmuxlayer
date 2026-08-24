@@ -14891,6 +14891,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface_id: string;
       send_via: "send_to";
       closure: ClosureState;
+      parsed_cli_mismatch?: true;
       health?: AgentHealth;
     };
     type ListAgentsCacheEntry = {
@@ -15005,6 +15006,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           detail: args.detail,
         });
         const renderListAgentsResponse = (entry: ListAgentsCacheEntry) => {
+          const actionableDeliveries =
+            args.detail === "full"
+              ? engine
+                  .listDeliveryReceipts()
+                  .filter(
+                    (receipt) =>
+                      !receipt.terminal || receipt.needs_attention === true,
+                  )
+                  .sort((left, right) =>
+                    left.created_at.localeCompare(right.created_at),
+                  )
+              : [];
           const agents =
             args.detail === "full"
               ? entry.agents
@@ -15023,6 +15036,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   blocked_on_prompt: agent.blocked_on_prompt.value,
                   send_via: agent.send_via,
                   closure: agent.closure,
+                  ...(agent.parsed_cli_mismatch === true
+                    ? { parsed_cli_mismatch: true }
+                    : {}),
                 }));
           const data = {
             derived_at: entry.derived_at,
@@ -15033,12 +15049,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : {}),
             ...(args.detail === "full"
               ? {
-                  deliveries: engine
-                    .listDeliveryReceipts()
-                    .filter(
-                      (receipt) =>
-                        !receipt.terminal || receipt.needs_attention === true,
-                    )
+                  deliveries: actionableDeliveries
                     .slice(-listAgentsDeliveryLimit)
                     .map((receipt) => ({
                       delivery_id: receipt.delivery_id,
@@ -15055,6 +15066,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           }
                         : {}),
                     })),
+                  deliveries_total: actionableDeliveries.length,
+                  deliveries_truncated:
+                    actionableDeliveries.length > listAgentsDeliveryLimit,
                 }
               : {}),
           };
@@ -15185,7 +15199,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                               paused: true,
                               pausedSource: agent.paused_source ?? "inferred",
                             }
-                        : {}),
+                          : {}),
                     }),
                     cli: agent.cli,
                     role: inferRecordRoleOrNull(agent),
