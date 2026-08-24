@@ -62,6 +62,44 @@ describe("daemon lifecycle state", () => {
     expect(successor.last_spawn_pid).toBe(200);
   });
 
+  it("ignores a late exit from a superseded daemon generation", () => {
+    // #530 final pass F9 (Codex addendum): the OLD child's `exit` can land
+    // AFTER a healthy successor has spawned. Recording it re-poisoned
+    // `last_exit` and re-raised the "not daemon-backed" warning against a
+    // daemon that is serving fine.
+    recordDaemonSpawnAttempt({ socketPath: "/tmp/gen.sock", pid: 100 });
+    recordDaemonSpawnAttempt({ socketPath: "/tmp/gen.sock", pid: 200 });
+    recordDaemonExit({
+      code: 1,
+      signal: null,
+      pid: 100,
+      stderrExcerpt: "late",
+    });
+
+    const snapshot = daemonLifecycleSnapshot();
+    expect(snapshot.last_exit).toBeNull();
+    expect(snapshot.last_spawn_pid).toBe(200);
+  });
+
+  it("still records an exit from the CURRENT generation", () => {
+    recordDaemonSpawnAttempt({ socketPath: "/tmp/gen.sock", pid: 200 });
+    recordDaemonExit({
+      code: 3,
+      signal: null,
+      pid: 200,
+      stderrExcerpt: "boom",
+    });
+    expect(daemonLifecycleSnapshot().last_exit?.code).toBe(3);
+  });
+
+  it("records an exit whose pid is unknown rather than dropping it", () => {
+    // An unknown pid cannot be attributed to a generation; dropping it would
+    // reintroduce silence, so it is recorded.
+    recordDaemonSpawnAttempt({ socketPath: "/tmp/gen.sock", pid: 200 });
+    recordDaemonExit({ code: 1, signal: null, stderrExcerpt: "no pid" });
+    expect(daemonLifecycleSnapshot().last_exit?.code).toBe(1);
+  });
+
   it("keeps reap history across generations", () => {
     recordDaemonSocketReap({
       path: "/tmp/gen.sock",

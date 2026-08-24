@@ -85,20 +85,36 @@ export async function spawnDaemonProcess(
     // #530 review P2-5: EPIPE on process.stderr arrives ASYNCHRONOUSLY, so a
     // try/catch around write() never sees it. Guard the stream itself, once.
     installParentStderrErrorGuard();
+    // #530 final pass F1: pausing on backpressure and resuming ONLY on `drain`
+    // introduced a NEW hang. An errored writable never emits `drain`, and the
+    // error guard swallows the error — so the child stayed paused forever, its
+    // 64KB stderr pipe filled, and the daemon blocked in write(2). Resume on
+    // `error` and `close` too, and stop forwarding once the destination is
+    // broken (capture is unaffected: the excerpt buffer is fed separately).
+    let forwardingBroken = false;
+    const resumeStderr = () => {
+      if (!stderrStream.destroyed) stderrStream.resume();
+    };
+    const breakForwarding = () => {
+      forwardingBroken = true;
+      resumeStderr();
+    };
+    process.stderr.once("error", breakForwarding);
+    process.stderr.once("close", breakForwarding);
     const sink =
       opts.stderrSink ??
       ((chunk: string) => {
+        if (forwardingBroken) return;
         try {
           if (!process.stderr.write(chunk)) {
             // Honor backpressure rather than buffering the daemon's output
             // without bound: pause the child until the parent drains.
             stderrStream.pause();
-            process.stderr.once("drain", () => {
-              if (!stderrStream.destroyed) stderrStream.resume();
-            });
+            process.stderr.once("drain", resumeStderr);
           }
         } catch {
           // A closed stderr must never take the spawning process down.
+          breakForwarding();
         }
       });
     stderrStream.setEncoding("utf8");

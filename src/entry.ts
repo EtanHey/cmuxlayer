@@ -123,6 +123,8 @@ export interface DaemonChildLike {
    */
   exitCode?: number | null;
   signalCode?: string | null;
+  /** Generation marker for lifecycle exit recording (#530 F9). */
+  pid?: number | null;
 }
 
 export interface DaemonReadinessOptions {
@@ -182,6 +184,7 @@ export async function awaitDaemonReadiness(
       recordDaemonExit({
         code: child.exitCode,
         signal: child.signalCode ?? null,
+        pid: child.pid ?? null,
         stderrExcerpt: readStderr(),
       });
       reject(
@@ -198,6 +201,7 @@ export async function awaitDaemonReadiness(
       recordDaemonExit({
         code: null,
         signal: child.signalCode,
+        pid: child.pid ?? null,
         stderrExcerpt: readStderr(),
       });
       reject(
@@ -216,7 +220,12 @@ export async function awaitDaemonReadiness(
     onExit = (code, signal) => {
       // Record here as well as in the spawner: readiness is the authority on
       // "the daemon died before it could serve", whoever spawned it.
-      recordDaemonExit({ code, signal, stderrExcerpt: readStderr() });
+      recordDaemonExit({
+        code,
+        signal,
+        pid: child.pid ?? null,
+        stderrExcerpt: readStderr(),
+      });
       reject(
         new DaemonStartupFailedError({
           socketPath: opts.socketPath,

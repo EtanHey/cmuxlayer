@@ -47,6 +47,7 @@ import {
 import {
   AgentEngine,
   AgentLaunchError,
+  LifecycleLockTimeoutError,
   RetryableDeliveryError,
   buildLaunchCommand,
   resolveSweepTiming,
@@ -1409,6 +1410,27 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === PLACEMENT_WORKSPACE_UNRESOLVED
       ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
       : {};
+  // #530 review (CodeRabbit): the lifecycle timeouts this PR adds carried a
+  // `code` that never reached the tool payload, so automated callers saw only
+  // free text and could not tell a bounded control-plane wait from any other
+  // failure. Both are retryable and both point at the same diagnostic.
+  const lifecycleTimeoutExtra =
+    error instanceof LifecycleStartTimeoutError
+      ? {
+          error_code: error.code,
+          waited_ms: error.waitedMs,
+          retryable: true,
+        }
+      : error instanceof LifecycleLockTimeoutError
+        ? {
+            error_code: error.code,
+            waited_ms: error.waitedMs,
+            lock_holder: error.holder,
+            held_for_ms: error.heldForMs,
+            queue_depth: error.queueDepth,
+            retryable: true,
+          }
+        : {};
   const readinessTimeout = findErrorInChain(
     error,
     (candidate): candidate is BootPromptTimeoutError | LauncherReadinessError =>
@@ -1445,6 +1467,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
+    ...lifecycleTimeoutExtra,
     ...readinessExtra,
     ...extra,
     ...createdIdentityFromError(error),
@@ -3409,7 +3432,8 @@ export class LifecycleStartTimeoutError extends Error {
   constructor(waitedMs: number) {
     super(
       `cmuxlayer lifecycle initialization did not complete within ${waitedMs}ms; ` +
-        "the daemon or its startup sweep is wedged (see control_health.daemon_lifecycle)",
+        "the daemon or its startup sweep is wedged. " +
+        "Retry; if it persists, see control_health.daemon_lifecycle.lifecycle_start.",
     );
     this.name = "LifecycleStartTimeoutError";
     this.waitedMs = waitedMs;

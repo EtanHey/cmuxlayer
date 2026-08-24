@@ -1005,7 +1005,8 @@ export class LifecycleLockTimeoutError extends Error {
       `lifecycle lock acquire timed out after ${opts.waitedMs}ms for "${opts.waiter}"; ` +
         `holder="${opts.holder ?? "unknown"}" held_for_ms=${
           opts.heldForMs ?? "unknown"
-        } queue_depth=${opts.queueDepth}`,
+        } queue_depth=${opts.queueDepth}. ` +
+        "Retry; if it persists, see control_health.daemon_lifecycle.lifecycle_lock.",
     );
     this.name = "LifecycleLockTimeoutError";
     this.holder = opts.holder;
@@ -1603,6 +1604,14 @@ export class AgentEngine {
   private readonly lifecycleLockAcquireTimeoutMs: number;
   private readonly lifecycleLockHoldTimeoutMs: number;
   private lifecycleLockHolder: string | null = null;
+  /**
+   * #530 review (Macroscope/CodeRabbit): labels are shared strings like
+   * "sweep", so an orphaned operation's `finally` could clear a NEWER holder's
+   * state and blank the diagnostics this PR exists to add. Ownership is tracked
+   * by a per-acquisition token instead.
+   */
+  private lifecycleLockAcquisitionSeq = 0;
+  private lifecycleLockAcquisitionId: number | null = null;
   private lifecycleLockAcquiredAtMs: number | null = null;
   private lifecycleLockQueueDepth = 0;
   private lifecycleLockForcedReleases = 0;
@@ -6213,7 +6222,9 @@ export class AgentEngine {
       );
     }
 
+    const acquisitionId = ++this.lifecycleLockAcquisitionSeq;
     this.lifecycleLockHolder = label;
+    this.lifecycleLockAcquisitionId = acquisitionId;
     this.lifecycleLockAcquiredAtMs = Date.now();
     const holdGuard =
       this.lifecycleLockHoldTimeoutMs > 0
@@ -6232,8 +6243,9 @@ export class AgentEngine {
       return await operation();
     } finally {
       if (holdGuard) clearTimeout(holdGuard);
-      if (this.lifecycleLockHolder === label) {
+      if (this.lifecycleLockAcquisitionId === acquisitionId) {
         this.lifecycleLockHolder = null;
+        this.lifecycleLockAcquisitionId = null;
         this.lifecycleLockAcquiredAtMs = null;
       }
       release();

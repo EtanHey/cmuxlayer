@@ -198,6 +198,20 @@ export function recordDaemonExit(opts: {
   pid?: number | null;
   stderrExcerpt?: string;
 }): void {
+  // #530 final pass F9: a SUPERSEDED generation's exit can land after a healthy
+  // successor spawned. Recording it re-poisons `last_exit` and re-raises the
+  // "not daemon-backed" warning against a daemon that is serving fine. Only
+  // drop it when both pids are known and differ — an unknown pid cannot be
+  // attributed, and dropping it would reintroduce silence.
+  const currentGeneration = state.last_spawn_pid;
+  if (
+    currentGeneration !== null &&
+    opts.pid !== null &&
+    opts.pid !== undefined &&
+    opts.pid !== currentGeneration
+  ) {
+    return;
+  }
   state = {
     ...state,
     last_exit: {

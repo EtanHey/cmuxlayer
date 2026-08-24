@@ -23,7 +23,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CmuxLayerDaemon, unlinkStaleSocket } from "../src/daemon.js";
+import {
+  CmuxLayerDaemon,
+  daemonSocketOwnerReceiptText,
+  unlinkStaleSocket,
+} from "../src/daemon.js";
 import {
   DaemonSocketInUseError,
   DaemonStartupFailedError,
@@ -88,6 +92,7 @@ describe("#529 daemon socket path handling", () => {
     // instead of reaping a leftover that provably has no live owner.
     const path = testSocketPath("dead-owner-leftover");
     rmSync(path, { force: true });
+    rmSync(`${path}.owner`, { force: true });
     writeFileSync(path, "");
     expect(statSync(path).isSocket()).toBe(false);
 
@@ -105,6 +110,87 @@ describe("#529 daemon socket path handling", () => {
       rmSync(path, { force: true });
     });
     await daemon.start();
+    expect(statSync(path).isSocket()).toBe(true);
+  });
+
+  it("F3: refuses a shutdown placeholder whose receipt names a LIVE owner", async () => {
+    // Codex P1: closeListener() parks a regular-file placeholder BEFORE
+    // waitForDrain(), so a daemon still draining in-flight requests presents a
+    // non-socket path for up to 5s. Classifying every non-socket as stale let a
+    // racing autostart reap it and bind a SECOND live daemon over the same
+    // state dir. The receipt must outrank the probe.
+    const path = testSocketPath("live-owner-placeholder");
+    rmSync(path, { force: true });
+    rmSync(`${path}.owner`, { force: true });
+    writeFileSync(path, "");
+    // This process is unquestionably alive, so it stands in for the drainer.
+    writeFileSync(`${path}.owner`, daemonSocketOwnerReceiptText());
+    cleanups.push(() => {
+      rmSync(path, { force: true });
+      rmSync(`${path}.owner`, { force: true });
+    });
+
+    const error = await unlinkStaleSocket(path).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(DaemonSocketInUseError);
+    expect((error as DaemonSocketInUseError).ownerPid).toBe(process.pid);
+    // The draining daemon's placeholder survives.
+    expect(existsSync(path)).toBe(true);
+    expect(existsSync(`${path}.owner`)).toBe(true);
+  });
+
+  it("F3: still reaps a placeholder whose receipt names a DEAD owner", async () => {
+    // The #529 reboot case must keep working: leftover placeholder plus a
+    // receipt naming a pid that no longer exists.
+    const path = testSocketPath("dead-owner-placeholder");
+    rmSync(path, { force: true });
+    writeFileSync(path, "");
+    writeFileSync(`${path}.owner`, "999999 1\n");
+    cleanups.push(() => {
+      rmSync(path, { force: true });
+      rmSync(`${path}.owner`, { force: true });
+    });
+
+    await expect(unlinkStaleSocket(path)).resolves.toBe("reaped");
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(`${path}.owner`)).toBe(false);
+  });
+
+  it("F8: refuses a socket that appeared during classification", async () => {
+    // Codex addendum: with the path ABSENT at classification, observedIdentity
+    // is null and the superseded comparison used to be skipped entirely — so a
+    // successor that bound mid-classification was unlinked.
+    const path = testSocketPath("appeared-mid-classify");
+    rmSync(path, { force: true });
+    rmSync(`${path}.owner`, { force: true });
+
+    const successor = net.createServer(() => {});
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          successor.close(() => resolve());
+          rmSync(path, { force: true });
+        }),
+    );
+
+    // Path is absent now; the successor binds while the probe is "running".
+    const error = await unlinkStaleSocket(path, {
+      probe: async () => {
+        await new Promise<void>((resolve) =>
+          successor.listen(path, () => resolve()),
+        );
+        return "stale";
+      },
+    }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(DaemonSocketInUseError);
+    expect((error as DaemonSocketInUseError).probe).toBe("superseded");
+    // The successor's live socket survives.
     expect(statSync(path).isSocket()).toBe(true);
   });
 

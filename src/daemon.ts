@@ -53,7 +53,7 @@ import {
   type StaleBuildResult,
 } from "./version.js";
 import { isMainModule } from "./is-main.js";
-import { processLiveness } from "./process-liveness.js";
+import { processLiveness, processStartedAtMs } from "./process-liveness.js";
 import {
   DaemonSocketInUseError,
   recordDaemonSocketInUse,
@@ -339,10 +339,15 @@ function isJsonRpcResponse(
 const DAEMON_SOCKET_PROBE_TIMEOUT_MS = 250;
 
 /**
- * connect(2) failures that PROVE nothing is listening on the path any more.
- * ENOTSOCK is the reboot shape: `detachOwnedSocketPath()` leaves an empty
- * regular file at the socket path on every clean shutdown, so a SIGTERM at
- * logout/reboot leaves a leftover that no daemon can ever own (#529).
+ * connect(2) failures that mean NOTHING ANSWERED. ENOTSOCK is the reboot shape:
+ * `detachOwnedSocketPath()` leaves an empty regular file at the socket path on
+ * every clean shutdown, so a SIGTERM at logout/reboot leaves a leftover no
+ * daemon can own (#529).
+ *
+ * These are NOT proof that the path is free. ECONNRESET and EPIPE in particular
+ * require a peer that accepted and reset — a live daemon draining or destroying
+ * the connection produces exactly that (CodeRabbit, #530). `unlinkStaleSocket`
+ * therefore consults the owner receipt on this path too, and a live owner wins.
  */
 const DEAD_OWNER_CONNECT_CODES = new Set([
   "ECONNREFUSED",
@@ -352,19 +357,77 @@ const DEAD_OWNER_CONNECT_CODES = new Set([
   "EPIPE",
 ]);
 
-/** Sidecar receipt naming the pid that currently owns the daemon socket. */
+/** Sidecar receipt naming the process that currently owns the daemon socket. */
 export function daemonSocketOwnerPath(socketPath: string): string {
   return `${socketPath}.owner`;
 }
 
-export function readDaemonSocketOwnerPid(socketPath: string): number | null {
+export interface DaemonSocketOwnerReceipt {
+  pid: number;
+  /**
+   * Process start time, so a pid recycled across a reboot cannot masquerade as
+   * the original owner. Null for receipts written by an older build.
+   */
+  startedAtMs: number | null;
+}
+
+/** `<pid> <startedAtMs>` — the second field is omitted when unavailable. */
+export function daemonSocketOwnerReceiptText(
+  pid: number = process.pid,
+): string {
+  const startedAtMs = processStartedAtMs(pid);
+  return startedAtMs === null ? `${pid}\n` : `${pid} ${startedAtMs}\n`;
+}
+
+export function readDaemonSocketOwnerReceipt(
+  socketPath: string,
+): DaemonSocketOwnerReceipt | null {
   try {
     const raw = readFileSync(daemonSocketOwnerPath(socketPath), "utf8").trim();
-    const pid = Number.parseInt(raw, 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
+    if (!raw) return null;
+    const [pidText, startedText] = raw.split(/\s+/);
+    const pid = Number.parseInt(pidText ?? "", 10);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    const startedAtMs = Number.parseInt(startedText ?? "", 10);
+    return {
+      pid,
+      startedAtMs: Number.isInteger(startedAtMs) ? startedAtMs : null,
+    };
   } catch {
     return null;
   }
+}
+
+export function readDaemonSocketOwnerPid(socketPath: string): number | null {
+  return readDaemonSocketOwnerReceipt(socketPath)?.pid ?? null;
+}
+
+/** `ps lstart` has whole-second precision, so allow a one-second skew. */
+const OWNER_START_SKEW_MS = 1_000;
+
+/**
+ * Is the recorded owner still the SAME live process? A bare-pid receipt (older
+ * build) cannot rule out pid reuse, so it is trusted only while the pid is
+ * live — which keeps #529's reboot fix working: a rebooted machine's leftover
+ * receipt names a pid that is either gone or demonstrably a different process.
+ */
+export function daemonSocketOwnerAlive(
+  receipt: DaemonSocketOwnerReceipt,
+): boolean {
+  if (processLiveness(receipt.pid) === "gone") {
+    return false;
+  }
+  if (receipt.startedAtMs !== null) {
+    const current = processStartedAtMs(receipt.pid);
+    if (
+      current !== null &&
+      Math.abs(current - receipt.startedAtMs) > OWNER_START_SKEW_MS
+    ) {
+      // The pid is live, but it is a DIFFERENT process wearing a recycled pid.
+      return false;
+    }
+  }
+  return true;
 }
 
 async function unlinkIfPresent(path: string): Promise<void> {
@@ -380,15 +443,25 @@ interface DaemonSocketIdentity {
   ino: number;
 }
 
-/** dev/ino of the path right now, or null when it does not exist. */
+/**
+ * dev/ino of the path right now, or null when it genuinely does not exist.
+ *
+ * #530 final pass F2: swallowing EVERY lstat error meant EIO/EACCES read as
+ * "absent", which silently disabled the superseded guard and let
+ * `unlinkStaleSocket` report "reaped" without deleting anything. Only ENOENT is
+ * absence; every other errno is a real failure and must propagate.
+ */
 async function socketIdentity(
   path: string,
 ): Promise<DaemonSocketIdentity | null> {
   try {
     const stats = await lstat(path);
     return { dev: stats.dev, ino: stats.ino };
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
   }
 }
 
@@ -406,13 +479,16 @@ function sameIdentity(
  */
 async function unlinkOwnerReceiptIfUnchanged(
   path: string,
-  expectedPid: number | null,
-  readOwnerPid: (path: string) => number | null,
+  expected: DaemonSocketOwnerReceipt | null,
+  readOwnerReceipt: (path: string) => DaemonSocketOwnerReceipt | null,
 ): Promise<void> {
-  if (expectedPid === null) {
+  // No receipt at classification time also covers F8's absent-then-present
+  // case for the receipt: a successor's brand-new receipt is never ours to delete.
+  if (expected === null) {
     return;
   }
-  if (readOwnerPid(path) !== expectedPid) {
+  const current = readOwnerReceipt(path);
+  if (current === null || current.pid !== expected.pid) {
     return;
   }
   await unlinkIfPresent(daemonSocketOwnerPath(path));
@@ -480,84 +556,103 @@ export type UnlinkStaleSocketOutcome = "absent" | "reaped";
 
 export interface UnlinkStaleSocketOptions {
   probe?: (path: string) => Promise<DaemonSocketProbe>;
-  readOwnerPid?: (path: string) => number | null;
-  ownerAlive?: (pid: number) => boolean;
+  readOwnerReceipt?: (path: string) => DaemonSocketOwnerReceipt | null;
+  ownerAlive?: (receipt: DaemonSocketOwnerReceipt) => boolean;
 }
 
 /**
- * Reap a genuinely dead-owner leftover; refuse a socket a live daemon owns.
+ * Reap a genuinely dead-owner leftover; refuse anything a live daemon owns.
+ *
+ * The owner receipt OUTRANKS the connect probe whenever it names a process
+ * that is still alive:
  *
  * - `missing`  -> nothing to do.
- * - `stale`    -> no listener can exist behind it; reap it and its receipt.
- * - `live`     -> a daemon is accepting connections. Throw
- *                 `DaemonSocketInUseError` so the caller CONNECTS to it.
- * - `unknown`  -> inconclusive. The owner receipt decides: a receipt naming a
- *                 dead pid proves a leftover, anything else fails closed.
+ * - `live`     -> a daemon is accepting connections. Refuse.
+ * - `stale`    -> nothing answered. #530 final pass F3 (Codex P1): that is NOT
+ *                 sufficient. `closeListener()` parks a regular-file
+ *                 placeholder BEFORE `waitForDrain()`, so a daemon that is
+ *                 still draining in-flight requests presents exactly this
+ *                 shape for up to 5s. CodeRabbit's ECONNRESET/EPIPE finding is
+ *                 the same hole from the other side: both errnos require a
+ *                 peer that reset, i.e. a live owner. So consult the receipt
+ *                 here too, and only reap when no live owner claims the path.
+ * - `unknown`  -> inconclusive; the receipt decides, and no receipt fails closed.
+ *
+ * On refusal the daemon fatals, its readiness rejects, and the ENTRY layer
+ * re-probes and attaches to the live owner (or falls back in-process). The
+ * "connect to it" outcome belongs to that layer, not to this function.
  */
 export async function unlinkStaleSocket(
   path: string,
   opts: UnlinkStaleSocketOptions = {},
 ): Promise<UnlinkStaleSocketOutcome> {
   const probe = opts.probe ?? probeDaemonSocketPath;
-  const readOwnerPid = opts.readOwnerPid ?? readDaemonSocketOwnerPid;
-  const ownerAlive =
-    opts.ownerAlive ?? ((pid: number) => processLiveness(pid) !== "gone");
+  const readOwnerReceipt =
+    opts.readOwnerReceipt ?? readDaemonSocketOwnerReceipt;
+  const ownerAlive = opts.ownerAlive ?? daemonSocketOwnerAlive;
 
-  // #530 review P2-2: capture the identity we are about to classify so the
-  // reap can prove it is still deleting THAT file and not a successor's.
+  const refuse = (
+    observedProbe: DaemonSocketProbe,
+    receipt: DaemonSocketOwnerReceipt | null,
+  ): never => {
+    const ownerPid = receipt?.pid ?? null;
+    recordDaemonSocketInUse({ path, ownerPid });
+    throw new DaemonSocketInUseError({
+      socketPath: path,
+      ownerPid,
+      probe: observedProbe,
+    });
+  };
+
+  // #530 review P2-2: capture what we are about to classify so the reap can
+  // prove it is still deleting THAT object and not a successor's.
   const observedIdentity = await socketIdentity(path);
-  const observedOwnerPid = readOwnerPid(path);
+  const observedReceipt = readOwnerReceipt(path);
 
   const status = await probe(path);
   if (status === "missing") {
     return "absent";
   }
-
-  let reason: string;
   if (status === "live") {
-    const ownerPid = readOwnerPid(path);
-    recordDaemonSocketInUse({ path, ownerPid });
-    throw new DaemonSocketInUseError({
-      socketPath: path,
-      ownerPid,
-      probe: status,
-    });
-  } else if (status === "unknown") {
-    const ownerPid = readOwnerPid(path);
-    if (ownerPid === null || ownerAlive(ownerPid)) {
-      recordDaemonSocketInUse({ path, ownerPid });
-      throw new DaemonSocketInUseError({
-        socketPath: path,
-        ownerPid,
-        probe: status,
-      });
-    }
-    reason = `owner-receipt-pid-${ownerPid}-gone`;
-  } else {
-    reason = "dead-owner-leftover";
+    refuse(status, readOwnerReceipt(path));
   }
+
+  const liveOwner = observedReceipt !== null && ownerAlive(observedReceipt);
+  if (liveOwner) {
+    refuse(status, observedReceipt);
+  }
+  if (status === "unknown" && observedReceipt === null) {
+    // Nothing answered and nothing claims it: fail closed rather than steal a
+    // socket an older build may still own.
+    refuse(status, null);
+  }
+  const reason =
+    observedReceipt === null
+      ? "dead-owner-leftover"
+      : `owner-receipt-pid-${observedReceipt.pid}-gone`;
 
   const current = await socketIdentity(path);
   if (current === null) {
     // It vanished on its own between classification and reap. Nothing left to
     // delete, and the path is free for us to bind.
-    await unlinkOwnerReceiptIfUnchanged(path, observedOwnerPid, readOwnerPid);
+    await unlinkOwnerReceiptIfUnchanged(
+      path,
+      observedReceipt,
+      readOwnerReceipt,
+    );
     recordDaemonSocketReap({ path, reason: `${reason}-vanished` });
     return "reaped";
   }
-  if (observedIdentity !== null && !sameIdentity(current, observedIdentity)) {
-    // Something replaced the leftover while we were classifying it. Unlinking
-    // now would steal a successor's socket, so refuse instead.
-    const ownerPid = readOwnerPid(path);
-    recordDaemonSocketInUse({ path, ownerPid });
-    throw new DaemonSocketInUseError({
-      socketPath: path,
-      ownerPid,
-      probe: "superseded",
-    });
+  // #530 final pass F8 (Codex addendum): when the path was ABSENT at
+  // classification, `observedIdentity` is null and the identity comparison used
+  // to be skipped entirely — so a successor that bound DURING classification
+  // was unlinked. Absent-then-present is a successor, never a leftover.
+  if (observedIdentity === null || !sameIdentity(current, observedIdentity)) {
+    refuse("superseded", readOwnerReceipt(path));
   }
+
   await unlinkIfPresent(path);
-  await unlinkOwnerReceiptIfUnchanged(path, observedOwnerPid, readOwnerPid);
+  await unlinkOwnerReceiptIfUnchanged(path, observedReceipt, readOwnerReceipt);
   recordDaemonSocketReap({ path, reason });
   return "reaped";
 }
@@ -659,7 +754,7 @@ export class CmuxLayerDaemon {
       // when the connect probe is inconclusive.
       await writeFile(
         daemonSocketOwnerPath(this.socketPath),
-        `${process.pid}\n`,
+        daemonSocketOwnerReceiptText(),
         "utf8",
       ).catch(() => {});
     }

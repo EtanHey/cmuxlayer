@@ -544,9 +544,17 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
       `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
     );
   }
-  if (lifecycle?.lifecycle_start && lifecycle.lifecycle_start.timeouts > 0) {
+  // #530 final pass F5: gating on `timeouts > 0` alone latched the warning
+  // forever, the same never-clearing class as P2-3. Once initialization has
+  // settled cleanly, past timeouts are history, not a current degradation.
+  const startHealth = lifecycle?.lifecycle_start;
+  if (
+    startHealth &&
+    startHealth.timeouts > 0 &&
+    (!startHealth.settled || startHealth.error !== null)
+  ) {
     warnings.push(
-      `lifecycle initialization wait timed out ${lifecycle.lifecycle_start.timeouts} time(s) (last at ${lifecycle.lifecycle_start.last_timeout_at ?? "unknown"}); lifecycle-gated tools are degraded.`,
+      `lifecycle initialization wait timed out ${startHealth.timeouts} time(s) (last at ${startHealth.last_timeout_at ?? "unknown"}); lifecycle-gated tools are degraded.`,
     );
   }
   const envSocket = health.current_process.env.CMUX_SOCKET_PATH;
