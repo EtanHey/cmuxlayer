@@ -47,6 +47,7 @@ function makeClient(
   workspaceId = "workspace:old",
 ): CmuxClient {
   return {
+    getTransportHealth: () => ({ mode: "socket", degraded: false }),
     newSplit: vi.fn().mockResolvedValue({
       workspace: "workspace:new",
       surface: "surface:new",

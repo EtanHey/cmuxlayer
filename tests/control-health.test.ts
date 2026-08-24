@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -103,9 +109,15 @@ describe("control health", () => {
     const prodSocket = join(stateDir, "cmux-501.sock");
     const nightlySocket = join(tmp, "cmux-nightly.sock");
     writeFileSync(join(stateDir, "last-socket-path"), `${prodSocket}\n`);
-    writeFileSync(join(stateDir, "nightly-last-socket-path"), `${nightlySocket}\n`);
+    writeFileSync(
+      join(stateDir, "nightly-last-socket-path"),
+      `${nightlySocket}\n`,
+    );
     writeFileSync(join(tmp, "cmux-last-socket-path"), `${prodSocket}\n`);
-    writeFileSync(join(tmp, "cmux-nightly-last-socket-path"), `${nightlySocket}\n`);
+    writeFileSync(
+      join(tmp, "cmux-nightly-last-socket-path"),
+      `${nightlySocket}\n`,
+    );
     writeFileSync(prodSocket, "");
     writeFileSync(nightlySocket, "");
 
@@ -140,17 +152,8 @@ describe("control health", () => {
         currentSocketPath: () => nightlySocket,
       },
       execFile: async (file, args) => {
-        if (
-          file === "ps" &&
-          args.join(" ") === "ax -o pid= -o command="
-        ) {
-          expect(args).toEqual([
-            "ax",
-            "-o",
-            "pid=",
-            "-o",
-            "command=",
-          ]);
+        if (file === "ps" && args.join(" ") === "ax -o pid= -o command=") {
+          expect(args).toEqual(["ax", "-o", "pid=", "-o", "command="]);
           return {
             stdout: [
               "100 /Applications/Other.app/Contents/MacOS/cmux-helper",
@@ -293,10 +296,16 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home-bounded");
     const tmp = join(TEST_ROOT, "tmp-bounded");
-    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-bounded.json");
+    const monitorRegistryPath = join(
+      TEST_ROOT,
+      "monitor-registry-bounded.json",
+    );
     mkdirSync(home, { recursive: true });
     mkdirSync(tmp, { recursive: true });
-    writeFileSync(monitorRegistryPath, JSON.stringify({ version: 1, monitors: [] }));
+    writeFileSync(
+      monitorRegistryPath,
+      JSON.stringify({ version: 1, monitors: [] }),
+    );
     const tracker = new SurfaceWriteLivenessTracker({
       now: () => Date.parse("2026-07-11T12:00:00.000Z"),
     });
@@ -327,7 +336,10 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home-malformed-registry");
     const tmp = join(TEST_ROOT, "tmp-malformed-registry");
-    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-malformed.json");
+    const monitorRegistryPath = join(
+      TEST_ROOT,
+      "monitor-registry-malformed.json",
+    );
     mkdirSync(home, { recursive: true });
     mkdirSync(tmp, { recursive: true });
     writeFileSync(monitorRegistryPath, "{not-json");
@@ -347,7 +359,9 @@ describe("control health", () => {
       collapsed: 0,
       error: expect.stringMatching(/malformed|json/i),
     });
-    expect(formatControlHealth(health)).toMatch(/monitor registry: unavailable/i);
+    expect(formatControlHealth(health)).toMatch(
+      /monitor registry: unavailable/i,
+    );
   });
 
   it("treats an absent monitor registry as an empty healthy registry", async () => {
@@ -425,7 +439,10 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home-invalid-monitor-record");
     const tmp = join(TEST_ROOT, "tmp-invalid-monitor-record");
-    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-invalid-record.json");
+    const monitorRegistryPath = join(
+      TEST_ROOT,
+      "monitor-registry-invalid-record.json",
+    );
     mkdirSync(home, { recursive: true });
     mkdirSync(tmp, { recursive: true });
     writeFileSync(
@@ -452,10 +469,16 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home-untracked-surface");
     const tmp = join(TEST_ROOT, "tmp-untracked-surface");
-    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-untracked.json");
+    const monitorRegistryPath = join(
+      TEST_ROOT,
+      "monitor-registry-untracked.json",
+    );
     mkdirSync(home, { recursive: true });
     mkdirSync(tmp, { recursive: true });
-    writeFileSync(monitorRegistryPath, JSON.stringify({ version: 1, monitors: [] }));
+    writeFileSync(
+      monitorRegistryPath,
+      JSON.stringify({ version: 1, monitors: [] }),
+    );
     const rawHealth = await collectControlHealth({
       homeDir: home,
       tmpDir: tmp,
@@ -485,15 +508,26 @@ describe("control health", () => {
     const controlHealth = (server as any)._registeredTools["control_health"];
 
     try {
-      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      await sendKey.handler(
+        { surface: "surface:untracked", key: "return" },
+        {} as any,
+      );
       nowMs += 1_000;
-      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      await sendKey.handler(
+        { surface: "surface:untracked", key: "return" },
+        {} as any,
+      );
       const first = await controlHealth.handler({}, {} as any);
       nowMs += 1_000;
-      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      await sendKey.handler(
+        { surface: "surface:untracked", key: "return" },
+        {} as any,
+      );
       const second = await controlHealth.handler({}, {} as any);
-      const firstHealth = first.structuredContent.health.self_heal.pane_pty_dead;
-      const secondHealth = second.structuredContent.health.self_heal.pane_pty_dead;
+      const firstHealth =
+        first.structuredContent.health.self_heal.pane_pty_dead;
+      const secondHealth =
+        second.structuredContent.health.self_heal.pane_pty_dead;
 
       expect(firstHealth).toMatchObject({
         count: 1,
@@ -527,9 +561,15 @@ describe("control health", () => {
       writeError = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
 
       nowMs += 31_000;
-      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      await sendKey.handler(
+        { surface: "surface:untracked", key: "return" },
+        {} as any,
+      );
       nowMs += 1_000;
-      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      await sendKey.handler(
+        { surface: "surface:untracked", key: "return" },
+        {} as any,
+      );
       const nextEpisode = await controlHealth.handler({}, {} as any);
       expect(
         nextEpisode.structuredContent.health.self_heal.pane_pty_dead.surfaces[0]
@@ -554,7 +594,9 @@ describe("control health", () => {
         stdin_is_tty: false,
         env: { CMUX_SOCKET_PATH: nightlySocket, PATH: "/bin" },
         path_entries: ["/bin"],
-        cmux_resolution: [{ path: "/Applications/cmux NIGHTLY.app/bin/cmux", exists: true }],
+        cmux_resolution: [
+          { path: "/Applications/cmux NIGHTLY.app/bin/cmux", exists: true },
+        ],
       },
       selected_transport: {
         client_class: "CmuxSocketClient",
@@ -745,8 +787,9 @@ describe("control health", () => {
     expect(
       health.daemon_lifecycle.lifecycle_lock?.sweep_skipped_mutations,
     ).toBe(2);
-    expect(formatControlHealth(health)).toContain(
-      "sweep_skipped_mutations=2",
+    expect(formatControlHealth(health)).toContain("sweep_skipped_mutations=2");
+    expect(health.warnings).toContain(
+      "WARNING: lifecycle sweep skipped destructive reconciliation 2 time(s); registry garbage collection is read-only until socket-backed complete topology recovers.",
     );
   });
 

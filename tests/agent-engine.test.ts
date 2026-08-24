@@ -85,6 +85,7 @@ function mockSpawnExit(code: number): {
 
 function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
   return {
+    getTransportHealth: () => ({ mode: "socket", degraded: false }),
     newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
       workspace: opts?.workspace ?? "ws:1",
       surface: "surface:new",

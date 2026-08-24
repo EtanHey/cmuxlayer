@@ -304,7 +304,8 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
 
     await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
     await waitForExpectation(
-      async () => expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(1),
+      async () =>
+        expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(1),
       { timeout: 1_000, interval: 5 },
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -318,10 +319,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
   });
 
   it("signals retirement after repeated upstream connection failures", async () => {
-    const socketPath = join(
-      tmpdir(),
-      `cmux-upstream-dead-${process.pid}.sock`,
-    );
+    const socketPath = join(tmpdir(), `cmux-upstream-dead-${process.pid}.sock`);
     let probeCountAtRetirement: number | undefined;
     const probeSocketHealth = vi.fn().mockResolvedValue({
       usable: false,
@@ -446,7 +444,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
   });
 
   it("preserves the transport error when the irrecoverable callback throws", async () => {
-    const socketPath = join(tmpdir(), `cmux-callback-throw-${process.pid}.sock`);
+    const socketPath = join(
+      tmpdir(),
+      `cmux-callback-throw-${process.pid}.sock`,
+    );
     const logger = { error: vi.fn() };
     const onIrrecoverableTransport = vi.fn(() => {
       throw new Error("retirement callback failed");
@@ -471,9 +472,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
 
     await waitForExpectation(
       async () =>
-        expect(
-          (client as any).upstreamProbeFailures,
-        ).toBeGreaterThanOrEqual(1),
+        expect((client as any).upstreamProbeFailures).toBeGreaterThanOrEqual(1),
       { timeout: 1_000, interval: 5 },
     );
     await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
@@ -505,7 +504,8 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     });
 
     await waitForExpectation(
-      async () => expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(1),
+      async () =>
+        expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(1),
       { timeout: 1_000, interval: 5 },
     );
     expect(logger.error).toHaveBeenCalledWith(
@@ -515,12 +515,19 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
   });
 
   it("counts the factory initial denial as the first socket denial", async () => {
-    const socketPath = join(tmpdir(), `cmux-initial-denial-${process.pid}.sock`);
+    const socketPath = join(
+      tmpdir(),
+      `cmux-initial-denial-${process.pid}.sock`,
+    );
     const onIrrecoverableTransport = vi.fn();
     const exec = vi.fn().mockRejectedValue(new Error("Broken pipe (errno 32)"));
     const probeSocketHealth = vi
       .fn()
-      .mockResolvedValueOnce({ usable: false, socketPath, error: "write EPIPE" })
+      .mockResolvedValueOnce({
+        usable: false,
+        socketPath,
+        error: "write EPIPE",
+      })
       .mockResolvedValue({
         usable: false,
         socketPath,
@@ -554,7 +561,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
-  it("treats access-control denial as a hard state without periodic re-probes", async () => {
+  it("backs off access-control denial to a slow recovery probe", async () => {
     vi.useFakeTimers();
     const socketPath = join(
       tmpdir(),
@@ -575,6 +582,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       },
       reprobeIntervalMs: 5,
       reprobeCapMs: 5,
+      hardDenialReprobeMs: 300_000,
       random: () => 0,
       probeSocketHealth,
     });
@@ -585,6 +593,36 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     expect(getTransportHealth(client)).toMatchObject({
       mode: "cli",
       degraded: true,
+      denied_reason: "access-control",
+    });
+
+    await vi.advanceTimersByTimeAsync(240_000);
+    await vi.runAllTicks();
+
+    expect(probeSocketHealth).toHaveBeenCalledTimes(1);
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "cli",
+      degraded: true,
+      denied_reason: "access-control",
+    });
+    client.stop();
+  });
+
+  it("classifies EPIPE as transport failure without an access-control remedy", () => {
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath: "/tmp/cmux-epipe-classification.sock",
+      reprobeIntervalMs: 60_000,
+    });
+    const internals = client as any;
+
+    expect(
+      internals.recordProbeResult({
+        usable: false,
+        socketPath: "/tmp/cmux-epipe-classification.sock",
+        error: "write EPIPE",
+      }),
+    ).toBe(false);
+    expect(getTransportHealth(client)).not.toMatchObject({
       denied_reason: "access-control",
     });
     client.stop();
@@ -718,7 +756,8 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
 
     await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
     await waitForExpectation(
-      async () => expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(2),
+      async () =>
+        expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(2),
       { timeout: 1_000, interval: 5 },
     );
     await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
@@ -841,6 +880,42 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("latches access-control denial from an active socket before downgrading", async () => {
+    const socketPath = join(tmpdir(), `cmux-active-denial-${process.pid}.sock`);
+    const logger = { error: vi.fn() };
+    const cli = new CmuxClient({
+      exec: vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      }),
+      bin: "cmux",
+    });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      ping: vi.fn().mockRejectedValue(new Error(ACCESS_CONTROL_DENIED_TEXT)),
+    } as unknown as CmuxSocketClient;
+
+    const client = wrapSocketWithSelfHeal(socket, cli, {
+      socketPath,
+      logger,
+      hardDenialReprobeMs: 300_000,
+    });
+
+    await expect(client.ping()).rejects.toThrow(ACCESS_CONTROL_DENIED_TEXT);
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "cli",
+      degraded: true,
+      current_socket_path: socketPath,
+      denied_reason: "access-control",
+      last_error: expect.stringContaining(ACCESS_CONTROL_DENIED_TEXT),
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("slow recovery re-probe active"),
+    );
+    client.stop();
+  });
+
   it("uses the same CLI env shape at boot and after socket re-degradation", async () => {
     const socketPath = join(tmpdir(), `cmux-env-parity-${process.pid}.sock`);
     const bootExec = vi.fn().mockResolvedValue({
@@ -934,7 +1009,9 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     expect(exec).toHaveBeenCalledWith(
       "cmux",
       [
-        "--json", "--id-format", "both",
+        "--json",
+        "--id-format",
+        "both",
         "send",
         "--surface",
         "surface:1",
@@ -985,10 +1062,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
 
   it("surfaces exhausted transport state and retry count", async () => {
     vi.useFakeTimers();
-    const transportFailure = Object.assign(
-      new Error("write ECONNRESET"),
-      { code: 1, stderr: "write ECONNRESET" },
-    );
+    const transportFailure = Object.assign(new Error("write ECONNRESET"), {
+      code: 1,
+      stderr: "write ECONNRESET",
+    });
     const exec = vi.fn().mockRejectedValue(transportFailure);
     const client = wrapCliWithSelfHeal(new CmuxClient({ exec, bin: "cmux" }), {
       socketPath: "/tmp/retry-exhausted.sock",
@@ -1019,7 +1096,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       bin: "cmux",
     });
     const responseFailure = Object.assign(
-      new CmuxSocketError("connection reset after response", "connection_error"),
+      new CmuxSocketError(
+        "connection reset after response",
+        "connection_error",
+      ),
       { transport_phase: "response" },
     );
     const socket = {
@@ -1040,7 +1120,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
   });
 
   it("forwards deleteWorkspace through the self-healing transport", async () => {
-    const socketPath = join(tmpdir(), `cmux-delete-workspace-${process.pid}.sock`);
+    const socketPath = join(
+      tmpdir(),
+      `cmux-delete-workspace-${process.pid}.sock`,
+    );
     const cli = new CmuxClient({
       exec: vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" }),
       bin: "cmux",
@@ -1104,13 +1187,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     const socket = {
       currentSocketPath: () => socketPath,
       disconnect: vi.fn(),
-      send: vi
-        .fn()
-        .mockRejectedValue(
-          new CmuxSocketError("Socket error: ECONNRESET", "connection_error", {
-            transportPhase: "write",
-          }),
-        ),
+      send: vi.fn().mockRejectedValue(
+        new CmuxSocketError("Socket error: ECONNRESET", "connection_error", {
+          transportPhase: "write",
+        }),
+      ),
       ping: vi
         .fn()
         .mockRejectedValue(

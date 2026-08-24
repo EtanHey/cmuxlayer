@@ -8,7 +8,10 @@ import { CmuxSocketError } from "../src/cmux-socket-error.js";
 
 const TEST_ROOT = join("/tmp", "cmux-persistent-socket-test");
 const INTERLEAVED_STATUS_FRAME = readFileSync(
-  new URL("./fixtures/cmux-interleaved-sidebar-status-frame.txt", import.meta.url),
+  new URL(
+    "./fixtures/cmux-interleaved-sidebar-status-frame.txt",
+    import.meta.url,
+  ),
   "utf8",
 ).trim();
 const servers: net.Server[] = [];
@@ -103,6 +106,46 @@ describe("CmuxPersistentSocket V1 demux", () => {
     });
   });
 
+  it("rejects at the connect deadline when the socket connects but never responds", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("connected-no-response");
+    await startLineServer(path, () => {
+      // Accept the request but deliberately never produce a response frame.
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      connectTimeoutMs: 40,
+      timeoutMs: 500,
+    });
+    const startedAt = Date.now();
+
+    try {
+      await expect(socket.call("system.ping")).rejects.toMatchObject({
+        code: "connection_error",
+        message: "Connect timeout after 40ms",
+        transport_phase: "connect",
+      });
+      expect(Date.now() - startedAt).toBeLessThan(250);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("backs off from two seconds to a bounded fifteen-second cap", () => {
+    const socket = new CmuxPersistentSocket({
+      backoff: { jitter: false },
+    });
+
+    socket.incrementBackoff();
+    expect(socket.currentBackoffMs()).toBe(2_000);
+    socket.incrementBackoff();
+    expect(socket.currentBackoffMs()).toBe(4_000);
+    socket.incrementBackoff();
+    socket.incrementBackoff();
+    socket.incrementBackoff();
+    expect(socket.currentBackoffMs()).toBe(15_000);
+  });
+
   it("rejects a JSON-like malformed frame instead of resolving the pending V1 request", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("malformed-v1");
@@ -122,9 +165,9 @@ describe("CmuxPersistentSocket V1 demux", () => {
     });
 
     try {
-      await expect(socket.sendLine("set_status first active")).rejects.toMatchObject(
-        { code: "protocol_error" },
-      );
+      await expect(
+        socket.sendLine("set_status first active"),
+      ).rejects.toMatchObject({ code: "protocol_error" });
       const second = socket.sendLine("set_status second active");
 
       await expect(second).resolves.toBe("OK");
@@ -505,14 +548,17 @@ describe("CmuxPersistentSocket V1 demux", () => {
         rejectAllPending: (error: CmuxSocketError) => void;
       };
       internals.rejectAllPending(
-        new CmuxSocketError(`Socket error: ${error.message}`, "connection_error", {
-          transportPhase: "response",
-        }),
+        new CmuxSocketError(
+          `Socket error: ${error.message}`,
+          "connection_error",
+          {
+            transportPhase: "response",
+          },
+        ),
       );
     });
     (socket as unknown as { connected: boolean }).connected = true;
-    (socket as unknown as { socket: EmittingSocket }).socket =
-      transport;
+    (socket as unknown as { socket: EmittingSocket }).socket = transport;
 
     await expect(socket.call("surface.send_text")).rejects.toMatchObject({
       code: "connection_error",
@@ -534,7 +580,10 @@ describe("CmuxPersistentSocket V1 demux", () => {
         })}\n`,
       );
     });
-    const socket = new CmuxPersistentSocket({ socketPath: path, timeoutMs: 500 });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
 
     try {
       expect(socket.currentConnectionGeneration()).toBe(0);

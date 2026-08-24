@@ -59,6 +59,7 @@ const DEAD_SHELL_SCREEN = "etanheyman@mac cmuxlayer % ";
 
 function makeMockClient(): CmuxClient {
   return {
+    getTransportHealth: () => ({ mode: "socket", degraded: false }),
     newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
       workspace: opts?.workspace ?? "ws:1",
       surface: "surface:new",

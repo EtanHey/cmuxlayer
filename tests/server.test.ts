@@ -862,6 +862,7 @@ describe("Claude channels", () => {
     });
 
     const mockClient = {
+      getTransportHealth: () => ({ mode: "socket", degraded: false }),
       listWorkspaces: vi
         .fn()
         .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),
@@ -1000,6 +1001,7 @@ describe("Claude channels", () => {
     });
 
     const mockClient = {
+      getTransportHealth: () => ({ mode: "socket", degraded: false }),
       listWorkspaces: vi
         .fn()
         .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),

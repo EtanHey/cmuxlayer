@@ -18,6 +18,7 @@ const TEST_DIR = join(tmpdir(), "cmux-agents-test-quality");
 
 function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
   return {
+    getTransportHealth: () => ({ mode: "socket", degraded: false }),
     newSplit: vi.fn().mockResolvedValue({
       workspace: "ws:1",
       surface: "surface:new",

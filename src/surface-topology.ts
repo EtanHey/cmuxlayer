@@ -46,10 +46,7 @@ export interface SurfaceTopologyClient {
   }): Promise<CmuxPaneSurfaces>;
 }
 
-export type SurfaceObserverIdProvider = () =>
-  | string
-  | null
-  | undefined;
+export type SurfaceObserverIdProvider = () => string | null | undefined;
 
 /**
  * `undefined` means observer scoping is intentionally disabled for a legacy
@@ -311,7 +308,11 @@ export async function collectSurfaceTopology(
   for (const workspaceRef of workspaceRefs) {
     try {
       const panes = await client.listPanes({ workspace: workspaceRef });
-      if (!panes.panes || panes.panes.length === 0) continue;
+      if (!Array.isArray(panes.panes)) {
+        snapshot.complete = false;
+        continue;
+      }
+      if (panes.panes.length === 0) continue;
 
       const columnIndex = deriveRoleColumnIndex(panes.panes);
       const columnCount = new Set(columnIndex.values()).size;
@@ -349,10 +350,14 @@ export async function collectSurfaceTopology(
           });
         }
       }
-      const partitioned = partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
-        workspace_ref: panes.workspace_ref ?? workspaceRef,
-        window_ref: panes.window_ref,
-      });
+      const partitioned = partitionPaneSurfacesByMembership(
+        panes.panes,
+        rawGroups,
+        {
+          workspace_ref: panes.workspace_ref ?? workspaceRef,
+          window_ref: panes.window_ref,
+        },
+      );
       for (const pane of panes.panes) {
         const expectedSurfaceRefs = new Set(pane.surface_refs);
         const observedGroup = partitioned.find(
@@ -378,7 +383,9 @@ export async function collectSurfaceTopology(
         }
       }
       for (const group of partitioned) {
-        const pane = panes.panes.find((candidate) => candidate.ref === group.pane_ref);
+        const pane = panes.panes.find(
+          (candidate) => candidate.ref === group.pane_ref,
+        );
         for (const surface of group.surfaces) {
           const surfaceIndex = pane?.surface_refs?.indexOf(surface.ref) ?? -1;
           const surfaceId =

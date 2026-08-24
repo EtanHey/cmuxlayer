@@ -541,6 +541,13 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
       `lifecycle lock was force-released ${lifecycle.lifecycle_lock.forced_releases} time(s); an operation never settled.`,
     );
   }
+  const skippedSweepMutations =
+    lifecycle?.lifecycle_lock?.sweep_skipped_mutations ?? 0;
+  if (skippedSweepMutations > 0) {
+    warnings.push(
+      `WARNING: lifecycle sweep skipped destructive reconciliation ${skippedSweepMutations} time(s); registry garbage collection is read-only until socket-backed complete topology recovers.`,
+    );
+  }
   // #530: a stranded/unrestorable socket, or any recorded daemon lifecycle
   // error, must be visible rather than living only in a log line.
   if (lifecycle?.last_error) {
