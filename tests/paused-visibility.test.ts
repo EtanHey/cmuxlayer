@@ -205,7 +205,7 @@ describe("paused pane visibility", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("list_agents summary rows include paused with source", async () => {
+  it("list_agents summary rows include flat paused state", async () => {
     registerAgent(
       server,
       makeAgent({
@@ -220,16 +220,11 @@ describe("paused pane visibility", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agents[0]).toMatchObject({
       agent_id: "agent-paused",
-      paused: {
-        value: true,
-        source: "inferred",
-        coverage: "harness_only",
-        note: "cmux-UI pause not detectable; see #447",
-      },
+      paused: true,
     });
   });
 
-  it("list_agents summary rows keep boolean false and name harness-only coverage on a clean agent", async () => {
+  it("list_agents summary rows keep boolean false on a clean agent", async () => {
     registerAgent(
       server,
       makeAgent({
@@ -242,14 +237,9 @@ describe("paused pane visibility", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agents[0]).toMatchObject({
       agent_id: "agent-idle",
-      paused: {
-        value: false,
-        source: "inferred",
-        coverage: "harness_only",
-        note: "cmux-UI pause not detectable; see #447",
-      },
+      paused: false,
     });
-    expect(typeof parsed.agents[0].paused.value).toBe("boolean");
+    expect(typeof parsed.agents[0].paused).toBe("boolean");
   });
 
   it("read_screen parsed output includes paused with inferred source", async () => {

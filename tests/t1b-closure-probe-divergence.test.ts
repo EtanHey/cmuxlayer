@@ -239,8 +239,7 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     const parsed = parseResult(await callTool(server, "list_agents", {}));
     const row = rowFor(parsed, "cmuxlayerCodex-t1b-busy");
     expect(row, JSON.stringify(parsed)).toBeTruthy();
-    expect(row.state.value).toBe("working");
-    expect(row.state.source).toBe("screen");
+    expect(row.state).toBe("working");
     expect(row.closure).toBe("pending");
   });
 

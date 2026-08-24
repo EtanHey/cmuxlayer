@@ -66,6 +66,7 @@ import {
   issueCoordinationContract,
   coordinationFooterBytes,
   writeBootContractFile,
+  type ClosureState,
   type CoordinationContract,
 } from "./coordination-paths.js";
 import {
@@ -14883,16 +14884,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // 15. list_agents
+    const listAgentsDeliveryLimit = 20;
+    type ListAgentsObservedRow = ObservedPublicAgent & {
+      cli: CliType;
+      role: AgentRole | null;
+      surface_id: string;
+      send_via: "send_to";
+      closure: ClosureState;
+      health?: AgentHealth;
+    };
     type ListAgentsCacheEntry = {
       topology_signature: string;
       derived_at: number;
-      agents: Array<
-        ObservedPublicAgent & {
-          surface_id: string;
-          send_via: "send_to";
-          health?: AgentHealth;
-        }
-      >;
+      agents: ListAgentsObservedRow[];
       skipped_agents: Array<{ agent_id: string; error: string }>;
     };
     const listAgentsCache = new Map<string, ListAgentsCacheEntry>();
@@ -14914,7 +14918,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary is lean (id, state, surface_id, send_via, paused). Pass detail=full for health diagnostics and the full registry record.",
+      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars only. Pass detail=full for provenance, health diagnostics, the full registry record, and up to 20 unresolved or attention delivery receipts.",
       {
         state: z
           .enum([
@@ -14954,7 +14958,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .default("summary")
           .describe(
-            "summary (default): lean addressable rows. full: health diagnostics plus the full registry record.",
+            "summary (default): flat addressable scalar rows. full: provenance, health diagnostics, the full registry record, and up to 20 unresolved or attention delivery receipts.",
           ),
         max_age_ms: z
           .number()
@@ -15001,30 +15005,56 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           detail: args.detail,
         });
         const renderListAgentsResponse = (entry: ListAgentsCacheEntry) => {
+          const agents =
+            args.detail === "full"
+              ? entry.agents
+              : entry.agents.map((agent) => ({
+                  agent_id: agent.agent_id,
+                  repo: agent.repo,
+                  cli: agent.cli,
+                  role: agent.role,
+                  state: agent.state.value,
+                  surface_id: agent.surface_id,
+                  model: agent.model.value,
+                  session_id: agent.session_id.value,
+                  resumable: agent.resumable.value,
+                  resume_command: agent.resume_command ?? null,
+                  paused: agent.paused.value,
+                  blocked_on_prompt: agent.blocked_on_prompt.value,
+                  send_via: agent.send_via,
+                  closure: agent.closure,
+                }));
           const data = {
             derived_at: entry.derived_at,
-            agents: entry.agents as unknown as Record<string, unknown>[],
-            count: entry.agents.length,
+            agents: agents as unknown as Record<string, unknown>[],
+            count: agents.length,
             ...(entry.skipped_agents.length > 0
               ? { skipped_agents: entry.skipped_agents }
               : {}),
             ...(args.detail === "full"
               ? {
-                  deliveries: engine.listDeliveryReceipts().map((receipt) => ({
-                    delivery_id: receipt.delivery_id,
-                    agent_id: receipt.agent_id,
-                    delivery_state: receipt.delivery_state,
-                    terminal: receipt.terminal,
-                    created_at: receipt.created_at,
-                    resolved_at: receipt.resolved_at,
-                    retry_count: receipt.retry_count,
-                    ...(receipt.needs_attention === true
-                      ? {
-                          needs_attention: true,
-                          attention_reason: receipt.attention_reason,
-                        }
-                      : {}),
-                  })),
+                  deliveries: engine
+                    .listDeliveryReceipts()
+                    .filter(
+                      (receipt) =>
+                        !receipt.terminal || receipt.needs_attention === true,
+                    )
+                    .slice(-listAgentsDeliveryLimit)
+                    .map((receipt) => ({
+                      delivery_id: receipt.delivery_id,
+                      agent_id: receipt.agent_id,
+                      delivery_state: receipt.delivery_state,
+                      terminal: receipt.terminal,
+                      created_at: receipt.created_at,
+                      resolved_at: receipt.resolved_at,
+                      retry_count: receipt.retry_count,
+                      ...(receipt.needs_attention === true
+                        ? {
+                            needs_attention: true,
+                            attention_reason: receipt.attention_reason,
+                          }
+                        : {}),
+                    })),
                 }
               : {}),
           };
@@ -15155,8 +15185,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                               paused: true,
                               pausedSource: agent.paused_source ?? "inferred",
                             }
-                          : {}),
+                        : {}),
                     }),
+                    cli: agent.cli,
+                    role: inferRecordRoleOrNull(agent),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
                     // #481: computed on every listMerged, read only by the

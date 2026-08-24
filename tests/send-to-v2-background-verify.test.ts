@@ -1015,7 +1015,7 @@ describe("send_to v2 background verify", () => {
     });
   });
 
-  it("exposes deliveries on list_agents detail=full", async () => {
+  it("bounds list_agents detail=full deliveries to the last 20 unresolved or attention receipts", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
     registerAgent(server);
@@ -1028,17 +1028,44 @@ describe("send_to v2 background verify", () => {
       }),
     );
 
+    const engine = server._registeredTools.interact._engine;
+    const terminal = engine.queueDelivery({
+      delivery_id: "terminal-history",
+      agent_id: "agent-1",
+      text: "old terminal receipt",
+      press_enter: true,
+      source_event: "send_to",
+    });
+    engine.resolveDelivery({
+      ...terminal,
+      delivery_state: "submitted",
+      terminal: true,
+      submit_verified: true,
+    });
+    for (let index = 0; index < 25; index += 1) {
+      engine.queueDelivery({
+        delivery_id: `queued-${index}`,
+        agent_id: "agent-1",
+        text: `queued ${index}`,
+        press_enter: true,
+        source_event: "send_to",
+      });
+    }
+
     const listed = parseResult(
       await callTool(server, "list_agents", { detail: "full" }),
     );
+    expect(listed.deliveries).toHaveLength(20);
     expect(listed.deliveries).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          delivery_id: sent.delivery_id,
-          agent_id: "agent-1",
-          delivery_state: "pending_verify",
-          terminal: false,
-        }),
+        expect.objectContaining({ delivery_id: "queued-24" }),
+      ]),
+    );
+    expect(listed.deliveries).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ delivery_id: sent.delivery_id }),
+        expect.objectContaining({ delivery_id: "terminal-history" }),
+        expect.objectContaining({ delivery_id: "queued-0" }),
       ]),
     );
   });
