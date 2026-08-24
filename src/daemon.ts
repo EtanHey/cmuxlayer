@@ -2,7 +2,14 @@
 
 import net from "node:net";
 import { readFileSync } from "node:fs";
-import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  mkdir,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
@@ -53,7 +60,14 @@ import {
   type StaleBuildResult,
 } from "./version.js";
 import { isMainModule } from "./is-main.js";
-import { processLiveness, processStartedAtMs } from "./process-liveness.js";
+import {
+  daemonSocketOwnerAlive,
+  daemonSocketOwnerPath,
+  daemonSocketOwnerReceiptText,
+  readDaemonSocketOwnerReceipt,
+  readDaemonSocketOwnerReceiptAt,
+  type DaemonSocketOwnerReceipt,
+} from "./daemon-socket-owner.js";
 import {
   DaemonSocketInUseError,
   DaemonSocketPathOccupiedError,
@@ -358,77 +372,51 @@ const DEAD_OWNER_CONNECT_CODES = new Set([
   "EPIPE",
 ]);
 
-/** Sidecar receipt naming the process that currently owns the daemon socket. */
-export function daemonSocketOwnerPath(socketPath: string): string {
-  return `${socketPath}.owner`;
-}
-
-export interface DaemonSocketOwnerReceipt {
-  pid: number;
-  /**
-   * Process start time, so a pid recycled across a reboot cannot masquerade as
-   * the original owner. Null for receipts written by an older build.
-   */
-  startedAtMs: number | null;
-}
-
-/** `<pid> <startedAtMs>` — the second field is omitted when unavailable. */
-export function daemonSocketOwnerReceiptText(
-  pid: number = process.pid,
-): string {
-  const startedAtMs = processStartedAtMs(pid);
-  return startedAtMs === null ? `${pid}\n` : `${pid} ${startedAtMs}\n`;
-}
-
-export function readDaemonSocketOwnerReceipt(
-  socketPath: string,
-): DaemonSocketOwnerReceipt | null {
-  try {
-    const raw = readFileSync(daemonSocketOwnerPath(socketPath), "utf8").trim();
-    if (!raw) return null;
-    const [pidText, startedText] = raw.split(/\s+/);
-    const pid = Number.parseInt(pidText ?? "", 10);
-    if (!Number.isInteger(pid) || pid <= 0) return null;
-    const startedAtMs = Number.parseInt(startedText ?? "", 10);
-    return {
-      pid,
-      startedAtMs: Number.isInteger(startedAtMs) ? startedAtMs : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function readDaemonSocketOwnerPid(socketPath: string): number | null {
-  return readDaemonSocketOwnerReceipt(socketPath)?.pid ?? null;
-}
-
-/** `ps lstart` has whole-second precision, so allow a one-second skew. */
-const OWNER_START_SKEW_MS = 1_000;
+export {
+  daemonSocketOwnerPath,
+  daemonSocketOwnerReceiptText,
+  readDaemonSocketOwnerReceipt,
+  readDaemonSocketOwnerPid,
+  daemonSocketOwnerAlive,
+  type DaemonSocketOwnerReceipt,
+} from "./daemon-socket-owner.js";
 
 /**
- * Is the recorded owner still the SAME live process? A bare-pid receipt (older
- * build) cannot rule out pid reuse, so it is trusted only while the pid is
- * live — which keeps #529's reboot fix working: a rebooted machine's leftover
- * receipt names a pid that is either gone or demonstrably a different process.
+ * Put a sheltered object back at its well-known path WITHOUT clobbering
+ * whatever may have taken that path meanwhile (#530, Codex P1).
+ *
+ * POSIX `rename` always replaces, so restoring with it can overwrite a
+ * successor that bound the briefly-vacant path — leaving a live daemon
+ * unreachable. `link(2)` refuses with EEXIST instead, which is exactly the
+ * no-replace semantic needed here (verified on macOS and Linux: link works on
+ * socket files and returns EEXIST on an occupied name).
+ *
+ * When the path is taken, the sheltered object is deliberately LEFT in place
+ * rather than deleted: an orphaned socket is recoverable, a deleted live one is
+ * not.
  */
-export function daemonSocketOwnerAlive(
-  receipt: DaemonSocketOwnerReceipt,
-): boolean {
-  if (processLiveness(receipt.pid) === "gone") {
-    return false;
-  }
-  if (receipt.startedAtMs !== null) {
-    const current = processStartedAtMs(receipt.pid);
-    if (
-      current !== null &&
-      Math.abs(current - receipt.startedAtMs) > OWNER_START_SKEW_MS
-    ) {
-      // The pid is live, but it is a DIFFERENT process wearing a recycled pid.
-      return false;
+async function restoreSheltered(
+  shelterPath: string,
+  path: string,
+  logger: Pick<Console, "error">,
+): Promise<void> {
+  try {
+    await link(shelterPath, path);
+    await unlinkIfPresent(shelterPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      logger.error(
+        `[cmuxlayer-daemon] not restoring ${shelterPath}: ${path} is owned by someone else now; leaving the sheltered copy in place`,
+      );
+      return;
     }
+    logger.error(
+      `[cmuxlayer-daemon] failed to restore ${shelterPath} to ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
-  return true;
 }
 
 /**
@@ -442,8 +430,6 @@ export function daemonSocketOwnerAlive(
  * the path free. Identity is then verified on a name no other process knows,
  * and anything we did not mean to move is put back rather than destroyed.
  *
- * `detachOwnedSocketPath()` already uses this shelter-and-restore idiom.
- *
  * Returns true when the path is ours to bind, false when we moved something
  * that turned out to belong to a successor (restored, and the caller refuses).
  */
@@ -451,6 +437,7 @@ async function reapClassifiedSocket(
   path: string,
   observedIdentity: DaemonSocketIdentity | null,
   readIdentity: (path: string) => Promise<DaemonSocketIdentity | null>,
+  logger: Pick<Console, "error">,
 ): Promise<boolean> {
   const reapingPath = `${path}.reaping-${process.pid}-${Date.now()}`;
   try {
@@ -477,14 +464,54 @@ async function reapClassifiedSocket(
     (await probeDaemonSocketPath(reapingPath)) === "live";
 
   if (!stillOurs || answersNow) {
-    // We grabbed something that is NOT what we classified — a successor bound
-    // here after our check. Put it back; never delete it.
-    await rename(reapingPath, path).catch(() => {});
+    await restoreSheltered(reapingPath, path, logger);
     return false;
   }
 
   await unlinkIfPresent(reapingPath);
   return true;
+}
+
+/**
+ * Remove the owner receipt only when it is still the one we classified, with
+ * validation and deletion made ATOMIC by the same shelter trick (#530, Codex).
+ *
+ * Comparing then unlinking left a window in which a successor could rewrite the
+ * receipt and have its brand-new one deleted — which later removes the
+ * live-owner evidence that protects that successor's own shutdown placeholder.
+ */
+async function unlinkOwnerReceiptIfUnchanged(
+  path: string,
+  expected: DaemonSocketOwnerReceipt | null,
+  logger: Pick<Console, "error">,
+): Promise<void> {
+  // No receipt at classification time also covers the absent-then-present case:
+  // a successor's brand-new receipt is never ours to delete.
+  if (expected === null) {
+    return;
+  }
+  const receiptPath = daemonSocketOwnerPath(path);
+  const shelterPath = `${receiptPath}.reaping-${process.pid}-${Date.now()}`;
+  try {
+    await rename(receiptPath, shelterPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  const moved = readDaemonSocketOwnerReceiptAt(shelterPath);
+  if (
+    moved !== null &&
+    moved.pid === expected.pid &&
+    moved.startedAtMs === expected.startedAtMs
+  ) {
+    await unlinkIfPresent(shelterPath);
+    return;
+  }
+  // A successor rewrote it between classification and now. Put it back.
+  await restoreSheltered(shelterPath, receiptPath, logger);
 }
 
 async function unlinkIfPresent(path: string): Promise<void> {
@@ -556,35 +583,6 @@ function sameIdentity(
     a.ino === b.ino &&
     a.kind === b.kind
   );
-}
-
-/**
- * #530 review P2-2: only remove the owner receipt when it still names the pid
- * we classified. The old unconditional unlink could delete a SUCCESSOR
- * daemon's receipt written between classification and reap.
- */
-async function unlinkOwnerReceiptIfUnchanged(
-  path: string,
-  expected: DaemonSocketOwnerReceipt | null,
-  readOwnerReceipt: (path: string) => DaemonSocketOwnerReceipt | null,
-): Promise<void> {
-  // No receipt at classification time also covers F8's absent-then-present
-  // case for the receipt: a successor's brand-new receipt is never ours to delete.
-  if (expected === null) {
-    return;
-  }
-  const current = readOwnerReceipt(path);
-  if (
-    current === null ||
-    current.pid !== expected.pid ||
-    current.startedAtMs !== expected.startedAtMs
-  ) {
-    // A successor that happens to REUSE the classified pid is still a
-    // different process, and its receipt is the only evidence later probes
-    // have that it owns the path (Macroscope, #530).
-    return;
-  }
-  await unlinkIfPresent(daemonSocketOwnerPath(path));
 }
 
 /**
@@ -662,6 +660,7 @@ export interface UnlinkStaleSocketOptions {
    * (#530 CI).
    */
   readIdentity?: (path: string) => Promise<DaemonSocketIdentity | null>;
+  logger?: Pick<Console, "error">;
 }
 
 /**
@@ -695,6 +694,7 @@ export async function unlinkStaleSocket(
     opts.readOwnerReceipt ?? readDaemonSocketOwnerReceipt;
   const ownerAlive = opts.ownerAlive ?? daemonSocketOwnerAlive;
   const readIdentity = opts.readIdentity ?? socketIdentity;
+  const logger = opts.logger ?? console;
 
   const refuse = (
     observedProbe: DaemonSocketProbe,
@@ -752,11 +752,7 @@ export async function unlinkStaleSocket(
   if (current === null) {
     // It vanished on its own between classification and reap. Nothing left to
     // delete, and the path is free for us to bind.
-    await unlinkOwnerReceiptIfUnchanged(
-      path,
-      observedReceipt,
-      readOwnerReceipt,
-    );
+    await unlinkOwnerReceiptIfUnchanged(path, observedReceipt, logger);
     recordDaemonSocketReap({ path, reason: `${reason}-vanished` });
     return "reaped";
   }
@@ -768,10 +764,12 @@ export async function unlinkStaleSocket(
     refuse("superseded", readOwnerReceipt(path));
   }
 
-  if (!(await reapClassifiedSocket(path, observedIdentity, readIdentity))) {
+  if (
+    !(await reapClassifiedSocket(path, observedIdentity, readIdentity, logger))
+  ) {
     refuse("superseded", readOwnerReceipt(path));
   }
-  await unlinkOwnerReceiptIfUnchanged(path, observedReceipt, readOwnerReceipt);
+  await unlinkOwnerReceiptIfUnchanged(path, observedReceipt, logger);
   recordDaemonSocketReap({ path, reason });
   return "reaped";
 }
@@ -1510,7 +1508,7 @@ export class CmuxLayerDaemon {
       await unlinkIfPresent(this.socketPath).catch(() => {});
     }
 
-    if (readDaemonSocketOwnerPid(this.socketPath) === process.pid) {
+    if (readDaemonSocketOwnerReceipt(this.socketPath)?.pid === process.pid) {
       await unlinkIfPresent(daemonSocketOwnerPath(this.socketPath)).catch(
         () => {},
       );

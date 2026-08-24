@@ -10,6 +10,7 @@ import {
 } from "./proxy.js";
 import { defaultDaemonSocketPath as resolveDefaultDaemonSocketPath } from "./daemon-socket-path.js";
 import {
+  awaitDaemonStderrDrained,
   capturedDaemonStderr,
   spawnDaemonProcess,
   type SpawnDaemonOptions,
@@ -20,6 +21,7 @@ import {
   recordDaemonExit,
   recordDaemonLifecycleError,
 } from "./daemon-lifecycle-state.js";
+import { daemonSocketHasLiveOwner } from "./daemon-socket-owner.js";
 import { callerContextFromEnv } from "./caller-context.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
@@ -222,6 +224,14 @@ export async function awaitDaemonReadiness(
       return;
     }
     onExit = (code, signal) => {
+      // #530 (Codex P1): give the piped stderr a bounded moment to finish
+      // arriving before we classify the failure — the daemon prints its refusal
+      // marker and exits immediately, so `exit` can beat the pipe.
+      void awaitDaemonStderrDrained(child).then(() => {
+        rejectWithExit(code, signal);
+      });
+    };
+    const rejectWithExit = (code: number | null, signal: string | null) => {
       // Record here as well as in the spawner: readiness is the authority on
       // "the daemon died before it could serve", whoever spawned it.
       recordDaemonExit({
@@ -413,13 +423,27 @@ export function bindProxyStdioLifecycle(opts: {
  * prints `fatal code=EDAEMONSOCKETINUSE` before exiting, so this is a
  * structured check rather than prose matching (#530).
  */
-export function isOwnerBusyFailure(error: unknown): boolean {
-  return (
-    error instanceof DaemonStartupFailedError &&
+export function isOwnerBusyFailure(
+  error: unknown,
+  socketPath?: string,
+): boolean {
+  if (!(error instanceof DaemonStartupFailedError)) {
+    return false;
+  }
+  if (
     /EDAEMONSOCKETINUSE|DaemonSocketInUseError|socket is already in use/.test(
       error.stderrExcerpt,
     )
-  );
+  ) {
+    return true;
+  }
+  // #530 (Codex P1): stderr is NOT guaranteed to be drained when `exit` fires —
+  // the daemon calls process.exit(1) immediately after printing the marker, so
+  // the excerpt can be empty. Fall back to OUT-OF-BAND evidence: if a live
+  // owner still claims the socket path, the refusal was an owner-busy refusal
+  // whatever we did or did not manage to read.
+  const path = socketPath ?? error.socketPath;
+  return path ? daemonSocketHasLiveOwner(path) : false;
 }
 
 export interface DaemonHandoffOptions {
@@ -604,7 +628,7 @@ export async function runDaemonFirstEntry(
   // two-sources-of-truth harm the refusal exists to prevent. Wait for the
   // handoff instead: the drainer removes its placeholder when it finishes, and
   // either it or a successor answers on the socket.
-  if (isOwnerBusyFailure(readinessError)) {
+  if (isOwnerBusyFailure(readinessError, socketPath)) {
     terminateSpawnedDaemon(spawnedDaemon, logger);
     const handoff = await awaitDaemonHandoff({
       socketPath,

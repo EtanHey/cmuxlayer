@@ -33,6 +33,47 @@ export function capturedDaemonStderr(child: unknown): string {
   return daemonStderrExcerpt(capturedStderr.get(child as object)?.text ?? "");
 }
 
+interface Settled {
+  promise: Promise<void>;
+  resolve: () => void;
+}
+
+function createSettled(): Settled {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+const stderrDrained = new WeakMap<object, Promise<void>>();
+
+/**
+ * Wait, briefly, for a dead child's stderr to finish arriving (#530).
+ *
+ * A daemon that refuses the socket prints its marker and calls
+ * `process.exit(1)` immediately, so `exit` can beat the pipe and leave the
+ * excerpt empty. `close` fires only once stdio is done — this waits for that,
+ * bounded, so a child that never closes cannot stall readiness.
+ */
+export async function awaitDaemonStderrDrained(
+  child: unknown,
+  timeoutMs = 300,
+): Promise<void> {
+  if (!child || typeof child !== "object") return;
+  const drained = stderrDrained.get(child as object);
+  if (!drained) return;
+  let timer: NodeJS.Timeout | null = null;
+  await Promise.race([
+    drained,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+      timer.unref?.();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
 let parentStderrGuardInstalled = false;
 
 /**
@@ -80,6 +121,8 @@ export async function spawnDaemonProcess(
 
   const buffer = { text: "" };
   capturedStderr.set(child, buffer);
+  const stderrSettled = createSettled();
+  stderrDrained.set(child, stderrSettled.promise);
   if (captureStderr && child.stderr) {
     const stderrStream = child.stderr;
     // #530 review P2-5: EPIPE on process.stderr arrives ASYNCHRONOUSLY, so a
@@ -131,6 +174,11 @@ export async function spawnDaemonProcess(
     opts.logger.error(
       `[cmuxlayer-proxy] spawned daemon failed (pid=${child.pid ?? "unknown"}): ${error.message}`,
     );
+  });
+  child.once("close", () => {
+    // #530 (Codex P1): `close` fires only after the stdio streams are done, so
+    // by here the captured excerpt is complete. `exit` alone can beat the pipe.
+    stderrSettled.resolve();
   });
   child.once("exit", (code, signal) => {
     recordDaemonExit({

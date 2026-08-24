@@ -208,13 +208,17 @@ describe("#529 daemon socket path handling", () => {
     expect(existsSync(path)).toBe(true);
   });
 
-  it("keeps a successor's receipt when it reuses the classified pid", async () => {
-    // Macroscope (#530): comparing only the pid deleted a successor's receipt
-    // when the pid was recycled, destroying the evidence later probes rely on.
-    const path = testSocketPath("receipt-pid-reuse");
+  it("restores, never deletes, a receipt a successor rewrote", async () => {
+    // Macroscope + Codex (#530): comparing the receipt and THEN unlinking left a
+    // window in which a successor could rewrite it and have its brand-new
+    // receipt deleted — which later strips the live-owner evidence protecting
+    // that successor's own shutdown placeholder. Validation and deletion are now
+    // made atomic by the same shelter-and-verify trick used for the socket.
+    const path = testSocketPath("receipt-rewritten");
     rmSync(path, { force: true });
     writeFileSync(path, "");
-    writeFileSync(`${path}.owner`, "999999 111\n");
+    // What is actually on disk is the SUCCESSOR's receipt.
+    writeFileSync(`${path}.owner`, "424242 999\n");
     cleanups.push(() => {
       rmSync(path, { force: true });
       rmSync(`${path}.owner`, { force: true });
@@ -223,20 +227,16 @@ describe("#529 daemon socket path handling", () => {
     await expect(
       unlinkStaleSocket(path, {
         probe: async () => "stale",
-        // The successor rewrites the receipt with the SAME pid but a different
-        // start time between classification and reap.
-        readOwnerReceipt: (() => {
-          let call = 0;
-          return () => {
-            call += 1;
-            return { pid: 999999, startedAtMs: call === 1 ? 111 : 222 };
-          };
-        })(),
+        // We classified a DIFFERENT receipt than the one now on disk.
+        readOwnerReceipt: () => ({ pid: 111111, startedAtMs: 1 }),
         ownerAlive: () => false,
+        logger: { error: () => {} },
       }),
     ).resolves.toBe("reaped");
-    // Socket reaped, but the successor's receipt survives.
+
+    // Socket reaped, but the successor's receipt survives intact.
     expect(existsSync(`${path}.owner`)).toBe(true);
+    expect(readFileSync(`${path}.owner`, "utf8").trim()).toBe("424242 999");
   });
 
   it("F8: refuses a socket that appeared during classification", async () => {
@@ -655,6 +655,50 @@ describe("#530 daemon handoff instead of a competing backend", () => {
 
     expect(attached).toBe(false);
   }, 5_000);
+
+  it("classifies owner-busy from the RECEIPT when stderr never arrived", async () => {
+    // Codex P1: the daemon prints its marker then calls process.exit(1), so the
+    // piped stderr can still be in flight when `exit` fires. If the decision
+    // rested on stderr alone, an empty excerpt made the entry skip the handoff
+    // and start an in-process backend beside a still-draining daemon.
+    const path = testSocketPath("owner-busy-oob");
+    rmSync(path, { force: true });
+    writeFileSync(path, "");
+    writeFileSync(`${path}.owner`, daemonSocketOwnerReceiptText());
+    cleanups.push(() => {
+      rmSync(path, { force: true });
+      rmSync(`${path}.owner`, { force: true });
+    });
+
+    const noStderr = new DaemonStartupFailedError({
+      socketPath: path,
+      exitCode: 1,
+      stderrExcerpt: "",
+    });
+    // Out-of-band evidence: a LIVE owner still claims the path.
+    expect(isOwnerBusyFailure(noStderr, path)).toBe(true);
+
+    // A dead owner is not owner-busy, so a genuinely broken daemon still falls
+    // through to the fallback instead of waiting out a handoff that never comes.
+    const deadPath = testSocketPath("owner-busy-dead");
+    rmSync(deadPath, { force: true });
+    writeFileSync(deadPath, "");
+    writeFileSync(`${deadPath}.owner`, "999999 1\n");
+    cleanups.push(() => {
+      rmSync(deadPath, { force: true });
+      rmSync(`${deadPath}.owner`, { force: true });
+    });
+    expect(
+      isOwnerBusyFailure(
+        new DaemonStartupFailedError({
+          socketPath: deadPath,
+          exitCode: 1,
+          stderrExcerpt: "",
+        }),
+        deadPath,
+      ),
+    ).toBe(false);
+  });
 
   it("classifies a socket-in-use daemon exit as owner-busy, not a hard failure", () => {
     const busy = new DaemonStartupFailedError({
