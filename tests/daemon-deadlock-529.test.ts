@@ -253,6 +253,33 @@ describe("#536 follow-up: placeholder removal is identity-checked", () => {
     expect(existsSync(path)).toBe(false);
   }, 10_000);
 
+  it("never deletes a non-empty operator file at the socket path", async () => {
+    // #537 review (Macroscope Critical): rejecting only sockets let a NON-EMPTY
+    // operator file pass both identity checks and be deleted.
+    const path = testSocketPath("cleanup-operator-file");
+    rmSync(path, { force: true });
+
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: listSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+    await daemon.start();
+    await daemon.shutdown();
+
+    writeFileSync(path, "operator data\n");
+    cleanups.push(() => rmSync(path, { force: true }));
+
+    await (
+      daemon as unknown as {
+        removeOwnedSocketPlaceholder(): Promise<void>;
+      }
+    ).removeOwnedSocketPlaceholder();
+
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, "utf8")).toBe("operator data\n");
+  }, 10_000);
+
   it("leaves a successor's live socket alone", async () => {
     // Macroscope Critical / Codex P1 asked for identity revalidation between
     // the lstat and the unlink. The narrow interleaving itself is not
@@ -302,6 +329,20 @@ describe("#536 follow-up: readiness honours always-settles", () => {
       probeDaemon: () => new Promise<boolean>(() => {}),
       sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
       timeoutMs: 40,
+      pollMs: 5,
+    });
+    await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+  }, 3_000);
+
+  it("rejects immediately at timeoutMs=0 when the probe never settles", async () => {
+    // #537 review (Macroscope): the zero-timeout path bypassed the deadline
+    // race entirely, so a hung probe hung forever on the configuration that
+    // asks for no waiting at all.
+    const readiness = awaitDaemonReadiness({
+      socketPath: "/tmp/cmux529/zero-timeout.sock",
+      probeDaemon: () => new Promise<boolean>(() => {}),
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      timeoutMs: 0,
       pollMs: 5,
     });
     await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);

@@ -1217,12 +1217,20 @@ export class CmuxLayerDaemon {
       // and an operator file that replaced the placeholder was deleted too.
       // Capture the identity we inspected and prove it is still the same object
       // immediately before removing it.
-      const observed = await socketIdentity(this.socketPath);
-      if (observed === null || observed.kind === "socket") {
-        // Gone already, or a successor bound a real socket here. Either way it
-        // is not our placeholder to remove.
+      // #537 review (Macroscope Critical): rejecting only sockets was not
+      // enough — a NON-EMPTY operator file sitting at the path passed both
+      // identity checks and was deleted. The placeholder we create is an EMPTY
+      // regular file, so require exactly that shape, matching the same size
+      // rule `probeDaemonSocketPath` uses.
+      const stats = await lstat(this.socketPath);
+      if (!stats.isFile() || stats.size !== 0) {
         return;
       }
+      const observed: DaemonSocketIdentity = {
+        dev: stats.dev,
+        ino: stats.ino,
+        kind: "file",
+      };
       if (!sameIdentity(await socketIdentity(this.socketPath), observed)) {
         // Replaced between the check and the unlink.
         return;

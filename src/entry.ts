@@ -278,7 +278,11 @@ export async function awaitDaemonReadiness(
    * wait never leaves a pending handle behind.
    */
   const withDeadline = async <T>(work: Promise<T>): Promise<T> => {
-    if (opts.timeoutMs === 0) return work;
+    // #537 review (Macroscope): an early return for `timeoutMs === 0` bypassed
+    // the race entirely, so a never-settling probe hung forever on exactly the
+    // configuration that asks for no waiting at all. A zero deadline yields a
+    // 0ms timer instead: a well-behaved probe still wins on the microtask
+    // queue, a hung one rejects immediately.
     let timer: NodeJS.Timeout | null = null;
     try {
       return await Promise.race([
