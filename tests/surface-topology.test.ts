@@ -291,6 +291,38 @@ describe("collectSurfaceTopology", () => {
     });
   });
 
+  it("rejects a snapshot when only its distinct observer owner changes", async () => {
+    let observerId = "cmux:/tmp/cmux-primary.sock";
+    const observerEpoch = "cmux-route@socket:1";
+    const client = makeTopologyClient(
+      [pane("pane:right", 0, ["surface:1"])],
+      [
+        {
+          workspace_ref: "workspace:1",
+          pane_ref: "pane:right",
+          surfaces: [surface("surface:1")],
+        },
+      ],
+    );
+    const listPaneSurfaces = client.listPaneSurfaces.getMockImplementation()!;
+    client.listPaneSurfaces.mockImplementation(async (opts) => {
+      const result = await listPaneSurfaces(opts);
+      observerId = "cmux:/tmp/cmux-secondary.sock";
+      return result;
+    });
+
+    const snapshot = await collectSurfaceTopology(
+      client,
+      "workspace:1",
+      () => observerEpoch,
+      () => observerId,
+    );
+
+    expect(observerEpoch).toBe("cmux-route@socket:1");
+    expect(observerId).toBe("cmux:/tmp/cmux-secondary.sock");
+    expect(snapshot).toBeNull();
+  });
+
   it("resolves a stale ref through the stable UUID from the same topology observation", async () => {
     const surfaceUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
     const panes = [

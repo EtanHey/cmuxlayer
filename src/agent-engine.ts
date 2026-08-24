@@ -898,6 +898,10 @@ interface SweepAgentContext {
   observedSurfaceRef?: string | null;
 }
 
+interface SweepMutationSkipAccounting {
+  counted: boolean;
+}
+
 class PlacementSurfaceBindingError extends Error {}
 
 interface StopPostConditionResult {
@@ -5197,12 +5201,21 @@ export class AgentEngine {
 
   private canRunSnapshotBackedSweepMutation(
     surfaceTopology: SurfaceTopologySnapshot | null,
+    skipAccounting: SweepMutationSkipAccounting,
   ): boolean {
     if (this.isSweepTopologyObserverCurrent(surfaceTopology)) return true;
-    // The topology belongs to a replaced route. Count each preserved mutation
-    // as reason=epoch_changed and never re-collect partway through this sweep.
-    this.sweepSkippedMutations += 1;
+    // The topology belongs to a replaced route. Count this preserved sweep tick
+    // once as reason=epoch_changed and never re-collect partway through it.
+    this.countSkippedSweepTick(skipAccounting);
     return false;
+  }
+
+  private countSkippedSweepTick(
+    skipAccounting: SweepMutationSkipAccounting,
+  ): void {
+    if (skipAccounting.counted) return;
+    skipAccounting.counted = true;
+    this.sweepSkippedMutations += 1;
   }
 
   private assertSurfaceObserverEpochCurrent(
@@ -5243,6 +5256,7 @@ export class AgentEngine {
   private async syncSidebar(
     opts: { firstConnect?: boolean } = {},
     surfaceTopologyOverride?: SurfaceTopologySnapshot | null,
+    snapshotMutationAllowed?: () => boolean,
   ): Promise<void> {
     const agents = this.registry.list();
     const total = agents.length;
@@ -5277,6 +5291,9 @@ export class AgentEngine {
     const fleetCandidates: FleetSidebarCandidate[] = [];
 
     for (const registryAgent of agents) {
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
       if (opts.firstConnect && TERMINAL_STATES.has(registryAgent.state)) {
         this.cliExitShellMatches.delete(registryAgent.agent_id);
         continue;
@@ -5350,6 +5367,9 @@ export class AgentEngine {
         bindingPatch.surface_observer_id = observerId;
       }
       if (Object.keys(bindingPatch).length > 0) {
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          continue;
+        }
         originalAgent = this.stateMgr.updateRecord(
           originalAgent.agent_id,
           bindingPatch,
@@ -5371,6 +5391,9 @@ export class AgentEngine {
         sweepCtx,
         taskDoneResult.screenText,
       );
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
       const initialAgentId = agent.agent_id;
       if (this.isKnownClosedSurface(agent, surfaceTopology)) {
         const prev = this.sidebarSnapshot.get(initialAgentId);
@@ -5489,12 +5512,17 @@ export class AgentEngine {
           harvestability,
         },
       );
-      if (
-        !(await this.sweepReadMatchesBinding(
-          sweepCtx,
-          surfaceBinding.surfaceRef,
-        ))
-      ) {
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
+      const sweepReadMatchesBinding = await this.sweepReadMatchesBinding(
+        sweepCtx,
+        surfaceBinding.surfaceRef,
+      );
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
+      if (!sweepReadMatchesBinding) {
         // The fresh I/O resolver observed this stable UUID at a different ref
         // than the topology snapshot that began the sweep. The screen belongs
         // to the fresh route, while title/topology still belong to the outer
@@ -5524,12 +5552,18 @@ export class AgentEngine {
       if (haltScreenText !== undefined) {
         agent = await this.maybeEscalateLiveHalt(agent, haltScreenText);
       }
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
       const { agent_id: agentId, state } = agent;
       const boundSurfaceRef = surfaceBinding.surfaceRef;
       const boundWorkspaceId =
         surfaceBinding.workspaceId ?? agent.workspace_id ?? null;
       const health = evaluateAgentHealth(agent, healthInput);
       await this.maybeNotifyLeadMonitorDeath(agent, healthInput);
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
       const healthSignature = this.healthSignature(health);
       const statusValue = this.buildSidebarStatusValue(
         agent,
@@ -5580,6 +5614,9 @@ export class AgentEngine {
       }
 
       if (!(opts.firstConnect && TERMINAL_STATES.has(state))) {
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          continue;
+        }
         fleetCandidates.push({
           agentId: agent.agent_id,
           agentType: agent.cli,
@@ -5634,6 +5671,9 @@ export class AgentEngine {
           } catch {
             // Best-effort cleanup of stale workspace-scoped status.
           }
+        }
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          continue;
         }
         const sidebar = STATE_SIDEBAR[state];
         statusUpdates.push({
@@ -5724,6 +5764,10 @@ export class AgentEngine {
       }
     }
 
+    if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+      return;
+    }
+
     let statusBatchApplied = true;
     if (statusUpdates.length === 1) {
       const [update] = statusUpdates;
@@ -5755,6 +5799,9 @@ export class AgentEngine {
     }
     for (const [agentId, snapshot] of this.sidebarSnapshot) {
       if (!currentAgentIds.has(agentId)) {
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          return;
+        }
         try {
           await this.client.clearStatus(agentId, {
             workspace: snapshot.workspaceId ?? undefined,
@@ -5789,6 +5836,9 @@ export class AgentEngine {
           : opts.firstConnect
             ? "unknown"
             : "empty";
+    if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+      return;
+    }
     try {
       this.fleetSidebarPublisher.publish({
         state: publicationState,
@@ -7196,6 +7246,7 @@ export class AgentEngine {
   }
 
   private async runSweepOnce(): Promise<void> {
+    const skipAccounting: SweepMutationSkipAccounting = { counted: false };
     this.currentSweepScreenSignatures = new Map();
     await this.runCloseForensicsBestEffort();
     const surfaceTopology = await this.collectObservedSurfaceTopology();
@@ -7227,17 +7278,23 @@ export class AgentEngine {
         ...surfacelessConfirmation,
         ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
       };
-      if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
+      if (
+        this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
+      ) {
         await this.registry.reconcile(observed);
       }
-      if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
+      if (
+        this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
+      ) {
         await this.registry.evictSurfaceless(observed);
       }
-      if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
+      if (
+        this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
+      ) {
         await this.purgeStartupTerminalAgents();
       }
     } else {
-      this.sweepSkippedMutations += 1;
+      this.countSkippedSweepTick(skipAccounting);
     }
 
     // Deferred transcript identity does not require a live surface binding.
@@ -7247,7 +7304,7 @@ export class AgentEngine {
     await this.sweepWatchesBestEffort();
     if (
       mutationsAreSafe &&
-      this.canRunSnapshotBackedSweepMutation(surfaceTopology)
+      this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
     ) {
       await this.registry.purgeTerminal({
         ...surfacelessConfirmation,
@@ -7257,14 +7314,18 @@ export class AgentEngine {
     await this.sweepMonitorRegistryBestEffort();
     if (
       mutationsAreSafe &&
-      this.canRunSnapshotBackedSweepMutation(surfaceTopology)
+      this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
     ) {
       await this.reconcileRolePlacements("idle", { surfaceTopology });
     }
     if (!mutationsAreSafe) {
       await this.syncSidebar({}, null);
-    } else if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
-      await this.syncSidebar({}, surfaceTopology);
+    } else if (
+      this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
+    ) {
+      await this.syncSidebar({}, surfaceTopology, () =>
+        this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting),
+      );
     }
     await this.drainOutboxBestEffort();
   }

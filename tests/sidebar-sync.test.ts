@@ -573,9 +573,119 @@ describe("Sidebar Sync", () => {
       surface_id: "surface:stale",
       surface_uuid: stableUuid,
     });
-    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBeGreaterThan(
-      0,
+    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
+  });
+
+  it("stops sidebar updates when the observer epoch changes during an earlier agent read", async () => {
+    engine.dispose();
+    (
+      mockClient as unknown as Record<string, unknown>
+    ).supportsStableSurfaceReads = true;
+    const observerId = "cmux:/tmp/cmux-primary.sock";
+    let observerEpoch = `${observerId}@socket:1`;
+    const firstUuid = "11111111-2222-4333-8444-555555555551";
+    const secondUuid = "11111111-2222-4333-8444-555555555552";
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+      observerIdProvider: () => observerId,
+      observerEpochProvider: () => observerEpoch,
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: (publication) => {
+          if ("snapshot" in publication) {
+            publishedFleetPublications.push(publication);
+          }
+        },
+        dispose: () => {},
+      },
+    });
+    const first = makeRecord({
+      agent_id: "epoch-read-agent-1",
+      surface_id: "surface:one",
+      surface_uuid: firstUuid,
+      surface_observer_id: observerId,
+      workspace_id: "workspace:test",
+      state: "working",
+      role: "worker",
+      cli_session_id: "session-1",
+    });
+    const second = makeRecord({
+      agent_id: "epoch-read-agent-2",
+      surface_id: "surface:stale-two",
+      surface_uuid: secondUuid,
+      surface_observer_id: observerId,
+      workspace_id: "workspace:stale",
+      state: "working",
+      role: "worker",
+      cli_session_id: "session-2",
+    });
+    for (const record of [first, second]) {
+      stateMgr.writeState(record);
+      registry.set(record.agent_id, record);
+    }
+    vi.spyOn(registry, "reconcile").mockResolvedValue(new Set());
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:one"),
+        id: firstUuid,
+        workspace_ref: "workspace:test",
+      },
+      {
+        ...makeSurface("surface:two"),
+        id: secondUuid,
+        workspace_ref: "workspace:test",
+      },
+    ];
+    let releaseFirstRead: (() => void) | undefined;
+    const firstReadStarted = new Promise<void>((resolve) => {
+      mockClient.readScreen.mockImplementation(async (surface: string) => {
+        if (surface.toLowerCase() === firstUuid.toLowerCase()) {
+          resolve();
+          await new Promise<void>((release) => {
+            releaseFirstRead = release;
+          });
+        }
+        return {
+          surface,
+          text: "gpt-5.6 · Working",
+          lines: 20,
+          scrollback_used: false,
+        };
+      });
+    });
+
+    const sweep = engine.runSweep();
+    await firstReadStarted;
+    observerEpoch = `${observerId}@socket:2`;
+    releaseFirstRead?.();
+    await sweep;
+
+    expect(registry.get(second.agent_id)).toMatchObject({
+      surface_id: "surface:stale-two",
+      workspace_id: "workspace:stale",
+      surface_observer_id: observerId,
+    });
+    expect(stateMgr.readState(second.agent_id)).toMatchObject({
+      surface_id: "surface:stale-two",
+      workspace_id: "workspace:stale",
+      surface_observer_id: observerId,
+    });
+    expect(mockClient.setStatus).not.toHaveBeenCalledWith(
+      second.agent_id,
+      expect.anything(),
+      expect.anything(),
     );
+    const publishedAgentIds = publishedFleetPublications.flatMap(
+      (publication) =>
+        publication.snapshot.lanes.flatMap((lane) =>
+          lane.seats.map((seat) => seat.agentId),
+        ),
+    );
+    expect(publishedAgentIds).not.toContain(second.agent_id);
+    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
   });
 
   it("enumerates topology once through live-agent sidebar and liveness paths", async () => {
@@ -666,9 +776,10 @@ describe("Sidebar Sync", () => {
       },
     ];
     await engine.getRegistry().reconstitute();
-    let releaseRead!: () => void;
+    let releaseRead: (() => void) | undefined;
     const readStarted = new Promise<void>((resolve) => {
       mockClient.readScreen.mockImplementation(async (surface: string) => {
+        releaseRead?.();
         liveSurfaces = [
           {
             ...makeSurface("surface:new"),
@@ -694,7 +805,7 @@ describe("Sidebar Sync", () => {
     const concurrentRoute = await engine.resolveAgentIoRoute(
       "concurrent-route-agent",
     );
-    releaseRead();
+    releaseRead?.();
     await sweep;
 
     expect(concurrentRoute.surface_id).toBe("surface:new");
