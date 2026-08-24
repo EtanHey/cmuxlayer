@@ -127,6 +127,28 @@ describe("#529 daemon socket path handling", () => {
     expect(readFileSync(path, "utf8")).toBe("important user data\n");
   });
 
+  it("the reap boundary is size: 0 bytes reaped, 1 byte preserved", async () => {
+    // Lead ruling on the Codex P1 (#536): an EMPTY regular file at the socket
+    // path IS the reboot leftover #529 exists to clear, and 0 bytes carries no
+    // operator data to destroy. The guarantee is the size check — anything
+    // non-empty is untouchable. This pins both sides of that boundary.
+    const empty = testSocketPath("boundary-empty");
+    rmSync(empty, { force: true });
+    writeFileSync(empty, "");
+    cleanups.push(() => rmSync(empty, { force: true }));
+    await expect(unlinkStaleSocket(empty)).resolves.toBe("reaped");
+    expect(existsSync(empty)).toBe(false);
+
+    const oneByte = testSocketPath("boundary-one-byte");
+    rmSync(oneByte, { force: true });
+    writeFileSync(oneByte, "x");
+    cleanups.push(() => rmSync(oneByte, { force: true }));
+    await expect(unlinkStaleSocket(oneByte)).rejects.toBeInstanceOf(
+      DaemonSocketPathOccupiedError,
+    );
+    expect(readFileSync(oneByte, "utf8")).toBe("x");
+  });
+
   it("fails closed on an inconclusive probe", async () => {
     // An unanswered probe is not evidence that the path is free.
     const path = testSocketPath("inconclusive");
@@ -209,6 +231,156 @@ describe("#529 daemon socket path handling", () => {
     // The successor's live socket is still at the well-known path.
     expect(statSync(path).isSocket()).toBe(true);
   });
+});
+
+describe("#536 follow-up: placeholder removal is identity-checked", () => {
+  it("removes its OWN placeholder on clean shutdown", async () => {
+    // The #529 root cause: the shutdown placeholder was left behind, and the
+    // next daemon could not reap it. A clean shutdown must leave the path free.
+    const path = testSocketPath("placeholder-cleanup");
+    rmSync(path, { force: true });
+
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: listSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+    cleanups.push(() => rmSync(path, { force: true }));
+
+    await daemon.start();
+    expect(statSync(path).isSocket()).toBe(true);
+    await daemon.shutdown();
+    expect(existsSync(path)).toBe(false);
+  }, 10_000);
+
+  it("never deletes a non-empty operator file at the socket path", async () => {
+    // #537 review (Macroscope Critical): rejecting only sockets let a NON-EMPTY
+    // operator file pass both identity checks and be deleted.
+    const path = testSocketPath("cleanup-operator-file");
+    rmSync(path, { force: true });
+
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: listSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+    await daemon.start();
+    await daemon.shutdown();
+
+    writeFileSync(path, "operator data\n");
+    cleanups.push(() => rmSync(path, { force: true }));
+
+    await (
+      daemon as unknown as {
+        removeOwnedSocketPlaceholder(): Promise<void>;
+      }
+    ).removeOwnedSocketPlaceholder();
+
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, "utf8")).toBe("operator data\n");
+  }, 10_000);
+
+  it("leaves a successor's live socket alone", async () => {
+    // Macroscope Critical / Codex P1 asked for identity revalidation between
+    // the lstat and the unlink. The narrow interleaving itself is not
+    // deterministically reproducible without an injected filesystem seam — see
+    // the PR body — so this asserts the observable contract: a SOCKET at the
+    // path is never removed by the placeholder cleanup.
+    const path = testSocketPath("successor-survives");
+    rmSync(path, { force: true });
+
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: listSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+    await daemon.start();
+    await daemon.shutdown();
+
+    const successor = net.createServer(() => {});
+    await new Promise<void>((resolve) =>
+      successor.listen(path, () => resolve()),
+    );
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          successor.close(() => resolve());
+          rmSync(path, { force: true });
+        }),
+    );
+
+    await (
+      daemon as unknown as {
+        removeOwnedSocketPlaceholder(): Promise<void>;
+      }
+    ).removeOwnedSocketPlaceholder();
+
+    expect(statSync(path).isSocket()).toBe(true);
+  }, 10_000);
+});
+
+describe("#536 follow-up: readiness honours always-settles", () => {
+  it("rejects at the deadline even when the probe NEVER settles", async () => {
+    // Codex P2: the loop awaited probeDaemon directly, so a probe that never
+    // settled blocked before the deadline check and the whole helper hung —
+    // the deadlock it exists to bound, reproduced inside it.
+    const startedAt = Date.now();
+    const readiness = awaitDaemonReadiness({
+      socketPath: "/tmp/cmux529/never-settles.sock",
+      probeDaemon: () => new Promise<boolean>(() => {}),
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      timeoutMs: 40,
+      pollMs: 5,
+    });
+    await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+    // Near the deadline, not merely before the test timeout: a regression that
+    // rejects after seconds would otherwise still pass (CodeRabbit, #537).
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  }, 3_000);
+
+  it("rejects immediately at timeoutMs=0 when the probe never settles", async () => {
+    // #537 review (Macroscope): the zero-timeout path bypassed the deadline
+    // race entirely, so a hung probe hung forever on the configuration that
+    // asks for no waiting at all.
+    const startedAt = Date.now();
+    const readiness = awaitDaemonReadiness({
+      socketPath: "/tmp/cmux529/zero-timeout.sock",
+      probeDaemon: () => new Promise<boolean>(() => {}),
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      timeoutMs: 0,
+      pollMs: 5,
+    });
+    await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  }, 3_000);
+
+  it("rejects at the deadline even when the SLEEP never settles", async () => {
+    const startedAt = Date.now();
+    const readiness = awaitDaemonReadiness({
+      socketPath: "/tmp/cmux529/sleep-hangs.sock",
+      probeDaemon: async () => false,
+      sleep: () => new Promise<void>(() => {}),
+      timeoutMs: 40,
+      pollMs: 5,
+    });
+    await expect(readiness).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  }, 3_000);
+
+  it("does not overshoot the deadline when pollMs exceeds timeoutMs", async () => {
+    const startedAt = Date.now();
+    await expect(
+      awaitDaemonReadiness({
+        socketPath: "/tmp/cmux529/overshoot.sock",
+        probeDaemon: async () => false,
+        sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+        timeoutMs: 50,
+        // Far larger than the deadline: an uncapped sleep would block ~5s.
+        pollMs: 5_000,
+      }),
+    ).rejects.toBeInstanceOf(DaemonReadinessTimeoutError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  }, 5_000);
 });
 
 describe("#529 daemon readiness propagation", () => {

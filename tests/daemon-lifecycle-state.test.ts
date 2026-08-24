@@ -7,6 +7,9 @@
  * that actually matters.
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   DaemonReadinessTimeoutError,
   DaemonSocketInUseError,
@@ -110,6 +113,48 @@ describe("daemon lifecycle state", () => {
       "dead-owner-leftover",
     );
   });
+
+  it("captures the stderr of a FAST-FAILING child, not an empty excerpt", async () => {
+    // #536 review (Macroscope): the record was written from `exit`, which
+    // snapshots the buffer BEFORE the stderr pipe has drained. The real daemon
+    // does exactly this shape — print the fatal, then `process.exit(1)` — so a
+    // lost excerpt loses the evidence #529 needed.
+    //
+    // HONEST NOTE: on the pre-fix code this is a RACE, not a guaranteed
+    // failure — a short write often lands before `exit` fires, which is why it
+    // did not bite when run against main. What the fix changes is that the
+    // capture is now deterministic (recorded on `close`, after stdio
+    // completes) rather than dependent on that timing. This test asserts the
+    // contract; it cannot prove the removal of a race in one run.
+    const { spawnDaemonProcess } = await import("../src/daemon-spawn.js");
+    const dir = mkdtempSync(join(tmpdir(), "cmux536-stderr-"));
+    const script = join(dir, "fast-fail.js");
+    writeFileSync(
+      script,
+      'process.stderr.write("[cmuxlayer-daemon] fatal Error: boom\\n");\n' +
+        "process.exit(1);\n",
+    );
+
+    const child = await spawnDaemonProcess({
+      socketPath: join(dir, "unused.sock"),
+      env: {},
+      daemonScriptPath: script,
+      logger: { error: () => {} },
+      // Keep the test's own stderr clean; capture still happens.
+      stderrSink: () => {},
+    });
+
+    await new Promise<void>((resolve) => {
+      child.once("close", () => setTimeout(resolve, 50));
+    });
+
+    const snapshot = daemonLifecycleSnapshot();
+    expect(snapshot.last_exit).not.toBeNull();
+    expect(snapshot.last_exit?.code).toBe(1);
+    expect(snapshot.last_exit?.stderr_excerpt).toContain("fatal Error: boom");
+
+    rmSync(dir, { recursive: true, force: true });
+  }, 10_000);
 
   it("bounds the stderr excerpt from the tail", () => {
     const excerpt = daemonStderrExcerpt(`${"x".repeat(5_000)}TAIL`);

@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
 import net from "node:net";
-import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
@@ -551,6 +558,7 @@ export class CmuxLayerDaemon {
   private readonly monitorReconcileIntervalMs: number;
   private readonly logger: Pick<Console, "error">;
   private ownedSocketIdentity: { dev: number; ino: number } | null = null;
+  private ownedPlaceholderIdentity: DaemonSocketIdentity | null = null;
 
   constructor(private readonly opts: CmuxLayerDaemonOptions = {}) {
     this.context = opts.context ?? null;
@@ -1211,13 +1219,70 @@ export class CmuxLayerDaemon {
       return;
     }
     try {
+      // #536 review (Macroscope Critical / Codex P1): this used to `lstat` and
+      // then `unlink` BY PATHNAME. A successor that removed the placeholder and
+      // bound its own socket between those two calls lost its live endpoint —
+      // and an operator file that replaced the placeholder was deleted too.
+      // Capture the identity we inspected and prove it is still the same object
+      // immediately before removing it.
+      // #537 review (Macroscope Critical): rejecting only sockets was not
+      // enough — a NON-EMPTY operator file sitting at the path passed both
+      // identity checks and was deleted. The placeholder we create is an EMPTY
+      // regular file, so require exactly that shape, matching the same size
+      // rule `probeDaemonSocketPath` uses.
+      const created = this.ownedPlaceholderIdentity;
+      if (created === null) {
+        // We never recorded creating one, so there is nothing of ours here.
+        return;
+      }
       const stats = await lstat(this.socketPath);
-      if (stats.isSocket()) {
+      if (!stats.isFile() || stats.size !== 0) {
+        // Not the empty-placeholder shape: a socket, or an operator's file.
+        return;
+      }
+      if (
+        !sameIdentity(
+          { dev: stats.dev, ino: stats.ino, kind: "file" },
+          created,
+        )
+      ) {
+        // Something replaced our placeholder. Not ours to delete.
+        return;
+      }
+      if (!sameIdentity(await socketIdentity(this.socketPath), created)) {
+        // Replaced between the check and the unlink.
         return;
       }
       await unlink(this.socketPath);
+      this.ownedPlaceholderIdentity = null;
     } catch {
       // Best effort: a placeholder we cannot remove is reaped by the successor.
+    }
+  }
+
+  /**
+   * Create the shutdown placeholder AND remember exactly which object we
+   * created (#537 review, CodeRabbit): comparing two later lookups only proves
+   * they agree with each other, not that either is ours. A replacement that
+   * lands before the first lookup satisfies both.
+   */
+  private async writeOwnedSocketPlaceholder(): Promise<void> {
+    // #537 review (Macroscope): a separate `socketIdentity()` after the write
+    // could observe a REPLACEMENT if another process unlinked and recreated the
+    // path in between, and we would then treat that foreign file as ours.
+    // `open(path, "wx")` creates it exclusively and hands back a descriptor, so
+    // `fstat` on that handle is the identity of the object WE created — taken
+    // from the creation operation itself rather than a follow-up lookup.
+    const handle = await open(this.socketPath, "wx");
+    try {
+      const stats = await handle.stat();
+      this.ownedPlaceholderIdentity = {
+        dev: stats.dev,
+        ino: stats.ino,
+        kind: "file",
+      };
+    } finally {
+      await handle.close();
     }
   }
 
@@ -1234,7 +1299,7 @@ export class CmuxLayerDaemon {
       current = await lstat(this.socketPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        await writeFile(this.socketPath, "", { flag: "wx" });
+        await this.writeOwnedSocketPlaceholder();
         return null;
       }
       throw error;
@@ -1246,13 +1311,13 @@ export class CmuxLayerDaemon {
     ) {
       const shelteredPath = `${this.socketPath}.foreign-${process.pid}-${Date.now()}`;
       await rename(this.socketPath, shelteredPath);
-      await writeFile(this.socketPath, "", { flag: "wx" });
+      await this.writeOwnedSocketPlaceholder();
       return { path: shelteredPath, restore: true };
     }
 
     const detachedPath = `${this.socketPath}.closing-${process.pid}-${Date.now()}`;
     await rename(this.socketPath, detachedPath);
-    await writeFile(this.socketPath, "", { flag: "wx" });
+    await this.writeOwnedSocketPlaceholder();
     return { path: detachedPath, restore: false };
   }
 

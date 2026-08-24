@@ -261,22 +261,66 @@ export async function awaitDaemonReadiness(
   // Nothing else may observe this promise until the race below.
   childFailure.catch(() => {});
 
+  const deadline = startedAt + opts.timeoutMs;
+  const timedOut = () =>
+    new DaemonReadinessTimeoutError({
+      socketPath: opts.socketPath,
+      waitedMs: Math.max(0, now() - startedAt),
+      stderrExcerpt: readStderr(),
+    });
+
+  /**
+   * #536 review (Codex P2): the loop used to `await opts.probeDaemon(...)`
+   * directly, so a probe that NEVER settles blocked before the deadline check
+   * and `Promise.race` stayed pending forever — the helper reproduced the very
+   * deadlock it exists to bound. Every await inside the loop is now raced
+   * against a standalone deadline timer, cleared in `finally` so a resolved
+   * wait never leaves a pending handle behind.
+   */
+  const withDeadline = async <T>(work: Promise<T>): Promise<T> => {
+    // #537 review (Macroscope): an early return for `timeoutMs === 0` bypassed
+    // the race entirely, so a never-settling probe hung forever on exactly the
+    // configuration that asks for no waiting at all. A zero deadline yields a
+    // 0ms timer instead: a well-behaved probe still wins on the microtask
+    // queue, a hung one rejects immediately.
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(timedOut()),
+            Math.max(0, deadline - now()),
+          );
+          // #537 review (Codex P2): deliberately NOT unref'd. A never-settling
+          // probe owns no libuv handle, so an unref'd deadline let node exit
+          // before the timeout fired — the standalone CLI would terminate
+          // instead of reaching its in-process fallback, breaking the
+          // always-settles guarantee outside vitest (which keeps other handles
+          // alive and masked it). The timer is cleared in `finally`, so keeping
+          // it referenced cannot leak.
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
   const polling = (async (): Promise<void> => {
-    const deadline = startedAt + opts.timeoutMs;
     for (;;) {
       if (aborted) return;
-      if (await opts.probeDaemon(opts.socketPath)) {
+      if (await withDeadline(opts.probeDaemon(opts.socketPath))) {
         return;
       }
       if (aborted) return;
       if (opts.timeoutMs === 0 || now() >= deadline) {
-        throw new DaemonReadinessTimeoutError({
-          socketPath: opts.socketPath,
-          waitedMs: Math.max(0, now() - startedAt),
-          stderrExcerpt: readStderr(),
-        });
+        throw timedOut();
       }
-      await opts.sleep(opts.pollMs);
+      // #536 review (Macroscope): cap the sleep to the remaining time, or a
+      // pollMs larger than timeoutMs overshoots the promised hard deadline.
+      await withDeadline(
+        opts.sleep(Math.max(0, Math.min(opts.pollMs, deadline - now()))),
+      );
     }
   })();
 
