@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
 import net from "node:net";
-import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
@@ -1260,10 +1267,23 @@ export class CmuxLayerDaemon {
    * lands before the first lookup satisfies both.
    */
   private async writeOwnedSocketPlaceholder(): Promise<void> {
-    await writeFile(this.socketPath, "", { flag: "wx" });
-    this.ownedPlaceholderIdentity = await socketIdentity(this.socketPath).catch(
-      () => null,
-    );
+    // #537 review (Macroscope): a separate `socketIdentity()` after the write
+    // could observe a REPLACEMENT if another process unlinked and recreated the
+    // path in between, and we would then treat that foreign file as ours.
+    // `open(path, "wx")` creates it exclusively and hands back a descriptor, so
+    // `fstat` on that handle is the identity of the object WE created — taken
+    // from the creation operation itself rather than a follow-up lookup.
+    const handle = await open(this.socketPath, "wx");
+    try {
+      const stats = await handle.stat();
+      this.ownedPlaceholderIdentity = {
+        dev: stats.dev,
+        ino: stats.ino,
+        kind: "file",
+      };
+    } finally {
+      await handle.close();
+    }
   }
 
   private async detachOwnedSocketPath(): Promise<{

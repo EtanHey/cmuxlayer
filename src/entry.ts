@@ -292,7 +292,13 @@ export async function awaitDaemonReadiness(
             () => reject(timedOut()),
             Math.max(0, deadline - now()),
           );
-          timer.unref?.();
+          // #537 review (Codex P2): deliberately NOT unref'd. A never-settling
+          // probe owns no libuv handle, so an unref'd deadline let node exit
+          // before the timeout fired — the standalone CLI would terminate
+          // instead of reaching its in-process fallback, breaking the
+          // always-settles guarantee outside vitest (which keeps other handles
+          // alive and masked it). The timer is cleared in `finally`, so keeping
+          // it referenced cannot leak.
         }),
       ]);
     } finally {
