@@ -69,6 +69,51 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * SIGTERM the child AND wait for it to be gone (#530, Codex P1).
+ *
+ * Terminating without awaiting let the daemon's graceful shutdown — and its
+ * startup lifecycle sweep — overlap the in-process fallback's registry
+ * mutations: two sources of truth despite the attempted termination. Bounded,
+ * because a child that refuses to die must not hang startup.
+ */
+export async function terminateSpawnedDaemonAndWait(
+  spawnedDaemon: unknown,
+  logger: Pick<Console, "error">,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  terminateSpawnedDaemon(spawnedDaemon, logger);
+  const child = spawnedDaemon as DaemonChildLike | null;
+  if (!child) return;
+  if (child.exitCode !== null && child.exitCode !== undefined) return;
+  if (child.signalCode !== null && child.signalCode !== undefined) return;
+  if (typeof child.once !== "function") return;
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      logger.error(
+        "[cmuxlayer] timed-out daemon did not exit before the in-process fallback started",
+      );
+      finish();
+    }, opts.timeoutMs ?? 2_000);
+    timer.unref?.();
+    child.once!("exit", () => {
+      clearTimeout(timer);
+      finish();
+    });
+    child.once!("close", () => {
+      clearTimeout(timer);
+      finish();
+    });
+  });
+}
+
 function terminateSpawnedDaemon(
   spawnedDaemon: unknown,
   logger: Pick<Console, "error">,
@@ -662,7 +707,7 @@ export async function runDaemonFirstEntry(
     }
   }
 
-  terminateSpawnedDaemon(spawnedDaemon, logger);
+  await terminateSpawnedDaemonAndWait(spawnedDaemon, logger);
   const detail =
     readinessError instanceof DaemonStartupFailedError
       ? `daemon exited before ready (code=${readinessError.exitCode ?? "none"}, signal=${

@@ -424,11 +424,15 @@ async function restoreSheltered(
       recordDaemonLifecycleError(detail);
       return;
     }
-    logger.error(
-      `[cmuxlayer-daemon] failed to restore ${shelterPath} to ${path}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
+    // #530 (Macroscope): swallowing this returned "restored" while a live
+    // socket sat stranded at the shelter name and the well-known path stayed
+    // vacant — unreachable daemon, silent. Record it and propagate.
+    const detail =
+      `failed to restore ${shelterPath} to ${path}: ` +
+      (error instanceof Error ? error.message : String(error));
+    logger.error(`[cmuxlayer-daemon] ${detail}`);
+    recordDaemonLifecycleError(detail);
+    throw error;
   }
 }
 
@@ -1557,11 +1561,19 @@ export class CmuxLayerDaemon {
     }
 
     if (observed !== null) {
-      if (!sameIdentity(await socketIdentity(this.socketPath), observed)) {
-        // Replaced under us between the check and the unlink.
+      // #530 (Codex P1): this was still check-then-unlink, so a starter could
+      // move the placeholder after the comparison, bind its successor socket,
+      // and have that LIVE socket removed by our unlink. Claim it atomically
+      // with the same rename-verify-or-restore path the reap uses.
+      const claimed = await reapClassifiedSocket(
+        this.socketPath,
+        observed,
+        socketIdentity,
+        this.logger,
+      ).catch(() => false);
+      if (!claimed) {
         return;
       }
-      await unlinkIfPresent(this.socketPath).catch(() => {});
     }
 
     if (readDaemonSocketOwnerReceipt(this.socketPath)?.pid === process.pid) {

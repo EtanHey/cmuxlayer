@@ -189,7 +189,6 @@ function emptySnapshot(): DaemonLifecycleSnapshot {
     last_socket_in_use: null,
     last_error: null,
   };
-  persistSidecar();
 }
 
 let state: DaemonLifecycleSnapshot = emptySnapshot();
@@ -278,6 +277,7 @@ export function recordDaemonSpawnAttempt(opts: {
     last_socket_in_use: null,
     last_error: null,
   };
+  persistSidecar();
 }
 
 export function recordDaemonExit(opts: {
