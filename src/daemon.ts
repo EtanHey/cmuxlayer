@@ -488,7 +488,14 @@ async function unlinkOwnerReceiptIfUnchanged(
     return;
   }
   const current = readOwnerReceipt(path);
-  if (current === null || current.pid !== expected.pid) {
+  if (
+    current === null ||
+    current.pid !== expected.pid ||
+    current.startedAtMs !== expected.startedAtMs
+  ) {
+    // A successor that happens to REUSE the classified pid is still a
+    // different process, and its receipt is the only evidence later probes
+    // have that it owns the path (Macroscope, #530).
     return;
   }
   await unlinkIfPresent(daemonSocketOwnerPath(path));
@@ -621,10 +628,15 @@ export async function unlinkStaleSocket(
   if (liveOwner) {
     refuse(status, observedReceipt);
   }
-  if (status === "unknown" && observedReceipt === null) {
-    // Nothing answered and nothing claims it: fail closed rather than steal a
-    // socket an older build may still own.
-    refuse(status, null);
+  if (status === "unknown") {
+    // An inconclusive probe is NEVER sufficient evidence that the path is safe
+    // to reap, receipt or no receipt (Macroscope, #530). The receipt write is
+    // best-effort, and an fd-activated daemon never writes one at all, so a
+    // stale receipt naming a dead pid can coexist with a live owner — reaping
+    // on that combination orphans a running daemon and lets a second one bind.
+    // Failing closed costs a fallback to the in-process runtime, which is
+    // degraded but correct, and control_health now says why.
+    refuse(status, observedReceipt);
   }
   const reason =
     observedReceipt === null

@@ -158,6 +158,62 @@ describe("#529 daemon socket path handling", () => {
     expect(existsSync(`${path}.owner`)).toBe(false);
   });
 
+  it("fails closed on an inconclusive probe even with a dead-pid receipt", async () => {
+    // Macroscope (#530, post-cf2f66c): the receipt write is best-effort and an
+    // fd-activated daemon never writes one, so a stale receipt naming a dead
+    // pid can coexist with a LIVE owner. Reaping on that combination orphans a
+    // running daemon and lets a second one bind the same control plane.
+    const path = testSocketPath("unknown-dead-receipt");
+    rmSync(path, { force: true });
+    writeFileSync(path, "");
+    writeFileSync(`${path}.owner`, "999999 1\n");
+    cleanups.push(() => {
+      rmSync(path, { force: true });
+      rmSync(`${path}.owner`, { force: true });
+    });
+
+    const error = await unlinkStaleSocket(path, {
+      probe: async () => "unknown",
+    }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(DaemonSocketInUseError);
+    expect((error as DaemonSocketInUseError).probe).toBe("unknown");
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it("keeps a successor's receipt when it reuses the classified pid", async () => {
+    // Macroscope (#530): comparing only the pid deleted a successor's receipt
+    // when the pid was recycled, destroying the evidence later probes rely on.
+    const path = testSocketPath("receipt-pid-reuse");
+    rmSync(path, { force: true });
+    writeFileSync(path, "");
+    writeFileSync(`${path}.owner`, "999999 111\n");
+    cleanups.push(() => {
+      rmSync(path, { force: true });
+      rmSync(`${path}.owner`, { force: true });
+    });
+
+    await expect(
+      unlinkStaleSocket(path, {
+        probe: async () => "stale",
+        // The successor rewrites the receipt with the SAME pid but a different
+        // start time between classification and reap.
+        readOwnerReceipt: (() => {
+          let call = 0;
+          return () => {
+            call += 1;
+            return { pid: 999999, startedAtMs: call === 1 ? 111 : 222 };
+          };
+        })(),
+        ownerAlive: () => false,
+      }),
+    ).resolves.toBe("reaped");
+    // Socket reaped, but the successor's receipt survives.
+    expect(existsSync(`${path}.owner`)).toBe(true);
+  });
+
   it("F8: refuses a socket that appeared during classification", async () => {
     // Codex addendum: with the path ABSENT at classification, observedIdentity
     // is null and the superseded comparison used to be skipped entirely — so a
