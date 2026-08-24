@@ -503,6 +503,81 @@ describe("Sidebar Sync", () => {
     });
   });
 
+  it("skips every snapshot-backed mutation when the observer epoch changes after collection", async () => {
+    engine.dispose();
+    (mockClient as unknown as Record<string, unknown>).moveSurface = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const observerId = "cmux:/tmp/cmux-primary.sock";
+    let observerEpoch = `${observerId}@socket:1`;
+    const stableUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+      observerIdProvider: () => observerId,
+      observerEpochProvider: () => observerEpoch,
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "epoch-race-agent",
+        surface_id: "surface:stale",
+        surface_uuid: stableUuid,
+        surface_observer_id: observerId,
+        workspace_id: "workspace:test",
+        state: "done",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      }),
+    );
+    registry.set("epoch-race-agent", stateMgr.readState("epoch-race-agent")!);
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:witness"),
+        id: "11111111-2222-4333-8444-555555555555",
+        workspace_ref: "workspace:test",
+      },
+    ];
+
+    const reconcile = vi.spyOn(registry, "reconcile");
+    const evictSurfaceless = vi.spyOn(registry, "evictSurfaceless");
+    const purgeTerminal = vi.spyOn(registry, "purgeTerminal");
+    const purgeAllTerminal = vi.spyOn(registry, "purgeAllTerminal");
+    const removeState = vi.spyOn(stateMgr, "removeState");
+    const engineWithReaper = engine as unknown as {
+      reapChannelMarkersBestEffort: () => Promise<void>;
+    };
+    engineWithReaper.reapChannelMarkersBestEffort = async () => {
+      observerEpoch = `${observerId}@socket:2`;
+    };
+
+    await engine.runSweep();
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(evictSurfaceless).not.toHaveBeenCalled();
+    expect(purgeTerminal).not.toHaveBeenCalled();
+    expect(purgeAllTerminal).not.toHaveBeenCalled();
+    expect(removeState).not.toHaveBeenCalled();
+    expect(mockClient.moveSurface).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).not.toHaveBeenCalled();
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+    expect(mockClient.clearStatus).not.toHaveBeenCalled();
+    expect(registry.get("epoch-race-agent")).toMatchObject({
+      state: "done",
+      surface_id: "surface:stale",
+      surface_uuid: stableUuid,
+    });
+    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBeGreaterThan(
+      0,
+    );
+  });
+
   it("enumerates topology once through live-agent sidebar and liveness paths", async () => {
     let clientTopologyEnumerations = 0;
     let registryTopologyEnumerations = 0;

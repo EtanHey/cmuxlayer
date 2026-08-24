@@ -5157,14 +5157,21 @@ export class AgentEngine {
     return !surfaceTopology.workspaceBySurface.has(agent.surface_id);
   }
 
-  private surfaceObserverIdProvider(): SurfaceObserverIdProvider | undefined {
+  private surfaceObserverEpochProvider():
+    SurfaceObserverIdProvider | undefined {
     return this.registry.isObserverOwnershipEnforced()
       ? () => this.registry.getObserverEpoch()
       : undefined;
   }
 
+  private surfaceObserverIdProvider(): SurfaceObserverIdProvider | undefined {
+    return this.registry.isObserverOwnershipEnforced()
+      ? () => this.registry.getObserverId()
+      : undefined;
+  }
+
   private captureSurfaceObserverEpoch(): SurfaceObserverEpoch {
-    return captureObserverEpoch(this.surfaceObserverIdProvider());
+    return captureObserverEpoch(this.surfaceObserverEpochProvider());
   }
 
   private isSurfaceObserverEpochCurrent(
@@ -5172,8 +5179,30 @@ export class AgentEngine {
   ): boolean {
     return isSurfaceObserverEpochCurrent(
       observerEpoch,
-      this.surfaceObserverIdProvider(),
+      this.surfaceObserverEpochProvider(),
     );
+  }
+
+  private isSweepTopologyObserverCurrent(
+    surfaceTopology: SurfaceTopologySnapshot | null,
+  ): boolean {
+    if (!this.registry.isObserverOwnershipEnforced()) return true;
+    return Boolean(
+      surfaceTopology?.observerId &&
+      surfaceTopology.observerEpoch &&
+      this.registry.getObserverId() === surfaceTopology.observerId &&
+      this.registry.getObserverEpoch() === surfaceTopology.observerEpoch,
+    );
+  }
+
+  private canRunSnapshotBackedSweepMutation(
+    surfaceTopology: SurfaceTopologySnapshot | null,
+  ): boolean {
+    if (this.isSweepTopologyObserverCurrent(surfaceTopology)) return true;
+    // The topology belongs to a replaced route. Count each preserved mutation
+    // as reason=epoch_changed and never re-collect partway through this sweep.
+    this.sweepSkippedMutations += 1;
+    return false;
   }
 
   private assertSurfaceObserverEpochCurrent(
@@ -5193,6 +5222,7 @@ export class AgentEngine {
     return collectSurfaceTopology(
       this.client,
       undefined,
+      this.surfaceObserverEpochProvider(),
       this.surfaceObserverIdProvider(),
     );
   }
@@ -5201,6 +5231,7 @@ export class AgentEngine {
     return collectSurfaceTopology(
       this.client,
       undefined,
+      this.surfaceObserverEpochProvider(),
       this.surfaceObserverIdProvider(),
     );
   }
@@ -7196,9 +7227,15 @@ export class AgentEngine {
         ...surfacelessConfirmation,
         ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
       };
-      await this.registry.reconcile(observed);
-      await this.registry.evictSurfaceless(observed);
-      await this.purgeStartupTerminalAgents();
+      if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
+        await this.registry.reconcile(observed);
+      }
+      if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
+        await this.registry.evictSurfaceless(observed);
+      }
+      if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
+        await this.purgeStartupTerminalAgents();
+      }
     } else {
       this.sweepSkippedMutations += 1;
     }
@@ -7208,18 +7245,27 @@ export class AgentEngine {
     // before normal terminal cleanup can act on a closed pane.
     await this.retryDeferredTranscriptCaptures();
     await this.sweepWatchesBestEffort();
-    if (mutationsAreSafe) {
+    if (
+      mutationsAreSafe &&
+      this.canRunSnapshotBackedSweepMutation(surfaceTopology)
+    ) {
       await this.registry.purgeTerminal({
         ...surfacelessConfirmation,
         ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
       });
     }
     await this.sweepMonitorRegistryBestEffort();
-    if (mutationsAreSafe) {
+    if (
+      mutationsAreSafe &&
+      this.canRunSnapshotBackedSweepMutation(surfaceTopology)
+    ) {
       await this.reconcileRolePlacements("idle", { surfaceTopology });
     }
-    const sidebarTopology = mutationsAreSafe ? surfaceTopology : null;
-    await this.syncSidebar({}, sidebarTopology);
+    if (!mutationsAreSafe) {
+      await this.syncSidebar({}, null);
+    } else if (this.canRunSnapshotBackedSweepMutation(surfaceTopology)) {
+      await this.syncSidebar({}, surfaceTopology);
+    }
     await this.drainOutboxBestEffort();
   }
 

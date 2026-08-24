@@ -266,7 +266,7 @@ describe("collectSurfaceTopology", () => {
     expect(snapshot).toBeNull();
   });
 
-  it("records the observer epoch that authorized a completed snapshot", async () => {
+  it("records the observer owner and epoch that authorized a completed snapshot", async () => {
     const observerId = "cmux:/tmp/cmux-primary.sock";
     const client = makeTopologyClient(
       [pane("pane:right", 0, ["surface:1"])],
@@ -285,7 +285,10 @@ describe("collectSurfaceTopology", () => {
       () => observerId,
     );
 
-    expect(snapshot?.observerEpoch).toBe(observerId);
+    expect(snapshot).toMatchObject({
+      observerId,
+      observerEpoch: observerId,
+    });
   });
 
   it("resolves a stale ref through the stable UUID from the same topology observation", async () => {

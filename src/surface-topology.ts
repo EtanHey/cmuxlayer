@@ -13,6 +13,8 @@ import type {
 export type SurfaceTopology = AgentTopologyHealthInput;
 
 export interface SurfaceTopologySnapshot {
+  /** Stable observer owner that produced this completed observation. */
+  observerId?: string | null;
   /** Observer epoch that authorized this completed observation. */
   observerEpoch?: SurfaceObserverEpoch;
   complete: boolean;
@@ -280,10 +282,13 @@ export function enrichSurfaceIdsFromPanes(
 export async function collectSurfaceTopology(
   client: SurfaceTopologyClient,
   workspace?: string,
-  observerIdProvider?: SurfaceObserverIdProvider,
+  observerEpochProvider?: SurfaceObserverIdProvider,
+  observerIdProvider:
+    SurfaceObserverIdProvider | undefined = observerEpochProvider,
 ): Promise<SurfaceTopologySnapshot | null> {
-  const observerEpoch = captureSurfaceObserverEpoch(observerIdProvider);
-  if (observerEpoch === null) {
+  const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
+  const observerId = captureSurfaceObserverEpoch(observerIdProvider);
+  if (observerEpoch === null || observerId === null) {
     return null;
   }
 
@@ -297,6 +302,7 @@ export async function collectSurfaceTopology(
   }
 
   const snapshot: SurfaceTopologySnapshot = {
+    observerId,
     observerEpoch,
     complete: true,
     surfaces: [],
@@ -448,7 +454,10 @@ export async function collectSurfaceTopology(
     snapshot.complete = false;
   }
 
-  if (!isSurfaceObserverEpochCurrent(observerEpoch, observerIdProvider)) {
+  if (
+    !isSurfaceObserverEpochCurrent(observerEpoch, observerEpochProvider) ||
+    !isSurfaceObserverEpochCurrent(observerId, observerIdProvider)
+  ) {
     return null;
   }
 
