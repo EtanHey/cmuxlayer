@@ -430,6 +430,49 @@ export function daemonSocketOwnerAlive(
   return true;
 }
 
+/**
+ * Reap the EXACT object we classified, using rename(2) as the arbitration
+ * primitive (#530, Codex P1).
+ *
+ * A dev/ino check followed by a separate `unlink(2)` cannot be made safe: two
+ * successors can both validate the old inode, and the loser then deletes the
+ * winner's live socket. `rename` is atomic, so exactly one racer can move the
+ * object out of the well-known path; everyone else gets ENOENT and simply finds
+ * the path free. Identity is then verified on a name no other process knows,
+ * and anything we did not mean to move is put back rather than destroyed.
+ *
+ * `detachOwnedSocketPath()` already uses this shelter-and-restore idiom.
+ *
+ * Returns true when the path is ours to bind, false when we moved something
+ * that turned out to belong to a successor (restored, and the caller refuses).
+ */
+async function reapClassifiedSocket(
+  path: string,
+  observedIdentity: DaemonSocketIdentity | null,
+): Promise<boolean> {
+  const reapingPath = `${path}.reaping-${process.pid}-${Date.now()}`;
+  try {
+    await rename(path, reapingPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // Another racer moved it first; the path is free either way.
+      return true;
+    }
+    throw error;
+  }
+
+  const moved = await socketIdentity(reapingPath).catch(() => null);
+  if (observedIdentity !== null && !sameIdentity(moved, observedIdentity)) {
+    // We grabbed something that is NOT what we classified — a successor bound
+    // here after our check. Put it back; never delete it.
+    await rename(reapingPath, path).catch(() => {});
+    return false;
+  }
+
+  await unlinkIfPresent(reapingPath);
+  return true;
+}
+
 async function unlinkIfPresent(path: string): Promise<void> {
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") {
@@ -663,7 +706,9 @@ export async function unlinkStaleSocket(
     refuse("superseded", readOwnerReceipt(path));
   }
 
-  await unlinkIfPresent(path);
+  if (!(await reapClassifiedSocket(path, observedIdentity))) {
+    refuse("superseded", readOwnerReceipt(path));
+  }
   await unlinkOwnerReceiptIfUnchanged(path, observedReceipt, readOwnerReceipt);
   recordDaemonSocketReap({ path, reason });
   return "reaped";
@@ -1550,6 +1595,14 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   // an unhandled EPIPE there would kill an otherwise healthy shared daemon.
   process.stderr.on("error", () => {});
   runDaemon().catch((error) => {
+    // #530 (Codex P1): the spawning entry reads this stderr to tell "another
+    // owner holds the socket, wait for it" apart from a genuine startup
+    // failure. Print the structured code so that decision is not string
+    // matching on prose.
+    const code = (error as { code?: unknown } | null)?.code;
+    if (typeof code === "string") {
+      console.error(`[cmuxlayer-daemon] fatal code=${code}`);
+    }
     console.error("[cmuxlayer-daemon] fatal", error);
     process.exit(1);
   });

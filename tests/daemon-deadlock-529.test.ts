@@ -35,7 +35,11 @@ import {
   daemonLifecycleSnapshot,
   resetDaemonLifecycleState,
 } from "../src/daemon-lifecycle-state.js";
-import { awaitDaemonReadiness } from "../src/entry.js";
+import {
+  awaitDaemonHandoff,
+  awaitDaemonReadiness,
+  isOwnerBusyFailure,
+} from "../src/entry.js";
 import { AgentEngine, LifecycleLockTimeoutError } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
@@ -250,6 +254,50 @@ describe("#529 daemon socket path handling", () => {
     expect(statSync(path).isSocket()).toBe(true);
   });
 
+  it("restores, never deletes, a successor's socket grabbed by the reap", async () => {
+    // Codex P1: a dev/ino check followed by a separate unlink(2) cannot be made
+    // safe — two successors can both validate the old inode and the loser then
+    // deletes the winner's LIVE socket. The reap now moves the object with
+    // rename(2) and verifies identity on a name nobody else knows, so anything
+    // it did not mean to move is put back rather than destroyed.
+    const path = testSocketPath("reap-restores-successor");
+    rmSync(path, { force: true });
+    rmSync(`${path}.owner`, { force: true });
+    writeFileSync(path, "");
+
+    const successor = net.createServer(() => {});
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          successor.close(() => resolve());
+          rmSync(path, { force: true });
+        }),
+    );
+
+    // Classification sees the placeholder; the successor swaps in its live
+    // socket before the reap runs.
+    let probed = false;
+    const error = await unlinkStaleSocket(path, {
+      probe: async () => {
+        if (!probed) {
+          probed = true;
+          rmSync(path, { force: true });
+          await new Promise<void>((resolve) =>
+            successor.listen(path, () => resolve()),
+          );
+        }
+        return "stale";
+      },
+    }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(DaemonSocketInUseError);
+    // The successor's live socket is still at the well-known path.
+    expect(statSync(path).isSocket()).toBe(true);
+  });
+
   it("refuses a LIVE owner with a structured error instead of a bare throw", async () => {
     const path = testSocketPath("live-owner");
     rmSync(path, { force: true });
@@ -443,5 +491,59 @@ describe("#529 control_health observability", () => {
     expect(health.daemon_lifecycle).toBeDefined();
     expect(health.daemon_lifecycle.spawn_attempts).toBe(0);
     expect(health.daemon_lifecycle.last_exit).toBeNull();
+  });
+});
+
+describe("#530 daemon handoff instead of a competing backend", () => {
+  it("waits for a draining owner and attaches instead of falling back in-process", async () => {
+    // Codex P1: when autostart overlaps a clean shutdown, our spawned daemon
+    // refuses (live-owner placeholder) and exits at once. Falling back
+    // in-process there starts a SECOND backend against the same registry while
+    // the old daemon is still draining in-flight mutations.
+    let probes = 0;
+    const attached = await awaitDaemonHandoff({
+      socketPath: "/tmp/cmux529/draining.sock",
+      // The drainer hands off on the third probe.
+      probeDaemon: async () => ++probes >= 3,
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      timeoutMs: 2_000,
+      pollMs: 5,
+      spawnDaemon: vi.fn().mockResolvedValue({ pid: 1 }),
+      awaitReady: vi.fn().mockResolvedValue(undefined),
+      logger: { error: vi.fn() },
+    });
+
+    expect(attached).toBe(true);
+  }, 5_000);
+
+  it("gives up on the handoff instead of waiting forever", async () => {
+    const attached = await awaitDaemonHandoff({
+      socketPath: "/tmp/cmux529/never.sock",
+      probeDaemon: async () => false,
+      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+      timeoutMs: 30,
+      pollMs: 5,
+      spawnDaemon: vi.fn().mockRejectedValue(new Error("nope")),
+      awaitReady: vi.fn(),
+      logger: { error: vi.fn() },
+    });
+
+    expect(attached).toBe(false);
+  }, 5_000);
+
+  it("classifies a socket-in-use daemon exit as owner-busy, not a hard failure", () => {
+    const busy = new DaemonStartupFailedError({
+      socketPath: "/tmp/cmux529/x.sock",
+      exitCode: 1,
+      stderrExcerpt: "[cmuxlayer-daemon] fatal code=EDAEMONSOCKETINUSE",
+    });
+    expect(isOwnerBusyFailure(busy)).toBe(true);
+
+    const broken = new DaemonStartupFailedError({
+      socketPath: "/tmp/cmux529/x.sock",
+      exitCode: 1,
+      stderrExcerpt: "SyntaxError: Unexpected token",
+    });
+    expect(isOwnerBusyFailure(broken)).toBe(false);
   });
 });

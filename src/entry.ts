@@ -23,6 +23,7 @@ import { callerContextFromEnv } from "./caller-context.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTOSTART_POLL_MS = 50;
+const DEFAULT_DAEMON_HANDOFF_TIMEOUT_MS = 8_000;
 
 export { resolveDefaultDaemonSocketPath as defaultDaemonSocketPath };
 
@@ -52,6 +53,8 @@ export interface DaemonFirstEntryOptions {
   daemonScriptPath?: string;
   autostartTimeoutMs?: number;
   autostartPollMs?: number;
+  /** Bound the wait for a draining daemon owner to hand off (#530). */
+  daemonHandoffTimeoutMs?: number;
   exit?: ExitFn;
 }
 
@@ -404,6 +407,72 @@ export function bindProxyStdioLifecycle(opts: {
   opts.input.once("close", () => shutdown("stdin close"));
 }
 
+/**
+ * Did the daemon refuse because ANOTHER owner holds the socket? The daemon
+ * prints `fatal code=EDAEMONSOCKETINUSE` before exiting, so this is a
+ * structured check rather than prose matching (#530).
+ */
+export function isOwnerBusyFailure(error: unknown): boolean {
+  return (
+    error instanceof DaemonStartupFailedError &&
+    /EDAEMONSOCKETINUSE|DaemonSocketInUseError|socket is already in use/.test(
+      error.stderrExcerpt,
+    )
+  );
+}
+
+export interface DaemonHandoffOptions {
+  socketPath: string;
+  probeDaemon: (socketPath: string) => Promise<boolean>;
+  sleep: (ms: number) => Promise<void>;
+  timeoutMs: number;
+  pollMs: number;
+  spawnDaemon: () => Promise<unknown>;
+  awaitReady: (child: unknown) => Promise<void>;
+  logger: Pick<Console, "error">;
+  now?: () => number;
+}
+
+/**
+ * Wait out a draining owner rather than starting a competing backend.
+ *
+ * Poll for a daemon answering on the socket. Once the drainer clears its
+ * placeholder, retry the spawn ONCE so the control plane comes back on the
+ * daemon path instead of degrading to an in-process runtime that would outlive
+ * the successor. Returns true when a daemon is answering.
+ */
+export async function awaitDaemonHandoff(
+  opts: DaemonHandoffOptions,
+): Promise<boolean> {
+  const now = opts.now ?? Date.now;
+  const deadline = now() + opts.timeoutMs;
+  let respawned = false;
+
+  for (;;) {
+    if (await opts.probeDaemon(opts.socketPath)) {
+      return true;
+    }
+    if (now() >= deadline) {
+      return opts.probeDaemon(opts.socketPath);
+    }
+    await opts.sleep(opts.pollMs);
+
+    if (!respawned && !(await opts.probeDaemon(opts.socketPath))) {
+      // The drainer may have finished and left the path free for us.
+      respawned = true;
+      try {
+        const child = await opts.spawnDaemon();
+        await opts.awaitReady(child);
+        return true;
+      } catch (error) {
+        opts.logger.error(
+          `[cmuxlayer] daemon handoff respawn failed: ${errorText(error)}`,
+        );
+      }
+    }
+  }
+}
+
 export async function runDaemonFirstEntry(
   opts: DaemonFirstEntryOptions = {},
 ): Promise<EntryRuntime> {
@@ -419,6 +488,9 @@ export async function runDaemonFirstEntry(
   const autostartTimeoutMs =
     opts.autostartTimeoutMs ?? DEFAULT_AUTOSTART_TIMEOUT_MS;
   const autostartPollMs = opts.autostartPollMs ?? DEFAULT_AUTOSTART_POLL_MS;
+  // Long enough to outlast the daemon's own drain bound (5s) plus its handoff.
+  const handoffTimeoutMs =
+    opts.daemonHandoffTimeoutMs ?? DEFAULT_DAEMON_HANDOFF_TIMEOUT_MS;
 
   const startProxy = async (): Promise<EntryRuntime> => {
     const input = opts.input ?? process.stdin;
@@ -501,6 +573,48 @@ export async function runDaemonFirstEntry(
   // A daemon that came up on the very last tick still wins the race.
   if (await probeDaemon(socketPath)) {
     return startProxy();
+  }
+
+  // #530 (Codex P1): when autostart overlaps a CLEAN SHUTDOWN, the socket path
+  // is deliberately a regular-file placeholder whose receipt names the still
+  // draining owner, so our spawned daemon refuses and exits at once. Falling
+  // back in-process here would start a SECOND backend against the same registry
+  // while the old daemon is still handling in-flight mutations — the exact
+  // two-sources-of-truth harm the refusal exists to prevent. Wait for the
+  // handoff instead: the drainer removes its placeholder when it finishes, and
+  // either it or a successor answers on the socket.
+  if (isOwnerBusyFailure(readinessError)) {
+    terminateSpawnedDaemon(spawnedDaemon, logger);
+    const handoff = await awaitDaemonHandoff({
+      socketPath,
+      probeDaemon,
+      sleep,
+      timeoutMs: handoffTimeoutMs,
+      pollMs: autostartPollMs,
+      spawnDaemon: async () => {
+        spawnedDaemon = await spawnDaemon({
+          socketPath,
+          env,
+          daemonScriptPath: opts.daemonScriptPath,
+          logger,
+        });
+        return spawnedDaemon;
+      },
+      awaitReady: (child) =>
+        awaitDaemonReadiness({
+          socketPath,
+          probeDaemon,
+          sleep,
+          timeoutMs: autostartTimeoutMs,
+          pollMs: autostartPollMs,
+          child: child as DaemonChildLike | null,
+          readStderr: () => capturedDaemonStderr(child),
+        }),
+      logger,
+    });
+    if (handoff) {
+      return startProxy();
+    }
   }
 
   terminateSpawnedDaemon(spawnedDaemon, logger);
