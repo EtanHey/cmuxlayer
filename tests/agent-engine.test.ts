@@ -13718,6 +13718,22 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("launches worker-authority Codex roles in launcher worker mode", () => {
+    expect(
+      buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
+        authority: "worker",
+      }),
+    ).toBe("brainlayerCodex -s --worker");
+  });
+
+  it("leaves lead-authority Codex launches out of launcher worker mode", () => {
+    expect(
+      buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
+        authority: "lead",
+      }),
+    ).toBe("brainlayerCodex -s");
+  });
+
   it("passes an explicit Codex model with the launcher override env", () => {
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.6-luna"),

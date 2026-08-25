@@ -1374,6 +1374,8 @@ export function buildLaunchCommand(
     allowModelOverride?: boolean;
     effort?: CodexEffort;
     launchMode?: AgentLaunchMode;
+    /** Worker-authority Codex launches use repoGolem's light worker prompt. */
+    authority?: AgentAuthority;
     /** Approval handling for this launch; defaults to the machine's setting. */
     permissionMode?: SpawnPermissionMode;
   },
@@ -1394,6 +1396,7 @@ export function buildLaunchCommand(
     opts?.permissionMode ?? resolveSpawnPermissionMode(),
   );
   const launcherSkipArg = bypassApprovals ? " -s" : "";
+  const launcherWorkerArg = opts?.authority === "worker" ? " --worker" : "";
   const launcherWorktreeArg = opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : "";
   const launcherEffortArg = opts?.effort ? ` -E ${opts.effort}` : "";
   const rawCdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
@@ -1444,7 +1447,7 @@ export function buildLaunchCommand(
       // repoGolem launcher handles env vars via ralph-registry
       return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${claudeModelArgs}${launcherWorktreeArg}`;
     case "codex":
-      return `${envPrefix}${launcherName ?? `${safeRepo}Codex`}${launcherSkipArg}${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Codex`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "gemini":
       // repoGolem launcher (e.g. golemsGemini -s) wires antigravity + MCP.
       return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`}${launcherSkipArg}${launcherModelArgs}${launcherWorktreeArg}`;
@@ -8174,6 +8177,8 @@ export class AgentEngine {
       spawnParams.role !== undefined
         ? inferAgentRole({ role: spawnParams.role })
         : "worker";
+    const authority =
+      spawnParams.authority ?? (role === "orchestrator" ? "lead" : "worker");
 
     this.spawnGuard.check(spawnParams.workspace);
 
@@ -8314,8 +8319,7 @@ export class AgentEngine {
       parent_agent_id: parentAgentId,
       spawn_depth: spawnDepth,
       role,
-      authority:
-        spawnParams.authority ?? (role === "orchestrator" ? "lead" : "worker"),
+      authority,
       function: spawnParams.function ?? "implementor",
       placement:
         spawnParams.placement ?? (role === "orchestrator" ? "left" : "right"),
@@ -8417,6 +8421,7 @@ export class AgentEngine {
         allowModelOverride: modelPolicy.override_allowed,
         effort: effort ?? undefined,
         launchMode,
+        authority,
       },
     );
     try {
