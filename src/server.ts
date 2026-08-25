@@ -1003,6 +1003,7 @@ export interface PublicDeliveryReceipt {
   duplicate_of?: string;
   needs_attention?: boolean;
   attention_reason?: string;
+  timings_ms?: DeliveryPhaseTimings;
   observation?: {
     status: ParsedScreenResult["status"];
     composer_empty: boolean;
@@ -1010,6 +1011,35 @@ export interface PublicDeliveryReceipt {
     last_10_lines: string[];
   };
   WARNING?: string;
+}
+
+type DeliveryPhase = "route" | "lock" | "enumerate" | "type" | "verify";
+type DeliveryPhaseTimings = Record<DeliveryPhase, number>;
+
+function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
+  return { route: 0, lock: 0, enumerate: 0, type: 0, verify: 0 };
+}
+
+function addDeliveryPhaseTiming(
+  timings: DeliveryPhaseTimings | undefined,
+  phase: DeliveryPhase,
+  startedAt: number,
+): void {
+  if (!timings) return;
+  timings[phase] += Math.max(0, Date.now() - startedAt);
+}
+
+async function timeDeliveryPhase<T>(
+  timings: DeliveryPhaseTimings | undefined,
+  phase: DeliveryPhase,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await operation();
+  } finally {
+    addDeliveryPhaseTiming(timings, phase, startedAt);
+  }
 }
 
 /**
@@ -1027,6 +1057,7 @@ export function buildPublicDeliveryReceipt(input: {
   retry_count: number;
   needs_attention?: boolean;
   attention_reason?: string | null;
+  timings_ms?: DeliveryPhaseTimings;
   observation?: PublicDeliveryReceipt["observation"];
   WARNING?: string;
 }): PublicDeliveryReceipt {
@@ -1069,6 +1100,7 @@ export function buildPublicDeliveryReceipt(input: {
             : {}),
         }
       : {}),
+    ...(input.timings_ms ? { timings_ms: { ...input.timings_ms } } : {}),
     ...(input.observation ? { observation: input.observation } : {}),
     ...(warning ? { WARNING: warning } : {}),
   };
@@ -5864,6 +5896,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verify_timeout_ms?: number;
     stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
+    timings?: DeliveryPhaseTimings;
   }): Promise<
     PublicDeliveryReceipt & {
       bytes: number;
@@ -5887,25 +5920,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
-      await sendKeyWithRetry(
-        opts.surface,
-        key,
-        opts.workspace,
-        opts.beforeMutation,
+      await timeDeliveryPhase(opts.timings, "type", () =>
+        sendKeyWithRetry(
+          opts.surface,
+          key,
+          opts.workspace,
+          opts.beforeMutation,
+        ),
       );
       const verification =
         submitAttempted && opts.verify_submit
-          ? await verifySubmitKeyOutcome({
-              surface: opts.surface,
-              workspace: opts.workspace,
-              baseline: submitBaseline,
-            })
+          ? await timeDeliveryPhase(opts.timings, "verify", () =>
+              verifySubmitKeyOutcome({
+                surface: opts.surface,
+                workspace: opts.workspace,
+                baseline: submitBaseline,
+              }),
+            )
           : { submit_verified: null, submit_verification_reason: null };
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
         submit_attempted: submitAttempted,
         submit_verified: verification.submit_verified,
         retry_count: 0,
+        timings_ms: opts.timings,
         ...(submitAttempted && verification.submit_verified === null
           ? {
               WARNING:
@@ -5965,26 +6003,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.chunks,
       deliveryBatches.length,
     );
-    for (const [index, batch] of deliveryBatches.entries()) {
-      await sendChunkWithRetry(
-        opts.surface,
-        batch.text,
-        {
-          workspace: opts.workspace,
-        },
-        batch.firstChunkNumber,
-        opts.chunks.length,
-        shouldPaste,
-        opts.source_event === "spawn_agent",
-        opts.beforeMutation,
-      );
-      for (const sentChunks of batch.deliveredChunkCounts) {
-        opts.onChunkDelivered?.(sentChunks);
+    await timeDeliveryPhase(opts.timings, "type", async () => {
+      for (const [index, batch] of deliveryBatches.entries()) {
+        await sendChunkWithRetry(
+          opts.surface,
+          batch.text,
+          {
+            workspace: opts.workspace,
+          },
+          batch.firstChunkNumber,
+          opts.chunks.length,
+          shouldPaste,
+          opts.source_event === "spawn_agent",
+          opts.beforeMutation,
+        );
+        for (const sentChunks of batch.deliveredChunkCounts) {
+          opts.onChunkDelivered?.(sentChunks);
+        }
+        if (index < deliveryBatches.length - 1) {
+          await delay(opts.chunk_delay_ms);
+        }
       }
-      if (index < deliveryBatches.length - 1) {
-        await delay(opts.chunk_delay_ms);
-      }
-    }
+    });
 
     const bytes = opts.chunks.reduce(
       (sum, chunk) => sum + Buffer.byteLength(chunk, "utf-8"),
@@ -6052,13 +6092,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               )
             : null;
         }
-        await delay(computeEnterDelayMs(bytes, opts.chunks.length));
-        await sendKeyWithRetry(
-          opts.surface,
-          "return",
-          opts.workspace,
-          opts.beforeMutation,
-        );
+        await timeDeliveryPhase(opts.timings, "type", async () => {
+          await delay(computeEnterDelayMs(bytes, opts.chunks.length));
+          await sendKeyWithRetry(
+            opts.surface,
+            "return",
+            opts.workspace,
+            opts.beforeMutation,
+          );
+        });
         appendDeliveryEvent({
           event_type: "press_enter",
           source_agent: opts.source_agent ?? null,
@@ -6069,25 +6111,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           retry_count,
         });
 
-        const verification = await verifySubmitAfterEnter({
-          surface: opts.surface,
-          workspace: opts.workspace,
-          text: submittedText,
-          bytes,
-          source_event: opts.source_event ?? "send_command",
-          source_agent: opts.source_agent,
-          verify_submit: opts.verify_submit ?? false,
-          allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
-          timeout_ms: opts.submit_verify_timeout_ms,
-          cursor_response_baseline: cursorResponseBaseline,
-          pre_type_screen: deliverySafetySnapshot?.text,
-          pre_return_screen: preReturnBootEvidence?.screenText,
-          pre_return_metrics: preReturnBootEvidence?.metrics,
-          require_attributable_submit_evidence:
-            requireObservedPayloadBeforeEnter,
-          require_working_status: opts.source_event === "boot_prompt",
-          beforeMutation: opts.beforeMutation,
-        });
+        const verification = await timeDeliveryPhase(
+          opts.timings,
+          "verify",
+          () =>
+            verifySubmitAfterEnter({
+              surface: opts.surface,
+              workspace: opts.workspace,
+              text: submittedText,
+              bytes,
+              source_event: opts.source_event ?? "send_command",
+              source_agent: opts.source_agent,
+              verify_submit: opts.verify_submit ?? false,
+              allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+              timeout_ms: opts.submit_verify_timeout_ms,
+              cursor_response_baseline: cursorResponseBaseline,
+              pre_type_screen: deliverySafetySnapshot?.text,
+              pre_return_screen: preReturnBootEvidence?.screenText,
+              pre_return_metrics: preReturnBootEvidence?.metrics,
+              require_attributable_submit_evidence:
+                requireObservedPayloadBeforeEnter,
+              require_working_status: opts.source_event === "boot_prompt",
+              beforeMutation: opts.beforeMutation,
+            }),
+        );
         submit_verified = verification.submit_verified;
         submit_evidence = verification.submit_evidence;
         submit_verification_reason = verification.submit_verification_reason;
@@ -6160,6 +6207,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verified,
       submit_evidence,
       retry_count,
+      timings_ms: opts.timings,
     });
 
     if (
@@ -9621,12 +9669,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        const internalArgs = args as typeof args & {
+          _cmuxlayer_source_event?: DeliveryEventType;
+          _cmuxlayer_delivery_id?: string;
+          _cmuxlayer_timings?: DeliveryPhaseTimings;
+        };
         const sourceEvent =
-          (
-            args as typeof args & {
-              _cmuxlayer_source_event?: DeliveryEventType;
-            }
-          )._cmuxlayer_source_event ?? "send_input";
+          internalArgs._cmuxlayer_source_event ?? "send_input";
+        const requestedDeliveryId = internalArgs._cmuxlayer_delivery_id;
+        const timings = internalArgs._cmuxlayer_timings;
         assertInlineInputAllowed({
           tool: "send_input",
           arg: "text",
@@ -9650,15 +9701,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 chunkTerminalInput(sanitizedText, effectiveChunkSize),
               )
             : [sanitizedText];
-        const route = await resolveRawSurfaceMutationRoute(
-          args.surface,
-          args.workspace,
-          "send_input",
+        const route = await timeDeliveryPhase(timings, "enumerate", () =>
+          resolveRawSurfaceMutationRoute(
+            args.surface,
+            args.workspace,
+            "send_input",
+          ),
         );
         const targetRecord = resolveLatestSurfaceAgentRecord(
           stateMgr,
           route.surface,
         );
+        // A public delivery_id is a promise that wait_for can resolve. Raw,
+        // unmanaged surfaces have no lifecycle identity for the verifier, so
+        // keep their truthful queued receipt ID-free instead of exposing an
+        // orphaned handle.
+        const deliveryId = targetRecord ? requestedDeliveryId : undefined;
         assertInteractiveMultilineInputAllowed({
           tool: "send_input",
           value: args.text,
@@ -9726,9 +9784,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         }
 
+        const lockStartedAt = Date.now();
         const delivery = await withSurfaceWrite(
           route.surface,
           async () => {
+            addDeliveryPhaseTiming(timings, "lock", lockStartedAt);
             await route.assertCurrent();
             return executeDeliveryEngine({
               surface: route.surface,
@@ -9740,8 +9800,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               rename_to_task: args.rename_to_task,
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: sourceEvent,
+              delivery_id: deliveryId,
               verify_submit: shouldVerifySubmit,
               beforeMutation: route.assertCurrent,
+              timings,
             });
           },
           {
@@ -9751,6 +9813,55 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: route.stableSurfaceIdentity,
           },
         );
+
+        const receiptEngine = context.lifecycleSweepEngine;
+        if (
+          sourceEvent === "send_to" &&
+          deliveryId &&
+          targetRecord &&
+          receiptEngine
+        ) {
+          if (
+            delivery.delivery === "queued" ||
+            delivery.delivery === "queued_followup"
+          ) {
+            receiptEngine.acceptComposerQueue({
+              delivery_id: deliveryId,
+              agent_id: targetRecord.agent_id,
+              text: sanitizedText,
+              press_enter: args.press_enter,
+              source_event: "send_to",
+              retry_count: delivery.retry_count,
+              delivery_state: delivery.delivery,
+            });
+          } else if (delivery.delivery === "pending_verify") {
+            receiptEngine.acceptPendingVerify({
+              delivery_id: deliveryId,
+              agent_id: targetRecord.agent_id,
+              text: sanitizedText,
+              press_enter: args.press_enter,
+              source_event: "send_to",
+              retry_count: delivery.retry_count,
+            });
+          } else {
+            receiptEngine.resolveDelivery({
+              delivery_id: deliveryId,
+              agent_id: targetRecord.agent_id,
+              text: sanitizedText,
+              press_enter: args.press_enter,
+              source_event: "send_to",
+              delivery_state:
+                delivery.delivery === "rescued" ? "rescued" : "submitted",
+              terminal: true,
+              retry_count: delivery.retry_count,
+              submit_verified: delivery.submit_verified,
+              error:
+                delivery.delivery === "rescued"
+                  ? "Prompt appeared only after an external interrupt"
+                  : null,
+            });
+          }
+        }
 
         const identity = resolveTargetIdentity(
           stateMgr,
@@ -12293,9 +12404,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       allow_busy?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
+      timings?: DeliveryPhaseTimings;
     }) => {
-      await refreshManagedMetadataBestEffort(args.agent_id);
-      let route = await engine.resolveAgentIoRoute(args.agent_id);
+      const routeStartedAt = Date.now();
+      const enumerateStartedAt = args.timings?.enumerate ?? 0;
+      // Delivery already proves the UUID route from fresh topology and scans the
+      // one target TUI before mutation. A fleet-wide managed-metadata refresh
+      // here only queued the first send behind the startup sweep's lifecycle
+      // lock, adding 11-15 seconds without strengthening the route proof.
+      let route = await timeDeliveryPhase(args.timings, "enumerate", () =>
+        engine.resolveAgentIoRoute(args.agent_id),
+      );
       const requiresMutableRefGuards = !route.surface_uuid;
       // Guard against stale surface refs before sending. Registry refs drift
       // after a crash/respawn (a pane closes or is recycled), so a cached
@@ -12310,7 +12429,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // A UUID-less route is safe only if this check is newer than the
           // resolver that supplied its mutable ref.
           invalidateSurfaceTopologyCallScope(client as object);
-          const surfaces = await surfaceProvider();
+          const surfaces = await timeDeliveryPhase(
+            args.timings,
+            "enumerate",
+            surfaceProvider,
+          );
           return surfaces.length > 0
             ? new Set(surfaces.map((surface) => surface.ref))
             : null;
@@ -12327,14 +12450,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         isPositivelyStale(await liveSurfaceRefs(), route.surface_id)
       ) {
         discovery.invalidate();
-        await registry.listMerged(discovery, { force: true });
+        await timeDeliveryPhase(args.timings, "enumerate", () =>
+          registry.listMerged(discovery, { force: true }),
+        );
         invalidateSurfaceTopologyCallScope(client as object);
         // Re-resolve after the resync. The agent may have been evicted (its
         // surface vanished) or still point at a dead surface — either way,
         // refuse with a clear stale-ref error instead of misdelivering.
         let reresolved: typeof route | null;
         try {
-          reresolved = await engine.resolveAgentIoRoute(args.agent_id);
+          reresolved = await timeDeliveryPhase(args.timings, "enumerate", () =>
+            engine.resolveAgentIoRoute(args.agent_id),
+          );
         } catch {
           reresolved = null;
         }
@@ -12358,7 +12485,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // surface/command/key modes bypass this helper and remain available for
       // deliberate recovery.
       const assertAgentRouteHasTui = async (candidateRoute: typeof route) => {
-        const freshOccupant = await discovery.scanTarget(candidateRoute);
+        const freshOccupant = await timeDeliveryPhase(
+          args.timings,
+          "enumerate",
+          () => discovery.scanTarget(candidateRoute),
+        );
         if (
           freshOccupant &&
           !freshOccupant.read_error &&
@@ -12395,7 +12526,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // Confirm against another target-scoped fresh read before refusing;
           // one parse alone can be transient, while a fleet-wide scan would
           // couple this route to unrelated pane churn.
-          const freshOccupant = await discovery.scanTarget(route);
+          const freshOccupant = await timeDeliveryPhase(
+            args.timings,
+            "enumerate",
+            () => discovery.scanTarget(route),
+          );
           if (isForeign(freshOccupant)) {
             throw new Error(
               `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
@@ -12465,13 +12600,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // immediately before every chunk attempt and Return. Once any text has
       // landed, following a moved UUID would split one logical message across
       // terminals, so route changes fail closed instead.
-      route = await engine.resolveAgentIoRoute(args.agent_id);
+      route = await timeDeliveryPhase(args.timings, "enumerate", () =>
+        engine.resolveAgentIoRoute(args.agent_id),
+      );
       await assertAgentRouteHasTui(route);
       const deliveryRoute = route;
+      const routeElapsed = Math.max(0, Date.now() - routeStartedAt);
+      const enumerateElapsed = Math.max(
+        0,
+        (args.timings?.enumerate ?? 0) - enumerateStartedAt,
+      );
+      if (args.timings) {
+        args.timings.route += Math.max(0, routeElapsed - enumerateElapsed);
+      }
       const assertDeliveryRouteCurrent = async (): Promise<void> => {
         let current: typeof deliveryRoute;
         try {
-          current = await engine.resolveAgentIoRoute(args.agent_id);
+          current = await timeDeliveryPhase(args.timings, "enumerate", () =>
+            engine.resolveAgentIoRoute(args.agent_id),
+          );
         } catch {
           throw new Error(
             `Agent "${args.agent_id}" surface route changed during terminal ` +
@@ -12492,9 +12639,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       };
 
+      const lockStartedAt = Date.now();
       return withSurfaceWrite(
         deliveryRoute.surface_id,
         async () => {
+          addDeliveryPhaseTiming(args.timings, "lock", lockStartedAt);
           await assertDeliveryRouteCurrent();
           const delivery = await executeDeliveryEngine({
             surface: deliveryRoute.surface_id,
@@ -12538,6 +12687,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
               : shortPointerVerifyTimeoutMs,
             beforeMutation: assertDeliveryRouteCurrent,
+            timings: args.timings,
           });
           if (args.press_enter && delivery.submit_verified === true) {
             engine.markAgentWorking(args.agent_id);
@@ -16127,6 +16277,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               if (args.text === undefined) {
                 throw new Error("send_to mode=surface requires text");
               }
+              const deliveryId = randomUUID();
+              const timings = createDeliveryPhaseTimings();
               return legacyHandler("send_input")(
                 {
                   surface,
@@ -16138,6 +16290,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   rename_to_task: args.rename_to_task,
                   allow_long_inline: args.allow_long_inline,
                   _cmuxlayer_source_event: "send_to",
+                  _cmuxlayer_delivery_id: deliveryId,
+                  _cmuxlayer_timings: timings,
                 },
                 {},
               );
@@ -16588,6 +16742,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!agentId) {
             throw new Error("send_to mode=agent requires agent_id or target");
           }
+          const timings = createDeliveryPhaseTimings();
           const targetAgent =
             engine.getAgentState(agentId) ?? registry.get(agentId);
           assertInteractiveMultilineInputAllowed({
@@ -16615,6 +16770,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 retry_count: duplicate.retry_count,
                 needs_attention: duplicate.needs_attention,
                 attention_reason: duplicate.attention_reason,
+                timings_ms: timings,
               }),
             };
             return okFormatted(
@@ -16650,6 +16806,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 submit_attempted: false,
                 submit_verified: receipt.submit_verified,
                 retry_count: receipt.retry_count,
+                timings_ms: timings,
                 WARNING: pausedTargetWarning(livePaused.source),
               }),
             };
@@ -16667,6 +16824,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               allow_busy: args.allow_busy,
               source_event: "send_to",
               delivery_id: deliveryId,
+              timings,
             });
           } catch (error) {
             // AIDEV-NOTE (F1): a RetryableDeliveryError is, by name and by the
@@ -16694,6 +16852,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   submit_attempted: false,
                   submit_verified: receipt.submit_verified,
                   retry_count: receipt.retry_count,
+                  timings_ms: timings,
                   WARNING: `Delivery is queued for retry, not delivered yet: ${error.message}`,
                 }),
               };
@@ -16739,6 +16898,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : false,
                 submit_verified: failedReceipt.submit_verified,
                 retry_count: failedReceipt.retry_count,
+                timings_ms: timings,
               }),
             };
             throw error;
@@ -16801,6 +16961,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             submit_verified: delivery.submit_verified,
             submit_evidence: delivery.submit_evidence,
             retry_count: delivery.retry_count,
+            timings_ms: timings,
           });
           failedReceiptPayload = { ...publicReceipt };
           const evidence = await collectDeliveryEvidence(agentId);
