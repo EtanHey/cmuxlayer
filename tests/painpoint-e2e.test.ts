@@ -148,6 +148,14 @@ function makeLifecycleExec(surfaceRefs: string[], opts?: {
   const screenBySurface = opts?.screenBySurface ?? new Map<string, string>();
   const exec: ExecFn = async (_cmd, args) => {
     const { command, index: commandIndex } = commandArg(args);
+    if (command === "list-windows") {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (command === "list-workspaces") {
       return {
         stdout: JSON.stringify({

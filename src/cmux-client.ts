@@ -10,6 +10,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type {
   CmuxPane,
+  CmuxWindow,
   CmuxWorkspace,
   CmuxPaneSurfaces,
   CmuxNewSplitResult,
@@ -337,8 +338,20 @@ export class CmuxClient {
     return workspace;
   }
 
-  async listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }> {
-    const raw = await this.run(["list-workspaces"]);
+  async listWindows(): Promise<{ windows: CmuxWindow[] }> {
+    const raw = await this.run(["list-windows"]);
+    const parsed = this.parse<unknown>(raw, "list-windows");
+    return Array.isArray(parsed)
+      ? { windows: parsed as CmuxWindow[] }
+      : (parsed as { windows: CmuxWindow[] });
+  }
+
+  async listWorkspaces(opts?: {
+    window?: string;
+  }): Promise<{ workspaces: CmuxWorkspace[] }> {
+    const args = ["list-workspaces"];
+    if (opts?.window) args.push("--window", opts.window);
+    const raw = await this.run(args);
     return this.parse(raw, "list-workspaces");
   }
 

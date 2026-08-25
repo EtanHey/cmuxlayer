@@ -37,6 +37,7 @@ import { findWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
   captureSurfaceObserverEpoch,
+  enumerateAllWindowWorkspacesWithRetry,
   enrichSurfaceIdsFromPanes,
   isSurfaceObserverEpochCurrent,
   type SurfaceObserverEpoch,
@@ -227,7 +228,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         observerEpoch,
         "app-server surface enumeration",
       );
-      const workspaces = await this.client.listWorkspaces();
+      const workspaces = await this.listAllWorkspaces();
       const panesByWorkspace = await Promise.all(
         workspaces.workspaces.map(async (ws) => ({
           ref: ws.ref,
@@ -284,7 +285,10 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         getTransportHealth: () => getTransportHealth(this.client),
         supportsStableSurfaceReads: true,
         log: async () => {},
-        listWorkspaces: () => this.client.listWorkspaces(),
+        listAllWorkspaces: () => this.listAllWorkspaces(),
+        listWindows: () => this.client.listWindows(),
+        listWorkspaces: (workspaceOpts) =>
+          this.client.listWorkspaces(workspaceOpts),
         setStatus: async () => {},
         setStatuses: async () => {},
         clearStatus: async () => {},
@@ -448,7 +452,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       observerEpoch,
       "app-server thread start",
     );
-    const workspaces = await this.client.listWorkspaces();
+    const workspaces = await this.listAllWorkspaces();
     this.assertSurfaceObserverEpochCurrent(
       observerEpoch,
       "app-server thread start",
@@ -670,6 +674,17 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
 
   private captureSurfaceObserverEpoch(): SurfaceObserverEpoch {
     return captureSurfaceObserverEpoch(() => this.getSurfaceObserverEpoch());
+  }
+
+  private async listAllWorkspaces() {
+    const listed = await enumerateAllWindowWorkspacesWithRetry(
+      this.client,
+      () => this.getSurfaceObserverEpoch(),
+    );
+    if (!listed.complete) {
+      throw new Error("Incomplete cmux all-window workspace enumeration");
+    }
+    return listed;
   }
 
   private assertSurfaceObserverEpochCurrent(

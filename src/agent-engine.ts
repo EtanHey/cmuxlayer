@@ -84,6 +84,7 @@ import type {
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusUpdate,
+  CmuxWindow,
   CmuxWorkspace,
   ParsedScreenResult,
   ParsedScreenStatus,
@@ -222,10 +223,12 @@ import {
 import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology,
+  enumerateAllWindowWorkspacesWithRetry,
   EMPTY_SURFACE_TOPOLOGY,
   healthTopologyOverrides,
   isSurfaceObserverEpochCurrent,
   resolveAgentSurfaceBinding,
+  type AllWindowWorkspaceEnumeration,
   type SurfaceObserverEpoch,
   type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
@@ -1104,7 +1107,11 @@ interface AgentEngineClient {
   getTransportHealth?(): TransportHealthSignal | null;
   /** Native and CLI clients accept a stable UUID as the read-screen target. */
   supportsStableSurfaceReads?: boolean;
-  listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }>;
+  listWindows?(): Promise<{ windows: CmuxWindow[] }>;
+  listAllWorkspaces?(): Promise<AllWindowWorkspaceEnumeration>;
+  listWorkspaces(opts?: {
+    window?: string;
+  }): Promise<{ workspaces: CmuxWorkspace[] }>;
   log(
     message: string,
     opts?: {
@@ -3031,7 +3038,7 @@ export class AgentEngine {
   ): Promise<string | undefined> {
     if (workspace || !repo) return workspace;
 
-    return resolveWorkspaceRefForRepo(repo, () => this.client.listWorkspaces());
+    return resolveWorkspaceRefForRepo(repo, () => this.listAllWorkspaces());
   }
 
   private async sendLaunchCommand(
@@ -5316,6 +5323,19 @@ export class AgentEngine {
 
   private captureSurfaceObserverEpoch(): SurfaceObserverEpoch {
     return captureObserverEpoch(this.surfaceObserverEpochProvider());
+  }
+
+  private async listAllWorkspaces(): Promise<AllWindowWorkspaceEnumeration> {
+    const listed = this.client.listAllWorkspaces
+      ? await this.client.listAllWorkspaces()
+      : await enumerateAllWindowWorkspacesWithRetry(
+          this.client,
+          this.surfaceObserverEpochProvider(),
+        );
+    if (!listed.complete) {
+      throw new Error("Incomplete cmux all-window workspace enumeration");
+    }
+    return listed;
   }
 
   private isSurfaceObserverEpochCurrent(

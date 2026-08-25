@@ -74,6 +74,14 @@ function makeExec(
     }
   };
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({

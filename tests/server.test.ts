@@ -1119,6 +1119,14 @@ describe("tool handler integration", () => {
   let mockExec: ExecFn;
 
   const defaultPanePlacementResult = (args: string[]) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -1491,6 +1499,12 @@ describe("tool handler integration", () => {
   it("list_surfaces dedupes overlapping pane results and returns the condensed default schema", async () => {
     mockExec = vi
       .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 2 }],
+        }),
+        stderr: "",
+      })
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
           workspaces: [
@@ -1930,6 +1944,12 @@ describe("tool handler integration", () => {
       .fn()
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
           workspaces: [
             {
               ref: "workspace:1",
@@ -2002,6 +2022,12 @@ describe("tool handler integration", () => {
   it("list_surfaces preserves the current full schema behind verbose=true while still deduping", async () => {
     mockExec = vi
       .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      })
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
           workspaces: [
@@ -2876,31 +2902,47 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Stable identity resolution runs first, then mode scope, screen preflight,
-    // text delivery, and Return. Legacy topology has no UUID to retain.
-    expect(mockExec).toHaveBeenCalledTimes(5);
+    // Stable identity resolution retries the deliberately incomplete `{}`
+    // topology fixture once, then checks mode scope and screen readiness
+    // before delivery and Return.
+    expect(mockExec).toHaveBeenCalledTimes(8);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["list-workspaces"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:1"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["read-screen"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
       "cmux",
-      expect.arrayContaining(["send"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       5,
+      "cmux",
+      expect.arrayContaining(["identify", "--surface", "surface:1"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      6,
+      "cmux",
+      expect.arrayContaining(["read-screen"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      7,
+      "cmux",
+      expect.arrayContaining(["send"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      8,
       "cmux",
       expect.arrayContaining(["send-key"]),
     );
@@ -3025,29 +3067,44 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(5);
+    expect(mockExec).toHaveBeenCalledTimes(8);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["list-workspaces"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:6"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
       "cmux",
-      expect.arrayContaining(["send", "--surface", "surface:6"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       5,
+      "cmux",
+      expect.arrayContaining(["identify", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      6,
+      "cmux",
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      7,
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      8,
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
     );
@@ -3183,6 +3240,14 @@ describe("tool handler integration", () => {
     });
 
     const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({
@@ -3373,6 +3438,14 @@ describe("tool handler integration", () => {
     });
 
     const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({
@@ -8133,6 +8206,18 @@ describe("tool handler integration", () => {
         stdout: JSON.stringify({ ok: true }),
         stderr: "",
       });
+    const queuedExec = mockExec;
+    mockExec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
+      return queuedExec(cmd, args);
+    }) as typeof mockExec;
     const server = createServer({
       exec: mockExec,
       skipAgentLifecycle: true,
@@ -8522,6 +8607,14 @@ describe("tool handler integration", () => {
       const sentTexts: string[] = [];
 
       mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("list-windows")) {
+          return {
+            stdout: JSON.stringify({
+              windows: [{ ref: "window:1", workspace_count: 1 }],
+            }),
+            stderr: "",
+          };
+        }
         if (args.includes("list-workspaces")) {
           return {
             stdout: JSON.stringify({
@@ -8841,6 +8934,14 @@ describe("tool handler integration", () => {
     const submittedCommands: string[] = [];
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({
@@ -9192,6 +9293,14 @@ describe("tool handler integration", () => {
     const updateMenuKeys: string[] = [];
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({

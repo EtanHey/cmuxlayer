@@ -249,6 +249,7 @@ import {
 import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology as collectCmuxSurfaceTopology,
+  enumerateAllWindowWorkspacesWithRetry,
   EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
@@ -3824,6 +3825,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
   const client = context.client;
+  const listAllWorkspaces = async () => {
+    const listed = await enumerateAllWindowWorkspacesWithRetry(
+      client,
+      () => context.surfaceObserverEpoch,
+    );
+    if (!listed.complete) {
+      throw new SurfaceEnumerationError(
+        "Malformed cmux surface enumeration: incomplete all-window workspace enumeration",
+      );
+    }
+    return listed;
+  };
   const stateMgr = context.stateMgr;
   const roleSurfaceOverrides = context.roleSurfaceOverrides;
   const explicitRoleForDiscoveredSurface = (
@@ -4642,7 +4655,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const resolveWorkspaceForRepo = async (
     repo: string | null | undefined,
   ): Promise<string | undefined> => {
-    return resolveWorkspaceRefForRepo(repo, () => client.listWorkspaces());
+    return resolveWorkspaceRefForRepo(repo, listAllWorkspaces);
   };
 
   const getSurfaceDelivery = (surface: string) => {
@@ -7128,7 +7141,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): Promise<string | undefined> => {
     if (!candidate) return undefined;
     try {
-      const { workspaces } = await client.listWorkspaces();
+      const { workspaces } = await listAllWorkspaces();
       const normalized = candidate.trim();
       return (
         workspaces.find(
@@ -7150,7 +7163,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         typeof value === "string" && value.trim().length > 0,
     );
     try {
-      const { workspaces } = await client.listWorkspaces();
+      const { workspaces } = await listAllWorkspaces();
       for (const candidate of candidates) {
         const match = workspaces.find((workspace) =>
           envWorkspaceMatches(workspace, candidate),
@@ -7191,8 +7204,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   /** Currently-focused workspace ref, or undefined if it can't be read. */
   const currentFocusedWorkspace = async (): Promise<string | undefined> => {
     try {
-      const { workspaces } = await client.listWorkspaces();
-      return workspaces.find((w) => w.selected)?.ref;
+      const { workspaces } = await listAllWorkspaces();
+      const callerContext = currentCallerContext();
+      const callerCandidates = [
+        callerContext?.workspaceId,
+        callerContext?.tabId,
+      ].filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      );
+      const callerWorkspace = callerCandidates
+        .map((candidate) =>
+          workspaces.find((workspace) =>
+            envWorkspaceMatches(workspace, candidate),
+          ),
+        )
+        .find((workspace) => workspace !== undefined);
+      if (callerWorkspace?.window_ref) {
+        return workspaces.find(
+          (workspace) =>
+            workspace.selected &&
+            workspace.window_ref === callerWorkspace.window_ref,
+        )?.ref;
+      }
+      const connectorWorkspaces = await client.listWorkspaces();
+      return connectorWorkspaces.workspaces.find((workspace) => workspace.selected)
+        ?.ref;
     } catch {
       return undefined;
     }
@@ -7241,12 +7278,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (!repo) return;
     let workspace: CmuxWorkspace | undefined;
     try {
-      const listed = await client.listWorkspaces();
+      const listed = await listAllWorkspaces();
       workspace = listed.workspaces.find((candidate) =>
         envWorkspaceMatches(candidate, workspaceRef),
       );
-    } catch {
-      return;
+    } catch (error) {
+      throw new PlacementWorkspaceError(
+        `Cannot verify whether workspace ${workspaceRef} belongs to repo ${repo}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     const cwd = workspace?.current_directory?.trim();
     if (!cwd || workspaceDirectoryRepoMatchScore(repo, cwd) > 0) return;
@@ -7321,7 +7361,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     try {
-      const { workspaces } = await client.listWorkspaces();
+      const { workspaces } = await listAllWorkspaces();
       const paneLists = await Promise.all(
         workspaces.map(async (workspace) => ({
           workspace: workspace.ref,
@@ -7546,7 +7586,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     try {
       const workspaceRefs = workspace
         ? [workspace]
-        : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
+        : (await listAllWorkspaces()).workspaces.map((ws) => ws.ref);
 
       for (const workspaceRef of workspaceRefs) {
         const panes = await client.listPanes({ workspace: workspaceRef });
@@ -7714,31 +7754,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             remapped_to: route.surface,
           }
         : route;
-    const throwStaleSurfaceRef = (
-      snapshot: SurfaceTopologySnapshot | null,
-      diagnostic?: string,
-    ): never => {
-      const liveAgents: Array<{ agent_id: string; surface_id: string }> = [];
+    const throwStaleSurfaceRef = (diagnostic?: string): never => {
+      const expectedUuidKey = expectedUuid?.trim().toLowerCase() ?? null;
+      const owners: AgentRecord[] = [];
       const seen = new Set<string>();
       for (const record of stateMgr.listStates()) {
-        const uuid = record.surface_uuid?.trim();
-        const currentRef =
-          uuid && snapshot ? findSurfaceRefByUuid(snapshot, uuid) : null;
-        const liveRef =
-          currentRef ??
-          (snapshot?.workspaceBySurface.has(record.surface_id)
-            ? record.surface_id
-            : null);
-        if (!liveRef || seen.has(record.agent_id)) continue;
+        const recordUuidKey = record.surface_uuid?.trim().toLowerCase() ?? null;
+        const ownsRequestedRef = record.surface_id === requestedSurface;
+        const ownsExpectedUuid = Boolean(
+          expectedUuidKey && recordUuidKey === expectedUuidKey,
+        );
+        if (
+          (!ownsRequestedRef && !ownsExpectedUuid) ||
+          seen.has(record.agent_id)
+        ) {
+          continue;
+        }
         seen.add(record.agent_id);
-        liveAgents.push({ agent_id: record.agent_id, surface_id: liveRef });
+        owners.push(record);
       }
       const occupancy =
-        liveAgents.length === 1
-          ? `${requestedSurface} is stale; agent ${liveAgents[0].agent_id} is alive at ${liveAgents[0].surface_id} — use agent_id`
-          : liveAgents.length > 1
-            ? `${requestedSurface} is stale; live managed agents: ${liveAgents
-                .map((agent) => `${agent.agent_id} at ${agent.surface_id}`)
+        owners.length === 1
+          ? `${requestedSurface} is stale; agent ${owners[0].agent_id} owns this ref but no live route was proven — use agent_id`
+          : owners.length > 1
+            ? `${requestedSurface} is stale; managed agents recorded on this ref: ${owners
+                .map((agent) => agent.agent_id)
                 .join(", ")} — use agent_id`
             : `${requestedSurface} is stale; no live managed agent maps this ref`;
       throw new Error(diagnostic ? `${occupancy} (${diagnostic})` : occupancy);
@@ -7771,7 +7811,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const currentRef = findSurfaceRefByUuid(topology, stableUuid);
         if (!currentRef) {
           return throwStaleSurfaceRef(
-            topology,
             `Stable surface UUID ${stableUuid} captured for ${requestedSurface} ` +
               `is no longer live; refusing ${operation} rather than using a recycled ref.`,
           );
@@ -7813,11 +7852,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         topology.surfaceIdByRef.size > 0 ||
         topology.surfaceRefById.size > 0
       ) {
-        throwStaleSurfaceRef(topology);
+        throwStaleSurfaceRef();
       }
 
       if (!topology.workspaceBySurface.has(requestedSurface)) {
-        throwStaleSurfaceRef(topology);
+        throwStaleSurfaceRef();
       }
 
       const workspace =
@@ -8270,7 +8309,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       try {
         const listingObserverEpoch = context.surfaceObserverEpoch;
-        const workspaces = await client.listWorkspaces();
+        const workspaces = await listAllWorkspaces();
         const targetWorkspaceRefs = args.workspace
           ? [args.workspace]
           : workspaces.workspaces.map((workspace) => workspace.ref);
@@ -8681,7 +8720,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
 
         const [{ workspaces }, panes] = await Promise.all([
-          client.listWorkspaces(),
+          listAllWorkspaces(),
           client.listPanes({ workspace: targetWorkspace }),
         ]);
         const paneGroups = await Promise.all(
@@ -9906,7 +9945,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.workspace,
             "read_screen",
           );
-          if (route.surface === args.surface) throw readError;
+          if (
+            route.surface === args.surface &&
+            (route.workspace ?? null) === (args.workspace ?? null)
+          ) {
+            throw readError;
+          }
           screenRemap = remapFields(route);
           ({ result, topology } = await readScreenSnapshot({
             ...snapshotOpts,
@@ -11246,7 +11290,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let lastLifecycleSurfaces: CmuxSurface[] | null = null;
     let lastLifecycleSurfaceObserverEpoch: string | null = null;
     const readLifecycleSurfaces = async () => {
-      const workspaces = await client.listWorkspaces();
+      const workspaces = await listAllWorkspaces();
       const workspaceList = requireSurfaceEnumerationArray<CmuxWorkspace>(
         workspaces.workspaces,
         "workspaces.workspaces",
@@ -11502,7 +11546,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           getTransportHealth: () => getTransportHealth(client),
           supportsStableSurfaceReads: true,
           log: (message, eventOpts) => client.log(message, eventOpts),
-          listWorkspaces: () => client.listWorkspaces(),
+          ...(typeof client.listWindows === "function"
+            ? { listWindows: () => client.listWindows() }
+            : {}),
+          listAllWorkspaces,
+          listWorkspaces: (workspaceOpts) =>
+            client.listWorkspaces(workspaceOpts),
           setStatus: (key, value, statusOpts) =>
             client.setStatus(key, value, statusOpts),
           setStatuses: async (updates) => {

@@ -10,6 +10,7 @@
 
 import type {
   CmuxWorkspace,
+  CmuxWindow,
   CmuxPaneSurfaces,
   CmuxPane,
   CmuxNewSplitResult,
@@ -28,6 +29,7 @@ import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
+import { listAllWindowWorkspaces } from "./surface-topology.js";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -252,8 +254,23 @@ export class CmuxSocketClient {
     return result.pong === true;
   }
 
-  async listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }> {
-    return this.call("workspace.list");
+  async listWindows(): Promise<{ windows: CmuxWindow[] }> {
+    try {
+      return await this.call("window.list");
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallbackPinned()!.listWindows();
+      }
+      throw e;
+    }
+  }
+
+  async listWorkspaces(opts?: {
+    window?: string;
+  }): Promise<{ workspaces: CmuxWorkspace[] }> {
+    return this.call("workspace.list", {
+      ...(opts?.window ? { window_id: opts.window } : {}),
+    });
   }
 
   async selectWorkspace(workspace: string): Promise<void> {
@@ -819,7 +836,10 @@ export class CmuxSocketClient {
   ): Promise<string> {
     if (workspace) return workspace;
 
-    const { workspaces } = await this.listWorkspaces();
+    const { workspaces } = await listAllWindowWorkspaces(
+      this,
+      () => this.currentObserverTransportEpoch(),
+    );
     for (const ws of workspaces) {
       const surfaces = await this.listPaneSurfaces({ workspace: ws.ref });
       if (surfaces.surfaces.some((s) => s.ref === surface)) {

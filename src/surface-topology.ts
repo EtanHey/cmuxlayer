@@ -7,6 +7,7 @@ import type {
   CmuxPane,
   CmuxPaneSurfaces,
   CmuxSurface,
+  CmuxWindow,
   CmuxWorkspace,
 } from "./types.js";
 
@@ -40,7 +41,10 @@ export interface ResolvedAgentSurfaceBinding {
 }
 
 export interface SurfaceTopologyClient {
-  listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }>;
+  listWindows?(): Promise<{ windows: CmuxWindow[] }>;
+  listWorkspaces(opts?: {
+    window?: string;
+  }): Promise<{ workspaces: CmuxWorkspace[] }>;
   listPanes(opts?: { workspace?: string }): Promise<{
     workspace_ref?: string;
     window_ref?: string;
@@ -52,6 +56,19 @@ export interface SurfaceTopologyClient {
   }): Promise<CmuxPaneSurfaces>;
 }
 
+const SURFACE_TOPOLOGY_CLIENT_METHOD_MAP = {
+  listWindows: true,
+  listWorkspaces: true,
+  listPanes: true,
+  listPaneSurfaces: true,
+} satisfies Record<keyof SurfaceTopologyClient, true>;
+
+export const SURFACE_TOPOLOGY_CLIENT_METHODS = Object.freeze(
+  Object.keys(SURFACE_TOPOLOGY_CLIENT_METHOD_MAP) as Array<
+    keyof SurfaceTopologyClient
+  >,
+);
+
 export type SurfaceObserverIdProvider = () => string | null | undefined;
 
 /**
@@ -60,6 +77,22 @@ export type SurfaceObserverIdProvider = () => string | null | undefined;
  * an observation cannot authorize a later mutation.
  */
 export type SurfaceObserverEpoch = string | null | undefined;
+
+export interface AllWindowWorkspaceEnumeration {
+  workspaces: CmuxWorkspace[];
+  complete: boolean;
+  window_count: number | null;
+}
+
+interface CachedWorkspaceEnumeration {
+  observerEpoch: string;
+  pending: Promise<AllWindowWorkspaceEnumeration>;
+}
+
+const workspaceEnumerationCache = new WeakMap<
+  object,
+  CachedWorkspaceEnumeration
+>();
 
 export function captureSurfaceObserverEpoch(
   observerIdProvider?: SurfaceObserverIdProvider,
@@ -79,6 +112,129 @@ export function isSurfaceObserverEpochCurrent(
   if (observerEpoch === undefined) return true;
   if (!observerEpoch || !observerIdProvider) return false;
   return captureSurfaceObserverEpoch(observerIdProvider) === observerEpoch;
+}
+
+export async function enumerateAllWindowWorkspaces(
+  client: Pick<SurfaceTopologyClient, "listWindows" | "listWorkspaces">,
+  observerEpochProvider?: SurfaceObserverIdProvider,
+  opts: { cache?: boolean } = {},
+): Promise<AllWindowWorkspaceEnumeration> {
+  const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
+  const cacheKey = client as object;
+  if (observerEpoch && opts.cache !== false) {
+    const cached = workspaceEnumerationCache.get(cacheKey);
+    if (cached?.observerEpoch === observerEpoch) return cached.pending;
+  }
+
+  const enumerate = async (): Promise<AllWindowWorkspaceEnumeration> => {
+    if (!client.listWindows) {
+      const listed = await client.listWorkspaces();
+      return {
+        workspaces: listed.workspaces,
+        complete: Array.isArray(listed.workspaces),
+        window_count: null,
+      };
+    }
+
+    const listedWindows = await client.listWindows();
+    if (
+      listedWindows == null ||
+      !Object.prototype.hasOwnProperty.call(listedWindows, "windows")
+    ) {
+      // Legacy/test doubles may expose the optional method without supporting
+      // it. Production socket clients convert method_not_found to CLI first.
+      const listed = await client.listWorkspaces();
+      return {
+        workspaces: listed.workspaces,
+        complete: Array.isArray(listed.workspaces),
+        window_count: null,
+      };
+    }
+    if (!Array.isArray(listedWindows.windows)) {
+      throw new Error("Malformed cmux window enumeration");
+    }
+    let complete = listedWindows.windows.length > 0;
+    const workspaceLists = await Promise.all(
+      listedWindows.windows.map(async (window) => {
+        const windowTarget = window.ref ?? window.id;
+        if (!windowTarget) {
+          complete = false;
+          return [] as CmuxWorkspace[];
+        }
+        const listed = await client.listWorkspaces({ window: windowTarget });
+        if (!Array.isArray(listed.workspaces)) {
+          throw new Error(
+            `Malformed cmux workspace enumeration for ${windowTarget}`,
+          );
+        }
+        if (
+          typeof window.workspace_count === "number"
+            ? listed.workspaces.length !== window.workspace_count
+            : listed.workspaces.length === 0
+        ) {
+          complete = false;
+        }
+        return listed.workspaces.map((workspace) => ({
+          ...workspace,
+          window_ref: workspace.window_ref ?? windowTarget,
+        }));
+      }),
+    );
+    const byRef = new Map<string, CmuxWorkspace>();
+    for (const workspace of workspaceLists.flat()) {
+      byRef.set(workspace.ref, workspace);
+    }
+    return {
+      workspaces: [...byRef.values()],
+      complete,
+      window_count: listedWindows.windows.length,
+    };
+  };
+
+  const pending = enumerate();
+  if (observerEpoch && opts.cache !== false) {
+    // Coalesce the N callers in one observer epoch that arrive together, but
+    // do not retain a completed map: windows/workspaces can change without an
+    // observer reconnect, and route-proof callers must see that same-epoch
+    // topology change on their next observation.
+    workspaceEnumerationCache.set(cacheKey, { observerEpoch, pending });
+    const clearPending = () => {
+      const cached = workspaceEnumerationCache.get(cacheKey);
+      if (cached?.pending === pending) {
+        workspaceEnumerationCache.delete(cacheKey);
+      }
+    };
+    void pending.then(clearPending, clearPending);
+  }
+  return pending;
+}
+
+export async function enumerateAllWindowWorkspacesWithRetry(
+  client: Pick<SurfaceTopologyClient, "listWindows" | "listWorkspaces">,
+  observerEpochProvider?: SurfaceObserverIdProvider,
+): Promise<AllWindowWorkspaceEnumeration> {
+  const first = await enumerateAllWindowWorkspaces(
+    client,
+    observerEpochProvider,
+  );
+  if (first.complete) return first;
+  return enumerateAllWindowWorkspaces(client, observerEpochProvider, {
+    cache: false,
+  });
+}
+
+export async function listAllWindowWorkspaces(
+  client: Pick<SurfaceTopologyClient, "listWindows" | "listWorkspaces">,
+  observerEpochProvider?: SurfaceObserverIdProvider,
+): Promise<{ workspaces: CmuxWorkspace[] }> {
+  const result = await enumerateAllWindowWorkspacesWithRetry(
+    client,
+    observerEpochProvider,
+  );
+  if (!result.complete) {
+    throw new Error("Incomplete cmux all-window workspace enumeration");
+  }
+  return { workspaces: result.workspaces };
 }
 
 export const EMPTY_SURFACE_TOPOLOGY: SurfaceTopology = {
@@ -295,10 +451,18 @@ export async function collectSurfaceTopology(
   }
 
   let workspaceRefs: string[];
+  let workspaceEnumerationComplete = true;
   try {
-    workspaceRefs = workspace
-      ? [workspace]
-      : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
+    if (workspace) {
+      workspaceRefs = [workspace];
+    } else {
+      const listed = await enumerateAllWindowWorkspacesWithRetry(
+        client,
+        observerEpochProvider,
+      );
+      workspaceEnumerationComplete = listed.complete;
+      workspaceRefs = listed.workspaces.map((ws) => ws.ref);
+    }
   } catch {
     return null;
   }
@@ -306,7 +470,7 @@ export async function collectSurfaceTopology(
   const snapshot: SurfaceTopologySnapshot = {
     observerId,
     observerEpoch,
-    complete: true,
+    complete: workspaceEnumerationComplete,
     surfaces: [],
     workspaceBySurface: new Map(),
     titleBySurface: new Map(),

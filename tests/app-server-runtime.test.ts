@@ -48,6 +48,7 @@ function makeClient() {
   return {
     getTransportHealth: () => ({ mode: "socket", degraded: false }),
     currentSocketPath: vi.fn(() => "/tmp/cmux-app-test.sock"),
+    listWindows: vi.fn().mockResolvedValue(undefined),
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
     listPanes: vi.fn().mockResolvedValue({ panes: [] }),
     listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
@@ -842,6 +843,81 @@ describe("CmuxAppServerRuntime", () => {
       expect(spawnAgent).not.toHaveBeenCalled();
       expect(client.newSplit).not.toHaveBeenCalled();
       expect(client.newSurface).not.toHaveBeenCalled();
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
+  it("starts a thread in a repo workspace belonging to another window", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    client.listWindows = vi.fn().mockResolvedValue({
+      windows: [
+        { ref: "window:A", workspace_count: 1 },
+        { ref: "window:B", workspace_count: 1 },
+      ],
+    });
+    client.listWorkspaces.mockImplementation(
+      async (opts?: { window?: string }) => ({
+        workspaces:
+          opts?.window === "window:B"
+            ? [
+                {
+                  ref: "workspace:B",
+                  title: "brainlayer",
+                  current_directory: "/Users/test/Gits/brainlayer",
+                },
+              ]
+            : [
+                {
+                  ref: "workspace:A",
+                  title: "cmuxlayer",
+                  current_directory: "/Users/test/Gits/cmuxlayer",
+                },
+              ],
+      }),
+    );
+    client.identify.mockResolvedValue({
+      focused: {
+        workspace_ref: "workspace:B",
+        surface_ref: "surface:new",
+      },
+    });
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    expect((runtime as any).engine.client.listWindows).toEqual(
+      expect.any(Function),
+    );
+    const record = makeRecord();
+    const spawnAgent = vi
+      .spyOn((runtime as any).engine, "spawnAgent")
+      .mockResolvedValue({
+        agent_id: record.agent_id,
+        surface_id: "surface:new",
+        workspace_id: "workspace:B",
+        state: "booting",
+      });
+    vi.spyOn(runtime as any, "waitForCodexPrompt").mockResolvedValue(undefined);
+    vi.spyOn((runtime as any).engine, "getAgentState").mockReturnValue({
+      ...record,
+      surface_id: "surface:new",
+      workspace_id: "workspace:B",
+    });
+
+    try {
+      await expect(
+        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+      ).resolves.toMatchObject({ threadId: record.agent_id });
+      expect(spawnAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ workspace: "workspace:B" }),
+      );
+      expect(client.listWorkspaces).toHaveBeenCalledWith({
+        window: "window:A",
+      });
+      expect(client.listWorkspaces).toHaveBeenCalledWith({
+        window: "window:B",
+      });
     } finally {
       runtime.dispose();
       rmSync(TEST_DIR, { recursive: true, force: true });

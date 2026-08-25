@@ -47,6 +47,18 @@ type MockResponseHandler = (req: MockV2Request) => unknown;
 
 const MOCK_RESPONSES: Record<string, unknown> = {
   "system.ping": { pong: true },
+  "window.list": {
+    windows: [
+      {
+        id: "11111111-2222-4333-8444-555555555555",
+        ref: "window:2",
+        index: 0,
+        key: true,
+        visible: true,
+        workspace_count: 1,
+      },
+    ],
+  },
   "workspace.list": {
     workspaces: [
       {
@@ -481,6 +493,26 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(result.workspaces[0]).toHaveProperty("selected");
   });
 
+  it("listWindows sends a window.list request", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    const result = await client.listWindows();
+
+    expect(result.windows[0]?.ref).toBe("window:2");
+    expect(lastV2Request).toEqual({ method: "window.list", params: {} });
+  });
+
+  it("scopes workspace.list to an explicit window", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.listWorkspaces({ window: "window:2" });
+
+    expect(lastV2Request).toEqual({
+      method: "workspace.list",
+      params: { window_id: "window:2" },
+    });
+  });
+
   it("selectWorkspace sends a workspace.select request", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
@@ -570,6 +602,79 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(result).toHaveProperty("lines");
     expect(result).toHaveProperty("scrollback_used");
     expect(result.text).toContain("hello");
+  });
+
+  it("resolves read, send, and close targets across windows without a workspace", async () => {
+    const savedWindows = MOCK_RESPONSES["window.list"];
+    const savedWorkspaces = MOCK_RESPONSES["workspace.list"];
+    const savedSurfaces = MOCK_RESPONSES["surface.list"];
+    MOCK_RESPONSES["window.list"] = {
+      windows: [
+        { ref: "window:A", workspace_count: 1 },
+        { ref: "window:B", workspace_count: 1 },
+      ],
+    };
+    MOCK_RESPONSES["workspace.list"] = (req) => ({
+      workspaces: [
+        {
+          ref:
+            req.params.window_id === "window:B"
+              ? "workspace:B"
+              : "workspace:A",
+          title: String(req.params.window_id ?? "window:A"),
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+      ],
+    });
+    MOCK_RESPONSES["surface.list"] = (req) => ({
+      workspace_ref: req.params.workspace_id,
+      window_ref:
+        req.params.workspace_id === "workspace:B" ? "window:B" : "window:A",
+      pane_ref: "pane:1",
+      surfaces:
+        req.params.workspace_id === "workspace:B"
+          ? [
+              {
+                ref: "surface:B",
+                title: "other window",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ]
+          : [],
+    });
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await expect(client.readScreen("surface:B")).resolves.toHaveProperty(
+        "surface",
+      );
+      await expect(client.send("surface:B", "hello")).resolves.toBeUndefined();
+      await expect(client.closeSurface("surface:B")).resolves.toBeUndefined();
+
+      for (const method of [
+        "surface.read_text",
+        "surface.send_text",
+        "surface.close",
+      ]) {
+        expect(mockEvents).toContainEqual({
+          type: "v2",
+          method,
+          params: expect.objectContaining({
+            surface_id: "surface:B",
+            workspace_id: "workspace:B",
+          }),
+        });
+      }
+    } finally {
+      MOCK_RESPONSES["window.list"] = savedWindows;
+      MOCK_RESPONSES["workspace.list"] = savedWorkspaces;
+      MOCK_RESPONSES["surface.list"] = savedSurfaces;
+    }
   });
 
   it("newSplit creates a surface and returns refs", async () => {
@@ -873,10 +978,14 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
   });
 
   it("resolves surface-targeted sidebar commands to the target surface workspace", async () => {
+    const savedWindowList = MOCK_RESPONSES["window.list"];
     const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
     const savedSurfaceList = MOCK_RESPONSES["surface.list"];
     const savedIdentify = MOCK_RESPONSES["system.identify"];
 
+    MOCK_RESPONSES["window.list"] = {
+      windows: [{ ref: "window:1", workspace_count: 2 }],
+    };
     MOCK_RESPONSES["workspace.list"] = {
       workspaces: [
         {
@@ -959,6 +1068,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
         "notify --title Done --workspace workspace:2 --surface surface:target",
       );
     } finally {
+      MOCK_RESPONSES["window.list"] = savedWindowList;
       MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
       MOCK_RESPONSES["surface.list"] = savedSurfaceList;
       MOCK_RESPONSES["system.identify"] = savedIdentify;
@@ -966,10 +1076,14 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
   });
 
   it("falls back to the focused workspace for tab commands when a surface cannot be mapped", async () => {
+    const savedWindowList = MOCK_RESPONSES["window.list"];
     const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
     const savedSurfaceList = MOCK_RESPONSES["surface.list"];
     const savedIdentify = MOCK_RESPONSES["system.identify"];
 
+    MOCK_RESPONSES["window.list"] = {
+      windows: [{ ref: "window:1", workspace_count: 2 }],
+    };
     MOCK_RESPONSES["workspace.list"] = {
       workspaces: [
         {
@@ -1023,6 +1137,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
         "notify --title Done --surface surface:unmapped",
       );
     } finally {
+      MOCK_RESPONSES["window.list"] = savedWindowList;
       MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
       MOCK_RESPONSES["surface.list"] = savedSurfaceList;
       MOCK_RESPONSES["system.identify"] = savedIdentify;
@@ -1087,6 +1202,12 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
   function createMockCli(): CmuxClient {
     cliCalls = [];
     return {
+      listWindows: async () => {
+        cliCalls.push({ method: "listWindows", args: [] });
+        return {
+          windows: [{ id: "cli-window", workspace_count: 1 }],
+        };
+      },
       newSplit: async (direction: string, opts?: unknown) => {
         cliCalls.push({ method: "newSplit", args: [direction, opts] });
         return {
@@ -1131,6 +1252,24 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       },
     } as unknown as CmuxClient;
   }
+
+  it("listWindows falls back to CLI when window.list returns method_not_found", async () => {
+    const saved = MOCK_RESPONSES["window.list"];
+    delete MOCK_RESPONSES["window.list"];
+    try {
+      const client = new CmuxSocketClient({
+        socketPath: MOCK_SOCKET_PATH,
+        cliFallback: createMockCli(),
+      });
+
+      await expect(client.listWindows()).resolves.toEqual({
+        windows: [{ id: "cli-window", workspace_count: 1 }],
+      });
+      expect(cliCalls).toEqual([{ method: "listWindows", args: [] }]);
+    } finally {
+      MOCK_RESPONSES["window.list"] = saved;
+    }
+  });
 
   it("newSplit routes an explicit focus preference through the verified CLI contract", async () => {
     const client = new CmuxSocketClient({

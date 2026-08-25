@@ -51,6 +51,14 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
           title: "witness-pane",
         };
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("new-split") || args.includes("new-surface")) {
       surfaceLive = true;
     }
@@ -165,6 +173,14 @@ function makeSharedPaneExec(): ExecFn {
           title: "witness-pane",
         };
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("close-surface")) {
       const surface = String(args[args.indexOf("--surface") + 1] ?? "");
       liveSurfaces.delete(surface);

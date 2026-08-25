@@ -18,6 +18,7 @@ import {
   wrapCliWithSelfHeal,
   wrapSocketWithSelfHeal,
 } from "../src/cmux-transport-self-heal.js";
+import { SURFACE_TOPOLOGY_CLIENT_METHODS } from "../src/surface-topology.js";
 
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
 const ACCESS_CONTROL_DENIED_TEXT =
@@ -138,6 +139,33 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     for (const { server, path } of servers.splice(0)) {
       await stopPingServer(server, path);
     }
+  });
+
+  it("preserves every SurfaceTopologyClient method through the wrapper", () => {
+    const socketPath = join(tmpdir(), `cmux-topology-parity-${process.pid}.sock`);
+    const cli = new CmuxClient({
+      exec: vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" }),
+      bin: "cmux",
+    });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      listWindows: vi.fn(),
+      listWorkspaces: vi.fn(),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(socket, cli, {
+      socketPath,
+      reprobeIntervalMs: 60_000,
+    });
+
+    for (const method of SURFACE_TOPOLOGY_CLIENT_METHODS) {
+      expect(typeof (client as unknown as Record<string, unknown>)[method]).toBe(
+        "function",
+      );
+    }
+    client.stop();
   });
 
   function track(server: net.Server, path: string): void {

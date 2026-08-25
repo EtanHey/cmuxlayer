@@ -11,11 +11,24 @@ export interface SurfaceMode {
 export interface CmuxWorkspace {
   id?: string;
   ref: string;
+  /** Owning window, attached by all-window topology enumeration. */
+  window_ref?: string;
   title: string;
   index: number;
   selected: boolean;
   pinned: boolean;
   current_directory?: string | null;
+}
+
+export interface CmuxWindow {
+  id?: string;
+  ref?: string;
+  index?: number;
+  key?: boolean;
+  visible?: boolean;
+  workspace_count?: number;
+  selected_workspace_id?: string | null;
+  selected_workspace_ref?: string | null;
 }
 
 export type SurfaceWorkingDirectorySource =

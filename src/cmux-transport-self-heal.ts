@@ -9,6 +9,7 @@ import { CmuxClient } from "./cmux-client.js";
 import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { CmuxSocketClient } from "./cmux-socket-client.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
+import { SURFACE_TOPOLOGY_CLIENT_METHODS } from "./surface-topology.js";
 import type { CreateCmuxClientOptions } from "./cmux-client-factory.js";
 import {
   candidateSocketPathsForOpts,
@@ -81,9 +82,7 @@ export interface CmuxSelfHealingClientOptions {
 }
 
 const FORWARDED_ASYNC_METHODS = [
-  "listWorkspaces",
-  "listPaneSurfaces",
-  "listPanes",
+  ...SURFACE_TOPOLOGY_CLIENT_METHODS,
   "listTerminalMetadata",
   "newSplit",
   "newSurface",
@@ -127,6 +126,7 @@ interface QueuedFailedPayload {
 }
 
 const READ_ONLY_METHODS = new Set<ForwardedAsyncMethod>([
+  "listWindows",
   "listWorkspaces",
   "listPaneSurfaces",
   "listPanes",

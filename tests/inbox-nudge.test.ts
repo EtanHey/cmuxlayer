@@ -81,6 +81,14 @@ function makeExec(
     if (mutableScreen) mutableScreen.text = text;
   };
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -1010,6 +1018,14 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     // Recycle the surface: it now hosts a Codex agent.
     (exec as ReturnType<typeof vi.fn>).mockImplementation(
       async (_cmd: string, args: string[]) => {
+        if (args.includes("list-windows")) {
+          return {
+            stdout: JSON.stringify({
+              windows: [{ ref: "window:1", workspace_count: 1 }],
+            }),
+            stderr: "",
+          };
+        }
         if (args.includes("read-screen")) {
           return {
             stdout: JSON.stringify({
