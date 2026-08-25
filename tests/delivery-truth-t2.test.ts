@@ -735,10 +735,18 @@ describe("boot-submit readiness and attributable evidence", () => {
     payloadAppears: boolean;
     submitAfterReturn?: number | null;
     staleReadyAfterReturn?: boolean;
+    frontMatterReads?: number;
+    interruptAfterReturn?: boolean;
     cli?: "codex" | "claude";
-  }): { exec: ExecFn; returnPresses: () => number } {
+  }): {
+    exec: ExecFn;
+    returnPresses: () => number;
+    promptSentAfterRead: () => number | null;
+  } {
     let promptSent = false;
+    let promptSentAfterRead: number | null = null;
     let returnPresses = 0;
+    let screenReads = 0;
     const exec: ExecFn = vi.fn().mockImplementation(
       async (_cmd, args: string[]) => {
         if (args.includes("new-split")) {
@@ -794,6 +802,7 @@ describe("boot-submit readiness and attributable evidence", () => {
         }
         if (args.includes("send") && !args.includes("send-key")) {
           promptSent = true;
+          promptSentAfterRead = screenReads;
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("send-key") && args.includes("return")) {
@@ -801,11 +810,20 @@ describe("boot-submit readiness and attributable evidence", () => {
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("read-screen")) {
+          screenReads += 1;
           const cli = opts.cli ?? "codex";
+          const frontMatterActive =
+            cli === "codex" && screenReads <= (opts.frontMatterReads ?? 0);
           const readyScreen =
             cli === "claude"
               ? ["Claude Code", "What can I help you with?", "❯"].join("\n")
-              : codexReady;
+              : frontMatterActive
+                ? [
+                    "Working (1s • esc to interrupt)",
+                    "› Ask Codex to do anything",
+                    "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+                  ].join("\n")
+                : codexReady;
           const submitted =
             opts.submitAfterReturn !== null &&
             opts.submitAfterReturn !== undefined &&
@@ -824,6 +842,9 @@ describe("boot-submit readiness and attributable evidence", () => {
                   ].join("\n")
                 : [
                     ">_ OpenAI Codex",
+                    ...(opts.interruptAfterReturn
+                      ? ["Conversation interrupted"]
+                      : []),
                     "• Read and follow the brief",
                     "Working (1s • esc to interrupt)",
                     "gpt-5.6-sol high · ~/Gits/cmuxlayer",
@@ -857,7 +878,11 @@ describe("boot-submit readiness and attributable evidence", () => {
         return { stdout: "{}", stderr: "" };
       },
     );
-    return { exec, returnPresses: () => returnPresses };
+    return {
+      exec,
+      returnPresses: () => returnPresses,
+      promptSentAfterRead: () => promptSentAfterRead,
+    };
   }
 
   it("correlates the complete multi-paragraph Codex composer including blank lines and the » glyph", async () => {
@@ -917,6 +942,97 @@ describe("boot-submit readiness and attributable evidence", () => {
       __submitEvidenceTestHooks.extractComposerInputRegion(screen),
     ).toBe("");
   });
+
+  it("waits for the front-matter turn to become idle before typing the boot prompt", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: 1,
+      frontMatterReads: 1,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 5_000,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(harness.promptSentAfterRead()).toBeGreaterThan(1);
+    expect(parsed.boot_prompt_receipt.submit_verified).toBe(true);
+  }, 20_000);
+
+  it("returns banner-independent queued state by deadline without typing or pressing Return", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: 1,
+      frontMatterReads: 100,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 250,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+      delivered: false,
+      typed: false,
+      submit_attempted: false,
+      submit_verified: null,
+      observation: {
+        status: "working",
+        composer_empty: true,
+        prompt_echoed: false,
+      },
+    });
+    expect(harness.promptSentAfterRead()).toBeNull();
+    expect(harness.returnPresses()).toBe(0);
+  }, 20_000);
+
+  it("classifies transcript echo after a new interrupt as rescued, never verified", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: 1,
+      interruptAfterReturn: true,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 1_000,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivery_state: "rescued",
+      terminal: true,
+      delivered: false,
+      submit_verified: false,
+      submit_evidence: "transcript_echo",
+    });
+  }, 20_000);
 
   it("does not press Return or certify status plus token_count:null before observing the payload", async () => {
     const { createServer } = await loadServerModule();

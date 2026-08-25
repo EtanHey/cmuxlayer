@@ -299,6 +299,7 @@ export interface DeliveryTelemetryEvent {
     | "submitted"
     | "queued"
     | "queued_followup"
+    | "rescued"
     | "failed"
     | "pending_verify"
     | "failed_confirmed";

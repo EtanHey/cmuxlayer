@@ -621,6 +621,7 @@ const DeliveryOutputShape = {
       "submitted",
       "queued",
       "queued_followup",
+      "rescued",
       "failed",
       "pending_verify",
       "failed_confirmed",
@@ -631,6 +632,7 @@ const DeliveryOutputShape = {
       "submitted",
       "queued",
       "queued_followup",
+      "rescued",
       "failed",
       "pending_verify",
       "failed_confirmed",
@@ -976,6 +978,7 @@ type PublicDeliveryState =
   | "submitted"
   | "queued"
   | "queued_followup"
+  | "rescued"
   | "failed"
   | "pending_verify"
   | "failed_confirmed";
@@ -994,6 +997,12 @@ export interface PublicDeliveryReceipt {
   duplicate_of?: string;
   needs_attention?: boolean;
   attention_reason?: string;
+  observation?: {
+    status: ParsedScreenResult["status"];
+    composer_empty: boolean;
+    prompt_echoed: boolean;
+    last_10_lines: string[];
+  };
   WARNING?: string;
 }
 
@@ -1012,11 +1021,13 @@ export function buildPublicDeliveryReceipt(input: {
   retry_count: number;
   needs_attention?: boolean;
   attention_reason?: string | null;
+  observation?: PublicDeliveryReceipt["observation"];
   WARNING?: string;
 }): PublicDeliveryReceipt {
   const evidencedState =
     input.delivery_state === "queued" ||
     input.delivery_state === "queued_followup" ||
+    input.delivery_state === "rescued" ||
     input.delivery_state === "failed" ||
     input.delivery_state === "pending_verify" ||
     input.delivery_state === "failed_confirmed"
@@ -1026,6 +1037,7 @@ export function buildPublicDeliveryReceipt(input: {
         : undefined;
   const terminal =
     evidencedState === "submitted" ||
+    evidencedState === "rescued" ||
     evidencedState === "failed" ||
     evidencedState === "failed_confirmed";
   const warning = input.WARNING ?? defaultNonDeliveryWarning(evidencedState);
@@ -1051,6 +1063,7 @@ export function buildPublicDeliveryReceipt(input: {
             : {}),
         }
       : {}),
+    ...(input.observation ? { observation: input.observation } : {}),
     ...(warning ? { WARNING: warning } : {}),
   };
 }
@@ -1081,6 +1094,12 @@ function defaultNonDeliveryWarning(
       return (
         `NOT DELIVERED — terminal failure (${state}). The message did not ` +
         "land and will not be retried; do not relay as sent."
+      );
+    case "rescued":
+      return (
+        "NOT VERIFIED — state rescued: the prompt first appeared after an " +
+        "interrupt, so external intervention delivered text but cmuxlayer did " +
+        "not verify an intact task turn. Do not relay as delivered."
       );
     default:
       return undefined;
@@ -5314,7 +5333,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_evidence: SubmitEvidence | null;
     submit_verification_reason: SubmitVerificationFailureReason | null;
     retry_count: number;
-    delivery: "submitted" | "queued" | "queued_followup" | "pending_verify";
+    delivery:
+      | "submitted"
+      | "queued"
+      | "queued_followup"
+      | "rescued"
+      | "pending_verify";
   }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -5346,6 +5370,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let sawReadableScreen = false;
     let sawBlankScreen = false;
     let lastBootConsumptionRefuted = false;
+    const interruptMarkerCount = (screenText: string | null | undefined) =>
+      screenText?.match(/Conversation interrupted/gi)?.length ?? 0;
+    const preReturnInterruptMarkers = Math.max(
+      interruptMarkerCount(opts.pre_type_screen),
+      interruptMarkerCount(opts.pre_return_screen),
+    );
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
 
@@ -5467,6 +5497,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         bootFrameAdvanced &&
         !hasPendingSubmitEvidence &&
         screenIncludesSubmittedText(snapshot.text);
+      const newInterruptObserved =
+        interruptMarkerCount(snapshot.text) > preReturnInterruptMarkers;
+      if (
+        newInterruptObserved &&
+        !hasPendingSubmitEvidence &&
+        (bootHasTranscriptEcho || bootHasTokenOrCostDelta)
+      ) {
+        return {
+          submit_verified: false,
+          submit_evidence: bootHasTranscriptEcho
+            ? "transcript_echo"
+            : "token_delta",
+          submit_verification_reason: null,
+          retry_count: retryCount,
+          delivery: "rescued",
+        };
+      }
       if (
         !hasPendingSubmitEvidence &&
         !bootConsumptionRefuted &&
@@ -5886,7 +5933,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       null;
     let retry_count = 0;
     let deliveryOutcome:
-      "submitted" | "queued" | "queued_followup" | "pending_verify" =
+      | "submitted"
+      | "queued"
+      | "queued_followup"
+      | "rescued"
+      | "pending_verify" =
       "submitted";
 
     if (opts.press_enter) {
@@ -6016,6 +6067,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ? ("queued_followup" as const)
                     : deliveryOutcome === "pending_verify"
                       ? ("pending_verify" as const)
+                      : deliveryOutcome === "rescued"
+                        ? ("rescued" as const)
                       : submit_verified === false
                         ? ("failed" as const)
                         : ("submitted" as const),
@@ -6032,6 +6085,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? "queued_followup"
             : deliveryOutcome === "pending_verify"
               ? "pending_verify"
+              : deliveryOutcome === "rescued"
+                ? "rescued"
               : submit_verified === true
                 ? "submitted"
                 : undefined,
@@ -6047,6 +6102,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verified === false &&
       deliveryOutcome !== "queued" &&
       deliveryOutcome !== "queued_followup" &&
+      deliveryOutcome !== "rescued" &&
       deliveryOutcome !== "pending_verify"
     ) {
       const timeoutMs =
@@ -6066,13 +6122,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     cli?: CliType;
+    text: string;
     timeout_ms: number;
     onUpdateShellRelaunch?: () => Promise<void>;
     resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
   }): Promise<{
+    delivery_state: "ready" | "queued";
     metrics: RawSubmitEvidenceMetrics | null;
     route: { surface: string; workspace?: string };
     cli: CliType;
+    observation?: NonNullable<PublicDeliveryReceipt["observation"]>;
   }> => {
     let deadline = Date.now() + opts.timeout_ms;
     let lastText = "";
@@ -6085,6 +6144,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateShellRelaunches = 0;
     let codexUpdateMenuAccepted = false;
     let codexUpdateMenuAcceptedAt: number | null = null;
+    let queuedObservation:
+      | {
+          metrics: RawSubmitEvidenceMetrics;
+          route: { surface: string; workspace?: string };
+          cli: CliType;
+          observation: NonNullable<PublicDeliveryReceipt["observation"]>;
+        }
+      | null = null;
     const updateMaxMs = bootPromptUpdateMaxMs();
     const postUpdateReadyBudgetMs = () =>
       Math.max(opts.timeout_ms, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS);
@@ -6106,6 +6173,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const parsed = parseScreen(screen.text);
         const now = Date.now();
         const updateState = parsed.cli_update_state;
+        const runningTurn =
+          parsed.status === "working" || parsed.status === "thinking";
 
         const launcherFailure = launcherFailureFromShell(screen.text);
         if (launcherFailure) {
@@ -6231,9 +6300,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
         for (const candidate of candidates) {
           const match = matchReadyPattern(candidate, screen.text);
-          const ready =
+          const identified =
             match.matched &&
             screenHasReadyAgentIdentity(candidate, screen.text, parsed);
+          const bannerIndependentIdentity =
+            screenHasAnyAgentIdentity(screen.text, parsed) &&
+            inferComposerCli(screen.text, parsed) === candidate;
+          const composer = extractComposerInputRegion(screen.text, opts.text);
+          const promptEchoed = screenContainsCompleteSubmittedText(
+            screen.text,
+            opts.text,
+          );
+          const codexTurnStillRunning = candidate === "codex" && runningTurn;
+          if (
+            bannerIndependentIdentity &&
+            codexTurnStillRunning &&
+            composer !== null &&
+            composer.trim() === "" &&
+            !promptEchoed
+          ) {
+            queuedObservation = {
+              metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
+              route: target,
+              cli: candidate,
+              observation: {
+                status: parsed.status,
+                composer_empty: true,
+                prompt_echoed: false,
+                last_10_lines: tailLines(screen.text, 10),
+              },
+            };
+          } else if (identified || bannerIndependentIdentity) {
+            queuedObservation = null;
+          }
+          const ready = identified && !codexTurnStillRunning;
           const count = ready
             ? (consecutiveMatches.get(candidate) ?? 0) + 1
             : 0;
@@ -6242,6 +6342,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             count >= requiredBootReadyObservations(candidate, screen.text)
           ) {
             return {
+              delivery_state: "ready",
               metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
               route: target,
               cli: candidate,
@@ -6267,6 +6368,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         break;
       }
       await delay(Math.min(BOOT_PROMPT_READY_POLL_MS, remaining));
+    }
+
+    if (queuedObservation) {
+      return {
+        delivery_state: "queued",
+        ...queuedObservation,
+      };
     }
 
     throw new BootPromptTimeoutError(
@@ -6930,18 +7038,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
 
+    const rawPrompt = bootPromptPath
+      ? await readFile(bootPromptPath, "utf8")
+      : (opts.prompt ?? "");
+    const useFilePointer =
+      Boolean(bootPromptPath) &&
+      (/[\r\n]/.test(rawPrompt) ||
+        rawPrompt.length > SEND_INPUT_MAX_INLINE_CHARS);
+    const promptWarning =
+      bootPromptPath &&
+      rawPrompt.length > BOOT_PROMPT_PATH_WARNING_CHARS &&
+      !useFilePointer
+        ? `boot_prompt_path is ${rawPrompt.length} characters; prefer a one-line file pointer for boot prompts over ${BOOT_PROMPT_PATH_WARNING_CHARS} characters`
+        : null;
+    const callerDeliveryText = useFilePointer
+      ? `Read and follow ${bootPromptPath}`
+      : rawPrompt;
+    const deliveryText = [callerDeliveryText, opts.injected_prompt]
+      .filter((part): part is string => hasInlinePrompt(part))
+      .join("\n\n");
+    const sanitizedText = sanitizeTerminalInput(deliveryText);
+    const chunks =
+      sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
+        ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
+        : [sanitizedText];
+
     let readiness = await waitForBootPromptReady({
       surface: opts.surface,
       workspace: opts.workspace,
       cli: opts.cli,
+      text: sanitizedText,
       timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
       onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
       resolveRoute: opts.resolveRoute,
     });
 
-    const rawPrompt = bootPromptPath
-      ? await readFile(bootPromptPath, "utf8")
-      : (opts.prompt ?? "");
     let deliveryRoute = opts.resolveRoute
       ? await opts.resolveRoute()
       : readiness.route;
@@ -6956,6 +7087,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: deliveryRoute.surface,
         workspace: deliveryRoute.workspace,
         cli: opts.cli,
+        text: sanitizedText,
         timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
         onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
         resolveRoute: opts.resolveRoute,
@@ -6979,27 +7111,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
       : undefined;
-    const useFilePointer =
-      Boolean(bootPromptPath) &&
-      (/[\r\n]/.test(rawPrompt) ||
-        rawPrompt.length > SEND_INPUT_MAX_INLINE_CHARS);
-    const promptWarning =
-      bootPromptPath &&
-      rawPrompt.length > BOOT_PROMPT_PATH_WARNING_CHARS &&
-      !useFilePointer
-        ? `boot_prompt_path is ${rawPrompt.length} characters; prefer a one-line file pointer for boot prompts over ${BOOT_PROMPT_PATH_WARNING_CHARS} characters`
-        : null;
-    const callerDeliveryText = useFilePointer
-      ? `Read and follow ${bootPromptPath}`
-      : rawPrompt;
-    const deliveryText = [callerDeliveryText, opts.injected_prompt]
-      .filter((part): part is string => hasInlinePrompt(part))
-      .join("\n\n");
-    const sanitizedText = sanitizeTerminalInput(deliveryText);
-    const chunks =
-      sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
-        ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
-        : [sanitizedText];
+    if (readiness.delivery_state === "queued") {
+      return {
+        ...buildPublicDeliveryReceipt({
+          delivery_state: "queued",
+          typed: false,
+          submit_attempted: false,
+          submit_verified: null,
+          retry_count: 0,
+          observation: readiness.observation,
+          WARNING:
+            "BOOT PROMPT QUEUED — the agent turn remained active through the " +
+            `${opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS}ms deadline with an ` +
+            "empty composer and no prompt echo. No text or Return was sent; " +
+            "the live pane remains available for inspection or retry.",
+        }),
+        bytes: 0,
+        prompt_text: hasInlinePrompt(rawPrompt) ? rawPrompt : null,
+        prompt_warning: promptWarning,
+      };
+    }
     let sentChunks = 0;
 
     try {
@@ -12351,6 +12482,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ...(delivery.delivery === "submitted" ||
         delivery.delivery === "queued" ||
         delivery.delivery === "queued_followup" ||
+        delivery.delivery === "rescued" ||
         delivery.delivery === "pending_verify"
           ? { delivery: delivery.delivery }
           : {}),
@@ -12361,7 +12493,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       recipient: AgentRecord,
       message: ReturnType<typeof dispatch>,
     ): Promise<{
-      delivery: "submitted" | "queued" | "queued_followup" | "pending_verify";
+      delivery:
+        | "submitted"
+        | "queued"
+        | "queued_followup"
+        | "rescued"
+        | "pending_verify";
       delivery_id?: string;
     }> => {
       const pointer = formatInboxPing(
@@ -12407,6 +12544,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         delivered.delivery !== "submitted" &&
         delivered.delivery !== "queued" &&
         delivered.delivery !== "queued_followup" &&
+        delivered.delivery !== "rescued" &&
         delivered.delivery !== "pending_verify"
       ) {
         throw new Error(
@@ -12435,6 +12573,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           source_event: "report_to_parent",
           retry_count: delivered.retry_count,
         });
+      } else if (delivered.delivery === "rescued") {
+        engine.resolveDelivery({
+          delivery_id: deliveryId,
+          agent_id: recipient.agent_id,
+          text: pointer,
+          press_enter: true,
+          source_event: "report_to_parent",
+          delivery_state: "rescued",
+          terminal: true,
+          retry_count: delivered.retry_count,
+          submit_verified: false,
+          error: "Prompt appeared only after an external interrupt",
+        });
+        throw new Error(
+          "parent blocker wake was rescued by an external interrupt, not verified",
+        );
       } else {
         engine.resolveDelivery({
           delivery_id: deliveryId,
@@ -13557,7 +13711,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     bootPromptDelivery.prompt_text,
                     bootPromptPath,
                   ),
-                  boot_prompt_pending: false,
+                  boot_prompt_pending:
+                    bootPromptDelivery.delivery_state === "queued",
                   prompt_delivered: bootPromptDelivery.submit_verified === true,
                   submit_verified: bootPromptDelivery.submit_verified,
                 });
@@ -13964,7 +14119,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...bootPromptRegistryFields(
                 bootPromptDelivery.prompt_text ?? args.prompt ?? "",
               ),
-              boot_prompt_pending: false,
+              boot_prompt_pending:
+                bootPromptDelivery.delivery_state === "queued",
+              prompt_delivered: bootPromptDelivery.submit_verified === true,
+              submit_verified: bootPromptDelivery.submit_verified,
             });
             registry.set(result.agent_id, updated);
           }
@@ -14374,7 +14532,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ...bootPromptRegistryFields(
                   bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
                 ),
-                boot_prompt_pending: false,
+                boot_prompt_pending:
+                  bootPromptDelivery.delivery_state === "queued",
                 prompt_delivered:
                   hasPrompt && bootPromptDelivery.submit_verified === true,
                 submit_verified: hasPrompt
@@ -14384,7 +14543,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               registry.set(result.agent_id, updated);
 
               const current = engine.getAgentState(result.agent_id);
-              if (current?.state === "booting" && hasPrompt) {
+              if (
+                current?.state === "booting" &&
+                hasPrompt &&
+                bootPromptDelivery.submit_verified === true
+              ) {
                 const ready = stateMgr.transition(result.agent_id, "ready");
                 registry.set(result.agent_id, ready);
                 result.state = "ready";
@@ -16161,6 +16324,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           source_event: "send_to",
                           retry_count: delivery.retry_count,
                         })
+                      : delivery.delivery === "rescued"
+                        ? engine.resolveDelivery({
+                            delivery_id: deliveryId,
+                            agent_id: agent.agent_id,
+                            text: args.text,
+                            press_enter: args.press_enter,
+                            source_event: "send_to",
+                            delivery_state: "rescued",
+                            terminal: true,
+                            retry_count: delivery.retry_count,
+                            submit_verified: false,
+                            error:
+                              "Prompt appeared only after an external interrupt",
+                          })
                       : delivery.delivery === "submitted"
                         ? engine.resolveDelivery({
                             delivery_id: deliveryId,
@@ -16480,6 +16657,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     source_event: "send_to",
                     retry_count: delivery.retry_count,
                   })
+                : delivery.delivery === "rescued"
+                  ? engine.resolveDelivery({
+                      delivery_id: deliveryId,
+                      agent_id: agentId,
+                      text: args.text,
+                      press_enter: args.press_enter,
+                      source_event: "send_to",
+                      delivery_state: "rescued",
+                      terminal: true,
+                      retry_count: delivery.retry_count,
+                      submit_verified: false,
+                      error: "Prompt appeared only after an external interrupt",
+                    })
                 : delivery.delivery === "submitted"
                   ? engine.resolveDelivery({
                       delivery_id: deliveryId,

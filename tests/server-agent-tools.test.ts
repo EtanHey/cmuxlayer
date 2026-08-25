@@ -7052,6 +7052,79 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("spawn_agent keeps a live registered pane when front-matter delivery reaches its queued deadline", async () => {
+    const promptPath = join(TEST_DIR, "front-matter.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const baseExec = makeLifecycleExec();
+    let launched = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && /Codex\b/.test(text)) {
+        launched = true;
+      }
+      if (launched && args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: [
+              "Working (1s • esc to interrupt)",
+              "› Ask Codex to do anything",
+              "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+            ].join("\n"),
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const result = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 250,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.surface_id).toBe("surface:new");
+    expect(result.boot_prompt_receipt).toMatchObject({
+      delivery_state: "queued",
+      delivered: false,
+      terminal: false,
+      typed: false,
+      submit_attempted: false,
+      submit_verified: null,
+    });
+    const state = parseToolResult(
+      await getState.handler({ agent_id: result.agent_id }, {} as any),
+    );
+    expect(state).toMatchObject({
+      surface_id: "surface:new",
+      boot_prompt_pending: true,
+      prompt_delivered: false,
+      submit_verified: null,
+    });
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["close-surface", "surface:new"]),
+    );
+  }, 20_000);
+
   it("spawn_agent defaults managed agents to lifecycle escalation and persists explicit opt-outs", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];

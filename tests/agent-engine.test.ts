@@ -8936,6 +8936,46 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("does not manufacture boot delivery from an active Codex front-matter turn", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-undelivered-front-matter",
+          state: "booting",
+          surface_id: "surface:undelivered-front-matter",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/front-matter.md",
+          prompt_delivered: false,
+          submit_verified: null,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:undelivered-front-matter")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:undelivered-front-matter",
+        text: [
+          ">_ OpenAI Codex",
+          "Working (1s • esc to interrupt)",
+          "› Ask Codex to do anything",
+          "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("agent-undelivered-front-matter"),
+      ).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+        prompt_delivered: false,
+        submit_verified: false,
+      });
+    });
+
     it("errors a stale managed pane whose boot prompt was never delivered", async () => {
       stateMgr.writeState(
         makeRecord({

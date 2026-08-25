@@ -262,6 +262,7 @@ export type AgentDeliveryState =
   | "submitted"
   | "queued"
   | "queued_followup"
+  | "rescued"
   | "failed"
   | "pending_verify"
   | "failed_confirmed";
@@ -352,7 +353,12 @@ export class RetryableDeliveryError extends Error {
 type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
-  delivery?: "submitted" | "queued" | "queued_followup" | "pending_verify";
+  delivery?:
+    | "submitted"
+    | "queued"
+    | "queued_followup"
+    | "rescued"
+    | "pending_verify";
 }>;
 
 export interface SpawnAgentParams {
@@ -2711,8 +2717,7 @@ export class AgentEngine {
       const awaitingManagedBootPrompt =
         targetState === "ready" &&
         agent.boot_prompt_pending === true &&
-        agent.prompt_delivered === false &&
-        !evidence.activeCodex;
+        agent.prompt_delivered === false;
       if (
         !hasTargetEvidence ||
         awaitingManagedBootPrompt ||
@@ -2744,7 +2749,8 @@ export class AgentEngine {
             transitionAgent.model,
             parsedModel,
           ),
-          ...(transitionAgent.boot_prompt_pending
+          ...(transitionAgent.boot_prompt_pending &&
+          transitionAgent.prompt_delivered !== false
             ? {
                 boot_prompt_pending: false,
                 prompt_delivered: true,
@@ -3911,12 +3917,10 @@ export class AgentEngine {
       const evidence = this.readReadyEvidence(agent, screen.text);
       const promptStillPending =
         agent.boot_prompt_pending === true &&
-        !evidence.activeCodex &&
         this.screenShowsPendingBootPrompt(agent, screen.text);
       const awaitingManagedBootPrompt =
         agent.boot_prompt_pending === true &&
-        agent.prompt_delivered === false &&
-        !evidence.activeCodex;
+        agent.prompt_delivered === false;
 
       if (promptStillPending || awaitingManagedBootPrompt) {
         this.readyPatternMatches.delete(agent.agent_id);
@@ -3994,7 +3998,7 @@ export class AgentEngine {
 
       const settled = this.stateMgr.updateRecord(agent.agent_id, {
         ...settlement,
-        ...(agent.boot_prompt_pending
+        ...(agent.boot_prompt_pending && agent.prompt_delivered !== false
           ? {
               boot_prompt_pending: false,
               prompt_delivered: true,
@@ -7380,6 +7384,13 @@ export class AgentEngine {
             receipt.verify_deadline_at ??= new Date(
               Date.now() + this.deliveryVerifyDeadlineMs,
             ).toISOString();
+          } else if (result.delivery === "rescued") {
+            receipt.delivery_state = "rescued";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.submit_verified = false;
+            receipt.error = "Prompt appeared only after an external interrupt";
+            receipt.verify_deadline_at = null;
           } else {
             receipt.delivery_state = "submitted";
             receipt.terminal = true;
