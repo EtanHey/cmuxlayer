@@ -264,6 +264,34 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     },
   );
 
+  it("aligns the embedded agent when a polling wait later fails fast", async () => {
+    vi.useFakeTimers();
+    stateMgr.writeState(makeRecord({ state: "working" }));
+    await engine.getRegistry().reconstitute();
+    let observedState: "working" | "error" = "working";
+    engine.setLiveStateResolver((agent) => ({
+      state: observedState,
+      source: "screen",
+      registry_state: agent.state,
+      screen_state: observedState,
+      stale_registry_state: observedState !== agent.state,
+    }));
+
+    const pending = engine.waitFor(
+      "voicelayerClaude-2ac0d960",
+      "idle",
+      1_500,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    observedState = "error";
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await pending;
+
+    expect(result.source).toBe("sweep");
+    expect(result.state).toBe("error");
+    expect(result.agent?.state).toBe("error");
+  });
+
   it("does not report a match from a record state the screen contradicts", async () => {
     vi.useFakeTimers();
     stateMgr.writeState(makeRecord({ state: "idle" }));

@@ -8977,7 +8977,7 @@ export class AgentEngine {
             state: liveState,
             elapsed,
             source: "sweep",
-            agent: toPublicAgent(current),
+            agent: toPublicAgent({ ...current, state: liveState }),
             error:
               current.error ?? `Agent entered terminal state: ${liveState}`,
           });
