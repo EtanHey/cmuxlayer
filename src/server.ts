@@ -945,6 +945,7 @@ type BroadcastReceipt = {
   agent_id: string;
   seat: string;
   delivered: boolean;
+  delivery_state?: PublicDeliveryState;
   submit_verified: boolean | null;
   submit_verification_reason?: SubmitVerificationFailureReason;
   retry_safe?: false;
@@ -2319,12 +2320,23 @@ function hasParsedAgentIdentity(
   return Boolean(parsed && parsed.agent_type !== "unknown");
 }
 
+function screenHasWorkingCodexChrome(screenText: string): boolean {
+  return (
+    /(?:^|\n)\s*(?:•\s*)?(?:Working|Waiting|Thinking)\b[^\n]*\besc to interrupt\b/im.test(
+      screenText,
+    ) &&
+    /(?:^|\n)[ \t]*[›»][ \t]*$/m.test(screenText) &&
+    /(?:^|\n)\s*tab to queue message\b/im.test(screenText)
+  );
+}
+
 function screenHasAnyAgentIdentity(
   screenText: string,
   parsed: ParsedScreenResult = parseScreen(screenText),
 ): boolean {
   return (
     hasParsedAgentIdentity(parsed) ||
+    screenHasWorkingCodexChrome(screenText) ||
     /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?|(?:^|\n)\s*(?:codex>|cursor>|kiro>)(?:\s|$)/im.test(
       screenText,
     )
@@ -2382,7 +2394,8 @@ function inferComposerCli(
   }
   if (
     /\bOpenAI\s+Codex\b/i.test(screenText) ||
-    /(?:^|\n)\s*(?:Model:\s*)?gpt-[0-9]/i.test(screenText)
+    /(?:^|\n)\s*(?:Model:\s*)?gpt-[0-9]/i.test(screenText) ||
+    screenHasWorkingCodexChrome(screenText)
   ) {
     return "codex";
   }
@@ -5372,9 +5385,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let lastBootConsumptionRefuted = false;
     const interruptMarkerCount = (screenText: string | null | undefined) =>
       screenText?.match(/Conversation interrupted/gi)?.length ?? 0;
-    const preReturnInterruptMarkers = Math.max(
-      interruptMarkerCount(opts.pre_type_screen),
-      interruptMarkerCount(opts.pre_return_screen),
+    // The pre-Return frame is the current marker epoch. A stale marker may be
+    // visible before typing and then scroll away while the composer fills; a
+    // later marker is a new interrupt even when its ordinal matches the stale
+    // pre-type occurrence.
+    const preReturnInterruptMarkers = interruptMarkerCount(
+      opts.pre_return_screen,
     );
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
@@ -5896,6 +5912,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ? { draftGuardText }
         : {}),
     });
+    // Boot delivery is always attributable. Established relay paths retain
+    // their lighter verification unless an existing interrupt marker makes a
+    // later marker ambiguous; in that collision case, observe the payload
+    // before Return so `rescued` is both reachable and correctly attributed.
+    const requireObservedPayloadBeforeEnter =
+      opts.require_observed_payload_before_enter === true &&
+      (opts.source_event === "boot_prompt" ||
+        /Conversation interrupted/i.test(deliverySafetySnapshot?.text ?? ""));
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,
@@ -5943,7 +5967,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
-        opts.require_observed_payload_before_enter === true &&
+        requireObservedPayloadBeforeEnter &&
         (opts.verify_submit ?? false)
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
@@ -5959,7 +5983,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             })
           : null;
       if (
-        opts.require_observed_payload_before_enter === true &&
+        requireObservedPayloadBeforeEnter &&
         (opts.verify_submit ?? false) &&
         preReturnBootEvidence === null
       ) {
@@ -6020,7 +6044,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           pre_return_screen: preReturnBootEvidence?.screenText,
           pre_return_metrics: preReturnBootEvidence?.metrics,
           require_attributable_submit_evidence:
-            opts.require_observed_payload_before_enter === true,
+            requireObservedPayloadBeforeEnter,
           require_working_status: opts.source_event === "boot_prompt",
           beforeMutation: opts.beforeMutation,
         });
@@ -6144,14 +6168,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateShellRelaunches = 0;
     let codexUpdateMenuAccepted = false;
     let codexUpdateMenuAcceptedAt: number | null = null;
-    let queuedObservation:
-      | {
-          metrics: RawSubmitEvidenceMetrics;
-          route: { surface: string; workspace?: string };
-          cli: CliType;
-          observation: NonNullable<PublicDeliveryReceipt["observation"]>;
-        }
-      | null = null;
+    type QueuedBootObservation = {
+      metrics: RawSubmitEvidenceMetrics;
+      route: { surface: string; workspace?: string };
+      cli: CliType;
+      observation: NonNullable<PublicDeliveryReceipt["observation"]>;
+    };
+    let queuedObservation: QueuedBootObservation | null = null;
     const updateMaxMs = bootPromptUpdateMaxMs();
     const postUpdateReadyBudgetMs = () =>
       Math.max(opts.timeout_ms, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS);
@@ -6298,6 +6321,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           continue;
         }
 
+        let frameQueuedObservation: QueuedBootObservation | null = null;
         for (const candidate of candidates) {
           const match = matchReadyPattern(candidate, screen.text);
           const identified =
@@ -6319,7 +6343,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             composer.trim() === "" &&
             !promptEchoed
           ) {
-            queuedObservation = {
+            frameQueuedObservation = {
               metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
               route: target,
               cli: candidate,
@@ -6330,8 +6354,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 last_10_lines: tailLines(screen.text, 10),
               },
             };
-          } else if (identified || bannerIndependentIdentity) {
-            queuedObservation = null;
           }
           const ready = identified && !codexTurnStillRunning;
           const count = ready
@@ -6349,6 +6371,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
           }
         }
+        queuedObservation = frameQueuedObservation;
       } catch (error) {
         if (
           error instanceof BootPromptTimeoutError ||
@@ -6360,6 +6383,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (isSurfaceGoneReadFailure(error, target.surface)) {
           throw new SurfaceGoneError(target.surface, error);
         }
+        queuedObservation = null;
         lastText = error instanceof Error ? error.message : String(error);
       }
 
@@ -12446,6 +12470,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               args.source_event === "send_to" ||
               args.source_event === "dispatch_nudge" ||
               args.source_event === "report_to_parent",
+            require_observed_payload_before_enter:
+              args.source_event === "send_to" ||
+              args.source_event === "dispatch_nudge" ||
+              args.source_event === "report_to_parent",
             submit_verify_timeout_ms: args.allow_busy
               ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
               : undefined,
@@ -13719,7 +13747,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 registry.set(result.agent_id, updated);
               } else {
                 const updated = stateMgr.updateRecord(result.agent_id, {
-                  boot_prompt_pending: false,
+                  boot_prompt_pending:
+                    bootPromptDelivery.delivery_state === "queued",
                   prompt_delivered: false,
                   submit_verified: null,
                 });
@@ -15822,11 +15851,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 press_enter: args.press_enter,
                 source_event: "send_to",
               });
+              const nonterminalDelivery =
+                delivery.delivery_state === "queued" ||
+                delivery.delivery_state === "queued_followup" ||
+                delivery.delivery_state === "pending_verify" ||
+                delivery.delivery_state === "rescued";
               receipts.push({
                 agent_id: agent.agent_id,
                 seat: agentSeatLabel(agent),
-                delivered: true,
+                delivered: !nonterminalDelivery,
+                delivery_state: delivery.delivery_state,
                 submit_verified: delivery.submit_verified,
+                ...(delivery.delivery_state === "rescued"
+                  ? {
+                      error:
+                        "Prompt appeared only after an external interrupt",
+                    }
+                  : {}),
               });
             } catch (e) {
               receipts.push({

@@ -736,6 +736,8 @@ describe("boot-submit readiness and attributable evidence", () => {
     submitAfterReturn?: number | null;
     staleReadyAfterReturn?: boolean;
     frontMatterReads?: number;
+    blankAfterFrontMatter?: boolean;
+    staleInterruptBeforeType?: boolean;
     interruptAfterReturn?: boolean;
     cli?: "codex" | "claude";
   }): {
@@ -814,16 +816,28 @@ describe("boot-submit readiness and attributable evidence", () => {
           const cli = opts.cli ?? "codex";
           const frontMatterActive =
             cli === "codex" && screenReads <= (opts.frontMatterReads ?? 0);
+          const liveWorkingCodexScreen = [
+            " ",
+            "• Ran 6 commands · ctrl + t to view transcript",
+            " ",
+            "Working (19s • esc to interrupt)",
+            " ",
+            " ",
+            "›",
+            " ",
+            " ",
+            "  tab to queue message                                                    88% context left",
+          ].join("\n");
           const readyScreen =
             cli === "claude"
               ? ["Claude Code", "What can I help you with?", "❯"].join("\n")
               : frontMatterActive
-                ? [
-                    "Working (1s • esc to interrupt)",
-                    "› Ask Codex to do anything",
-                    "gpt-5.6-sol high · ~/Gits/cmuxlayer",
-                  ].join("\n")
-                : codexReady;
+                ? liveWorkingCodexScreen
+                : opts.blankAfterFrontMatter && !promptSent
+                  ? ""
+                  : opts.staleInterruptBeforeType && !promptSent
+                    ? ["Conversation interrupted", codexReady].join("\n")
+                    : codexReady;
           const submitted =
             opts.submitAfterReturn !== null &&
             opts.submitAfterReturn !== undefined &&
@@ -1005,11 +1019,68 @@ describe("boot-submit readiness and attributable evidence", () => {
     expect(harness.returnPresses()).toBe(0);
   }, 20_000);
 
+  it("drops queued evidence when the live working frame is followed by a blank frame", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: 1,
+      frontMatterReads: 1,
+      blankAfterFrontMatter: true,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 600,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.boot_prompt_receipt).toBeUndefined();
+    expect(harness.promptSentAfterRead()).toBeNull();
+    expect(harness.returnPresses()).toBe(0);
+  }, 20_000);
+
   it("classifies transcript echo after a new interrupt as rescued, never verified", async () => {
     const { createServer } = await loadServerModule();
     const harness = makeCodexBootExec({
       payloadAppears: true,
       submitAfterReturn: 1,
+      interruptAfterReturn: true,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 1_000,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivery_state: "rescued",
+      terminal: true,
+      delivered: false,
+      submit_verified: false,
+      submit_evidence: "transcript_echo",
+    });
+  }, 20_000);
+
+  it("classifies a new interrupt as rescued when an older marker scrolled off before Return", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: 1,
+      staleInterruptBeforeType: true,
       interruptAfterReturn: true,
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
