@@ -239,6 +239,31 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.error).toBe("Agent has already completed");
   });
 
+  it.each(["done", "error"] as const)(
+    "aligns the embedded agent when live evidence short-circuits as %s",
+    async (liveState) => {
+      stateMgr.writeState(makeRecord({ state: "working" }));
+      await engine.getRegistry().reconstitute();
+      engine.setLiveStateResolver((agent) => ({
+        state: liveState,
+        source: "screen",
+        registry_state: agent.state,
+        screen_state: liveState,
+        stale_registry_state: true,
+      }));
+
+      const result = await engine.waitFor(
+        "voicelayerClaude-2ac0d960",
+        "idle",
+        1_500,
+      );
+
+      expect(result.source).toBe("immediate");
+      expect(result.state).toBe(liveState);
+      expect(result.agent?.state).toBe(liveState);
+    },
+  );
+
   it("does not report a match from a record state the screen contradicts", async () => {
     vi.useFakeTimers();
     stateMgr.writeState(makeRecord({ state: "idle" }));

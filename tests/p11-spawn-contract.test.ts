@@ -394,7 +394,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     writeFileSync(
       child.report_path,
-      `STATUS: BLOCKED\nsecond stop\n${child.done_marker}\n`,
+      `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,
       "utf8",
     );
     await engine.sweepWatchesBestEffort();

@@ -242,7 +242,11 @@ afterEach(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-function makeServer(exec: ExecFn, withStableObserver = false) {
+function makeServer(
+  exec: ExecFn,
+  withStableObserver = false,
+  withProcessEvidence = true,
+) {
   return createServer({
     exec,
     stateDir,
@@ -254,8 +258,12 @@ function makeServer(exec: ExecFn, withStableObserver = false) {
         ? {
             session_id: agent.cli_session_id,
             path: agent.cli_session_path ?? null,
-            pid: process.pid,
-            pid_registered_at: new Date().toISOString(),
+            ...(withProcessEvidence
+              ? {
+                  pid: process.pid,
+                  pid_registered_at: new Date().toISOString(),
+                }
+              : {}),
           }
         : null,
     // Model CI/fresh-clone CLI mode explicitly. Ambient access to a developer's
@@ -547,10 +555,10 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     );
     try {
       const exec = makeExec({
-        screen: () => IDLE_CLAUDE_SCREEN,
+        screen: () => "$ ",
         witnessSurface: true,
       });
-      const server = makeServer(exec, true);
+      const server = makeServer(exec, true, false);
       const record = seedAgent(server, {
         cli: "codex",
         model: "gpt-5.6-sol",
@@ -559,14 +567,15 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
           sessionDir,
           `rollout-2026-08-25T10-00-00-${sessionId}.jsonl`,
         ),
-        surface_uuid: null,
+        surface_uuid: SURFACE_UUID,
+        surface_observer_id: "cmux:test",
         surface_provenance: "cmuxlayer_spawn",
         launch_cwd: "/Users/e/Gits/golems/.worktrees/run3",
         worktree_path: "/Users/e/Gits/golems/.worktrees/run3",
       });
 
       const closed = (await getTool(server, "close_surface").handler(
-        { scope: "agent", agent_id: record.agent_id },
+        { scope: "agent", agent_id: record.agent_id, force: true },
         {},
       )) as ToolCallResult;
       expect(
@@ -594,6 +603,34 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
         process.env.CMUXLAYER_HARNESS_HOME = previousHarnessHome;
       }
     }
+  });
+
+  it("returns a structured refusal when forced agent close lacks stable topology", async () => {
+    const exec = makeExec({
+      screen: () => IDLE_CLAUDE_SCREEN,
+      surfaceEnumerationFails: true,
+    });
+    const server = makeServer(exec, true, false);
+    const record = seedAgent(server, {
+      state: "done",
+      cli_session_id: "019faccc-1111-7222-8333-444455556666",
+      surface_uuid: SURFACE_UUID,
+      surface_observer_id: "cmux:test",
+      pid: null,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id, force: true },
+      {},
+    )) as ToolCallResult;
+    const data = payload(result);
+
+    expect(data).toMatchObject({
+      agent_stopped: false,
+      surface_closed: false,
+    });
+    expect(String(data.reason)).toMatch(/topology|surface|enumerat/i);
+    expect(String(data.remedy)).toMatch(/refresh|list_agents|retry/i);
   });
 
   it("never reads like a completed close while the pane is still listed", async () => {

@@ -633,6 +633,8 @@ export interface AgentEngineOptions {
   spawnGuard?: SpawnGuard;
   postSpawnLivenessMs?: number;
   stopPostConditionTimeoutMs?: number;
+  /** Codex-only self-registration wait; clamped to the 2s product bound. */
+  spawnSessionCaptureTimeoutMs?: number;
   /**
    * Optional fallback override after self-registration misses. When supplied,
    * it replaces the filesystem transcript scan (primarily for hermetic tests).
@@ -797,6 +799,8 @@ const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
 const FLEET_SIDEBAR_WAKE_REPUBLISH_DELAY_MS = 500;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
+const MAX_SPAWN_SESSION_CAPTURE_MS = 2_000;
+const SPAWN_SESSION_CAPTURE_POLL_MS = 50;
 const CHANNEL_MARKER_REAP_INTERVAL_MS = 60 * 60 * 1_000;
 const CHANNEL_MARKER_REAP_RETRY_MS = 60 * 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
@@ -1577,6 +1581,7 @@ export class AgentEngine {
   private spawnGuard: SpawnGuard;
   private postSpawnLivenessMs: number;
   private stopPostConditionTimeoutMs: number;
+  private spawnSessionCaptureTimeoutMs: number;
   private roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -1835,6 +1840,13 @@ export class AgentEngine {
         process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS,
         DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS,
       );
+    this.spawnSessionCaptureTimeoutMs = Math.max(
+      0,
+      Math.min(
+        MAX_SPAWN_SESSION_CAPTURE_MS,
+        opts?.spawnSessionCaptureTimeoutMs ?? MAX_SPAWN_SESSION_CAPTURE_MS,
+      ),
+    );
     this.codexModelListRunner =
       opts?.codexModelListRunner ?? defaultCodexModelListRunner;
     this.spawnPreflight =
@@ -3834,6 +3846,27 @@ export class AgentEngine {
       return null;
     }
     return this.maybeCaptureBootSessionId(agent, {});
+  }
+
+  private async captureCodexSpawnSessionId(agentId: string): Promise<void> {
+    const deadline = Date.now() + this.spawnSessionCaptureTimeoutMs;
+    while (true) {
+      const current =
+        this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+      if (!current) return;
+      const captured = await this.maybeCaptureBootSessionId(current, {}, {
+        resolveTranscript: false,
+      });
+      if (captured.cli_session_id) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await new Promise<void>((resolveSleep) =>
+        setTimeout(
+          resolveSleep,
+          Math.min(SPAWN_SESSION_CAPTURE_POLL_MS, remaining),
+        ),
+      );
+    }
   }
 
   private async retryDeferredTranscriptCaptures(): Promise<void> {
@@ -8390,23 +8423,20 @@ export class AgentEngine {
         error,
       );
     }
-    let returnedAgentId = agentId;
-    if (this.selfRegistrationSessionResolver) {
+    if (
+      spawnParams.cli === "codex" &&
+      this.selfRegistrationSessionResolver
+    ) {
       try {
-        const current = this.registry.get(agentId) ?? record;
-        returnedAgentId = (
-          await this.maybeCaptureBootSessionId(current, {}, {
-            resolveTranscript: false,
-          })
-        ).agent_id;
+        await this.captureCodexSpawnSessionId(agentId);
       } catch {
         // Registration is written by the launched harness. A later sweep keeps
         // retrying if the append has not landed by the time spawn returns.
       }
     }
-    this.schedulePostSpawnLivenessAssertion(returnedAgentId);
+    this.schedulePostSpawnLivenessAssertion(agentId);
     return {
-      agent_id: returnedAgentId,
+      agent_id: agentId,
       parent_agent_id: parentAgentId,
       surface_id: surface.surface,
       workspace_id: surface.workspace,
@@ -8722,7 +8752,7 @@ export class AgentEngine {
         state: initialState,
         elapsed: Date.now() - start,
         source: "immediate",
-        agent: toPublicAgent(initial),
+        agent: toPublicAgent({ ...initial, state: initialState }),
         error: initial.error ?? "Agent is in error state",
       };
     }
@@ -8734,7 +8764,7 @@ export class AgentEngine {
         state: initialState,
         elapsed: Date.now() - start,
         source: "immediate",
-        agent: toPublicAgent(initial),
+        agent: toPublicAgent({ ...initial, state: initialState }),
         error: "Agent has already completed",
       };
     }

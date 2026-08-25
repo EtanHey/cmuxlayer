@@ -3577,6 +3577,39 @@ describe("AgentRegistry", () => {
         pid: process.pid,
       });
     });
+
+    it("keeps only the newest fifty resumable close tombstones", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      for (let index = 0; index < 52; index += 1) {
+        const timestamp = new Date(Date.UTC(2026, 7, 25, 10, 0, index));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `closed-tombstone-${String(index).padStart(2, "0")}`,
+            state: "done",
+            cli_session_id: `session-${index}`,
+            user_killed: true,
+            pid: null,
+            created_at: timestamp.toISOString(),
+            updated_at: timestamp.toISOString(),
+          }),
+        );
+      }
+
+      await registry.reconstitute();
+
+      const retained = registry
+        .list()
+        .filter((record) => record.agent_id.startsWith("closed-tombstone-"))
+        .map((record) => record.agent_id)
+        .sort();
+      expect(retained).toHaveLength(50);
+      expect(retained).not.toContain("closed-tombstone-00");
+      expect(retained).not.toContain("closed-tombstone-01");
+      expect(stateMgr.readState("closed-tombstone-00")).toBeNull();
+      expect(stateMgr.readState("closed-tombstone-51")).not.toBeNull();
+    });
   });
 
   describe("purgeTerminal", () => {
@@ -3805,7 +3838,7 @@ describe("AgentRegistry", () => {
       expect(registry.get("uuid-agent-on-legacy-topology")).not.toBeNull();
     });
 
-    it("keeps a recoverable seat ghost when only a terminal same-seat record has a surface", async () => {
+    it("evicts an unclosed recoverable ghost when only a terminal same-seat record has a surface", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -3840,15 +3873,11 @@ describe("AgentRegistry", () => {
 
       await expect(
         registry.evictSurfaceless({ confirmationMs: 0 }),
-      ).resolves.toEqual([]);
-      expect(registry.get("coachClaude")).toMatchObject({
-        state: "error",
-        cli_session_id: "recover-me",
-        crash_recover: true,
-      });
+      ).resolves.toEqual(["coachClaude"]);
+      expect(registry.get("coachClaude")).toBeNull();
     });
 
-    it("keeps a recoverable seat ghost when a stale working same-seat record has only a shell surface", async () => {
+    it("evicts an unclosed recoverable ghost when a stale same-seat record has only a shell surface", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -3912,12 +3941,8 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual([]);
-      expect(registry.get("coachClaude")).toMatchObject({
-        state: "error",
-        cli_session_id: "recover-me",
-        crash_recover: true,
-      });
+      ).resolves.toEqual(["coachClaude"]);
+      expect(registry.get("coachClaude")).toBeNull();
     });
 
     it("evicts a confirmed recoverable ghost when discovery proves the live same-seat agent", async () => {
@@ -3987,7 +4012,7 @@ describe("AgentRegistry", () => {
       expect(registry.get("live-coach-record")).not.toBeNull();
     });
 
-    it("keeps a recoverable seat ghost when the live sibling surface resolves to another seat", async () => {
+    it("evicts an unclosed recoverable ghost when the live sibling resolves to another seat", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -4049,14 +4074,11 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual([]);
-      expect(registry.get("coachClaude")).toMatchObject({
-        cli_session_id: "recover-me",
-        crash_recover: true,
-      });
+      ).resolves.toEqual(["coachClaude"]);
+      expect(registry.get("coachClaude")).toBeNull();
     });
 
-    it("keeps a recoverable seat ghost when seat classification returns a mismatch", async () => {
+    it("evicts an unclosed recoverable ghost when seat classification returns a mismatch", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -4119,14 +4141,11 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual([]);
-      expect(registry.get("coachClaude")).toMatchObject({
-        cli_session_id: "recover-me",
-        crash_recover: true,
-      });
+      ).resolves.toEqual(["coachClaude"]);
+      expect(registry.get("coachClaude")).toBeNull();
     });
 
-    it("keeps a recoverable seat ghost when the observer epoch changes after proof", async () => {
+    it("evicts an unclosed recoverable ghost when the observer epoch changes after proof", async () => {
       let observerEpoch = "cmux:/tmp/test.sock@epoch-1";
       stateMgr.writeState(
         makeRecord({
@@ -4190,11 +4209,8 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual([]);
-      expect(registry.get("coachClaude")).toMatchObject({
-        cli_session_id: "recover-me",
-        crash_recover: true,
-      });
+      ).resolves.toEqual(["coachClaude"]);
+      expect(registry.get("coachClaude")).toBeNull();
     });
 
     it("resets the absence window when the same surface is observed live", async () => {

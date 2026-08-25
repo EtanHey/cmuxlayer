@@ -409,7 +409,9 @@ function countMarker(path: string, marker: string): number {
 }
 
 function contentFingerprint(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+  const stat = statSync(path, { bigint: true });
+  const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
+  return [digest, stat.mtimeNs, stat.ctimeNs, stat.ino].join(":");
 }
 
 function assertSpec(

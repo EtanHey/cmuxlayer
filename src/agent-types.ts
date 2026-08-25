@@ -233,12 +233,10 @@ export function hasRecoverableCrashError(error: string | null): boolean {
 }
 
 /**
- * #492: cmuxlayer never respawns a pane on its own, so a row that died on its
- * own is the operator's ONLY handle for an explicit `spawn_agent
- * ({resume_agent_id})`. Keep such a row (and its captured session) instead of
- * reaping it. Closing a pane is no longer deletion of its resumable identity:
- * terminal rows with a captured harness session are durable tombstones, so a
- * lead can revive the same agent after either a crash or a deliberate close.
+ * A deliberate agent close preserves the captured harness session as a
+ * resumable tombstone. Unexpected crashes keep their existing error behavior,
+ * but do not accumulate as durable resume rows; the registry also caps these
+ * deliberate-close tombstones so persistence remains bounded.
  */
 export function shouldRetainForExplicitResume(
   agent: Pick<AgentRecord, "state" | "user_killed" | "cli_session_id" | "error">,
@@ -246,9 +244,7 @@ export function shouldRetainForExplicitResume(
   return (
     (agent.state === "done" || agent.state === "error") &&
     !!agent.cli_session_id &&
-    (agent.user_killed === true ||
-      agent.state === "done" ||
-      hasRecoverableCrashError(agent.error))
+    agent.user_killed === true
   );
 }
 

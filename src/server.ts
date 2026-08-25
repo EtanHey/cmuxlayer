@@ -135,6 +135,7 @@ import type {
 } from "./agent-types.js";
 import {
   bootPromptRegistryFields,
+  shouldRetainForExplicitResume,
   summarizeTaskSummary,
 } from "./agent-types.js";
 import {
@@ -10360,16 +10361,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!agentStopped) {
             // The stop itself failed: keep its verbatim ok:false/error and add
             // the surface half, which was never attempted.
-            return {
-              ...result,
-              structuredContent: {
-                ...rawStopContent,
-                scope: "agent",
-                agent_stopped: false,
-                surface_closed: false,
-                surface_close_skipped: "agent_stop_failed",
-              },
-            };
+            const reason =
+              typeof rawStopContent.error === "string"
+                ? rawStopContent.error
+                : "Agent stop could not establish a safe terminal I/O route";
+            const remedy =
+              "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
+            return err(new Error(`close_surface scope=agent refused: ${reason}`), {
+              ...rawStopContent,
+              scope: "agent",
+              agent_stopped: false,
+              surface_closed: false,
+              surface_close_skipped: "agent_stop_failed",
+              reason,
+              remedy,
+              WARNING: remedy,
+            });
           }
           if (!boundSurface) {
             const data = {
@@ -14968,7 +14975,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars only. Pass detail=full for provenance, health diagnostics, the full registry record, and up to 20 unresolved or attention delivery receipts.",
+      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides retained close tombstones; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
       {
         state: z
           .enum([
@@ -15140,10 +15147,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
         ) => {
           const registryObservedAt = Date.now();
+          const visibleRecords =
+            args.detail === "full" || requestedState !== undefined
+              ? records
+              : records.filter(
+                  (agent) => !shouldRetainForExplicitResume(agent),
+                );
           const uuidKey = (value: string | null | undefined) =>
             value?.trim().toLowerCase() || null;
           const rows = await Promise.all(
-            records.map(async (agent) => {
+            visibleRecords.map(async (agent) => {
               try {
                 const agentUuid = uuidKey(agent.surface_uuid);
                 const observedSurface = liveDiscovery?.rows.find((surface) => {
@@ -15669,12 +15682,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await engine.stopAgent(args.agent_id, args.force, {
-            beforeSurfaceMutation: (route) =>
-              assertSurfaceMutationAllowed(
-                "stop_agent",
-                route.surface_id,
-                route.workspace_id ?? undefined,
-              ),
+            beforeSurfaceMutation: args.force
+              ? undefined
+              : (route) =>
+                  assertSurfaceMutationAllowed(
+                    "stop_agent",
+                    route.surface_id,
+                    route.workspace_id ?? undefined,
+                  ),
           });
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({

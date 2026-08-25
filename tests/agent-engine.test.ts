@@ -4434,6 +4434,93 @@ Session ID: ${sessionId}`,
       expect(existsSync(stableMarker)).toBe(true);
     });
 
+    it("waits only for Codex self-registration during spawn", async () => {
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      let attempts = 0;
+      const resolver = vi.fn(() => {
+        attempts += 1;
+        return attempts >= 2 ? { session_id: sessionId, path: null } : null;
+      });
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+        spawnSessionCaptureTimeoutMs: 100,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+
+      const pending = engine.spawnAgent({
+        repo: "cmuxlayer",
+        model: "gpt-5.6-sol",
+        cli: "codex",
+        prompt: "Capture Codex registration",
+      });
+      await vi.advanceTimersByTimeAsync(60);
+      const result = await pending;
+
+      expect(resolver).toHaveBeenCalledTimes(2);
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        agent_id: result.agent_id,
+        cli_session_id: sessionId,
+      });
+    });
+
+    it("bounds Codex registration capture and leaves lazy fallback enabled", async () => {
+      const resolver = vi.fn(() => null);
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+        spawnSessionCaptureTimeoutMs: 100,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+
+      const pending = engine.spawnAgent({
+        repo: "cmuxlayer",
+        model: "gpt-5.6-sol",
+        cli: "codex",
+        prompt: "Return after the bounded registration window",
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await pending;
+
+      expect(resolver).toHaveBeenCalledTimes(3);
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        agent_id: result.agent_id,
+        cli_session_id: null,
+        transcript_session_capture_deferred: true,
+      });
+    });
+
+    it("does not wait for non-Codex self-registration during spawn", async () => {
+      const resolver = vi.fn(() => ({
+        session_id: "5b9f4f35-2942-4c8b-b1af-d89d4e36c95d",
+        path: null,
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+
+      const result = await engine.spawnAgent({
+        repo: "cmuxlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Do not block this spawn",
+      });
+
+      expect(resolver).not.toHaveBeenCalled();
+      expect(engine.getAgentState(result.agent_id)?.cli_session_id).toBeNull();
+    });
+
     it("preserves a durable transcript path while backfilling pid-only registration evidence", async () => {
       const agentId = "cmuxlayerClaude-durable-path";
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
