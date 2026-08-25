@@ -8981,6 +8981,47 @@ describe("agent lifecycle tool handlers", () => {
     expect(sendCalls).toHaveLength(0);
   });
 
+  it("send_to targeting counts a rescued target as failed", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "rescued-target",
+      surface_id: "surface:rescued-target",
+      state: "ready",
+      function: "reviewer",
+      cli: "codex",
+    });
+    const { server } = await createBroadcastServer([record], {
+      rescuedSurface: record.surface_id,
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Reply with the single word OK",
+        targeting: { agent_ids: [record.agent_id] },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      target_count: 1,
+      submitted_count: 0,
+      queued_count: 0,
+      delivered_count: 0,
+      failed_count: 1,
+      skipped_count: 0,
+      receipts: [
+        expect.objectContaining({
+          agent_id: record.agent_id,
+          delivery_state: "rescued",
+          delivered: false,
+          terminal: true,
+        }),
+      ],
+    });
+    expect(result.content[0].text).toContain("1 failed");
+  }, 20_000);
+
   it("send_to rejects targeting combined with a singular agent id", async () => {
     const { server, sendCalls } = await createBroadcastServer([]);
 

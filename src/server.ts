@@ -5392,6 +5392,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const preReturnInterruptMarkers = interruptMarkerCount(
       opts.pre_return_screen,
     );
+    let sawNewInterrupt = false;
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
 
@@ -5411,6 +5412,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         continue;
       }
       sawReadableScreen = true;
+      sawNewInterrupt ||=
+        interruptMarkerCount(snapshot.text) > preReturnInterruptMarkers;
 
       const hasPendingInput =
         opts.require_attributable_submit_evidence === true
@@ -5513,10 +5516,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         bootFrameAdvanced &&
         !hasPendingSubmitEvidence &&
         screenIncludesSubmittedText(snapshot.text);
-      const newInterruptObserved =
-        interruptMarkerCount(snapshot.text) > preReturnInterruptMarkers;
       if (
-        newInterruptObserved &&
+        sawNewInterrupt &&
         !hasPendingSubmitEvidence &&
         (bootHasTranscriptEcho || bootHasTokenOrCostDelta)
       ) {
@@ -16488,7 +16489,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               (receipt) => receipt.delivery_state === "queued",
             ).length;
             const failedCount = receipts.filter(
-              (receipt) => receipt.delivery_state === "failed",
+              (receipt) =>
+                receipt.delivery_state === "failed" ||
+                receipt.delivery_state === "rescued",
             ).length;
             const skippedCount = receipts.filter(
               (receipt) => receipt.skipped !== undefined,

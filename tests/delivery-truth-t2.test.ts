@@ -739,6 +739,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     blankAfterFrontMatter?: boolean;
     staleInterruptBeforeType?: boolean;
     interruptAfterReturn?: boolean;
+    interruptBeforeEchoAfterReturn?: boolean;
     cli?: "codex" | "claude";
   }): {
     exec: ExecFn;
@@ -749,6 +750,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     let promptSentAfterRead: number | null = null;
     let returnPresses = 0;
     let screenReads = 0;
+    let postReturnReads = 0;
     const exec: ExecFn = vi.fn().mockImplementation(
       async (_cmd, args: string[]) => {
         if (args.includes("new-split")) {
@@ -813,6 +815,9 @@ describe("boot-submit readiness and attributable evidence", () => {
         }
         if (args.includes("read-screen")) {
           screenReads += 1;
+          if (returnPresses > 0) {
+            postReturnReads += 1;
+          }
           const cli = opts.cli ?? "codex";
           const frontMatterActive =
             cli === "codex" && screenReads <= (opts.frontMatterReads ?? 0);
@@ -846,6 +851,13 @@ describe("boot-submit readiness and attributable evidence", () => {
             ? readyScreen
             : opts.staleReadyAfterReturn && returnPresses > 0
               ? readyScreen
+            : opts.interruptBeforeEchoAfterReturn && postReturnReads === 1
+              ? [
+                  ">_ OpenAI Codex",
+                  "Conversation interrupted",
+                  "Working (1s • esc to interrupt)",
+                  "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+                ].join("\n")
             : submitted
               ? cli === "claude"
                 ? [
@@ -1082,6 +1094,35 @@ describe("boot-submit readiness and attributable evidence", () => {
       submitAfterReturn: 1,
       staleInterruptBeforeType: true,
       interruptAfterReturn: true,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 1_000,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivery_state: "rescued",
+      terminal: true,
+      delivered: false,
+      submit_verified: false,
+      submit_evidence: "transcript_echo",
+    });
+  }, 20_000);
+
+  it("latches a new interrupt that appears before the transcript echo frame", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      payloadAppears: true,
+      submitAfterReturn: 1,
+      interruptBeforeEchoAfterReturn: true,
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
