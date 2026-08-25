@@ -83,6 +83,27 @@ describe("control health", () => {
     });
   });
 
+  it("handles spaces in bundle executable names without accepting bundle arguments", () => {
+    expect(
+      resolveSpawnerAncestry(
+        "700 1 /Applications/Google Drive.app/Contents/MacOS/Google Drive\n1 0 /sbin/launchd",
+        700,
+      ),
+    ).toEqual({
+      app_bundle_path: "/Applications/Google Drive.app",
+      pid: 700,
+    });
+    expect(
+      resolveSpawnerAncestry(
+        "700 1 /opt/homebrew/bin/node /Users/x/dist/daemon.js --cli /Applications/Google Drive.app/Contents/MacOS/Google Drive\n1 0 /sbin/launchd",
+        700,
+      ),
+    ).toEqual({
+      app_bundle_path: null,
+      pid: null,
+    });
+  });
+
   it("only notifies on blocking health and records code severity in signatures", () => {
     const { engine, stateDir } = createHealthNotificationEngine();
     try {
