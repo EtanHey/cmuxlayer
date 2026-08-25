@@ -25,6 +25,7 @@ vi.mock("../src/fleet-sidebar.js", () => ({
   FleetSidebarPublisher: class {},
 }));
 vi.mock("../src/self-registration.js", () => ({
+  makeSelfRegistrationSessionLookup: vi.fn(() => null),
   makeSelfRegistrationSessionResolver: vi.fn(() => null),
 }));
 

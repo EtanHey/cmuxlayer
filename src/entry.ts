@@ -382,7 +382,10 @@ export async function startInProcessRuntime(
     { defaultWatchRegistryPath, httpNotifyWatch },
     { ensureNodeMaxOldSpaceEnv, installHeapGuard },
     { FleetSidebarPublisher },
-    { makeSelfRegistrationSessionResolver },
+    {
+      makeSelfRegistrationSessionLookup,
+      makeSelfRegistrationSessionResolver,
+    },
   ] = await Promise.all([
     import("@modelcontextprotocol/sdk/server/stdio.js"),
     import("./stdio-lifecycle.js"),
@@ -411,6 +414,7 @@ export async function startInProcessRuntime(
     watchNotify: httpNotifyWatch,
     enableCloseForensics: true,
     selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
+    selfRegistrationSessionLookup: makeSelfRegistrationSessionLookup(),
     fleetSidebarPublisher: new FleetSidebarPublisher(),
     defaultPalette: opts.env?.CMUXLAYER_DEFAULT_PALETTE,
     ...(explicitStateDir ? { stateDir: explicitStateDir } : {}),

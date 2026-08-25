@@ -2516,8 +2516,7 @@ describe("agent lifecycle tool handlers", () => {
           expect.objectContaining({
             owner: parentId,
             target: expected.report_path,
-            marker: expected.done_marker,
-            watermark: 1,
+            change: "content",
             state: "armed",
           }),
         ]),

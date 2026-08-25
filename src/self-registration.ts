@@ -22,7 +22,7 @@
  * session_id + surface_uuid to bind, never fabricate an id.
  */
 
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentRecord } from "./agent-types.js";
@@ -521,6 +521,42 @@ export function makeSelfRegistrationSessionResolver(
           }
         : {}),
     };
+  };
+}
+
+/**
+ * Resolve an exact raw harness session id back to its newest registration row.
+ * Resume is rare, so this deliberately reads the append-only file directly;
+ * the hot per-sweep resolver above remains incrementally indexed by surface.
+ */
+export function makeSelfRegistrationSessionLookup(
+  options: SelfRegistrationResolverOptions = {},
+): (sessionId: string) => SelfRegistrationEntry | null {
+  const registryPath = options.registryPath ?? resolveSessionRegistryPath();
+  const readText = (): string | null => {
+    try {
+      return options.readFile
+        ? options.readFile(registryPath)
+        : readFileSync(registryPath, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  return (sessionId: string): SelfRegistrationEntry | null => {
+    const requested = sessionId.trim().toLowerCase();
+    if (!requested) return null;
+    const text = readText();
+    if (!text) return null;
+    const matches = parseSelfRegistrationLines(text).filter(
+      (entry) => entry.session_id.trim().toLowerCase() === requested,
+    );
+    if (matches.length === 0) return null;
+    return matches.reduce((latest, entry) =>
+      (entry.ts ?? Number.NEGATIVE_INFINITY) >=
+      (latest.ts ?? Number.NEGATIVE_INFINITY)
+        ? entry
+        : latest,
+    );
   };
 }
 

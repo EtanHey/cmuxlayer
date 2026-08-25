@@ -3932,7 +3932,12 @@ describe("AgentEngine", () => {
         }
 
         expect(mockClient.newSplit).not.toHaveBeenCalled();
-        expect(engine.getAgentState("agent-user-closed")).toBeNull();
+        expect(engine.getAgentState("agent-user-closed")).toMatchObject({
+          agent_id: "agent-user-closed",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          state: "error",
+          user_killed: true,
+        });
       },
     );
 
@@ -4159,7 +4164,7 @@ describe("AgentEngine", () => {
       }
     });
 
-    it("uses Codex rollout identity instead of self-registration", async () => {
+    it("uses stable-surface self-registration before Codex rollout inference", async () => {
       const rolloutSessionId = "019fec96-588d-7000-8000-000000000000";
       const registeredSessionId = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
       const rolloutPath =
@@ -4202,13 +4207,13 @@ describe("AgentEngine", () => {
 
       await engine.captureBootSessionId("cmuxlayerCodex-pending-source");
 
-      expect(selfRegistrationResolver).not.toHaveBeenCalled();
-      expect(transcriptResolver).toHaveBeenCalledTimes(1);
-      expect(engine.getAgentState("cmuxlayerCodex-019fec96")).toMatchObject({
-        cli_session_id: rolloutSessionId,
-        cli_session_path: rolloutPath,
+      expect(selfRegistrationResolver).toHaveBeenCalledTimes(1);
+      expect(transcriptResolver).not.toHaveBeenCalled();
+      expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toMatchObject({
+        cli_session_id: registeredSessionId,
+        cli_session_path: null,
       });
-      expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toBeNull();
+      expect(engine.getAgentState("cmuxlayerCodex-019fec96")).toBeNull();
     });
 
     it("backfills Codex pid evidence only after rollout identity is durable", async () => {
@@ -12498,8 +12503,16 @@ Session ID: ${sessionId}`,
           expect(killCalls).toContainEqual([pid, 0]);
           expect(killCalls).not.toContainEqual([pid, "SIGKILL"]);
           if (force) {
-            expect(stateMgr.readState("agent-force-recycled-pid")).toBeNull();
-            expect(engine.getAgentState("agent-force-recycled-pid")).toBeNull();
+            expect(stateMgr.readState("agent-force-recycled-pid")).toMatchObject({
+              cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+              state: "done",
+              user_killed: true,
+            });
+            expect(engine.getAgentState("agent-force-recycled-pid")).toMatchObject({
+              cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+              state: "done",
+              user_killed: true,
+            });
           } else {
             expect(stateMgr.readState("agent-force-recycled-pid")).toMatchObject({
               state: "done",

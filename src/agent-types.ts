@@ -236,17 +236,19 @@ export function hasRecoverableCrashError(error: string | null): boolean {
  * #492: cmuxlayer never respawns a pane on its own, so a row that died on its
  * own is the operator's ONLY handle for an explicit `spawn_agent
  * ({resume_agent_id})`. Keep such a row (and its captured session) instead of
- * reaping it. A row someone MEANT to end is not retained -- that close was the
- * decision.
+ * reaping it. Closing a pane is no longer deletion of its resumable identity:
+ * terminal rows with a captured harness session are durable tombstones, so a
+ * lead can revive the same agent after either a crash or a deliberate close.
  */
 export function shouldRetainForExplicitResume(
   agent: Pick<AgentRecord, "state" | "user_killed" | "cli_session_id" | "error">,
 ): boolean {
   return (
-    agent.state === "error" &&
-    agent.user_killed !== true &&
+    (agent.state === "done" || agent.state === "error") &&
     !!agent.cli_session_id &&
-    hasRecoverableCrashError(agent.error)
+    (agent.user_killed === true ||
+      agent.state === "done" ||
+      hasRecoverableCrashError(agent.error))
   );
 }
 

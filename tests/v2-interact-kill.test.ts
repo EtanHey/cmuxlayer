@@ -659,7 +659,7 @@ describe("kill — scoped targets", () => {
     expect(parsed.ok).toBe(true);
   });
 
-  it("kill force removes surfaceless terminal registry ghosts", async () => {
+  it("kill force retains resumable surfaceless terminal tombstones", async () => {
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeAgentRecord({
@@ -682,11 +682,17 @@ describe("kill — scoped targets", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.killed).toContain("surfaceless-error-agent");
-    expect(stateMgr.readState("surfaceless-error-agent")).toBeNull();
+    expect(stateMgr.readState("surfaceless-error-agent")).toMatchObject({
+      agent_id: "surfaceless-error-agent",
+      cli_session_id: "019ec0e6-1111-2222-3333-444455556666",
+      state: "error",
+      user_killed: true,
+      pid: null,
+    });
 
     const listed = parseResult(await callTool(server, "list_agents", {}));
     expect(
       listed.agents.map((agent: { agent_id: string }) => agent.agent_id),
-    ).not.toContain("surfaceless-error-agent");
+    ).toContain("surfaceless-error-agent");
   });
 });

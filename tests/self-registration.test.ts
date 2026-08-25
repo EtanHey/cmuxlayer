@@ -8,6 +8,7 @@ import {
   boundPendingRegistrationLine,
   copyBufferTail,
   makeSelfRegistrationSessionResolver,
+  makeSelfRegistrationSessionLookup,
   parseSelfRegistrationLines,
   resolveSessionRegistryPath,
   SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE,
@@ -91,6 +92,37 @@ describe("copyBufferTail", () => {
     expect(tail.buffer.byteLength).toBe(tail.byteLength);
     source.fill(0x63);
     expect(tail).toEqual(Buffer.alloc(64, 0x62));
+  });
+});
+
+describe("makeSelfRegistrationSessionLookup", () => {
+  it("returns the newest exact raw session-id registration", () => {
+    const lookup = makeSelfRegistrationSessionLookup({
+      registryPath: "/fake/registry.jsonl",
+      readFile: () =>
+        jsonl(
+          {
+            session_id: "raw-session-id",
+            ts: 10,
+            cwd: "/old",
+          },
+          {
+            session_id: "different-session",
+            ts: 30,
+          },
+          {
+            session_id: "raw-session-id",
+            ts: 20,
+            cwd: "/new",
+          },
+        ),
+    });
+
+    expect(lookup("RAW-SESSION-ID")).toMatchObject({
+      session_id: "raw-session-id",
+      cwd: "/new",
+      ts: 20,
+    });
   });
 });
 

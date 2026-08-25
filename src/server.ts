@@ -55,6 +55,7 @@ import {
   type AgentDeliveryReceipt,
   type AgentLifecycleEvent,
   type LifecycleLockState,
+  type SelfRegistrationSessionEntry,
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
@@ -3348,6 +3349,9 @@ export interface CreateServerOptions {
    * `makeSelfRegistrationSessionResolver()`; unset in tests keeps HOME I/O out.
    */
   selfRegistrationSessionResolver?: SessionIdentityResolver;
+  selfRegistrationSessionLookup?: (
+    sessionId: string,
+  ) => SelfRegistrationSessionEntry | null;
   /** Async, throttled Codex rollout reader (primarily injectable for tests). */
   codexRolloutFillProvider?: CodexRolloutFillProvider;
   /** Override git worktree execution/home for tests. */
@@ -3523,6 +3527,9 @@ export interface CmuxServerContext {
   disableSpawnPreflight?: boolean;
   sessionIdentityResolver?: SessionIdentityResolver;
   selfRegistrationSessionResolver?: SessionIdentityResolver;
+  selfRegistrationSessionLookup?: (
+    sessionId: string,
+  ) => SelfRegistrationSessionEntry | null;
   lifecycleRegistry: AgentRegistry | null;
   lifecycleInitializer: (() => Promise<void>) | null;
   lifecycleStarted: boolean;
@@ -3675,6 +3682,7 @@ export function createServerContext(
     disableSpawnPreflight: opts?.disableSpawnPreflight,
     sessionIdentityResolver: opts?.sessionIdentityResolver,
     selfRegistrationSessionResolver: opts?.selfRegistrationSessionResolver,
+    selfRegistrationSessionLookup: opts?.selfRegistrationSessionLookup,
     lifecycleRegistry: opts?.lifecycleRegistry ?? null,
     lifecycleInitializer: opts?.lifecycleInitializer ?? null,
     lifecycleStarted: false,
@@ -11632,6 +11640,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sessionIdentityResolver: context.sessionIdentityResolver,
           selfRegistrationSessionResolver:
             context.selfRegistrationSessionResolver,
+          selfRegistrationSessionLookup:
+            context.selfRegistrationSessionLookup,
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
           inboxOpts,
           launchCommandSender: async ({
@@ -11678,9 +11688,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               registry.get(event.owner) ?? stateMgr.readState(event.owner);
             if (owner && lifecycleAgentInputDeliverer) {
               const text = (() => {
-                if (event.reason === "predicate_matched") {
+                if (
+                  event.reason === "predicate_matched" ||
+                  event.reason === "target_changed"
+                ) {
                   return event.target_kind === "file"
-                    ? `[report] done marker observed — read ${event.target}`
+                    ? `[report] changed — read ${event.target}`
                     : `[watch] agent predicate matched — inspect ${event.target}`;
                 }
                 if (event.reason === "target_missing") {
@@ -12378,7 +12391,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await engine.armWatch({
           owner: parentAgentId,
           target: coordination.report_path,
-          marker: coordination.done_marker,
+          change: "content",
           deadline: Number.MAX_SAFE_INTEGER,
         });
         return null;
@@ -12857,7 +12870,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             await awaitLifecycleStart();
-            const existing = engine.getAgentState(args.resume_agent_id);
+            const existing = engine.resolveResumeAgent(args.resume_agent_id);
             if (!existing) {
               return err(new Error(`Agent not found: ${args.resume_agent_id}`));
             }

@@ -647,6 +647,10 @@ export interface AgentEngineOptions {
    * registry file — hermetic like `outboxDrain`/`closeForensicsRunner`.
    */
   selfRegistrationSessionResolver?: SessionIdentityResolver;
+  /** Reverse lookup used by resume_agent_id when callers supply a harness id. */
+  selfRegistrationSessionLookup?: (
+    sessionId: string,
+  ) => SelfRegistrationSessionEntry | null;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -738,6 +742,17 @@ export interface AgentEngineOptions {
   haltIdleWithoutDoneDwellMs?: number;
   haltWedgedDwellMs?: number;
   haltWedgedSweeps?: number;
+}
+
+export interface SelfRegistrationSessionEntry {
+  session_id: string;
+  surface_uuid: string;
+  cwd: string | null;
+  pid: number | null;
+  cli: string | null;
+  launcher: string | null;
+  session_path: string | null;
+  ts: number | null;
 }
 
 export type RolePlacementReconcileTrigger = "spawn" | "idle" | "boot";
@@ -1574,6 +1589,9 @@ export class AgentEngine {
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
   private selfRegistrationSessionResolver: SessionIdentityResolver | null;
+  private selfRegistrationSessionLookup:
+    | ((sessionId: string) => SelfRegistrationSessionEntry | null)
+    | null;
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private fleetSidebarWakeRepublishTimer: ReturnType<typeof setTimeout> | null =
@@ -1767,6 +1785,8 @@ export class AgentEngine {
     // app-server-runtime).
     this.selfRegistrationSessionResolver =
       opts?.selfRegistrationSessionResolver ?? null;
+    this.selfRegistrationSessionLookup =
+      opts?.selfRegistrationSessionLookup ?? null;
     const fallbackSessionIdentityResolver = opts?.sessionIdentityResolver;
     this.sessionIdentityResolver = (agent) =>
       this.resolveSessionIdentityWithSelfRegistration(
@@ -3068,9 +3088,7 @@ export class AgentEngine {
   }
 
   private canUseSelfRegistrationSessionResolver(agent: AgentRecord): boolean {
-    return (
-      agent.cli !== "codex" && this.canUseSelfRegistrationProcessEvidence(agent)
-    );
+    return this.canUseSelfRegistrationProcessEvidence(agent);
   }
 
   /**
@@ -3243,10 +3261,10 @@ export class AgentEngine {
   }
 
   /**
-   * Default session-identity resolution is harness-specific. Codex identity is
-   * sourced only from its rollout JSONL because its screen does not reliably
-   * expose the UUID and self-registration can race or carry unrelated identity.
-   * Claude/Cursor retain self-registration first, then transcript fallback.
+   * Default session-identity resolution is harness-specific. The registration
+   * row is keyed by the exact stable surface UUID and launch timestamp, so it is
+   * authoritative for Codex as well as Claude/Cursor; transcript scanning is a
+   * fallback only when that direct registration is absent.
    */
   private resolveSessionIdentityWithSelfRegistration(
     agent: AgentRecord,
@@ -8360,9 +8378,23 @@ export class AgentEngine {
         error,
       );
     }
-    this.schedulePostSpawnLivenessAssertion(agentId);
+    let returnedAgentId = agentId;
+    if (this.selfRegistrationSessionResolver) {
+      try {
+        const current = this.registry.get(agentId) ?? record;
+        returnedAgentId = (
+          await this.maybeCaptureBootSessionId(current, {}, {
+            resolveTranscript: false,
+          })
+        ).agent_id;
+      } catch {
+        // Registration is written by the launched harness. A later sweep keeps
+        // retrying if the append has not landed by the time spawn returns.
+      }
+    }
+    this.schedulePostSpawnLivenessAssertion(returnedAgentId);
     return {
-      agent_id: agentId,
+      agent_id: returnedAgentId,
       parent_agent_id: parentAgentId,
       surface_id: surface.surface,
       workspace_id: surface.workspace,
@@ -8388,8 +8420,7 @@ export class AgentEngine {
     agentId: string,
     opts?: { workspace?: string; force?: boolean },
   ): Promise<SpawnAgentResult> {
-    const agent =
-      this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    const agent = this.resolveResumeAgent(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -8525,6 +8556,63 @@ export class AgentEngine {
       }
       throw error;
     }
+  }
+
+  /** Resolve either cmuxlayer's public label or the harness's full session id. */
+  resolveResumeAgent(agentOrSessionId: string): AgentRecord | null {
+    const direct =
+      this.registry.get(agentOrSessionId) ??
+      this.stateMgr.readState(agentOrSessionId);
+    if (direct) return direct;
+    const requestedSessionId = agentOrSessionId.trim().toLowerCase();
+    const captured =
+      this.stateMgr
+        .listStates()
+        .find(
+          (record) =>
+            record.cli_session_id?.trim().toLowerCase() === requestedSessionId,
+        ) ?? null;
+    if (captured) return captured;
+
+    const registration = this.selfRegistrationSessionLookup?.(agentOrSessionId);
+    if (!registration) return null;
+    const surfaceUuid = registration.surface_uuid.trim().toLowerCase();
+    const registrationCwd = registration.cwd?.trim() || null;
+    const registrationCli = registration.cli?.trim().toLowerCase() || null;
+    const records = this.stateMgr.listStates();
+    const uniqueMatch = (
+      predicate: (record: AgentRecord) => boolean,
+    ): AgentRecord | null => {
+      const matches = records.filter(predicate);
+      return matches.length === 1 ? matches[0]! : null;
+    };
+    const surfaceMatches = records.filter(
+      (record) => record.surface_uuid?.trim().toLowerCase() === surfaceUuid,
+    );
+    if (surfaceMatches.length > 1) return null;
+    const candidate =
+      surfaceMatches[0] ??
+      (registration.pid
+        ? uniqueMatch((record) => record.pid === registration.pid)
+        : null) ??
+      (registrationCwd
+        ? uniqueMatch(
+            (record) =>
+              record.launch_cwd === registrationCwd &&
+              (!registrationCli || record.cli === registrationCli),
+          )
+        : null);
+    if (!candidate) return null;
+    return this.finalizeCapturedSession(candidate, {
+      session_id: registration.session_id,
+      path: registration.session_path,
+      ...(registration.pid && registration.ts
+        ? {
+            pid: registration.pid,
+            pid_registered_at: new Date(registration.ts).toISOString(),
+          }
+        : {}),
+    });
   }
 
   /**
@@ -9569,7 +9657,15 @@ export class AgentEngine {
 
     if (TERMINAL_STATES.has(agent.state)) {
       if (force) {
-        this.registry.evictExplicit(canonicalAgentId);
+        if (!agent.cli_session_id) {
+          this.registry.evictExplicit(canonicalAgentId);
+          return;
+        }
+        const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
+          user_killed: true,
+          pid: null,
+        });
+        this.registry.set(canonicalAgentId, tombstone);
         return;
       }
       if (
@@ -9812,7 +9908,27 @@ export class AgentEngine {
     }
 
     if (force) {
-      this.registry.evict(canonicalAgentId);
+      const current = this.registry.get(canonicalAgentId) ?? agent;
+      if (!current.cli_session_id) {
+        this.registry.evictExplicit(canonicalAgentId);
+        return;
+      }
+      const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
+        user_killed: true,
+        pid: null,
+      });
+      this.registry.set(canonicalAgentId, tombstone);
+      if (!TERMINAL_STATES.has(current.state)) {
+        try {
+          const done = this.stateMgr.transition(canonicalAgentId, "done");
+          this.registry.set(canonicalAgentId, done);
+        } catch {
+          const failed = this.stateMgr.transition(canonicalAgentId, "error", {
+            error: "Force stopped",
+          });
+          this.registry.set(canonicalAgentId, failed);
+        }
+      }
       return;
     }
 
