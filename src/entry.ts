@@ -21,11 +21,6 @@ import {
   recordDaemonLifecycleError,
 } from "./daemon-lifecycle-state.js";
 import { callerContextFromEnv } from "./caller-context.js";
-import {
-  candidateSocketPathsForOpts,
-  probeSocketHealth,
-  type SocketProbeResult,
-} from "./cmux-socket-probe.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTOSTART_POLL_MS = 50;
@@ -51,7 +46,6 @@ export interface DaemonFirstEntryOptions {
   output?: Writable;
   logger?: Pick<Console, "error">;
   probeDaemon?: (socketPath: string) => Promise<boolean>;
-  probeCmuxSocket?: () => Promise<SocketProbeResult>;
   spawnDaemon?: (opts: SpawnDaemonOptions) => Promise<unknown> | unknown;
   runProxy?: (opts: CmuxLayerProxyOptions) => Promise<CmuxLayerProxy>;
   startInProcess?: (opts: StartInProcessOptions) => Promise<McpServer>;
@@ -68,26 +62,6 @@ function isEnabled(value: string | undefined): boolean {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-async function probeEntryCmuxSocket(
-  env: NodeJS.ProcessEnv,
-): Promise<SocketProbeResult> {
-  const candidates = candidateSocketPathsForOpts({
-    socketPath: env.CMUX_SOCKET_PATH?.trim() || undefined,
-  });
-  let lastResult: SocketProbeResult = {
-    usable: false,
-    socketPath: candidates[0] ?? "unknown",
-  };
-  for (const socketPath of candidates) {
-    const result = await probeSocketHealth(socketPath);
-    if (result.usable || result.denied_reason === "access-control") {
-      return result;
-    }
-    lastResult = result;
-  }
-  return lastResult;
 }
 
 function terminateSpawnedDaemon(
@@ -490,8 +464,6 @@ export async function runDaemonFirstEntry(
   const logger = opts.logger ?? console;
   const socketPath = resolveDefaultDaemonSocketPath(env);
   const probeDaemon = opts.probeDaemon ?? probeDaemonSocket;
-  const probeCmuxSocket =
-    opts.probeCmuxSocket ?? (() => probeEntryCmuxSocket(env));
   const runProxy = opts.runProxy ?? runProxyRuntime;
   const spawnDaemon = opts.spawnDaemon ?? spawnDaemonProcess;
   const startInProcess = opts.startInProcess ?? startInProcessRuntime;
@@ -545,14 +517,6 @@ export async function runDaemonFirstEntry(
 
   if (await probeDaemon(socketPath)) {
     return startProxy();
-  }
-
-  const cmuxProbe = await probeCmuxSocket();
-  if (cmuxProbe.denied_reason === "access-control") {
-    return fallback(
-      `daemon autostart suppressed because this proxy is denied by cmux at ${cmuxProbe.socketPath}; ` +
-        "daemon must be spawned from inside a cmux pane",
-    );
   }
 
   let spawnedDaemon: unknown;
