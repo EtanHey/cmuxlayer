@@ -1119,6 +1119,14 @@ describe("tool handler integration", () => {
   let mockExec: ExecFn;
 
   const defaultPanePlacementResult = (args: string[]) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -2877,12 +2885,12 @@ describe("tool handler integration", () => {
     );
 
     // Stable identity resolution runs first, then mode scope, screen preflight,
-    // text delivery, and Return. Legacy topology has no UUID to retain.
+    // text delivery, and Return. This minimal mock has no topology to retain.
     expect(mockExec).toHaveBeenCalledTimes(5);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["list-workspaces"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
@@ -3029,7 +3037,7 @@ describe("tool handler integration", () => {
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["list-workspaces"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
@@ -3183,6 +3191,14 @@ describe("tool handler integration", () => {
     });
 
     const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({
@@ -3373,6 +3389,14 @@ describe("tool handler integration", () => {
     });
 
     const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({
@@ -8522,6 +8546,14 @@ describe("tool handler integration", () => {
       const sentTexts: string[] = [];
 
       mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("list-windows")) {
+          return {
+            stdout: JSON.stringify({
+              windows: [{ ref: "window:1", workspace_count: 1 }],
+            }),
+            stderr: "",
+          };
+        }
         if (args.includes("list-workspaces")) {
           return {
             stdout: JSON.stringify({
@@ -8841,6 +8873,14 @@ describe("tool handler integration", () => {
     const submittedCommands: string[] = [];
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({
@@ -9192,6 +9232,14 @@ describe("tool handler integration", () => {
     const updateMenuKeys: string[] = [];
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("list-workspaces")) {
         return {
           stdout: JSON.stringify({

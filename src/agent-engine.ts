@@ -84,6 +84,7 @@ import type {
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusUpdate,
+  CmuxWindow,
   CmuxWorkspace,
   ParsedScreenResult,
   ParsedScreenStatus,
@@ -1104,7 +1105,10 @@ interface AgentEngineClient {
   getTransportHealth?(): TransportHealthSignal | null;
   /** Native and CLI clients accept a stable UUID as the read-screen target. */
   supportsStableSurfaceReads?: boolean;
-  listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }>;
+  listWindows?(): Promise<{ windows: CmuxWindow[] }>;
+  listWorkspaces(opts?: {
+    window?: string;
+  }): Promise<{ workspaces: CmuxWorkspace[] }>;
   log(
     message: string,
     opts?: {

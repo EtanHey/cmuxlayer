@@ -59,6 +59,14 @@ async function spawnReadyAgent(
 
 function makeLifecycleExec(readScreenText: () => string): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("read-screen")) {
       return {
         stdout: JSON.stringify({

@@ -51,6 +51,43 @@ describe("CmuxClient.listWorkspaces", () => {
     expect(result.workspaces).toHaveLength(1);
     expect(result.workspaces[0].ref).toBe("workspace:1");
   });
+
+  it("scopes workspace enumeration to an explicit window", async () => {
+    const { client, exec } = mockClient({ workspaces: [] });
+
+    await client.listWorkspaces({ window: "window:2" });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json", "--id-format", "both",
+      "list-workspaces",
+      "--window",
+      "window:2",
+    ]);
+  });
+});
+
+describe("CmuxClient.listWindows", () => {
+  it("calls cmux --json list-windows", async () => {
+    const { client, exec } = mockClient({
+      windows: [
+        {
+          ref: "window:2",
+          id: "11111111-2222-4333-8444-555555555555",
+          index: 0,
+          key: true,
+          visible: true,
+          workspace_count: 1,
+        },
+      ],
+    });
+
+    const result = await client.listWindows();
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json", "--id-format", "both", "list-windows",
+    ]);
+    expect(result.windows[0]?.ref).toBe("window:2");
+  });
 });
 
 describe("CmuxClient observer transport identity", () => {

@@ -191,6 +191,96 @@ describe("enrichSurfaceIdsFromPanes", () => {
 });
 
 describe("collectSurfaceTopology", () => {
+  it("enumerates workspaces in every cmux window before marking topology complete", async () => {
+    const surfaceAUuid = "11111111-2222-4333-8444-555555555555";
+    const surfaceBUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+    const client = {
+      listWindows: vi.fn().mockResolvedValue({
+        windows: [
+          { ref: "window:A", workspace_count: 1 },
+          { ref: "window:B", workspace_count: 1 },
+        ],
+      }),
+      listWorkspaces: vi.fn(
+        async (opts?: { window?: string }) => ({
+          workspaces:
+            opts?.window === "window:B"
+              ? [workspace("workspace:B")]
+              : [workspace("workspace:A")],
+        }),
+      ),
+      listPanes: vi.fn(async (opts?: { workspace?: string }) => {
+        const inWindowB = opts?.workspace === "workspace:B";
+        const ref = inWindowB ? "surface:B" : "surface:A";
+        return {
+          workspace_ref: opts?.workspace,
+          window_ref: inWindowB ? "window:B" : "window:A",
+          panes: [
+            {
+              ...pane(inWindowB ? "pane:B" : "pane:A", 0, [ref]),
+              surface_ids: [inWindowB ? surfaceBUuid : surfaceAUuid],
+            },
+          ],
+        };
+      }),
+      listPaneSurfaces: vi.fn(
+        async (opts?: { workspace?: string; pane?: string }) => {
+          const inWindowB = opts?.workspace === "workspace:B";
+          const ref = inWindowB ? "surface:B" : "surface:A";
+          return {
+            workspace_ref: opts?.workspace ?? "workspace:A",
+            window_ref: inWindowB ? "window:B" : "window:A",
+            pane_ref: opts?.pane ?? (inWindowB ? "pane:B" : "pane:A"),
+            surfaces: [
+              {
+                ...surface(ref),
+                id: inWindowB ? surfaceBUuid : surfaceAUuid,
+              },
+            ],
+          };
+        },
+      ),
+    };
+
+    const snapshot = await collectSurfaceTopology(client);
+
+    expect(client.listWindows).toHaveBeenCalledTimes(1);
+    expect(client.listWorkspaces).toHaveBeenCalledWith({ window: "window:A" });
+    expect(client.listWorkspaces).toHaveBeenCalledWith({ window: "window:B" });
+    expect(snapshot?.complete).toBe(true);
+    expect(snapshot?.workspaceBySurface).toEqual(
+      new Map([
+        ["surface:A", "workspace:A"],
+        ["surface:B", "workspace:B"],
+      ]),
+    );
+    expect(snapshot?.surfaceRefById.get(surfaceBUuid)).toBe("surface:B");
+  });
+
+  it("uses the stable window id when the CLI omits a window ref", async () => {
+    const client = {
+      listWindows: vi.fn().mockResolvedValue({
+        windows: [{ id: "window-uuid-B", workspace_count: 1 }],
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [workspace("workspace:B")],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:B",
+        window_ref: "window:B",
+        panes: [],
+      }),
+      listPaneSurfaces: vi.fn(),
+    };
+
+    const snapshot = await collectSurfaceTopology(client);
+
+    expect(snapshot?.complete).toBe(true);
+    expect(client.listWorkspaces).toHaveBeenCalledWith({
+      window: "window-uuid-B",
+    });
+  });
+
   it("marks malformed pane enumeration incomplete", async () => {
     const client = makeTopologyClient([], []);
     client.listPanes.mockResolvedValueOnce({

@@ -88,6 +88,14 @@ function makeExec(opts?: {
   let resumedSurfaceLive = false;
   const exec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     calls.push(args);
+    if (args.includes("list-windows")) {
+      return {
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("new-split") || args.includes("new-surface")) {
       resumedSurfaceLive = true;
       return {

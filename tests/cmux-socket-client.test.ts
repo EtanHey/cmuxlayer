@@ -47,6 +47,18 @@ type MockResponseHandler = (req: MockV2Request) => unknown;
 
 const MOCK_RESPONSES: Record<string, unknown> = {
   "system.ping": { pong: true },
+  "window.list": {
+    windows: [
+      {
+        id: "11111111-2222-4333-8444-555555555555",
+        ref: "window:2",
+        index: 0,
+        key: true,
+        visible: true,
+        workspace_count: 1,
+      },
+    ],
+  },
   "workspace.list": {
     workspaces: [
       {
@@ -479,6 +491,26 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(result.workspaces[0]).toHaveProperty("title");
     expect(result.workspaces[0]).toHaveProperty("index");
     expect(result.workspaces[0]).toHaveProperty("selected");
+  });
+
+  it("listWindows sends a window.list request", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    const result = await client.listWindows();
+
+    expect(result.windows[0]?.ref).toBe("window:2");
+    expect(lastV2Request).toEqual({ method: "window.list", params: {} });
+  });
+
+  it("scopes workspace.list to an explicit window", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.listWorkspaces({ window: "window:2" });
+
+    expect(lastV2Request).toEqual({
+      method: "workspace.list",
+      params: { window_id: "window:2" },
+    });
   });
 
   it("selectWorkspace sends a workspace.select request", async () => {

@@ -7,6 +7,7 @@ import type {
   CmuxPane,
   CmuxPaneSurfaces,
   CmuxSurface,
+  CmuxWindow,
   CmuxWorkspace,
 } from "./types.js";
 
@@ -40,7 +41,10 @@ export interface ResolvedAgentSurfaceBinding {
 }
 
 export interface SurfaceTopologyClient {
-  listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }>;
+  listWindows?(): Promise<{ windows: CmuxWindow[] }>;
+  listWorkspaces(opts?: {
+    window?: string;
+  }): Promise<{ workspaces: CmuxWorkspace[] }>;
   listPanes(opts?: { workspace?: string }): Promise<{
     workspace_ref?: string;
     window_ref?: string;
@@ -295,10 +299,37 @@ export async function collectSurfaceTopology(
   }
 
   let workspaceRefs: string[];
+  let workspaceEnumerationComplete = true;
   try {
-    workspaceRefs = workspace
-      ? [workspace]
-      : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
+    if (workspace) {
+      workspaceRefs = [workspace];
+    } else if (client.listWindows) {
+      const listedWindows = await client.listWindows();
+      if (!Array.isArray(listedWindows.windows)) return null;
+      const refs = new Set<string>();
+      for (const window of listedWindows.windows) {
+        const windowTarget = window.ref ?? window.id;
+        if (!windowTarget) return null;
+        const listedWorkspaces = await client.listWorkspaces({
+          window: windowTarget,
+        });
+        if (!Array.isArray(listedWorkspaces.workspaces)) return null;
+        if (
+          typeof window.workspace_count === "number" &&
+          listedWorkspaces.workspaces.length !== window.workspace_count
+        ) {
+          workspaceEnumerationComplete = false;
+        }
+        for (const listedWorkspace of listedWorkspaces.workspaces) {
+          refs.add(listedWorkspace.ref);
+        }
+      }
+      workspaceRefs = [...refs];
+    } else {
+      workspaceRefs = (await client.listWorkspaces()).workspaces.map(
+        (ws) => ws.ref,
+      );
+    }
   } catch {
     return null;
   }
@@ -306,7 +337,7 @@ export async function collectSurfaceTopology(
   const snapshot: SurfaceTopologySnapshot = {
     observerId,
     observerEpoch,
-    complete: true,
+    complete: workspaceEnumerationComplete,
     surfaces: [],
     workspaceBySurface: new Map(),
     titleBySurface: new Map(),

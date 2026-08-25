@@ -7714,31 +7714,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             remapped_to: route.surface,
           }
         : route;
-    const throwStaleSurfaceRef = (
-      snapshot: SurfaceTopologySnapshot | null,
-      diagnostic?: string,
-    ): never => {
-      const liveAgents: Array<{ agent_id: string; surface_id: string }> = [];
+    const throwStaleSurfaceRef = (diagnostic?: string): never => {
+      const expectedUuidKey = expectedUuid?.trim().toLowerCase() ?? null;
+      const owners: AgentRecord[] = [];
       const seen = new Set<string>();
       for (const record of stateMgr.listStates()) {
-        const uuid = record.surface_uuid?.trim();
-        const currentRef =
-          uuid && snapshot ? findSurfaceRefByUuid(snapshot, uuid) : null;
-        const liveRef =
-          currentRef ??
-          (snapshot?.workspaceBySurface.has(record.surface_id)
-            ? record.surface_id
-            : null);
-        if (!liveRef || seen.has(record.agent_id)) continue;
+        const recordUuidKey = record.surface_uuid?.trim().toLowerCase() ?? null;
+        const ownsRequestedRef = record.surface_id === requestedSurface;
+        const ownsExpectedUuid = Boolean(
+          expectedUuidKey && recordUuidKey === expectedUuidKey,
+        );
+        if (
+          (!ownsRequestedRef && !ownsExpectedUuid) ||
+          seen.has(record.agent_id)
+        ) {
+          continue;
+        }
         seen.add(record.agent_id);
-        liveAgents.push({ agent_id: record.agent_id, surface_id: liveRef });
+        owners.push(record);
       }
       const occupancy =
-        liveAgents.length === 1
-          ? `${requestedSurface} is stale; agent ${liveAgents[0].agent_id} is alive at ${liveAgents[0].surface_id} — use agent_id`
-          : liveAgents.length > 1
-            ? `${requestedSurface} is stale; live managed agents: ${liveAgents
-                .map((agent) => `${agent.agent_id} at ${agent.surface_id}`)
+        owners.length === 1
+          ? `${requestedSurface} is stale; agent ${owners[0].agent_id} owns this ref but no live route was proven — use agent_id`
+          : owners.length > 1
+            ? `${requestedSurface} is stale; managed agents recorded on this ref: ${owners
+                .map((agent) => agent.agent_id)
                 .join(", ")} — use agent_id`
             : `${requestedSurface} is stale; no live managed agent maps this ref`;
       throw new Error(diagnostic ? `${occupancy} (${diagnostic})` : occupancy);
@@ -7771,7 +7771,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const currentRef = findSurfaceRefByUuid(topology, stableUuid);
         if (!currentRef) {
           return throwStaleSurfaceRef(
-            topology,
             `Stable surface UUID ${stableUuid} captured for ${requestedSurface} ` +
               `is no longer live; refusing ${operation} rather than using a recycled ref.`,
           );
@@ -7813,11 +7812,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         topology.surfaceIdByRef.size > 0 ||
         topology.surfaceRefById.size > 0
       ) {
-        throwStaleSurfaceRef(topology);
+        throwStaleSurfaceRef();
       }
 
       if (!topology.workspaceBySurface.has(requestedSurface)) {
-        throwStaleSurfaceRef(topology);
+        throwStaleSurfaceRef();
       }
 
       const workspace =
@@ -11502,7 +11501,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           getTransportHealth: () => getTransportHealth(client),
           supportsStableSurfaceReads: true,
           log: (message, eventOpts) => client.log(message, eventOpts),
-          listWorkspaces: () => client.listWorkspaces(),
+          ...(typeof client.listWindows === "function"
+            ? { listWindows: () => client.listWindows() }
+            : {}),
+          listWorkspaces: (workspaceOpts) =>
+            client.listWorkspaces(workspaceOpts),
           setStatus: (key, value, statusOpts) =>
             client.setStatus(key, value, statusOpts),
           setStatuses: async (updates) => {

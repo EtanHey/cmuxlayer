@@ -10,6 +10,7 @@
 
 import type {
   CmuxWorkspace,
+  CmuxWindow,
   CmuxPaneSurfaces,
   CmuxPane,
   CmuxNewSplitResult,
@@ -252,8 +253,16 @@ export class CmuxSocketClient {
     return result.pong === true;
   }
 
-  async listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }> {
-    return this.call("workspace.list");
+  async listWindows(): Promise<{ windows: CmuxWindow[] }> {
+    return this.call("window.list");
+  }
+
+  async listWorkspaces(opts?: {
+    window?: string;
+  }): Promise<{ workspaces: CmuxWorkspace[] }> {
+    return this.call("workspace.list", {
+      ...(opts?.window ? { window_id: opts.window } : {}),
+    });
   }
 
   async selectWorkspace(workspace: string): Promise<void> {
