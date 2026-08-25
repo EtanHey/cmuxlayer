@@ -172,6 +172,7 @@ describe("Sidebar Sync", () => {
   let liveSurfaces: CmuxSurface[];
   let inboxOpts: { baseDir: string };
   let publishedFleetPublications: FleetSidebarPublication[];
+  let sweepDebugLogs: string[];
 
   beforeEach(() => {
     delete process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
@@ -241,12 +242,14 @@ describe("Sidebar Sync", () => {
       },
     );
     publishedFleetPublications = [];
+    sweepDebugLogs = [];
     inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
+      sweepDebugLog: (message) => sweepDebugLogs.push(message),
       inboxOpts,
       fleetSidebarPublisher: {
         publish: (publication) => {
@@ -518,6 +521,7 @@ describe("Sidebar Sync", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
+      sweepDebugLog: (message) => sweepDebugLogs.push(message),
       inboxOpts,
       fleetSidebarPublisher: {
         publish: () => {},
@@ -730,6 +734,7 @@ describe("Sidebar Sync", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
+      sweepDebugLog: (message) => sweepDebugLogs.push(message),
       inboxOpts,
       fleetSidebarPublisher: {
         publish: () => {},
@@ -750,6 +755,82 @@ describe("Sidebar Sync", () => {
       registryTopologyEnumerations: 0,
     });
     expect(mockClient.readScreen).toHaveBeenCalledTimes(3);
+    expect(sweepDebugLogs.at(-1)).toMatch(
+      /sweep timing topology_ms=\d+.*sidebar_ms=\d+.*total_ms=\d+/,
+    );
+  });
+
+  it("guards every sweep-reachable mutation helper before its first side effect", () => {
+    const source = readFileSync(
+      new URL("../src/agent-engine.ts", import.meta.url),
+      "utf8",
+    );
+    const guardedHelpers = [
+      "maybeCaptureBootSessionId",
+      "maybeMarkBootReady",
+      "maybeMarkTaskDone",
+      "maybeMarkCliExited",
+      "maybeEscalateLiveHalt",
+      "maybeResolvePrompt",
+      "logLifecycleEvent",
+      "notifyLifecycleEventForSweep",
+      "publishSweepStatus",
+      "evictSurfacelessForSweep",
+      "purgeTerminalForSweep",
+      "removeStateForSweep",
+      "reconcileRolePlacements",
+      "markIntentionalSurfaceCloses",
+    ];
+
+    for (const helper of guardedHelpers) {
+      const declaration = [
+        `private async ${helper}(`,
+        `private ${helper}(`,
+        `async ${helper}(`,
+      ]
+        .map((needle) => source.indexOf(needle))
+        .filter((offset) => offset >= 0)
+        .sort((left, right) => left - right)[0];
+      expect(declaration, `${helper} must exist`).toBeGreaterThanOrEqual(0);
+      const bodyStart = source.indexOf("{", declaration);
+      expect(
+        source.slice(bodyStart + 1, bodyStart + 420),
+        `${helper} must guard before writing or dispatching`,
+      ).toMatch(/assertSweepInputCurrent\(/);
+    }
+  });
+
+  it("yields the remaining sweep phases to a queued interactive waiter", async () => {
+    const registry = engine.getRegistry();
+    let releaseReconcile: (() => void) | undefined;
+    const reconcileStarted = new Promise<void>((resolve) => {
+      vi.spyOn(registry, "reconcile").mockImplementation(async () => {
+        resolve();
+        await new Promise<void>((release) => {
+          releaseReconcile = release;
+        });
+        return new Set();
+      });
+    });
+    const evict = vi.spyOn(registry, "evictSurfaceless");
+    liveSurfaces = [makeSurface("surface:one")];
+
+    const sweep = engine.runSweep();
+    await reconcileStarted;
+    let waiterRan = false;
+    const waiter = engine.runLifecycleMutation(
+      async () => {
+        waiterRan = true;
+      },
+      { label: "interactive-test" },
+    );
+    expect(engine.lifecycleLockState().queue_depth).toBe(1);
+    releaseReconcile?.();
+    await Promise.all([sweep, waiter]);
+
+    expect(waiterRan).toBe(true);
+    expect(evict).not.toHaveBeenCalled();
+    expect(engine.lifecycleLockState().sweep_yielded).toBe(1);
   });
 
   it("does not expose a sweep snapshot to concurrent terminal routing", async () => {

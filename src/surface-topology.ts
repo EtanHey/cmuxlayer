@@ -13,6 +13,8 @@ import type {
 export type SurfaceTopology = AgentTopologyHealthInput;
 
 export interface SurfaceTopologySnapshot {
+  /** Engine-local generation assigned to the observation used by one sweep. */
+  generation?: number;
   /** Stable observer owner that produced this completed observation. */
   observerId?: string | null;
   /** Observer epoch that authorized this completed observation. */
