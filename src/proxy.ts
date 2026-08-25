@@ -1427,19 +1427,19 @@ export class CmuxLayerProxy {
             const spawnStartedAt = Date.now();
             const spawned = await this.spawnDaemonForVersionBump({
               socketPath: this.socketPath,
-            env: process.env,
-            logger: this.logger,
-            daemonScriptPath,
-          });
-          instrumentSpawnedDaemon(spawned, spawnStartedAt, this.logger);
-          const pid =
-            spawned &&
-            typeof spawned === "object" &&
-            "pid" in spawned &&
-            typeof spawned.pid === "number"
-              ? spawned.pid
-              : "unknown";
-          this.logReconnect(
+              env: process.env,
+              logger: this.logger,
+              daemonScriptPath,
+            });
+            instrumentSpawnedDaemon(spawned, spawnStartedAt, this.logger);
+            const pid =
+              spawned &&
+              typeof spawned === "object" &&
+              "pid" in spawned &&
+              typeof spawned.pid === "number"
+                ? spawned.pid
+                : "unknown";
+            this.logReconnect(
               "spawn-fired-version-bump",
               `[cmuxlayer-proxy] daemon spawn fired (script=${daemonScriptPath}, pid=${pid})`,
             );

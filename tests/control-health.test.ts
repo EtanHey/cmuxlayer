@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import {
   collectControlHealth,
   formatControlHealth,
+  resolveSpawnerAncestry,
 } from "../src/control-health.js";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ControlHealth } from "../src/control-health.js";
@@ -55,6 +56,33 @@ afterEach(() => {
 });
 
 describe("control health", () => {
+  it.each([
+    "/opt/homebrew/bin/node /Users/x/dist/daemon.js --cli /Applications/cmux.app/Contents/MacOS/cmux",
+    "/opt/homebrew/bin/node /Users/x/dist/daemon.js /Applications/cmux.app/Contents/MacOS/cmux",
+  ])("ignores app bundle paths passed only as ancestor arguments", (command) => {
+    expect(resolveSpawnerAncestry(`700 1 ${command}\n1 0 /sbin/launchd`, 700)).toEqual({
+      app_bundle_path: null,
+      pid: null,
+    });
+  });
+
+  it("reports an app bundle when the ancestor executable is bundle-resident", () => {
+    expect(
+      resolveSpawnerAncestry(
+        [
+          "900 800 /opt/homebrew/bin/node /opt/cmuxlayer/dist/daemon.js",
+          "800 700 /opt/homebrew/bin/node /opt/cmuxlayer/dist/proxy.js",
+          "700 1 /Applications/cmux.app/Contents/MacOS/cmux",
+          "1 0 /sbin/launchd",
+        ].join("\n"),
+        900,
+      ),
+    ).toEqual({
+      app_bundle_path: "/Applications/cmux.app",
+      pid: 700,
+    });
+  });
+
   it("only notifies on blocking health and records code severity in signatures", () => {
     const { engine, stateDir } = createHealthNotificationEngine();
     try {
@@ -209,7 +237,7 @@ describe("control health", () => {
             stdout: [
               "900 800 /opt/homebrew/bin/node /opt/cmuxlayer/dist/daemon.js",
               "800 700 /opt/homebrew/bin/node /opt/cmuxlayer/dist/proxy.js",
-              "700 1 /usr/bin/open -a /Applications/Zed.app",
+              "700 1 /Applications/Zed.app/Contents/MacOS/Zed",
               "1 0 /sbin/launchd",
             ].join("\n"),
           };
