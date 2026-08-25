@@ -5643,6 +5643,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verified: boolean | null;
     submit_verification_reason: SubmitKeyVerificationReason | null;
   }> => {
+    const baselineComposerInput =
+      opts.baseline === null
+        ? null
+        : extractComposerInputRegion(opts.baseline.text);
+    if (
+      opts.baseline?.parsed.control_state !== "permission_prompt" &&
+      baselineComposerInput !== null &&
+      baselineComposerInput.trim() === ""
+    ) {
+      return {
+        submit_verified: null,
+        submit_verification_reason: "submit_evidence_absent",
+      };
+    }
+
     const startedAt = Date.now();
     let sawReadableScreen = false;
 
@@ -5659,10 +5674,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ) {
         return { submit_verified: true, submit_verification_reason: null };
       }
-      const baselineComposerInput =
-        opts.baseline === null
-          ? null
-          : extractComposerInputRegion(opts.baseline.text);
       const composerInput = extractComposerInputRegion(snapshot.text);
       if (
         baselineComposerInput !== null &&

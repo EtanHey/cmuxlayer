@@ -301,6 +301,9 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     expect(data.submit_verified).toBeNull();
     expect(data.submit_verification_reason).toBe("submit_evidence_absent");
     expect(data.WARNING).toMatch(/submit not verified/i);
+    expect(exec.calls.filter((args) => args.includes("read-screen"))).toHaveLength(
+      1,
+    );
   });
 
   it("verifies Return when a Codex permission prompt is dismissed", async () => {
