@@ -8604,7 +8604,6 @@ export class AgentEngine {
     const registration = this.selfRegistrationSessionLookup?.(agentOrSessionId);
     if (!registration) return null;
     const surfaceUuid = registration.surface_uuid.trim().toLowerCase();
-    const registrationCwd = registration.cwd?.trim() || null;
     const registrationCli = registration.cli?.trim().toLowerCase() || null;
     const records = this.stateMgr.listStates();
     const uniqueMatch = (
@@ -8621,13 +8620,6 @@ export class AgentEngine {
       surfaceMatches[0] ??
       (registration.pid
         ? uniqueMatch((record) => record.pid === registration.pid)
-        : null) ??
-      (registrationCwd
-        ? uniqueMatch(
-            (record) =>
-              record.launch_cwd === registrationCwd &&
-              (!registrationCli || record.cli === registrationCli),
-          )
         : null);
     if (
       !candidate ||

@@ -499,6 +499,35 @@ describe("revive on purpose (#492)", () => {
     expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
   });
 
+  it("rejects a raw-session registration that matches only by cwd", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "missing-surface-uuid",
+        cwd: "/shared/worktree",
+        pid: null,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: null,
+        ts: Date.now(),
+      }),
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "cwd-only-agent",
+        state: "done",
+        cli_session_id: null,
+        surface_uuid: "different-surface-uuid",
+        launch_cwd: "/shared/worktree",
+      }),
+    );
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+  });
+
   it("does not mutate an active fallback match during raw-id resolution", async () => {
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
