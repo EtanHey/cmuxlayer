@@ -228,7 +228,18 @@ export function hasRecoverableCrashError(error: string | null): boolean {
     error.includes("disappeared") ||
     // Preserve resumability for legacy rows written by the deleted crash-recovery path.
     error.startsWith("Crash recovery failed:") ||
+    error.startsWith("Explicit resume failed:") ||
     error === CLI_EXIT_ERROR
+  );
+}
+
+export function isDeliberateCloseTombstone(
+  agent: Pick<AgentRecord, "state" | "user_killed" | "cli_session_id">,
+): boolean {
+  return (
+    (agent.state === "done" || agent.state === "error") &&
+    !!agent.cli_session_id &&
+    agent.user_killed === true
   );
 }
 

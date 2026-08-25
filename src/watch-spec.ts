@@ -105,9 +105,20 @@ export interface WatchAgentObservation {
 export interface WatchRegistryOptions {
   registryPath?: string;
   now?: () => number;
+  contentFingerprintIo?: WatchContentFingerprintIo;
   agentObservation?: (
     agentId: string,
   ) => Promise<WatchAgentObservation> | WatchAgentObservation;
+}
+
+export interface WatchContentFingerprintIo {
+  stat: (path: string) => {
+    mtimeNs: bigint;
+    ctimeNs: bigint;
+    ino: bigint;
+    size: bigint;
+  };
+  read: (path: string) => Buffer;
 }
 
 export interface WatchSweepOptions extends WatchRegistryOptions {
@@ -408,10 +419,24 @@ function countMarker(path: string, marker: string): number {
   return count;
 }
 
-function contentFingerprint(path: string): string {
-  const stat = statSync(path, { bigint: true });
-  const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
-  return [digest, stat.mtimeNs, stat.ctimeNs, stat.ino].join(":");
+function contentFingerprint(
+  path: string,
+  io: WatchContentFingerprintIo = {
+    stat: (target) => statSync(target, { bigint: true }),
+    read: (target) => readFileSync(target),
+  },
+): string {
+  const revision = (stat: ReturnType<WatchContentFingerprintIo["stat"]>) =>
+    [stat.mtimeNs, stat.ctimeNs, stat.ino, stat.size].join(":");
+  const before = io.stat(path);
+  let content = io.read(path);
+  let after = io.stat(path);
+  if (revision(before) !== revision(after)) {
+    content = io.read(path);
+    after = io.stat(path);
+  }
+  const digest = createHash("sha256").update(content).digest("hex");
+  return [digest, after.mtimeNs, after.ctimeNs, after.ino, after.size].join(":");
 }
 
 function assertSpec(
@@ -518,7 +543,9 @@ export async function armWatch(
   const watermark = checked.marker
     ? (spec.watermark ?? countMarker(target, checked.marker))
     : spec.watermark;
-  const fingerprint = checked.change ? contentFingerprint(target) : undefined;
+  const fingerprint = checked.change
+    ? contentFingerprint(target, opts.contentFingerprintIo)
+    : undefined;
   const agentObservation =
     checked.targetKind === "agent"
       ? await opts.agentObservation?.(target)
@@ -709,7 +736,7 @@ export async function sweepWatches(
       const observedValue =
         record.target_kind === "file"
           ? record.change === "content"
-            ? contentFingerprint(record.target)
+            ? contentFingerprint(record.target, opts.contentFingerprintIo)
             : countMarker(record.target, record.marker!)
           : (agentObservation?.state ?? "unknown");
       const matched =

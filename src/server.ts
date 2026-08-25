@@ -136,6 +136,7 @@ import type {
 } from "./agent-types.js";
 import {
   bootPromptRegistryFields,
+  isDeliberateCloseTombstone,
   shouldRetainForExplicitResume,
   summarizeTaskSummary,
 } from "./agent-types.js";
@@ -11488,6 +11489,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       });
     };
+    const watchRegistryPath =
+      opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json");
     const testProcess =
       process.env.VITEST === "true" || process.env.NODE_ENV === "test";
     const engine =
@@ -11692,8 +11695,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           monitorRegistryPath: opts?.monitorRegistryPath,
           monitorRegistryNow: opts?.monitorRegistryNow,
           monitorRegistryNotify: opts?.monitorRegistryNotify,
-          watchRegistryPath:
-            opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+          watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
             let externalDelivered = true;
@@ -12407,8 +12409,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ): Promise<string | null> => {
       try {
         const reportPath = resolve(coordination.report_path);
-        const watchRegistryPath =
-          opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json");
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
         }).watches.find(
@@ -15167,7 +15167,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             (args.agent_ids?.length ?? 0) > 0
               ? records
               : records.filter(
-                  (agent) => !shouldRetainForExplicitResume(agent),
+                  (agent) => !isDeliberateCloseTombstone(agent),
                 );
           const uuidKey = (value: string | null | undefined) =>
             value?.trim().toLowerCase() || null;

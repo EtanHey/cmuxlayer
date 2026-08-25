@@ -3,6 +3,7 @@ import {
   isValidTransition,
   assertValidTransition,
   generateAgentId,
+  shouldRetainForExplicitResume,
   VALID_TRANSITIONS,
   type AgentState,
 } from "../src/agent-types.js";
@@ -34,6 +35,19 @@ describe("VALID_TRANSITIONS", () => {
 
   it("error can only go to creating (restart)", () => {
     expect(VALID_TRANSITIONS.error).toEqual(["creating"]);
+  });
+});
+
+describe("shouldRetainForExplicitResume", () => {
+  it("retains an explicit-resume failure with a captured session", () => {
+    expect(
+      shouldRetainForExplicitResume({
+        state: "error",
+        user_killed: false,
+        cli_session_id: "session-to-retry",
+        error: "Explicit resume failed: harness unavailable",
+      }),
+    ).toBe(true);
   });
 });
 

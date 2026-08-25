@@ -1732,6 +1732,7 @@ export class AgentRegistry {
     for (const tombstone of tombstones.slice(MAX_RESUMABLE_TOMBSTONES)) {
       const removedAgentId = this.deleteAgentAndAliases(tombstone.agent_id);
       this.stateMgr.removeState(removedAgentId);
+      this.stateMgr.getSurfaceSessionIndex().removeAgent(removedAgentId);
       removed.push(tombstone);
     }
     return removed;

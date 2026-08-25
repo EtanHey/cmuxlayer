@@ -12318,6 +12318,7 @@ codex>
     ["stop_agent", false],
     ["kill", false],
     ["stop_agent", true],
+    ["kill", true],
   ] as const)(
     "%s force=%s refuses manual mode on a freshly moved UUID route before mutation",
     async (toolName, force) => {

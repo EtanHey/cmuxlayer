@@ -96,7 +96,7 @@ describe("copyBufferTail", () => {
 });
 
 describe("makeSelfRegistrationSessionLookup", () => {
-  it("returns the newest exact raw session-id registration", () => {
+  it("returns the last-written exact raw session-id registration, regardless of ts", () => {
     const lookup = makeSelfRegistrationSessionLookup({
       registryPath: "/fake/registry.jsonl",
       readFile: () =>

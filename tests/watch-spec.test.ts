@@ -51,6 +51,59 @@ describe("WatchSpec arm contract", () => {
     });
   });
 
+  it("re-reads an interleaved content write and wakes exactly once", async () => {
+    const target = join(TEST_DIR, "interleaved.md");
+    writeFileSync(target, "before", "utf8");
+    let revision = 1n;
+    let interleave = false;
+    const contentFingerprintIo = {
+      stat: () => ({
+        mtimeNs: revision,
+        ctimeNs: revision,
+        ino: 1n,
+        size: revision === 1n ? 6n : 5n,
+      }),
+      read: () => {
+        const content =
+          revision === 1n ? Buffer.from("before") : Buffer.from("after");
+        if (interleave && revision === 1n) revision = 2n;
+        return content;
+      },
+    };
+    const notify = vi.fn().mockResolvedValue(true);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        change: "content",
+        deadline: 60_000,
+      },
+      {
+        registryPath: registryPath(),
+        now: () => 1_000,
+        contentFingerprintIo,
+      },
+    );
+
+    interleave = true;
+    const changed = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+      contentFingerprintIo,
+    });
+    const unchanged = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 3_000,
+      notify,
+      contentFingerprintIo,
+    });
+
+    expect(changed.fired).toEqual([armed.watch_id]);
+    expect(unchanged.fired).toEqual([]);
+    expect(notify).toHaveBeenCalledOnce();
+  });
+
   it("rejects an agent watch without an independent observation provider", async () => {
     await expect(
       armWatch(

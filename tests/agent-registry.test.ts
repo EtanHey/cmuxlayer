@@ -3587,6 +3587,7 @@ describe("AgentRegistry", () => {
         stateMgr.writeState(
           makeRecord({
             agent_id: `closed-tombstone-${String(index).padStart(2, "0")}`,
+            surface_id: `surface:closed-${index}`,
             state: "done",
             cli_session_id: `session-${index}`,
             user_killed: true,
@@ -3609,6 +3610,18 @@ describe("AgentRegistry", () => {
       expect(retained).not.toContain("closed-tombstone-01");
       expect(stateMgr.readState("closed-tombstone-00")).toBeNull();
       expect(stateMgr.readState("closed-tombstone-51")).not.toBeNull();
+      expect(
+        stateMgr.getSurfaceSessionIndex().lookup({
+          workspace_id: null,
+          surface_id: "surface:closed-0",
+        }),
+      ).toBeNull();
+      expect(
+        stateMgr.getSurfaceSessionIndex().lookup({
+          workspace_id: null,
+          surface_id: "surface:closed-51",
+        }),
+      ).toMatchObject({ agent_id: "closed-tombstone-51" });
     });
   });
 

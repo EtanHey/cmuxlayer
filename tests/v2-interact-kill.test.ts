@@ -663,6 +663,18 @@ describe("kill — scoped targets", () => {
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeAgentRecord({
+        agent_id: "recoverable-crash-agent",
+        surface_id: "surface:crashed",
+        state: "error",
+        cli_session_id: "019ec0e6-aaaa-bbbb-cccc-ddddeeeeffff",
+        role: "worker",
+        error: "Surface surface:crashed disappeared",
+        crash_recover: false,
+        user_killed: false,
+      }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({
         agent_id: "surfaceless-done-agent",
         surface_id: "surface:ghost",
         state: "done",
@@ -694,6 +706,9 @@ describe("kill — scoped targets", () => {
     expect(
       listed.agents.map((agent: { agent_id: string }) => agent.agent_id),
     ).not.toContain("surfaceless-done-agent");
+    expect(
+      listed.agents.map((agent: { agent_id: string }) => agent.agent_id),
+    ).toContain("recoverable-crash-agent");
     const filtered = parseResult(
       await callTool(server, "list_agents", { state: "done" }),
     );
