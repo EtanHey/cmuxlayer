@@ -1816,9 +1816,11 @@ function makeBroadcastClient(
     failSurface?: string;
     callerSurface?: string;
     malformedEnumeration?: boolean;
+    rescuedSurface?: string;
   } = {},
 ): BroadcastMockClient {
   const submittedSurfaces = new Set<string>();
+  const pendingTextBySurface = new Map<string, string>();
   const sendCalls: Array<{
     surface: string;
     text: string;
@@ -1841,6 +1843,15 @@ function makeBroadcastClient(
       (candidate) => candidate.surface_id === surface,
     );
     if (submittedSurfaces.has(surface)) {
+      if (opts.rescuedSurface === surface) {
+        return [
+          ">_ OpenAI Codex",
+          "■ Conversation interrupted - tell the model what to do differently",
+          `• ${pendingTextBySurface.get(surface) ?? ""}`,
+          "Working (1s • esc to interrupt)",
+          "gpt-5.6-sol medium · ~/Gits/cmuxlayer",
+        ].join("\n");
+      }
       return record?.cli === "claude"
         ? "Claude Code\nWorking\n"
         : "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
@@ -1850,6 +1861,21 @@ function makeBroadcastClient(
     }
     if (record?.cli === "cursor") {
       return "cursor>\n";
+    }
+    if (opts.rescuedSurface === surface) {
+      const pendingText = pendingTextBySurface.get(surface);
+      return pendingText
+        ? [
+            ">_ OpenAI Codex",
+            `» ${pendingText}`,
+            "gpt-5.6-sol medium · ~/Gits/cmuxlayer",
+          ].join("\n")
+        : [
+            ">_ OpenAI Codex",
+            "Conversation interrupted",
+            "›",
+            "gpt-5.6-sol medium · ~/Gits/cmuxlayer",
+          ].join("\n");
     }
     return "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\ncodex> ";
   };
@@ -1912,6 +1938,7 @@ function makeBroadcastClient(
     })),
     send: vi.fn().mockImplementation(async (surface, text, sendOpts) => {
       sendCalls.push({ surface, text, workspace: sendOpts?.workspace });
+      pendingTextBySurface.set(surface, text);
       if (opts.failSurface === surface) {
         throw new Error(`send failed for ${surface}`);
       }
@@ -1958,6 +1985,7 @@ async function createBroadcastServer(
     failSurface?: string;
     callerSurface?: string;
     malformedEnumeration?: boolean;
+    rescuedSurface?: string;
   } = {},
 ) {
   const ownedRecords = records.map((record) => ({
@@ -6888,12 +6916,13 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
-  it("spawn_agent reports readiness timeout without poisoning agent state", async () => {
+  it("spawn_agent timeout keeps the live pane bound through close_surface and explicit resume", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     let launchSent = false;
     let readCountAfterLaunch = 0;
+    let surfaceClosed = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-windows")) {
         return {
@@ -6904,7 +6933,19 @@ describe("agent lifecycle tool handlers", () => {
         };
       }
       if (args.includes("send")) {
+        if (surfaceClosed) {
+          surfaceClosed = false;
+          readCountAfterLaunch = 0;
+        }
         launchSent = true;
+      }
+      if (args.includes("close-surface")) {
+        surfaceClosed = true;
+      }
+      if (args.includes("new-split")) {
+        surfaceClosed = false;
+        launchSent = false;
+        readCountAfterLaunch = 0;
       }
       if (args.includes("list-workspaces")) {
         return {
@@ -6928,14 +6969,27 @@ describe("agent lifecycle tool handlers", () => {
             workspace_ref: "workspace:1",
             window_ref: "window:1",
             panes: [
+              ...(surfaceClosed
+                ? []
+                : [
+                    {
+                      ref: "pane:1",
+                      index: 0,
+                      focused: true,
+                      surface_count: 1,
+                      surface_refs: ["surface:new"],
+                      surface_ids: [stableUuid],
+                      selected_surface_ref: "surface:new",
+                    },
+                  ]),
               {
-                ref: "pane:1",
-                index: 0,
-                focused: true,
+                ref: "pane:2",
+                index: 1,
+                focused: surfaceClosed,
                 surface_count: 1,
-                surface_refs: ["surface:new"],
-                surface_ids: [stableUuid],
-                selected_surface_ref: "surface:new",
+                surface_refs: ["surface:witness"],
+                surface_ids: ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"],
+                selected_surface_ref: "surface:witness",
               },
             ],
           }),
@@ -6943,21 +6997,36 @@ describe("agent lifecycle tool handlers", () => {
         };
       }
       if (args.includes("list-pane-surfaces")) {
+        const pane = args[args.indexOf("--pane") + 1];
         return {
           stdout: JSON.stringify({
             workspace_ref: "workspace:1",
             window_ref: "window:1",
-            pane_ref: "pane:1",
-            surfaces: [
-              {
-                id: stableUuid,
-                ref: "surface:new",
-                title: "agent-pane",
-                type: "terminal",
-                index: 0,
-                selected: true,
-              },
-            ],
+            pane_ref: pane,
+            surfaces:
+              pane === "pane:2"
+                ? [
+                    {
+                      id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                      ref: "surface:witness",
+                      title: "witness",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : surfaceClosed
+                  ? []
+                  : [
+                      {
+                        id: stableUuid,
+                        ref: "surface:new",
+                        title: "agent-pane",
+                        type: "terminal",
+                        index: 0,
+                        selected: true,
+                      },
+                    ],
           }),
           stderr: "",
         };
@@ -7005,6 +7074,7 @@ describe("agent lifecycle tool handlers", () => {
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
+    const close = (server as any)._registeredTools["close_surface"];
 
     const spawnResult = await spawn.handler(
       {
@@ -7050,7 +7120,182 @@ describe("agent lifecycle tool handlers", () => {
         "file prompt body",
       ]),
     );
+
+    const closeResult = await close.handler(
+      { scope: "agent", agent_id: parsed.agent_id, force: true },
+      {} as any,
+    );
+    const closed = parseToolResult(closeResult);
+    expect(surfaceClosed).toBe(true);
+    expect(closed).toMatchObject({
+      scope: "agent",
+    });
+    expect(closed.ok, JSON.stringify(closed)).toBe(true);
+    expect(String(closed.error ?? "")).not.toMatch(/Agent not found/i);
+
+    const resumeResult = await spawn.handler(
+      { resume_agent_id: parsed.agent_id, force: true },
+      {} as any,
+    );
+    const resumed = parseToolResult(resumeResult);
+    expect(resumed, JSON.stringify(resumed)).toMatchObject({
+      ok: true,
+      resumed: true,
+      agent_id: parsed.agent_id,
+      surface_id: "surface:new",
+    });
   });
+
+  it("spawn_agent keeps a live registered pane when front-matter delivery reaches its queued deadline", async () => {
+    const promptPath = join(TEST_DIR, "front-matter.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const baseExec = makeLifecycleExec();
+    let launched = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && /Codex\b/.test(text)) {
+        launched = true;
+      }
+      if (launched && args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: [
+              " ",
+              "• Ran 6 commands · ctrl + t to view transcript",
+              " ",
+              "Working (19s • esc to interrupt)",
+              " ",
+              " ",
+              "›",
+              " ",
+              " ",
+              "  tab to queue message                                                    88% context left",
+            ].join("\n"),
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const result = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 250,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.surface_id).toBe("surface:new");
+    expect(result.boot_prompt_receipt).toMatchObject({
+      delivery_state: "queued",
+      delivered: false,
+      terminal: false,
+      typed: false,
+      submit_attempted: false,
+      submit_verified: null,
+    });
+    const state = parseToolResult(
+      await getState.handler({ agent_id: result.agent_id }, {} as any),
+    );
+    expect(state).toMatchObject({
+      surface_id: "surface:new",
+      boot_prompt_pending: true,
+      prompt_delivered: false,
+      submit_verified: null,
+    });
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["close-surface", "surface:new"]),
+    );
+  }, 20_000);
+
+  it("spawn_agent keeps injected-only queued boot work pending", async () => {
+    const baseExec = makeLifecycleExec();
+    let launched = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && /Codex\b/.test(text)) {
+        launched = true;
+      }
+      if (launched && args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: [
+              " ",
+              "• Ran 6 commands · ctrl + t to view transcript",
+              " ",
+              "Working (19s • esc to interrupt)",
+              " ",
+              " ",
+              "›",
+              " ",
+              " ",
+              "  tab to queue message                                                    88% context left",
+            ].join("\n"),
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const result = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 250,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(result.boot_prompt_receipt).toMatchObject({
+      delivery_state: "queued",
+      delivered: false,
+      typed: false,
+      submit_verified: null,
+      prompt_text: null,
+    });
+    const state = parseToolResult(
+      await getState.handler({ agent_id: result.agent_id }, {} as any),
+    );
+    expect(state).toMatchObject({
+      state: "booting",
+      surface_id: "surface:new",
+      boot_prompt_pending: true,
+      prompt_delivered: false,
+      submit_verified: null,
+    });
+  }, 20_000);
 
   it("spawn_agent defaults managed agents to lifecycle escalation and persists explicit opt-outs", async () => {
     const server = createLifecycleServer(mockExec);
@@ -7993,6 +8238,43 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("broadcast does not count a rescued send as delivered", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "rescued-lead",
+      surface_id: "surface:rescued",
+      state: "ready",
+      role: "orchestrator",
+      cli: "codex",
+      task_summary: "rescued lead",
+    });
+    const { server } = await createBroadcastServer([record], {
+      rescuedSurface: record.surface_id,
+    });
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = parseToolResult(
+      await broadcast.handler(
+        { text: "Reply with the single word OK", role: "leads" },
+        {} as any,
+      ),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      target_count: 1,
+      delivered_count: 0,
+      failed_count: 1,
+      receipts: [
+        expect.objectContaining({
+          agent_id: record.agent_id,
+          delivered: false,
+          delivery_state: "rescued",
+          submit_verified: false,
+        }),
+      ],
+    });
+  }, 20_000);
+
   it("RC6: broadcast receipt seat labels never contain the full boot prompt", async () => {
     const bootPrompt = "Implement the registry liveness brief. ".repeat(40);
     const records = [
@@ -8698,6 +8980,47 @@ describe("agent lifecycle tool handlers", () => {
     ]);
     expect(sendCalls).toHaveLength(0);
   });
+
+  it("send_to targeting counts a rescued target as failed", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "rescued-target",
+      surface_id: "surface:rescued-target",
+      state: "ready",
+      function: "reviewer",
+      cli: "codex",
+    });
+    const { server } = await createBroadcastServer([record], {
+      rescuedSurface: record.surface_id,
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Reply with the single word OK",
+        targeting: { agent_ids: [record.agent_id] },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      target_count: 1,
+      submitted_count: 0,
+      queued_count: 0,
+      delivered_count: 0,
+      failed_count: 1,
+      skipped_count: 0,
+      receipts: [
+        expect.objectContaining({
+          agent_id: record.agent_id,
+          delivery_state: "rescued",
+          delivered: false,
+          terminal: true,
+        }),
+      ],
+    });
+    expect(result.content[0].text).toContain("1 failed");
+  }, 20_000);
 
   it("send_to rejects targeting combined with a singular agent id", async () => {
     const { server, sendCalls } = await createBroadcastServer([]);
@@ -12900,6 +13223,293 @@ codex>
     expect(deliveredText).not.toContain("\x1b");
     expect(deliveredText).not.toContain("\x07");
   });
+
+  it("send_to reports rescued when a new interrupt follows a scrolled-off stale marker", async () => {
+    const message = "Reply with the single word OK";
+    const baseExec = makeLifecycleExec();
+    let relayActive = false;
+    let relayTyped = false;
+    let relayReturned = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (
+        relayActive &&
+        (args.includes("send") || args.includes("set-buffer")) &&
+        text.includes(message)
+      ) {
+        relayTyped = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (
+        relayActive &&
+        args.includes("send-key") &&
+        args.includes("return")
+      ) {
+        relayReturned = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (relayActive && args.includes("read-screen")) {
+        const screen = !relayTyped
+          ? [
+              ">_ OpenAI Codex",
+              "Conversation interrupted",
+              "›",
+              "gpt-5.6-sol medium · ~/Gits/brainlayer",
+            ].join("\n")
+          : !relayReturned
+            ? [
+                ">_ OpenAI Codex",
+                `» ${message}`,
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n")
+            : [
+                ">_ OpenAI Codex",
+                "■ Conversation interrupted - tell the model what to do differently",
+                `• ${message}`,
+                "Working (1s • esc to interrupt)",
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n");
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: screen,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+    const spawned = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "initial work",
+        },
+        {} as any,
+      ),
+    );
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const ready = engine.stateMgr.updateRecord(spawned.agent_id, {
+      state: "ready",
+    });
+    registry.set(spawned.agent_id, ready);
+    relayActive = true;
+
+    const result = parseToolResult(
+      await sendTo.handler(
+        { agent_id: spawned.agent_id, text: message, press_enter: true },
+        {} as any,
+      ),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      delivery_state: "rescued",
+      terminal: true,
+      delivered: false,
+      submit_verified: false,
+      submit_evidence: "transcript_echo",
+    });
+  }, 20_000);
+
+  it("send_to reports rescued on a first-ever interrupt after Return", async () => {
+    const message = "Reply with the single word OK";
+    const baseExec = makeLifecycleExec();
+    let relayActive = false;
+    let relayTyped = false;
+    let relayReturned = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (
+        relayActive &&
+        (args.includes("send") || args.includes("set-buffer")) &&
+        text.includes(message)
+      ) {
+        relayTyped = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (
+        relayActive &&
+        args.includes("send-key") &&
+        args.includes("return")
+      ) {
+        relayReturned = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (relayActive && args.includes("read-screen")) {
+        const screen = !relayTyped
+          ? [
+              ">_ OpenAI Codex",
+              "› Ask Codex to do anything",
+              "gpt-5.6-sol medium · ~/Gits/brainlayer",
+            ].join("\n")
+          : !relayReturned
+            ? [
+                ">_ OpenAI Codex",
+                `» ${message}`,
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n")
+            : [
+                ">_ OpenAI Codex",
+                "■ Conversation interrupted - tell the model what to do differently",
+                `• ${message}`,
+                "Working (1s • esc to interrupt)",
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n");
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: screen,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+    const spawned = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "initial work",
+        },
+        {} as any,
+      ),
+    );
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const ready = engine.stateMgr.updateRecord(spawned.agent_id, {
+      state: "ready",
+    });
+    registry.set(spawned.agent_id, ready);
+    relayActive = true;
+
+    const result = parseToolResult(
+      await sendTo.handler(
+        { agent_id: spawned.agent_id, text: message, press_enter: true },
+        {} as any,
+      ),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      delivery_state: "rescued",
+      terminal: true,
+      delivered: false,
+      submit_verified: false,
+      submit_evidence: "transcript_echo",
+    });
+  }, 20_000);
+
+  it("keeps a latched interrupt rescued after pending delivery verification sweeps", async () => {
+    const message = "Reply with the single word OK";
+    const baseExec = makeLifecycleExec();
+    let relayActive = false;
+    let relayTyped = false;
+    let relayReturned = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (
+        relayActive &&
+        (args.includes("send") || args.includes("set-buffer")) &&
+        text.includes(message)
+      ) {
+        relayTyped = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (
+        relayActive &&
+        args.includes("send-key") &&
+        args.includes("return")
+      ) {
+        relayReturned = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (relayActive && args.includes("read-screen")) {
+        const screen = !relayTyped
+          ? [
+              ">_ OpenAI Codex",
+              "› Ask Codex to do anything",
+              "gpt-5.6-sol medium · ~/Gits/brainlayer",
+            ].join("\n")
+          : !relayReturned
+            ? [
+                ">_ OpenAI Codex",
+                `» ${message}`,
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n")
+            : [
+                ">_ OpenAI Codex",
+                "■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/",
+                "  feedback` to report the issue.",
+                "",
+                "› Ask Codex to do anything",
+                "",
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n");
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: screen,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+    const spawned = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "initial work",
+        },
+        {} as any,
+      ),
+    );
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const ready = engine.stateMgr.updateRecord(spawned.agent_id, {
+      state: "ready",
+    });
+    registry.set(spawned.agent_id, ready);
+    relayActive = true;
+
+    const sent = parseToolResult(
+      await sendTo.handler(
+        { agent_id: spawned.agent_id, text: message, press_enter: true },
+        {} as any,
+      ),
+    );
+    await engine.verifyPendingDeliveries();
+
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "rescued",
+      terminal: true,
+      submit_verified: false,
+    });
+  }, 20_000);
 
   it("send_to submits chunked multiline text as one receiver message", async () => {
     const baseExec = makeLifecycleExec();
