@@ -900,7 +900,10 @@ export class CmuxSocketClient {
   }
 
   private async resolveWorkspaceTabId(workspace: string): Promise<string> {
-    const { workspaces } = await this.listWorkspaces();
+    const { workspaces } = await listAllWindowWorkspaces(
+      this,
+      () => this.currentObserverTransportEpoch(),
+    );
     const match = workspaces.find(
       (candidate) => candidate.ref === workspace || candidate.id === workspace,
     );

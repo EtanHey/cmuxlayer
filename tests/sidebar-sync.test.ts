@@ -4008,6 +4008,64 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("publishes the rest of a sweep when one agent status cannot resolve", async () => {
+    useActiveCodexScreen(mockClient);
+    for (const [agentId, workspace, surface] of [
+      ["status-good", "workspace:alpha", "surface:good"],
+      ["status-missing", "workspace:missing", "surface:missing"],
+    ] as const) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "working",
+          surface_id: surface,
+          workspace_id: workspace,
+          cli_session_id: `session-${agentId}`,
+        }),
+      );
+      liveSurfaces.push({ ...makeSurface(surface), workspace_ref: workspace });
+      writeHeartbeat(agentId, inboxOpts);
+    }
+    mockClient.setStatuses.mockRejectedValueOnce(
+      new Error(
+        "cmux set-status failed for keys [status-missing]: Unable to resolve tab id",
+      ),
+    );
+    mockClient.setStatus.mockImplementation(async (key: string) => {
+      if (key === "status-missing") {
+        throw new Error("Unable to resolve tab id for workspace workspace:missing");
+      }
+    });
+    await engine.getRegistry().reconstitute();
+
+    await expect(engine.runSweep()).resolves.toBeUndefined();
+
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "status-good",
+      expect.stringContaining("state=working"),
+      expect.objectContaining({ workspace: "workspace:alpha" }),
+    );
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "status-missing",
+      expect.stringContaining("state=working"),
+      expect.objectContaining({ workspace: "workspace:missing" }),
+    );
+    expect(sweepDebugLogs).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "status-missing: Unable to resolve tab id for workspace workspace:missing",
+        ),
+      ]),
+    );
+    expect(publishedFleetPublications.at(-1)?.snapshot.seatCount).toBe(2);
+
+    mockClient.setStatus.mockClear();
+    await expect(engine.runSweep()).resolves.toBeUndefined();
+    expect(
+      mockClient.setStatus.mock.calls.map(([key]) => key),
+    ).toEqual(["status-missing"]);
+  });
+
   it("logs spawned event on first sweep for each new agent", async () => {
     stateMgr.writeState(
       makeRecord({
