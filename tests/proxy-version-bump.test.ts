@@ -146,6 +146,8 @@ class FakeDaemon {
 describe("proxy version-bump auto-reconnect", () => {
   const daemons: FakeDaemon[] = [];
   const proxies: CmuxLayerProxy[] = [];
+  const insideCmuxProbe = () =>
+    Promise.resolve({ usable: true, socketPath: "/tmp/cmux.sock" });
 
   afterEach(async () => {
     vi.useRealTimers();
@@ -183,12 +185,14 @@ describe("proxy version-bump auto-reconnect", () => {
       input,
       output,
       logger,
+      env: {},
       initialBackoffMs: 5,
       maxBackoffMs: 20,
       reconnectJitterRatio: 0,
       requestTimeoutMs: 500,
       staleRecheckIntervalMs: 20,
       detectStaleBuild,
+      probeCmuxSocket: insideCmuxProbe,
       spawnDaemonForVersionBump,
       installedDaemonScriptPath: () =>
         "/opt/homebrew/opt/cmuxlayer/dist/daemon.js",
@@ -228,6 +232,52 @@ describe("proxy version-bump auto-reconnect", () => {
     );
   });
 
+  it("does not spawn the installed daemon for a version bump after cmux denial", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("bump-denied");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue({ pid: 4242 });
+    const logger = { error: vi.fn() };
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input: new PassThrough(),
+      output: new PassThrough(),
+      logger,
+      env: {},
+      staleRecheckIntervalMs: 60_000,
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.4.58",
+        installed: "0.4.59",
+      }),
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      probeCmuxSocket: () =>
+        Promise.resolve({
+          usable: false,
+          socketPath: "/tmp/cmux.sock",
+          denied_reason: "access-control" as const,
+          error:
+            "Access denied - only processes started inside cmux can connect",
+        }),
+      spawnDaemonForVersionBump,
+    });
+    proxies.push(proxy);
+    proxy.start();
+    await waitFor(() => daemon.connections.length > 0);
+
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(spawnDaemonForVersionBump).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer-proxy] daemon spawn suppressed (reason=cmux-access-control, path=/tmp/cmux.sock, trigger=version-bump)",
+    );
+  });
+
   it("requeues an in-flight request across a version-bump reconnect", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("in-flight-bump");
@@ -244,6 +294,7 @@ describe("proxy version-bump auto-reconnect", () => {
       socketPath: path,
       input,
       output,
+      env: {},
       initialBackoffMs: 5,
       maxBackoffMs: 20,
       reconnectJitterRatio: 0,
@@ -264,6 +315,7 @@ describe("proxy version-bump auto-reconnect", () => {
       spawnDaemonForVersionBump: vi.fn().mockImplementation(async () => {
         runningVersion = installedVersion;
       }),
+      probeCmuxSocket: insideCmuxProbe,
       installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
       logger: { error: vi.fn() },
     });
@@ -334,8 +386,10 @@ describe("proxy version-bump auto-reconnect", () => {
       socketPath: path,
       input: new PassThrough(),
       output: new PassThrough(),
+      env: {},
       staleRecheckIntervalMs: 60_000,
       detectStaleBuild,
+      probeCmuxSocket: insideCmuxProbe,
       spawnDaemonForVersionBump,
       installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
     });
@@ -363,6 +417,7 @@ describe("proxy version-bump auto-reconnect", () => {
       input: new PassThrough(),
       output: new PassThrough(),
       logger,
+      env: {},
       initialBackoffMs: 1_000,
       maxBackoffMs: 1_000,
       reconnectJitterRatio: 0,
@@ -373,6 +428,7 @@ describe("proxy version-bump auto-reconnect", () => {
           ? { stale: true, running: "0.3.33", installed: "0.3.34" }
           : { stale: false, running: "0.3.33", installed: "0.3.33" },
       spawnDaemonForVersionBump: vi.fn().mockResolvedValue({ pid: 4242 }),
+      probeCmuxSocket: insideCmuxProbe,
       installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
     });
     proxies.push(proxy);

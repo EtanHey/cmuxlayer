@@ -28,6 +28,11 @@ import {
   resolveInstalledEntryScript,
 } from "./version.js";
 import { canonicalPath, isMainModule } from "./is-main.js";
+import {
+  candidateSocketPathsForOpts,
+  probeSocketHealth,
+  type SocketProbeResult,
+} from "./cmux-socket-probe.js";
 
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 5_000;
@@ -107,12 +112,16 @@ export class VersionBumpReconnectGuard {
     this.now = opts.now ?? Date.now;
   }
 
-  allow(): boolean {
+  canAttempt(): boolean {
     const cutoff = this.now() - this.windowMs;
     while (this.attempts.length > 0 && this.attempts[0] < cutoff) {
       this.attempts.shift();
     }
-    if (this.attempts.length >= this.maxAttempts) {
+    return this.attempts.length < this.maxAttempts;
+  }
+
+  allow(): boolean {
+    if (!this.canAttempt()) {
       return false;
     }
     this.attempts.push(this.now());
@@ -140,6 +149,7 @@ export interface CmuxLayerProxyOptions {
   spawnDaemonForVersionBump?: (
     opts: SpawnDaemonOptions,
   ) => Promise<unknown> | unknown;
+  probeCmuxSocket?: () => Promise<SocketProbeResult>;
   versionBumpReconnectGuard?: VersionBumpReconnectGuard;
   selfReexecGuard?: VersionBumpReconnectGuard;
   reconnectDaemonSpawnGuard?: VersionBumpReconnectGuard;
@@ -288,6 +298,7 @@ export class CmuxLayerProxy {
   private readonly spawnDaemonForVersionBump?: (
     opts: SpawnDaemonOptions,
   ) => Promise<unknown> | unknown;
+  private readonly probeCmuxSocket: () => Promise<SocketProbeResult>;
   private readonly versionBumpReconnectGuard: VersionBumpReconnectGuard;
   private readonly selfReexecGuard: VersionBumpReconnectGuard;
   private readonly reconnectDaemonSpawnGuard: VersionBumpReconnectGuard;
@@ -324,6 +335,8 @@ export class CmuxLayerProxy {
   private readonly agentOutputWrites = new Set<Promise<void>>();
   private bufferedRequestTimer: NodeJS.Timeout | null = null;
   private readonly reconnectLogTimes = new Map<string, number>();
+  private lastCmuxProbe: SocketProbeResult | null = null;
+  private readonly loggedSpawnSuppressions = new Set<string>();
   private readonly queue: QueuedMessage[] = [];
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly expiredRequestKeys = new Set<string>();
@@ -361,6 +374,8 @@ export class CmuxLayerProxy {
     this.installedDaemonScriptPath =
       opts.installedDaemonScriptPath ?? resolveInstalledDaemonScript;
     this.spawnDaemonForVersionBump = opts.spawnDaemonForVersionBump;
+    this.probeCmuxSocket =
+      opts.probeCmuxSocket ?? (() => probeProxyCmuxSocket(this.env));
     this.versionBumpReconnectGuard =
       opts.versionBumpReconnectGuard ?? new VersionBumpReconnectGuard();
     this.selfReexecGuard =
@@ -641,11 +656,17 @@ export class CmuxLayerProxy {
         );
         return;
       }
-      if (!this.reconnectDaemonSpawnGuard.allow()) {
+      if (!this.reconnectDaemonSpawnGuard.canAttempt()) {
         this.logReconnect(
           "spawn-guard",
           `[cmuxlayer-proxy] daemon spawn skipped (reason=guard, attempt=${attempt})`,
         );
+        return;
+      }
+      if (!(await this.canSpawnSharedDaemon("reconnect-failure"))) {
+        return;
+      }
+      if (!this.reconnectDaemonSpawnGuard.allow()) {
         return;
       }
       const spawnStartedAt = Date.now();
@@ -673,6 +694,47 @@ export class CmuxLayerProxy {
         error,
       );
     }
+  }
+
+  private async canSpawnSharedDaemon(
+    trigger: "reconnect-failure" | "version-bump",
+  ): Promise<boolean> {
+    if (isEnabled(this.env.CMUXLAYER_FORCE_INPROCESS)) {
+      this.logSpawnSuppression("force-inprocess", "none", trigger);
+      return false;
+    }
+    const probe =
+      this.lastCmuxProbe?.denied_reason === "access-control"
+        ? this.lastCmuxProbe
+        : await this.probeCmuxSocket();
+    this.lastCmuxProbe = probe;
+    if (probe.usable) {
+      return true;
+    }
+    this.logSpawnSuppression(
+      probe.denied_reason === "access-control"
+        ? "cmux-access-control"
+        : "cmux-ancestry-unproven",
+      probe.socketPath,
+      trigger,
+    );
+    return false;
+  }
+
+  private logSpawnSuppression(
+    reason:
+      "cmux-access-control" | "cmux-ancestry-unproven" | "force-inprocess",
+    path: string,
+    trigger: "reconnect-failure" | "version-bump",
+  ): void {
+    const key = `${reason}:${path}:${trigger}`;
+    if (this.loggedSpawnSuppressions.has(key)) {
+      return;
+    }
+    this.loggedSpawnSuppressions.add(key);
+    this.logger.error(
+      `[cmuxlayer-proxy] daemon spawn suppressed (reason=${reason}, path=${path}, trigger=${trigger})`,
+    );
   }
 
   private attachDaemonSocket(socket: net.Socket): void {
@@ -1361,9 +1423,10 @@ export class CmuxLayerProxy {
       const daemonScriptPath = this.installedDaemonScriptPath();
       if (daemonScriptPath && this.spawnDaemonForVersionBump) {
         try {
-          const spawnStartedAt = Date.now();
-          const spawned = await this.spawnDaemonForVersionBump({
-            socketPath: this.socketPath,
+          if (await this.canSpawnSharedDaemon("version-bump")) {
+            const spawnStartedAt = Date.now();
+            const spawned = await this.spawnDaemonForVersionBump({
+              socketPath: this.socketPath,
             env: process.env,
             logger: this.logger,
             daemonScriptPath,
@@ -1377,9 +1440,10 @@ export class CmuxLayerProxy {
               ? spawned.pid
               : "unknown";
           this.logReconnect(
-            "spawn-fired-version-bump",
-            `[cmuxlayer-proxy] daemon spawn fired (script=${daemonScriptPath}, pid=${pid})`,
-          );
+              "spawn-fired-version-bump",
+              `[cmuxlayer-proxy] daemon spawn fired (script=${daemonScriptPath}, pid=${pid})`,
+            );
+          }
         } catch (error) {
           this.logger.error(
             "[cmuxlayer-proxy] failed to spawn installed daemon for version bump",
@@ -1407,6 +1471,30 @@ export class CmuxLayerProxy {
       this.versionBumpReconnecting = false;
     }
   }
+}
+
+function isEnabled(value: string | undefined): boolean {
+  return value === "1" || value?.toLowerCase() === "true";
+}
+
+async function probeProxyCmuxSocket(
+  env: NodeJS.ProcessEnv,
+): Promise<SocketProbeResult> {
+  const candidates = candidateSocketPathsForOpts({
+    socketPath: env.CMUX_SOCKET_PATH?.trim() || undefined,
+  });
+  let lastResult: SocketProbeResult = {
+    usable: false,
+    socketPath: candidates[0] ?? "unknown",
+  };
+  for (const socketPath of candidates) {
+    const result = await probeSocketHealth(socketPath);
+    if (result.usable || result.denied_reason === "access-control") {
+      return result;
+    }
+    lastResult = result;
+  }
+  return lastResult;
 }
 
 export async function runProxy(

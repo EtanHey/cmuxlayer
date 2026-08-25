@@ -513,6 +513,7 @@ export async function runDaemonFirstEntry(
       output: opts.output,
       logger,
       env,
+      probeCmuxSocket,
       spawnDaemonForVersionBump: spawnDaemon,
     });
     bindProxyStdioLifecycle({ input, proxy, logger, exit });
