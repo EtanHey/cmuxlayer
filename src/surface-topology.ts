@@ -56,6 +56,19 @@ export interface SurfaceTopologyClient {
   }): Promise<CmuxPaneSurfaces>;
 }
 
+const SURFACE_TOPOLOGY_CLIENT_METHOD_MAP = {
+  listWindows: true,
+  listWorkspaces: true,
+  listPanes: true,
+  listPaneSurfaces: true,
+} satisfies Record<keyof SurfaceTopologyClient, true>;
+
+export const SURFACE_TOPOLOGY_CLIENT_METHODS = Object.freeze(
+  Object.keys(SURFACE_TOPOLOGY_CLIENT_METHOD_MAP) as Array<
+    keyof SurfaceTopologyClient
+  >,
+);
+
 export type SurfaceObserverIdProvider = () => string | null | undefined;
 
 /**
@@ -161,7 +174,10 @@ export async function enumerateAllWindowWorkspaces(
         ) {
           complete = false;
         }
-        return listed.workspaces;
+        return listed.workspaces.map((workspace) => ({
+          ...workspace,
+          window_ref: workspace.window_ref ?? windowTarget,
+        }));
       }),
     );
     const byRef = new Map<string, CmuxWorkspace>();
@@ -193,11 +209,25 @@ export async function enumerateAllWindowWorkspaces(
   return pending;
 }
 
+export async function enumerateAllWindowWorkspacesWithRetry(
+  client: Pick<SurfaceTopologyClient, "listWindows" | "listWorkspaces">,
+  observerEpochProvider?: SurfaceObserverIdProvider,
+): Promise<AllWindowWorkspaceEnumeration> {
+  const first = await enumerateAllWindowWorkspaces(
+    client,
+    observerEpochProvider,
+  );
+  if (first.complete) return first;
+  return enumerateAllWindowWorkspaces(client, observerEpochProvider, {
+    cache: false,
+  });
+}
+
 export async function listAllWindowWorkspaces(
   client: Pick<SurfaceTopologyClient, "listWindows" | "listWorkspaces">,
   observerEpochProvider?: SurfaceObserverIdProvider,
 ): Promise<{ workspaces: CmuxWorkspace[] }> {
-  const result = await enumerateAllWindowWorkspaces(
+  const result = await enumerateAllWindowWorkspacesWithRetry(
     client,
     observerEpochProvider,
   );
@@ -426,7 +456,7 @@ export async function collectSurfaceTopology(
     if (workspace) {
       workspaceRefs = [workspace];
     } else {
-      const listed = await enumerateAllWindowWorkspaces(
+      const listed = await enumerateAllWindowWorkspacesWithRetry(
         client,
         observerEpochProvider,
       );

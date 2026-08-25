@@ -2902,9 +2902,10 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Stable identity resolution first enumerates windows and workspaces, then
-    // checks mode scope and screen readiness before delivery and Return.
-    expect(mockExec).toHaveBeenCalledTimes(6);
+    // Stable identity resolution retries the deliberately incomplete `{}`
+    // topology fixture once, then checks mode scope and screen readiness
+    // before delivery and Return.
+    expect(mockExec).toHaveBeenCalledTimes(8);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
@@ -2918,20 +2919,30 @@ describe("tool handler integration", () => {
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:1"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
       "cmux",
-      expect.arrayContaining(["read-screen"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       5,
       "cmux",
-      expect.arrayContaining(["send"]),
+      expect.arrayContaining(["identify", "--surface", "surface:1"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       6,
+      "cmux",
+      expect.arrayContaining(["read-screen"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      7,
+      "cmux",
+      expect.arrayContaining(["send"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      8,
       "cmux",
       expect.arrayContaining(["send-key"]),
     );
@@ -3056,7 +3067,7 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(6);
+    expect(mockExec).toHaveBeenCalledTimes(8);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
@@ -3070,20 +3081,30 @@ describe("tool handler integration", () => {
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:6"]),
+      expect.arrayContaining(["list-windows"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
       "cmux",
-      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       5,
       "cmux",
-      expect.arrayContaining(["send", "--surface", "surface:6"]),
+      expect.arrayContaining(["identify", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       6,
+      "cmux",
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      7,
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      8,
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
     );

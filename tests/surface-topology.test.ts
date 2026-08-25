@@ -4,6 +4,7 @@ import type { AgentRecord } from "../src/agent-types.js";
 import {
   collectSurfaceTopology,
   enumerateAllWindowWorkspaces,
+  listAllWindowWorkspaces,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   resolveAgentSurfaceBinding,
@@ -338,6 +339,28 @@ describe("collectSurfaceTopology", () => {
     );
 
     expect(client.listWindows).toHaveBeenCalledTimes(1);
+    expect(client.listWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries one incomplete window snapshot before refusing it", async () => {
+    const client = {
+      listWindows: vi
+        .fn()
+        .mockResolvedValueOnce({
+          windows: [{ ref: "window:A", workspace_count: 2 }],
+        })
+        .mockResolvedValueOnce({
+          windows: [{ ref: "window:A", workspace_count: 1 }],
+        }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [workspace("workspace:A")],
+      }),
+    };
+
+    await expect(listAllWindowWorkspaces(client)).resolves.toEqual({
+      workspaces: [expect.objectContaining({ ref: "workspace:A" })],
+    });
+    expect(client.listWindows).toHaveBeenCalledTimes(2);
     expect(client.listWorkspaces).toHaveBeenCalledTimes(2);
   });
 

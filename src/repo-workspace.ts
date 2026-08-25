@@ -224,10 +224,6 @@ export async function resolveWorkspaceRefForRepo(
   opts: FindWorkspaceForRepoOptions = {},
 ): Promise<string | undefined> {
   if (!repo) return undefined;
-  try {
-    const { workspaces } = await listAllWorkspaces();
-    return findWorkspaceRefForRepo(workspaces, repo, opts);
-  } catch {
-    return undefined;
-  }
+  const { workspaces } = await listAllWorkspaces();
+  return findWorkspaceRefForRepo(workspaces, repo, opts);
 }

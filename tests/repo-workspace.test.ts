@@ -163,11 +163,12 @@ describe("resolveWorkspaceRefForRepo", () => {
     expect(ref).toBe("ws:root");
   });
 
-  it("swallows listWorkspaces errors and returns undefined", async () => {
-    const ref = await resolveWorkspaceRefForRepo("brainlayer", async () => {
-      throw new Error("socket down");
-    });
-    expect(ref).toBeUndefined();
+  it("propagates enumeration errors so placement fails closed", async () => {
+    await expect(
+      resolveWorkspaceRefForRepo("brainlayer", async () => {
+        throw new Error("socket down");
+      }),
+    ).rejects.toThrow("socket down");
   });
 });
 

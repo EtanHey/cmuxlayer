@@ -249,7 +249,7 @@ import {
 import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology as collectCmuxSurfaceTopology,
-  enumerateAllWindowWorkspaces,
+  enumerateAllWindowWorkspacesWithRetry,
   EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
@@ -3825,11 +3825,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
   const client = context.client;
-  const listAllWorkspaces = async (cache = true) => {
-    const listed = await enumerateAllWindowWorkspaces(
+  const listAllWorkspaces = async () => {
+    const listed = await enumerateAllWindowWorkspacesWithRetry(
       client,
       () => context.surfaceObserverEpoch,
-      { cache },
     );
     if (!listed.complete) {
       throw new SurfaceEnumerationError(
@@ -7206,7 +7205,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const currentFocusedWorkspace = async (): Promise<string | undefined> => {
     try {
       const { workspaces } = await listAllWorkspaces();
-      return workspaces.find((w) => w.selected)?.ref;
+      const callerContext = currentCallerContext();
+      const callerCandidates = [
+        callerContext?.workspaceId,
+        callerContext?.tabId,
+      ].filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      );
+      const callerWorkspace = callerCandidates
+        .map((candidate) =>
+          workspaces.find((workspace) =>
+            envWorkspaceMatches(workspace, candidate),
+          ),
+        )
+        .find((workspace) => workspace !== undefined);
+      if (callerWorkspace?.window_ref) {
+        return workspaces.find(
+          (workspace) =>
+            workspace.selected &&
+            workspace.window_ref === callerWorkspace.window_ref,
+        )?.ref;
+      }
+      const connectorWorkspaces = await client.listWorkspaces();
+      return connectorWorkspaces.workspaces.find((workspace) => workspace.selected)
+        ?.ref;
     } catch {
       return undefined;
     }
@@ -9922,7 +9945,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.workspace,
             "read_screen",
           );
-          if (route.surface === args.surface) throw readError;
+          if (
+            route.surface === args.surface &&
+            (route.workspace ?? null) === (args.workspace ?? null)
+          ) {
+            throw readError;
+          }
           screenRemap = remapFields(route);
           ({ result, topology } = await readScreenSnapshot({
             ...snapshotOpts,

@@ -223,7 +223,7 @@ import {
 import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology,
-  enumerateAllWindowWorkspaces,
+  enumerateAllWindowWorkspacesWithRetry,
   EMPTY_SURFACE_TOPOLOGY,
   healthTopologyOverrides,
   isSurfaceObserverEpochCurrent,
@@ -5328,7 +5328,7 @@ export class AgentEngine {
   private async listAllWorkspaces(): Promise<AllWindowWorkspaceEnumeration> {
     const listed = this.client.listAllWorkspaces
       ? await this.client.listAllWorkspaces()
-      : await enumerateAllWindowWorkspaces(
+      : await enumerateAllWindowWorkspacesWithRetry(
           this.client,
           this.surfaceObserverEpochProvider(),
         );

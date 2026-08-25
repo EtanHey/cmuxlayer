@@ -48,6 +48,7 @@ function makeClient() {
   return {
     getTransportHealth: () => ({ mode: "socket", degraded: false }),
     currentSocketPath: vi.fn(() => "/tmp/cmux-app-test.sock"),
+    listWindows: vi.fn().mockResolvedValue(undefined),
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
     listPanes: vi.fn().mockResolvedValue({ panes: [] }),
     listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
@@ -885,6 +886,9 @@ describe("CmuxAppServerRuntime", () => {
       },
     });
     const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    expect((runtime as any).engine.client.listWindows).toEqual(
+      expect.any(Function),
+    );
     const record = makeRecord();
     const spawnAgent = vi
       .spyOn((runtime as any).engine, "spawnAgent")

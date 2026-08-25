@@ -11,6 +11,8 @@ export interface SurfaceMode {
 export interface CmuxWorkspace {
   id?: string;
   ref: string;
+  /** Owning window, attached by all-window topology enumeration. */
+  window_ref?: string;
   title: string;
   index: number;
   selected: boolean;

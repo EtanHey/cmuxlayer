@@ -10950,6 +10950,111 @@ codex>
     );
   });
 
+  it("read_screen retries the same cross-window surface with its resolved workspace", async () => {
+    const routeClient = makeCrossWindowUuidRouteClient([
+      {
+        ref: "surface:A",
+        id: "11111111-2222-4333-8444-555555555555",
+        workspace_ref: "workspace:A",
+        window_ref: "window:A",
+      },
+      {
+        ref: "surface:B",
+        id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        workspace_ref: "workspace:B",
+        window_ref: "window:B",
+      },
+    ]);
+    routeClient.client.readScreen.mockImplementation(
+      async (surface: string, opts?: { workspace?: string }) => {
+        if (surface === "surface:B" && opts?.workspace !== "workspace:B") {
+          throw new Error("Unable to resolve workspace for surface surface:B");
+        }
+        return {
+          surface,
+          text: "gpt-5.6-sol medium - 80% left\ncodex> ",
+          lines: 20,
+          scrollback_used: false,
+        };
+      },
+    );
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+    });
+
+    const result = await registeredTestTool(server, "read_screen").handler(
+      { surface: "surface:B" },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(routeClient.client.readScreen).toHaveBeenLastCalledWith(
+      "surface:B",
+      expect.objectContaining({ workspace: "workspace:B" }),
+    );
+  });
+
+  it("uses the selected workspace from the caller's window when two windows are selected", async () => {
+    const routeClient = makeCrossWindowUuidRouteClient([
+      {
+        ref: "surface:A",
+        workspace_ref: "workspace:A",
+        window_ref: "window:A",
+      },
+      {
+        ref: "surface:B",
+        workspace_ref: "workspace:B",
+        window_ref: "window:B",
+      },
+    ]);
+    routeClient.client.listWorkspaces.mockImplementation(
+      async (opts?: { window?: string }) => ({
+        workspaces: [
+          {
+            ref: opts?.window === "window:B" ? "workspace:B" : "workspace:A",
+            id:
+              opts?.window === "window:B"
+                ? "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+                : "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+            title: opts?.window ?? "window:A",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+        ],
+      }),
+    );
+    routeClient.client.newSplit.mockResolvedValue({
+      workspace: "workspace:A",
+      surface: "surface:new",
+      pane: "pane:new",
+      title: "",
+      type: "terminal" as const,
+    });
+
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      lifecycleInitializer: async () => {},
+    });
+    const result = await runWithCallerContext(
+      { workspaceId: "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb" },
+      () =>
+        registeredTestTool(server, "new_split").handler(
+          { direction: "right", workspace: "workspace:A" },
+          {} as any,
+        ),
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(routeClient.client.selectWorkspace).toHaveBeenCalledWith(
+      "workspace:A",
+    );
+  });
+
   it("raw send_to on a stale ref with no mapped agent names that no live agent occupies it", async () => {
     const routeClient = makeUuidRouteClient([
       {
@@ -14369,7 +14474,7 @@ codex>
       const pending = registeredTestTool(server, "my_agents").handler({}, {});
       for (
         let index = 0;
-        index < 50 && get.mock.calls.length === 0;
+        index < 250 && get.mock.calls.length === 0;
         index += 1
       ) {
         await Promise.resolve();
@@ -14419,7 +14524,11 @@ codex>
     });
 
     const pending = registeredTestTool(server, "my_agents").handler({}, {});
-    for (let index = 0; index < 50 && get.mock.calls.length === 0; index += 1) {
+    for (
+      let index = 0;
+      index < 250 && get.mock.calls.length === 0;
+      index += 1
+    ) {
       await Promise.resolve();
     }
     expect(get).toHaveBeenCalledWith(path);

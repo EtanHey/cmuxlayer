@@ -37,7 +37,7 @@ import { findWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
   captureSurfaceObserverEpoch,
-  enumerateAllWindowWorkspaces,
+  enumerateAllWindowWorkspacesWithRetry,
   enrichSurfaceIdsFromPanes,
   isSurfaceObserverEpochCurrent,
   type SurfaceObserverEpoch,
@@ -286,6 +286,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         supportsStableSurfaceReads: true,
         log: async () => {},
         listAllWorkspaces: () => this.listAllWorkspaces(),
+        listWindows: () => this.client.listWindows(),
         listWorkspaces: (workspaceOpts) =>
           this.client.listWorkspaces(workspaceOpts),
         setStatus: async () => {},
@@ -675,11 +676,10 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     return captureSurfaceObserverEpoch(() => this.getSurfaceObserverEpoch());
   }
 
-  private async listAllWorkspaces(cache = true) {
-    const listed = await enumerateAllWindowWorkspaces(
+  private async listAllWorkspaces() {
+    const listed = await enumerateAllWindowWorkspacesWithRetry(
       this.client,
       () => this.getSurfaceObserverEpoch(),
-      { cache },
     );
     if (!listed.complete) {
       throw new Error("Incomplete cmux all-window workspace enumeration");

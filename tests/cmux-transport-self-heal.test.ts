@@ -18,6 +18,7 @@ import {
   wrapCliWithSelfHeal,
   wrapSocketWithSelfHeal,
 } from "../src/cmux-transport-self-heal.js";
+import { SURFACE_TOPOLOGY_CLIENT_METHODS } from "../src/surface-topology.js";
 
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
 const ACCESS_CONTROL_DENIED_TEXT =
@@ -159,12 +160,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       reprobeIntervalMs: 60_000,
     });
 
-    for (const method of [
-      "listWindows",
-      "listWorkspaces",
-      "listPanes",
-      "listPaneSurfaces",
-    ]) {
+    for (const method of SURFACE_TOPOLOGY_CLIENT_METHODS) {
       expect(typeof (client as unknown as Record<string, unknown>)[method]).toBe(
         "function",
       );
