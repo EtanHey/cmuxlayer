@@ -1718,6 +1718,10 @@ function makeCrossWindowUuidRouteClient(initialSurfaces: UuidRouteSurface[]) {
     ["window:A", "workspace:A"],
     ["window:B", "workspace:B"],
   ]);
+  const workspaceIdForRef = new Map([
+    ["workspace:A", "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"],
+    ["workspace:B", "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"],
+  ]);
   (routeClient.client as any).listWindows = vi.fn().mockResolvedValue({
     windows: windows.map((ref) => ({ ref, workspace_count: 1 })),
   });
@@ -1733,6 +1737,7 @@ function makeCrossWindowUuidRouteClient(initialSurfaces: UuidRouteSurface[]) {
           ? [
               {
                 ref: workspaceRef,
+                id: workspaceIdForRef.get(workspaceRef),
                 title: workspaceRef,
                 index: 0,
                 selected: workspaceRef === "workspace:A",
@@ -10870,6 +10875,81 @@ codex>
     );
   });
 
+  it("spawn_agent resolves an unscoped caller workspace in another window", async () => {
+    const callerWorkspaceId = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+    const spawnedUuid = "cccccccc-dddd-4eee-8fff-000000000000";
+    const initialSurfaces: UuidRouteSurface[] = [
+      {
+        ref: "surface:A",
+        id: "11111111-2222-4333-8444-555555555555",
+        workspace_ref: "workspace:A",
+        window_ref: "window:A",
+      },
+      {
+        ref: "surface:B",
+        id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        workspace_ref: "workspace:B",
+        window_ref: "window:B",
+      },
+    ];
+    const routeClient = makeCrossWindowUuidRouteClient(initialSurfaces);
+    routeClient.client.newSplit.mockImplementation(
+      async (_direction: string, opts?: { workspace?: string }) => {
+        routeClient.setLiveSurfaces([
+          ...initialSurfaces,
+          {
+            ref: "surface:spawned",
+            id: spawnedUuid,
+            workspace_ref: opts?.workspace ?? "workspace:A",
+            window_ref: opts?.workspace === "workspace:B" ? "window:B" : "window:A",
+          },
+        ]);
+        return {
+          workspace: opts?.workspace ?? "workspace:A",
+          surface: "surface:spawned",
+          surface_id: spawnedUuid,
+          pane: "pane:spawned",
+          title: "caller workspace spawn",
+          type: "terminal" as const,
+        };
+      },
+    );
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      lifecycleInitializer: async () => {},
+      sessionIdentityResolver: () => null,
+    });
+
+    const result = await runWithCallerContext(
+      { workspaceId: callerWorkspaceId },
+      () =>
+        registeredTestTool(server, "spawn_agent").handler(
+          {
+            repo: "cmuxlayer",
+            model: "gpt-5.5",
+            cli: "codex",
+            role: "implementor",
+            force_new: true,
+          },
+          {} as any,
+        ),
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      workspace_id: "workspace:B",
+      surface_id: "surface:spawned",
+    });
+    expect(routeClient.client.newSplit).toHaveBeenCalledWith(
+      "right",
+      expect.objectContaining({ workspace: "workspace:B" }),
+    );
+  });
+
   it("raw send_to on a stale ref with no mapped agent names that no live agent occupies it", async () => {
     const routeClient = makeUuidRouteClient([
       {
@@ -13913,10 +13993,7 @@ codex>
       { surface: "surface:path-race", parsed_only: true },
       {},
     );
-    for (let index = 0; index < 50 && get.mock.calls.length === 0; index += 1) {
-      await Promise.resolve();
-    }
-    expect(get).toHaveBeenCalledWith(oldPath);
+    await vi.waitFor(() => expect(get).toHaveBeenCalledWith(oldPath));
     const updated = {
       ...record,
       cli_session_path: "/fixtures/codex/session-after-read.jsonl",
@@ -14058,10 +14135,7 @@ codex>
       { agent_id: record.agent_id },
       {},
     );
-    for (let index = 0; index < 50 && get.mock.calls.length === 0; index += 1) {
-      await Promise.resolve();
-    }
-    expect(get).toHaveBeenCalledWith(oldPath);
+    await vi.waitFor(() => expect(get).toHaveBeenCalledWith(oldPath));
     const updated = {
       ...record,
       cli_session_path: "/fixtures/codex/state-session-after.jsonl",
@@ -14112,10 +14186,7 @@ codex>
       { agent_id: record.agent_id },
       {},
     );
-    for (let index = 0; index < 50 && get.mock.calls.length === 0; index += 1) {
-      await Promise.resolve();
-    }
-    expect(get).toHaveBeenCalledWith(path);
+    await vi.waitFor(() => expect(get).toHaveBeenCalledWith(path));
     const updated = {
       ...record,
       cli: "claude" as const,
@@ -15037,6 +15108,37 @@ describe("auto-focus discipline (focus target before split, restore after render
     let createdSurfaceReadStarted = false;
     const exec = vi.fn(async (cmd: string, args: string[]) => {
       calls.push(args);
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 2 }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: focusedWorkspace === "workspace:1",
+                pinned: false,
+              },
+              {
+                ref: "workspace:2",
+                title: "Review team",
+                index: 1,
+                selected: focusedWorkspace === "workspace:2",
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("identify")) {
         if (
           opts?.failFocusObservationAfterCreation &&

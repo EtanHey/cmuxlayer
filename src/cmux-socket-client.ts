@@ -254,7 +254,14 @@ export class CmuxSocketClient {
   }
 
   async listWindows(): Promise<{ windows: CmuxWindow[] }> {
-    return this.call("window.list");
+    try {
+      return await this.call("window.list");
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallbackPinned()!.listWindows();
+      }
+      throw e;
+    }
   }
 
   async listWorkspaces(opts?: {

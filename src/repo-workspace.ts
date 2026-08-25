@@ -218,14 +218,14 @@ export function findWorkspaceRefForRepo(
 
 export async function resolveWorkspaceRefForRepo(
   repo: string | null | undefined,
-  listWorkspaces: () => Promise<{
+  listAllWorkspaces: () => Promise<{
     workspaces: Array<WorkspaceCandidate>;
   }>,
   opts: FindWorkspaceForRepoOptions = {},
 ): Promise<string | undefined> {
   if (!repo) return undefined;
   try {
-    const { workspaces } = await listWorkspaces();
+    const { workspaces } = await listAllWorkspaces();
     return findWorkspaceRefForRepo(workspaces, repo, opts);
   } catch {
     return undefined;

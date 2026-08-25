@@ -223,10 +223,12 @@ import {
 import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology,
+  enumerateAllWindowWorkspaces,
   EMPTY_SURFACE_TOPOLOGY,
   healthTopologyOverrides,
   isSurfaceObserverEpochCurrent,
   resolveAgentSurfaceBinding,
+  type AllWindowWorkspaceEnumeration,
   type SurfaceObserverEpoch,
   type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
@@ -1106,6 +1108,7 @@ interface AgentEngineClient {
   /** Native and CLI clients accept a stable UUID as the read-screen target. */
   supportsStableSurfaceReads?: boolean;
   listWindows?(): Promise<{ windows: CmuxWindow[] }>;
+  listAllWorkspaces?(): Promise<AllWindowWorkspaceEnumeration>;
   listWorkspaces(opts?: {
     window?: string;
   }): Promise<{ workspaces: CmuxWorkspace[] }>;
@@ -3035,7 +3038,7 @@ export class AgentEngine {
   ): Promise<string | undefined> {
     if (workspace || !repo) return workspace;
 
-    return resolveWorkspaceRefForRepo(repo, () => this.client.listWorkspaces());
+    return resolveWorkspaceRefForRepo(repo, () => this.listAllWorkspaces());
   }
 
   private async sendLaunchCommand(
@@ -5320,6 +5323,19 @@ export class AgentEngine {
 
   private captureSurfaceObserverEpoch(): SurfaceObserverEpoch {
     return captureObserverEpoch(this.surfaceObserverEpochProvider());
+  }
+
+  private async listAllWorkspaces(): Promise<AllWindowWorkspaceEnumeration> {
+    const listed = this.client.listAllWorkspaces
+      ? await this.client.listAllWorkspaces()
+      : await enumerateAllWindowWorkspaces(
+          this.client,
+          this.surfaceObserverEpochProvider(),
+        );
+    if (!listed.complete) {
+      throw new Error("Incomplete cmux all-window workspace enumeration");
+    }
+    return listed;
   }
 
   private isSurfaceObserverEpochCurrent(

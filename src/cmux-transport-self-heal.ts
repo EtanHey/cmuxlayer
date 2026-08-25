@@ -81,6 +81,7 @@ export interface CmuxSelfHealingClientOptions {
 }
 
 const FORWARDED_ASYNC_METHODS = [
+  "listWindows",
   "listWorkspaces",
   "listPaneSurfaces",
   "listPanes",
@@ -127,6 +128,7 @@ interface QueuedFailedPayload {
 }
 
 const READ_ONLY_METHODS = new Set<ForwardedAsyncMethod>([
+  "listWindows",
   "listWorkspaces",
   "listPaneSurfaces",
   "listPanes",

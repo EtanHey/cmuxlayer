@@ -1119,6 +1119,12 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
   function createMockCli(): CmuxClient {
     cliCalls = [];
     return {
+      listWindows: async () => {
+        cliCalls.push({ method: "listWindows", args: [] });
+        return {
+          windows: [{ id: "cli-window", workspace_count: 1 }],
+        };
+      },
       newSplit: async (direction: string, opts?: unknown) => {
         cliCalls.push({ method: "newSplit", args: [direction, opts] });
         return {
@@ -1163,6 +1169,24 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       },
     } as unknown as CmuxClient;
   }
+
+  it("listWindows falls back to CLI when window.list returns method_not_found", async () => {
+    const saved = MOCK_RESPONSES["window.list"];
+    delete MOCK_RESPONSES["window.list"];
+    try {
+      const client = new CmuxSocketClient({
+        socketPath: MOCK_SOCKET_PATH,
+        cliFallback: createMockCli(),
+      });
+
+      await expect(client.listWindows()).resolves.toEqual({
+        windows: [{ id: "cli-window", workspace_count: 1 }],
+      });
+      expect(cliCalls).toEqual([{ method: "listWindows", args: [] }]);
+    } finally {
+      MOCK_RESPONSES["window.list"] = saved;
+    }
+  });
 
   it("newSplit routes an explicit focus preference through the verified CLI contract", async () => {
     const client = new CmuxSocketClient({

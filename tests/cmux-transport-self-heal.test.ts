@@ -140,6 +140,38 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     }
   });
 
+  it("preserves every SurfaceTopologyClient method through the wrapper", () => {
+    const socketPath = join(tmpdir(), `cmux-topology-parity-${process.pid}.sock`);
+    const cli = new CmuxClient({
+      exec: vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" }),
+      bin: "cmux",
+    });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      listWindows: vi.fn(),
+      listWorkspaces: vi.fn(),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(socket, cli, {
+      socketPath,
+      reprobeIntervalMs: 60_000,
+    });
+
+    for (const method of [
+      "listWindows",
+      "listWorkspaces",
+      "listPanes",
+      "listPaneSurfaces",
+    ]) {
+      expect(typeof (client as unknown as Record<string, unknown>)[method]).toBe(
+        "function",
+      );
+    }
+    client.stop();
+  });
+
   function track(server: net.Server, path: string): void {
     servers.push({ server, path });
   }

@@ -67,26 +67,33 @@ describe("CmuxClient.listWorkspaces", () => {
 });
 
 describe("CmuxClient.listWindows", () => {
-  it("calls cmux --json list-windows", async () => {
-    const { client, exec } = mockClient({
-      windows: [
-        {
-          ref: "window:2",
-          id: "11111111-2222-4333-8444-555555555555",
-          index: 0,
-          key: true,
-          visible: true,
-          workspace_count: 1,
-        },
-      ],
-    });
+  it("normalizes the captured bare-array CLI envelope", async () => {
+    const { client, exec } = mockClient([
+      {
+        id: "22C79E1B-0D28-44F1-A9A1-EA2B232A31F1",
+        index: 0,
+        key: false,
+        selected_workspace_id: "A00EB8D5-5383-4711-9671-07F58E8CB868",
+        workspace_count: 1,
+      },
+      {
+        id: "514AF6DA-3510-4DD0-9531-3607E386B6CC",
+        index: 1,
+        key: true,
+        selected_workspace_id: "DD9FC08A-BF20-45FD-A7AC-C1166DA802B8",
+        workspace_count: 1,
+      },
+    ]);
 
     const result = await client.listWindows();
 
     expect(exec).toHaveBeenCalledWith("cmux", [
       "--json", "--id-format", "both", "list-windows",
     ]);
-    expect(result.windows[0]?.ref).toBe("window:2");
+    expect(result.windows).toHaveLength(2);
+    expect(result.windows[0]?.id).toBe(
+      "22C79E1B-0D28-44F1-A9A1-EA2B232A31F1",
+    );
   });
 });
 

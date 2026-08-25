@@ -340,7 +340,10 @@ export class CmuxClient {
 
   async listWindows(): Promise<{ windows: CmuxWindow[] }> {
     const raw = await this.run(["list-windows"]);
-    return this.parse(raw, "list-windows");
+    const parsed = this.parse<unknown>(raw, "list-windows");
+    return Array.isArray(parsed)
+      ? { windows: parsed as CmuxWindow[] }
+      : (parsed as { windows: CmuxWindow[] });
   }
 
   async listWorkspaces(opts?: {

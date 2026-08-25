@@ -848,6 +848,78 @@ describe("CmuxAppServerRuntime", () => {
     }
   });
 
+  it("starts a thread in a repo workspace belonging to another window", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    client.listWindows = vi.fn().mockResolvedValue({
+      windows: [
+        { ref: "window:A", workspace_count: 1 },
+        { ref: "window:B", workspace_count: 1 },
+      ],
+    });
+    client.listWorkspaces.mockImplementation(
+      async (opts?: { window?: string }) => ({
+        workspaces:
+          opts?.window === "window:B"
+            ? [
+                {
+                  ref: "workspace:B",
+                  title: "brainlayer",
+                  current_directory: "/Users/test/Gits/brainlayer",
+                },
+              ]
+            : [
+                {
+                  ref: "workspace:A",
+                  title: "cmuxlayer",
+                  current_directory: "/Users/test/Gits/cmuxlayer",
+                },
+              ],
+      }),
+    );
+    client.identify.mockResolvedValue({
+      focused: {
+        workspace_ref: "workspace:B",
+        surface_ref: "surface:new",
+      },
+    });
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const record = makeRecord();
+    const spawnAgent = vi
+      .spyOn((runtime as any).engine, "spawnAgent")
+      .mockResolvedValue({
+        agent_id: record.agent_id,
+        surface_id: "surface:new",
+        workspace_id: "workspace:B",
+        state: "booting",
+      });
+    vi.spyOn(runtime as any, "waitForCodexPrompt").mockResolvedValue(undefined);
+    vi.spyOn((runtime as any).engine, "getAgentState").mockReturnValue({
+      ...record,
+      surface_id: "surface:new",
+      workspace_id: "workspace:B",
+    });
+
+    try {
+      await expect(
+        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+      ).resolves.toMatchObject({ threadId: record.agent_id });
+      expect(spawnAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ workspace: "workspace:B" }),
+      );
+      expect(client.listWorkspaces).toHaveBeenCalledWith({
+        window: "window:A",
+      });
+      expect(client.listWorkspaces).toHaveBeenCalledWith({
+        window: "window:B",
+      });
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to start a thread when no workspace belongs to its repo instead of using the selected workspace", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });

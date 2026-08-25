@@ -249,6 +249,7 @@ import {
 import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology as collectCmuxSurfaceTopology,
+  enumerateAllWindowWorkspaces,
   EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
@@ -3824,6 +3825,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
   const client = context.client;
+  const listAllWorkspaces = async (cache = true) => {
+    const listed = await enumerateAllWindowWorkspaces(
+      client,
+      () => context.surfaceObserverEpoch,
+      { cache },
+    );
+    if (!listed.complete) {
+      throw new SurfaceEnumerationError(
+        "Malformed cmux surface enumeration: incomplete all-window workspace enumeration",
+      );
+    }
+    return listed;
+  };
   const stateMgr = context.stateMgr;
   const roleSurfaceOverrides = context.roleSurfaceOverrides;
   const explicitRoleForDiscoveredSurface = (
@@ -4642,7 +4656,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const resolveWorkspaceForRepo = async (
     repo: string | null | undefined,
   ): Promise<string | undefined> => {
-    return resolveWorkspaceRefForRepo(repo, () => client.listWorkspaces());
+    return resolveWorkspaceRefForRepo(repo, listAllWorkspaces);
   };
 
   const getSurfaceDelivery = (surface: string) => {
@@ -7128,7 +7142,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): Promise<string | undefined> => {
     if (!candidate) return undefined;
     try {
-      const { workspaces } = await client.listWorkspaces();
+      const { workspaces } = await listAllWorkspaces();
       const normalized = candidate.trim();
       return (
         workspaces.find(
@@ -7150,7 +7164,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         typeof value === "string" && value.trim().length > 0,
     );
     try {
-      const { workspaces } = await client.listWorkspaces();
+      const { workspaces } = await listAllWorkspaces();
       for (const candidate of candidates) {
         const match = workspaces.find((workspace) =>
           envWorkspaceMatches(workspace, candidate),
@@ -7191,7 +7205,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   /** Currently-focused workspace ref, or undefined if it can't be read. */
   const currentFocusedWorkspace = async (): Promise<string | undefined> => {
     try {
-      const { workspaces } = await client.listWorkspaces();
+      const { workspaces } = await listAllWorkspaces();
       return workspaces.find((w) => w.selected)?.ref;
     } catch {
       return undefined;
@@ -7241,12 +7255,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (!repo) return;
     let workspace: CmuxWorkspace | undefined;
     try {
-      const listed = await client.listWorkspaces();
+      const listed = await listAllWorkspaces();
       workspace = listed.workspaces.find((candidate) =>
         envWorkspaceMatches(candidate, workspaceRef),
       );
-    } catch {
-      return;
+    } catch (error) {
+      throw new PlacementWorkspaceError(
+        `Cannot verify whether workspace ${workspaceRef} belongs to repo ${repo}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     const cwd = workspace?.current_directory?.trim();
     if (!cwd || workspaceDirectoryRepoMatchScore(repo, cwd) > 0) return;
@@ -7321,7 +7338,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     try {
-      const { workspaces } = await client.listWorkspaces();
+      const { workspaces } = await listAllWorkspaces();
       const paneLists = await Promise.all(
         workspaces.map(async (workspace) => ({
           workspace: workspace.ref,
@@ -7546,7 +7563,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     try {
       const workspaceRefs = workspace
         ? [workspace]
-        : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
+        : (await listAllWorkspaces()).workspaces.map((ws) => ws.ref);
 
       for (const workspaceRef of workspaceRefs) {
         const panes = await client.listPanes({ workspace: workspaceRef });
@@ -8269,7 +8286,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       try {
         const listingObserverEpoch = context.surfaceObserverEpoch;
-        const workspaces = await client.listWorkspaces();
+        const workspaces = await listAllWorkspaces();
         const targetWorkspaceRefs = args.workspace
           ? [args.workspace]
           : workspaces.workspaces.map((workspace) => workspace.ref);
@@ -8680,7 +8697,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
 
         const [{ workspaces }, panes] = await Promise.all([
-          client.listWorkspaces(),
+          listAllWorkspaces(),
           client.listPanes({ workspace: targetWorkspace }),
         ]);
         const paneGroups = await Promise.all(
@@ -11245,7 +11262,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let lastLifecycleSurfaces: CmuxSurface[] | null = null;
     let lastLifecycleSurfaceObserverEpoch: string | null = null;
     const readLifecycleSurfaces = async () => {
-      const workspaces = await client.listWorkspaces();
+      const workspaces = await listAllWorkspaces();
       const workspaceList = requireSurfaceEnumerationArray<CmuxWorkspace>(
         workspaces.workspaces,
         "workspaces.workspaces",
@@ -11504,6 +11521,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ...(typeof client.listWindows === "function"
             ? { listWindows: () => client.listWindows() }
             : {}),
+          listAllWorkspaces,
           listWorkspaces: (workspaceOpts) =>
             client.listWorkspaces(workspaceOpts),
           setStatus: (key, value, statusOpts) =>

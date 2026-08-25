@@ -3,6 +3,7 @@ import { evaluateAgentHealth } from "../src/agent-health.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import {
   collectSurfaceTopology,
+  enumerateAllWindowWorkspaces,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   resolveAgentSurfaceBinding,
@@ -279,6 +280,65 @@ describe("collectSurfaceTopology", () => {
     expect(client.listWorkspaces).toHaveBeenCalledWith({
       window: "window-uuid-B",
     });
+  });
+
+  it("does not mark a zero-window topology complete", async () => {
+    const client = {
+      listWindows: vi.fn().mockResolvedValue({ windows: [] }),
+      listWorkspaces: vi.fn(),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+    };
+
+    const snapshot = await collectSurfaceTopology(client);
+
+    expect(snapshot).toMatchObject({ complete: false, surfaces: [] });
+  });
+
+  it("does not mark an uncounted empty window complete", async () => {
+    const client = {
+      listWindows: vi.fn().mockResolvedValue({
+        windows: [{ id: "window-uuid" }],
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+    };
+
+    const snapshot = await collectSurfaceTopology(client);
+
+    expect(snapshot).toMatchObject({ complete: false, surfaces: [] });
+  });
+
+  it("coalesces concurrent window-to-workspace enumeration within one observer epoch", async () => {
+    const client = {
+      listWindows: vi.fn().mockResolvedValue({
+        windows: [
+          { ref: "window:A", workspace_count: 1 },
+          { ref: "window:B", workspace_count: 1 },
+        ],
+      }),
+      listWorkspaces: vi.fn(async (opts?: { window?: string }) => ({
+        workspaces: [
+          workspace(opts?.window === "window:B" ? "workspace:B" : "workspace:A"),
+        ],
+      })),
+      listPanes: vi.fn(async (opts?: { workspace?: string }) => ({
+        workspace_ref: opts?.workspace,
+        panes: [],
+      })),
+      listPaneSurfaces: vi.fn(),
+    };
+    const observerEpoch = () => "observer:epoch:1";
+
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        enumerateAllWindowWorkspaces(client, observerEpoch),
+      ),
+    );
+
+    expect(client.listWindows).toHaveBeenCalledTimes(1);
+    expect(client.listWorkspaces).toHaveBeenCalledTimes(2);
   });
 
   it("marks malformed pane enumeration incomplete", async () => {

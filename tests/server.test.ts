@@ -1501,6 +1501,12 @@ describe("tool handler integration", () => {
       .fn()
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 2 }],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
           workspaces: [
             {
               ref: "workspace:1",
@@ -1938,6 +1944,12 @@ describe("tool handler integration", () => {
       .fn()
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
           workspaces: [
             {
               ref: "workspace:1",
@@ -2010,6 +2022,12 @@ describe("tool handler integration", () => {
   it("list_surfaces preserves the current full schema behind verbose=true while still deduping", async () => {
     mockExec = vi
       .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        stderr: "",
+      })
       .mockResolvedValueOnce({
         stdout: JSON.stringify({
           workspaces: [
@@ -2884,9 +2902,9 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Stable identity resolution runs first, then mode scope, screen preflight,
-    // text delivery, and Return. This minimal mock has no topology to retain.
-    expect(mockExec).toHaveBeenCalledTimes(5);
+    // Stable identity resolution first enumerates windows and workspaces, then
+    // checks mode scope and screen readiness before delivery and Return.
+    expect(mockExec).toHaveBeenCalledTimes(6);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
@@ -2895,20 +2913,25 @@ describe("tool handler integration", () => {
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:1"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["read-screen"]),
+      expect.arrayContaining(["identify", "--surface", "surface:1"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
       "cmux",
-      expect.arrayContaining(["send"]),
+      expect.arrayContaining(["read-screen"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       5,
+      "cmux",
+      expect.arrayContaining(["send"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      6,
       "cmux",
       expect.arrayContaining(["send-key"]),
     );
@@ -3033,7 +3056,7 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(5);
+    expect(mockExec).toHaveBeenCalledTimes(6);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
@@ -3042,20 +3065,25 @@ describe("tool handler integration", () => {
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:6"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+      expect.arrayContaining(["identify", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
       "cmux",
-      expect.arrayContaining(["send", "--surface", "surface:6"]),
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       5,
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      6,
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
     );
@@ -8157,6 +8185,18 @@ describe("tool handler integration", () => {
         stdout: JSON.stringify({ ok: true }),
         stderr: "",
       });
+    const queuedExec = mockExec;
+    mockExec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify({
+            windows: [{ ref: "window:1", workspace_count: 1 }],
+          }),
+          stderr: "",
+        };
+      }
+      return queuedExec(cmd, args);
+    }) as typeof mockExec;
     const server = createServer({
       exec: mockExec,
       skipAgentLifecycle: true,
