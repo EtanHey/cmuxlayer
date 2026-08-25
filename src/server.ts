@@ -5632,8 +5632,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
    * AIDEV-NOTE (#484/#500): key mode writes no payload, so post-key composer
    * contents cannot prove whether this key landed. Positive evidence comes
    * from an observed state transition (especially permission_prompt being
-   * dismissed) or a composer that visibly clears; otherwise the result stays
-   * unknown rather than inventing `composer_still_populated`.
+   * dismissed) or a composer observed populated before the key and empty
+   * afterward; otherwise the result stays unknown rather than inventing
+   * `composer_still_populated`.
    */
   const verifySubmitKeyOutcome = async (opts: {
     surface: string;
