@@ -850,7 +850,7 @@ describe("lean spawn tool responses", () => {
       title: "P5 live probe",
       cwd_receipt: {
         delivered: false,
-        terminal: false,
+        terminal: true,
         typed: true,
         submit_attempted: true,
         submit_verified: null,

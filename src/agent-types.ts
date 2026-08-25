@@ -296,6 +296,7 @@ export interface DeliveryTelemetryEvent {
   delivery_id?: string;
   /** Nonterminal acceptance or terminal resolution. */
   delivery_state?:
+    | "typed"
     | "submitted"
     | "queued"
     | "queued_followup"

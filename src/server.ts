@@ -624,6 +624,7 @@ const DeliveryOutputShape = {
   delivery: z
     .enum([
       "submitted",
+      "typed",
       "queued",
       "queued_followup",
       "rescued",
@@ -635,6 +636,7 @@ const DeliveryOutputShape = {
   delivery_state: z
     .enum([
       "submitted",
+      "typed",
       "queued",
       "queued_followup",
       "rescued",
@@ -981,6 +983,7 @@ export type SubmitEvidence =
   | "status_only";
 
 type PublicDeliveryState =
+  | "typed"
   | "submitted"
   | "queued"
   | "queued_followup"
@@ -1062,6 +1065,7 @@ export function buildPublicDeliveryReceipt(input: {
   WARNING?: string;
 }): PublicDeliveryReceipt {
   const evidencedState =
+    input.delivery_state === "typed" ||
     input.delivery_state === "queued" ||
     input.delivery_state === "queued_followup" ||
     input.delivery_state === "rescued" ||
@@ -1069,17 +1073,19 @@ export function buildPublicDeliveryReceipt(input: {
     input.delivery_state === "pending_verify" ||
     input.delivery_state === "failed_confirmed"
       ? input.delivery_state
-      : input.delivery_state === "submitted" && input.submit_verified === true
+      : input.delivery_state === "submitted"
         ? "submitted"
         : undefined;
   const terminal =
+    evidencedState === "typed" ||
     evidencedState === "submitted" ||
     evidencedState === "rescued" ||
     evidencedState === "failed" ||
     evidencedState === "failed_confirmed";
   const warning = input.WARNING ?? defaultNonDeliveryWarning(evidencedState);
   return {
-    delivered: evidencedState === "submitted",
+    delivered:
+      evidencedState === "submitted" && input.submit_verified === true,
     terminal,
     typed: input.typed,
     submit_attempted: input.submit_attempted,
@@ -3301,11 +3307,16 @@ function resolveTargetIdentity(
   stateMgr: StateManager,
   surfaceRef: string,
   surfaceTitle?: string | null,
+  stableSurfaceIdentity?: string | null,
 ): TargetIdentity {
   const identity: TargetIdentity = { surface: surfaceRef };
   const title = surfaceTitle?.trim();
   if (title) identity.title = title;
-  const record = resolveLatestSurfaceAgentRecord(stateMgr, surfaceRef);
+  const record = resolveLatestSurfaceAgentRecord(
+    stateMgr,
+    surfaceRef,
+    stableSurfaceIdentity,
+  );
   if (record?.model) identity.model = record.model;
   if (record?.cli) identity.agent_type = record.cli;
   return identity;
@@ -3314,10 +3325,16 @@ function resolveTargetIdentity(
 function resolveLatestSurfaceAgentRecord(
   stateMgr: StateManager,
   surfaceRef: string,
+  stableSurfaceIdentity?: string | null,
 ): AgentRecord | undefined {
+  const stableUuid = stableSurfaceIdentity?.trim().toLowerCase() ?? null;
   return stateMgr
     .listStates()
-    .filter((record) => record.surface_id === surfaceRef)
+    .filter((record) =>
+      stableUuid
+        ? record.surface_uuid?.trim().toLowerCase() === stableUuid
+        : record.surface_id === surfaceRef,
+    )
     .sort((a, b) => {
       if (b.version !== a.version) return b.version - a.version;
       return (
@@ -6172,7 +6189,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? {
               delivery_id: opts.delivery_id,
               delivery_state:
-                deliveryOutcome === "queued"
+                !opts.press_enter
+                  ? ("typed" as const)
+                  : deliveryOutcome === "queued"
                   ? ("queued" as const)
                   : deliveryOutcome === "queued_followup"
                     ? ("queued_followup" as const)
@@ -6190,7 +6209,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const receipt = buildPublicDeliveryReceipt({
       delivery_state:
-        deliveryOutcome === "queued"
+        !opts.press_enter
+          ? "typed"
+          : deliveryOutcome === "queued"
           ? "queued"
           : deliveryOutcome === "queued_followup"
             ? "queued_followup"
@@ -6198,7 +6219,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? "pending_verify"
               : deliveryOutcome === "rescued"
                 ? "rescued"
-              : submit_verified === true
+              : submit_verified === true || opts.verify_submit !== true
                 ? "submitted"
                 : undefined,
       delivery_id: opts.delivery_id,
@@ -7765,7 +7786,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  const startBackgroundDelivery = (record: DeliveryRecord) => {
+  type BackgroundDeliveryLifecycle = {
+    engine: AgentEngine;
+    agent_id: string;
+    text: string;
+    source_event: DeliveryEventType;
+  };
+
+  const startBackgroundDelivery = (
+    record: DeliveryRecord,
+    lifecycle?: BackgroundDeliveryLifecycle,
+  ) => {
     // Preserve the backend owner that accepted the asynchronous write. Reading
     // the observer after completion could attribute old-backend evidence to a
     // new backend that reused the same mutable ref.
@@ -7790,7 +7821,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: record.press_enter,
           rename_to_task: record.rename_to_task,
           stableSurfaceIdentity: record.stableSurfaceIdentity,
-          source_event: "send_input",
+          source_event: lifecycle?.source_event ?? "send_input",
+          delivery_id: lifecycle ? record.delivery_id : undefined,
           verify_submit: record.verify_submit,
           beforeMutation: record.beforeMutation,
           onChunkDelivered: (sentChunks) => {
@@ -7800,6 +7832,52 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         record.submit_verified = delivery.submit_verified;
         record.retry_count = delivery.retry_count;
         finishDelivery(record, "delivered");
+        if (lifecycle) {
+          if (
+            delivery.delivery === "queued" ||
+            delivery.delivery === "queued_followup"
+          ) {
+            lifecycle.engine.acceptComposerQueue({
+              delivery_id: record.delivery_id,
+              agent_id: lifecycle.agent_id,
+              text: lifecycle.text,
+              press_enter: record.press_enter,
+              source_event: lifecycle.source_event,
+              retry_count: delivery.retry_count,
+              delivery_state: delivery.delivery,
+            });
+          } else if (delivery.delivery === "pending_verify") {
+            lifecycle.engine.acceptPendingVerify({
+              delivery_id: record.delivery_id,
+              agent_id: lifecycle.agent_id,
+              text: lifecycle.text,
+              press_enter: record.press_enter,
+              source_event: lifecycle.source_event,
+              retry_count: delivery.retry_count,
+            });
+          } else {
+            lifecycle.engine.resolveDelivery({
+              delivery_id: record.delivery_id,
+              agent_id: lifecycle.agent_id,
+              text: lifecycle.text,
+              press_enter: record.press_enter,
+              source_event: lifecycle.source_event,
+              delivery_state:
+                delivery.delivery === "rescued"
+                  ? "rescued"
+                  : delivery.delivery === "typed"
+                    ? "typed"
+                    : "submitted",
+              terminal: true,
+              retry_count: delivery.retry_count,
+              submit_verified: delivery.submit_verified,
+              error:
+                delivery.delivery === "rescued"
+                  ? "Prompt appeared only after an external interrupt"
+                  : null,
+            });
+          }
+        }
       } catch (error) {
         if (error instanceof SubmitVerificationError) {
           record.submit_verified = false;
@@ -7813,6 +7891,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const failedChunk =
           error instanceof DeliveryError ? error.failed_chunk : undefined;
         finishDelivery(record, "failed", message, failedChunk);
+        if (lifecycle) {
+          lifecycle.engine.resolveDelivery({
+            delivery_id: record.delivery_id,
+            agent_id: lifecycle.agent_id,
+            text: lifecycle.text,
+            press_enter: record.press_enter,
+            source_event: lifecycle.source_event,
+            delivery_state: "failed",
+            terminal: true,
+            retry_count: record.retry_count,
+            submit_verified: record.submit_verified,
+            error: message,
+          });
+        }
       }
     };
 
@@ -9711,6 +9803,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const targetRecord = resolveLatestSurfaceAgentRecord(
           stateMgr,
           route.surface,
+          route.stableSurfaceIdentity,
         );
         // A public delivery_id is a promise that wait_for can resolve. Raw,
         // unmanaged surfaces have no lifecycle identity for the verifier, so
@@ -9736,7 +9829,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           await route.assertCurrent();
           const record: DeliveryRecord = {
-            delivery_id: randomUUID(),
+            delivery_id: deliveryId ?? randomUUID(),
             surface: route.surface,
             workspace: route.workspace,
             status: "delivering",
@@ -9754,18 +9847,42 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: route.stableSurfaceIdentity,
             beforeMutation: route.assertCurrent,
           };
-          startBackgroundDelivery(record);
+          const receiptEngine = context.lifecycleSweepEngine;
+          const backgroundLifecycle =
+            targetRecord && receiptEngine
+              ? {
+                  engine: receiptEngine,
+                  agent_id: targetRecord.agent_id,
+                  text: sanitizedText,
+                  source_event: sourceEvent,
+                }
+              : undefined;
+          if (backgroundLifecycle) {
+            backgroundLifecycle.engine.registerExternalDelivery({
+              delivery_id: record.delivery_id,
+              agent_id: backgroundLifecycle.agent_id,
+              text: sanitizedText,
+              press_enter: args.press_enter,
+              source_event: sourceEvent,
+            });
+          }
+          startBackgroundDelivery(record, backgroundLifecycle);
+          const publicBackgroundDeliveryId =
+            backgroundLifecycle || sourceEvent !== "send_to"
+              ? record.delivery_id
+              : undefined;
 
           const identity = resolveTargetIdentity(
             stateMgr,
             route.surface,
             route.title,
+            route.stableSurfaceIdentity,
           );
           const data = {
             ...identity,
             ...buildPublicDeliveryReceipt({
               delivery_state: "queued",
-              delivery_id: record.delivery_id,
+              delivery_id: publicBackgroundDeliveryId,
               typed: false,
               submit_attempted: args.press_enter,
               submit_verified: record.submit_verified,
@@ -9779,7 +9896,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...identity,
               delivered: false,
               pending: true,
-            }) + ` (background ${record.delivery_id})`,
+            }) +
+              (publicBackgroundDeliveryId
+                ? ` (background ${record.delivery_id})`
+                : " (background started; no wait_for receipt for unmanaged surface)"),
             data,
           );
         }
@@ -9851,7 +9971,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: args.press_enter,
               source_event: "send_to",
               delivery_state:
-                delivery.delivery === "rescued" ? "rescued" : "submitted",
+                delivery.delivery === "rescued"
+                  ? "rescued"
+                  : delivery.delivery === "typed"
+                    ? "typed"
+                    : "submitted",
               terminal: true,
               retry_count: delivery.retry_count,
               submit_verified: delivery.submit_verified,
@@ -9867,6 +9991,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stateMgr,
           route.surface,
           route.title,
+          route.stableSurfaceIdentity,
         );
         const data = {
           ...identity,
@@ -10044,6 +10169,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stateMgr,
           route.surface,
           route.title,
+          route.stableSurfaceIdentity,
         );
         const data = {
           ...identity,

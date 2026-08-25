@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
@@ -16,6 +15,7 @@ const DEFAULT_CLIENTS = 8;
 const DEFAULT_ROUNDS = 12;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
+const READ_SCREEN_P50_BUDGET_MS = 250;
 let JsonRpcLineBuffer;
 
 function parsePositiveInt(raw, fallback) {
@@ -198,7 +198,11 @@ class McpProcess {
     return new Promise((resolvePromise, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`${this.label} timed out waiting for ${method}`));
+        reject(
+          new Error(
+            `${this.label} timed out waiting for ${method}; stderr=${this.stderr.trim()}`,
+          ),
+        );
       }, timeoutMs);
       this.pending.set(id, { resolve: resolvePromise, reject, timeout });
       this.send(message);
@@ -237,10 +241,14 @@ class McpProcess {
 }
 
 function stopChild(child) {
-  if (!child || child.exitCode !== null) return Promise.resolve();
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve();
+  }
   return new Promise((resolvePromise) => {
     const forceTimer = setTimeout(() => {
-      if (child.exitCode === null) child.kill("SIGKILL");
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
     }, 1_000);
     child.once("exit", () => {
       clearTimeout(forceTimer);
@@ -271,6 +279,9 @@ function readState() {
 function writeState(state) {
   if (statePath) fs.writeFileSync(statePath, JSON.stringify(state));
 }
+function patchState(patch) {
+  writeState({ ...readState(), ...patch });
+}
 const state = readState();
 const surfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   ref: "surface:bench-" + index,
@@ -293,7 +304,14 @@ function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
 if (command === "list-workspaces") {
+  if (state.hold_next_sweep === true) {
+    patchState({ hold_next_sweep: false, sweep_hold_started: true });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3500);
+    patchState({ sweep_hold_finished: true });
+  }
   write({ workspaces: [{ ref: "workspace:bench", title: "Bench", index: 0, selected: true, pinned: false, current_directory: cwd }] });
+} else if (command === "list-windows") {
+  write({ windows: [{ ref: "window:bench", title: "Bench", index: 0, selected: true, workspace_refs: ["workspace:bench"] }] });
 } else if (command === "list-panes") {
   write({ workspace_ref: "workspace:bench", window_ref: "window:bench", panes: [{ ref: "pane:bench", index: 0, focused: true, surface_count: surfaces.length, surface_refs: surfaces.map((surface) => surface.ref), surface_ids: surfaces.map((surface) => surface.id), selected_surface_ref: surfaces[0].ref, current_directory: cwd }] });
 } else if (command === "list-pane-surfaces") {
@@ -416,7 +434,46 @@ function toolData(result, label) {
   return JSON.parse(text);
 }
 
-async function measureFirstSendAfterSpawn(client) {
+async function readFakeState(statePath) {
+  try {
+    return JSON.parse(await readFile(statePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+async function armSweepHold(statePath) {
+  const current = await readFakeState(statePath);
+  await writeFile(
+    statePath,
+    JSON.stringify({
+      ...current,
+      hold_next_sweep: true,
+      sweep_hold_started: false,
+      sweep_hold_finished: false,
+    }),
+  );
+}
+
+async function waitForSweepHoldStarted(statePath, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await readFakeState(statePath)).sweep_hold_started === true) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  throw new Error("timed out waiting for the benchmark startup sweep hold");
+}
+
+async function waitForSweepHoldFinished(statePath, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await readFakeState(statePath)).sweep_hold_finished === true) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  throw new Error("timed out waiting for the benchmark startup sweep release");
+}
+
+async function measureFirstSendAfterSpawn(client, lockClient, fakeCmuxState) {
   const spawnResult = toolData(
     await client.callTool("spawn_agent", {
       repo: "cmuxlayer",
@@ -444,11 +501,23 @@ async function measureFirstSendAfterSpawn(client) {
     return { elapsed_ms: round(nowMs() - startedAt), receipt };
   };
 
+  // Simulate the startup sweep with the same daemon lifecycle lock: a second
+  // client starts a real managed-metadata refresh whose topology enumeration is
+  // held for 3.5s. Removing the target-scoped send path must push this over 2s.
+  await armSweepHold(fakeCmuxState);
+  const heldRefresh = lockClient.callTool("wait_for", {
+    agent_id: spawnResult.agent_id,
+    target_state: "ready",
+    timeout_ms: 1_000,
+  });
+  await waitForSweepHoldStarted(fakeCmuxState);
   const first = await measureSend({
     agent_id: spawnResult.agent_id,
     text: `Read and follow ${repoRoot}/docs.local/scratch/run5r3/bench-first-send.md`,
     press_enter: true,
   });
+  await waitForSweepHoldFinished(fakeCmuxState);
+  toolData(await heldRefresh, "held lifecycle refresh");
   const second = await measureSend({
     agent_id: spawnResult.agent_id,
     text: `Read and follow ${repoRoot}/docs.local/scratch/run5r3/bench-second-send.md`,
@@ -461,13 +530,32 @@ async function measureFirstSendAfterSpawn(client) {
     text: "surface benchmark",
     press_enter: true,
   });
+  let surfaceWaitFor;
+  if (typeof surface.receipt.delivery_id === "string") {
+    try {
+      surfaceWaitFor = toolData(
+        await client.callTool("wait_for", {
+          delivery_id: surface.receipt.delivery_id,
+          timeout_ms: 2_000,
+        }),
+        "wait_for(surface receipt)",
+      );
+    } catch (error) {
+      surfaceWaitFor = {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  } else {
+    surfaceWaitFor = { ok: false, error: "surface receipt omitted delivery_id" };
+  }
 
   return {
     agent_id: spawnResult.agent_id,
     surface_id: spawnResult.surface_id,
     first,
     second,
-    surface,
+    surface: { ...surface, wait_for: surfaceWaitFor },
   };
 }
 
@@ -477,12 +565,17 @@ async function main() {
   }
   ({ JsonRpcLineBuffer } = await import("../dist/json-rpc-line-buffer.js"));
 
-  const tempRoot = await mkdtemp(join(tmpdir(), "cmuxlayer-daemon-bench-"));
+  const scratchRoot = process.env.CMUXLAYER_BENCH_SCRATCH
+    ? resolve(process.env.CMUXLAYER_BENCH_SCRATCH)
+    : join(repoRoot, "docs.local", "scratch", "run5r3");
+  await mkdir(scratchRoot, { recursive: true });
+  const tempRoot = await mkdtemp(join(scratchRoot, "b-"));
   const binDir = join(tempRoot, "bin");
   await mkdir(binDir, { recursive: true });
+  await writeFile(join(binDir, "package.json"), '{"type":"commonjs"}\n');
   await writeFakeCmux(binDir);
-  const daemonSocket = join(tempRoot, "cmuxlayer-stated.sock");
-  const missingCmuxSocket = join(tempRoot, "missing-cmux.sock");
+  const daemonSocket = join(tempRoot, "d.sock");
+  const missingCmuxSocket = join(tempRoot, "m.sock");
   const fakeCmuxSocketServer = net.createServer((socket) => socket.destroy());
   await new Promise((resolvePromise, reject) => {
     fakeCmuxSocketServer.once("error", reject);
@@ -541,13 +634,21 @@ async function main() {
     });
     await waitForSocket(daemonSocket);
 
-    daemonClients = await startClients("daemon", clientCount, {
-      ...baseEnv,
-      CMUXLAYER_DAEMON_SOCKET: daemonSocket,
-    });
+    try {
+      daemonClients = await startClients("daemon", clientCount, {
+        ...baseEnv,
+        CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+      });
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; daemon stderr=${daemonStderr.trim()}`,
+      );
+    }
     const daemonLatency = await measureLatency(daemonClients);
     const firstSendAfterSpawn = await measureFirstSendAfterSpawn(
       daemonClients[0],
+      daemonClients[1],
+      fakeCmuxState,
     );
     const daemonRssMb = await totalRssMb(
       [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
@@ -574,12 +675,8 @@ async function main() {
         "list_surfaces",
         "p99_ms",
       ),
-      read_screen_p50_no_regression: latencyGate(
-        baselineLatency,
-        daemonLatency,
-        "read_screen",
-        "p50_ms",
-      ),
+      read_screen_p50_within_250ms:
+        daemonLatency.read_screen.p50_ms <= READ_SCREEN_P50_BUDGET_MS,
       read_screen_p99_no_regression: latencyGate(
         baselineLatency,
         daemonLatency,
@@ -589,8 +686,10 @@ async function main() {
       first_send_after_spawn_within_2s:
         firstSendAfterSpawn.first.elapsed_ms <= 2_000,
       surface_receipt_is_waitable:
-        firstSendAfterSpawn.surface.receipt.terminal === true ||
-        typeof firstSendAfterSpawn.surface.receipt.delivery_id === "string",
+        typeof firstSendAfterSpawn.surface.receipt.delivery_id === "string" &&
+        firstSendAfterSpawn.surface.wait_for.delivery_id ===
+          firstSendAfterSpawn.surface.receipt.delivery_id &&
+        firstSendAfterSpawn.surface.wait_for.terminal === true,
     };
     const green = Object.values(gates).every(Boolean);
     const result = {
