@@ -287,6 +287,25 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     expect(data.submit_verification_reason).toBeNull();
   });
 
+  it("does not verify Return when the composer was already empty", async () => {
+    const exec = makeExec({
+      screen: () => WORKING_AND_CLEARED_CLAUDE_SCREEN,
+    });
+
+    const result = await sendKey(makeServer(exec), "return");
+
+    const data = payload(result);
+    expect(result.isError).toBeUndefined();
+    expect(data.ok).toBe(true);
+    expect(data.key_dispatched).toBe(true);
+    expect(data.submit_verified).toBeNull();
+    expect(data.submit_verification_reason).toBe("submit_evidence_absent");
+    expect(data.WARNING).toMatch(/submit not verified/i);
+    expect(exec.calls.filter((args) => args.includes("read-screen"))).toHaveLength(
+      1,
+    );
+  });
+
   it("verifies Return when a Codex permission prompt is dismissed", async () => {
     let approved = false;
     const exec = makeExec({

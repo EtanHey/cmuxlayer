@@ -5632,8 +5632,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
    * AIDEV-NOTE (#484/#500): key mode writes no payload, so post-key composer
    * contents cannot prove whether this key landed. Positive evidence comes
    * from an observed state transition (especially permission_prompt being
-   * dismissed) or a composer that visibly clears; otherwise the result stays
-   * unknown rather than inventing `composer_still_populated`.
+   * dismissed) or a composer observed populated before the key and empty
+   * afterward; otherwise the result stays unknown rather than inventing
+   * `composer_still_populated`.
    */
   const verifySubmitKeyOutcome = async (opts: {
     surface: string;
@@ -5643,6 +5644,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verified: boolean | null;
     submit_verification_reason: SubmitKeyVerificationReason | null;
   }> => {
+    const baselineComposerInput =
+      opts.baseline === null
+        ? null
+        : extractComposerInputRegion(opts.baseline.text);
+    if (
+      opts.baseline?.parsed.control_state !== "permission_prompt" &&
+      baselineComposerInput !== null &&
+      baselineComposerInput.trim() === ""
+    ) {
+      return {
+        submit_verified: null,
+        submit_verification_reason: "submit_evidence_absent",
+      };
+    }
+
     const startedAt = Date.now();
     let sawReadableScreen = false;
 
@@ -5660,9 +5676,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return { submit_verified: true, submit_verification_reason: null };
       }
       const composerInput = extractComposerInputRegion(snapshot.text);
-      if (composerInput !== null && composerInput.trim() === "") {
-        // The composer is readable and empty: it let go of its contents. This
-        // is positive proof for a composer submit. A "working" status alone
+      if (
+        baselineComposerInput !== null &&
+        baselineComposerInput.trim() !== "" &&
+        composerInput !== null &&
+        composerInput.trim() === ""
+      ) {
+        // The composer was populated before Return and is now readable and
+        // empty: it visibly let go of its contents. A "working" status alone
         // deliberately does not count: the reported target was already
         // working on its previous turn, so status cannot distinguish "my
         // submit started a turn" from "a turn was already running" -- and a
