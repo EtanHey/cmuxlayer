@@ -624,6 +624,8 @@ async function validateCodexModel(
 }
 
 export interface AgentEngineOptions {
+  /** Debug-only sweep phase timings. Defaults to stderr so MCP stdout stays framed. */
+  sweepDebugLog?: (message: string) => void;
   spawnPreflight?: (
     params: SpawnAgentParams,
   ) => Promise<SpawnPreflightResult | void>;
@@ -900,6 +902,26 @@ interface SweepAgentContext {
 
 interface SweepMutationSkipAccounting {
   counted: boolean;
+}
+
+type SweepDeferredOperation = () => unknown | Promise<unknown>;
+
+interface SweepPlan {
+  surfaceTopology: SurfaceTopologySnapshot | null;
+  initialVersions: Map<string, number>;
+  persistence: SweepDeferredOperation[];
+  publications: SweepDeferredOperation[];
+  notifications: SweepDeferredOperation[];
+  planner: AgentEngine;
+  registryMaps: {
+    agents: Map<string, AgentRecord>;
+    aliases: Map<string, string>;
+    surfacelessObservations: Map<string, unknown>;
+    unclaimedAbsenceObservations: Map<string, unknown>;
+  };
+  originalSidebarSnapshot: Map<string, SidebarStatusSnapshot>;
+  timings: Record<string, number>;
+  readOnly: boolean;
 }
 
 class PlacementSurfaceBindingError extends Error {}
@@ -1575,6 +1597,10 @@ export class AgentEngine {
   private lastSweepSignature: string | null = null;
   private unchangedSweepCount = 0;
   private currentSweepScreenSignatures = new Map<string, string>();
+  /** Tick-wide screen memo: every agent is read at most once while planning. */
+  private currentSweepAgentContexts = new Map<string, SweepAgentContext>();
+  /** Non-null only on the isolated planner clone used outside the lifecycle lock. */
+  private activeSweepPlan: SweepPlan | null = null;
   /** agentId → last material (de-chromed) screen output change. */
   private fleetScreenProgress = new Map<string, FleetScreenProgressSnapshot>();
   /** agentId → last-pushed status target/value */
@@ -1652,6 +1678,7 @@ export class AgentEngine {
   private haltWedgedDwellMs: number;
   private haltWedgedSweeps: number;
   private autoResolvePrompts: boolean;
+  private sweepDebugLog: (message: string) => void;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -1659,6 +1686,9 @@ export class AgentEngine {
     opts?: AgentEngineOptions,
   ) {
     this.stateMgr = stateMgr;
+    this.sweepDebugLog =
+      opts?.sweepDebugLog ??
+      ((message) => process.stderr.write(`${message}\n`));
     this.deliveryReceiptsPath = join(
       stateMgr.getBaseDir(),
       "delivery-receipts.json",
@@ -3522,6 +3552,14 @@ export class AgentEngine {
     agent: AgentRecord,
     ctx: SweepAgentContext,
   ): Promise<CmuxReadScreenResult> {
+    if (this.activeSweepPlan) {
+      const sharedCtx =
+        this.currentSweepAgentContexts.get(agent.agent_id) ?? ctx;
+      if (!this.currentSweepAgentContexts.has(agent.agent_id)) {
+        this.currentSweepAgentContexts.set(agent.agent_id, sharedCtx);
+      }
+      ctx = sharedCtx;
+    }
     ctx.route ??= this.resolveAgentIoRoute(
       agent.agent_id,
       this.client.supportsStableSurfaceReads ? ctx.surfaceTopology : undefined,
@@ -4653,22 +4691,28 @@ export class AgentEngine {
     );
     const unblockAction = this.haltUnblockAction(episode, haltType);
     try {
-      dispatchOnce(
-        ancestor.agent_id,
-        {
-          id: `agent-halt:${episode.agent_id}:${episode.halt_episode_started_at}`,
-          from: "cmuxlayer:lifecycle",
-          to: ancestor.agent_id,
-          tag: `agent_halt_${haltType}`,
-          task:
-            `Agent ${episode.agent_id} in surface ${episode.surface_id} has remained ` +
-            `${haltType} for ${durationSeconds}s. Last observable action: ` +
-            `${episode.halt_last_observable_action ?? "unknown"}. ` +
-            `Exact unblock action: ${unblockAction}. ` +
-            `Session resume fallback: ${resumeCommand}`,
-        },
-        this.inboxOpts,
-      );
+      const haltDispatch = () =>
+        dispatchOnce(
+          ancestor.agent_id,
+          {
+            id: `agent-halt:${episode.agent_id}:${episode.halt_episode_started_at}`,
+            from: "cmuxlayer:lifecycle",
+            to: ancestor.agent_id,
+            tag: `agent_halt_${haltType}`,
+            task:
+              `Agent ${episode.agent_id} in surface ${episode.surface_id} has remained ` +
+              `${haltType} for ${durationSeconds}s. Last observable action: ` +
+              `${episode.halt_last_observable_action ?? "unknown"}. ` +
+              `Exact unblock action: ${unblockAction}. ` +
+              `Session resume fallback: ${resumeCommand}`,
+          },
+          this.inboxOpts,
+        );
+      if (this.activeSweepPlan) {
+        this.activeSweepPlan.notifications.push(haltDispatch);
+      } else {
+        haltDispatch();
+      }
       const notified = this.stateMgr.updateRecord(episode.agent_id, {
         halt_notification_sent_at: nowIso,
         halt_notified_ancestor_id: ancestor.agent_id,
@@ -4751,20 +4795,27 @@ export class AgentEngine {
 
     let inboxDispatched = false;
     if (agent.parent_agent_id) {
+      const parentAgentId = agent.parent_agent_id;
       try {
-        dispatchOnce(
-          agent.parent_agent_id,
-          {
-            id: `agent-cli-exit:${agent.agent_id}:${exited.updated_at}`,
-            from: "cmuxlayer:lifecycle",
-            to: agent.parent_agent_id,
-            tag: "agent_cli_exit",
-            task:
-              `Agent ${agent.agent_id} CLI exited to a bare shell without done evidence. ` +
-              `Registry state is error; surface ${agent.surface_id}.`,
-          },
-          this.inboxOpts,
-        );
+        const exitDispatch = () =>
+          dispatchOnce(
+            parentAgentId,
+            {
+              id: `agent-cli-exit:${agent.agent_id}:${exited.updated_at}`,
+              from: "cmuxlayer:lifecycle",
+              to: parentAgentId,
+              tag: "agent_cli_exit",
+              task:
+                `Agent ${agent.agent_id} CLI exited to a bare shell without done evidence. ` +
+                `Registry state is error; surface ${agent.surface_id}.`,
+            },
+            this.inboxOpts,
+          );
+        if (this.activeSweepPlan) {
+          this.activeSweepPlan.notifications.push(exitDispatch);
+        } else {
+          exitDispatch();
+        }
         inboxDispatched = true;
       } catch {
         // The durable event below records the failed dispatch for lead recovery.
@@ -6434,9 +6485,24 @@ export class AgentEngine {
   }
 
   async runSweep(): Promise<void> {
-    await this.runLifecycleMutation(() => this.runSweepOnce(), {
+    this.currentSweepScreenSignatures = new Map();
+    this.currentSweepAgentContexts = new Map();
+    const buildStartedAt = Date.now();
+    await this.sweepMonitorRegistryBestEffort();
+    const plan = await this.buildSweepPlan();
+    plan.timings.build_total_ms = Date.now() - buildStartedAt;
+    const applyStartedAt = Date.now();
+    await this.runLifecycleMutation(() => this.applySweepPlan(plan), {
       label: "sweep",
     });
+    plan.timings.apply_ms = Date.now() - applyStartedAt;
+    await this.sweepWatchesBestEffort();
+    await this.drainOutboxBestEffort();
+    this.sweepDebugLog(
+      `[cmuxlayer] sweep timing ${Object.entries(plan.timings)
+        .map(([name, value]) => `${name}=${value}`)
+        .join(" ")}`,
+    );
     await this.drainDeliveryQueue();
     await this.verifyPendingDeliveries();
   }
@@ -7245,24 +7311,388 @@ export class AgentEngine {
     timer.unref?.();
   }
 
-  private async runSweepOnce(): Promise<void> {
+  private createSweepPlan(
+    surfaceTopology: SurfaceTopologySnapshot | null,
+  ): SweepPlan {
+    const realStateMgr = this.stateMgr;
+    const records = new Map(
+      realStateMgr.listStates().map((record) => [record.agent_id, record]),
+    );
+    const persistence: SweepDeferredOperation[] = [];
+    const publications: SweepDeferredOperation[] = [];
+    const notifications: SweepDeferredOperation[] = [];
+    const originalSidebarSnapshot = new Map(this.sidebarSnapshot);
+    const eventLog = realStateMgr.getEventLog() as unknown as Record<
+      string,
+      (...args: unknown[]) => unknown
+    >;
+    const eventLogProxy = new Proxy(eventLog, {
+      get: (target, property) => {
+        const value = target[property as string];
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          persistence.push(() => value.apply(target, args));
+        };
+      },
+    });
+    const surfaceIndex =
+      realStateMgr.getSurfaceSessionIndex() as unknown as Record<
+        string,
+        (...args: unknown[]) => unknown
+      >;
+    const surfaceIndexProxy = new Proxy(surfaceIndex, {
+      get: (target, property) => {
+        const value = target[property as string];
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          persistence.push(() => value.apply(target, args));
+        };
+      },
+    });
+    const requireRecord = (agentId: string): AgentRecord => {
+      const current = records.get(agentId);
+      if (!current) throw new Error(`Agent not found: ${agentId}`);
+      return current;
+    };
+    const stateProxy = new Proxy(realStateMgr, {
+      get: (target, property) => {
+        if (property === "readState") {
+          return (agentId: string) => records.get(agentId) ?? null;
+        }
+        if (property === "listStates") {
+          return () => [...records.values()];
+        }
+        if (property === "hasStateFile") {
+          return (agentId: string) => records.has(agentId);
+        }
+        if (property === "getEventLog") return () => eventLogProxy;
+        if (property === "getSurfaceSessionIndex") {
+          return () => surfaceIndexProxy;
+        }
+        if (property === "updateRecord") {
+          return (agentId: string, fields: Partial<AgentRecord>) => {
+            const current = requireRecord(agentId);
+            const updated: AgentRecord = {
+              ...current,
+              ...fields,
+              version: current.version + 1,
+              updated_at: new Date().toISOString(),
+            };
+            records.set(agentId, updated);
+            persistence.push(() => {
+              realStateMgr.updateRecord(agentId, fields);
+            });
+            return updated;
+          };
+        }
+        if (property === "transition") {
+          return (
+            agentId: string,
+            toState: AgentState,
+            extra?: Partial<AgentRecord>,
+          ) => {
+            const current = requireRecord(agentId);
+            if (!isValidTransition(current.state, toState)) {
+              throw new Error(
+                `Invalid state transition: ${current.state} → ${toState}`,
+              );
+            }
+            const updated: AgentRecord = {
+              ...current,
+              state: toState,
+              version: current.version + 1,
+              updated_at: new Date().toISOString(),
+              ...(extra?.error !== undefined ? { error: extra.error } : {}),
+              ...(extra?.pid !== undefined ? { pid: extra.pid } : {}),
+              ...(extra?.cli_session_id !== undefined
+                ? { cli_session_id: extra.cli_session_id }
+                : {}),
+              ...(extra?.cli_session_path !== undefined
+                ? { cli_session_path: extra.cli_session_path }
+                : {}),
+            };
+            records.set(agentId, updated);
+            persistence.push(() => {
+              realStateMgr.transition(agentId, toState, extra);
+            });
+            return updated;
+          };
+        }
+        if (property === "setTranscriptSessionCaptureDeferred") {
+          return (agentId: string, deferred: boolean, attempts = 0) => {
+            const current = requireRecord(agentId);
+            const normalizedAttempts = Number.isFinite(attempts)
+              ? Math.max(0, Math.trunc(attempts))
+              : 0;
+            if (
+              current.transcript_session_capture_deferred === deferred &&
+              (current.transcript_session_capture_attempts ?? 0) ===
+                normalizedAttempts
+            ) {
+              return current;
+            }
+            const updated = {
+              ...current,
+              transcript_session_capture_deferred: deferred,
+              transcript_session_capture_attempts: normalizedAttempts,
+            };
+            records.set(agentId, updated);
+            persistence.push(() => {
+              realStateMgr.setTranscriptSessionCaptureDeferred(
+                agentId,
+                deferred,
+                normalizedAttempts,
+              );
+            });
+            return updated;
+          };
+        }
+        if (property === "removeState") {
+          return (agentId: string) => {
+            records.delete(agentId);
+            persistence.push(() => realStateMgr.removeState(agentId));
+          };
+        }
+        if (property === "renameState") {
+          return (agentId: string, newAgentId: string) => {
+            const current = requireRecord(agentId);
+            if (records.has(newAgentId)) {
+              throw new Error(`Agent already exists: ${newAgentId}`);
+            }
+            const updated: AgentRecord = {
+              ...current,
+              agent_id: newAgentId,
+              version: current.version + 1,
+              updated_at: new Date().toISOString(),
+            };
+            records.delete(agentId);
+            records.set(newAgentId, updated);
+            for (const [childId, child] of records) {
+              if (child.parent_agent_id === agentId) {
+                records.set(childId, {
+                  ...child,
+                  parent_agent_id: newAgentId,
+                  version: child.version + 1,
+                  updated_at: new Date().toISOString(),
+                });
+              }
+            }
+            persistence.push(() => {
+              realStateMgr.renameState(agentId, newAgentId);
+            });
+            return updated;
+          };
+        }
+        if (property === "writeState") {
+          return (record: AgentRecord) => {
+            records.set(record.agent_id, record);
+            persistence.push(() => realStateMgr.writeState(record));
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as StateManager;
+
+    const registryInternals = this.registry as unknown as {
+      agents: Map<string, AgentRecord>;
+      aliases: Map<string, string>;
+      surfacelessObservations: Map<string, unknown>;
+      unclaimedAbsenceObservations: Map<string, unknown>;
+    };
+    const registryMaps = {
+      agents: new Map(registryInternals.agents),
+      aliases: new Map(registryInternals.aliases),
+      surfacelessObservations: new Map(
+        registryInternals.surfacelessObservations,
+      ),
+      unclaimedAbsenceObservations: new Map(
+        registryInternals.unclaimedAbsenceObservations,
+      ),
+    };
+    const registryProxy = new Proxy(this.registry, {
+      get: (target, property, receiver) => {
+        if (property === "stateMgr") return stateProxy;
+        if (property in registryMaps) {
+          return registryMaps[property as keyof typeof registryMaps];
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const planner = Object.assign(
+      Object.create(Object.getPrototypeOf(this)),
+      this,
+    ) as AgentEngine;
+    const plan: SweepPlan = {
+      surfaceTopology,
+      initialVersions: new Map(
+        [...records].map(([agentId, record]) => [agentId, record.version]),
+      ),
+      persistence,
+      publications,
+      notifications,
+      planner,
+      registryMaps,
+      originalSidebarSnapshot,
+      timings: {},
+      readOnly: false,
+    };
+
+    const realClient = this.client as unknown as Record<string, unknown>;
+    const publicationMethods = new Set([
+      "setStatus",
+      "setStatuses",
+      "clearStatus",
+      "setProgress",
+      "clearProgress",
+      "log",
+    ]);
+    const notificationMethods = new Set([
+      "notify",
+      "notifyLifecycleEvent",
+      "send",
+    ]);
+    const topologyMutationMethods = new Set([
+      "newSplit",
+      "newSurface",
+      "moveSurface",
+      "closeSurface",
+      "renameTab",
+    ]);
+    const clientProxy = new Proxy(realClient, {
+      get: (target, property) => {
+        const name = String(property);
+        const value = target[name];
+        if (typeof value !== "function") return value;
+        if (publicationMethods.has(name)) {
+          return (...args: unknown[]) => {
+            publications.push(async () => {
+              const result = await value.apply(target, args);
+              if (name === "setStatuses" && result === false) {
+                const updates = (args[0] ?? []) as CmuxStatusUpdate[];
+                for (const update of updates) {
+                  const previous = originalSidebarSnapshot.get(update.key);
+                  if (previous) this.sidebarSnapshot.set(update.key, previous);
+                  else this.sidebarSnapshot.delete(update.key);
+                }
+              }
+            });
+            return Promise.resolve(name === "setStatuses" ? true : undefined);
+          };
+        }
+        if (notificationMethods.has(name)) {
+          return (...args: unknown[]) => {
+            notifications.push(async () => {
+              try {
+                await value.apply(target, args);
+              } catch {
+                if (name === "notifyLifecycleEvent") {
+                  const [event, agent, signature] = args as [
+                    AgentLifecycleEvent,
+                    AgentRecord,
+                    string | undefined,
+                  ];
+                  const suffix = signature === undefined ? "" : `:${signature}`;
+                  this.notifiedEvents.delete(
+                    `${agent.agent_id}:${event}${suffix}`,
+                  );
+                  const previous = originalSidebarSnapshot.get(agent.agent_id);
+                  if (previous) {
+                    this.sidebarSnapshot.set(agent.agent_id, previous);
+                  } else {
+                    this.sidebarSnapshot.delete(agent.agent_id);
+                  }
+                } else if (name === "notify") {
+                  const notification = args[0] as { surface?: string };
+                  const agent = this.registry
+                    .list()
+                    .find(
+                      (candidate) =>
+                        candidate.surface_id === notification.surface,
+                    );
+                  if (agent) {
+                    this.deliveredLeadMonitorDeathAlerts.delete(agent.agent_id);
+                  }
+                }
+              }
+            });
+            return Promise.resolve(undefined);
+          };
+        }
+        if (topologyMutationMethods.has(name)) {
+          return (...args: unknown[]) => {
+            persistence.push(() => value.apply(target, args));
+            if (name === "newSplit") {
+              const opts = (args[1] ?? {}) as {
+                workspace?: string;
+                pane?: string;
+              };
+              return Promise.resolve({
+                workspace: opts.workspace ?? "",
+                surface: "sweep-plan-placeholder",
+                pane: opts.pane ?? "",
+                title: "",
+                type: "terminal",
+              });
+            }
+            return Promise.resolve(undefined);
+          };
+        }
+        return value.bind(target);
+      },
+    }) as unknown as AgentEngineClient;
+    const realPublisher = this.fleetSidebarPublisher;
+    const publisherProxy = new Proxy(realPublisher, {
+      get: (target, property) => {
+        if (property === "publish") {
+          return (...args: unknown[]) => {
+            publications.push(() =>
+              (target.publish as (...values: unknown[]) => void)(...args),
+            );
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    planner.stateMgr = stateProxy;
+    planner.registry = registryProxy;
+    planner.client = clientProxy;
+    planner.fleetSidebarPublisher = publisherProxy;
+    planner.sidebarSnapshot = new Map(this.sidebarSnapshot);
+    planner.fleetScreenProgress = new Map(this.fleetScreenProgress);
+    planner.loggedEvents = new Set(this.loggedEvents);
+    planner.notifiedEvents = new Set(this.notifiedEvents);
+    planner.deliveredLeadMonitorDeathAlerts = new Set(
+      this.deliveredLeadMonitorDeathAlerts,
+    );
+    planner.readyPatternMatches = new Map(this.readyPatternMatches);
+    planner.cliExitShellMatches = new Map(this.cliExitShellMatches);
+    planner.promptResolutionFailures = new Map(this.promptResolutionFailures);
+    planner.promptMotionObservedAtMs = new Map(this.promptMotionObservedAtMs);
+    planner.promptMotionScreenSignatures = new Map(
+      this.promptMotionScreenSignatures,
+    );
+    planner.currentSweepScreenSignatures = new Map();
+    planner.currentSweepAgentContexts = new Map();
+    planner.activeSweepPlan = plan;
+    return plan;
+  }
+
+  private async buildSweepPlanContents(
+    surfaceTopology: SurfaceTopologySnapshot,
+    timings: Record<string, number>,
+  ): Promise<void> {
     const skipAccounting: SweepMutationSkipAccounting = { counted: false };
-    this.currentSweepScreenSignatures = new Map();
-    await this.runCloseForensicsBestEffort();
-    const surfaceTopology = await this.collectObservedSurfaceTopology();
-    const transportHealth = getTransportHealth(this.client);
-    const topologyIsAuthoritative =
-      surfaceTopology?.complete === true && surfaceTopology.surfaces.length > 0;
-    const mutationsAreSafe =
-      topologyIsAuthoritative &&
-      transportHealth?.mode === "socket" &&
-      transportHealth.degraded === false;
-    if (mutationsAreSafe) {
-      this.sweepSkippedMutations = 0;
-    }
-    const observedSurfaces = topologyIsAuthoritative
-      ? surfaceTopology.surfaces
-      : undefined;
+    const time = async (name: string, operation: () => Promise<void>) => {
+      const startedAt = Date.now();
+      await operation();
+      timings[name] = Date.now() - startedAt;
+    };
+    const observedSurfaces = surfaceTopology.surfaces;
+    await time("close_forensics_ms", () => this.runCloseForensicsBestEffort());
     // Reuse the resync path's authoritative-safe ghost eviction on every sweep,
     // but require one confirmation window after the surface is first observed
     // absent. The same gate also applies to terminal worker cleanup below.
@@ -7272,11 +7702,10 @@ export class AgentEngine {
       confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
       now: Date.now(),
     };
-    await this.reapChannelMarkersBestEffort();
-    if (mutationsAreSafe) {
+    await time("registry_ms", async () => {
       const observed = {
         ...surfacelessConfirmation,
-        ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
+        surfaces: observedSurfaces,
       };
       if (
         this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
@@ -7293,17 +7722,13 @@ export class AgentEngine {
       ) {
         await this.purgeStartupTerminalAgents();
       }
-    } else {
-      this.countSkippedSweepTick(skipAccounting);
-    }
+    });
 
     // Deferred transcript identity does not require a live surface binding.
     // Retry after the one-shot startup purge has retained marked rows, but
     // before normal terminal cleanup can act on a closed pane.
-    await this.retryDeferredTranscriptCaptures();
-    await this.sweepWatchesBestEffort();
+    await time("transcript_ms", () => this.retryDeferredTranscriptCaptures());
     if (
-      mutationsAreSafe &&
       this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
     ) {
       await this.registry.purgeTerminal({
@@ -7311,23 +7736,153 @@ export class AgentEngine {
         ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
       });
     }
-    await this.sweepMonitorRegistryBestEffort();
     if (
-      mutationsAreSafe &&
       this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
     ) {
-      await this.reconcileRolePlacements("idle", { surfaceTopology });
+      await time("role_ms", async () => {
+        await this.reconcileRolePlacements("idle", { surfaceTopology });
+      });
     }
-    if (!mutationsAreSafe) {
-      await this.syncSidebar({}, null);
-    } else if (
+    if (
       this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting)
     ) {
-      await this.syncSidebar({}, surfaceTopology, () =>
-        this.canRunSnapshotBackedSweepMutation(surfaceTopology, skipAccounting),
+      await time("sidebar_ms", async () => {
+        await this.syncSidebar({}, surfaceTopology, () =>
+          this.canRunSnapshotBackedSweepMutation(
+            surfaceTopology,
+            skipAccounting,
+          ),
+        );
+      });
+    }
+  }
+
+  private async buildSweepPlan(): Promise<SweepPlan> {
+    const topologyStartedAt = Date.now();
+    const surfaceTopology = await this.collectObservedSurfaceTopology();
+    const plan = this.createSweepPlan(surfaceTopology);
+    plan.timings.topology_ms = Date.now() - topologyStartedAt;
+    const markerStartedAt = Date.now();
+    await this.reapChannelMarkersBestEffort();
+    plan.timings.channel_markers_ms = Date.now() - markerStartedAt;
+    const transportHealth = getTransportHealth(this.client);
+    const canBuildMutatingPlan =
+      surfaceTopology?.complete === true &&
+      surfaceTopology.surfaces.length > 0 &&
+      transportHealth?.mode === "socket" &&
+      transportHealth.degraded === false;
+    if (!canBuildMutatingPlan || !surfaceTopology) {
+      plan.readOnly = true;
+      const sidebarStartedAt = Date.now();
+      await plan.planner.syncSidebar({}, null);
+      plan.timings.sidebar_ms = Date.now() - sidebarStartedAt;
+      return plan;
+    }
+    const buildStartedAt = Date.now();
+    await plan.planner.buildSweepPlanContents(surfaceTopology, plan.timings);
+    plan.timings.build_total_ms = Date.now() - buildStartedAt;
+    return plan;
+  }
+
+  private sweepPlanInputIsCurrent(plan: SweepPlan): boolean {
+    if (!this.isSweepTopologyObserverCurrent(plan.surfaceTopology))
+      return false;
+    const transportHealth = getTransportHealth(this.client);
+    if (
+      transportHealth?.mode !== "socket" ||
+      transportHealth.degraded !== false
+    ) {
+      return false;
+    }
+    const currentRecords = new Map(
+      this.stateMgr
+        .listStates()
+        .map((record) => [record.agent_id, record.version]),
+    );
+    if (currentRecords.size !== plan.initialVersions.size) return false;
+    for (const [agentId, version] of plan.initialVersions) {
+      if (currentRecords.get(agentId) !== version) return false;
+    }
+    return true;
+  }
+
+  private applyPlannedRegistry(plan: SweepPlan): void {
+    const target = this.registry as unknown as {
+      agents: Map<string, AgentRecord>;
+      aliases: Map<string, string>;
+      surfacelessObservations: Map<string, unknown>;
+      unclaimedAbsenceObservations: Map<string, unknown>;
+    };
+    target.agents.clear();
+    for (const [agentId, preview] of plan.registryMaps.agents) {
+      target.agents.set(agentId, this.stateMgr.readState(agentId) ?? preview);
+    }
+    target.aliases = new Map(plan.registryMaps.aliases);
+    target.surfacelessObservations = new Map(
+      plan.registryMaps.surfacelessObservations,
+    );
+    target.unclaimedAbsenceObservations = new Map(
+      plan.registryMaps.unclaimedAbsenceObservations,
+    );
+  }
+
+  private applyPlannedMemory(plan: SweepPlan): void {
+    const planner = plan.planner;
+    this.sidebarSnapshot = planner.sidebarSnapshot;
+    this.fleetScreenProgress = planner.fleetScreenProgress;
+    this.loggedEvents = planner.loggedEvents;
+    this.notifiedEvents = planner.notifiedEvents;
+    this.deliveredLeadMonitorDeathAlerts =
+      planner.deliveredLeadMonitorDeathAlerts;
+    this.readyPatternMatches = planner.readyPatternMatches;
+    this.cliExitShellMatches = planner.cliExitShellMatches;
+    this.promptResolutionFailures = planner.promptResolutionFailures;
+    this.promptMotionObservedAtMs = planner.promptMotionObservedAtMs;
+    this.promptMotionScreenSignatures = planner.promptMotionScreenSignatures;
+    this.currentSweepScreenSignatures = planner.currentSweepScreenSignatures;
+  }
+
+  private async applySweepPlan(plan: SweepPlan): Promise<boolean> {
+    // This is the single post-pass authorization check. Nothing in the plan
+    // has touched authoritative state, cmux status, or notification channels.
+    if (plan.readOnly) {
+      this.applyPlannedMemory(plan);
+      for (const operation of plan.publications) await operation();
+      this.sweepSkippedMutations += 1;
+      return false;
+    }
+    if (!this.sweepPlanInputIsCurrent(plan)) {
+      this.sweepSkippedMutations += 1;
+      console.warn(
+        "[cmuxlayer] sweep plan dropped: topology observer, transport, or registry version changed",
       );
+      return false;
     }
-    await this.drainOutboxBestEffort();
+
+    try {
+      for (const operation of plan.persistence) await operation();
+    } catch (error) {
+      this.sweepSkippedMutations += 1;
+      console.warn(
+        `[cmuxlayer] sweep plan persistence failed before publication: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
+    this.applyPlannedRegistry(plan);
+    this.applyPlannedMemory(plan);
+    for (const operation of plan.publications) {
+      try {
+        await operation();
+      } catch {
+        // Status/log publication is best-effort. A failed row remains dirty in
+        // the in-memory snapshot and is retried by the next planned sweep.
+      }
+    }
+    for (const operation of plan.notifications) await operation();
+    this.sweepSkippedMutations = 0;
+    return true;
   }
 
   private async reapChannelMarkersBestEffort(): Promise<void> {

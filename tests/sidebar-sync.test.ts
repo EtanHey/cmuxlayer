@@ -172,6 +172,7 @@ describe("Sidebar Sync", () => {
   let liveSurfaces: CmuxSurface[];
   let inboxOpts: { baseDir: string };
   let publishedFleetPublications: FleetSidebarPublication[];
+  let sweepDebugLog: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     delete process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
@@ -241,6 +242,7 @@ describe("Sidebar Sync", () => {
       },
     );
     publishedFleetPublications = [];
+    sweepDebugLog = vi.fn();
     inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
@@ -248,6 +250,7 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts,
+      sweepDebugLog,
       fleetSidebarPublisher: {
         publish: (publication) => {
           if (!("snapshot" in publication)) {
@@ -686,6 +689,141 @@ describe("Sidebar Sync", () => {
     );
     expect(publishedAgentIds).not.toContain(second.agent_id);
     expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
+  });
+
+  it("drops every planned sweep side effect when the observer changes during a screen read", async () => {
+    engine.dispose();
+    (
+      mockClient as unknown as Record<string, unknown>
+    ).supportsStableSurfaceReads = true;
+    const observerId = "cmux:/tmp/cmux-primary.sock";
+    let observerEpoch = `${observerId}@socket:1`;
+    const stableUuid = "11111111-2222-4333-8444-555555555553";
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+      observerIdProvider: () => observerId,
+      observerEpochProvider: () => observerEpoch,
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: (publication) => {
+          if ("snapshot" in publication) {
+            publishedFleetPublications.push(publication);
+          }
+        },
+        dispose: () => {},
+      },
+    });
+    const agent = makeRecord({
+      agent_id: "transactional-epoch-agent",
+      surface_id: "surface:one",
+      surface_uuid: stableUuid,
+      surface_observer_id: observerId,
+      workspace_id: "workspace:test",
+      state: "ready",
+      role: "worker",
+      cli_session_id: "session-transactional",
+      task_done_candidate_at: "2026-08-24T00:00:00.000Z",
+    });
+    stateMgr.writeState(agent);
+    registry.set(agent.agent_id, agent);
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:one"),
+        id: stableUuid,
+        workspace_ref: "workspace:test",
+      },
+    ];
+    vi.spyOn(registry, "reconcile").mockResolvedValue(new Set());
+    const sidebarSnapshot = (
+      engine as unknown as {
+        sidebarSnapshot: Map<string, unknown>;
+      }
+    ).sidebarSnapshot;
+    sidebarSnapshot.set(agent.agent_id, {
+      statusValue: "before",
+      surfaceId: agent.surface_id,
+      workspaceId: agent.workspace_id,
+      healthSignature: "before",
+    });
+    const beforeSidebar = [...sidebarSnapshot.entries()];
+    let releaseRead: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      mockClient.readScreen.mockImplementation(async (surface: string) => {
+        resolve();
+        await new Promise<void>((release) => {
+          releaseRead = release;
+        });
+        observerEpoch = `${observerId}@socket:2`;
+        return {
+          surface,
+          text: "Implemented the fix.\nTASK_DONE",
+          lines: 20,
+          scrollback_used: false,
+        };
+      });
+    });
+
+    const sweep = engine.runSweep();
+    await readStarted;
+    expect(engine.lifecycleLockState().holder).toBeNull();
+    releaseRead?.();
+    await sweep;
+
+    expect(stateMgr.readState(agent.agent_id)).toMatchObject({
+      state: "ready",
+      version: agent.version,
+    });
+    expect(registry.get(agent.agent_id)).toMatchObject({ state: "ready" });
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
+    expect(mockClient.notify).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).not.toHaveBeenCalled();
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+    expect([...sidebarSnapshot.entries()]).toEqual(beforeSidebar);
+    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
+  });
+
+  it("applies a healthy sweep plan and reads each agent screen once", async () => {
+    (
+      mockClient as unknown as Record<string, unknown>
+    ).supportsStableSurfaceReads = true;
+    for (let index = 1; index <= 2; index += 1) {
+      const stableUuid = `11111111-2222-4333-8444-55555555556${index}`;
+      const agent = makeRecord({
+        agent_id: `transactional-healthy-${index}`,
+        surface_id: `surface:${index}`,
+        surface_uuid: stableUuid,
+        workspace_id: "workspace:test",
+        state: "working",
+        role: "worker",
+        cli_session_id: `session-${index}`,
+      });
+      stateMgr.writeState(agent);
+      liveSurfaces.push({
+        ...makeSurface(`surface:${index}`),
+        id: stableUuid,
+        workspace_ref: "workspace:test",
+      });
+    }
+    useActiveCodexScreen(mockClient);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    for (const surface of liveSurfaces) {
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(2);
+      expect(mockClient.readScreen).toHaveBeenCalledWith(
+        surface.id,
+        expect.objectContaining({ workspace: "workspace:test" }),
+      );
+    }
+    expect(mockClient.setStatuses).toHaveBeenCalledTimes(1);
+    expect(sweepDebugLog).toHaveBeenCalledWith(
+      expect.stringMatching(/sweep timing.*build_total_ms=.*apply_ms=/i),
+    );
+    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(0);
   });
 
   it("enumerates topology once through live-agent sidebar and liveness paths", async () => {
