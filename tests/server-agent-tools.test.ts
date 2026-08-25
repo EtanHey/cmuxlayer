@@ -13415,6 +13415,102 @@ codex>
     });
   }, 20_000);
 
+  it("keeps a latched interrupt rescued after pending delivery verification sweeps", async () => {
+    const message = "Reply with the single word OK";
+    const baseExec = makeLifecycleExec();
+    let relayActive = false;
+    let relayTyped = false;
+    let relayReturned = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (
+        relayActive &&
+        (args.includes("send") || args.includes("set-buffer")) &&
+        text.includes(message)
+      ) {
+        relayTyped = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (
+        relayActive &&
+        args.includes("send-key") &&
+        args.includes("return")
+      ) {
+        relayReturned = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (relayActive && args.includes("read-screen")) {
+        const screen = !relayTyped
+          ? [
+              ">_ OpenAI Codex",
+              "› Ask Codex to do anything",
+              "gpt-5.6-sol medium · ~/Gits/brainlayer",
+            ].join("\n")
+          : !relayReturned
+            ? [
+                ">_ OpenAI Codex",
+                `» ${message}`,
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n")
+            : [
+                ">_ OpenAI Codex",
+                "■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/",
+                "  feedback` to report the issue.",
+                "",
+                "› Ask Codex to do anything",
+                "",
+                "gpt-5.6-sol medium · ~/Gits/brainlayer",
+              ].join("\n");
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: screen,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+    const spawned = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "initial work",
+        },
+        {} as any,
+      ),
+    );
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const ready = engine.stateMgr.updateRecord(spawned.agent_id, {
+      state: "ready",
+    });
+    registry.set(spawned.agent_id, ready);
+    relayActive = true;
+
+    const sent = parseToolResult(
+      await sendTo.handler(
+        { agent_id: spawned.agent_id, text: message, press_enter: true },
+        {} as any,
+      ),
+    );
+    await engine.verifyPendingDeliveries();
+
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "rescued",
+      terminal: true,
+      submit_verified: false,
+    });
+  }, 20_000);
+
   it("send_to submits chunked multiline text as one receiver message", async () => {
     const baseExec = makeLifecycleExec();
     const buffers = new Map<string, string>();

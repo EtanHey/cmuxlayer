@@ -5666,6 +5666,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         retryEligiblePendingInput &&
         Date.now() - retriedAt >= SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS
       ) {
+        if (sawNewInterrupt) {
+          return {
+            submit_verified: false,
+            submit_evidence: null,
+            submit_verification_reason: null,
+            retry_count: retryCount,
+            delivery: "rescued",
+          };
+        }
         return {
           submit_verified: false,
           submit_evidence: null,
@@ -5683,8 +5692,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
+    // A latched interrupt is terminal evidence that this verifier cannot
+    // attribute the task turn. Never hand it to the marker-unaware background
+    // verifier as pending_verify, where an empty composer could false-green it.
+    if (sawNewInterrupt) {
+      return {
+        submit_verified: false,
+        submit_evidence: null,
+        submit_verification_reason: null,
+        retry_count: retryCount,
+        delivery: "rescued",
+      };
+    }
     if (
-      !sawNewInterrupt &&
       sawClearedComposerEvidence &&
       sawAllowedClearedComposerEvidence
     ) {
