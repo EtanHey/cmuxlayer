@@ -5261,23 +5261,39 @@ export class AgentEngine {
   private async publishSweepStatus(
     ctx: SweepAgentContext,
     statusUpdates: CmuxStatusUpdate[],
-  ): Promise<boolean> {
-    if (!this.assertSweepInputCurrent(ctx)) return false;
-    if (statusUpdates.length === 1) {
-      const [update] = statusUpdates;
-      await this.client.setStatus(update.key, update.value, update);
-      return true;
-    }
+  ): Promise<ReadonlySet<string>> {
+    if (!this.assertSweepInputCurrent(ctx)) return new Set();
     if (statusUpdates.length > 1) {
       if (this.client.setStatuses) {
-        return (await this.client.setStatuses(statusUpdates)) !== false;
-      }
-      for (const update of statusUpdates) {
-        if (!this.assertSweepInputCurrent(ctx)) return false;
-        await this.client.setStatus(update.key, update.value, update);
+        try {
+          const batchApplied = await this.client.setStatuses(statusUpdates);
+          if (batchApplied !== false) {
+            return new Set(statusUpdates.map(({ key }) => key));
+          }
+          return new Set();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.sweepDebugLog(
+            `[cmuxlayer] sidebar status batch failed; retrying entries independently: ${message}`,
+          );
+        }
       }
     }
-    return true;
+
+    const applied = new Set<string>();
+    for (const update of statusUpdates) {
+      if (!this.assertSweepInputCurrent(ctx)) return new Set();
+      try {
+        await this.client.setStatus(update.key, update.value, update);
+        applied.add(update.key);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.sweepDebugLog(
+          `[cmuxlayer] sidebar status skipped for ${update.key}: ${message}`,
+        );
+      }
+    }
+    return applied;
   }
 
   private shouldNotifyDone(harvestability: WorkerHarvestability): boolean {
@@ -5983,7 +5999,7 @@ export class AgentEngine {
       return;
     }
 
-    const statusBatchApplied = await this.publishSweepStatus(
+    const appliedStatusKeys = await this.publishSweepStatus(
       sweepContext,
       statusUpdates,
     );
@@ -5993,8 +6009,8 @@ export class AgentEngine {
     ) {
       return;
     }
-    if (statusBatchApplied) {
-      for (const pending of pendingStatusSnapshots) {
+    for (const pending of pendingStatusSnapshots) {
+      if (appliedStatusKeys.has(pending.agentId)) {
         this.sidebarSnapshot.set(pending.agentId, pending.snapshot);
       }
     }

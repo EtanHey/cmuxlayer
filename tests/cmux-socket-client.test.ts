@@ -862,6 +862,60 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     // No throw = success
   });
 
+  it("resolves a status tab id from a workspace in another window", async () => {
+    const savedWindowList = MOCK_RESPONSES["window.list"];
+    const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
+
+    MOCK_RESPONSES["window.list"] = {
+      windows: [
+        { ref: "window:1", workspace_count: 1 },
+        { ref: "window:2", workspace_count: 1 },
+      ],
+    };
+    MOCK_RESPONSES["workspace.list"] = (req) => {
+      const windowRef = String(req.params.window_id ?? "");
+      return {
+        workspaces:
+          windowRef === "window:2"
+            ? [
+                {
+                  id: MOCK_SECOND_WORKSPACE_ID,
+                  ref: "workspace:2",
+                  title: "Other Window",
+                  index: 0,
+                  selected: true,
+                  pinned: false,
+                },
+              ]
+            : [
+                {
+                  id: MOCK_WORKSPACE_ID,
+                  ref: "workspace:1",
+                  title: "Caller Window",
+                  index: 0,
+                  selected: true,
+                  pinned: false,
+                },
+              ],
+      };
+    };
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.setStatus("agent", "active", {
+        workspace: "workspace:2",
+      });
+
+      expect(lastV1Command).toBe(
+        `set_status agent active --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+      );
+    } finally {
+      MOCK_RESPONSES["window.list"] = savedWindowList;
+      MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
+    }
+  });
+
   it("sends a 12-entry status batch through one persistent connection", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
