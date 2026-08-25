@@ -149,6 +149,44 @@ export function invalidateSurfaceTopologyCallScope(
   }
 }
 
+const SURFACE_TOPOLOGY_MUTATION_METHODS = new Set<PropertyKey>([
+  "closeSurface",
+  "createWorkspace",
+  "deleteWorkspace",
+  "focusSurface",
+  "moveSurface",
+  "newSplit",
+  "newSurface",
+  "renameTab",
+  "selectWorkspace",
+]);
+
+/** Centralize call-scope invalidation at the cmux mutation boundary. */
+export function withSurfaceTopologyMutationInvalidation<T extends object>(
+  client: T,
+): T {
+  const boundMethods = new Map<PropertyKey, unknown>();
+  let wrapped: T;
+  wrapped = new Proxy(client, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      if (boundMethods.has(property)) return boundMethods.get(property);
+
+      const bound = SURFACE_TOPOLOGY_MUTATION_METHODS.has(property)
+        ? async (...args: unknown[]) => {
+            const result = await Reflect.apply(value, target, args);
+            invalidateSurfaceTopologyCallScope(wrapped);
+            return result;
+          }
+        : value.bind(target);
+      boundMethods.set(property, bound);
+      return bound;
+    },
+  });
+  return wrapped;
+}
+
 let workspaceEnumerationCache = new WeakMap<
   object,
   CachedWorkspaceEnumeration
@@ -287,15 +325,25 @@ export async function enumerateAllWindowWorkspacesWithRetry(
     observerEpochProvider,
   );
   if (first.complete) return first;
+  invalidateSurfaceTopologyCallScope(client as object);
+  const retryObserverEpoch = captureSurfaceObserverEpoch(
+    observerEpochProvider,
+  );
   const retried = await enumerateAllWindowWorkspaces(
     client,
     observerEpochProvider,
     { cache: false },
   );
-  const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
-  if (observerEpoch) {
+  const completedObserverEpoch = captureSurfaceObserverEpoch(
+    observerEpochProvider,
+  );
+  if (
+    retried.complete &&
+    retryObserverEpoch &&
+    retryObserverEpoch === completedObserverEpoch
+  ) {
     currentWorkspaceEnumerationCallScope()?.cache.set(client as object, {
-      observerEpoch,
+      observerEpoch: retryObserverEpoch,
       pending: Promise.resolve(retried),
     });
   }

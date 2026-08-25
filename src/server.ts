@@ -257,6 +257,7 @@ import {
   isSurfaceObserverEpochCurrent,
   resolveAgentSurfaceBinding,
   runWithSurfaceTopologyCallScope,
+  withSurfaceTopologyMutationInvalidation,
   type SurfaceObserverEpoch,
   type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
@@ -3860,7 +3861,7 @@ function buildLifecycleChannelMeta(
 export function createServer(opts?: CreateServerOptions): McpServer {
   const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
-  const client = context.client;
+  const client = withSurfaceTopologyMutationInvalidation(context.client);
   const listAllWorkspaces = async () => {
     const listed = await enumerateAllWindowWorkspacesWithRetry(
       client,

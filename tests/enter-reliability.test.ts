@@ -635,7 +635,10 @@ describe("enter reliability", () => {
     expect(parsed.error).toMatch(/press_enter|allow_busy|boolean/i);
   });
 
-  it("retries Enter once when a Codex composer still holds the exact send", async () => {
+  it.each([
+    ["short pointer", "Read and follow /tmp/run5-pointer.md"],
+    ["long inline", "x".repeat(2000)],
+  ] as const)("retries Enter once for a %s whose Codex composer still holds the exact send", async (_name, text) => {
     const client = new FakeClaudeSurfaceClient();
     client.cli = "codex";
     server = createReliabilityServer(client);
@@ -643,7 +646,7 @@ describe("enter reliability", () => {
 
     const result = await callTool(server, "send_to", {
       agent_id: "agent-1",
-      text: "x".repeat(2000),
+      text,
       press_enter: true,
       allow_long_inline: true,
     });
@@ -656,7 +659,7 @@ describe("enter reliability", () => {
     expect(parsed.submit_verified).toBe(true);
     expect(parsed.submit_evidence).toBe("cleared_composer");
     expect(parsed.retry_count).toBe(1);
-    expect(client.sendCalls.join("")).toHaveLength(2000);
+    expect(client.sendCalls.join("")).toBe(text);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       2,
     );
@@ -731,8 +734,10 @@ describe("enter reliability", () => {
     },
   );
 
-  it("bounds a short pointer send to one second with a 750ms verify budget", async () => {
-    const client = new FakeUnavailableVerificationScreenClient("throw");
+  it.each(["throw", "blank"] as const)(
+    "bounds a short pointer send with %s verification to one second",
+    async (mode) => {
+    const client = new FakeUnavailableVerificationScreenClient(mode);
     client.requiredReturns = 1;
     server = createReliabilityServer(client);
     registerAgent(server);
@@ -768,7 +773,7 @@ describe("enter reliability", () => {
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
-  });
+  }, 10_000);
 
   it("surface-mode pointer sends bypass a held lifecycle lock", async () => {
     const client = new FakeClaudeSurfaceClient();

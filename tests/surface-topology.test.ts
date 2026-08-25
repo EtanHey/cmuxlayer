@@ -4,12 +4,14 @@ import type { AgentRecord } from "../src/agent-types.js";
 import {
   collectSurfaceTopology,
   enumerateAllWindowWorkspaces,
+  enumerateAllWindowWorkspacesWithRetry,
   listAllWindowWorkspaces,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   resolveAgentSurfaceBinding,
   runWithSurfaceTopologyCallScope,
   SurfaceIdentityConflictError,
+  withSurfaceTopologyMutationInvalidation,
 } from "../src/surface-topology.js";
 import type {
   CmuxPane,
@@ -396,6 +398,84 @@ describe("collectSurfaceTopology", () => {
     });
     expect(client.listWindows).toHaveBeenCalledTimes(2);
     expect(client.listWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache a retry across an observer epoch change", async () => {
+    let observerEpoch = "observer:epoch:A";
+    const client = {
+      listWindows: vi
+        .fn()
+        .mockResolvedValueOnce({ windows: [{ ref: "window:A", workspace_count: 2 }] })
+        .mockResolvedValue({ windows: [{ ref: "window:A", workspace_count: 1 }] }),
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValueOnce({ workspaces: [workspace("workspace:OLD")] })
+        .mockImplementationOnce(async () => {
+          observerEpoch = "observer:epoch:B";
+          return { workspaces: [workspace("workspace:OLD")] };
+        })
+        .mockResolvedValue({ workspaces: [workspace("workspace:NEW")] }),
+    };
+
+    const result = await runWithSurfaceTopologyCallScope(async () => {
+      await enumerateAllWindowWorkspacesWithRetry(client, () => observerEpoch);
+      return enumerateAllWindowWorkspaces(client, () => observerEpoch);
+    });
+
+    expect(result.workspaces[0]?.ref).toBe("workspace:NEW");
+    expect(client.listWorkspaces).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not cache an incomplete retry", async () => {
+    const client = {
+      listWindows: vi
+        .fn()
+        .mockResolvedValueOnce({ windows: [{ ref: "window:A", workspace_count: 2 }] })
+        .mockResolvedValueOnce({ windows: [{ ref: "window:A", workspace_count: 2 }] })
+        .mockResolvedValue({ windows: [{ ref: "window:A", workspace_count: 1 }] }),
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValueOnce({ workspaces: [workspace("workspace:OLD")] })
+        .mockResolvedValueOnce({ workspaces: [workspace("workspace:OLD")] })
+        .mockResolvedValue({ workspaces: [workspace("workspace:NEW")] }),
+    };
+
+    const result = await runWithSurfaceTopologyCallScope(async () => {
+      await enumerateAllWindowWorkspacesWithRetry(
+        client,
+        () => "observer:epoch:A",
+      );
+      return enumerateAllWindowWorkspaces(client, () => "observer:epoch:A");
+    });
+
+    expect(result.workspaces[0]?.ref).toBe("workspace:NEW");
+    expect(client.listWorkspaces).toHaveBeenCalledTimes(3);
+  });
+
+  it("invalidates the call-scope workspace map after a structural mutation", async () => {
+    let workspaceRef = "workspace:OLD";
+    const rawClient = {
+      listWindows: vi.fn().mockResolvedValue({
+        windows: [{ ref: "window:A", workspace_count: 1 }],
+      }),
+      listWorkspaces: vi.fn(async () => ({
+        workspaces: [workspace(workspaceRef)],
+      })),
+      createWorkspace: vi.fn(async () => {
+        workspaceRef = "workspace:NEW";
+        return { workspace: workspaceRef, title: "new" };
+      }),
+    };
+    const client = withSurfaceTopologyMutationInvalidation(rawClient);
+
+    const result = await runWithSurfaceTopologyCallScope(async () => {
+      await enumerateAllWindowWorkspaces(client, () => "observer:epoch:A");
+      await client.createWorkspace();
+      return enumerateAllWindowWorkspaces(client, () => "observer:epoch:A");
+    });
+
+    expect(result.workspaces[0]?.ref).toBe("workspace:NEW");
+    expect(rawClient.listWorkspaces).toHaveBeenCalledTimes(2);
   });
 
   it("marks malformed pane enumeration incomplete", async () => {
