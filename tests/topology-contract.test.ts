@@ -163,6 +163,7 @@ function engineFixture(): {
   let liveSurfaces: CmuxSurface[] = [];
   const publications: FleetSidebarPublication[] = [];
   const client = {
+    getTransportHealth: () => ({ mode: "socket", degraded: false }),
     newSplit: vi.fn().mockResolvedValue({
       workspace: "workspace:fleet",
       surface: "surface:new",

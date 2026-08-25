@@ -14,12 +14,15 @@ import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { isCmuxSidebarStatusFrame } from "./cmux-status-frame.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const CONNECT_TIMEOUT_MS = 2_000;
+const BACKOFF_BASE_MS = 2_000;
+const BACKOFF_MAX_MS = 15_000;
 const MAX_IN_FLIGHT = 256;
 
 export interface BackoffOptions {
-  /** Base delay in milliseconds (default: 1000) */
+  /** Base delay in milliseconds (default: 2_000) */
   baseMs?: number;
-  /** Maximum delay in milliseconds (default: 30_000) */
+  /** Maximum delay in milliseconds (default: 15_000) */
   maxMs?: number;
   /** Apply random jitter to prevent thundering herd (default: true) */
   jitter?: boolean;
@@ -28,8 +31,11 @@ export interface BackoffOptions {
 export interface CmuxPersistentSocketOptions {
   socketPath?: string;
   timeoutMs?: number;
+  connectTimeoutMs?: number;
   maxInFlight?: number;
   backoff?: BackoffOptions;
+  /** Override connection creation for deterministic connect-leg tests. */
+  createConnection?: typeof net.createConnection;
 }
 
 interface V2Request {
@@ -65,10 +71,12 @@ export class CmuxPersistentSocket {
   }> = [];
   private connected = false;
   private timeoutMs: number;
+  private connectTimeoutMs: number;
   private maxInFlight: number;
   /** Guards against concurrent connect() calls */
   private connectPromise: Promise<void> | null = null;
   private connectionGeneration = 0;
+  private createConnection: typeof net.createConnection;
 
   // Backoff state
   private backoffBaseMs: number;
@@ -81,10 +89,12 @@ export class CmuxPersistentSocket {
     this.socketPath =
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.connectTimeoutMs = opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
     this.maxInFlight = opts?.maxInFlight ?? MAX_IN_FLIGHT;
-    this.backoffBaseMs = opts?.backoff?.baseMs ?? 1000;
-    this.backoffMaxMs = opts?.backoff?.maxMs ?? 30_000;
+    this.backoffBaseMs = opts?.backoff?.baseMs ?? BACKOFF_BASE_MS;
+    this.backoffMaxMs = opts?.backoff?.maxMs ?? BACKOFF_MAX_MS;
     this.backoffJitter = opts?.backoff?.jitter ?? true;
+    this.createConnection = opts?.createConnection ?? net.createConnection;
   }
 
   /** Current backoff delay in ms (0 when connected or no failures). */
@@ -127,7 +137,11 @@ export class CmuxPersistentSocket {
     this.connectPromise = new Promise<void>((resolve, reject) => {
       let settled = false;
 
-      this.socket = net.createConnection({ path: this.socketPath }, () => {
+      const socket = this.createConnection({ path: this.socketPath }, () => {
+        if (settled) {
+          socket.destroy();
+          return;
+        }
         this.connectionGeneration++;
         this.connected = true;
         settled = true;
@@ -135,14 +149,38 @@ export class CmuxPersistentSocket {
         this.resetBackoff();
         resolve();
       });
-      this.raiseSocketListenerLimit(this.socket);
+      this.socket = socket;
+      this.raiseSocketListenerLimit(socket);
 
-      this.socket.on("data", (chunk: Buffer) => {
+      socket.setTimeout(this.connectTimeoutMs, () => {
+        const transportPhase = settled ? "response" : "connect";
+        const error = new CmuxSocketError(
+          `Connect timeout after ${this.connectTimeoutMs}ms`,
+          "connection_error",
+          { transportPhase },
+        );
+        this.connected = false;
+        this.connectPromise = null;
+        socket.destroy();
+        this.rejectAllPending(error);
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+      });
+
+      socket.on("data", (chunk: Buffer) => {
+        // A connected socket is not usable until cmux produces its first
+        // response bytes. Keep the connect-leg deadline armed across the OS
+        // connect event so an accepted-but-wedged daemon cannot inherit the
+        // much longer request timeout.
+        socket.setTimeout(0);
         this.buffer += chunk.toString("utf-8");
         this.processBuffer();
       });
 
-      this.socket.on("error", (err: Error) => {
+      socket.on("error", (err: Error) => {
+        if (this.socket !== socket) return;
         this.connected = false;
         const socketError = this.toConnectionError(
           err,
@@ -156,7 +194,8 @@ export class CmuxPersistentSocket {
         }
       });
 
-      this.socket.on("close", () => {
+      socket.on("close", () => {
+        if (this.socket !== socket) return;
         this.connected = false;
         this.socket = null;
         // Reject all inflight requests — transport is gone
@@ -446,7 +485,9 @@ export class CmuxPersistentSocket {
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        const index = this.pendingV1.findIndex((entry) => entry.timer === timer);
+        const index = this.pendingV1.findIndex(
+          (entry) => entry.timer === timer,
+        );
         const wasHead = index === 0;
         if (index !== -1) this.pendingV1.splice(index, 1);
         reject(

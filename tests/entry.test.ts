@@ -17,6 +17,10 @@ function createEntryOptions(
     logger: { error: vi.fn() },
     output: { write: vi.fn() } as unknown as Writable,
     probeDaemon: vi.fn().mockResolvedValue(true),
+    probeCmuxSocket: vi.fn().mockResolvedValue({
+      usable: true,
+      socketPath: "/tmp/cmux.sock",
+    }),
     runProxy: vi.fn().mockResolvedValue({ stop: vi.fn() }),
     spawnDaemon: vi.fn(),
     startInProcess: vi.fn().mockResolvedValue({
@@ -85,6 +89,31 @@ describe("daemon-first MCP entry", () => {
     expect(opts.startInProcess).not.toHaveBeenCalled();
   });
 
+  it("does not autostart a daemon when this proxy is denied by cmux", async () => {
+    const logger = { error: vi.fn() };
+    const opts = createEntryOptions({
+      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/denied-parent.sock" },
+      logger,
+      probeDaemon: vi.fn().mockResolvedValue(false),
+      probeCmuxSocket: vi.fn().mockResolvedValue({
+        usable: false,
+        socketPath: "/tmp/cmux.sock",
+        denied_reason: "access-control",
+        error: "Access denied - only processes started inside cmux can connect",
+      }),
+    });
+
+    const result = await runDaemonFirstEntry(opts);
+
+    expect(result.mode).toBe("in-process");
+    expect(opts.spawnDaemon).not.toHaveBeenCalled();
+    expect(opts.runProxy).not.toHaveBeenCalled();
+    expect(opts.startInProcess).toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/daemon must be spawned from inside a cmux pane/i),
+    );
+  });
+
   it("falls back to in-process mode with a loud warning when daemon start fails", async () => {
     const logger = { error: vi.fn() };
     const opts = createEntryOptions({
@@ -103,7 +132,9 @@ describe("daemon-first MCP entry", () => {
     expect(opts.startInProcess).toHaveBeenCalledWith(
       expect.objectContaining({
         fallbackWarnings: [
-          expect.stringContaining("daemon unavailable; using heavy in-process runtime"),
+          expect.stringContaining(
+            "daemon unavailable; using heavy in-process runtime",
+          ),
         ],
       }),
     );
@@ -191,8 +222,7 @@ describe("daemon-first MCP entry", () => {
     const logger = { error: vi.fn() };
     const opts = createEntryOptions({
       env: {
-        CMUXLAYER_DEFAULT_PALETTE:
-          "list_surfaces,control_health,read_screen",
+        CMUXLAYER_DEFAULT_PALETTE: "list_surfaces,control_health,read_screen",
       },
       logger,
     });

@@ -231,6 +231,10 @@ import {
   type SurfaceTopologySnapshot,
 } from "./surface-topology.js";
 import {
+  getTransportHealth,
+  type TransportHealthSignal,
+} from "./cmux-transport-self-heal.js";
+import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
   dispatchOnce,
   readInbox,
@@ -620,6 +624,8 @@ async function validateCodexModel(
 }
 
 export interface AgentEngineOptions {
+  /** Debug-only sweep phase timings. Defaults to stderr-safe console.debug. */
+  sweepDebugLog?: (message: string) => void;
   spawnPreflight?: (
     params: SpawnAgentParams,
   ) => Promise<SpawnPreflightResult | void>;
@@ -888,8 +894,17 @@ export interface SweepTimingOptions {
 type SweepTimingInput = number | Partial<SweepTimingOptions>;
 
 interface SweepAgentContext {
+  sweep?: boolean;
   screen?: Promise<CmuxReadScreenResult>;
   route?: Promise<AgentRoute>;
+  surfaceTopology?: SurfaceTopologySnapshot | null;
+  observedSurfaceRef?: string | null;
+  topologyGeneration?: number;
+  skipAccounting?: SweepMutationSkipAccounting;
+}
+
+interface SweepMutationSkipAccounting {
+  counted: boolean;
 }
 
 class PlacementSurfaceBindingError extends Error {}
@@ -981,6 +996,11 @@ export interface LifecycleLockState {
   acquire_timeout_ms: number;
   hold_timeout_ms: number;
   forced_releases: number;
+  /** Sweep ticks that preserved state because topology could not authorize deletion. */
+  sweep_skipped_mutations: number;
+  sweep_skipped_reason: string | null;
+  /** Sweep ticks that stopped early to let a queued lifecycle mutation run. */
+  sweep_yielded: number;
   timeouts: number;
   last_timeout: LifecycleLockTimeoutRecord | null;
 }
@@ -1062,6 +1082,9 @@ export function resolveSweepTiming(
 }
 
 interface AgentEngineClient {
+  getTransportHealth?(): TransportHealthSignal | null;
+  /** Native and CLI clients accept a stable UUID as the read-screen target. */
+  supportsStableSurfaceReads?: boolean;
   listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }>;
   log(
     message: string,
@@ -1560,6 +1583,7 @@ export class AgentEngine {
   private lastSweepSignature: string | null = null;
   private unchangedSweepCount = 0;
   private currentSweepScreenSignatures = new Map<string, string>();
+  private sweepDebugLog: (message: string) => void;
   /** agentId → last material (de-chromed) screen output change. */
   private fleetScreenProgress = new Map<string, FleetScreenProgressSnapshot>();
   /** agentId → last-pushed status target/value */
@@ -1615,6 +1639,10 @@ export class AgentEngine {
   private lifecycleLockAcquiredAtMs: number | null = null;
   private lifecycleLockQueueDepth = 0;
   private lifecycleLockForcedReleases = 0;
+  private sweepSkippedMutations = 0;
+  private sweepSkippedReason: string | null = null;
+  private sweepYielded = 0;
+  private sweepTopologyGeneration = 0;
   private lifecycleLockTimeouts = 0;
   private lifecycleLockLastTimeout: LifecycleLockTimeoutRecord | null = null;
   private deliveryReceipts = new Map<string, AgentDeliveryReceipt>();
@@ -1721,6 +1749,9 @@ export class AgentEngine {
     this.loadDeliveryReceipts();
     this.registry = registry;
     this.client = client;
+    this.sweepDebugLog =
+      opts?.sweepDebugLog ??
+      ((message) => process.stderr.write(`${message}\n`));
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
     this.inboxOpts = opts?.inboxOpts;
@@ -3466,7 +3497,7 @@ export class AgentEngine {
       index.persistRecord(canonicalFinal);
       this.registry.rename(updated.agent_id, finalAgentId, canonicalFinal);
       this.transferAgentRenameMemory(updated.agent_id, finalAgentId);
-      this.stateMgr.removeState(updated.agent_id);
+      this.removeStateForSweep({}, updated.agent_id);
       removePendingChannelMarkerAfterRegistration(
         updated.agent_id,
         finalAgentId,
@@ -3492,7 +3523,11 @@ export class AgentEngine {
     opts: { lines?: number; scrollback?: boolean } = {},
   ): Promise<CmuxReadScreenResult> {
     const route = await this.resolveAgentIoRoute(agent.agent_id);
-    return this.client.readScreen(route.surface_id, {
+    const readTarget =
+      this.client.supportsStableSurfaceReads && route.surface_uuid
+        ? route.surface_uuid
+        : route.surface_id;
+    return this.client.readScreen(readTarget, {
       ...opts,
       workspace: route.workspace_id ?? undefined,
     });
@@ -3502,17 +3537,28 @@ export class AgentEngine {
     agent: AgentRecord,
     ctx: SweepAgentContext,
   ): Promise<CmuxReadScreenResult> {
-    ctx.route ??= this.resolveAgentIoRoute(agent.agent_id);
+    ctx.route ??= this.resolveAgentIoRoute(
+      agent.agent_id,
+      this.client.supportsStableSurfaceReads ? ctx.surfaceTopology : undefined,
+    );
     ctx.screen ??= ctx.route.then(async (route) => {
-      const screen = await this.client.readScreen(route.surface_id, {
+      const readTarget =
+        this.client.supportsStableSurfaceReads && route.surface_uuid
+          ? route.surface_uuid
+          : route.surface_id;
+      const screen = await this.client.readScreen(readTarget, {
         lines: BOOT_SESSION_CAPTURE_LINES,
         workspace: route.workspace_id ?? undefined,
       });
-      await this.resolveUnchangedAgentIoRoute(
-        agent.agent_id,
-        route,
-        "sweep screen read",
-      );
+      const observedSurface = screen.surface?.trim();
+      ctx.observedSurfaceRef = observedSurface || null;
+      if (!this.client.supportsStableSurfaceReads) {
+        await this.resolveUnchangedAgentIoRoute(
+          agent.agent_id,
+          route,
+          "sweep screen read",
+        );
+      }
       this.currentSweepScreenSignatures.set(
         agent.agent_id,
         `${route.surface_id}:${screenTextSignature(screen.text)}`,
@@ -3547,6 +3593,16 @@ export class AgentEngine {
     if (!ctx.route) return true;
     try {
       const readRoute = await ctx.route;
+      if (this.client.supportsStableSurfaceReads) {
+        const observedSurface = ctx.observedSurfaceRef;
+        return (
+          readRoute.surface_id === surfaceRef &&
+          (!observedSurface ||
+            observedSurface === readRoute.surface_id ||
+            observedSurface.toLowerCase() ===
+              readRoute.surface_uuid?.toLowerCase())
+        );
+      }
       const currentRoute = await this.resolveAgentIoRoute(readRoute.agent_id);
       return (
         this.sameSurfaceRoute(readRoute, currentRoute) &&
@@ -3562,6 +3618,7 @@ export class AgentEngine {
     ctx: SweepAgentContext,
     opts: { resolveTranscript?: boolean } = {},
   ): Promise<AgentRecord> {
+    if (!this.assertSweepInputCurrent(ctx)) return agent;
     if (agent.cli_session_id) {
       const canResolveSelfRegistration =
         this.canUseSelfRegistrationProcessEvidence(agent);
@@ -3700,6 +3757,7 @@ export class AgentEngine {
 
     try {
       const screen = await this.readSweepScreen(captureAgent, ctx);
+      if (!this.assertSweepInputCurrent(ctx)) return captureAgent;
       const sessionId = extractSessionId(screen.text);
       if (!sessionId) {
         return captureAgent;
@@ -3759,6 +3817,7 @@ export class AgentEngine {
     agent: AgentRecord,
     ctx: SweepAgentContext,
   ): Promise<AgentRecord> {
+    if (!this.assertSweepInputCurrent(ctx)) return agent;
     if (agent.state !== "booting") {
       this.readyPatternMatches.delete(agent.agent_id);
       return agent;
@@ -3769,6 +3828,7 @@ export class AgentEngine {
 
     try {
       const screen = await this.readSweepScreen(agent, ctx);
+      if (!this.assertSweepInputCurrent(ctx)) return agent;
       const parsed = parseScreen(screen.text);
       const parsedEffort =
         agent.cli === "codex" ? parseCodexEffort(parsed.model) : null;
@@ -3897,9 +3957,11 @@ export class AgentEngine {
     agent: AgentRecord,
     ctx: SweepAgentContext,
   ): Promise<{ agent: AgentRecord; screenText?: string }> {
+    if (!this.assertSweepInputCurrent(ctx)) return { agent };
     if (TERMINAL_STATES.has(agent.state)) return { agent };
 
     if (await this.hasGroundTruthDone(agent, ctx)) {
+      if (!this.assertSweepInputCurrent(ctx)) return { agent };
       try {
         const marked = this.stateMgr.updateRecord(agent.agent_id, {
           task_done_candidate_at: null,
@@ -3917,6 +3979,7 @@ export class AgentEngine {
 
     try {
       const screen = await this.readSweepScreen(agent, ctx);
+      if (!this.assertSweepInputCurrent(ctx)) return { agent };
       if (!this.hasOutputDoneEvidence(agent.cli, screen.text)) {
         if (agent.task_done_candidate_at) {
           const updated = this.stateMgr.updateRecord(agent.agent_id, {
@@ -4294,7 +4357,9 @@ export class AgentEngine {
     screenText: string,
     disposition: Extract<PromptDisposition, { kind: "resolve" }>,
     nowIso: string,
+    ctx: SweepAgentContext = {},
   ): Promise<{ agent: AgentRecord; recovered: boolean }> {
+    if (!this.assertSweepInputCurrent(ctx)) return { agent, recovered: false };
     const signature = screenTextSignature(screenText);
     if (this.promptResolutionFailures.get(agent.agent_id) === signature) {
       return { agent, recovered: false };
@@ -4312,6 +4377,8 @@ export class AgentEngine {
     let error: string | null = null;
     try {
       const route = await this.resolveAgentIoRoute(agent.agent_id);
+      if (!this.assertSweepInputCurrent(ctx))
+        return { agent, recovered: false };
       const assertSurfaceBindingCurrent = async (): Promise<void> => {
         await this.resolveUnchangedAgentIoRoute(
           agent.agent_id,
@@ -4319,6 +4386,9 @@ export class AgentEngine {
           "prompt resolution",
         );
       };
+      if (!this.assertSweepInputCurrent(ctx)) {
+        return { agent, recovered: false };
+      }
       await this.client.sendKey(route.surface_id, disposition.key, {
         workspace: route.workspace_id ?? undefined,
         ...this.stableSurfaceWriteOptions(route.surface_uuid),
@@ -4330,6 +4400,9 @@ export class AgentEngine {
         workspace: route.workspace_id ?? undefined,
       });
       await assertSurfaceBindingCurrent();
+      if (!this.assertSweepInputCurrent(ctx)) {
+        return { agent, recovered: false };
+      }
       const after = parseScreen(afterScreen.text);
       afterControlState = after.control_state;
       const recovered =
@@ -4359,6 +4432,9 @@ export class AgentEngine {
       agent = this.persistPromptBlockedState(agent, false, nowIso);
       return { agent: this.clearHaltEpisode(agent), recovered: true };
     } catch (cause) {
+      if (!this.assertSweepInputCurrent(ctx)) {
+        return { agent, recovered: false };
+      }
       error = cause instanceof Error ? cause.message : String(cause);
       this.promptResolutionFailures.set(agent.agent_id, signature);
       this.appendResolvedPromptEvent({
@@ -4378,7 +4454,9 @@ export class AgentEngine {
   private async maybeEscalateLiveHalt(
     agent: AgentRecord,
     screenText: string,
+    ctx: SweepAgentContext = {},
   ): Promise<AgentRecord> {
+    if (!this.assertSweepInputCurrent(ctx)) return agent;
     const nowMs = this.haltNow();
     const nowIso = new Date(nowMs).toISOString();
     const parsed = parseScreen(screenText);
@@ -4389,7 +4467,9 @@ export class AgentEngine {
         screenText,
         disposition,
         nowIso,
+        ctx,
       );
+      if (!this.assertSweepInputCurrent(ctx)) return agent;
       agent = resolution.agent;
       if (resolution.recovered) return agent;
       disposition = {
@@ -4576,6 +4656,7 @@ export class AgentEngine {
       return episode;
     }
     const resolution = await this.nearestLiveHaltAncestor(episode, nowMs);
+    if (!this.assertSweepInputCurrent(ctx)) return agent;
     if (resolution.fallback) {
       episode = this.stateMgr.updateRecord(episode.agent_id, {
         halt_missing_ancestor_count:
@@ -4668,6 +4749,7 @@ export class AgentEngine {
     ctx: SweepAgentContext,
     knownScreenText?: string,
   ): Promise<AgentRecord> {
+    if (!this.assertSweepInputCurrent(ctx)) return agent;
     if (
       TERMINAL_STATES.has(agent.state) ||
       !(["ready", "working", "idle"] as AgentState[]).includes(agent.state)
@@ -4684,6 +4766,8 @@ export class AgentEngine {
       this.cliExitShellMatches.delete(agent.agent_id);
       return agent;
     }
+
+    if (!this.assertSweepInputCurrent(ctx)) return agent;
 
     if (parseScreen(screenText).control_state !== "shell") {
       this.cliExitShellMatches.delete(agent.agent_id);
@@ -4743,20 +4827,6 @@ export class AgentEngine {
       error: CLI_EXIT_ERROR,
     });
     return exited;
-  }
-
-  private async maybeArchiveDoneAgent(agent: AgentRecord): Promise<boolean> {
-    void agent;
-    // Sweeps must never close user panes. TASK_DONE marks state only; explicit
-    // close_surface/stop_agent remain available when an orchestrator chooses it.
-    return false;
-  }
-
-  private async maybeReapIdleWorker(agent: AgentRecord): Promise<boolean> {
-    void agent;
-    // The old idle-worker reaper was too destructive for unattended workspaces.
-    // Keep panes visible until an explicit close command is issued.
-    return false;
   }
 
   private async cleanupUnboundCreatedSurface(
@@ -5049,7 +5119,9 @@ export class AgentEngine {
   private async logLifecycleEvent(
     agent: AgentRecord,
     event: AgentLifecycleEvent,
+    ctx: SweepAgentContext = {},
   ): Promise<void> {
+    if (!this.assertSweepInputCurrent(ctx)) return;
     const eventKey = `${agent.agent_id}:${event}`;
     if (this.loggedEvents.has(eventKey)) {
       return;
@@ -5097,6 +5169,16 @@ export class AgentEngine {
     }
   }
 
+  private async notifyLifecycleEventForSweep(
+    ctx: SweepAgentContext,
+    agent: AgentRecord,
+    event: AgentLifecycleEvent,
+    signature?: string,
+  ): Promise<boolean> {
+    if (!this.assertSweepInputCurrent(ctx)) return false;
+    return this.notifyLifecycleEvent(agent, event, signature);
+  }
+
   private clearHealthNotificationMemory(agentId: string): void {
     const healthPrefix = `${agentId}:health:`;
     for (const key of this.notifiedEvents) {
@@ -5104,6 +5186,28 @@ export class AgentEngine {
         this.notifiedEvents.delete(key);
       }
     }
+  }
+
+  private async publishSweepStatus(
+    ctx: SweepAgentContext,
+    statusUpdates: CmuxStatusUpdate[],
+  ): Promise<boolean> {
+    if (!this.assertSweepInputCurrent(ctx)) return false;
+    if (statusUpdates.length === 1) {
+      const [update] = statusUpdates;
+      await this.client.setStatus(update.key, update.value, update);
+      return true;
+    }
+    if (statusUpdates.length > 1) {
+      if (this.client.setStatuses) {
+        return (await this.client.setStatuses(statusUpdates)) !== false;
+      }
+      for (const update of statusUpdates) {
+        if (!this.assertSweepInputCurrent(ctx)) return false;
+        await this.client.setStatus(update.key, update.value, update);
+      }
+    }
+    return true;
   }
 
   private shouldNotifyDone(harvestability: WorkerHarvestability): boolean {
@@ -5134,14 +5238,21 @@ export class AgentEngine {
     return !surfaceTopology.workspaceBySurface.has(agent.surface_id);
   }
 
-  private surfaceObserverIdProvider(): SurfaceObserverIdProvider | undefined {
+  private surfaceObserverEpochProvider():
+    SurfaceObserverIdProvider | undefined {
     return this.registry.isObserverOwnershipEnforced()
       ? () => this.registry.getObserverEpoch()
       : undefined;
   }
 
+  private surfaceObserverIdProvider(): SurfaceObserverIdProvider | undefined {
+    return this.registry.isObserverOwnershipEnforced()
+      ? () => this.registry.getObserverId()
+      : undefined;
+  }
+
   private captureSurfaceObserverEpoch(): SurfaceObserverEpoch {
-    return captureObserverEpoch(this.surfaceObserverIdProvider());
+    return captureObserverEpoch(this.surfaceObserverEpochProvider());
   }
 
   private isSurfaceObserverEpochCurrent(
@@ -5149,8 +5260,78 @@ export class AgentEngine {
   ): boolean {
     return isSurfaceObserverEpochCurrent(
       observerEpoch,
-      this.surfaceObserverIdProvider(),
+      this.surfaceObserverEpochProvider(),
     );
+  }
+
+  private isSweepTopologyObserverCurrent(
+    surfaceTopology: SurfaceTopologySnapshot | null,
+  ): boolean {
+    if (!this.registry.isObserverOwnershipEnforced()) return true;
+    return Boolean(
+      surfaceTopology?.observerId &&
+      surfaceTopology.observerEpoch &&
+      this.registry.getObserverId() === surfaceTopology.observerId &&
+      this.registry.getObserverEpoch() === surfaceTopology.observerEpoch,
+    );
+  }
+
+  private canRunSnapshotBackedSweepMutation(
+    surfaceTopology: SurfaceTopologySnapshot | null,
+    skipAccounting: SweepMutationSkipAccounting,
+  ): boolean {
+    if (this.isSweepTopologyObserverCurrent(surfaceTopology)) return true;
+    // The topology belongs to a replaced route. Count this preserved sweep tick
+    // once as reason=epoch_changed and never re-collect partway through it.
+    this.countSkippedSweepTick(skipAccounting);
+    return false;
+  }
+
+  /**
+   * The single bounded authorization check for a sweep side effect. Non-sweep
+   * callers do not carry `sweep`, so normal interactive lifecycle operations
+   * retain their existing behavior.
+   */
+  private assertSweepInputCurrent(ctx: SweepAgentContext): boolean {
+    if (ctx.sweep !== true) return true;
+    const topology = ctx.surfaceTopology ?? null;
+    const transport = getTransportHealth(this.client);
+    const reason =
+      topology?.complete !== true || topology.surfaces.length === 0
+        ? "topology_incomplete"
+        : !this.isSweepTopologyObserverCurrent(topology)
+          ? "epoch_changed"
+          : transport?.mode !== "socket" || transport.degraded !== false
+            ? "transport_degraded"
+            : ctx.topologyGeneration !== this.sweepTopologyGeneration ||
+                topology.generation !== ctx.topologyGeneration
+              ? "topology_generation_changed"
+              : null;
+    const current = reason === null;
+    if (!current && ctx.skipAccounting) {
+      this.countSkippedSweepTick(ctx.skipAccounting, reason);
+    }
+    return current;
+  }
+
+  private shouldYieldSweep(): boolean {
+    if (this.lifecycleLockQueueDepth === 0) return false;
+    this.sweepYielded += 1;
+    return true;
+  }
+
+  private invalidateSweepTopologyGeneration(): void {
+    this.sweepTopologyGeneration += 1;
+  }
+
+  private countSkippedSweepTick(
+    skipAccounting: SweepMutationSkipAccounting,
+    reason = "epoch_changed",
+  ): void {
+    if (skipAccounting.counted) return;
+    skipAccounting.counted = true;
+    this.sweepSkippedMutations += 1;
+    this.sweepSkippedReason = reason;
   }
 
   private assertSurfaceObserverEpochCurrent(
@@ -5170,6 +5351,16 @@ export class AgentEngine {
     return collectSurfaceTopology(
       this.client,
       undefined,
+      this.surfaceObserverEpochProvider(),
+      this.surfaceObserverIdProvider(),
+    );
+  }
+
+  private collectFreshObservedSurfaceTopology(): Promise<SurfaceTopologySnapshot | null> {
+    return collectSurfaceTopology(
+      this.client,
+      undefined,
+      this.surfaceObserverEpochProvider(),
       this.surfaceObserverIdProvider(),
     );
   }
@@ -5180,11 +5371,17 @@ export class AgentEngine {
    */
   private async syncSidebar(
     opts: { firstConnect?: boolean } = {},
+    surfaceTopologyOverride?: SurfaceTopologySnapshot | null,
+    snapshotMutationAllowed?: () => boolean,
+    sweepContext: SweepAgentContext = {},
   ): Promise<void> {
     const agents = this.registry.list();
     const total = agents.length;
     const done = agents.filter((a) => a.state === "done").length;
-    const surfaceTopology = await this.collectObservedSurfaceTopology();
+    const surfaceTopology =
+      surfaceTopologyOverride === undefined
+        ? await this.collectObservedSurfaceTopology()
+        : surfaceTopologyOverride;
     const observedLiveSurfaceRefs =
       surfaceTopology?.complete === true
         ? [...surfaceTopology.workspaceBySurface.keys()].sort()
@@ -5211,6 +5408,9 @@ export class AgentEngine {
     const fleetCandidates: FleetSidebarCandidate[] = [];
 
     for (const registryAgent of agents) {
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
       if (opts.firstConnect && TERMINAL_STATES.has(registryAgent.state)) {
         this.cliExitShellMatches.delete(registryAgent.agent_id);
         continue;
@@ -5240,6 +5440,7 @@ export class AgentEngine {
             // Best-effort cleanup for a no-longer-resolvable binding.
           }
         }
+        if (!this.assertSweepInputCurrent(sweepContext)) return;
         this.sidebarSnapshot.delete(registryAgent.agent_id);
         // The registry row still exists. Keep once-only lifecycle delivery
         // memory so a recovered binding cannot re-emit "spawned" or terminal
@@ -5284,13 +5485,19 @@ export class AgentEngine {
         bindingPatch.surface_observer_id = observerId;
       }
       if (Object.keys(bindingPatch).length > 0) {
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          continue;
+        }
         originalAgent = this.stateMgr.updateRecord(
           originalAgent.agent_id,
           bindingPatch,
         );
         this.registry.set(originalAgent.agent_id, originalAgent);
       }
-      const sweepCtx: SweepAgentContext = {};
+      const sweepCtx: SweepAgentContext = {
+        ...sweepContext,
+        surfaceTopology,
+      };
       // MCP readiness must not depend on a synchronous scan of the host's
       // transcript tree. Normal sweeps retry transcript capture after startup.
       const capturedAgent = await this.maybeCaptureBootSessionId(
@@ -5305,6 +5512,9 @@ export class AgentEngine {
         sweepCtx,
         taskDoneResult.screenText,
       );
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
       const initialAgentId = agent.agent_id;
       if (this.isKnownClosedSurface(agent, surfaceTopology)) {
         const prev = this.sidebarSnapshot.get(initialAgentId);
@@ -5317,6 +5527,7 @@ export class AgentEngine {
             // Best-effort cleanup; closed panes must not emit fresh health signals.
           }
         }
+        if (!this.assertSweepInputCurrent(sweepCtx)) return;
         this.sidebarSnapshot.delete(initialAgentId);
         this.clearAgentLifecycleMemory(initialAgentId);
         continue;
@@ -5355,7 +5566,7 @@ export class AgentEngine {
         if (targetAgent.agent_id === agent.agent_id) return sweepCtx;
         const existing = healthScreenContexts.get(targetAgent.agent_id);
         if (existing) return existing;
-        const next: SweepAgentContext = {};
+        const next: SweepAgentContext = { ...sweepContext, surfaceTopology };
         healthScreenContexts.set(targetAgent.agent_id, next);
         return next;
       };
@@ -5423,12 +5634,17 @@ export class AgentEngine {
           harvestability,
         },
       );
-      if (
-        !(await this.sweepReadMatchesBinding(
-          sweepCtx,
-          surfaceBinding.surfaceRef,
-        ))
-      ) {
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
+      const sweepReadMatchesBinding = await this.sweepReadMatchesBinding(
+        sweepCtx,
+        surfaceBinding.surfaceRef,
+      );
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
+      if (!sweepReadMatchesBinding) {
         // The fresh I/O resolver observed this stable UUID at a different ref
         // than the topology snapshot that began the sweep. The screen belongs
         // to the fresh route, while title/topology still belong to the outer
@@ -5443,6 +5659,7 @@ export class AgentEngine {
             // Best-effort cleanup; the next coherent sweep republishes it.
           }
         }
+        if (!this.assertSweepInputCurrent(sweepCtx)) return;
         this.sidebarSnapshot.delete(initialAgentId);
         this.clearAgentLifecycleMemory(initialAgentId);
         continue;
@@ -5456,7 +5673,14 @@ export class AgentEngine {
         }
       }
       if (haltScreenText !== undefined) {
-        agent = await this.maybeEscalateLiveHalt(agent, haltScreenText);
+        agent = await this.maybeEscalateLiveHalt(
+          agent,
+          haltScreenText,
+          sweepCtx,
+        );
+      }
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
       }
       const { agent_id: agentId, state } = agent;
       const boundSurfaceRef = surfaceBinding.surfaceRef;
@@ -5464,6 +5688,10 @@ export class AgentEngine {
         surfaceBinding.workspaceId ?? agent.workspace_id ?? null;
       const health = evaluateAgentHealth(agent, healthInput);
       await this.maybeNotifyLeadMonitorDeath(agent, healthInput);
+      if (!this.assertSweepInputCurrent(sweepCtx)) return;
+      if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
       const healthSignature = this.healthSignature(health);
       const statusValue = this.buildSidebarStatusValue(
         agent,
@@ -5480,27 +5708,28 @@ export class AgentEngine {
 
       // Lifecycle log: spawned (first encounter)
       if (!prev) {
-        await this.logLifecycleEvent(agent, "spawned");
+        await this.logLifecycleEvent(agent, "spawned", sweepCtx);
       }
 
       // Lifecycle log: done
       if (state === "done") {
-        await this.logLifecycleEvent(agent, "done");
+        await this.logLifecycleEvent(agent, "done", sweepCtx);
         if (this.shouldNotifyDone(harvestability)) {
-          await this.notifyLifecycleEvent(agent, "done");
+          await this.notifyLifecycleEventForSweep(sweepCtx, agent, "done");
         }
       }
 
       // Lifecycle log: error
       if (state === "error") {
-        await this.logLifecycleEvent(agent, "errored");
-        await this.notifyLifecycleEvent(agent, "errored");
+        await this.logLifecycleEvent(agent, "errored", sweepCtx);
+        await this.notifyLifecycleEventForSweep(sweepCtx, agent, "errored");
       }
 
       const shouldNotifyHealth = this.shouldNotifyHealthChange(prev, health);
       let healthNotificationDelivered = true;
       if (shouldNotifyHealth) {
-        healthNotificationDelivered = await this.notifyLifecycleEvent(
+        healthNotificationDelivered = await this.notifyLifecycleEventForSweep(
+          sweepCtx,
           agent,
           "health",
           healthSignature,
@@ -5513,24 +5742,10 @@ export class AgentEngine {
         this.clearHealthNotificationMemory(agentId);
       }
 
-      const archived = await this.maybeArchiveDoneAgent(agent);
-      const reaped = archived ? false : await this.maybeReapIdleWorker(agent);
-      if (archived || reaped) {
-        try {
-          await this.client.clearStatus(agentId, {
-            workspace: agent.workspace_id ?? undefined,
-          });
-        } catch {
-          // Best-effort sidebar cleanup; the surface has already been closed.
-        }
-        this.registry.remove(agentId);
-        this.stateMgr.removeState(agentId);
-        this.sidebarSnapshot.delete(agentId);
-        this.clearAgentLifecycleMemory(agentId);
-        continue;
-      }
-
       if (!(opts.firstConnect && TERMINAL_STATES.has(state))) {
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          continue;
+        }
         fleetCandidates.push({
           agentId: agent.agent_id,
           agentType: agent.cli,
@@ -5586,6 +5801,9 @@ export class AgentEngine {
             // Best-effort cleanup of stale workspace-scoped status.
           }
         }
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          continue;
+        }
         const sidebar = STATE_SIDEBAR[state];
         statusUpdates.push({
           key: agentId,
@@ -5606,6 +5824,7 @@ export class AgentEngine {
       if (statusChanged) {
         pendingStatusSnapshots.push({ agentId, snapshot: nextSnapshot });
       } else {
+        if (!this.assertSweepInputCurrent(sweepCtx)) return;
         this.sidebarSnapshot.set(agentId, nextSnapshot);
       }
 
@@ -5616,11 +5835,7 @@ export class AgentEngine {
         try {
           const screenText =
             taskDoneResult.screenText ??
-            (
-              await this.readAgentScreen(agent, {
-                lines: 5,
-              })
-            ).text;
+            (await this.readSweepScreen(agent, sweepCtx)).text;
           const parsed = parseScreen(tailScreenLines(screenText, 5));
           const contextPct = parsed.context_pct;
           if (
@@ -5628,6 +5843,7 @@ export class AgentEngine {
             contextPct >= 80 &&
             agent.quality !== "degraded"
           ) {
+            if (!this.assertSweepInputCurrent(sweepCtx)) return;
             // Mark degraded
             const updated = this.stateMgr.updateRecord(agentId, {
               quality: "degraded",
@@ -5670,26 +5886,29 @@ export class AgentEngine {
       if (
         state !== "booting" &&
         !TERMINAL_STATES.has(state) &&
-        (await this.registry.isSurfaceAlive(agent))
+        (await this.registry.isSurfaceAlive(agent, {
+          surfaces: surfaceTopology?.surfaces,
+        }))
       ) {
+        if (!this.assertSweepInputCurrent(sweepCtx)) return;
         const heartbeat = this.stateMgr.updateRecord(agentId, {});
         this.registry.set(agentId, heartbeat);
       }
     }
 
-    let statusBatchApplied = true;
-    if (statusUpdates.length === 1) {
-      const [update] = statusUpdates;
-      await this.client.setStatus(update.key, update.value, update);
-    } else if (statusUpdates.length > 1) {
-      if (this.client.setStatuses) {
-        statusBatchApplied =
-          (await this.client.setStatuses(statusUpdates)) !== false;
-      } else {
-        for (const update of statusUpdates) {
-          await this.client.setStatus(update.key, update.value, update);
-        }
-      }
+    if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+      return;
+    }
+
+    const statusBatchApplied = await this.publishSweepStatus(
+      sweepContext,
+      statusUpdates,
+    );
+    if (
+      statusUpdates.length > 0 &&
+      !this.assertSweepInputCurrent(sweepContext)
+    ) {
+      return;
     }
     if (statusBatchApplied) {
       for (const pending of pendingStatusSnapshots) {
@@ -5708,6 +5927,9 @@ export class AgentEngine {
     }
     for (const [agentId, snapshot] of this.sidebarSnapshot) {
       if (!currentAgentIds.has(agentId)) {
+        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+          return;
+        }
         try {
           await this.client.clearStatus(agentId, {
             workspace: snapshot.workspaceId ?? undefined,
@@ -5715,6 +5937,7 @@ export class AgentEngine {
         } catch {
           // Best-effort sidebar cleanup
         }
+        if (!this.assertSweepInputCurrent(sweepContext)) return;
         this.sidebarSnapshot.delete(agentId);
         this.clearAgentLifecycleMemory(agentId);
       }
@@ -5742,6 +5965,9 @@ export class AgentEngine {
           : opts.firstConnect
             ? "unknown"
             : "empty";
+    if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+      return;
+    }
     try {
       this.fleetSidebarPublisher.publish({
         state: publicationState,
@@ -5776,8 +6002,15 @@ export class AgentEngine {
    */
   async reconcileRolePlacements(
     trigger: RolePlacementReconcileTrigger,
-    opts: { agentIds?: ReadonlySet<string> } = {},
+    opts: {
+      agentIds?: ReadonlySet<string>;
+      surfaceTopology?: SurfaceTopologySnapshot | null;
+      sweepContext?: SweepAgentContext;
+    } = {},
   ): Promise<RolePlacementReconcileSummary> {
+    if (!this.assertSweepInputCurrent(opts.sweepContext ?? {})) {
+      return { moved: [], skipped: [] };
+    }
     const summary: RolePlacementReconcileSummary = { moved: [], skipped: [] };
     const eligibleForTrigger = (agent: AgentRecord): boolean => {
       if (agent.surface_provenance !== "cmuxlayer_spawn") return false;
@@ -5813,12 +6046,31 @@ export class AgentEngine {
         continue;
       }
 
+      // The sweep already owns one complete topology observation. If it proves
+      // this seat is in the canonical column, avoid enumerating the workspace
+      // again. A misplaced or inconclusive seat still takes the existing fresh
+      // mutation-guard path below.
+      const sweepBinding = resolveAgentSurfaceBinding(
+        agent,
+        opts.surfaceTopology ?? null,
+      );
+      if (
+        sweepBinding?.provenance === "uuid" &&
+        opts.surfaceTopology?.topologyBySurface.get(sweepBinding.surfaceRef)
+          ?.column === targetColumn
+      ) {
+        continue;
+      }
+
       const observerEpoch = this.captureSurfaceObserverEpoch();
       try {
         const assertFreshAgentBinding = async (
           expectedSurfaceRef: string,
           operation: string,
         ): Promise<void> => {
+          if (!this.assertSweepInputCurrent(opts.sweepContext ?? {})) {
+            throw new Error("sweep input changed before role placement");
+          }
           this.assertSurfaceObserverEpochCurrent(observerEpoch, operation);
           const current =
             this.registry.get(agent.agent_id) ??
@@ -5834,7 +6086,7 @@ export class AgentEngine {
               "agent provenance, state, or stable binding changed before mutation",
             );
           }
-          const topology = await this.collectObservedSurfaceTopology();
+          const topology = await this.collectFreshObservedSurfaceTopology();
           this.assertSurfaceObserverEpochCurrent(observerEpoch, operation);
           if (!topology?.complete) {
             throw new Error("fresh stable UUID topology is incomplete");
@@ -5863,6 +6115,9 @@ export class AgentEngine {
             this.stateMgr.readState(agent.agent_id);
           if (!latest || !eligibleForTrigger(latest)) {
             throw new Error("agent became busy before role placement mutation");
+          }
+          if (!this.assertSweepInputCurrent(opts.sweepContext ?? {})) {
+            throw new Error("sweep input changed before role placement");
           }
         };
 
@@ -5940,6 +6195,7 @@ export class AgentEngine {
             beforeMutation: () =>
               assertFreshAgentBinding(sourceRef, "worker-column seed"),
           });
+          this.invalidateSweepTopologyGeneration();
           this.assertSurfaceObserverEpochCurrent(
             observerEpoch,
             "role placement",
@@ -5973,6 +6229,7 @@ export class AgentEngine {
             beforeMutation: () =>
               assertFreshAgentBinding(sourceRef, "role placement move"),
           });
+          this.invalidateSweepTopologyGeneration();
           summary.moved.push({
             agent_id: agent.agent_id,
             surface_id: sourceRef,
@@ -5991,7 +6248,8 @@ export class AgentEngine {
                 "worker-column seed has no stable UUID; refusing cleanup by mutable ref",
               );
             }
-            const seedTopology = await this.collectObservedSurfaceTopology();
+            const seedTopology =
+              await this.collectFreshObservedSurfaceTopology();
             const seedBinding = seedTopology?.complete
               ? resolveAgentSurfaceBinding(
                   {
@@ -6015,7 +6273,7 @@ export class AgentEngine {
                   "role placement seed cleanup",
                 );
                 const freshSeedTopology =
-                  await this.collectObservedSurfaceTopology();
+                  await this.collectFreshObservedSurfaceTopology();
                 this.assertSurfaceObserverEpochCurrent(
                   observerEpoch,
                   "role placement seed cleanup",
@@ -6136,7 +6394,10 @@ export class AgentEngine {
     }
   }
 
-  private async purgeStartupTerminalAgents(): Promise<void> {
+  private async purgeStartupTerminalAgents(
+    ctx: SweepAgentContext = {},
+  ): Promise<void> {
+    if (!this.assertSweepInputCurrent(ctx)) return;
     if (!this.startupPurgePending) return;
     this.startupPurgePending = false;
     const retainedAgentIds = new Set(this.startupPurgeRetainedAgentIds);
@@ -6163,6 +6424,31 @@ export class AgentEngine {
         healthSignature: "__purged__",
       });
     }
+  }
+
+  private async evictSurfacelessForSweep(
+    ctx: SweepAgentContext,
+    observed: Parameters<AgentRegistry["evictSurfaceless"]>[0],
+  ): Promise<void> {
+    if (!this.assertSweepInputCurrent(ctx)) return;
+    await this.registry.evictSurfaceless(observed);
+  }
+
+  private async purgeTerminalForSweep(
+    ctx: SweepAgentContext,
+    observed: Parameters<AgentRegistry["purgeTerminal"]>[0],
+  ): Promise<void> {
+    if (!this.assertSweepInputCurrent(ctx)) return;
+    await this.registry.purgeTerminal(observed);
+  }
+
+  private removeStateForSweep(
+    ctx: SweepAgentContext,
+    agentId: string,
+  ): boolean {
+    if (!this.assertSweepInputCurrent(ctx)) return false;
+    this.stateMgr.removeState(agentId);
+    return true;
   }
 
   /**
@@ -6310,6 +6596,9 @@ export class AgentEngine {
       acquire_timeout_ms: this.lifecycleLockAcquireTimeoutMs,
       hold_timeout_ms: this.lifecycleLockHoldTimeoutMs,
       forced_releases: this.lifecycleLockForcedReleases,
+      sweep_skipped_mutations: this.sweepSkippedMutations,
+      sweep_skipped_reason: this.sweepSkippedReason,
+      sweep_yielded: this.sweepYielded,
       timeouts: this.lifecycleLockTimeouts,
       last_timeout: this.lifecycleLockLastTimeout,
     };
@@ -7128,33 +7417,141 @@ export class AgentEngine {
   }
 
   private async runSweepOnce(): Promise<void> {
-    this.currentSweepScreenSignatures = new Map();
-    await this.runCloseForensicsBestEffort();
-    // Reuse the resync path's authoritative-safe ghost eviction on every sweep,
-    // but require one confirmation window after the surface is first observed
-    // absent. The same gate also applies to terminal worker cleanup below.
-    // This absorbs cmux's short post-create topology lag without retaining old
-    // ghosts indefinitely. Empty or failed enumeration remains inconclusive.
-    const surfacelessConfirmation = {
-      confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
-      now: Date.now(),
+    const timings: Record<string, number> = {};
+    const sweepStartedAt = Date.now();
+    const time = async <T>(name: string, operation: () => Promise<T>) => {
+      const startedAt = Date.now();
+      try {
+        return await operation();
+      } finally {
+        timings[name] = Date.now() - startedAt;
+      }
     };
-    await this.registry.reconcile(surfacelessConfirmation);
-    await this.reapChannelMarkersBestEffort();
-    await this.registry.evictSurfaceless(surfacelessConfirmation);
+    try {
+      const skipAccounting: SweepMutationSkipAccounting = { counted: false };
+      this.currentSweepScreenSignatures = new Map();
+      const surfaceTopology = await time("topology_ms", () =>
+        this.collectObservedSurfaceTopology(),
+      );
+      this.sweepTopologyGeneration += 1;
+      if (surfaceTopology) {
+        surfaceTopology.generation = this.sweepTopologyGeneration;
+      }
+      const sweepCtx: SweepAgentContext = {
+        sweep: true,
+        surfaceTopology,
+        topologyGeneration: surfaceTopology?.generation,
+        skipAccounting,
+      };
+      const transportHealth = getTransportHealth(this.client);
+      const topologyIsAuthoritative =
+        surfaceTopology?.complete === true &&
+        surfaceTopology.surfaces.length > 0;
+      const mutationsAreSafe =
+        topologyIsAuthoritative &&
+        transportHealth?.mode === "socket" &&
+        transportHealth.degraded === false;
+      if (mutationsAreSafe) {
+        this.sweepSkippedMutations = 0;
+        this.sweepSkippedReason = null;
+      }
+      const observedSurfaces = topologyIsAuthoritative
+        ? surfaceTopology.surfaces
+        : undefined;
+      // Reuse the resync path's authoritative-safe ghost eviction on every sweep,
+      // but require one confirmation window after the surface is first observed
+      // absent. The same gate also applies to terminal worker cleanup below.
+      // This absorbs cmux's short post-create topology lag without retaining old
+      // ghosts indefinitely. Empty or failed enumeration remains inconclusive.
+      const surfacelessConfirmation = {
+        confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+        now: Date.now(),
+      };
+      await time("close_forensics_ms", () =>
+        this.runCloseForensicsBestEffort(sweepCtx),
+      );
+      if (this.shouldYieldSweep()) return;
+      await time("channel_markers_ms", () =>
+        this.reapChannelMarkersBestEffort(),
+      );
+      if (this.shouldYieldSweep()) return;
+      if (mutationsAreSafe) {
+        const observed = {
+          ...surfacelessConfirmation,
+          ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
+        };
+        if (this.assertSweepInputCurrent(sweepCtx)) {
+          await time("registry_reconcile_ms", () =>
+            this.registry.reconcile(observed),
+          );
+        }
+        if (this.shouldYieldSweep()) return;
+        if (this.assertSweepInputCurrent(sweepCtx)) {
+          await time("evict_ms", () =>
+            this.evictSurfacelessForSweep(sweepCtx, observed),
+          );
+        }
+        if (this.shouldYieldSweep()) return;
+        if (this.assertSweepInputCurrent(sweepCtx)) {
+          await time("startup_purge_ms", () =>
+            this.purgeStartupTerminalAgents(sweepCtx),
+          );
+        }
+      } else {
+        this.countSkippedSweepTick(skipAccounting, "transport_degraded");
+      }
 
-    await this.purgeStartupTerminalAgents();
-
-    // Deferred transcript identity does not require a live surface binding.
-    // Retry after the one-shot startup purge has retained marked rows, but
-    // before normal terminal cleanup can act on a closed pane.
-    await this.retryDeferredTranscriptCaptures();
-    await this.sweepWatchesBestEffort();
-    await this.registry.purgeTerminal(surfacelessConfirmation);
-    await this.sweepMonitorRegistryBestEffort();
-    await this.reconcileRolePlacements("idle");
-    await this.syncSidebar();
-    await this.drainOutboxBestEffort();
+      // Deferred transcript identity does not require a live surface binding.
+      // Retry after the one-shot startup purge has retained marked rows, but
+      // before normal terminal cleanup can act on a closed pane.
+      await time("transcript_ms", () => this.retryDeferredTranscriptCaptures());
+      if (this.shouldYieldSweep()) return;
+      await time("watches_ms", () => this.sweepWatchesBestEffort());
+      if (this.shouldYieldSweep()) return;
+      if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
+        await time("terminal_purge_ms", () =>
+          this.purgeTerminalForSweep(sweepCtx, {
+            ...surfacelessConfirmation,
+            ...(observedSurfaces ? { surfaces: observedSurfaces } : {}),
+          }),
+        );
+      }
+      if (this.shouldYieldSweep()) return;
+      await time("monitors_ms", () => this.sweepMonitorRegistryBestEffort());
+      if (this.shouldYieldSweep()) return;
+      if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
+        await time("placements_ms", () =>
+          this.reconcileRolePlacements("idle", {
+            surfaceTopology,
+            sweepContext: sweepCtx,
+          }),
+        );
+      }
+      if (this.shouldYieldSweep()) return;
+      if (!mutationsAreSafe) {
+        await time("sidebar_ms", () =>
+          this.syncSidebar({}, null, undefined, sweepCtx),
+        );
+      } else if (this.assertSweepInputCurrent(sweepCtx)) {
+        await time("sidebar_ms", () =>
+          this.syncSidebar(
+            {},
+            surfaceTopology,
+            () => this.assertSweepInputCurrent(sweepCtx),
+            sweepCtx,
+          ),
+        );
+      }
+      if (this.shouldYieldSweep()) return;
+      await time("outbox_ms", () => this.drainOutboxBestEffort());
+    } finally {
+      timings.total_ms = Date.now() - sweepStartedAt;
+      this.sweepDebugLog(
+        `[cmuxlayer] sweep timing ${Object.entries(timings)
+          .map(([name, value]) => `${name}=${value}`)
+          .join(" ")}`,
+      );
+    }
   }
 
   private async reapChannelMarkersBestEffort(): Promise<void> {
@@ -7210,13 +7607,15 @@ export class AgentEngine {
    * can become a recoverable crash. Forensics remains best-effort and never
    * breaks the sweep.
    */
-  private async runCloseForensicsBestEffort(): Promise<void> {
+  private async runCloseForensicsBestEffort(
+    ctx: SweepAgentContext,
+  ): Promise<void> {
     if (!this.closeForensicsRunner) return;
     if (this.closeForensicsSweepInFlight) return;
     this.closeForensicsSweepInFlight = true;
     try {
       const result = await this.closeForensicsRunner();
-      this.markIntentionalSurfaceCloses(result.events);
+      this.markIntentionalSurfaceCloses(result.events, ctx);
     } catch {
       // Never break the sweep on a forensics failure; it retries next sweep.
     } finally {
@@ -7224,7 +7623,11 @@ export class AgentEngine {
     }
   }
 
-  private markIntentionalSurfaceCloses(events: CloseForensicsEvent[]): void {
+  private markIntentionalSurfaceCloses(
+    events: CloseForensicsEvent[],
+    ctx: SweepAgentContext,
+  ): void {
+    if (!this.assertSweepInputCurrent(ctx)) return;
     const closedSurfaceUuids = new Set(
       events
         .filter(
@@ -8581,7 +8984,10 @@ export class AgentEngine {
    * UUID-less legacy records retain compatibility only when an owned ref is
    * proven by a complete fresh topology with no UUID identity coverage.
    */
-  async resolveAgentIoRoute(agentId: string): Promise<AgentRoute> {
+  async resolveAgentIoRoute(
+    agentId: string,
+    topologyOverride?: SurfaceTopologySnapshot | null,
+  ): Promise<AgentRoute> {
     let agent = this.registry.get(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
@@ -8597,7 +9003,16 @@ export class AgentEngine {
         );
       }
 
-      const topology = await this.collectObservedSurfaceTopology();
+      const topology =
+        topologyOverride === undefined
+          ? await this.collectObservedSurfaceTopology()
+          : topologyOverride;
+      if (topologyOverride !== undefined) {
+        this.assertSurfaceObserverEpochCurrent(
+          topology?.observerEpoch,
+          "sweep route resolution",
+        );
+      }
       const binding = resolveAgentSurfaceBinding(agent, topology);
       if (
         topology?.complete !== true ||
@@ -8627,7 +9042,16 @@ export class AgentEngine {
       return this.resolveAgentRoute(agent.agent_id);
     }
 
-    const topology = await this.collectObservedSurfaceTopology();
+    const topology =
+      topologyOverride === undefined
+        ? await this.collectObservedSurfaceTopology()
+        : topologyOverride;
+    if (topologyOverride !== undefined) {
+      this.assertSurfaceObserverEpochCurrent(
+        topology?.observerEpoch,
+        "sweep route resolution",
+      );
+    }
     const binding = resolveAgentSurfaceBinding(agent, topology);
     if (!binding || binding.provenance !== "uuid") {
       if (agentProcessMayBeAlive(agent)) {

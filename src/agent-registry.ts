@@ -43,6 +43,8 @@ export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 interface SurfaceAbsenceOptions {
   confirmationMs?: number;
   now?: number;
+  /** Same-tick observation supplied by AgentEngine to avoid re-enumeration. */
+  surfaces?: readonly CmuxSurface[];
 }
 
 export interface LiveSeatDiscoveryProof {
@@ -633,6 +635,12 @@ export class AgentRegistry {
     return this.enforceObserverOwnership;
   }
 
+  private observedSurfaces(
+    override?: readonly CmuxSurface[],
+  ): Promise<readonly CmuxSurface[]> {
+    return override ? Promise.resolve(override) : this.surfaceProvider();
+  }
+
   /**
    * Decide whether a live observation is strong enough to bind an existing row.
    * Stable UUID equality can migrate ownership; mutable refs require the row to
@@ -775,9 +783,9 @@ export class AgentRegistry {
     opts: SurfaceAbsenceOptions = {},
   ): Promise<Set<string>> {
     const observerSnapshot = this.captureObserverSnapshot();
-    let surfaces: CmuxSurface[];
+    let surfaces: readonly CmuxSurface[];
     try {
-      surfaces = await this.surfaceProvider();
+      surfaces = await this.observedSurfaces(opts.surfaces);
     } catch {
       // Treat enumeration failures as "unknown", not "zero surfaces". A transient
       // socket/listing failure must not mark every active agent as disappeared.
@@ -1024,16 +1032,16 @@ export class AgentRegistry {
 
   async isSurfaceAlive(
     agent: Pick<AgentRecord, "surface_id" | "surface_uuid">,
-    opts: { ptyDead?: boolean } = {},
+    opts: { ptyDead?: boolean; surfaces?: readonly CmuxSurface[] } = {},
   ): Promise<boolean> {
     if (opts.ptyDead === true) {
       return false;
     }
 
     const observerSnapshot = this.captureObserverSnapshot();
-    let surfaces: CmuxSurface[];
+    let surfaces: readonly CmuxSurface[];
     try {
-      surfaces = await this.surfaceProvider();
+      surfaces = await this.observedSurfaces(opts.surfaces);
     } catch {
       // "Live" here means "not proven absent" for liveness guards.
       return true;
@@ -1768,9 +1776,9 @@ export class AgentRegistry {
     opts: SurfacelessEvictionOptions = {},
   ): Promise<string[]> {
     const observerSnapshot = this.captureObserverSnapshot();
-    let surfaces: CmuxSurface[];
+    let surfaces: readonly CmuxSurface[];
     try {
-      surfaces = await this.surfaceProvider();
+      surfaces = await this.observedSurfaces(opts.surfaces);
     } catch {
       return [];
     }
@@ -2643,12 +2651,12 @@ export class AgentRegistry {
    * Agents whose surface is still alive are kept (user may want to inspect output).
    */
   async purgeTerminal(
-    opts: { confirmationMs?: number; now?: number } = {},
+    opts: SurfaceAbsenceOptions = {},
   ): Promise<number> {
     const observerSnapshot = this.captureObserverSnapshot();
-    let surfaces: CmuxSurface[];
+    let surfaces: readonly CmuxSurface[];
     try {
-      surfaces = await this.surfaceProvider();
+      surfaces = await this.observedSurfaces(opts.surfaces);
     } catch {
       return 0;
     }

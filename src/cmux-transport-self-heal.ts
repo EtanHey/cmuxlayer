@@ -23,6 +23,7 @@ export const DEFAULT_PING_RETRY_ATTEMPTS = 3;
 export const DEFAULT_PING_RETRY_BACKOFF_MS = [100, 250, 500] as const;
 export const DEFAULT_TRANSPORT_REPROBE_MS = 5_000;
 export const DEFAULT_TRANSPORT_REPROBE_CAP_MS = 30_000;
+export const DEFAULT_HARD_DENIAL_REPROBE_MS = 300_000;
 export const DEFAULT_INTERACTIVE_RETRY_ATTEMPTS = 3;
 export const DEFAULT_INTERACTIVE_RETRY_BASE_MS = 100;
 export const DEFAULT_INTERACTIVE_RETRY_CAP_MS = 400;
@@ -61,6 +62,8 @@ export interface CmuxSelfHealingClientOptions {
   factoryOpts?: CreateCmuxClientOptions;
   reprobeIntervalMs?: number;
   reprobeCapMs?: number;
+  /** Slow recovery probe used after explicit cmux access-control denial. */
+  hardDenialReprobeMs?: number;
   random?: () => number;
   initialDenial?: TransportDenialSignal;
   logger?: Pick<Console, "error">;
@@ -190,6 +193,8 @@ export class CmuxSelfHealingClient {
   private failedPayloadQueue: QueuedFailedPayload[] = [];
   private flushingFailedPayloadQueue: Promise<void> | null = null;
   private transportDenial: TransportDenialSignal | null = null;
+  /** Explicit cmux access-control denial suppresses the normal fast cadence. */
+  private hardAccessControlDenied = false;
   private completedRetryCount = 0;
   private upstreamProbeFailures = 0;
   private upstreamProbeStartedAt: number | null = null;
@@ -203,6 +208,8 @@ export class CmuxSelfHealingClient {
     this.socketClient = opts.socket ?? null;
     this.delegate = opts.socket ?? opts.cli;
     this.transportDenial = opts.initialDenial ?? null;
+    this.hardAccessControlDenied =
+      opts.initialDenial?.denied_reason === "access-control";
     if (opts.initialDenial) {
       this.upstreamProbeFailures = 1;
       this.upstreamProbeStartedAt = (opts.now ?? Date.now)();
@@ -216,7 +223,9 @@ export class CmuxSelfHealingClient {
     }
     if (!this.socketClient) {
       opts.logger?.error(
-        "[cmuxlayer] transport degraded: cli (periodic socket re-probe active)",
+        this.hardAccessControlDenied
+          ? "[cmuxlayer] transport denied: access-control (hard state); daemon must be spawned from inside a cmux pane; slow recovery re-probe active"
+          : "[cmuxlayer] transport degraded: cli (periodic socket re-probe active)",
       );
     }
     this.startReprobe();
@@ -318,6 +327,7 @@ export class CmuxSelfHealingClient {
       return await fn();
     } catch (error) {
       if (this.shouldDowngrade(error)) {
+        this.recordActiveAccessControlDenial(error);
         this.downgradeToCli();
       }
       throw error;
@@ -445,6 +455,9 @@ export class CmuxSelfHealingClient {
   }
 
   private nextReprobeDelayMs(): number {
+    if (this.hardAccessControlDenied) {
+      return this.opts.hardDenialReprobeMs ?? DEFAULT_HARD_DENIAL_REPROBE_MS;
+    }
     const baseMs = this.opts.reprobeIntervalMs ?? DEFAULT_TRANSPORT_REPROBE_MS;
     const previousMs = this.previousReprobeDelayMs || baseMs;
     const delayMs = decorrelatedJitterDelayMs({
@@ -468,8 +481,7 @@ export class CmuxSelfHealingClient {
   private isRecoverableSocketError(error: unknown): boolean {
     const isTransportError =
       error instanceof CmuxSocketError &&
-      (error.code === "connection_error" ||
-        error.code === "connection_closed");
+      (error.code === "connection_error" || error.code === "connection_closed");
     const message = error instanceof Error ? error.message : String(error);
     const hasRecoverableSignal =
       /\b(?:EPIPE|ECONNRESET|broken pipe)\b/i.test(message) ||
@@ -488,6 +500,7 @@ export class CmuxSelfHealingClient {
       this.socketClient &&
       this.isRecoverableSocketError(error)
     ) {
+      this.recordActiveAccessControlDenial(error);
       this.downgradeToCli();
     }
     if (!this.canRetryPayload(error, method)) {
@@ -569,11 +582,7 @@ export class CmuxSelfHealingClient {
       recordTransportRetry();
       const delegate = this.delegate;
       try {
-        return await this.callDelegate(
-          payload.method,
-          payload.args,
-          delegate,
-        );
+        return await this.callDelegate(payload.method, payload.args, delegate);
       } catch (error) {
         lastError = error;
         if (delegate === this.opts.cli) {
@@ -613,9 +622,13 @@ export class CmuxSelfHealingClient {
     this.socketClient = null;
     this.delegate = this.opts.cli;
     this.observerRouteGeneration++;
-    this.transportDenial = null;
+    if (!this.hardAccessControlDenied) {
+      this.transportDenial = null;
+    }
     this.opts.logger?.error(
-      "[cmuxlayer] transport downgraded: socket -> cli (periodic socket re-probe active)",
+      this.hardAccessControlDenied
+        ? "[cmuxlayer] transport downgraded: socket -> cli (access-control hard state; daemon must be spawned from inside a cmux pane)"
+        : "[cmuxlayer] transport downgraded: socket -> cli (periodic socket re-probe active)",
     );
     this.startReprobe();
   }
@@ -678,6 +691,7 @@ export class CmuxSelfHealingClient {
       this.delegate = client;
       this.observerRouteGeneration++;
       this.transportDenial = null;
+      this.hardAccessControlDenied = false;
       this.clearReprobe();
       this.previousReprobeDelayMs = 0;
       this.opts.logger?.error("[cmuxlayer] transport upgraded: cli -> socket");
@@ -715,9 +729,21 @@ export class CmuxSelfHealingClient {
       socketPath: result.socketPath,
       error: result.error ?? "Access denied",
     };
+    this.hardAccessControlDenied = true;
+    this.clearReprobe();
     this.opts.logger?.error(
-      `[cmuxlayer] transport denied: access-control (${result.socketPath}): ${this.transportDenial.error}`,
+      `[cmuxlayer] transport denied: access-control (${result.socketPath}): ${this.transportDenial.error}; hard state, daemon must be spawned from inside a cmux pane; slow recovery re-probe active`,
     );
+  }
+
+  private recordActiveAccessControlDenial(error: unknown): void {
+    if (!this.socketClient || !isCmuxAccessControlDenied(error)) return;
+    this.recordAccessControlDenial({
+      usable: false,
+      socketPath: this.socketClient.currentSocketPath(),
+      denied_reason: "access-control",
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   private isDenialClassError(error: unknown): boolean {
@@ -741,7 +767,7 @@ export class CmuxSelfHealingClient {
     const denialClass =
       result.denied_reason === "access-control" ||
       (typeof result.error === "string" &&
-        this.isDenialClassError(result.error));
+        isCmuxAccessControlDenied(result.error));
     if (result.usable) {
       this.resetUpstreamFailureEvidence();
       return false;
@@ -784,10 +810,7 @@ export class CmuxSelfHealingClient {
   }
 
   private logUpstreamFailureProgress(now: number): void {
-    if (
-      now - this.lastUpstreamFailureLogAt <
-      DENIAL_PROGRESS_LOG_INTERVAL_MS
-    ) {
+    if (now - this.lastUpstreamFailureLogAt < DENIAL_PROGRESS_LOG_INTERVAL_MS) {
       return;
     }
     this.lastUpstreamFailureLogAt = now;

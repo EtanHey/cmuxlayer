@@ -15,6 +15,7 @@ import {
   createDefaultToolPalette,
 } from "./palette.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
+import { getTransportHealth } from "./cmux-transport-self-heal.js";
 import {
   createFileSystemSeatManifestWriter,
   type SeatManifestWriter,
@@ -11446,6 +11447,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         stateMgr,
         registry,
         {
+          getTransportHealth: () => getTransportHealth(client),
+          supportsStableSurfaceReads: true,
           log: (message, eventOpts) => client.log(message, eventOpts),
           listWorkspaces: () => client.listWorkspaces(),
           setStatus: (key, value, statusOpts) =>

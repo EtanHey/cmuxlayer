@@ -13,7 +13,15 @@ import type {
 export type SurfaceTopology = AgentTopologyHealthInput;
 
 export interface SurfaceTopologySnapshot {
+  /** Engine-local generation assigned to the observation used by one sweep. */
+  generation?: number;
+  /** Stable observer owner that produced this completed observation. */
+  observerId?: string | null;
+  /** Observer epoch that authorized this completed observation. */
+  observerEpoch?: SurfaceObserverEpoch;
   complete: boolean;
+  /** Canonical surface rows captured by this same topology enumeration. */
+  surfaces: CmuxSurface[];
   workspaceBySurface: Map<string, string>;
   titleBySurface: Map<string, string>;
   topologyBySurface: Map<string, SurfaceTopology>;
@@ -44,10 +52,7 @@ export interface SurfaceTopologyClient {
   }): Promise<CmuxPaneSurfaces>;
 }
 
-export type SurfaceObserverIdProvider = () =>
-  | string
-  | null
-  | undefined;
+export type SurfaceObserverIdProvider = () => string | null | undefined;
 
 /**
  * `undefined` means observer scoping is intentionally disabled for a legacy
@@ -279,10 +284,13 @@ export function enrichSurfaceIdsFromPanes(
 export async function collectSurfaceTopology(
   client: SurfaceTopologyClient,
   workspace?: string,
-  observerIdProvider?: SurfaceObserverIdProvider,
+  observerEpochProvider?: SurfaceObserverIdProvider,
+  observerIdProvider:
+    SurfaceObserverIdProvider | undefined = observerEpochProvider,
 ): Promise<SurfaceTopologySnapshot | null> {
-  const observerEpoch = captureSurfaceObserverEpoch(observerIdProvider);
-  if (observerEpoch === null) {
+  const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
+  const observerId = captureSurfaceObserverEpoch(observerIdProvider);
+  if (observerEpoch === null || observerId === null) {
     return null;
   }
 
@@ -296,7 +304,10 @@ export async function collectSurfaceTopology(
   }
 
   const snapshot: SurfaceTopologySnapshot = {
+    observerId,
+    observerEpoch,
     complete: true,
+    surfaces: [],
     workspaceBySurface: new Map(),
     titleBySurface: new Map(),
     topologyBySurface: new Map(),
@@ -308,7 +319,11 @@ export async function collectSurfaceTopology(
   for (const workspaceRef of workspaceRefs) {
     try {
       const panes = await client.listPanes({ workspace: workspaceRef });
-      if (!panes.panes || panes.panes.length === 0) continue;
+      if (!Array.isArray(panes.panes)) {
+        snapshot.complete = false;
+        continue;
+      }
+      if (panes.panes.length === 0) continue;
 
       const columnIndex = deriveRoleColumnIndex(panes.panes);
       const columnCount = new Set(columnIndex.values()).size;
@@ -346,10 +361,14 @@ export async function collectSurfaceTopology(
           });
         }
       }
-      const partitioned = partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
-        workspace_ref: panes.workspace_ref ?? workspaceRef,
-        window_ref: panes.window_ref,
-      });
+      const partitioned = partitionPaneSurfacesByMembership(
+        panes.panes,
+        rawGroups,
+        {
+          workspace_ref: panes.workspace_ref ?? workspaceRef,
+          window_ref: panes.window_ref,
+        },
+      );
       for (const pane of panes.panes) {
         const expectedSurfaceRefs = new Set(pane.surface_refs);
         const observedGroup = partitioned.find(
@@ -375,13 +394,25 @@ export async function collectSurfaceTopology(
         }
       }
       for (const group of partitioned) {
-        const pane = panes.panes.find((candidate) => candidate.ref === group.pane_ref);
+        const pane = panes.panes.find(
+          (candidate) => candidate.ref === group.pane_ref,
+        );
         for (const surface of group.surfaces) {
           const surfaceIndex = pane?.surface_refs?.indexOf(surface.ref) ?? -1;
           const surfaceId =
             surface.id ??
             (surfaceIndex >= 0 ? pane?.surface_ids?.[surfaceIndex] : undefined);
+          const surfaceWorkspaceRef =
+            group.workspace_ref?.trim() || workspaceRef.trim() || undefined;
           identityPairs.push({ surfaceRef: surface.ref, surfaceId });
+          snapshot.surfaces.push({
+            ...surface,
+            ...(surfaceId ? { id: surfaceId } : {}),
+            ...(surfaceWorkspaceRef
+              ? { workspace_ref: surfaceWorkspaceRef }
+              : { workspace_ref: undefined }),
+            pane_ref: group.pane_ref,
+          });
           snapshot.workspaceBySurface.set(
             surface.ref,
             group.workspace_ref ?? workspaceRef,
@@ -425,7 +456,10 @@ export async function collectSurfaceTopology(
     snapshot.complete = false;
   }
 
-  if (!isSurfaceObserverEpochCurrent(observerEpoch, observerIdProvider)) {
+  if (
+    !isSurfaceObserverEpochCurrent(observerEpoch, observerEpochProvider) ||
+    !isSurfaceObserverEpochCurrent(observerId, observerIdProvider)
+  ) {
     return null;
   }
 

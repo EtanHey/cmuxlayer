@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
+import { getTransportHealth } from "./cmux-transport-self-heal.js";
 import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
 import { makeSelfRegistrationSessionResolver } from "./self-registration.js";
 import type { AgentRoute } from "./agent-types.js";
@@ -277,6 +278,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       this.stateMgr,
       this.registry,
       {
+        getTransportHealth: () => getTransportHealth(this.client),
+        supportsStableSurfaceReads: true,
         log: async () => {},
         listWorkspaces: () => this.client.listWorkspaces(),
         setStatus: async () => {},

@@ -541,6 +541,13 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
       `lifecycle lock was force-released ${lifecycle.lifecycle_lock.forced_releases} time(s); an operation never settled.`,
     );
   }
+  const skippedSweepMutations =
+    lifecycle?.lifecycle_lock?.sweep_skipped_mutations ?? 0;
+  if (skippedSweepMutations > 0) {
+    warnings.push(
+      `WARNING: lifecycle sweep skipped destructive reconciliation ${skippedSweepMutations} time(s); registry garbage collection is read-only until socket-backed complete topology recovers.`,
+    );
+  }
   // #530: a stranded/unrestorable socket, or any recorded daemon lifecycle
   // error, must be visible rather than living only in a log line.
   if (lifecycle?.last_error) {
@@ -620,7 +627,7 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
     health.selected_transport.transport_error
   ) {
     warnings.push(
-      `cmuxlayer control transport denied: access-control; ${health.selected_transport.transport_error}`,
+      `ERROR: cmuxlayer control transport denied: access-control; ${health.selected_transport.transport_error}. Remedy: daemon must be spawned from inside a cmux pane.`,
     );
   } else if (
     health.selected_transport.transport_degraded === true &&
@@ -834,7 +841,7 @@ function formatDaemonLifecycle(
     lines.push(
       `lifecycle lock: holder=${lock.holder ?? "none"} held_for_ms=${
         lock.held_for_ms ?? 0
-      } queue_depth=${lock.queue_depth} timeouts=${lock.timeouts} forced_releases=${lock.forced_releases}`,
+      } queue_depth=${lock.queue_depth} timeouts=${lock.timeouts} forced_releases=${lock.forced_releases} sweep_skipped_mutations=${lock.sweep_skipped_mutations}`,
     );
     if (lock.last_timeout) {
       lines.push(

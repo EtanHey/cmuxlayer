@@ -12,7 +12,10 @@ import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../src/agent-health-input.js";
-import { readMonitorRegistry, registerMonitor } from "../src/monitor-registry.js";
+import {
+  readMonitorRegistry,
+  registerMonitor,
+} from "../src/monitor-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
@@ -90,6 +93,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): MockClient {
     log: vi.fn().mockResolvedValue(undefined),
     notify: vi.fn().mockResolvedValue(undefined),
     notifyLifecycleEvent: vi.fn().mockResolvedValue(undefined),
+    getTransportHealth: () => ({ mode: "socket", degraded: false }),
     ...overrides,
   } as unknown as MockClient;
 }
@@ -168,6 +172,7 @@ describe("Sidebar Sync", () => {
   let liveSurfaces: CmuxSurface[];
   let inboxOpts: { baseDir: string };
   let publishedFleetPublications: FleetSidebarPublication[];
+  let sweepDebugLogs: string[];
 
   beforeEach(() => {
     delete process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
@@ -178,9 +183,8 @@ describe("Sidebar Sync", () => {
     liveSurfaces = [];
     const workspaceForSurface = (surface: CmuxSurface): string =>
       surface.workspace_ref ??
-      stateMgr
-        .listStates()
-        .find((record) => record.surface_id === surface.ref)?.workspace_id ??
+      stateMgr.listStates().find((record) => record.surface_id === surface.ref)
+        ?.workspace_id ??
       "workspace:test";
     mockClient.listWorkspaces.mockImplementation(async () => ({
       workspaces: [...new Set(liveSurfaces.map(workspaceForSurface))].map(
@@ -222,7 +226,10 @@ describe("Sidebar Sync", () => {
       },
     );
     mockClient.listPaneSurfaces.mockImplementation(
-      async ({ workspace, pane }: { workspace?: string; pane?: string } = {}) => {
+      async ({
+        workspace,
+        pane,
+      }: { workspace?: string; pane?: string } = {}) => {
         const workspaceRef = workspace ?? "workspace:test";
         return {
           workspace_ref: workspaceRef,
@@ -235,12 +242,14 @@ describe("Sidebar Sync", () => {
       },
     );
     publishedFleetPublications = [];
+    sweepDebugLogs = [];
     inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
+      sweepDebugLog: (message) => sweepDebugLogs.push(message),
       inboxOpts,
       fleetSidebarPublisher: {
         publish: (publication) => {
@@ -419,6 +428,468 @@ describe("Sidebar Sync", () => {
     expect(rendered).toContain(
       `"surfaceUuid": "${neverActiveBinding.surface_uuid}"`,
     );
+  });
+
+  it("skips destructive mutations when CLI topology is degraded", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T12:00:00.000Z"));
+    (mockClient as unknown as Record<string, unknown>).getTransportHealth =
+      () => ({
+        mode: "cli",
+        degraded: true,
+        denied_reason: "access-control",
+      });
+    for (let index = 1; index <= 3; index += 1) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: `degraded-agent-${index}`,
+          surface_id: `surface:${index}`,
+          state: "done",
+          role: "worker",
+          cli_session_id: `session-${index}`,
+        }),
+      );
+    }
+    liveSurfaces = [makeSurface("surface:1")];
+    const removeState = vi.spyOn(stateMgr, "removeState");
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    vi.setSystemTime(new Date("2026-08-24T12:01:00.000Z"));
+    await engine.runSweep();
+
+    expect(removeState).not.toHaveBeenCalled();
+    expect(mockClient.readScreen).not.toHaveBeenCalled();
+    expect(engine.getRegistry().list()).toHaveLength(3);
+    expect(engine.lifecycleLockState()).toMatchObject({
+      sweep_skipped_mutations: 2,
+    });
+
+    (mockClient as unknown as Record<string, unknown>).getTransportHealth =
+      () => ({ mode: "socket", degraded: false });
+    liveSurfaces = [1, 2, 3].map((index) => makeSurface(`surface:${index}`));
+    await engine.runSweep();
+
+    expect(engine.lifecycleLockState()).toMatchObject({
+      sweep_skipped_mutations: 0,
+    });
+  });
+
+  it("fails closed when transport health is unknown", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T12:00:00.000Z"));
+    delete (mockClient as unknown as Record<string, unknown>)
+      .getTransportHealth;
+    for (let index = 1; index <= 3; index += 1) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: `unknown-health-agent-${index}`,
+          surface_id: `surface:${index}`,
+          state: "done",
+          role: "worker",
+          cli_session_id: `session-${index}`,
+        }),
+      );
+    }
+    liveSurfaces = [makeSurface("surface:1")];
+    const removeState = vi.spyOn(stateMgr, "removeState");
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    vi.setSystemTime(new Date("2026-08-24T12:01:00.000Z"));
+    await engine.runSweep();
+
+    expect(removeState).not.toHaveBeenCalled();
+    expect(engine.getRegistry().list()).toHaveLength(3);
+    expect(engine.lifecycleLockState()).toMatchObject({
+      sweep_skipped_mutations: 2,
+    });
+  });
+
+  it("skips every snapshot-backed mutation when the observer epoch changes after collection", async () => {
+    engine.dispose();
+    (mockClient as unknown as Record<string, unknown>).moveSurface = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const observerId = "cmux:/tmp/cmux-primary.sock";
+    let observerEpoch = `${observerId}@socket:1`;
+    const stableUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+      observerIdProvider: () => observerId,
+      observerEpochProvider: () => observerEpoch,
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      sweepDebugLog: (message) => sweepDebugLogs.push(message),
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "epoch-race-agent",
+        surface_id: "surface:stale",
+        surface_uuid: stableUuid,
+        surface_observer_id: observerId,
+        workspace_id: "workspace:test",
+        state: "done",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      }),
+    );
+    registry.set("epoch-race-agent", stateMgr.readState("epoch-race-agent")!);
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:witness"),
+        id: "11111111-2222-4333-8444-555555555555",
+        workspace_ref: "workspace:test",
+      },
+    ];
+
+    const reconcile = vi.spyOn(registry, "reconcile");
+    const evictSurfaceless = vi.spyOn(registry, "evictSurfaceless");
+    const purgeTerminal = vi.spyOn(registry, "purgeTerminal");
+    const purgeAllTerminal = vi.spyOn(registry, "purgeAllTerminal");
+    const removeState = vi.spyOn(stateMgr, "removeState");
+    const engineWithReaper = engine as unknown as {
+      reapChannelMarkersBestEffort: () => Promise<void>;
+    };
+    engineWithReaper.reapChannelMarkersBestEffort = async () => {
+      observerEpoch = `${observerId}@socket:2`;
+    };
+
+    await engine.runSweep();
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(evictSurfaceless).not.toHaveBeenCalled();
+    expect(purgeTerminal).not.toHaveBeenCalled();
+    expect(purgeAllTerminal).not.toHaveBeenCalled();
+    expect(removeState).not.toHaveBeenCalled();
+    expect(mockClient.moveSurface).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).not.toHaveBeenCalled();
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+    expect(mockClient.clearStatus).not.toHaveBeenCalled();
+    expect(registry.get("epoch-race-agent")).toMatchObject({
+      state: "done",
+      surface_id: "surface:stale",
+      surface_uuid: stableUuid,
+    });
+    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
+  });
+
+  it("stops sidebar updates when the observer epoch changes during an earlier agent read", async () => {
+    engine.dispose();
+    (
+      mockClient as unknown as Record<string, unknown>
+    ).supportsStableSurfaceReads = true;
+    const observerId = "cmux:/tmp/cmux-primary.sock";
+    let observerEpoch = `${observerId}@socket:1`;
+    const firstUuid = "11111111-2222-4333-8444-555555555551";
+    const secondUuid = "11111111-2222-4333-8444-555555555552";
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+      observerIdProvider: () => observerId,
+      observerEpochProvider: () => observerEpoch,
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: (publication) => {
+          if ("snapshot" in publication) {
+            publishedFleetPublications.push(publication);
+          }
+        },
+        dispose: () => {},
+      },
+    });
+    const first = makeRecord({
+      agent_id: "epoch-read-agent-1",
+      surface_id: "surface:one",
+      surface_uuid: firstUuid,
+      surface_observer_id: observerId,
+      workspace_id: "workspace:test",
+      state: "working",
+      role: "worker",
+      cli_session_id: "session-1",
+    });
+    const second = makeRecord({
+      agent_id: "epoch-read-agent-2",
+      surface_id: "surface:stale-two",
+      surface_uuid: secondUuid,
+      surface_observer_id: observerId,
+      workspace_id: "workspace:stale",
+      state: "working",
+      role: "worker",
+      cli_session_id: "session-2",
+    });
+    for (const record of [first, second]) {
+      stateMgr.writeState(record);
+      registry.set(record.agent_id, record);
+    }
+    vi.spyOn(registry, "reconcile").mockResolvedValue(new Set());
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:one"),
+        id: firstUuid,
+        workspace_ref: "workspace:test",
+      },
+      {
+        ...makeSurface("surface:two"),
+        id: secondUuid,
+        workspace_ref: "workspace:test",
+      },
+    ];
+    let releaseFirstRead: (() => void) | undefined;
+    const firstReadStarted = new Promise<void>((resolve) => {
+      mockClient.readScreen.mockImplementation(async (surface: string) => {
+        if (surface.toLowerCase() === firstUuid.toLowerCase()) {
+          resolve();
+          await new Promise<void>((release) => {
+            releaseFirstRead = release;
+          });
+        }
+        return {
+          surface,
+          text: "gpt-5.6 · Working",
+          lines: 20,
+          scrollback_used: false,
+        };
+      });
+    });
+
+    const sweep = engine.runSweep();
+    await firstReadStarted;
+    observerEpoch = `${observerId}@socket:2`;
+    releaseFirstRead?.();
+    await sweep;
+
+    expect(registry.get(second.agent_id)).toMatchObject({
+      surface_id: "surface:stale-two",
+      workspace_id: "workspace:stale",
+      surface_observer_id: observerId,
+    });
+    expect(stateMgr.readState(second.agent_id)).toMatchObject({
+      surface_id: "surface:stale-two",
+      workspace_id: "workspace:stale",
+      surface_observer_id: observerId,
+    });
+    expect(mockClient.setStatus).not.toHaveBeenCalledWith(
+      second.agent_id,
+      expect.anything(),
+      expect.anything(),
+    );
+    const publishedAgentIds = publishedFleetPublications.flatMap(
+      (publication) =>
+        publication.snapshot.lanes.flatMap((lane) =>
+          lane.seats.map((seat) => seat.agentId),
+        ),
+    );
+    expect(publishedAgentIds).not.toContain(second.agent_id);
+    expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
+  });
+
+  it("enumerates topology once through live-agent sidebar and liveness paths", async () => {
+    let clientTopologyEnumerations = 0;
+    let registryTopologyEnumerations = 0;
+    (
+      mockClient as unknown as Record<string, unknown>
+    ).supportsStableSurfaceReads = true;
+    (mockClient as unknown as Record<string, unknown>).getTransportHealth =
+      () => ({ mode: "socket", degraded: false });
+    for (let index = 1; index <= 3; index += 1) {
+      const stableUuid = `11111111-2222-4333-8444-55555555555${index}`;
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: `topology-agent-${index}`,
+          surface_id: `surface:${index}`,
+          surface_uuid: stableUuid,
+          workspace_id: "workspace:test",
+          state: "working",
+          role: "worker",
+          cli_session_id: `session-${index}`,
+        }),
+      );
+      liveSurfaces.push({
+        ...makeSurface(`surface:${index}`),
+        id: stableUuid,
+        workspace_ref: "workspace:test",
+      });
+    }
+    useActiveCodexScreen(mockClient);
+    const originalListWorkspaces =
+      mockClient.listWorkspaces.getMockImplementation()!;
+    mockClient.listWorkspaces.mockImplementation(async () => {
+      clientTopologyEnumerations += 1;
+      return originalListWorkspaces();
+    });
+    engine.dispose();
+    const registry = new AgentRegistry(stateMgr, async () => {
+      registryTopologyEnumerations += 1;
+      return liveSurfaces;
+    });
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      sweepDebugLog: (message) => sweepDebugLogs.push(message),
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    await registry.reconstitute();
+    clientTopologyEnumerations = 0;
+    registryTopologyEnumerations = 0;
+
+    await engine.runSweep();
+
+    expect({
+      clientTopologyEnumerations,
+      registryTopologyEnumerations,
+    }).toEqual({
+      clientTopologyEnumerations: 1,
+      registryTopologyEnumerations: 0,
+    });
+    expect(mockClient.readScreen).toHaveBeenCalledTimes(3);
+    expect(sweepDebugLogs.at(-1)).toMatch(
+      /sweep timing topology_ms=\d+.*sidebar_ms=\d+.*total_ms=\d+/,
+    );
+  });
+
+  it("guards every sweep-reachable mutation helper before its first side effect", () => {
+    const source = readFileSync(
+      new URL("../src/agent-engine.ts", import.meta.url),
+      "utf8",
+    );
+    const guardedHelpers = [
+      "maybeCaptureBootSessionId",
+      "maybeMarkBootReady",
+      "maybeMarkTaskDone",
+      "maybeMarkCliExited",
+      "maybeEscalateLiveHalt",
+      "maybeResolvePrompt",
+      "logLifecycleEvent",
+      "notifyLifecycleEventForSweep",
+      "publishSweepStatus",
+      "evictSurfacelessForSweep",
+      "purgeTerminalForSweep",
+      "removeStateForSweep",
+      "reconcileRolePlacements",
+      "markIntentionalSurfaceCloses",
+    ];
+
+    for (const helper of guardedHelpers) {
+      const declaration = [
+        `private async ${helper}(`,
+        `private ${helper}(`,
+        `async ${helper}(`,
+      ]
+        .map((needle) => source.indexOf(needle))
+        .filter((offset) => offset >= 0)
+        .sort((left, right) => left - right)[0];
+      expect(declaration, `${helper} must exist`).toBeGreaterThanOrEqual(0);
+      const bodyStart = source.indexOf("{", declaration);
+      expect(
+        source.slice(bodyStart + 1, bodyStart + 420),
+        `${helper} must guard before writing or dispatching`,
+      ).toMatch(/assertSweepInputCurrent\(/);
+    }
+  });
+
+  it("yields the remaining sweep phases to a queued interactive waiter", async () => {
+    const registry = engine.getRegistry();
+    let releaseReconcile: (() => void) | undefined;
+    const reconcileStarted = new Promise<void>((resolve) => {
+      vi.spyOn(registry, "reconcile").mockImplementation(async () => {
+        resolve();
+        await new Promise<void>((release) => {
+          releaseReconcile = release;
+        });
+        return new Set();
+      });
+    });
+    const evict = vi.spyOn(registry, "evictSurfaceless");
+    liveSurfaces = [makeSurface("surface:one")];
+
+    const sweep = engine.runSweep();
+    await reconcileStarted;
+    let waiterRan = false;
+    const waiter = engine.runLifecycleMutation(
+      async () => {
+        waiterRan = true;
+      },
+      { label: "interactive-test" },
+    );
+    expect(engine.lifecycleLockState().queue_depth).toBe(1);
+    releaseReconcile?.();
+    await Promise.all([sweep, waiter]);
+
+    expect(waiterRan).toBe(true);
+    expect(evict).not.toHaveBeenCalled();
+    expect(engine.lifecycleLockState().sweep_yielded).toBe(1);
+  });
+
+  it("does not expose a sweep snapshot to concurrent terminal routing", async () => {
+    const stableUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    (
+      mockClient as unknown as Record<string, unknown>
+    ).supportsStableSurfaceReads = true;
+    (mockClient as unknown as Record<string, unknown>).getTransportHealth =
+      () => ({ mode: "socket", degraded: false });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "concurrent-route-agent",
+        surface_id: "surface:old",
+        surface_uuid: stableUuid,
+        workspace_id: "workspace:test",
+        state: "working",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:old"),
+        id: stableUuid,
+        workspace_ref: "workspace:test",
+      },
+    ];
+    await engine.getRegistry().reconstitute();
+    let releaseRead: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      mockClient.readScreen.mockImplementation(async (surface: string) => {
+        releaseRead?.();
+        liveSurfaces = [
+          {
+            ...makeSurface("surface:new"),
+            id: stableUuid,
+            workspace_ref: "workspace:test",
+          },
+        ];
+        resolve();
+        await new Promise<void>((release) => {
+          releaseRead = release;
+        });
+        return {
+          surface,
+          text: "gpt-5.6 · Working",
+          lines: 20,
+          scrollback_used: false,
+        };
+      });
+    });
+
+    const sweep = engine.runSweep();
+    await readStarted;
+    const concurrentRoute = await engine.resolveAgentIoRoute(
+      "concurrent-route-agent",
+    );
+    releaseRead?.();
+    await sweep;
+
+    expect(concurrentRoute.surface_id).toBe("surface:new");
   });
 
   it("publishes the canonical observed UUID when persisted casing differs", async () => {
@@ -722,8 +1193,7 @@ describe("Sidebar Sync", () => {
     });
     mockClient.readScreen.mockResolvedValue({
       surface: "surface:42",
-      text:
-        "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+      text: "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
       lines: 30,
       scrollback_used: false,
     });
@@ -810,15 +1280,13 @@ describe("Sidebar Sync", () => {
     mockClient.readScreen
       .mockResolvedValueOnce({
         surface: "surface:42",
-        text:
-          "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+        text: "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
         lines: 30,
         scrollback_used: false,
       })
       .mockResolvedValue({
         surface: "surface:42",
-        text:
-          "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\nImplemented the fix.\nTASK_DONE",
+        text: "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\nImplemented the fix.\nTASK_DONE",
         lines: 30,
         scrollback_used: false,
       });
@@ -830,13 +1298,13 @@ describe("Sidebar Sync", () => {
     await engine.initialize(terminalDiscovery);
 
     expect(deferredTranscriptResolver).not.toHaveBeenCalled();
-    expect(engine.getAgentState("cmuxlayerCodex-pending-startup")).toMatchObject(
-      {
-        state: "done",
-        cli_session_id: null,
-        transcript_session_capture_deferred: true,
-      },
-    );
+    expect(
+      engine.getAgentState("cmuxlayerCodex-pending-startup"),
+    ).toMatchObject({
+      state: "done",
+      cli_session_id: null,
+      transcript_session_capture_deferred: true,
+    });
 
     engine.dispose();
     const restartedRegistry = new AgentRegistry(
@@ -892,13 +1360,13 @@ describe("Sidebar Sync", () => {
         state: "done",
       }),
     );
-    expect(engine.getAgentState("cmuxlayerCodex-pending-startup")).toMatchObject(
-      {
-        state: "done",
-        cli_session_id: null,
-        transcript_session_capture_deferred: true,
-      },
-    );
+    expect(
+      engine.getAgentState("cmuxlayerCodex-pending-startup"),
+    ).toMatchObject({
+      state: "done",
+      cli_session_id: null,
+      transcript_session_capture_deferred: true,
+    });
 
     updateRecordSpy.mockRestore();
     await engine.runSweep();
@@ -1087,16 +1555,14 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     expect(deferredTranscriptResolver).not.toHaveBeenCalled();
-    expect(
-      engine.getAgentState("gemini-stale-deferred-capture"),
-    ).toMatchObject({ transcript_session_capture_deferred: false });
+    expect(engine.getAgentState("gemini-stale-deferred-capture")).toMatchObject(
+      { transcript_session_capture_deferred: false },
+    );
 
     vi.setSystemTime(startedAt.getTime() + 6_000);
     await engine.runSweep();
 
-    expect(
-      engine.getAgentState("gemini-stale-deferred-capture"),
-    ).toBeNull();
+    expect(engine.getAgentState("gemini-stale-deferred-capture")).toBeNull();
   });
 
   it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {
@@ -1196,8 +1662,7 @@ describe("Sidebar Sync", () => {
     });
     mockClient.readScreen.mockResolvedValue({
       surface: "surface:42",
-      text:
-        "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+      text: "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
       lines: 30,
       scrollback_used: false,
     });
@@ -1229,7 +1694,9 @@ describe("Sidebar Sync", () => {
   it("preserves the last generated fleet when topology enumeration is unknown", async () => {
     stateMgr.writeState(makeRecord());
     liveSurfaces = [makeSurface("surface:42")];
-    mockClient.listWorkspaces.mockRejectedValue(new Error("socket unavailable"));
+    mockClient.listWorkspaces.mockRejectedValue(
+      new Error("socket unavailable"),
+    );
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -1254,7 +1721,7 @@ describe("Sidebar Sync", () => {
     expect(publishedFleetPublications).toEqual([
       expect.objectContaining({
         state: "unknown",
-        observedLiveSurfaceRefs: [],
+        observedLiveSurfaceRefs: null,
       }),
     ]);
   });
@@ -1297,8 +1764,7 @@ describe("Sidebar Sync", () => {
       pane_ref: "pane:notes",
       surfaces: liveSurfaces,
     });
-    const newlySurfacelessAgentIds =
-      await engine.getRegistry().reconstitute();
+    const newlySurfacelessAgentIds = await engine.getRegistry().reconstitute();
     engine.enableStartupPurge({ retainAgentIds: newlySurfacelessAgentIds });
 
     await engine.runSweep();
@@ -1441,13 +1907,15 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(engine.getAgentState("possibly-live-voicelayer-codex")).toMatchObject({
+    expect(
+      engine.getAgentState("possibly-live-voicelayer-codex"),
+    ).toMatchObject({
       surface_id: "surface:possibly-live",
       state: "working",
     });
     expect(publishedFleetPublications.at(-1)).toMatchObject({
       state: "unknown",
-      observedLiveSurfaceRefs: [],
+      observedLiveSurfaceRefs: null,
     });
   }, 10_000);
 
@@ -1544,8 +2012,7 @@ describe("Sidebar Sync", () => {
     ];
     mockClient.readScreen.mockResolvedValue({
       surface: "surface:no-progress",
-      text:
-        "Claude Code\n✻ Baking… (1s · ↑ 4)\n🤖 Opus 4.8 | ⏱️ 1s\n⏵⏵ bypass permissions on",
+      text: "Claude Code\n✻ Baking… (1s · ↑ 4)\n🤖 Opus 4.8 | ⏱️ 1s\n⏵⏵ bypass permissions on",
       lines: 4,
       scrollback_used: false,
     });
@@ -1554,9 +2021,9 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     expect(
-      publishedFleetPublications.at(-1)?.snapshot.lanes.flatMap(
-        (lane) => lane.seats,
-      ),
+      publishedFleetPublications
+        .at(-1)
+        ?.snapshot.lanes.flatMap((lane) => lane.seats),
     ).toEqual([
       expect.objectContaining({
         agentId: "no-transcript-progress",
@@ -1567,8 +2034,7 @@ describe("Sidebar Sync", () => {
     vi.setSystemTime(startedAt.getTime() + 120_001);
     mockClient.readScreen.mockResolvedValue({
       surface: "surface:no-progress",
-      text:
-        "Claude Code\n✻ Baking… (2m 1s · ↑ 99)\n🤖 Opus 4.8 | ⏱️ 2m\n⏵⏵ bypass permissions on",
+      text: "Claude Code\n✻ Baking… (2m 1s · ↑ 99)\n🤖 Opus 4.8 | ⏱️ 2m\n⏵⏵ bypass permissions on",
       lines: 4,
       scrollback_used: false,
     });
@@ -1576,9 +2042,9 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     expect(
-      publishedFleetPublications.at(-1)?.snapshot.lanes.flatMap(
-        (lane) => lane.seats,
-      ),
+      publishedFleetPublications
+        .at(-1)
+        ?.snapshot.lanes.flatMap((lane) => lane.seats),
     ).toEqual([
       expect.objectContaining({
         agentId: "no-transcript-progress",
@@ -1924,7 +2390,8 @@ describe("Sidebar Sync", () => {
     ];
     mockClient.readScreen.mockImplementation(async (surface: string) => {
       const text = screens.get(surface);
-      if (text === undefined) throw new Error(`missing prompt-freeze screen for ${surface}`);
+      if (text === undefined)
+        throw new Error(`missing prompt-freeze screen for ${surface}`);
       return {
         surface,
         text,
@@ -2000,7 +2467,8 @@ describe("Sidebar Sync", () => {
         cli: "codex" as const,
         kind: "resolve" as const,
         screen: fixture("codex-update-menu"),
-        recovered: "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
+        recovered:
+          "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
       },
       {
         name: "real-human-question",
@@ -2318,7 +2786,9 @@ describe("Sidebar Sync", () => {
           role: "worker",
           parent_agent_id: parentId,
           spawn_depth: 1,
-          state: entry.name.includes("spinner-over-picker") ? "working" : "idle",
+          state: entry.name.includes("spinner-over-picker")
+            ? "working"
+            : "idle",
           blocked_on_prompt: false,
           blocked_on_prompt_since: null,
         }),
@@ -2357,11 +2827,7 @@ describe("Sidebar Sync", () => {
         const entry = cases.find(
           (candidate) => candidate.surfaceRef === surface,
         );
-        if (
-          key === "escape" &&
-          entry?.kind === "resolve" &&
-          entry.recovered
-        ) {
+        if (key === "escape" && entry?.kind === "resolve" && entry.recovered) {
           screensBySurface.set(surface, entry.recovered);
         }
       },
@@ -2369,7 +2835,9 @@ describe("Sidebar Sync", () => {
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
-    expect(engine.getAgentState("prompt-redirect-active-over-picker")).toMatchObject({
+    expect(
+      engine.getAgentState("prompt-redirect-active-over-picker"),
+    ).toMatchObject({
       halt_last_progress_signature: expect.any(String),
     });
     await engine.runSweep();
@@ -2526,8 +2994,7 @@ describe("Sidebar Sync", () => {
         id: surfaceUuid,
         title: "cmuxlayerClaude [surface:1025]",
         workspace_ref: "workspace:cmuxlayer",
-        current_directory:
-          "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+        current_directory: "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
         working_directory_source: "surface",
       },
     ];
@@ -2578,8 +3045,7 @@ describe("Sidebar Sync", () => {
 
     mockClient.readScreen.mockResolvedValue({
       surface: "surface:1025",
-      text:
-        "Claude Code\nWorking (1s)\nImplementing the requested follow-up after the overlay.",
+      text: "Claude Code\nWorking (1s)\nImplementing the requested follow-up after the overlay.",
       lines: 30,
       scrollback_used: false,
     });
@@ -2612,10 +3078,9 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     expect(engine.getAgentState("stale-surface-error")).toBeNull();
-    expect(mockClient.clearStatus).toHaveBeenCalledWith(
-      "stale-surface-error",
-      { workspace: "workspace:previous-session" },
-    );
+    expect(mockClient.clearStatus).toHaveBeenCalledWith("stale-surface-error", {
+      workspace: "workspace:previous-session",
+    });
   });
 
   it("does not emit channel notifications for initial spawned rows", async () => {
@@ -3700,8 +4165,7 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     const spawnedCalls = mockClient.log.mock.calls.filter(
-      (call) =>
-        typeof call[0] === "string" && call[0].startsWith("spawned:"),
+      (call) => typeof call[0] === "string" && call[0].startsWith("spawned:"),
     );
     expect(spawnedCalls).toHaveLength(0);
     expect(

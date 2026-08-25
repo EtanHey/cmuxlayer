@@ -93,10 +93,7 @@ function makeRecord(overrides: Partial<AgentRecord>): AgentRecord {
   };
 }
 
-function makeTopologyClient(
-  panes: CmuxPane[],
-  groups: CmuxPaneSurfaces[],
-) {
+function makeTopologyClient(panes: CmuxPane[], groups: CmuxPaneSurfaces[]) {
   return {
     listWorkspaces: vi.fn().mockResolvedValue({
       workspaces: [workspace("workspace:1")],
@@ -194,6 +191,19 @@ describe("enrichSurfaceIdsFromPanes", () => {
 });
 
 describe("collectSurfaceTopology", () => {
+  it("marks malformed pane enumeration incomplete", async () => {
+    const client = makeTopologyClient([], []);
+    client.listPanes.mockResolvedValueOnce({
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      panes: null,
+    } as never);
+
+    const snapshot = await collectSurfaceTopology(client, "workspace:1");
+
+    expect(snapshot).toMatchObject({ complete: false, surfaces: [] });
+  });
+
   it("returns null when a configured surface observer is unknown", async () => {
     const client = makeTopologyClient(
       [pane("pane:right", 0, ["surface:1"])],
@@ -252,6 +262,63 @@ describe("collectSurfaceTopology", () => {
       () => observerId,
     );
 
+    expect(observerId).toBe("cmux:/tmp/cmux-secondary.sock");
+    expect(snapshot).toBeNull();
+  });
+
+  it("records the observer owner and epoch that authorized a completed snapshot", async () => {
+    const observerId = "cmux:/tmp/cmux-primary.sock";
+    const client = makeTopologyClient(
+      [pane("pane:right", 0, ["surface:1"])],
+      [
+        {
+          workspace_ref: "workspace:1",
+          pane_ref: "pane:right",
+          surfaces: [surface("surface:1")],
+        },
+      ],
+    );
+
+    const snapshot = await collectSurfaceTopology(
+      client,
+      "workspace:1",
+      () => observerId,
+    );
+
+    expect(snapshot).toMatchObject({
+      observerId,
+      observerEpoch: observerId,
+    });
+  });
+
+  it("rejects a snapshot when only its distinct observer owner changes", async () => {
+    let observerId = "cmux:/tmp/cmux-primary.sock";
+    const observerEpoch = "cmux-route@socket:1";
+    const client = makeTopologyClient(
+      [pane("pane:right", 0, ["surface:1"])],
+      [
+        {
+          workspace_ref: "workspace:1",
+          pane_ref: "pane:right",
+          surfaces: [surface("surface:1")],
+        },
+      ],
+    );
+    const listPaneSurfaces = client.listPaneSurfaces.getMockImplementation()!;
+    client.listPaneSurfaces.mockImplementation(async (opts) => {
+      const result = await listPaneSurfaces(opts);
+      observerId = "cmux:/tmp/cmux-secondary.sock";
+      return result;
+    });
+
+    const snapshot = await collectSurfaceTopology(
+      client,
+      "workspace:1",
+      () => observerEpoch,
+      () => observerId,
+    );
+
+    expect(observerEpoch).toBe("cmux-route@socket:1");
     expect(observerId).toBe("cmux:/tmp/cmux-secondary.sock");
     expect(snapshot).toBeNull();
   });
@@ -333,7 +400,10 @@ describe("collectSurfaceTopology", () => {
   });
 
   it("keeps usable pane topology when another pane surface lookup fails", async () => {
-    const panes = [pane("pane:ok", 0, ["surface:ok"]), pane("pane:gone", 1, [])];
+    const panes = [
+      pane("pane:ok", 0, ["surface:ok"]),
+      pane("pane:gone", 1, []),
+    ];
     const client = {
       listWorkspaces: vi.fn().mockResolvedValue({
         workspaces: [workspace("workspace:1")],
@@ -391,9 +461,7 @@ describe("collectSurfaceTopology", () => {
         pane_ref: "pane:two-seats",
         // The command succeeded, but cmux returned only one of the two surfaces
         // advertised by the same pane observation.
-        surfaces: [
-          { ...surface("surface:first"), id: firstUuid },
-        ],
+        surfaces: [{ ...surface("surface:first"), id: firstUuid }],
       },
     ];
 
@@ -428,9 +496,7 @@ describe("collectSurfaceTopology", () => {
         workspace_ref: "workspace:1",
         window_ref: "window:1",
         pane_ref: "pane:first",
-        surfaces: [
-          { ...surface("surface:first", "first"), id: duplicateUuid },
-        ],
+        surfaces: [{ ...surface("surface:first", "first"), id: duplicateUuid }],
       },
       {
         workspace_ref: "workspace:1",
@@ -588,22 +654,21 @@ describe("collectSurfaceTopology", () => {
       "workspace:1",
     );
     expect(snapshot).not.toBeNull();
-    const lead = makeRecord({ surface_id: "surface:lead-left", role: undefined });
+    const lead = makeRecord({
+      surface_id: "surface:lead-left",
+      role: undefined,
+    });
     const worker = makeRecord({
       surface_id: "surface:worker-right",
       role: undefined,
     });
 
-    expect(
-      healthFor(lead, snapshot),
-    ).toEqual({
+    expect(healthFor(lead, snapshot)).toEqual({
       status: "healthy",
       issue_codes: [],
       issues: [],
     });
-    expect(
-      healthFor(worker, snapshot),
-    ).toEqual({
+    expect(healthFor(worker, snapshot)).toEqual({
       status: "healthy",
       issue_codes: [],
       issues: [],

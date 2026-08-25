@@ -46,6 +46,7 @@ function makeTempFleetPublisher(): FleetSidebarPublisher {
 
 function makeClient() {
   return {
+    getTransportHealth: () => ({ mode: "socket", degraded: false }),
     currentSocketPath: vi.fn(() => "/tmp/cmux-app-test.sock"),
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
     listPanes: vi.fn().mockResolvedValue({ panes: [] }),
@@ -416,7 +417,8 @@ describe("CmuxAppServerRuntime", () => {
       expect(publisher.publish).toHaveBeenCalledWith(
         expect.objectContaining({
           state: "unknown",
-          observedLiveSurfaceRefs: [],
+          observedLiveSurfaceRefs: null,
+          observedLiveSurfaceUuids: null,
           snapshot: {
             seatCount: 0,
             activeCount: 0,
