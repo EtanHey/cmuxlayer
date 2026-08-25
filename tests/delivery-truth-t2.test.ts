@@ -854,8 +854,11 @@ describe("boot-submit readiness and attributable evidence", () => {
             : opts.interruptBeforeEchoAfterReturn && postReturnReads === 1
               ? [
                   ">_ OpenAI Codex",
-                  "Conversation interrupted",
-                  "Working (1s • esc to interrupt)",
+                  "■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/",
+                  "  feedback` to report the issue.",
+                  "",
+                  "› Ask Codex to do anything",
+                  "",
                   "gpt-5.6-sol high · ~/Gits/cmuxlayer",
                 ].join("\n")
             : submitted

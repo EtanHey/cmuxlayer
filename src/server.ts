@@ -5516,14 +5516,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         bootFrameAdvanced &&
         !hasPendingSubmitEvidence &&
         screenIncludesSubmittedText(snapshot.text);
+      const interruptedHasTranscriptEcho =
+        bootHasTranscriptEcho ||
+        (opts.require_attributable_submit_evidence !== true &&
+          !hasPendingSubmitEvidence &&
+          screenIncludesSubmittedText(snapshot.text));
       if (
         sawNewInterrupt &&
         !hasPendingSubmitEvidence &&
-        (bootHasTranscriptEcho || bootHasTokenOrCostDelta)
+        (interruptedHasTranscriptEcho || bootHasTokenOrCostDelta)
       ) {
         return {
           submit_verified: false,
-          submit_evidence: bootHasTranscriptEcho
+          submit_evidence: interruptedHasTranscriptEcho
             ? "transcript_echo"
             : "token_delta",
           submit_verification_reason: null,
@@ -5532,6 +5537,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         };
       }
       if (
+        !sawNewInterrupt &&
         !hasPendingSubmitEvidence &&
         !bootConsumptionRefuted &&
         ((opts.require_attributable_submit_evidence !== true &&
@@ -5566,7 +5572,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const allowClearedComposerSubmitEvidence =
           opts.source_event !== "spawn_agent" ||
           !screenIncludesSubmittedText(snapshot.text);
-        if (allowClearedComposerSubmitEvidence) {
+        if (allowClearedComposerSubmitEvidence && !sawNewInterrupt) {
           sawAllowedClearedComposerEvidence = true;
           return {
             submit_verified: true,
@@ -5677,7 +5683,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
-    if (sawClearedComposerEvidence && sawAllowedClearedComposerEvidence) {
+    if (
+      !sawNewInterrupt &&
+      sawClearedComposerEvidence &&
+      sawAllowedClearedComposerEvidence
+    ) {
       return {
         submit_verified: true,
         submit_evidence: "cleared_composer",
