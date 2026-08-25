@@ -3838,7 +3838,7 @@ describe("AgentRegistry", () => {
       expect(registry.get("uuid-agent-on-legacy-topology")).not.toBeNull();
     });
 
-    it("evicts an unclosed recoverable ghost when only a terminal same-seat record has a surface", async () => {
+    it("keeps a recoverable seat ghost when only a terminal same-seat record has a surface", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -3873,11 +3873,15 @@ describe("AgentRegistry", () => {
 
       await expect(
         registry.evictSurfaceless({ confirmationMs: 0 }),
-      ).resolves.toEqual(["coachClaude"]);
-      expect(registry.get("coachClaude")).toBeNull();
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        state: "error",
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
     });
 
-    it("evicts an unclosed recoverable ghost when a stale same-seat record has only a shell surface", async () => {
+    it("keeps a recoverable seat ghost when a stale working same-seat record has only a shell surface", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -3941,8 +3945,12 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual(["coachClaude"]);
-      expect(registry.get("coachClaude")).toBeNull();
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        state: "error",
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
     });
 
     it("evicts a confirmed recoverable ghost when discovery proves the live same-seat agent", async () => {
@@ -4012,7 +4020,7 @@ describe("AgentRegistry", () => {
       expect(registry.get("live-coach-record")).not.toBeNull();
     });
 
-    it("evicts an unclosed recoverable ghost when the live sibling resolves to another seat", async () => {
+    it("keeps a recoverable seat ghost when the live sibling surface resolves to another seat", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -4074,11 +4082,14 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual(["coachClaude"]);
-      expect(registry.get("coachClaude")).toBeNull();
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
     });
 
-    it("evicts an unclosed recoverable ghost when seat classification returns a mismatch", async () => {
+    it("keeps a recoverable seat ghost when seat classification returns a mismatch", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "coachClaude",
@@ -4141,11 +4152,14 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual(["coachClaude"]);
-      expect(registry.get("coachClaude")).toBeNull();
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
     });
 
-    it("evicts an unclosed recoverable ghost when the observer epoch changes after proof", async () => {
+    it("keeps a recoverable seat ghost when the observer epoch changes after proof", async () => {
       let observerEpoch = "cmux:/tmp/test.sock@epoch-1";
       stateMgr.writeState(
         makeRecord({
@@ -4209,8 +4223,11 @@ describe("AgentRegistry", () => {
           confirmationMs: 0,
           liveSeatProof: proof,
         }),
-      ).resolves.toEqual(["coachClaude"]);
-      expect(registry.get("coachClaude")).toBeNull();
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
     });
 
     it("resets the absence window when the same surface is observed live", async () => {

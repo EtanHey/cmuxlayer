@@ -706,5 +706,15 @@ describe("kill — scoped targets", () => {
     expect(
       detailed.agents.map((agent: { agent_id: string }) => agent.agent_id),
     ).toContain("surfaceless-done-agent");
+    const explicitlyRequested = parseResult(
+      await callTool(server, "list_agents", {
+        agent_ids: ["surfaceless-done-agent"],
+      }),
+    );
+    expect(
+      explicitlyRequested.agents.map(
+        (agent: { agent_id: string }) => agent.agent_id,
+      ),
+    ).toContain("surfaceless-done-agent");
   });
 });

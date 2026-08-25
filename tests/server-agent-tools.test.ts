@@ -2447,12 +2447,12 @@ describe("agent lifecycle tool handlers", () => {
       {
         owner: parentId,
         target: expected.report_path,
-        marker: expected.done_marker,
+        change: "content",
         deadline: Number.MAX_SAFE_INTEGER,
       },
       { registryPath: watchRegistryPath },
     );
-    appendFileSync(expected.report_path, `${expected.done_marker}\n`, "utf8");
+    appendFileSync(expected.report_path, "first revision\n", "utf8");
     await sweepWatches({
       registryPath: watchRegistryPath,
       notify: async () => true,
@@ -2461,7 +2461,7 @@ describe("agent lifecycle tool handlers", () => {
       readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
         (watch) => watch.watch_id === oldWatch.watch_id,
       )?.state,
-    ).toBe("fired");
+    ).toBe("armed");
     const exec = makeLifecycleExec();
     const server = createTrackedServer({
       exec,
@@ -2505,22 +2505,18 @@ describe("agent lifecycle tool handlers", () => {
       ) as Record<string, unknown>;
       expect(detail.report_path).toBe(expected.report_path);
       expect(detail.done_marker).toBe(expected.done_marker);
-      expect(
-        readWatchRegistry({ registryPath: watchRegistryPath }).watches,
-      ).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            watch_id: oldWatch.watch_id,
-            state: "fired",
-          }),
-          expect.objectContaining({
-            owner: parentId,
-            target: expected.report_path,
-            change: "content",
-            state: "armed",
-          }),
-        ]),
+      const reportWatches = readWatchRegistry({
+        registryPath: watchRegistryPath,
+      }).watches.filter(
+        (watch) =>
+          watch.owner === parentId && watch.target === expected.report_path,
       );
+      expect(reportWatches).toHaveLength(1);
+      expect(reportWatches[0]).toMatchObject({
+        watch_id: oldWatch.watch_id,
+        change: "content",
+        state: "armed",
+      });
     } finally {
       rmSync(resumeInboxDir, { recursive: true, force: true });
     }
@@ -12318,9 +12314,13 @@ codex>
     },
   );
 
-  it.each(["stop_agent", "kill"] as const)(
-    "%s refuses manual mode on a freshly moved UUID route before mutation",
-    async (toolName) => {
+  it.each([
+    ["stop_agent", false],
+    ["kill", false],
+    ["stop_agent", true],
+  ] as const)(
+    "%s force=%s refuses manual mode on a freshly moved UUID route before mutation",
+    async (toolName, force) => {
       const stableUuid = "11111111-2222-4333-8444-555555555555";
       const routeClient = makeUuidRouteClient([
         {
@@ -12364,8 +12364,8 @@ codex>
 
       const args =
         toolName === "stop_agent"
-          ? { agent_id: record.agent_id, force: false }
-          : { target: record.agent_id, force: false };
+          ? { agent_id: record.agent_id, force }
+          : { target: record.agent_id, force };
       const result = await registeredTestTool(server, toolName).handler(
         args,
         {} as any,

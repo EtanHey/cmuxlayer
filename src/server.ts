@@ -88,6 +88,7 @@ import {
 } from "./monitor-registry.js";
 import {
   WATCH_AGENT_PREDICATES,
+  readWatchRegistry,
   WatchArmError,
   type WatchNotify,
   type WatchSpec,
@@ -11737,7 +11738,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const ownerDelivered =
                   delivery.delivery === "submitted" ||
                   delivery.delivery === "queued";
-                return ownerDelivered && externalDelivered;
+                return ownerDelivered;
               } catch {
                 // Keep notification_pending=true. A later lifecycle sweep uses
                 // the parent's refreshed route after a session restart.
@@ -12405,11 +12406,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       coordination: { report_path: string; done_marker: string },
     ): Promise<string | null> => {
       try {
-        await mkdir(dirname(coordination.report_path), { recursive: true });
-        await appendFile(coordination.report_path, "", "utf8");
+        const reportPath = resolve(coordination.report_path);
+        const watchRegistryPath =
+          opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json");
+        const existing = readWatchRegistry({
+          registryPath: watchRegistryPath,
+        }).watches.find(
+          (watch) =>
+            watch.owner === parentAgentId &&
+            watch.target === reportPath &&
+            watch.change === "content" &&
+            watch.state !== "failed",
+        );
+        if (existing) return null;
+        await mkdir(dirname(reportPath), { recursive: true });
+        await appendFile(reportPath, "", "utf8");
         await engine.armWatch({
           owner: parentAgentId,
-          target: coordination.report_path,
+          target: reportPath,
           change: "content",
           deadline: Number.MAX_SAFE_INTEGER,
         });
@@ -15148,7 +15162,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ) => {
           const registryObservedAt = Date.now();
           const visibleRecords =
-            args.detail === "full" || requestedState !== undefined
+            args.detail === "full" ||
+            requestedState !== undefined ||
+            (args.agent_ids?.length ?? 0) > 0
               ? records
               : records.filter(
                   (agent) => !shouldRetainForExplicitResume(agent),
@@ -15682,14 +15698,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await engine.stopAgent(args.agent_id, args.force, {
-            beforeSurfaceMutation: args.force
-              ? undefined
-              : (route) =>
-                  assertSurfaceMutationAllowed(
-                    "stop_agent",
-                    route.surface_id,
-                    route.workspace_id ?? undefined,
-                  ),
+            beforeSurfaceMutation: (route) =>
+              assertSurfaceMutationAllowed(
+                "stop_agent",
+                route.surface_id,
+                route.workspace_id ?? undefined,
+              ),
           });
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({

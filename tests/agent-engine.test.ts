@@ -4496,6 +4496,41 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("clamps the default Codex registration wait to two seconds", async () => {
+      const resolver = vi.fn(() => null);
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+      let settled = false;
+
+      const pending = engine
+        .spawnAgent({
+          repo: "cmuxlayer",
+          model: "gpt-5.6-sol",
+          cli: "codex",
+          prompt: "Use the product timeout",
+        })
+        .then((result) => {
+          settled = true;
+          return result;
+        });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pending;
+
+      expect(settled).toBe(true);
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        cli_session_id: null,
+        transcript_session_capture_deferred: true,
+      });
+    });
+
     it("does not wait for non-Codex self-registration during spawn", async () => {
       const resolver = vi.fn(() => ({
         session_id: "5b9f4f35-2942-4c8b-b1af-d89d4e36c95d",

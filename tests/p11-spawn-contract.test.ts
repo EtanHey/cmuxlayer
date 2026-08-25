@@ -335,6 +335,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
       return baseExec(cmd, args);
     });
+    let watchNow = 1_000;
+    const unavailableExternalNotify = vi.fn().mockResolvedValue(false);
     server = createServer(
       withTestSurfaceObserver({
         exec,
@@ -342,6 +344,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         disableSpawnPreflight: true,
         inboxBaseDir: inboxDir,
         watchRegistryPath,
+        watchRegistryNow: () => watchNow,
+        watchNotify: unavailableExternalNotify,
       }),
     );
     let engine = server._registeredTools.interact._engine;
@@ -370,6 +374,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         disableSpawnPreflight: true,
         inboxBaseDir: inboxDir,
         watchRegistryPath,
+        watchRegistryNow: () => watchNow,
+        watchNotify: unavailableExternalNotify,
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as any);
@@ -392,6 +398,19 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toBe(true);
 
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    watchNow = 2_000;
+    await engine.sweepWatchesBestEffort();
+    const retryCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      afterFirstWake,
+    );
+    expect(
+      retryCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(child.report_path),
+        ),
+      ),
+    ).toBe(false);
+
     writeFileSync(
       child.report_path,
       `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,

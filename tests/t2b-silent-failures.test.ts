@@ -88,7 +88,7 @@ function makeExec(opts?: {
   let resumedSurfaceLive = false;
   const exec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     calls.push(args);
-    if (args.includes("new-split")) {
+    if (args.includes("new-split") || args.includes("new-surface")) {
       resumedSurfaceLive = true;
       return {
         stdout: JSON.stringify({
@@ -115,6 +115,14 @@ function makeExec(opts?: {
             },
           ],
         }),
+        stderr: "",
+      };
+    }
+    if (args.includes("list-status")) {
+      return {
+        stdout: JSON.stringify([
+          { key: "mode.control", value: "autonomous" },
+        ]),
         stderr: "",
       };
     }
@@ -570,6 +578,7 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
         surface_uuid: SURFACE_UUID,
         surface_observer_id: "cmux:test",
         surface_provenance: "cmuxlayer_spawn",
+        role: "orchestrator",
         launch_cwd: "/Users/e/Gits/golems/.worktrees/run3",
         worktree_path: "/Users/e/Gits/golems/.worktrees/run3",
       });

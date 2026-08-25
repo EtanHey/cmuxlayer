@@ -8646,10 +8646,28 @@ export class AgentEngine {
       (record) => record.surface_uuid?.trim().toLowerCase() === surfaceUuid,
     );
     if (surfaceMatches.length > 1) return null;
+    const registrationCwd = registration.cwd
+      ? resolve(registration.cwd)
+      : null;
+    const registrationTimestamp =
+      typeof registration.ts === "number" ? registration.ts : Number.NaN;
     const candidate =
       surfaceMatches[0] ??
       (registration.pid
-        ? uniqueMatch((record) => record.pid === registration.pid)
+        ? uniqueMatch((record) => {
+            const recordTimestamp = Date.parse(record.created_at);
+            const recordCwd = record.launch_cwd ?? record.worktree_path;
+            return (
+              record.pid === registration.pid &&
+              Number.isFinite(registrationTimestamp) &&
+              Number.isFinite(recordTimestamp) &&
+              registrationTimestamp >= recordTimestamp &&
+              registrationCwd !== null &&
+              recordCwd !== null &&
+              recordCwd !== undefined &&
+              resolve(recordCwd) === registrationCwd
+            );
+          })
         : null);
     if (
       !candidate ||
@@ -9007,7 +9025,7 @@ export class AgentEngine {
     const startedAt = Date.now();
     const armed = await this.armWatch(spec);
     while (true) {
-      await sweepWatches({
+      const swept = await sweepWatches({
         registryPath: this.watchRegistryPath,
         now: this.watchRegistryNow,
         agentObservation: this.watchAgentObservation,
@@ -9020,7 +9038,7 @@ export class AgentEngine {
         throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
       }
       const elapsed = Date.now() - startedAt;
-      if (current.state === "fired") {
+      if (current.state === "fired" || swept.fired.includes(armed.watch_id)) {
         return { matched: true, elapsed, watch: current };
       }
       if (current.state === "failed") {

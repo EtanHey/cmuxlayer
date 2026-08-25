@@ -233,10 +233,9 @@ export function hasRecoverableCrashError(error: string | null): boolean {
 }
 
 /**
- * A deliberate agent close preserves the captured harness session as a
- * resumable tombstone. Unexpected crashes keep their existing error behavior,
- * but do not accumulate as durable resume rows; the registry also caps these
- * deliberate-close tombstones so persistence remains bounded.
+ * A deliberate close or recoverable crash preserves the captured harness
+ * session as a resumable tombstone. The registry caps these tombstones so
+ * persistence remains bounded.
  */
 export function shouldRetainForExplicitResume(
   agent: Pick<AgentRecord, "state" | "user_killed" | "cli_session_id" | "error">,
@@ -244,7 +243,7 @@ export function shouldRetainForExplicitResume(
   return (
     (agent.state === "done" || agent.state === "error") &&
     !!agent.cli_session_id &&
-    agent.user_killed === true
+    (agent.user_killed === true || hasRecoverableCrashError(agent.error))
   );
 }
 

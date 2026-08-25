@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -290,6 +290,29 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.source).toBe("sweep");
     expect(result.state).toBe("error");
     expect(result.agent?.state).toBe("error");
+  });
+
+  it("returns a synchronous content-watch match before persistent re-arm hides it", async () => {
+    vi.useFakeTimers();
+    const reportPath = join(TEST_DIR, "report.md");
+    writeFileSync(reportPath, "first", "utf8");
+    setTimeout(() => writeFileSync(reportPath, "second", "utf8"), 60);
+
+    const pending = engine.waitForWatch(
+      {
+        owner: "cmuxlayerClaude-parent",
+        target: reportPath,
+        change: "content",
+        deadline: 60_000,
+      },
+      3_000,
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await pending;
+
+    expect(result.matched).toBe(true);
+    expect(result.elapsed).toBeLessThan(3_000);
+    expect(result.watch.state).toBe("armed");
   });
 
   it("does not report a match from a record state the screen contradicts", async () => {

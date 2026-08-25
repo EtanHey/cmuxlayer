@@ -251,7 +251,9 @@ describe("revive on purpose (#492)", () => {
 
     expect(mockClient.newSplit).not.toHaveBeenCalled();
     expect(mockClient.newSurface).not.toHaveBeenCalled();
-    expect(engine.getAgentState("cmuxlayerCodex-revive")).toBeNull();
+    const state = engine.getAgentState("cmuxlayerCodex-revive");
+    expect(state?.state).toBe("error");
+    expect(state?.error).toContain("disappeared");
   });
 
   it("does not revive an unexpected CLI death; it records the terminal state", async () => {
@@ -277,7 +279,7 @@ describe("revive on purpose (#492)", () => {
     expect(state?.error).toContain("CLI exited");
   });
 
-  it("does not retain an unclosed CLI-death row after its pane is closed", async () => {
+  it("keeps a CLI death resumable by id after its pane is closed", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(makeRecord({ workspace_id: "ws:1" }));
     liveSurfaces = [
@@ -295,10 +297,9 @@ describe("revive on purpose (#492)", () => {
     liveSurfaces = [{ ...makeSurface("surface:other"), workspace_ref: "ws:1" }];
     await runConfirmedSurfaceAbsenceSweep();
 
-    expect(engine.getAgentState("cmuxlayerCodex-revive")).toBeNull();
-    await expect(
-      engine.resumeAgent("cmuxlayerCodex-revive"),
-    ).rejects.toThrow("Agent not found");
+    const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
+    expect(resumed.agent_id).toBe("cmuxlayerCodex-revive");
+    expect(resumed.surface_id).toBe("surface:new");
   });
 
   it("explicit resume by agent id works when the session artifact exists", async () => {
@@ -527,6 +528,56 @@ describe("revive on purpose (#492)", () => {
     expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
   });
 
+  it("rejects a stale registration that matches a newer record only by reused pid and cwd", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "long-gone-surface",
+        cwd: "/shared/worktree",
+        pid: 4242,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: null,
+        ts: 1_700_000_000_000,
+      }),
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "newer-unrelated-agent",
+        state: "done",
+        cli_session_id: null,
+        surface_uuid: "new-surface",
+        launch_cwd: "/shared/worktree",
+        pid: 4242,
+        created_at: "2026-08-25T10:00:00.000Z",
+      }),
+    );
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+    expect(stateMgr.readState("newer-unrelated-agent")?.cli_session_id).toBeNull();
+  });
+
+  it("clears prior-run done and halt evidence when reopening for resume", () => {
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        task_done_candidate_at: "2026-08-24T10:00:00.000Z",
+        task_done_detected_at: "2026-08-24T10:00:05.000Z",
+        halt_last_active_at: "2026-08-24T10:00:06.000Z",
+      }),
+    );
+
+    expect(stateMgr.reopenForResume("cmuxlayerCodex-revive")).toMatchObject({
+      state: "creating",
+      task_done_candidate_at: null,
+      task_done_detected_at: null,
+      halt_last_active_at: null,
+    });
+  });
+
   it("does not mutate an active fallback match during raw-id resolution", async () => {
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
@@ -752,7 +803,7 @@ describe("revive on purpose (#492)", () => {
     expect(mockClient.send).not.toHaveBeenCalled();
   });
 
-  it("evicts an unclosed terminal row when its stale process is gone", async () => {
+  it("retains a recoverable crash row when its stale process is gone", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(
       makeRecord({
@@ -766,14 +817,12 @@ describe("revive on purpose (#492)", () => {
       throw Object.assign(new Error("no such process"), { code: "ESRCH" });
     });
 
-    expect(engine.evictDeadProcessAgents()).toEqual([
-      "cmuxlayerCodex-revive",
-    ]);
-    expect(stateMgr.readState("cmuxlayerCodex-revive")).toBeNull();
+    expect(engine.evictDeadProcessAgents()).toEqual([]);
+    expect(stateMgr.readState("cmuxlayerCodex-revive")).not.toBeNull();
     killSpy.mockRestore();
   });
 
-  it("purges an unclosed legacy row during startup purge", async () => {
+  it("retains a recoverable legacy crash row during startup purge", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(
       makeRecord({
@@ -787,9 +836,7 @@ describe("revive on purpose (#492)", () => {
     });
     await registry.reconstitute();
 
-    expect(registry.purgeAllTerminal()).toEqual([
-      expect.objectContaining({ agent_id: "cmuxlayerCodex-revive" }),
-    ]);
-    expect(stateMgr.readState("cmuxlayerCodex-revive")).toBeNull();
+    expect(registry.purgeAllTerminal()).toEqual([]);
+    expect(stateMgr.readState("cmuxlayerCodex-revive")).not.toBeNull();
   });
 });

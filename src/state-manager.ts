@@ -390,6 +390,9 @@ export class StateManager {
       state: "creating",
       error: null,
       pid: null,
+      task_done_candidate_at: null,
+      task_done_detected_at: null,
+      halt_last_active_at: null,
       version: current.version + 1,
       updated_at: new Date().toISOString(),
     };
