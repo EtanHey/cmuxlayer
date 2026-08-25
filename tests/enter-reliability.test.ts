@@ -716,7 +716,7 @@ describe("enter reliability", () => {
 
       const result = await callTool(server, "send_to", {
         agent_id: "agent-1",
-        text: "slow first token",
+        text: `slow first token ${"x".repeat(190)}`,
         press_enter: true,
       });
       const parsed = parseResult(result);
@@ -730,6 +730,86 @@ describe("enter reliability", () => {
       expect(parsed.retry_count).toBe(0);
     },
   );
+
+  it("bounds a short pointer send to one second with a 750ms verify budget", async () => {
+    const client = new FakeUnavailableVerificationScreenClient("throw");
+    client.requiredReturns = 1;
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const tool = (server as any)._registeredTools["send_to"];
+    let settledAt: number | null = null;
+    const startedAt = Date.now();
+    const resultPromise = tool
+      .handler(
+        {
+          agent_id: "agent-1",
+          text: "Read and follow /tmp/run5-pointer.md",
+          press_enter: true,
+        },
+        {} as any,
+      )
+      .then((result: any) => {
+        settledAt = Date.now();
+        return result;
+      });
+
+    for (let elapsed = 0; elapsed < 2_000 && settledAt === null; elapsed += 50) {
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    const result = await resultPromise;
+    const parsed = parseResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.submit_verified).toBeNull();
+    expect(settledAt).not.toBeNull();
+    expect(settledAt! - startedAt).toBeLessThanOrEqual(1_000);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+  });
+
+  it("surface-mode pointer sends bypass a held lifecycle lock", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    server = createReliabilityServer(client);
+    registerAgent(server);
+    const engine = server._registeredTools["interact"]._engine;
+    let releaseLock!: () => void;
+    const held = engine.runLifecycleMutation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseLock = resolve;
+        }),
+      { label: "held-for-surface-send-test" },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    let settled = false;
+    const resultPromise = server._registeredTools.send_to
+      .handler(
+        {
+          mode: "surface",
+          surface: client.surface,
+          text: "surface pointer",
+          press_enter: false,
+        },
+        {} as any,
+      )
+      .then((result: any) => {
+        settled = true;
+        return result;
+      });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(settled).toBe(true);
+    const result = await resultPromise;
+    expect(result.isError).not.toBe(true);
+    expect(client.sendCalls).toEqual(["surface pointer"]);
+
+    releaseLock();
+    await held;
+  });
 
   it("reports send_to input as still pending when the composer never clears", async () => {
     const client = new FakeClaudeSurfaceClient();
@@ -833,7 +913,7 @@ describe("enter reliability", () => {
       const resultPromise = tool.handler(
         {
           agent_id: "agent-1",
-          text: "land once but evidence stays unavailable",
+          text: `land once but evidence stays unavailable ${"x".repeat(170)}`,
           press_enter: true,
         },
         {} as any,

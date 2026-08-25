@@ -8,6 +8,7 @@ import {
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   resolveAgentSurfaceBinding,
+  runWithSurfaceTopologyCallScope,
   SurfaceIdentityConflictError,
 } from "../src/surface-topology.js";
 import type {
@@ -193,6 +194,39 @@ describe("enrichSurfaceIdsFromPanes", () => {
 });
 
 describe("collectSurfaceTopology", () => {
+  it("reuses one completed workspace map within a call and refreshes it across calls", async () => {
+    let workspaceRef = "workspace:A";
+    const client = {
+      listWindows: vi.fn().mockResolvedValue({
+        windows: [{ ref: "window:A", workspace_count: 1 }],
+      }),
+      listWorkspaces: vi.fn(async () => ({
+        workspaces: [workspace(workspaceRef)],
+      })),
+    };
+    const observerEpoch = () => "observer@test:1";
+
+    const first = await runWithSurfaceTopologyCallScope(async () => {
+      const one = await enumerateAllWindowWorkspaces(client, observerEpoch);
+      const two = await enumerateAllWindowWorkspaces(client, observerEpoch);
+      return { one, two };
+    });
+
+    expect(first.one.workspaces[0]?.ref).toBe("workspace:A");
+    expect(first.two.workspaces[0]?.ref).toBe("workspace:A");
+    expect(client.listWindows).toHaveBeenCalledTimes(1);
+    expect(client.listWorkspaces).toHaveBeenCalledTimes(1);
+
+    workspaceRef = "workspace:B";
+    const second = await runWithSurfaceTopologyCallScope(() =>
+      enumerateAllWindowWorkspaces(client, observerEpoch),
+    );
+
+    expect(second.workspaces[0]?.ref).toBe("workspace:B");
+    expect(client.listWindows).toHaveBeenCalledTimes(2);
+    expect(client.listWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
   it("enumerates workspaces in every cmux window before marking topology complete", async () => {
     const surfaceAUuid = "11111111-2222-4333-8444-555555555555";
     const surfaceBUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";

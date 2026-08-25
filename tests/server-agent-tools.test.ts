@@ -11121,6 +11121,8 @@ codex>
     const server = await createUuidRouteServer(routeClient, record);
     routeClient.client.send.mockClear();
     routeClient.sendCalls.length = 0;
+    routeClient.client.listWindows.mockClear();
+    routeClient.client.listWorkspaces.mockClear();
 
     const result = await registeredTestTool(server, "send_to").handler(
       {
@@ -11136,6 +11138,15 @@ codex>
     expect(routeClient.sendCalls).toEqual([
       { surface: "surface:B", text: "cross-window delivery" },
     ]);
+    // D97 regression budget: one enumeration per stable phase -- initial
+    // route proof, post-write evidence, and derived status publication --
+    // instead of allowing the old route/read/guard multiplier to return.
+    expect(routeClient.client.listWindows.mock.calls.length).toBeLessThanOrEqual(
+      3,
+    );
+    expect(
+      routeClient.client.listWorkspaces.mock.calls.length,
+    ).toBeLessThanOrEqual(6);
   });
 
   it("spawn_agent creates a worker in an explicit workspace in another window", async () => {
