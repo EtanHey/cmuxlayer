@@ -551,12 +551,7 @@ export function makeSelfRegistrationSessionLookup(
       (entry) => entry.session_id.trim().toLowerCase() === requested,
     );
     if (matches.length === 0) return null;
-    return matches.reduce((latest, entry) =>
-      (entry.ts ?? Number.NEGATIVE_INFINITY) >=
-      (latest.ts ?? Number.NEGATIVE_INFINITY)
-        ? entry
-        : latest,
-    );
+    return matches.at(-1)!;
   };
 }
 

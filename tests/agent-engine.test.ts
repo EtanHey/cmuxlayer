@@ -4645,8 +4645,8 @@ Session ID: ${sessionId}`,
           repo: "cmuxlayer",
           cli: "claude",
           state: "booting",
-          surface_id: "surface:existing-final",
-          surface_uuid: surfaceUuid,
+          surface_id: "surface:new-capture",
+          surface_uuid: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
           surface_provenance: "cmuxlayer_spawn",
           cli_session_id: null,
           cli_session_path: null,
@@ -4655,8 +4655,8 @@ Session ID: ${sessionId}`,
       );
       liveSurfaces = [
         {
-          ...makeSurface("surface:existing-final"),
-          id: surfaceUuid,
+          ...makeSurface("surface:new-capture"),
+          id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
           workspace_ref: "ws:existing-final",
         },
       ];
@@ -4669,6 +4669,8 @@ Session ID: ${sessionId}`,
         cli_session_path: "/durable/claude/existing.jsonl",
         pid: process.pid,
         pid_registered_at: "2026-08-23T11:00:05.000Z",
+        surface_id: "surface:new-capture",
+        surface_uuid: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
       });
       expect(engine.getAgentState(pendingAgentId)).toMatchObject({
         agent_id: finalAgentId,
@@ -12573,6 +12575,63 @@ Session ID: ${sessionId}`,
       expect(mockClient.listPaneSurfaces).not.toHaveBeenCalled();
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    });
+
+    it("force-closes a live terminal agent before retaining its resumable tombstone", async () => {
+      const agentId = "terminal-live-resumable";
+      const pid = 54321;
+      let processAlive = true;
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((targetPid: number, signal?: NodeJS.Signals | 0) => {
+          expect(targetPid).toBe(pid);
+          if (signal === "SIGKILL") {
+            processAlive = false;
+            return true;
+          }
+          if (!processAlive) {
+            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+          }
+          return true;
+        }) as typeof process.kill);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:terminal-live",
+          surface_uuid: null,
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          pid,
+          created_at: "2026-08-23T11:00:00.000Z",
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:terminal-live")];
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          liveSurfaces = [makeSurface("surface:witness")];
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+            workspace_ref: "",
+            window_ref: "window:1",
+            panes: [],
+          });
+        },
+      );
+      await engine.getRegistry().reconstitute();
+      execFileSyncMock.mockReturnValue("Sun Aug 23 11:00:02 2026\n");
+
+      try {
+        await engine.stopAgent(agentId, true);
+
+        expect(mockClient.closeSurface).toHaveBeenCalled();
+        expect(stateMgr.readState(agentId)).toMatchObject({
+          state: "done",
+          user_killed: true,
+          pid: null,
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
     });
 
     it("rejects force stop when the pid remains alive after SIGKILL", async () => {

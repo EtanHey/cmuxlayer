@@ -3496,10 +3496,17 @@ export class AgentEngine {
         !hasCapturedProcessEvidence ||
         (existingFinal.pid === identity.pid &&
           existingFinal.pid_registered_at === identity.pid_registered_at);
+      const routeMatches =
+        existingFinal.surface_id === updated.surface_id &&
+        (existingFinal.surface_uuid ?? null) === (updated.surface_uuid ?? null) &&
+        (existingFinal.surface_observer_id ?? null) ===
+          (updated.surface_observer_id ?? null) &&
+        (existingFinal.workspace_id ?? null) === (updated.workspace_id ?? null);
       const canonicalFinal =
         existingFinal.cli_session_id === identity.session_id &&
         existingFinal.cli_session_path === sessionPath &&
         processEvidenceMatches &&
+        routeMatches &&
         existingFinal.transcript_session_capture_deferred !== true &&
         (existingFinal.transcript_session_capture_attempts ?? 0) === 0
           ? existingFinal
@@ -3507,6 +3514,11 @@ export class AgentEngine {
               cli_session_id: identity.session_id,
               cli_session_path: sessionPath,
               ...capturedProcessEvidence,
+              surface_id: updated.surface_id,
+              surface_uuid: updated.surface_uuid ?? null,
+              surface_observer_id: updated.surface_observer_id,
+              surface_provenance: updated.surface_provenance,
+              workspace_id: updated.workspace_id,
               transcript_session_capture_deferred: false,
               transcript_session_capture_attempts: 0,
             });
@@ -8420,7 +8432,7 @@ export class AgentEngine {
     agentId: string,
     opts?: { workspace?: string; force?: boolean },
   ): Promise<SpawnAgentResult> {
-    const agent = this.resolveResumeAgent(agentId);
+    let agent = this.resolveResumeAgent(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -8459,6 +8471,21 @@ export class AgentEngine {
     const requestedWorkspace =
       opts?.workspace ?? agent.workspace_id ?? undefined;
     this.spawnGuard.check(requestedWorkspace);
+    const persistedAgent = this.stateMgr.readState(agent.agent_id);
+    if (!persistedAgent) {
+      throw new Error(`Agent not found: ${agent.agent_id}`);
+    }
+    if (!persistedAgent.cli_session_id) {
+      agent = this.stateMgr.updateRecord(agent.agent_id, {
+        cli_session_id: agent.cli_session_id,
+        cli_session_path: agent.cli_session_path ?? null,
+      });
+      this.registry.set(agent.agent_id, agent);
+    } else if (persistedAgent.cli_session_id !== agent.cli_session_id) {
+      throw new Error(
+        `Agent "${agent.agent_id}" session identity changed during resume resolution`,
+      );
+    }
 
     let surface: CreatedAgentSurface | null = null;
     let surfaceBound = false;
@@ -8565,13 +8592,13 @@ export class AgentEngine {
       this.stateMgr.readState(agentOrSessionId);
     if (direct) return direct;
     const requestedSessionId = agentOrSessionId.trim().toLowerCase();
+    const capturedMatches = this.stateMgr.listStates().filter(
+      (record) =>
+        record.cli_session_id?.trim().toLowerCase() === requestedSessionId,
+    );
     const captured =
-      this.stateMgr
-        .listStates()
-        .find(
-          (record) =>
-            record.cli_session_id?.trim().toLowerCase() === requestedSessionId,
-        ) ?? null;
+      capturedMatches.length === 1 ? capturedMatches[0]! : null;
+    if (capturedMatches.length > 1) return null;
     if (captured) return captured;
 
     const registration = this.selfRegistrationSessionLookup?.(agentOrSessionId);
@@ -8602,17 +8629,21 @@ export class AgentEngine {
               (!registrationCli || record.cli === registrationCli),
           )
         : null);
-    if (!candidate) return null;
-    return this.finalizeCapturedSession(candidate, {
-      session_id: registration.session_id,
-      path: registration.session_path,
-      ...(registration.pid && registration.ts
-        ? {
-            pid: registration.pid,
-            pid_registered_at: new Date(registration.ts).toISOString(),
-          }
-        : {}),
-    });
+    if (
+      !candidate ||
+      !TERMINAL_STATES.has(candidate.state) ||
+      (registrationCli && candidate.cli !== registrationCli) ||
+      (candidate.cli_session_id &&
+        candidate.cli_session_id.trim().toLowerCase() !== requestedSessionId)
+    ) {
+      return null;
+    }
+    return {
+      ...candidate,
+      cli_session_id: registration.session_id,
+      cli_session_path:
+        registration.session_path ?? candidate.cli_session_path ?? null,
+    };
   }
 
   /**
@@ -9661,24 +9692,31 @@ export class AgentEngine {
           this.registry.evictExplicit(canonicalAgentId);
           return;
         }
-        const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
-          user_killed: true,
-          pid: null,
-        });
-        this.registry.set(canonicalAgentId, tombstone);
-        return;
+        const surfaceGone = await this.isAgentSurfaceGone(agent);
+        if (
+          surfaceGone &&
+          (this.isProcessConfirmedGone(agent) || agent.pid == null)
+        ) {
+          const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
+            user_killed: true,
+            pid: null,
+          });
+          this.registry.set(canonicalAgentId, tombstone);
+          return;
+        }
+      } else {
+        if (
+          agent.state === "error" &&
+          userInitiated &&
+          agent.user_killed !== true
+        ) {
+          const marked = this.stateMgr.updateRecord(canonicalAgentId, {
+            user_killed: true,
+          });
+          this.registry.set(canonicalAgentId, marked);
+        }
+        return; // Already stopped
       }
-      if (
-        agent.state === "error" &&
-        userInitiated &&
-        agent.user_killed !== true
-      ) {
-        const marked = this.stateMgr.updateRecord(canonicalAgentId, {
-          user_killed: true,
-        });
-        this.registry.set(canonicalAgentId, marked);
-      }
-      return; // Already stopped
     }
 
     let route = await this.resolveAgentStopIoRoute(canonicalAgentId);
@@ -9923,10 +9961,15 @@ export class AgentEngine {
           const done = this.stateMgr.transition(canonicalAgentId, "done");
           this.registry.set(canonicalAgentId, done);
         } catch {
-          const failed = this.stateMgr.transition(canonicalAgentId, "error", {
-            error: "Force stopped",
-          });
-          this.registry.set(canonicalAgentId, failed);
+          try {
+            const failed = this.stateMgr.transition(canonicalAgentId, "error", {
+              error: "Force stopped",
+            });
+            this.registry.set(canonicalAgentId, failed);
+          } catch {
+            const committed = this.stateMgr.readState(canonicalAgentId);
+            if (committed) this.registry.set(canonicalAgentId, committed);
+          }
         }
       }
       return;

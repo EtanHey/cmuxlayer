@@ -116,6 +116,24 @@ describe("WatchSpec MCP contract", () => {
     expect(armSchema.shape.predicate.description).toContain(
       "thinking, working, idle, done, error",
     );
+    const fileWatch = { ...baseWatch, target: join(TEST_DIR, "report.md") };
+    expect(
+      armSchema.safeParse({ ...fileWatch, change: "content" }).success,
+    ).toBe(true);
+    expect(
+      waitSchema.safeParse({
+        watch: { ...fileWatch, change: "content" },
+      }).success,
+    ).toBe(true);
+    expect(
+      waitSchema.safeParse({
+        watch: {
+          ...fileWatch,
+          marker: "DONE",
+          change: "content",
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts WatchSpec through wait_for and blocks until marker count increases", async () => {

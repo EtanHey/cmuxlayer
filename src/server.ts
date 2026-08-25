@@ -393,13 +393,17 @@ const WatchSpecArgsSchema = {
     .enum(WATCH_AGENT_PREDICATES)
     .optional()
     .describe(
-      "Agent screen-state predicate: thinking, working, idle, done, error; mutually exclusive with marker",
+      "Agent screen-state predicate: thinking, working, idle, done, error; mutually exclusive with marker and change",
     ),
   marker: z
     .string()
     .min(1)
     .optional()
-    .describe("Literal file marker; mutually exclusive with predicate"),
+    .describe("Literal file marker; mutually exclusive with predicate and change"),
+  change: z
+    .literal("content")
+    .optional()
+    .describe("Persistent file-content change watch; mutually exclusive with predicate and marker"),
   watermark: z
     .number()
     .int()
@@ -415,9 +419,17 @@ const WatchSpecArgsSchema = {
 
 const WatchSpecSchema = z
   .object(WatchSpecArgsSchema)
-  .refine((watch) => Boolean(watch.predicate) !== Boolean(watch.marker), {
-    message: "WatchSpec requires exactly one of predicate or marker",
-  });
+  .refine(
+    (watch) => {
+      const selectors = [watch.predicate, watch.marker, watch.change].filter(
+        (value) => value !== undefined,
+      );
+      return selectors.length === 1;
+    },
+    {
+      message: "WatchSpec requires exactly one of predicate, marker, or change",
+    },
+  );
 
 // Re-export for test access
 export { sanitizeTerminalInput } from "./sanitize.js";

@@ -333,6 +333,12 @@ describe("revive on purpose (#492)", () => {
       }),
     );
     await engine.getRegistry().reconstitute();
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:witness"),
+        workspace_ref: "ws:witness",
+      },
+    ];
 
     await engine.stopAgent("cmuxlayerCodex-revive", true);
 
@@ -368,6 +374,20 @@ describe("revive on purpose (#492)", () => {
       agent_id: "cmuxlayerCodex-revive",
       surface_id: "surface:new",
     });
+  });
+
+  it("rejects duplicate persisted owners of one raw harness session", async () => {
+    for (const agentId of ["duplicate-session-a", "duplicate-session-b"]) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          cli_session_id: CODEX_SESSION,
+        }),
+      );
+    }
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
   });
 
   it("recovers a missing captured id from the session registry before raw-id resume", async () => {
@@ -429,6 +449,7 @@ describe("revive on purpose (#492)", () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: "exact-agent",
+        state: "done",
         cli_session_id: null,
         surface_uuid: "exact-surface-uuid",
         launch_cwd: "/shared/worktree",
@@ -476,6 +497,41 @@ describe("revive on purpose (#492)", () => {
     }
 
     expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+  });
+
+  it("does not mutate an active fallback match during raw-id resolution", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "active-surface-uuid",
+        cwd: "/shared/worktree",
+        pid: null,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: "/rollout/raw.jsonl",
+        ts: Date.now(),
+      }),
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "active-agent",
+        state: "working",
+        cli_session_id: null,
+        cli_session_path: null,
+        surface_uuid: "active-surface-uuid",
+        launch_cwd: "/shared/worktree",
+      }),
+    );
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+    expect(stateMgr.readState("active-agent")).toMatchObject({
+      cli_session_id: null,
+      cli_session_path: null,
+      state: "working",
+    });
   });
 
   it("captures the full harness session id before spawn returns", async () => {

@@ -112,7 +112,7 @@ describe("makeSelfRegistrationSessionLookup", () => {
           },
           {
             session_id: "raw-session-id",
-            ts: 20,
+            ts: 5,
             cwd: "/new",
           },
         ),
@@ -121,7 +121,7 @@ describe("makeSelfRegistrationSessionLookup", () => {
     expect(lookup("RAW-SESSION-ID")).toMatchObject({
       session_id: "raw-session-id",
       cwd: "/new",
-      ts: 20,
+      ts: 5,
     });
   });
 });
