@@ -552,13 +552,15 @@ describe("CmuxLayerDaemon", () => {
     context.dispose();
   });
 
-  it("forwards a custom self-registration resolver into its lazy context", async () => {
+  it("forwards custom self-registration readers into its lazy context", async () => {
     const selfRegistrationSessionResolver = vi.fn(() => null);
+    const selfRegistrationSessionLookup = vi.fn(() => null);
     const daemon = new CmuxLayerDaemon({
       exec: createListSurfacesExec(),
       stateDir: stateDir("custom-self-registration-resolver-state"),
       skipAgentLifecycle: true,
       selfRegistrationSessionResolver,
+      selfRegistrationSessionLookup,
     });
 
     const context = await (
@@ -571,6 +573,9 @@ describe("CmuxLayerDaemon", () => {
 
     expect(context.selfRegistrationSessionResolver).toBe(
       selfRegistrationSessionResolver,
+    );
+    expect(context.selfRegistrationSessionLookup).toBe(
+      selfRegistrationSessionLookup,
     );
     context.dispose();
   });

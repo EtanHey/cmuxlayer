@@ -5,7 +5,10 @@ import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { getTransportHealth } from "./cmux-transport-self-heal.js";
 import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
-import { makeSelfRegistrationSessionResolver } from "./self-registration.js";
+import {
+  makeSelfRegistrationSessionLookup,
+  makeSelfRegistrationSessionResolver,
+} from "./self-registration.js";
 import type { AgentRoute } from "./agent-types.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
@@ -403,6 +406,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         monitorRegistryPath: defaultMonitorRegistryPath(),
         monitorRegistryNotify: httpNotifyMonitorDeadman,
         selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
+        selfRegistrationSessionLookup: makeSelfRegistrationSessionLookup(),
         inboxOpts: opts.inboxOpts,
         closeForensicsRunner: createDefaultCloseForensicsRunner({
           stateMgr: this.stateMgr,

@@ -25,7 +25,10 @@ import {
   type CreateCmuxClientOptions,
 } from "./cmux-client-factory.js";
 import { createServer, createServerContext } from "./server.js";
-import { makeSelfRegistrationSessionResolver } from "./self-registration.js";
+import {
+  makeSelfRegistrationSessionLookup,
+  makeSelfRegistrationSessionResolver,
+} from "./self-registration.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
 import {
   defaultMonitorRegistryPath,
@@ -667,6 +670,9 @@ export class CmuxLayerDaemon {
           selfRegistrationSessionResolver:
             this.opts.selfRegistrationSessionResolver ??
             makeSelfRegistrationSessionResolver(),
+          selfRegistrationSessionLookup:
+            this.opts.selfRegistrationSessionLookup ??
+            makeSelfRegistrationSessionLookup(),
           surfaceObserverOwnerIdProvider:
             this.opts.surfaceObserverOwnerIdProvider,
           surfaceObserverEpochProvider: this.opts.surfaceObserverEpochProvider,

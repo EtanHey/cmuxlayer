@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { httpDeliver } from "./outbox-drainer.js";
 
 export type WatchState = "armed" | "firing" | "fired" | "failed";
@@ -35,6 +35,8 @@ export interface WatchSpec {
   target: string;
   predicate?: WatchAgentPredicate;
   marker?: string;
+  /** Persistently notify after each distinct file-content revision. */
+  change?: "content";
   watermark?: number;
   /** Absolute Unix timestamp in milliseconds. */
   deadline: number;
@@ -44,6 +46,7 @@ export interface WatchRecord extends WatchSpec {
   watch_id: string;
   target_kind: "file" | "agent";
   watermark?: number;
+  fingerprint?: string;
   armed_at_ms: number;
   last_heartbeat_at_ms: number;
   liveness_source: string;
@@ -64,7 +67,11 @@ export interface WatchRegistryFile {
 }
 
 export type WatchNotificationReason =
-  "predicate_matched" | "consumer_died" | "target_missing" | "deadline_elapsed";
+  | "predicate_matched"
+  | "target_changed"
+  | "consumer_died"
+  | "target_missing"
+  | "deadline_elapsed";
 
 export interface WatchNotification {
   watch_id: string;
@@ -98,9 +105,20 @@ export interface WatchAgentObservation {
 export interface WatchRegistryOptions {
   registryPath?: string;
   now?: () => number;
+  contentFingerprintIo?: WatchContentFingerprintIo;
   agentObservation?: (
     agentId: string,
   ) => Promise<WatchAgentObservation> | WatchAgentObservation;
+}
+
+export interface WatchContentFingerprintIo {
+  stat: (path: string) => {
+    mtimeNs: bigint;
+    ctimeNs: bigint;
+    ino: bigint;
+    size: bigint;
+  };
+  read: (path: string) => Buffer;
 }
 
 export interface WatchSweepOptions extends WatchRegistryOptions {
@@ -182,6 +200,7 @@ function isWatchNotificationReason(
 ): value is WatchNotificationReason {
   return (
     value === "predicate_matched" ||
+    value === "target_changed" ||
     value === "consumer_died" ||
     value === "target_missing" ||
     value === "deadline_elapsed"
@@ -207,6 +226,9 @@ function isWatchRecord(value: unknown): value is WatchRecord {
     (value.liveness.source !== "process" && value.liveness.source !== "screen") ||
     !isFiniteNumber(value.liveness.observed_at_ms)
   ) {
+    return false;
+  }
+  if (value.fingerprint !== undefined && typeof value.fingerprint !== "string") {
     return false;
   }
   if (
@@ -266,10 +288,16 @@ function isWatchRecord(value: unknown): value is WatchRecord {
     return false;
   }
   if (value.target_kind === "file") {
-    return Boolean(cleanString(value.marker)) && value.predicate === undefined;
+    const hasMarker = Boolean(cleanString(value.marker));
+    const hasChange = value.change === "content";
+    return hasMarker !== hasChange && value.predicate === undefined;
   }
   if (value.target_kind === "agent") {
-    return isWatchAgentPredicate(value.predicate) && value.marker === undefined;
+    return (
+      isWatchAgentPredicate(value.predicate) &&
+      value.marker === undefined &&
+      value.change === undefined
+    );
   }
   return false;
 }
@@ -391,6 +419,26 @@ function countMarker(path: string, marker: string): number {
   return count;
 }
 
+function contentFingerprint(
+  path: string,
+  io: WatchContentFingerprintIo = {
+    stat: (target) => statSync(target, { bigint: true }),
+    read: (target) => readFileSync(target),
+  },
+): string {
+  const revision = (stat: ReturnType<WatchContentFingerprintIo["stat"]>) =>
+    [stat.mtimeNs, stat.ctimeNs, stat.ino, stat.size].join(":");
+  const before = io.stat(path);
+  let content = io.read(path);
+  let after = io.stat(path);
+  if (revision(before) !== revision(after)) {
+    content = io.read(path);
+    after = io.stat(path);
+  }
+  const digest = createHash("sha256").update(content).digest("hex");
+  return [digest, after.mtimeNs, after.ctimeNs, after.ino, after.size].join(":");
+}
+
 function assertSpec(
   spec: WatchSpec,
   opts: WatchRegistryOptions,
@@ -400,16 +448,19 @@ function assertSpec(
   targetKind: "file" | "agent";
   predicate?: WatchAgentPredicate;
   marker?: string;
+  change?: "content";
 } {
   const owner = cleanString(spec.owner);
   const target = cleanString(spec.target);
   const predicate = cleanString(spec.predicate);
   const marker = cleanString(spec.marker);
-  if (!owner || !target || (predicate === null) === (marker === null)) {
+  const change = spec.change === "content" ? "content" : null;
+  const selectorCount = Number(predicate !== null) + Number(marker !== null) + Number(change !== null);
+  if (!owner || !target || selectorCount !== 1) {
     throw new WatchArmError(
       "invalid_watch_spec",
       target ?? "",
-      "WatchSpec requires owner, target, and exactly one of predicate or marker",
+      "WatchSpec requires owner, target, and exactly one of predicate, marker, or change",
     );
   }
   const now = nowMs(opts);
@@ -433,11 +484,11 @@ function assertSpec(
 
   const targetKind = isAbsolute(target) ? "file" : "agent";
   if (targetKind === "file") {
-    if (!marker || predicate) {
+    if ((!marker && !change) || predicate || Boolean(marker) === Boolean(change)) {
       throw new WatchArmError(
         "invalid_watch_spec",
         target,
-        "File WatchSpec targets require marker and do not accept predicate",
+        "File WatchSpec targets require exactly one of marker or change and do not accept predicate",
       );
     }
     if (!existsSync(target)) {
@@ -448,7 +499,7 @@ function assertSpec(
       );
     }
   } else {
-    if (!isWatchAgentPredicate(predicate) || marker) {
+    if (!isWatchAgentPredicate(predicate) || marker || change) {
       throw new WatchArmError(
         "invalid_watch_spec",
         target,
@@ -471,6 +522,7 @@ function assertSpec(
     targetKind,
     ...(isWatchAgentPredicate(predicate) ? { predicate } : {}),
     ...(marker ? { marker } : {}),
+    ...(change ? { change } : {}),
   };
 }
 
@@ -491,6 +543,9 @@ export async function armWatch(
   const watermark = checked.marker
     ? (spec.watermark ?? countMarker(target, checked.marker))
     : spec.watermark;
+  const fingerprint = checked.change
+    ? contentFingerprint(target, opts.contentFingerprintIo)
+    : undefined;
   const agentObservation =
     checked.targetKind === "agent"
       ? await opts.agentObservation?.(target)
@@ -512,7 +567,9 @@ export async function armWatch(
     target,
     ...(checked.predicate ? { predicate: checked.predicate } : {}),
     ...(checked.marker ? { marker: checked.marker } : {}),
+    ...(checked.change ? { change: checked.change } : {}),
     ...(watermark !== undefined ? { watermark } : {}),
+    ...(fingerprint !== undefined ? { fingerprint } : {}),
     deadline: spec.deadline,
     target_kind: checked.targetKind,
     armed_at_ms: observedAt,
@@ -678,17 +735,24 @@ export async function sweepWatches(
 
       const observedValue =
         record.target_kind === "file"
-          ? countMarker(record.target, record.marker!)
+          ? record.change === "content"
+            ? contentFingerprint(record.target, opts.contentFingerprintIo)
+            : countMarker(record.target, record.marker!)
           : (agentObservation?.state ?? "unknown");
       const matched =
         record.target_kind === "file"
-          ? typeof observedValue === "number" &&
-            observedValue > (record.watermark ?? 0)
+          ? record.change === "content"
+            ? typeof observedValue === "string" &&
+              observedValue !== record.fingerprint
+            : typeof observedValue === "number" &&
+              observedValue > (record.watermark ?? 0)
           : observedValue === record.predicate;
       if (matched) {
+        const reason: WatchNotificationReason =
+          record.change === "content" ? "target_changed" : "predicate_matched";
         const notification = notificationFor(
           record,
-          "predicate_matched",
+          reason,
           observedAt,
           observedValue,
         );
@@ -698,7 +762,7 @@ export async function sweepWatches(
           ...record,
           ...heartbeat,
           state: "fired" as const,
-          terminal_reason: "predicate_matched" as const,
+          terminal_reason: reason,
           terminal_at_ms: observedAt,
           observed_value: observedValue,
           notification_pending: true,
@@ -759,6 +823,27 @@ export async function sweepWatches(
           return record;
         }
         if (delivered) {
+          if (
+            record.change === "content" &&
+            typeof notification.observed_value === "string"
+          ) {
+            const {
+              terminal_reason: _terminalReason,
+              terminal_at_ms: _terminalAt,
+              notification_next_attempt_at_ms: _nextAttempt,
+              notification_delivered_at_ms: _previousDelivery,
+              ...persistent
+            } = record;
+            return {
+              ...persistent,
+              state: "armed" as const,
+              fingerprint: notification.observed_value,
+              observed_value: notification.observed_value,
+              notification_pending: false,
+              notification_attempts: 0,
+              notification_delivered_at_ms: observedAt,
+            };
+          }
           return {
             ...record,
             notification_pending: false,
@@ -791,8 +876,11 @@ export async function httpNotifyWatch(
       title: "Declared watch changed",
       body: `Watch ${event.watch_id} for ${event.owner}: ${event.reason}; target=${event.target}`,
       source: "cmuxlayer-watch-spec",
-      priority: event.reason === "predicate_matched" ? "normal" : "high",
-      dedupe_key: `${event.watch_id}:${event.reason}`,
+      priority:
+        event.reason === "predicate_matched" || event.reason === "target_changed"
+          ? "normal"
+          : "high",
+      dedupe_key: `${event.watch_id}:${event.reason}:${event.observed_value ?? ""}`,
     },
     notifyUrl,
   );

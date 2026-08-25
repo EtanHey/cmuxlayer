@@ -3577,6 +3577,52 @@ describe("AgentRegistry", () => {
         pid: process.pid,
       });
     });
+
+    it("keeps only the newest fifty resumable close tombstones", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      for (let index = 0; index < 52; index += 1) {
+        const timestamp = new Date(Date.UTC(2026, 7, 25, 10, 0, index));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `closed-tombstone-${String(index).padStart(2, "0")}`,
+            surface_id: `surface:closed-${index}`,
+            state: "done",
+            cli_session_id: `session-${index}`,
+            user_killed: true,
+            pid: null,
+            created_at: timestamp.toISOString(),
+            updated_at: timestamp.toISOString(),
+          }),
+        );
+      }
+
+      await registry.reconstitute();
+
+      const retained = registry
+        .list()
+        .filter((record) => record.agent_id.startsWith("closed-tombstone-"))
+        .map((record) => record.agent_id)
+        .sort();
+      expect(retained).toHaveLength(50);
+      expect(retained).not.toContain("closed-tombstone-00");
+      expect(retained).not.toContain("closed-tombstone-01");
+      expect(stateMgr.readState("closed-tombstone-00")).toBeNull();
+      expect(stateMgr.readState("closed-tombstone-51")).not.toBeNull();
+      expect(
+        stateMgr.getSurfaceSessionIndex().lookup({
+          workspace_id: null,
+          surface_id: "surface:closed-0",
+        }),
+      ).toBeNull();
+      expect(
+        stateMgr.getSurfaceSessionIndex().lookup({
+          workspace_id: null,
+          surface_id: "surface:closed-51",
+        }),
+      ).toMatchObject({ agent_id: "closed-tombstone-51" });
+    });
   });
 
   describe("purgeTerminal", () => {

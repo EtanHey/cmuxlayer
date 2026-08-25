@@ -633,6 +633,8 @@ export interface AgentEngineOptions {
   spawnGuard?: SpawnGuard;
   postSpawnLivenessMs?: number;
   stopPostConditionTimeoutMs?: number;
+  /** Codex-only self-registration wait; clamped to the 2s product bound. */
+  spawnSessionCaptureTimeoutMs?: number;
   /**
    * Optional fallback override after self-registration misses. When supplied,
    * it replaces the filesystem transcript scan (primarily for hermetic tests).
@@ -647,6 +649,10 @@ export interface AgentEngineOptions {
    * registry file — hermetic like `outboxDrain`/`closeForensicsRunner`.
    */
   selfRegistrationSessionResolver?: SessionIdentityResolver;
+  /** Reverse lookup used by resume_agent_id when callers supply a harness id. */
+  selfRegistrationSessionLookup?: (
+    sessionId: string,
+  ) => SelfRegistrationSessionEntry | null;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -740,6 +746,17 @@ export interface AgentEngineOptions {
   haltWedgedSweeps?: number;
 }
 
+export interface SelfRegistrationSessionEntry {
+  session_id: string;
+  surface_uuid: string;
+  cwd: string | null;
+  pid: number | null;
+  cli: string | null;
+  launcher: string | null;
+  session_path: string | null;
+  ts: number | null;
+}
+
 export type RolePlacementReconcileTrigger = "spawn" | "idle" | "boot";
 
 export interface RolePlacementReconcileSummary {
@@ -782,6 +799,8 @@ const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
 const FLEET_SIDEBAR_WAKE_REPUBLISH_DELAY_MS = 500;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
+const MAX_SPAWN_SESSION_CAPTURE_MS = 2_000;
+const SPAWN_SESSION_CAPTURE_POLL_MS = 50;
 const CHANNEL_MARKER_REAP_INTERVAL_MS = 60 * 60 * 1_000;
 const CHANNEL_MARKER_REAP_RETRY_MS = 60 * 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
@@ -1562,6 +1581,7 @@ export class AgentEngine {
   private spawnGuard: SpawnGuard;
   private postSpawnLivenessMs: number;
   private stopPostConditionTimeoutMs: number;
+  private spawnSessionCaptureTimeoutMs: number;
   private roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -1574,6 +1594,9 @@ export class AgentEngine {
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
   private selfRegistrationSessionResolver: SessionIdentityResolver | null;
+  private selfRegistrationSessionLookup:
+    | ((sessionId: string) => SelfRegistrationSessionEntry | null)
+    | null;
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private fleetSidebarWakeRepublishTimer: ReturnType<typeof setTimeout> | null =
@@ -1767,6 +1790,8 @@ export class AgentEngine {
     // app-server-runtime).
     this.selfRegistrationSessionResolver =
       opts?.selfRegistrationSessionResolver ?? null;
+    this.selfRegistrationSessionLookup =
+      opts?.selfRegistrationSessionLookup ?? null;
     const fallbackSessionIdentityResolver = opts?.sessionIdentityResolver;
     this.sessionIdentityResolver = (agent) =>
       this.resolveSessionIdentityWithSelfRegistration(
@@ -1815,6 +1840,13 @@ export class AgentEngine {
         process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS,
         DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS,
       );
+    this.spawnSessionCaptureTimeoutMs = Math.max(
+      0,
+      Math.min(
+        MAX_SPAWN_SESSION_CAPTURE_MS,
+        opts?.spawnSessionCaptureTimeoutMs ?? MAX_SPAWN_SESSION_CAPTURE_MS,
+      ),
+    );
     this.codexModelListRunner =
       opts?.codexModelListRunner ?? defaultCodexModelListRunner;
     this.spawnPreflight =
@@ -3068,9 +3100,7 @@ export class AgentEngine {
   }
 
   private canUseSelfRegistrationSessionResolver(agent: AgentRecord): boolean {
-    return (
-      agent.cli !== "codex" && this.canUseSelfRegistrationProcessEvidence(agent)
-    );
+    return this.canUseSelfRegistrationProcessEvidence(agent);
   }
 
   /**
@@ -3243,10 +3273,10 @@ export class AgentEngine {
   }
 
   /**
-   * Default session-identity resolution is harness-specific. Codex identity is
-   * sourced only from its rollout JSONL because its screen does not reliably
-   * expose the UUID and self-registration can race or carry unrelated identity.
-   * Claude/Cursor retain self-registration first, then transcript fallback.
+   * Default session-identity resolution is harness-specific. The registration
+   * row is keyed by the exact stable surface UUID and launch timestamp, so it is
+   * authoritative for Codex as well as Claude/Cursor; transcript scanning is a
+   * fallback only when that direct registration is absent.
    */
   private resolveSessionIdentityWithSelfRegistration(
     agent: AgentRecord,
@@ -3478,10 +3508,17 @@ export class AgentEngine {
         !hasCapturedProcessEvidence ||
         (existingFinal.pid === identity.pid &&
           existingFinal.pid_registered_at === identity.pid_registered_at);
+      const routeMatches =
+        existingFinal.surface_id === updated.surface_id &&
+        (existingFinal.surface_uuid ?? null) === (updated.surface_uuid ?? null) &&
+        (existingFinal.surface_observer_id ?? null) ===
+          (updated.surface_observer_id ?? null) &&
+        (existingFinal.workspace_id ?? null) === (updated.workspace_id ?? null);
       const canonicalFinal =
         existingFinal.cli_session_id === identity.session_id &&
         existingFinal.cli_session_path === sessionPath &&
         processEvidenceMatches &&
+        routeMatches &&
         existingFinal.transcript_session_capture_deferred !== true &&
         (existingFinal.transcript_session_capture_attempts ?? 0) === 0
           ? existingFinal
@@ -3489,6 +3526,11 @@ export class AgentEngine {
               cli_session_id: identity.session_id,
               cli_session_path: sessionPath,
               ...capturedProcessEvidence,
+              surface_id: updated.surface_id,
+              surface_uuid: updated.surface_uuid ?? null,
+              surface_observer_id: updated.surface_observer_id,
+              surface_provenance: updated.surface_provenance,
+              workspace_id: updated.workspace_id,
               transcript_session_capture_deferred: false,
               transcript_session_capture_attempts: 0,
             });
@@ -3804,6 +3846,27 @@ export class AgentEngine {
       return null;
     }
     return this.maybeCaptureBootSessionId(agent, {});
+  }
+
+  private async captureCodexSpawnSessionId(agentId: string): Promise<void> {
+    const deadline = Date.now() + this.spawnSessionCaptureTimeoutMs;
+    while (true) {
+      const current =
+        this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+      if (!current) return;
+      const captured = await this.maybeCaptureBootSessionId(current, {}, {
+        resolveTranscript: false,
+      });
+      if (captured.cli_session_id) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await new Promise<void>((resolveSleep) =>
+        setTimeout(
+          resolveSleep,
+          Math.min(SPAWN_SESSION_CAPTURE_POLL_MS, remaining),
+        ),
+      );
+    }
   }
 
   private async retryDeferredTranscriptCaptures(): Promise<void> {
@@ -8360,6 +8423,17 @@ export class AgentEngine {
         error,
       );
     }
+    if (
+      spawnParams.cli === "codex" &&
+      this.selfRegistrationSessionResolver
+    ) {
+      try {
+        await this.captureCodexSpawnSessionId(agentId);
+      } catch {
+        // Registration is written by the launched harness. A later sweep keeps
+        // retrying if the append has not landed by the time spawn returns.
+      }
+    }
     this.schedulePostSpawnLivenessAssertion(agentId);
     return {
       agent_id: agentId,
@@ -8388,8 +8462,7 @@ export class AgentEngine {
     agentId: string,
     opts?: { workspace?: string; force?: boolean },
   ): Promise<SpawnAgentResult> {
-    const agent =
-      this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    let agent = this.resolveResumeAgent(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -8428,6 +8501,21 @@ export class AgentEngine {
     const requestedWorkspace =
       opts?.workspace ?? agent.workspace_id ?? undefined;
     this.spawnGuard.check(requestedWorkspace);
+    const persistedAgent = this.stateMgr.readState(agent.agent_id);
+    if (!persistedAgent) {
+      throw new Error(`Agent not found: ${agent.agent_id}`);
+    }
+    if (!persistedAgent.cli_session_id) {
+      agent = this.stateMgr.updateRecord(agent.agent_id, {
+        cli_session_id: agent.cli_session_id,
+        cli_session_path: agent.cli_session_path ?? null,
+      });
+      this.registry.set(agent.agent_id, agent);
+    } else if (persistedAgent.cli_session_id !== agent.cli_session_id) {
+      throw new Error(
+        `Agent "${agent.agent_id}" session identity changed during resume resolution`,
+      );
+    }
 
     let surface: CreatedAgentSurface | null = null;
     let surfaceBound = false;
@@ -8527,6 +8615,77 @@ export class AgentEngine {
     }
   }
 
+  /** Resolve either cmuxlayer's public label or the harness's full session id. */
+  resolveResumeAgent(agentOrSessionId: string): AgentRecord | null {
+    const direct =
+      this.registry.get(agentOrSessionId) ??
+      this.stateMgr.readState(agentOrSessionId);
+    if (direct) return direct;
+    const requestedSessionId = agentOrSessionId.trim().toLowerCase();
+    const capturedMatches = this.stateMgr.listStates().filter(
+      (record) =>
+        record.cli_session_id?.trim().toLowerCase() === requestedSessionId,
+    );
+    const captured =
+      capturedMatches.length === 1 ? capturedMatches[0]! : null;
+    if (capturedMatches.length > 1) return null;
+    if (captured) return captured;
+
+    const registration = this.selfRegistrationSessionLookup?.(agentOrSessionId);
+    if (!registration) return null;
+    const surfaceUuid = registration.surface_uuid.trim().toLowerCase();
+    const registrationCli = registration.cli?.trim().toLowerCase() || null;
+    const records = this.stateMgr.listStates();
+    const uniqueMatch = (
+      predicate: (record: AgentRecord) => boolean,
+    ): AgentRecord | null => {
+      const matches = records.filter(predicate);
+      return matches.length === 1 ? matches[0]! : null;
+    };
+    const surfaceMatches = records.filter(
+      (record) => record.surface_uuid?.trim().toLowerCase() === surfaceUuid,
+    );
+    if (surfaceMatches.length > 1) return null;
+    const registrationCwd = registration.cwd
+      ? resolve(registration.cwd)
+      : null;
+    const registrationTimestamp =
+      typeof registration.ts === "number" ? registration.ts : Number.NaN;
+    const candidate =
+      surfaceMatches[0] ??
+      (registration.pid
+        ? uniqueMatch((record) => {
+            const recordTimestamp = Date.parse(record.created_at);
+            const recordCwd = record.launch_cwd ?? record.worktree_path;
+            return (
+              record.pid === registration.pid &&
+              Number.isFinite(registrationTimestamp) &&
+              Number.isFinite(recordTimestamp) &&
+              registrationTimestamp >= recordTimestamp &&
+              registrationCwd !== null &&
+              recordCwd !== null &&
+              recordCwd !== undefined &&
+              resolve(recordCwd) === registrationCwd
+            );
+          })
+        : null);
+    if (
+      !candidate ||
+      !TERMINAL_STATES.has(candidate.state) ||
+      (registrationCli && candidate.cli !== registrationCli) ||
+      (candidate.cli_session_id &&
+        candidate.cli_session_id.trim().toLowerCase() !== requestedSessionId)
+    ) {
+      return null;
+    }
+    return {
+      ...candidate,
+      cli_session_id: registration.session_id,
+      cli_session_path:
+        registration.session_path ?? candidate.cli_session_path ?? null,
+    };
+  }
+
   /**
    * Cascade-kill all agents in the subtree rooted at rootId.
    * Uses DFS post-order (children before root). Continues on failures (best-effort).
@@ -8611,7 +8770,7 @@ export class AgentEngine {
         state: initialState,
         elapsed: Date.now() - start,
         source: "immediate",
-        agent: toPublicAgent(initial),
+        agent: toPublicAgent({ ...initial, state: initialState }),
         error: initial.error ?? "Agent is in error state",
       };
     }
@@ -8623,7 +8782,7 @@ export class AgentEngine {
         state: initialState,
         elapsed: Date.now() - start,
         source: "immediate",
-        agent: toPublicAgent(initial),
+        agent: toPublicAgent({ ...initial, state: initialState }),
         error: "Agent has already completed",
       };
     }
@@ -8836,7 +8995,7 @@ export class AgentEngine {
             state: liveState,
             elapsed,
             source: "sweep",
-            agent: toPublicAgent(current),
+            agent: toPublicAgent({ ...current, state: liveState }),
             error:
               current.error ?? `Agent entered terminal state: ${liveState}`,
           });
@@ -8866,7 +9025,7 @@ export class AgentEngine {
     const startedAt = Date.now();
     const armed = await this.armWatch(spec);
     while (true) {
-      await sweepWatches({
+      const swept = await sweepWatches({
         registryPath: this.watchRegistryPath,
         now: this.watchRegistryNow,
         agentObservation: this.watchAgentObservation,
@@ -8879,7 +9038,7 @@ export class AgentEngine {
         throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
       }
       const elapsed = Date.now() - startedAt;
-      if (current.state === "fired") {
+      if (current.state === "fired" || swept.fired.includes(armed.watch_id)) {
         return { matched: true, elapsed, watch: current };
       }
       if (current.state === "failed") {
@@ -9569,20 +9728,35 @@ export class AgentEngine {
 
     if (TERMINAL_STATES.has(agent.state)) {
       if (force) {
-        this.registry.evictExplicit(canonicalAgentId);
-        return;
+        if (!agent.cli_session_id) {
+          this.registry.evictExplicit(canonicalAgentId);
+          return;
+        }
+        const surfaceGone = await this.isAgentSurfaceGone(agent);
+        if (
+          surfaceGone &&
+          (this.isProcessConfirmedGone(agent) || agent.pid == null)
+        ) {
+          const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
+            user_killed: true,
+            pid: null,
+          });
+          this.registry.set(canonicalAgentId, tombstone);
+          return;
+        }
+      } else {
+        if (
+          agent.state === "error" &&
+          userInitiated &&
+          agent.user_killed !== true
+        ) {
+          const marked = this.stateMgr.updateRecord(canonicalAgentId, {
+            user_killed: true,
+          });
+          this.registry.set(canonicalAgentId, marked);
+        }
+        return; // Already stopped
       }
-      if (
-        agent.state === "error" &&
-        userInitiated &&
-        agent.user_killed !== true
-      ) {
-        const marked = this.stateMgr.updateRecord(canonicalAgentId, {
-          user_killed: true,
-        });
-        this.registry.set(canonicalAgentId, marked);
-      }
-      return; // Already stopped
     }
 
     let route = await this.resolveAgentStopIoRoute(canonicalAgentId);
@@ -9812,7 +9986,32 @@ export class AgentEngine {
     }
 
     if (force) {
-      this.registry.evict(canonicalAgentId);
+      const current = this.registry.get(canonicalAgentId) ?? agent;
+      if (!current.cli_session_id) {
+        this.registry.evictExplicit(canonicalAgentId);
+        return;
+      }
+      const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
+        user_killed: true,
+        pid: null,
+      });
+      this.registry.set(canonicalAgentId, tombstone);
+      if (!TERMINAL_STATES.has(current.state)) {
+        try {
+          const done = this.stateMgr.transition(canonicalAgentId, "done");
+          this.registry.set(canonicalAgentId, done);
+        } catch {
+          try {
+            const failed = this.stateMgr.transition(canonicalAgentId, "error", {
+              error: "Force stopped",
+            });
+            this.registry.set(canonicalAgentId, failed);
+          } catch {
+            const committed = this.stateMgr.readState(canonicalAgentId);
+            if (committed) this.registry.set(canonicalAgentId, committed);
+          }
+        }
+      }
       return;
     }
 

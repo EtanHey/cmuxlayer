@@ -228,25 +228,33 @@ export function hasRecoverableCrashError(error: string | null): boolean {
     error.includes("disappeared") ||
     // Preserve resumability for legacy rows written by the deleted crash-recovery path.
     error.startsWith("Crash recovery failed:") ||
+    error.startsWith("Explicit resume failed:") ||
     error === CLI_EXIT_ERROR
   );
 }
 
+export function isDeliberateCloseTombstone(
+  agent: Pick<AgentRecord, "state" | "user_killed" | "cli_session_id">,
+): boolean {
+  return (
+    (agent.state === "done" || agent.state === "error") &&
+    !!agent.cli_session_id &&
+    agent.user_killed === true
+  );
+}
+
 /**
- * #492: cmuxlayer never respawns a pane on its own, so a row that died on its
- * own is the operator's ONLY handle for an explicit `spawn_agent
- * ({resume_agent_id})`. Keep such a row (and its captured session) instead of
- * reaping it. A row someone MEANT to end is not retained -- that close was the
- * decision.
+ * A deliberate close or recoverable crash preserves the captured harness
+ * session as a resumable tombstone. The registry caps these tombstones so
+ * persistence remains bounded.
  */
 export function shouldRetainForExplicitResume(
   agent: Pick<AgentRecord, "state" | "user_killed" | "cli_session_id" | "error">,
 ): boolean {
   return (
-    agent.state === "error" &&
-    agent.user_killed !== true &&
+    (agent.state === "done" || agent.state === "error") &&
     !!agent.cli_session_id &&
-    hasRecoverableCrashError(agent.error)
+    (agent.user_killed === true || hasRecoverableCrashError(agent.error))
   );
 }
 

@@ -3932,7 +3932,12 @@ describe("AgentEngine", () => {
         }
 
         expect(mockClient.newSplit).not.toHaveBeenCalled();
-        expect(engine.getAgentState("agent-user-closed")).toBeNull();
+        expect(engine.getAgentState("agent-user-closed")).toMatchObject({
+          agent_id: "agent-user-closed",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          state: "error",
+          user_killed: true,
+        });
       },
     );
 
@@ -4159,7 +4164,7 @@ describe("AgentEngine", () => {
       }
     });
 
-    it("uses Codex rollout identity instead of self-registration", async () => {
+    it("uses stable-surface self-registration before Codex rollout inference", async () => {
       const rolloutSessionId = "019fec96-588d-7000-8000-000000000000";
       const registeredSessionId = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
       const rolloutPath =
@@ -4202,13 +4207,13 @@ describe("AgentEngine", () => {
 
       await engine.captureBootSessionId("cmuxlayerCodex-pending-source");
 
-      expect(selfRegistrationResolver).not.toHaveBeenCalled();
-      expect(transcriptResolver).toHaveBeenCalledTimes(1);
-      expect(engine.getAgentState("cmuxlayerCodex-019fec96")).toMatchObject({
-        cli_session_id: rolloutSessionId,
-        cli_session_path: rolloutPath,
+      expect(selfRegistrationResolver).toHaveBeenCalledTimes(1);
+      expect(transcriptResolver).not.toHaveBeenCalled();
+      expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toMatchObject({
+        cli_session_id: registeredSessionId,
+        cli_session_path: null,
       });
-      expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toBeNull();
+      expect(engine.getAgentState("cmuxlayerCodex-019fec96")).toBeNull();
     });
 
     it("backfills Codex pid evidence only after rollout identity is durable", async () => {
@@ -4429,6 +4434,128 @@ Session ID: ${sessionId}`,
       expect(existsSync(stableMarker)).toBe(true);
     });
 
+    it("waits only for Codex self-registration during spawn", async () => {
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      let attempts = 0;
+      const resolver = vi.fn(() => {
+        attempts += 1;
+        return attempts >= 2 ? { session_id: sessionId, path: null } : null;
+      });
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+        spawnSessionCaptureTimeoutMs: 100,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+
+      const pending = engine.spawnAgent({
+        repo: "cmuxlayer",
+        model: "gpt-5.6-sol",
+        cli: "codex",
+        prompt: "Capture Codex registration",
+      });
+      await vi.advanceTimersByTimeAsync(60);
+      const result = await pending;
+
+      expect(resolver).toHaveBeenCalledTimes(2);
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        agent_id: result.agent_id,
+        cli_session_id: sessionId,
+      });
+    });
+
+    it("bounds Codex registration capture and leaves lazy fallback enabled", async () => {
+      const resolver = vi.fn(() => null);
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+        spawnSessionCaptureTimeoutMs: 100,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+
+      const pending = engine.spawnAgent({
+        repo: "cmuxlayer",
+        model: "gpt-5.6-sol",
+        cli: "codex",
+        prompt: "Return after the bounded registration window",
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await pending;
+
+      expect(resolver).toHaveBeenCalledTimes(3);
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        agent_id: result.agent_id,
+        cli_session_id: null,
+        transcript_session_capture_deferred: true,
+      });
+    });
+
+    it("clamps the default Codex registration wait to two seconds", async () => {
+      const resolver = vi.fn(() => null);
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+      let settled = false;
+
+      const pending = engine
+        .spawnAgent({
+          repo: "cmuxlayer",
+          model: "gpt-5.6-sol",
+          cli: "codex",
+          prompt: "Use the product timeout",
+        })
+        .then((result) => {
+          settled = true;
+          return result;
+        });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pending;
+
+      expect(settled).toBe(true);
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        cli_session_id: null,
+        transcript_session_capture_deferred: true,
+      });
+    });
+
+    it("does not wait for non-Codex self-registration during spawn", async () => {
+      const resolver = vi.fn(() => ({
+        session_id: "5b9f4f35-2942-4c8b-b1af-d89d4e36c95d",
+        path: null,
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        selfRegistrationSessionResolver: resolver,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+
+      const result = await engine.spawnAgent({
+        repo: "cmuxlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Do not block this spawn",
+      });
+
+      expect(resolver).not.toHaveBeenCalled();
+      expect(engine.getAgentState(result.agent_id)?.cli_session_id).toBeNull();
+    });
+
     it("preserves a durable transcript path while backfilling pid-only registration evidence", async () => {
       const agentId = "cmuxlayerClaude-durable-path";
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
@@ -4640,8 +4767,8 @@ Session ID: ${sessionId}`,
           repo: "cmuxlayer",
           cli: "claude",
           state: "booting",
-          surface_id: "surface:existing-final",
-          surface_uuid: surfaceUuid,
+          surface_id: "surface:new-capture",
+          surface_uuid: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
           surface_provenance: "cmuxlayer_spawn",
           cli_session_id: null,
           cli_session_path: null,
@@ -4650,8 +4777,8 @@ Session ID: ${sessionId}`,
       );
       liveSurfaces = [
         {
-          ...makeSurface("surface:existing-final"),
-          id: surfaceUuid,
+          ...makeSurface("surface:new-capture"),
+          id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
           workspace_ref: "ws:existing-final",
         },
       ];
@@ -4664,6 +4791,8 @@ Session ID: ${sessionId}`,
         cli_session_path: "/durable/claude/existing.jsonl",
         pid: process.pid,
         pid_registered_at: "2026-08-23T11:00:05.000Z",
+        surface_id: "surface:new-capture",
+        surface_uuid: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
       });
       expect(engine.getAgentState(pendingAgentId)).toMatchObject({
         agent_id: finalAgentId,
@@ -12498,8 +12627,16 @@ Session ID: ${sessionId}`,
           expect(killCalls).toContainEqual([pid, 0]);
           expect(killCalls).not.toContainEqual([pid, "SIGKILL"]);
           if (force) {
-            expect(stateMgr.readState("agent-force-recycled-pid")).toBeNull();
-            expect(engine.getAgentState("agent-force-recycled-pid")).toBeNull();
+            expect(stateMgr.readState("agent-force-recycled-pid")).toMatchObject({
+              cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+              state: "done",
+              user_killed: true,
+            });
+            expect(engine.getAgentState("agent-force-recycled-pid")).toMatchObject({
+              cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+              state: "done",
+              user_killed: true,
+            });
           } else {
             expect(stateMgr.readState("agent-force-recycled-pid")).toMatchObject({
               state: "done",
@@ -12560,6 +12697,63 @@ Session ID: ${sessionId}`,
       expect(mockClient.listPaneSurfaces).not.toHaveBeenCalled();
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    });
+
+    it("force-closes a live terminal agent before retaining its resumable tombstone", async () => {
+      const agentId = "terminal-live-resumable";
+      const pid = 54321;
+      let processAlive = true;
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((targetPid: number, signal?: NodeJS.Signals | 0) => {
+          expect(targetPid).toBe(pid);
+          if (signal === "SIGKILL") {
+            processAlive = false;
+            return true;
+          }
+          if (!processAlive) {
+            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+          }
+          return true;
+        }) as typeof process.kill);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:terminal-live",
+          surface_uuid: null,
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          pid,
+          created_at: "2026-08-23T11:00:00.000Z",
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:terminal-live")];
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          liveSurfaces = [makeSurface("surface:witness")];
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+            workspace_ref: "",
+            window_ref: "window:1",
+            panes: [],
+          });
+        },
+      );
+      await engine.getRegistry().reconstitute();
+      execFileSyncMock.mockReturnValue("Sun Aug 23 11:00:02 2026\n");
+
+      try {
+        await engine.stopAgent(agentId, true);
+
+        expect(mockClient.closeSurface).toHaveBeenCalled();
+        expect(stateMgr.readState(agentId)).toMatchObject({
+          state: "done",
+          user_killed: true,
+          pid: null,
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
     });
 
     it("rejects force stop when the pid remains alive after SIGKILL", async () => {

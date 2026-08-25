@@ -323,6 +323,321 @@ describe("revive on purpose (#492)", () => {
     expect(sends.some((text) => text.includes(CODEX_SESSION))).toBe(true);
   });
 
+  it("retains a resumable tombstone when a terminal agent is force-closed", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        workspace_id: "ws:1",
+        surface_id: "surface:old",
+      }),
+    );
+    await engine.getRegistry().reconstitute();
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:witness"),
+        workspace_ref: "ws:witness",
+      },
+    ];
+
+    await engine.stopAgent("cmuxlayerCodex-revive", true);
+
+    expect(stateMgr.readState("cmuxlayerCodex-revive")).toMatchObject({
+      agent_id: "cmuxlayerCodex-revive",
+      cli_session_id: CODEX_SESSION,
+      state: "done",
+      user_killed: true,
+    });
+    expect(registry.purgeAllTerminal()).toEqual([]);
+    expect(stateMgr.readState("cmuxlayerCodex-revive")).not.toBeNull();
+    const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
+    expect(resumed).toMatchObject({
+      agent_id: "cmuxlayerCodex-revive",
+      surface_id: "surface:new",
+    });
+  });
+
+  it("resumes by the raw harness session id and preserves the public agent id", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        workspace_id: "ws:1",
+        surface_id: "surface:old",
+      }),
+    );
+    await engine.getRegistry().reconstitute();
+
+    const resumed = await engine.resumeAgent(CODEX_SESSION);
+
+    expect(resumed).toMatchObject({
+      agent_id: "cmuxlayerCodex-revive",
+      surface_id: "surface:new",
+    });
+  });
+
+  it("rejects duplicate persisted owners of one raw harness session", async () => {
+    for (const agentId of ["duplicate-session-a", "duplicate-session-b"]) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          cli_session_id: CODEX_SESSION,
+        }),
+      );
+    }
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+  });
+
+  it("recovers a missing captured id from the session registry before raw-id resume", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: (sessionId) =>
+        sessionId === CODEX_SESSION
+          ? {
+              session_id: CODEX_SESSION,
+              surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              cwd: "/Users/e/Gits/cmuxlayer/.worktrees/run3",
+              pid: null,
+              cli: "codex",
+              launcher: "cmuxlayerCodex",
+              session_path: null,
+              ts: Date.now(),
+            }
+          : null,
+      inboxOpts: { baseDir: TEST_DIR },
+    });
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        workspace_id: "ws:1",
+        surface_id: "surface:old",
+        surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        cli_session_id: null,
+      }),
+    );
+    await registry.reconstitute();
+
+    const resumed = await engine.resumeAgent(CODEX_SESSION);
+
+    expect(resumed.agent_id).toBe("cmuxlayerCodex-revive");
+    expect(stateMgr.readState("cmuxlayerCodex-revive")?.cli_session_id).toBe(
+      CODEX_SESSION,
+    );
+  });
+
+  it("prefers an exact registration surface over same-cwd fallback records", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "exact-surface-uuid",
+        cwd: "/shared/worktree",
+        pid: null,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: null,
+        ts: Date.now(),
+      }),
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "exact-agent",
+        state: "done",
+        cli_session_id: null,
+        surface_uuid: "exact-surface-uuid",
+        launch_cwd: "/shared/worktree",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "same-cwd-agent",
+        cli_session_id: null,
+        surface_uuid: "different-surface-uuid",
+        launch_cwd: "/shared/worktree",
+      }),
+    );
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)?.agent_id).toBe(
+      "exact-agent",
+    );
+  });
+
+  it("rejects ambiguous same-cwd registration fallback records", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "missing-surface-uuid",
+        cwd: "/shared/worktree",
+        pid: null,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: null,
+        ts: Date.now(),
+      }),
+    });
+    for (const agentId of ["first-cwd-agent", "second-cwd-agent"]) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          cli_session_id: null,
+          surface_uuid: `${agentId}-surface`,
+          launch_cwd: "/shared/worktree",
+        }),
+      );
+    }
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+  });
+
+  it("rejects a raw-session registration that matches only by cwd", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "missing-surface-uuid",
+        cwd: "/shared/worktree",
+        pid: null,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: null,
+        ts: Date.now(),
+      }),
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "cwd-only-agent",
+        state: "done",
+        cli_session_id: null,
+        surface_uuid: "different-surface-uuid",
+        launch_cwd: "/shared/worktree",
+      }),
+    );
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+  });
+
+  it("rejects a stale registration that matches a newer record only by reused pid and cwd", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "long-gone-surface",
+        cwd: "/shared/worktree",
+        pid: 4242,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: null,
+        ts: 1_700_000_000_000,
+      }),
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "newer-unrelated-agent",
+        state: "done",
+        cli_session_id: null,
+        surface_uuid: "new-surface",
+        launch_cwd: "/shared/worktree",
+        pid: 4242,
+        created_at: "2026-08-25T10:00:00.000Z",
+      }),
+    );
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+    expect(stateMgr.readState("newer-unrelated-agent")?.cli_session_id).toBeNull();
+  });
+
+  it("clears prior-run done and halt evidence when reopening for resume", () => {
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        task_done_candidate_at: "2026-08-24T10:00:00.000Z",
+        task_done_detected_at: "2026-08-24T10:00:05.000Z",
+        halt_last_active_at: "2026-08-24T10:00:06.000Z",
+      }),
+    );
+
+    expect(stateMgr.reopenForResume("cmuxlayerCodex-revive")).toMatchObject({
+      state: "creating",
+      task_done_candidate_at: null,
+      task_done_detected_at: null,
+      halt_last_active_at: null,
+    });
+  });
+
+  it("does not mutate an active fallback match during raw-id resolution", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionLookup: () => ({
+        session_id: CODEX_SESSION,
+        surface_uuid: "active-surface-uuid",
+        cwd: "/shared/worktree",
+        pid: null,
+        cli: "codex",
+        launcher: "cmuxlayerCodex",
+        session_path: "/rollout/raw.jsonl",
+        ts: Date.now(),
+      }),
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "active-agent",
+        state: "working",
+        cli_session_id: null,
+        cli_session_path: null,
+        surface_uuid: "active-surface-uuid",
+        launch_cwd: "/shared/worktree",
+      }),
+    );
+
+    expect(engine.resolveResumeAgent(CODEX_SESSION)).toBeNull();
+    expect(stateMgr.readState("active-agent")).toMatchObject({
+      cli_session_id: null,
+      cli_session_path: null,
+      state: "working",
+    });
+  });
+
+  it("captures the full harness session id before spawn returns", async () => {
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      selfRegistrationSessionResolver: (agent) => ({
+        session_id: CODEX_SESSION,
+        path: "/rollout/codex.jsonl",
+        pid: null,
+        pid_registered_at: null,
+      }),
+      inboxOpts: { baseDir: TEST_DIR },
+    });
+
+    const spawned = await engine.spawnAgent({
+      repo: "cmuxlayer",
+      cli: "codex",
+      prompt: "capture my real harness id",
+    });
+
+    expect(stateMgr.readState(spawned.agent_id)?.cli_session_id).toBe(
+      CODEX_SESSION,
+    );
+  });
+
   it("restores the persisted caller title when resuming an agent", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(
@@ -488,7 +803,7 @@ describe("revive on purpose (#492)", () => {
     expect(mockClient.send).not.toHaveBeenCalled();
   });
 
-  it("keeps a recoverable terminal row when its stale process is gone", async () => {
+  it("retains a recoverable crash row when its stale process is gone", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(
       makeRecord({
@@ -507,7 +822,7 @@ describe("revive on purpose (#492)", () => {
     killSpy.mockRestore();
   });
 
-  it("keeps a recoverable legacy row during startup purge without surface ownership", async () => {
+  it("retains a recoverable legacy crash row during startup purge", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(
       makeRecord({

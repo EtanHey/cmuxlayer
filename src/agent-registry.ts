@@ -107,6 +107,7 @@ export function deriveSurfaceObserverId(
 }
 
 export const SURFACE_EVICTION_CONFIRMATION_MS = 5_000;
+export const MAX_RESUMABLE_TOMBSTONES = 50;
 
 /**
  * Absence window for rows NO live observer claims (#480).
@@ -706,6 +707,7 @@ export class AgentRegistry {
     for (const record of stateFiles) {
       this.agents.set(record.agent_id, record);
     }
+    this.pruneResumableTombstones();
 
     return this.reconcileSurfaces(opts);
   }
@@ -723,6 +725,7 @@ export class AgentRegistry {
         this.agents.set(record.agent_id, record);
       }
     }
+    this.pruneResumableTombstones();
 
     return this.reconcileSurfaces(opts);
   }
@@ -1704,12 +1707,35 @@ export class AgentRegistry {
     const resolved = this.resolveAlias(agentId);
     if (resolved !== agentId && record.agent_id === resolved) {
       this.agents.set(resolved, record);
+      this.pruneResumableTombstones();
       return;
     }
     if (agentId !== record.agent_id) {
       this.aliases.set(agentId, record.agent_id);
     }
     this.agents.set(record.agent_id, record);
+    this.pruneResumableTombstones();
+  }
+
+  private pruneResumableTombstones(): AgentRecord[] {
+    const tombstones = [...this.agents.values()]
+      .filter(shouldRetainForExplicitResume)
+      .sort((left, right) => {
+        const leftAt = Date.parse(left.updated_at);
+        const rightAt = Date.parse(right.updated_at);
+        const byUpdatedAt =
+          (Number.isFinite(rightAt) ? rightAt : 0) -
+          (Number.isFinite(leftAt) ? leftAt : 0);
+        return byUpdatedAt || right.agent_id.localeCompare(left.agent_id);
+      });
+    const removed: AgentRecord[] = [];
+    for (const tombstone of tombstones.slice(MAX_RESUMABLE_TOMBSTONES)) {
+      const removedAgentId = this.deleteAgentAndAliases(tombstone.agent_id);
+      this.stateMgr.removeState(removedAgentId);
+      this.stateMgr.getSurfaceSessionIndex().removeAgent(removedAgentId);
+      removed.push(tombstone);
+    }
+    return removed;
   }
 
   rename(oldAgentId: string, newAgentId: string, record: AgentRecord): void {

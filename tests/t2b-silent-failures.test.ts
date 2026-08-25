@@ -14,7 +14,7 @@
  * red run.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -85,8 +85,23 @@ function makeExec(opts?: {
 }): ExecFn & { calls: string[][] } {
   const calls: string[][] = [];
   let surfaceLive = true;
+  let resumedSurfaceLive = false;
   const exec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     calls.push(args);
+    if (args.includes("new-split") || args.includes("new-surface")) {
+      resumedSurfaceLive = true;
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:1",
+          surface: "surface:resumed",
+          surface_id: "BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    }
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -103,16 +118,28 @@ function makeExec(opts?: {
         stderr: "",
       };
     }
+    if (args.includes("list-status")) {
+      return {
+        stdout: JSON.stringify([
+          { key: "mode.control", value: "autonomous" },
+        ]),
+        stderr: "",
+      };
+    }
     if (args.includes("list-panes")) {
       if (opts?.surfaceEnumerationFails) {
         throw new Error("cmux list-panes: transient enumeration failure");
       }
       const surfaceRefs = [
         ...(surfaceLive ? [SURFACE] : []),
+        ...(resumedSurfaceLive ? ["surface:resumed"] : []),
         ...(opts?.witnessSurface ? [WITNESS_SURFACE] : []),
       ];
       const surfaceIds = [
         ...(surfaceLive ? [SURFACE_UUID] : []),
+        ...(resumedSurfaceLive
+          ? ["BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF"]
+          : []),
         ...(opts?.witnessSurface ? [WITNESS_UUID] : []),
       ];
       return {
@@ -165,6 +192,19 @@ function makeExec(opts?: {
                   },
                 ]
               : []),
+            ...(resumedSurfaceLive
+              ? [
+                  {
+                    id: "BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF",
+                    ref: "surface:resumed",
+                    pane: "pane:1",
+                    workspace: "workspace:1",
+                    title: "resumed worker",
+                    type: "terminal",
+                    selected: true,
+                  },
+                ]
+              : []),
           ],
         }),
         stderr: "",
@@ -210,7 +250,11 @@ afterEach(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-function makeServer(exec: ExecFn) {
+function makeServer(
+  exec: ExecFn,
+  withStableObserver = false,
+  withProcessEvidence = true,
+) {
   return createServer({
     exec,
     stateDir,
@@ -222,14 +266,20 @@ function makeServer(exec: ExecFn) {
         ? {
             session_id: agent.cli_session_id,
             path: agent.cli_session_path ?? null,
-            pid: process.pid,
-            pid_registered_at: new Date().toISOString(),
+            ...(withProcessEvidence
+              ? {
+                  pid: process.pid,
+                  pid_registered_at: new Date().toISOString(),
+                }
+              : {}),
           }
         : null,
     // Model CI/fresh-clone CLI mode explicitly. Ambient access to a developer's
     // real cmux socket must not decide whether teardown receipts are truthful.
-    surfaceObserverOwnerIdProvider: () => null,
-    surfaceObserverEpochProvider: () => null,
+    surfaceObserverOwnerIdProvider: () =>
+      withStableObserver ? "cmux:test" : null,
+    surfaceObserverEpochProvider: () =>
+      withStableObserver ? "cmux:test@socket:1" : null,
   }) as unknown;
 }
 
@@ -491,6 +541,105 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     expect(result.isError).toBeUndefined();
     expect(await listSurfaceRefs(server)).not.toContain(SURFACE);
     expect(payload(result).surface_closed).toBe(true);
+  });
+
+  it("closes then resumes the same public agent by its raw Codex session id", async () => {
+    const sessionId = "019faccc-1111-7222-8333-444455556666";
+    const harnessHome = mkdtempSync(join(tmpdir(), "cmux-t2b-harness-"));
+    const previousHarnessHome = process.env.CMUXLAYER_HARNESS_HOME;
+    process.env.CMUXLAYER_HARNESS_HOME = harnessHome;
+    const sessionDir = join(
+      harnessHome,
+      ".codex",
+      "sessions",
+      "2026",
+      "08",
+      "25",
+    );
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, `rollout-2026-08-25T10-00-00-${sessionId}.jsonl`),
+      `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`,
+    );
+    try {
+      const exec = makeExec({
+        screen: () => "$ ",
+        witnessSurface: true,
+      });
+      const server = makeServer(exec, true, false);
+      const record = seedAgent(server, {
+        cli: "codex",
+        model: "gpt-5.6-sol",
+        cli_session_id: sessionId,
+        cli_session_path: join(
+          sessionDir,
+          `rollout-2026-08-25T10-00-00-${sessionId}.jsonl`,
+        ),
+        surface_uuid: SURFACE_UUID,
+        surface_observer_id: "cmux:test",
+        surface_provenance: "cmuxlayer_spawn",
+        role: "orchestrator",
+        launch_cwd: "/Users/e/Gits/golems/.worktrees/run3",
+        worktree_path: "/Users/e/Gits/golems/.worktrees/run3",
+      });
+
+      const closed = (await getTool(server, "close_surface").handler(
+        { scope: "agent", agent_id: record.agent_id, force: true },
+        {},
+      )) as ToolCallResult;
+      expect(
+        payload(closed).surface_closed,
+        JSON.stringify({ payload: payload(closed), calls: exec.calls }),
+      ).toBe(true);
+
+      const resumedResult = (await getTool(server, "spawn_agent").handler(
+        { resume_agent_id: sessionId, workspace: "workspace:1" },
+        {},
+      )) as ToolCallResult;
+      const resumed = payload(resumedResult);
+
+      expect(resumed, JSON.stringify(resumed)).toMatchObject({
+        ok: true,
+        resumed: true,
+        agent_id: record.agent_id,
+        surface_id: "surface:resumed",
+      });
+    } finally {
+      rmSync(harnessHome, { recursive: true, force: true });
+      if (previousHarnessHome === undefined) {
+        delete process.env.CMUXLAYER_HARNESS_HOME;
+      } else {
+        process.env.CMUXLAYER_HARNESS_HOME = previousHarnessHome;
+      }
+    }
+  });
+
+  it("returns a structured refusal when forced agent close lacks stable topology", async () => {
+    const exec = makeExec({
+      screen: () => IDLE_CLAUDE_SCREEN,
+      surfaceEnumerationFails: true,
+    });
+    const server = makeServer(exec, true, false);
+    const record = seedAgent(server, {
+      state: "done",
+      cli_session_id: "019faccc-1111-7222-8333-444455556666",
+      surface_uuid: SURFACE_UUID,
+      surface_observer_id: "cmux:test",
+      pid: null,
+    });
+
+    const result = (await getTool(server, "close_surface").handler(
+      { scope: "agent", agent_id: record.agent_id, force: true },
+      {},
+    )) as ToolCallResult;
+    const data = payload(result);
+
+    expect(data).toMatchObject({
+      agent_stopped: false,
+      surface_closed: false,
+    });
+    expect(String(data.reason)).toMatch(/topology|surface|enumerat/i);
+    expect(String(data.remedy)).toMatch(/refresh|list_agents|retry/i);
   });
 
   it("never reads like a completed close while the pane is still listed", async () => {

@@ -301,7 +301,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.done_marker).toBe(parsed.done_marker);
   });
 
-  it("automatically arms the parent's persistent watch on the child report", async () => {
+  it("wakes the parent for every report revision even when the terminal marker is unchanged", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -335,6 +335,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
       return baseExec(cmd, args);
     });
+    let watchNow = 1_000;
+    const unavailableExternalNotify = vi.fn().mockResolvedValue(false);
     server = createServer(
       withTestSurfaceObserver({
         exec,
@@ -342,6 +344,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         disableSpawnPreflight: true,
         inboxBaseDir: inboxDir,
         watchRegistryPath,
+        watchRegistryNow: () => watchNow,
+        watchNotify: unavailableExternalNotify,
       }),
     );
     let engine = server._registeredTools.interact._engine;
@@ -357,8 +361,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       expect.objectContaining({
         owner: parent.agent_id,
         target: child.report_path,
-        marker: child.done_marker,
-        watermark: 0,
+        change: "content",
         state: "armed",
       }),
     ]);
@@ -371,12 +374,18 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         disableSpawnPreflight: true,
         inboxBaseDir: inboxDir,
         watchRegistryPath,
+        watchRegistryNow: () => watchNow,
+        watchNotify: unavailableExternalNotify,
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as any);
     engine = server._registeredTools.interact._engine;
     const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
-    appendFileSync(child.report_path, `${child.done_marker}\n`, "utf8");
+    writeFileSync(
+      child.report_path,
+      `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,
+      "utf8",
+    );
     await engine.sweepWatchesBestEffort();
     const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
     expect(
@@ -388,19 +397,46 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toBe(true);
 
-    const rearmed = await engine.armWatch({
-      owner: parent.agent_id,
-      target: child.report_path,
-      marker: child.done_marker,
-      deadline: Number.MAX_SAFE_INTEGER,
-    });
-    expect(rearmed.watermark).toBe(1);
+    const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    watchNow = 2_000;
     await engine.sweepWatchesBestEffort();
+    const retryCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      afterFirstWake,
+    );
     expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
-        (watch) => watch.watch_id === rearmed.watch_id,
-      )?.state,
-    ).toBe("armed");
+      retryCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(child.report_path),
+        ),
+      ),
+    ).toBe(false);
+
+    writeFileSync(
+      child.report_path,
+      `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,
+      "utf8",
+    );
+    await engine.sweepWatchesBestEffort();
+    const secondWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      afterFirstWake,
+    );
+    expect(
+      secondWakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(child.report_path),
+        ),
+      ),
+    ).toBe(true);
+
+    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches).toEqual([
+      expect.objectContaining({
+        owner: parent.agent_id,
+        target: child.report_path,
+        change: "content",
+        state: "armed",
+        notification_pending: false,
+      }),
+    ]);
   });
 
   it("does not describe a missing report target as a done marker and preserves the reason-aware notifier", async () => {

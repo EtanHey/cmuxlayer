@@ -659,34 +659,77 @@ describe("kill — scoped targets", () => {
     expect(parsed.ok).toBe(true);
   });
 
-  it("kill force removes surfaceless terminal registry ghosts", async () => {
+  it("kill force retains a tombstone hidden from default list_agents", async () => {
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeAgentRecord({
-        agent_id: "surfaceless-error-agent",
-        surface_id: "surface:ghost",
+        agent_id: "recoverable-crash-agent",
+        surface_id: "surface:crashed",
         state: "error",
+        cli_session_id: "019ec0e6-aaaa-bbbb-cccc-ddddeeeeffff",
+        role: "worker",
+        error: "Surface surface:crashed disappeared",
+        crash_recover: false,
+        user_killed: false,
+      }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "surfaceless-done-agent",
+        surface_id: "surface:ghost",
+        state: "done",
         cli_session_id: "019ec0e6-1111-2222-3333-444455556666",
         role: "orchestrator",
-        error: "Surface surface:ghost disappeared",
-        crash_recover: true,
+        error: null,
+        crash_recover: false,
       }),
     );
     await callTool(server, "list_agents", {});
 
     const result = await callTool(server, "kill", {
-      target: "surfaceless-error-agent",
+      target: "surfaceless-done-agent",
       force: true,
     });
     const parsed = parseResult(result);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.killed).toContain("surfaceless-error-agent");
-    expect(stateMgr.readState("surfaceless-error-agent")).toBeNull();
+    expect(parsed.killed).toContain("surfaceless-done-agent");
+    expect(stateMgr.readState("surfaceless-done-agent")).toMatchObject({
+      agent_id: "surfaceless-done-agent",
+      cli_session_id: "019ec0e6-1111-2222-3333-444455556666",
+      state: "done",
+      user_killed: true,
+      pid: null,
+    });
 
     const listed = parseResult(await callTool(server, "list_agents", {}));
     expect(
       listed.agents.map((agent: { agent_id: string }) => agent.agent_id),
-    ).not.toContain("surfaceless-error-agent");
+    ).not.toContain("surfaceless-done-agent");
+    expect(
+      listed.agents.map((agent: { agent_id: string }) => agent.agent_id),
+    ).toContain("recoverable-crash-agent");
+    const filtered = parseResult(
+      await callTool(server, "list_agents", { state: "done" }),
+    );
+    expect(
+      filtered.agents.map((agent: { agent_id: string }) => agent.agent_id),
+    ).toContain("surfaceless-done-agent");
+    const detailed = parseResult(
+      await callTool(server, "list_agents", { detail: "full" }),
+    );
+    expect(
+      detailed.agents.map((agent: { agent_id: string }) => agent.agent_id),
+    ).toContain("surfaceless-done-agent");
+    const explicitlyRequested = parseResult(
+      await callTool(server, "list_agents", {
+        agent_ids: ["surfaceless-done-agent"],
+      }),
+    );
+    expect(
+      explicitlyRequested.agents.map(
+        (agent: { agent_id: string }) => agent.agent_id,
+      ),
+    ).toContain("surfaceless-done-agent");
   });
 });

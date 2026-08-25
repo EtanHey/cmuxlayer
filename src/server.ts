@@ -55,6 +55,7 @@ import {
   type AgentDeliveryReceipt,
   type AgentLifecycleEvent,
   type LifecycleLockState,
+  type SelfRegistrationSessionEntry,
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
@@ -87,6 +88,7 @@ import {
 } from "./monitor-registry.js";
 import {
   WATCH_AGENT_PREDICATES,
+  readWatchRegistry,
   WatchArmError,
   type WatchNotify,
   type WatchSpec,
@@ -134,6 +136,8 @@ import type {
 } from "./agent-types.js";
 import {
   bootPromptRegistryFields,
+  isDeliberateCloseTombstone,
+  shouldRetainForExplicitResume,
   summarizeTaskSummary,
 } from "./agent-types.js";
 import {
@@ -392,13 +396,17 @@ const WatchSpecArgsSchema = {
     .enum(WATCH_AGENT_PREDICATES)
     .optional()
     .describe(
-      "Agent screen-state predicate: thinking, working, idle, done, error; mutually exclusive with marker",
+      "Agent screen-state predicate: thinking, working, idle, done, error; mutually exclusive with marker and change",
     ),
   marker: z
     .string()
     .min(1)
     .optional()
-    .describe("Literal file marker; mutually exclusive with predicate"),
+    .describe("Literal file marker; mutually exclusive with predicate and change"),
+  change: z
+    .literal("content")
+    .optional()
+    .describe("Persistent file-content change watch; mutually exclusive with predicate and marker"),
   watermark: z
     .number()
     .int()
@@ -414,9 +422,17 @@ const WatchSpecArgsSchema = {
 
 const WatchSpecSchema = z
   .object(WatchSpecArgsSchema)
-  .refine((watch) => Boolean(watch.predicate) !== Boolean(watch.marker), {
-    message: "WatchSpec requires exactly one of predicate or marker",
-  });
+  .refine(
+    (watch) => {
+      const selectors = [watch.predicate, watch.marker, watch.change].filter(
+        (value) => value !== undefined,
+      );
+      return selectors.length === 1;
+    },
+    {
+      message: "WatchSpec requires exactly one of predicate, marker, or change",
+    },
+  );
 
 // Re-export for test access
 export { sanitizeTerminalInput } from "./sanitize.js";
@@ -3348,6 +3364,9 @@ export interface CreateServerOptions {
    * `makeSelfRegistrationSessionResolver()`; unset in tests keeps HOME I/O out.
    */
   selfRegistrationSessionResolver?: SessionIdentityResolver;
+  selfRegistrationSessionLookup?: (
+    sessionId: string,
+  ) => SelfRegistrationSessionEntry | null;
   /** Async, throttled Codex rollout reader (primarily injectable for tests). */
   codexRolloutFillProvider?: CodexRolloutFillProvider;
   /** Override git worktree execution/home for tests. */
@@ -3523,6 +3542,9 @@ export interface CmuxServerContext {
   disableSpawnPreflight?: boolean;
   sessionIdentityResolver?: SessionIdentityResolver;
   selfRegistrationSessionResolver?: SessionIdentityResolver;
+  selfRegistrationSessionLookup?: (
+    sessionId: string,
+  ) => SelfRegistrationSessionEntry | null;
   lifecycleRegistry: AgentRegistry | null;
   lifecycleInitializer: (() => Promise<void>) | null;
   lifecycleStarted: boolean;
@@ -3675,6 +3697,7 @@ export function createServerContext(
     disableSpawnPreflight: opts?.disableSpawnPreflight,
     sessionIdentityResolver: opts?.sessionIdentityResolver,
     selfRegistrationSessionResolver: opts?.selfRegistrationSessionResolver,
+    selfRegistrationSessionLookup: opts?.selfRegistrationSessionLookup,
     lifecycleRegistry: opts?.lifecycleRegistry ?? null,
     lifecycleInitializer: opts?.lifecycleInitializer ?? null,
     lifecycleStarted: false,
@@ -10340,16 +10363,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!agentStopped) {
             // The stop itself failed: keep its verbatim ok:false/error and add
             // the surface half, which was never attempted.
-            return {
-              ...result,
-              structuredContent: {
-                ...rawStopContent,
-                scope: "agent",
-                agent_stopped: false,
-                surface_closed: false,
-                surface_close_skipped: "agent_stop_failed",
-              },
-            };
+            const reason =
+              typeof rawStopContent.error === "string"
+                ? rawStopContent.error
+                : "Agent stop could not establish a safe terminal I/O route";
+            const remedy =
+              "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
+            return err(new Error(`close_surface scope=agent refused: ${reason}`), {
+              ...rawStopContent,
+              scope: "agent",
+              agent_stopped: false,
+              surface_closed: false,
+              surface_close_skipped: "agent_stop_failed",
+              reason,
+              remedy,
+              WARNING: remedy,
+            });
           }
           if (!boundSurface) {
             const data = {
@@ -11460,6 +11489,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       });
     };
+    const watchRegistryPath =
+      opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json");
     const testProcess =
       process.env.VITEST === "true" || process.env.NODE_ENV === "test";
     const engine =
@@ -11632,6 +11663,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sessionIdentityResolver: context.sessionIdentityResolver,
           selfRegistrationSessionResolver:
             context.selfRegistrationSessionResolver,
+          selfRegistrationSessionLookup:
+            context.selfRegistrationSessionLookup,
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
           inboxOpts,
           launchCommandSender: async ({
@@ -11662,8 +11695,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           monitorRegistryPath: opts?.monitorRegistryPath,
           monitorRegistryNow: opts?.monitorRegistryNow,
           monitorRegistryNotify: opts?.monitorRegistryNotify,
-          watchRegistryPath:
-            opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+          watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
             let externalDelivered = true;
@@ -11678,9 +11710,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               registry.get(event.owner) ?? stateMgr.readState(event.owner);
             if (owner && lifecycleAgentInputDeliverer) {
               const text = (() => {
-                if (event.reason === "predicate_matched") {
+                if (
+                  event.reason === "predicate_matched" ||
+                  event.reason === "target_changed"
+                ) {
                   return event.target_kind === "file"
-                    ? `[report] done marker observed — read ${event.target}`
+                    ? `[report] changed — read ${event.target}`
                     : `[watch] agent predicate matched — inspect ${event.target}`;
                 }
                 if (event.reason === "target_missing") {
@@ -11705,7 +11740,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const ownerDelivered =
                   delivery.delivery === "submitted" ||
                   delivery.delivery === "queued";
-                return ownerDelivered && externalDelivered;
+                return ownerDelivered;
               } catch {
                 // Keep notification_pending=true. A later lifecycle sweep uses
                 // the parent's refreshed route after a session restart.
@@ -12373,12 +12408,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       coordination: { report_path: string; done_marker: string },
     ): Promise<string | null> => {
       try {
-        await mkdir(dirname(coordination.report_path), { recursive: true });
-        await appendFile(coordination.report_path, "", "utf8");
+        const reportPath = resolve(coordination.report_path);
+        const existing = readWatchRegistry({
+          registryPath: watchRegistryPath,
+        }).watches.find(
+          (watch) =>
+            watch.owner === parentAgentId &&
+            watch.target === reportPath &&
+            watch.change === "content" &&
+            watch.state !== "failed",
+        );
+        if (existing) return null;
+        await mkdir(dirname(reportPath), { recursive: true });
+        await appendFile(reportPath, "", "utf8");
         await engine.armWatch({
           owner: parentAgentId,
-          target: coordination.report_path,
-          marker: coordination.done_marker,
+          target: reportPath,
+          change: "content",
           deadline: Number.MAX_SAFE_INTEGER,
         });
         return null;
@@ -12857,7 +12903,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             await awaitLifecycleStart();
-            const existing = engine.getAgentState(args.resume_agent_id);
+            const existing = engine.resolveResumeAgent(args.resume_agent_id);
             if (!existing) {
               return err(new Error(`Agent not found: ${args.resume_agent_id}`));
             }
@@ -14943,7 +14989,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars only. Pass detail=full for provenance, health diagnostics, the full registry record, and up to 20 unresolved or attention delivery receipts.",
+      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides retained close tombstones; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
       {
         state: z
           .enum([
@@ -15115,10 +15161,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
         ) => {
           const registryObservedAt = Date.now();
+          const visibleRecords =
+            args.detail === "full" ||
+            requestedState !== undefined ||
+            (args.agent_ids?.length ?? 0) > 0
+              ? records
+              : records.filter(
+                  (agent) => !isDeliberateCloseTombstone(agent),
+                );
           const uuidKey = (value: string | null | undefined) =>
             value?.trim().toLowerCase() || null;
           const rows = await Promise.all(
-            records.map(async (agent) => {
+            visibleRecords.map(async (agent) => {
               try {
                 const agentUuid = uuidKey(agent.surface_uuid);
                 const observedSurface = liveDiscovery?.rows.find((surface) => {
