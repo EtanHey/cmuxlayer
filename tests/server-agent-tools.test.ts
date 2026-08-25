@@ -1246,7 +1246,10 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", "cmuxlayerCodex -s -E medium"]),
+      expect.arrayContaining([
+        "send",
+        "cmuxlayerCodex -s --worker -E medium",
+      ]),
     );
   });
 
@@ -4038,7 +4041,7 @@ describe("agent lifecycle tool handlers", () => {
         "send",
         "--surface",
         "surface:new",
-        `cmuxlayerCodex -s -w '${worktreePath}'`,
+        `cmuxlayerCodex -s --worker -w '${worktreePath}'`,
       ]),
     );
   });
@@ -4408,7 +4411,10 @@ describe("agent lifecycle tool handlers", () => {
       let launcherSentAt: number | null = null;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === "voicelayerCodex -s") {
+        if (
+          args.includes("send") &&
+          text === "voicelayerCodex -s --worker"
+        ) {
           launcherSentAt = Date.now();
           return { stdout: "{}", stderr: "" };
         }
@@ -4424,7 +4430,8 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: elapsed < 800 ? "$ voicelayerCodex -s" : "codex> ",
+              text:
+                elapsed < 800 ? "$ voicelayerCodex -s --worker" : "codex> ",
               lines: 20,
               scrollback_used: false,
             }),
@@ -4718,7 +4725,7 @@ describe("agent lifecycle tool handlers", () => {
         "send",
         "--surface",
         "surface:new",
-        `CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s -w '${worktreePath}'`,
+        `CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s --worker -w '${worktreePath}'`,
       ]),
     );
   });
@@ -5305,7 +5312,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === "voicelayerCodex -s") {
+        if (lastSentText === "voicelayerCodex -s --worker") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -5319,7 +5326,7 @@ describe("agent lifecycle tool handlers", () => {
               : lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
-                  ? "$ voicelayerCodex -s"
+                  ? "$ voicelayerCodex -s --worker"
                   : "codex> ",
             lines: 20,
             scrollback_used: false,
@@ -5393,7 +5400,10 @@ describe("agent lifecycle tool handlers", () => {
       let launcherReturns = 0;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === "voicelayerCodex -s") {
+        if (
+          args.includes("send") &&
+          text === "voicelayerCodex -s --worker"
+        ) {
           launcherSent = true;
           return { stdout: "{}", stderr: "" };
         }
@@ -5409,7 +5419,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: "bash-5.2$ voicelayerCodex -s",
+              text: "bash-5.2$ voicelayerCodex -s --worker",
               lines: 20,
               scrollback_used: false,
             }),
@@ -5437,7 +5447,9 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed.error).toContain(
         "launcher command remained pending after Return",
       );
-      expect(parsed.last_10_lines).toContain("bash-5.2$ voicelayerCodex -s");
+      expect(parsed.last_10_lines).toContain(
+        "bash-5.2$ voicelayerCodex -s --worker",
+      );
       expect(launcherReturns).toBeGreaterThanOrEqual(1);
     } finally {
       vi.useRealTimers();
@@ -6348,7 +6360,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === "voicelayerCodex -s") {
+        if (lastSentText === "voicelayerCodex -s --worker") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -6361,7 +6373,7 @@ describe("agent lifecycle tool handlers", () => {
               ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
               : lastSentText === ""
                 ? "$ "
-                : "$ voicelayerCodex -s\ncodex> ",
+                : "$ voicelayerCodex -s --worker\ncodex> ",
             lines: 20,
             scrollback_used: false,
           }),

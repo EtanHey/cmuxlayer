@@ -139,7 +139,9 @@ const RESUMABLE_CLIS = CLIS.filter(
 );
 
 function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string {
-  if (path === "registry") return `${EXPECTED_LAUNCHER_NAME[cli]} -s`;
+  if (path === "registry") {
+    return `${EXPECTED_LAUNCHER_NAME[cli]} -s${cli === "codex" ? " --worker" : ""}`;
+  }
   const cd = `cd '${root}' && `;
   switch (cli) {
     case "claude":

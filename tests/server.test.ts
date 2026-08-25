@@ -8596,6 +8596,10 @@ describe("tool handler integration", () => {
           string
         >;
       };
+      const workerLauncherCommand = fixture.launcher_command.replace(
+        " -s ",
+        " -s --worker ",
+      );
 
       let launcherSends = 0;
       let promptSent = false;
@@ -8762,7 +8766,7 @@ describe("tool handler integration", () => {
               text.includes("cmuxlayerCodex") &&
               !text.includes("cmuxlayer contract for"),
           ),
-        ).toEqual([fixture.launcher_command, fixture.launcher_command]);
+        ).toEqual([workerLauncherCommand, workerLauncherCommand]);
         expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
         expect(returnPresses).toBeGreaterThanOrEqual(3);
         expect(
@@ -8928,6 +8932,7 @@ describe("tool handler integration", () => {
       corrupted_command: string;
       screen: string;
     };
+    const workerLauncherCommand = `${fixture.launcher_command} --worker`;
 
     let composer = "";
     let launcherSendAttempts = 0;
@@ -8982,7 +8987,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
-        if (text === fixture.launcher_command) {
+        if (text === workerLauncherCommand) {
           launcherSendAttempts += 1;
           composer += text;
           if (launcherSendAttempts === 1) {
@@ -9005,7 +9010,7 @@ describe("tool handler integration", () => {
             ? codexComposerFrame(composer)
             : submitted === fixture.corrupted_command
             ? fixture.screen
-            : submitted === fixture.launcher_command
+            : submitted === workerLauncherCommand
               ? "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›"
               : submitted?.includes("cmuxlayer contract for")
                 ? codexSubmittedFrame(submitted)
@@ -9046,7 +9051,7 @@ describe("tool handler integration", () => {
         2_000,
       );
 
-      expect(submittedCommands[0]).toBe(fixture.launcher_command);
+      expect(submittedCommands[0]).toBe(workerLauncherCommand);
       expect(submittedCommands[1]).toContain("cmuxlayer contract for");
       expect(submittedCommands).not.toContain(fixture.corrupted_command);
       expect(launcherSendAttempts).toBe(1);
@@ -9106,6 +9111,13 @@ describe("tool handler integration", () => {
         pending_probe_screen: string;
       };
     };
+    const workerLauncherCommand = `${fixture.launcher_command} --worker`;
+    const workerCorruptedCommand =
+      workerLauncherCommand + workerLauncherCommand;
+    const workerPendingProbeScreen = fixture.replay.pending_probe_screen.replace(
+      fixture.launcher_command,
+      workerLauncherCommand,
+    );
 
     let composer = "";
     let launcherSendAttempts = 0;
@@ -9154,7 +9166,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
-        if (text === fixture.launcher_command) {
+        if (text === workerLauncherCommand) {
           launcherSendAttempts += 1;
           composer += text;
           if (launcherSendAttempts === 1) {
@@ -9187,7 +9199,7 @@ describe("tool handler integration", () => {
             );
           }
           if (probe === "delayed-visible" && ambiguityProbeReads > 1) {
-            text = fixture.replay.pending_probe_screen;
+            text = workerPendingProbeScreen;
           }
         }
         return {
@@ -9238,7 +9250,7 @@ describe("tool handler integration", () => {
         probe === "delayed-visible" ? 2 : 1,
       );
       if (probe === "delayed-visible") {
-        expect(submittedCommands[0]).toBe(fixture.launcher_command);
+        expect(submittedCommands[0]).toBe(workerLauncherCommand);
         expect(submittedCommands[1]).toContain("cmuxlayer contract for");
       } else {
         expect(submittedCommands).toEqual([]);
@@ -9246,6 +9258,7 @@ describe("tool handler integration", () => {
       expect(submittedCommands).not.toContain(
         fixture.captured_corrupted_command,
       );
+      expect(submittedCommands).not.toContain(workerCorruptedCommand);
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
     }
