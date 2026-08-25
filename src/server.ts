@@ -5659,10 +5659,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ) {
         return { submit_verified: true, submit_verification_reason: null };
       }
+      const baselineComposerInput =
+        opts.baseline === null
+          ? null
+          : extractComposerInputRegion(opts.baseline.text);
       const composerInput = extractComposerInputRegion(snapshot.text);
-      if (composerInput !== null && composerInput.trim() === "") {
-        // The composer is readable and empty: it let go of its contents. This
-        // is positive proof for a composer submit. A "working" status alone
+      if (
+        baselineComposerInput !== null &&
+        baselineComposerInput.trim() !== "" &&
+        composerInput !== null &&
+        composerInput.trim() === ""
+      ) {
+        // The composer was populated before Return and is now readable and
+        // empty: it visibly let go of its contents. A "working" status alone
         // deliberately does not count: the reported target was already
         // working on its previous turn, so status cannot distinguish "my
         // submit started a turn" from "a turn was already running" -- and a
