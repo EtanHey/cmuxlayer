@@ -191,6 +191,45 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("reports the daemon spawner's real app ancestry instead of inherited cmux env", async () => {
+    const health = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "ancestry-home"),
+      tmpDir: join(TEST_ROOT, "ancestry-tmp"),
+      pid: 900,
+      ppid: 800,
+      cwd: TEST_ROOT,
+      env: {
+        PATH: "/usr/bin:/bin",
+        CMUX_SURFACE_ID: "inherited-pane-id",
+      },
+      execFile: async (file, args) => {
+        if (file !== "ps") return { stdout: "" };
+        if (args.join(" ") === "-ww -axo pid=,ppid=,command=") {
+          return {
+            stdout: [
+              "900 800 /opt/homebrew/bin/node /opt/cmuxlayer/dist/daemon.js",
+              "800 700 /opt/homebrew/bin/node /opt/cmuxlayer/dist/proxy.js",
+              "700 1 /Applications/Zed.app/Contents/MacOS/Zed",
+              "1 0 /sbin/launchd",
+            ].join("\n"),
+          };
+        }
+        if (args.join(" ") === "ax -o pid= -o command=") {
+          return { stdout: "" };
+        }
+        return { stdout: "900 800 900 900 S+ ?? node daemon.js" };
+      },
+    });
+
+    expect(health.current_process.spawner_ancestry).toEqual({
+      app_bundle_path: "/Applications/Zed.app",
+      pid: 700,
+    });
+    expect(formatControlHealth(health)).toContain(
+      "daemon spawner ancestry: /Applications/Zed.app (pid=700)",
+    );
+  });
+
   it("reports pane_pty_dead surfaces and monitor recovery state", async () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home-observability");

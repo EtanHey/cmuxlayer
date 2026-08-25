@@ -159,6 +159,10 @@ export interface ControlHealth {
     ps?: string;
     ps_error?: string;
     script_path?: string | null;
+    spawner_ancestry?: {
+      app_bundle_path: string | null;
+      pid: number | null;
+    };
   };
   selected_transport: {
     client_class: string | null;
@@ -641,6 +645,49 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   return warnings;
 }
 
+interface ProcessAncestryRow {
+  pid: number;
+  ppid: number;
+  command: string;
+}
+
+function parseProcessAncestryRows(output: string): ProcessAncestryRow[] {
+  return output
+    .split("\n")
+    .map((line) => {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+      if (!match) return null;
+      return {
+        pid: Number(match[1]),
+        ppid: Number(match[2]),
+        command: match[3],
+      };
+    })
+    .filter((row): row is ProcessAncestryRow => row !== null);
+}
+
+export function resolveSpawnerAncestry(
+  processTable: string,
+  spawnerPid: number,
+): { app_bundle_path: string | null; pid: number | null } {
+  const byPid = new Map(
+    parseProcessAncestryRows(processTable).map((row) => [row.pid, row]),
+  );
+  const visited = new Set<number>();
+  let pid = spawnerPid;
+  while (pid > 0 && !visited.has(pid)) {
+    visited.add(pid);
+    const row = byPid.get(pid);
+    if (!row) break;
+    const bundle = row.command.match(/(\/.*?\.app)(?:\/|$)/)?.[1] ?? null;
+    if (bundle) {
+      return { app_bundle_path: bundle, pid: row.pid };
+    }
+    pid = row.ppid;
+  }
+  return { app_bundle_path: null, pid: null };
+}
+
 export async function collectControlHealth(
   opts: ControlHealthOptions = {},
 ): Promise<ControlHealth> {
@@ -663,17 +710,23 @@ export async function collectControlHealth(
   const nightlyDefaultSocket = join(tmpDir, "cmux-nightly.sock");
   const pathEntries = splitPathEntries(env.PATH);
 
-  const [prodMarkers, nightlyMarkers, cmuxResolution, processList, ps] =
-    await Promise.all([
-      Promise.all([
-        readMarker(
-          "state_last_socket",
-          join(stateDir, "last-socket-path"),
-          deps,
-        ),
-        readMarker(
-          "tmp_last_socket",
-          join(tmpDir, "cmux-last-socket-path"),
+  const [
+    prodMarkers,
+    nightlyMarkers,
+    cmuxResolution,
+    processList,
+    processAncestry,
+    ps,
+  ] = await Promise.all([
+    Promise.all([
+      readMarker(
+        "state_last_socket",
+        join(stateDir, "last-socket-path"),
+        deps,
+      ),
+      readMarker(
+        "tmp_last_socket",
+        join(tmpDir, "cmux-last-socket-path"),
           deps,
         ),
       ]),
@@ -688,12 +741,13 @@ export async function collectControlHealth(
           join(tmpDir, "cmux-nightly-last-socket-path"),
           deps,
         ),
-      ]),
-      resolveExecutables("cmux", pathEntries, deps),
-      runOptional(deps.execFile, "ps", ["ax", "-o", "pid=", "-o", "command="]),
-      runOptional(deps.execFile, "ps", [
-        "-o",
-        "pid=",
+    ]),
+    resolveExecutables("cmux", pathEntries, deps),
+    runOptional(deps.execFile, "ps", ["ax", "-o", "pid=", "-o", "command="]),
+    runOptional(deps.execFile, "ps", ["-ww", "-axo", "pid=,ppid=,command="]),
+    runOptional(deps.execFile, "ps", [
+      "-o",
+      "pid=",
         "-o",
         "ppid=",
         "-o",
@@ -719,6 +773,10 @@ export async function collectControlHealth(
   const envSnapshot = Object.fromEntries(
     ENV_KEYS.map((key) => [key, redactEnvValue(key, env[key])]),
   ) as Record<string, string | null>;
+  const spawnerAncestry = resolveSpawnerAncestry(
+    processAncestry.stdout ?? "",
+    opts.ppid ?? process.ppid,
+  );
 
   const base: Omit<ControlHealth, "warnings"> = {
     generated_at: (opts.now ?? (() => new Date()))().toISOString(),
@@ -732,6 +790,7 @@ export async function collectControlHealth(
       env: envSnapshot,
       path_entries: pathEntries,
       cmux_resolution: cmuxResolution,
+      spawner_ancestry: spawnerAncestry,
       ...(ps.stdout ? { ps: ps.stdout } : {}),
       ...(ps.error ? { ps_error: ps.error } : {}),
     },
@@ -865,6 +924,10 @@ function formatDaemonLifecycle(
 }
 
 export function formatControlHealth(health: ControlHealth): string {
+  const spawnerAncestry = health.current_process.spawner_ancestry ?? {
+    app_bundle_path: null,
+    pid: null,
+  };
   const lines = [
     "cmuxlayer control_health",
     `generated_at: ${health.generated_at}`,
@@ -879,6 +942,9 @@ export function formatControlHealth(health: ControlHealth): string {
           `transport_error: ${health.selected_transport.transport_error ?? "unknown"}`,
         ]
       : []),
+    `daemon spawner ancestry: ${spawnerAncestry.app_bundle_path ?? "none"}${
+      spawnerAncestry.pid === null ? "" : ` (pid=${spawnerAncestry.pid})`
+    }`,
     `env CMUX_SOCKET_PATH: ${health.current_process.env.CMUX_SOCKET_PATH ?? "unset"}`,
     `env CMUX_BUNDLED_CLI_PATH: ${health.current_process.env.CMUX_BUNDLED_CLI_PATH ?? "unset"}`,
     "cmux resolution:",

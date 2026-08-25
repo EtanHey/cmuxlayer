@@ -400,6 +400,11 @@ describe("CmuxLayerProxy", () => {
       reconnectJitterRatio: 0,
       requestTimeoutMs: 500,
       maxBufferedRequests: 8,
+      env: {},
+      probeCmuxSocket: vi.fn().mockResolvedValue({
+        usable: true,
+        socketPath: "/tmp/cmux.sock",
+      }),
       ...opts,
     });
     proxies.push(proxy);
@@ -873,6 +878,37 @@ describe("CmuxLayerProxy", () => {
     );
   });
 
+  it("does not spawn the installed daemon after reconnect denial by cmux", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-spawn-denied");
+    const logger = { error: vi.fn() };
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue({ pid: 4242 });
+    const attempts: number[] = [];
+    const { proxy } = createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      logger,
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+      probeCmuxSocket: vi.fn().mockResolvedValue({
+        usable: false,
+        socketPath: "/tmp/cmux.sock",
+        denied_reason: "access-control",
+        error: "Access denied - only processes started inside cmux can connect",
+      }),
+      reconnectLogIntervalMs: 0,
+      spawnDaemonForVersionBump,
+    });
+
+    await waitFor(() => attempts.length >= 3);
+    await proxy.stop();
+
+    expect(spawnDaemonForVersionBump).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer-proxy] daemon spawn suppressed (reason=cmux-access-control, path=/tmp/cmux.sock, trigger=reconnect-failure)",
+    );
+  });
+
   it(
     "logs a successful daemon spawn that exits suspiciously quickly",
     async () => {
@@ -899,7 +935,7 @@ describe("CmuxLayerProxy", () => {
             "daemon spawn suspicious quick-exit (isMain/symlink mismatch?)",
           ),
         ),
-      );
+      ),
       await proxy.stop();
     },
   );
