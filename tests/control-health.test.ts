@@ -209,7 +209,7 @@ describe("control health", () => {
             stdout: [
               "900 800 /opt/homebrew/bin/node /opt/cmuxlayer/dist/daemon.js",
               "800 700 /opt/homebrew/bin/node /opt/cmuxlayer/dist/proxy.js",
-              "700 1 /Applications/Zed.app/Contents/MacOS/Zed",
+              "700 1 /usr/bin/open -a /Applications/Zed.app",
               "1 0 /sbin/launchd",
             ].join("\n"),
           };

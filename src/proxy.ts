@@ -112,12 +112,16 @@ export class VersionBumpReconnectGuard {
     this.now = opts.now ?? Date.now;
   }
 
-  allow(): boolean {
+  canAttempt(): boolean {
     const cutoff = this.now() - this.windowMs;
     while (this.attempts.length > 0 && this.attempts[0] < cutoff) {
       this.attempts.shift();
     }
-    if (this.attempts.length >= this.maxAttempts) {
+    return this.attempts.length < this.maxAttempts;
+  }
+
+  allow(): boolean {
+    if (!this.canAttempt()) {
       return false;
     }
     this.attempts.push(this.now());
@@ -652,7 +656,7 @@ export class CmuxLayerProxy {
         );
         return;
       }
-      if (!this.reconnectDaemonSpawnGuard.allow()) {
+      if (!this.reconnectDaemonSpawnGuard.canAttempt()) {
         this.logReconnect(
           "spawn-guard",
           `[cmuxlayer-proxy] daemon spawn skipped (reason=guard, attempt=${attempt})`,
@@ -660,6 +664,9 @@ export class CmuxLayerProxy {
         return;
       }
       if (!(await this.canSpawnSharedDaemon("reconnect-failure"))) {
+        return;
+      }
+      if (!this.reconnectDaemonSpawnGuard.allow()) {
         return;
       }
       const spawnStartedAt = Date.now();

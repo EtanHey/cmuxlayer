@@ -679,7 +679,10 @@ export function resolveSpawnerAncestry(
     visited.add(pid);
     const row = byPid.get(pid);
     if (!row) break;
-    const bundle = row.command.match(/(\/.*?\.app)(?:\/|$)/)?.[1] ?? null;
+    const bundle =
+      row.command.match(
+        /(?:^|\s)(\/(?:(?!\s(?:-|\/)).)*?\.app)(?:\/|\s|$)/,
+      )?.[1] ?? null;
     if (bundle) {
       return { app_bundle_path: bundle, pid: row.pid };
     }

@@ -935,7 +935,7 @@ describe("CmuxLayerProxy", () => {
             "daemon spawn suspicious quick-exit (isMain/symlink mismatch?)",
           ),
         ),
-      ),
+      );
       await proxy.stop();
     },
   );
@@ -960,6 +960,35 @@ describe("CmuxLayerProxy", () => {
     await waitFor(() => attempts.length >= 6);
 
     expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not consume reconnect spawn guard capacity on transient probe failures", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-probe-guard");
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue(undefined);
+    const attempts: number[] = [];
+    const probeCmuxSocket = vi
+      .fn()
+      .mockResolvedValueOnce({ usable: false, socketPath: "/tmp/cmux.sock" })
+      .mockResolvedValueOnce({ usable: false, socketPath: "/tmp/cmux.sock" })
+      .mockResolvedValue({ usable: true, socketPath: "/tmp/cmux.sock" });
+    createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+      probeCmuxSocket,
+      reconnectDaemonSpawnGuard: new VersionBumpReconnectGuard({
+        maxAttempts: 1,
+        windowMs: 60_000,
+      }),
+      spawnDaemonForVersionBump,
+    });
+
+    await waitFor(() => attempts.length >= 5);
+
+    expect(probeCmuxSocket).toHaveBeenCalledTimes(3);
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
   });
 
   it("replays queued requests after reconnect autostart brings up the daemon", async () => {
