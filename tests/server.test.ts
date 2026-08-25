@@ -8117,97 +8117,7 @@ describe("tool handler integration", () => {
   });
 
   it("new_split with launcher-style title honors explicit pane when role is omitted", async () => {
-    mockExec = vi
-      .fn()
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          workspaces: [
-            {
-              ref: "workspace:1",
-              title: "brainlayer",
-              current_directory: "/Users/etanheyman/Gits/brainlayer",
-            },
-          ],
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          workspace_ref: "workspace:1",
-          window_ref: "window:1",
-          panes: [
-            {
-              ref: "pane:manual",
-              index: 0,
-              focused: true,
-              surface_count: 1,
-              surface_refs: ["surface:manual-anchor"],
-            },
-          ],
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          workspaces: [
-            {
-              ref: "workspace:1",
-              title: "brainlayer",
-              current_directory: "/Users/etanheyman/Gits/brainlayer",
-            },
-          ],
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          workspaces: [
-            {
-              ref: "workspace:1",
-              title: "brainlayer",
-              current_directory: "/Users/etanheyman/Gits/brainlayer",
-            },
-          ],
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: "[]",
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          workspace_ref: "workspace:1",
-          window_ref: "window:1",
-          pane_ref: "pane:manual",
-          surfaces: [
-            {
-              ref: "surface:manual-anchor",
-              title: "existing",
-              type: "terminal",
-              index: 0,
-              selected: true,
-            },
-          ],
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          workspace: "workspace:1",
-          surface: "surface:manual-title",
-          pane: "pane:manual",
-          title: "brainlayerCodex",
-          type: "terminal",
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({ ok: true }),
-        stderr: "",
-      });
-    const queuedExec = mockExec;
-    mockExec = vi.fn(async (cmd: string, args: string[]) => {
+    mockExec = vi.fn(async (_cmd: string, args: string[]) => {
       if (args.includes("list-windows")) {
         return {
           stdout: JSON.stringify({
@@ -8216,7 +8126,76 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      return queuedExec(cmd, args);
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "brainlayer",
+                current_directory: "/Users/etanheyman/Gits/brainlayer",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:manual",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:manual-anchor"],
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-status")) {
+        return { stdout: "[]", stderr: "" };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:manual",
+            surfaces: [
+              {
+                ref: "surface:manual-anchor",
+                title: "existing",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:manual-title",
+            pane: "pane:manual",
+            title: "brainlayerCodex",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("rename-tab")) {
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+      }
+      throw new Error(`Unexpected cmux command in test: ${args.join(" ")}`);
     }) as typeof mockExec;
     const server = createServer({
       exec: mockExec,

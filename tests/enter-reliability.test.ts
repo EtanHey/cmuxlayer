@@ -635,7 +635,10 @@ describe("enter reliability", () => {
     expect(parsed.error).toMatch(/press_enter|allow_busy|boolean/i);
   });
 
-  it("retries Enter once when a Codex composer still holds the exact send", async () => {
+  it.each([
+    ["short pointer", "Read and follow /tmp/run5-pointer.md"],
+    ["long inline", "x".repeat(2000)],
+  ] as const)("retries Enter once for a %s whose Codex composer still holds the exact send", async (_name, text) => {
     const client = new FakeClaudeSurfaceClient();
     client.cli = "codex";
     server = createReliabilityServer(client);
@@ -643,7 +646,7 @@ describe("enter reliability", () => {
 
     const result = await callTool(server, "send_to", {
       agent_id: "agent-1",
-      text: "x".repeat(2000),
+      text,
       press_enter: true,
       allow_long_inline: true,
     });
@@ -656,7 +659,7 @@ describe("enter reliability", () => {
     expect(parsed.submit_verified).toBe(true);
     expect(parsed.submit_evidence).toBe("cleared_composer");
     expect(parsed.retry_count).toBe(1);
-    expect(client.sendCalls.join("")).toHaveLength(2000);
+    expect(client.sendCalls.join("")).toBe(text);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       2,
     );
@@ -716,7 +719,7 @@ describe("enter reliability", () => {
 
       const result = await callTool(server, "send_to", {
         agent_id: "agent-1",
-        text: "slow first token",
+        text: `slow first token ${"x".repeat(190)}`,
         press_enter: true,
       });
       const parsed = parseResult(result);
@@ -730,6 +733,88 @@ describe("enter reliability", () => {
       expect(parsed.retry_count).toBe(0);
     },
   );
+
+  it.each(["throw", "blank"] as const)(
+    "bounds a short pointer send with %s verification to one second",
+    async (mode) => {
+    const client = new FakeUnavailableVerificationScreenClient(mode);
+    client.requiredReturns = 1;
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const tool = (server as any)._registeredTools["send_to"];
+    let settledAt: number | null = null;
+    const startedAt = Date.now();
+    const resultPromise = tool
+      .handler(
+        {
+          agent_id: "agent-1",
+          text: "Read and follow /tmp/run5-pointer.md",
+          press_enter: true,
+        },
+        {} as any,
+      )
+      .then((result: any) => {
+        settledAt = Date.now();
+        return result;
+      });
+
+    for (let elapsed = 0; elapsed < 2_000 && settledAt === null; elapsed += 50) {
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    const result = await resultPromise;
+    const parsed = parseResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.submit_verified).toBeNull();
+    expect(settledAt).not.toBeNull();
+    expect(settledAt! - startedAt).toBeLessThanOrEqual(1_000);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+  }, 10_000);
+
+  it("surface-mode pointer sends bypass a held lifecycle lock", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    server = createReliabilityServer(client);
+    registerAgent(server);
+    const engine = server._registeredTools["interact"]._engine;
+    let releaseLock!: () => void;
+    const held = engine.runLifecycleMutation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseLock = resolve;
+        }),
+      { label: "held-for-surface-send-test" },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    let settled = false;
+    const resultPromise = server._registeredTools.send_to
+      .handler(
+        {
+          mode: "surface",
+          surface: client.surface,
+          text: "surface pointer",
+          press_enter: false,
+        },
+        {} as any,
+      )
+      .then((result: any) => {
+        settled = true;
+        return result;
+      });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(settled).toBe(true);
+    const result = await resultPromise;
+    expect(result.isError).not.toBe(true);
+    expect(client.sendCalls).toEqual(["surface pointer"]);
+
+    releaseLock();
+    await held;
+  });
 
   it("reports send_to input as still pending when the composer never clears", async () => {
     const client = new FakeClaudeSurfaceClient();
@@ -833,7 +918,7 @@ describe("enter reliability", () => {
       const resultPromise = tool.handler(
         {
           agent_id: "agent-1",
-          text: "land once but evidence stays unavailable",
+          text: `land once but evidence stays unavailable ${"x".repeat(170)}`,
           press_enter: true,
         },
         {} as any,

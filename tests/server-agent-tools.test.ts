@@ -10762,6 +10762,47 @@ codex>
     );
   });
 
+  it("send_to delivers to an idle live agent with a recorded pid when its stable UUID route is valid", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:send-1",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "send-1-recorded-pid",
+      surface_id: "surface:send-1",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "idle",
+      pid: process.pid,
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "send 1",
+        press_enter: false,
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(routeClient.sendCalls).toEqual([
+      { surface: "surface:send-1", text: "send 1" },
+    ]);
+    expect(String(parseToolResult(result).error ?? "")).not.toMatch(
+      /topology did not prove its surface route/i,
+    );
+  });
+
   it("send_to rechecks for a bare shell after its final agent route resolution", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([
@@ -11121,6 +11162,8 @@ codex>
     const server = await createUuidRouteServer(routeClient, record);
     routeClient.client.send.mockClear();
     routeClient.sendCalls.length = 0;
+    routeClient.client.listWindows.mockClear();
+    routeClient.client.listWorkspaces.mockClear();
 
     const result = await registeredTestTool(server, "send_to").handler(
       {
@@ -11136,6 +11179,15 @@ codex>
     expect(routeClient.sendCalls).toEqual([
       { surface: "surface:B", text: "cross-window delivery" },
     ]);
+    // D97 regression budget: one enumeration per stable phase -- initial
+    // route proof, post-write evidence, and derived status publication --
+    // instead of allowing the old route/read/guard multiplier to return.
+    expect(routeClient.client.listWindows.mock.calls.length).toBeLessThanOrEqual(
+      3,
+    );
+    expect(
+      routeClient.client.listWorkspaces.mock.calls.length,
+    ).toBeLessThanOrEqual(6);
   });
 
   it("spawn_agent creates a worker in an explicit workspace in another window", async () => {

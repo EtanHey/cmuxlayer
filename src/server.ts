@@ -250,11 +250,14 @@ import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology as collectCmuxSurfaceTopology,
   enumerateAllWindowWorkspacesWithRetry,
+  invalidateSurfaceTopologyCallScope,
   EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   isSurfaceObserverEpochCurrent,
   resolveAgentSurfaceBinding,
+  runWithSurfaceTopologyCallScope,
+  withSurfaceTopologyMutationInvalidation,
   type SurfaceObserverEpoch,
   type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
@@ -498,6 +501,8 @@ export const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
   DEFAULT_SEND_INPUT_MAX_INLINE_CHARS,
 );
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
+const SHORT_POINTER_MAX_CHARS = 200;
+const SHORT_POINTER_SUBMIT_VERIFY_TIMEOUT_MS = 750;
 // A bare submit key either takes effect on the next render or it did not take
 // effect at all -- there is no chunked typing to wait out, so the key path uses
 // a much shorter verification window than the text path (#484).
@@ -3856,7 +3861,7 @@ function buildLifecycleChannelMeta(
 export function createServer(opts?: CreateServerOptions): McpServer {
   const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
-  const client = context.client;
+  const client = withSurfaceTopologyMutationInvalidation(context.client);
   const listAllWorkspaces = async () => {
     const listed = await enumerateAllWindowWorkspacesWithRetry(
       client,
@@ -4514,7 +4519,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const handler = args[handlerIndex];
     if (typeof handler === "function") {
       const trackedHandler = (...handlerArgs: unknown[]) =>
-        withTransportRetryTracking(() => handler(...handlerArgs));
+        runWithSurfaceTopologyCallScope(() =>
+          withTransportRetryTracking(() => handler(...handlerArgs)),
+        );
       args[handlerIndex] = trackedHandler;
       if (typeof toolName === "string") {
         toolHandlersByName.set(
@@ -4942,6 +4949,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         } else {
           await client.send(surface, chunk, opts);
         }
+        invalidateSurfaceTopologyCallScope(client as object);
         return;
       } catch (error) {
         lastError = error;
@@ -5027,6 +5035,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         await beforeMutation?.();
         await client.sendKey(surface, key, { workspace });
+        invalidateSurfaceTopologyCallScope(client as object);
         return;
       } catch (error) {
         attempt += 1;
@@ -12298,6 +12307,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // healthy relay.
       const liveSurfaceRefs = async (): Promise<Set<string> | null> => {
         try {
+          // A UUID-less route is safe only if this check is newer than the
+          // resolver that supplied its mutable ref.
+          invalidateSurfaceTopologyCallScope(client as object);
           const surfaces = await surfaceProvider();
           return surfaces.length > 0
             ? new Set(surfaces.map((surface) => surface.ref))
@@ -12316,6 +12328,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ) {
         discovery.invalidate();
         await registry.listMerged(discovery, { force: true });
+        invalidateSurfaceTopologyCallScope(client as object);
         // Re-resolve after the resync. The agent may have been evicted (its
         // surface vanished) or still point at a dead surface — either way,
         // refuse with a clear stale-ref error instead of misdelivering.
@@ -12438,6 +12451,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
           ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
           : [sanitizedText];
+      const shortPointerVerifyTimeoutMs =
+        args.source_event === "send_to" &&
+        sanitizedText.length <= SHORT_POINTER_MAX_CHARS
+          ? Math.min(
+              SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+              SHORT_POINTER_SUBMIT_VERIFY_TIMEOUT_MS,
+            )
+          : undefined;
 
       // All validation above can await. Establish the delivery binding only
       // after those gates, then prove the exact UUID/ref/workspace pair again
@@ -12448,7 +12469,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await assertAgentRouteHasTui(route);
       const deliveryRoute = route;
       const assertDeliveryRouteCurrent = async (): Promise<void> => {
-        const current = await engine.resolveAgentIoRoute(args.agent_id);
+        let current: typeof deliveryRoute;
+        try {
+          current = await engine.resolveAgentIoRoute(args.agent_id);
+        } catch {
+          throw new Error(
+            `Agent "${args.agent_id}" surface route changed during terminal ` +
+              `delivery; refusing to continue on another surface.`,
+          );
+        }
         if (
           current.surface_id !== deliveryRoute.surface_id ||
           (current.surface_uuid ?? null) !==
@@ -12507,7 +12536,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               args.source_event === "report_to_parent",
             submit_verify_timeout_ms: args.allow_busy
               ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
-              : undefined,
+              : shortPointerVerifyTimeoutMs,
             beforeMutation: assertDeliveryRouteCurrent,
           });
           if (args.press_enter && delivery.submit_verified === true) {
@@ -15677,10 +15706,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
             return { merged: scoped, discovered, observedAtMs };
           }, { label: "list-agents" });
+          invalidateSurfaceTopologyCallScope(client as object);
+          const reconciledTopology = await collectSurfaceTopology();
+          const reconciledTopologySignature =
+            listAgentsTopologySignature(reconciledTopology);
           return await buildListAgentsResponse(
             live.merged,
-            topology,
-            topologySignature,
+            reconciledTopology,
+            reconciledTopologySignature,
             {
               rows: live.discovered,
               observed_at_ms: live.observedAtMs,
@@ -17398,6 +17431,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             () => registry.listMerged(discovery),
             { label: "list-agent-hierarchy" },
           );
+          invalidateSurfaceTopologyCallScope(client as object);
           const agents = args.parent_agent_id
             ? (() => {
                 const childIds = new Set(

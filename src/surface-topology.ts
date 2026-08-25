@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentRecord } from "./agent-types.js";
 import type { AgentTopologyHealthInput } from "./agent-health.js";
 import type { AgentHealthInputOverrides } from "./agent-health-input.js";
@@ -89,7 +90,104 @@ interface CachedWorkspaceEnumeration {
   pending: Promise<AllWindowWorkspaceEnumeration>;
 }
 
-const workspaceEnumerationCache = new WeakMap<
+interface WorkspaceEnumerationCallScope {
+  active: boolean;
+  cache: WeakMap<object, CachedWorkspaceEnumeration>;
+}
+
+const workspaceEnumerationCallScope =
+  new AsyncLocalStorage<WorkspaceEnumerationCallScope>();
+
+/**
+ * Give one public tool invocation a consistent window -> workspace snapshot.
+ * Nested tool adapters reuse the same scope. Async work that outlives the
+ * handler sees the inactive marker and cannot retain the completed snapshot
+ * across public calls.
+ */
+export async function runWithSurfaceTopologyCallScope<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  const existing = workspaceEnumerationCallScope.getStore();
+  if (existing?.active) return operation();
+
+  const scope: WorkspaceEnumerationCallScope = {
+    active: true,
+    cache: new WeakMap(),
+  };
+  try {
+    return await workspaceEnumerationCallScope.run(scope, operation);
+  } finally {
+    scope.active = false;
+  }
+}
+
+function currentWorkspaceEnumerationCallScope(): WorkspaceEnumerationCallScope | null {
+  const scope = workspaceEnumerationCallScope.getStore();
+  return scope?.active ? scope : null;
+}
+
+/**
+ * Start a new topology phase inside the current public tool call.
+ *
+ * A call-scoped workspace snapshot is valid only until that call mutates cmux
+ * or completes lifecycle reconciliation that may have observed a moved pane.
+ * Clearing it at those boundaries preserves the fresh-route checks while
+ * still coalescing every topology reader within one stable phase.
+ */
+export function invalidateSurfaceTopologyCallScope(
+  client?: object,
+): void {
+  const scope = currentWorkspaceEnumerationCallScope();
+  if (!scope) return;
+  if (client) {
+    scope.cache.delete(client);
+    workspaceEnumerationCache.delete(client);
+  } else {
+    scope.cache = new WeakMap<object, CachedWorkspaceEnumeration>();
+    workspaceEnumerationCache =
+      new WeakMap<object, CachedWorkspaceEnumeration>();
+  }
+}
+
+const SURFACE_TOPOLOGY_MUTATION_METHODS = new Set<PropertyKey>([
+  "closeSurface",
+  "createWorkspace",
+  "deleteWorkspace",
+  "focusSurface",
+  "moveSurface",
+  "newSplit",
+  "newSurface",
+  "renameTab",
+  "selectWorkspace",
+]);
+
+/** Centralize call-scope invalidation at the cmux mutation boundary. */
+export function withSurfaceTopologyMutationInvalidation<T extends object>(
+  client: T,
+): T {
+  const boundMethods = new Map<PropertyKey, unknown>();
+  let wrapped: T;
+  wrapped = new Proxy(client, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      if (boundMethods.has(property)) return boundMethods.get(property);
+
+      const bound = SURFACE_TOPOLOGY_MUTATION_METHODS.has(property)
+        ? async (...args: unknown[]) => {
+            const result = await Reflect.apply(value, target, args);
+            invalidateSurfaceTopologyCallScope(wrapped);
+            return result;
+          }
+        : value.bind(target);
+      boundMethods.set(property, bound);
+      return bound;
+    },
+  });
+  return wrapped;
+}
+
+let workspaceEnumerationCache = new WeakMap<
   object,
   CachedWorkspaceEnumeration
 >();
@@ -122,6 +220,11 @@ export async function enumerateAllWindowWorkspaces(
   const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
   const cacheKey = client as object;
   if (observerEpoch && opts.cache !== false) {
+    const callCached =
+      currentWorkspaceEnumerationCallScope()?.cache.get(cacheKey);
+    if (callCached?.observerEpoch === observerEpoch) {
+      return callCached.pending;
+    }
     const cached = workspaceEnumerationCache.get(cacheKey);
     if (cached?.observerEpoch === observerEpoch) return cached.pending;
   }
@@ -193,6 +296,10 @@ export async function enumerateAllWindowWorkspaces(
 
   const pending = enumerate();
   if (observerEpoch && opts.cache !== false) {
+    currentWorkspaceEnumerationCallScope()?.cache.set(cacheKey, {
+      observerEpoch,
+      pending,
+    });
     // Coalesce the N callers in one observer epoch that arrive together, but
     // do not retain a completed map: windows/workspaces can change without an
     // observer reconnect, and route-proof callers must see that same-epoch
@@ -218,9 +325,29 @@ export async function enumerateAllWindowWorkspacesWithRetry(
     observerEpochProvider,
   );
   if (first.complete) return first;
-  return enumerateAllWindowWorkspaces(client, observerEpochProvider, {
-    cache: false,
-  });
+  invalidateSurfaceTopologyCallScope(client as object);
+  const retryObserverEpoch = captureSurfaceObserverEpoch(
+    observerEpochProvider,
+  );
+  const retried = await enumerateAllWindowWorkspaces(
+    client,
+    observerEpochProvider,
+    { cache: false },
+  );
+  const completedObserverEpoch = captureSurfaceObserverEpoch(
+    observerEpochProvider,
+  );
+  if (
+    retried.complete &&
+    retryObserverEpoch &&
+    retryObserverEpoch === completedObserverEpoch
+  ) {
+    currentWorkspaceEnumerationCallScope()?.cache.set(client as object, {
+      observerEpoch: retryObserverEpoch,
+      pending: Promise.resolve(retried),
+    });
+  }
+  return retried;
 }
 
 export async function listAllWindowWorkspaces(
