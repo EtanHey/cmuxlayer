@@ -443,8 +443,34 @@ PY
   [[ -f "$brainbar_ready" && -S "$brainbar_sock" ]] \
     || fail "early-close BrainBar listener did not become ready"
 
+  cat >"$root_dir/bin/socat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+socket_path="${*: -1}"
+socket_path="${socket_path#UNIX-CONNECT:}"
+python3 -c '
+import socket
+import sys
+import time
+
+payload = sys.stdin.buffer.read()
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(sys.argv[1])
+time.sleep(0.1)
+try:
+    client.sendall(payload)
+except (BrokenPipeError, ConnectionResetError) as error:
+    print(f"early-close socket send failed: {error}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    client.close()
+' "$socket_path"
+EOF
+  chmod +x "$root_dir/bin/socat"
+
   export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
   export CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="$brainbar_sock"
+  export PATH="$root_dir/bin:$PATH"
   # Exceed the pipe buffer so jq is still producing when the peer closes.
   large_value="$(awk 'BEGIN { for (i = 0; i < 98304; i++) printf "x" }')"
 
@@ -489,7 +515,6 @@ exit 0
 EOF
   chmod +x "$root_dir/bin/nc"
   export CMUX_MEM_WATCHDOG_NOTIFY_URL="http://127.0.0.1:$notify_port/notify"
-  export PATH="$root_dir/bin:$PATH"
   if notify_breach 4242 footprint 1073741824 4294967296 "$large_value" \
     2>>"$stderr_log"; then
     notify_status=0
