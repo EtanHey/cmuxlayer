@@ -14,10 +14,6 @@ case "$MODE" in
   *) echo "usage: install.sh [--dry-run|--install]" >&2; exit 2 ;;
 esac
 
-sed_escape() {
-  printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
-}
-
 xml_escape() {
   printf '%s' "$1" | sed \
     -e 's/&/\&amp;/g' \
@@ -28,13 +24,25 @@ xml_escape() {
 }
 
 render_plist() {
-  local script_path watchdog_home
-  script_path="$(sed_escape "$(xml_escape "$SCRIPT_PATH")")"
-  watchdog_home="$(sed_escape "$(xml_escape "$HOME")")"
-  sed \
-    -e "s|@CMUX_WATCHDOG_SCRIPT@|$script_path|g" \
-    -e "s|@CMUX_WATCHDOG_HOME@|$watchdog_home|g" \
-    "$SOURCE_PLIST"
+  local line prefix suffix script_path watchdog_home
+  script_path="$(xml_escape "$SCRIPT_PATH")"
+  watchdog_home="$(xml_escape "$HOME")"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *'@CMUX_WATCHDOG_SCRIPT@'*)
+        prefix="${line%%@CMUX_WATCHDOG_SCRIPT@*}"
+        suffix="${line#*@CMUX_WATCHDOG_SCRIPT@}"
+        printf '%s%s%s\n' "$prefix" "$script_path" "$suffix"
+        ;;
+      *'@CMUX_WATCHDOG_HOME@'*)
+        prefix="${line%%@CMUX_WATCHDOG_HOME@*}"
+        suffix="${line#*@CMUX_WATCHDOG_HOME@}"
+        printf '%s%s%s\n' "$prefix" "$watchdog_home" "$suffix"
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$SOURCE_PLIST"
 }
 
 if [ "$MODE" = "--dry-run" ]; then
