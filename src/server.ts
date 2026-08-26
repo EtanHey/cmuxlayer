@@ -1023,6 +1023,23 @@ function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
   return { route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0 };
 }
 
+function withSurfaceDeliveryTimings(
+  result: ToolReturn,
+  timings: DeliveryPhaseTimings,
+): ToolReturn {
+  const payload = result.structuredContent;
+  if (!payload) return result;
+  const structuredContent = {
+    ...payload,
+    timings_ms: payload.timings_ms ?? timings,
+  };
+  return {
+    ...result,
+    content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+    structuredContent,
+  };
+}
+
 function addDeliveryPhaseTiming(
   timings: DeliveryPhaseTimings | undefined,
   phase: DeliveryPhase,
@@ -16793,42 +16810,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const deliveryId = randomUUID();
               const timings = createDeliveryPhaseTimings();
-              const result = await legacyHandler("send_input")(
-                {
-                  surface,
-                  workspace: args.workspace,
-                  text: args.text,
-                  chunk_size: args.chunk_size,
-                  background: args.background,
-                  press_enter: args.press_enter,
-                  rename_to_task: args.rename_to_task,
-                  allow_long_inline: args.allow_long_inline,
-                  _cmuxlayer_source_event: "send_to",
-                  _cmuxlayer_delivery_id: deliveryId,
-                  _cmuxlayer_timings: timings,
-                },
-                {},
+              return withSurfaceDeliveryTimings(
+                await legacyHandler("send_input")(
+                  {
+                    surface,
+                    workspace: args.workspace,
+                    text: args.text,
+                    chunk_size: args.chunk_size,
+                    background: args.background,
+                    press_enter: args.press_enter,
+                    rename_to_task: args.rename_to_task,
+                    allow_long_inline: args.allow_long_inline,
+                    _cmuxlayer_source_event: "send_to",
+                    _cmuxlayer_delivery_id: deliveryId,
+                    _cmuxlayer_timings: timings,
+                  },
+                  {},
+                ),
+                timings,
               );
-              if (
-                !result ||
-                typeof result !== "object" ||
-                !("structuredContent" in result) ||
-                !result.structuredContent ||
-                typeof result.structuredContent !== "object"
-              ) {
-                return result;
-              }
-              const structuredContent = {
-                ...(result.structuredContent as Record<string, unknown>),
-                timings_ms:
-                  (result.structuredContent as Record<string, unknown>)
-                    .timings_ms ?? timings,
-              };
-              return {
-                ...result,
-                content: [{ type: "text", text: JSON.stringify(structuredContent) }],
-                structuredContent,
-              };
             }
             if (mode === "command") {
               const command = args.command ?? args.text;

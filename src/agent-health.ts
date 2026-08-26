@@ -314,6 +314,13 @@ function isWithinInboxMonitorBootGrace(
   return now - firstSeenAt <= AGENT_HEALTH_INBOX_MONITOR_BOOT_GRACE_MS;
 }
 
+function hasActiveScreenEvidence(
+  screenActive: boolean,
+  screenConfirmedState: AgentState | undefined,
+): boolean {
+  return screenActive || screenConfirmedState === "ready";
+}
+
 export function evaluateAgentHealth(
   agent: AgentRecord,
   input: AgentHealthInput = {},
@@ -624,7 +631,7 @@ export function evaluateAgentHealth(
   }
 
   const issueSeverities = deriveIssueSeverities(issueCodes, {
-    screenActive: screenActive || screenConfirmedState === "ready",
+    screenActive: hasActiveScreenEvidence(screenActive, screenConfirmedState),
     autoDiscovered,
     lacksManagedPlacement: lacksManagedPlacement(agent),
     panePtyDead,

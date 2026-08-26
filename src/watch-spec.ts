@@ -256,6 +256,26 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function hasValidNotificationMetadata(
+  value: Record<string, unknown>,
+): boolean {
+  return (
+    (value.notification_pending === undefined ||
+      typeof value.notification_pending === "boolean") &&
+    (value.notification_attempts === undefined ||
+      (Number.isInteger(value.notification_attempts) &&
+        (value.notification_attempts as number) >= 0)) &&
+    (value.notification_next_attempt_at_ms === undefined ||
+      isFiniteNumber(value.notification_next_attempt_at_ms)) &&
+    (value.notification_delivered_at_ms === undefined ||
+      isFiniteNumber(value.notification_delivered_at_ms)) &&
+    (value.notification_exhausted_at_ms === undefined ||
+      isFiniteNumber(value.notification_exhausted_at_ms)) &&
+    (value.notification_exhausted_reason === undefined ||
+      Boolean(cleanString(value.notification_exhausted_reason)))
+  );
+}
+
 function isWatchRecord(value: unknown): value is WatchRecord {
   if (!isRecord(value) || !isRecord(value.liveness)) return false;
   if (
@@ -311,43 +331,7 @@ function isWatchRecord(value: unknown): value is WatchRecord {
   ) {
     return false;
   }
-  if (
-    value.notification_pending !== undefined &&
-    typeof value.notification_pending !== "boolean"
-  ) {
-    return false;
-  }
-  if (
-    value.notification_attempts !== undefined &&
-    (!Number.isInteger(value.notification_attempts) ||
-      (value.notification_attempts as number) < 0)
-  ) {
-    return false;
-  }
-  if (
-    value.notification_next_attempt_at_ms !== undefined &&
-    !isFiniteNumber(value.notification_next_attempt_at_ms)
-  ) {
-    return false;
-  }
-  if (
-    value.notification_delivered_at_ms !== undefined &&
-    !isFiniteNumber(value.notification_delivered_at_ms)
-  ) {
-    return false;
-  }
-  if (
-    value.notification_exhausted_at_ms !== undefined &&
-    !isFiniteNumber(value.notification_exhausted_at_ms)
-  ) {
-    return false;
-  }
-  if (
-    value.notification_exhausted_reason !== undefined &&
-    !cleanString(value.notification_exhausted_reason)
-  ) {
-    return false;
-  }
+  if (!hasValidNotificationMetadata(value)) return false;
   if (
     value.terminal_reason !== undefined &&
     !isWatchNotificationReason(value.terminal_reason)
