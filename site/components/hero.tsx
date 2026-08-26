@@ -68,7 +68,7 @@ export function Hero() {
         </p>
 
         <p className="text-[13px] text-text-dim mb-10 relative hero-fade hero-fade-d1">
-          free &middot; open source &middot; 22 MCP tools
+          free &middot; open source &middot; 10 public MCP tools
         </p>
 
         <div className="flex items-center justify-center gap-3 mb-12 relative hero-fade hero-fade-d2 max-[480px]:flex-col">

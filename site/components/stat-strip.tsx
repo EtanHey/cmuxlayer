@@ -1,6 +1,6 @@
 const stats = [
   { value: "0.2ms", label: "socket latency" },
-  { value: "22", label: "MCP tools" },
+  { value: "10", label: "public MCP tools" },
   { value: "5", label: "agent CLIs" },
   { value: "326", label: "tests passing" },
 ];
