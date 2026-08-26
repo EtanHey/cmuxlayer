@@ -228,7 +228,9 @@ run_case() {
 
   # shellcheck disable=SC1090
   source "$SCRIPT_PATH"
+  trap 'cat "$log_dir/stderr.log" >&2' ERR
   run_once 2>"$log_dir/stderr.log"
+  trap - ERR
 
   if [[ "$expect_breach" == "1" ]]; then
     assert_file_contains "$log_dir/curl.log" "http://localhost:3847/notify"
