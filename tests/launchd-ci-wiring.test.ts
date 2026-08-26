@@ -21,4 +21,34 @@ describe("launchd CI wiring", () => {
     }
     expect(workflow).not.toMatch(/launchd-units:[\s\S]*launchctl\s+(?:bootstrap|load)/);
   });
+
+  it("keeps the macOS-only suites independent of test doubles and Etan's checkout", () => {
+    const watchdogSuite = readFileSync(
+      join(
+        import.meta.dirname,
+        "..",
+        "launchd",
+        "cmux-memory-watchdog",
+        "tests",
+        "cmux-memory-watchdog.sh",
+      ),
+      "utf8",
+    );
+    expect(watchdogSuite).toContain("/bin/sleep 0.1");
+    expect(watchdogSuite).not.toMatch(/^\s+sleep 0\.1$/m);
+
+    const samplerSuite = readFileSync(
+      join(
+        import.meta.dirname,
+        "..",
+        "launchd",
+        "cmux-ram-sampler",
+        "tests",
+        "cmux-ram-sampler.sh",
+      ),
+      "utf8",
+    );
+    expect(samplerSuite).toContain('[[ -x "$SCRIPT_PATH" ]]');
+    expect(samplerSuite).not.toContain('[[ -x "$program" ]]');
+  });
 });

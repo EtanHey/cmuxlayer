@@ -208,7 +208,7 @@ run_case() {
   brainbar_pid="$!"
   for _ in 1 2 3 4 5; do
     [[ -S "$brainbar_sock" ]] && break
-    sleep 0.1
+    /bin/sleep 0.1
   done
 
   printf '%s' "$footprint_fixture" >"$root_dir/fixtures/footprint.fixture"
@@ -434,7 +434,7 @@ run_ps_fallback_case() {
   brainbar_pid="$!"
   for _ in 1 2 3 4 5; do
     [[ -S "$brainbar_sock" ]] && break
-    sleep 0.1
+    /bin/sleep 0.1
   done
 
   cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
