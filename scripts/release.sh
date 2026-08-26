@@ -8,10 +8,9 @@
 #   scripts/release.sh 0.3.0 --require-contract  # a skipped real-cmux gate aborts the release
 #   scripts/release.sh 0.3.0 --require-ci        # a non-green CI on HEAD aborts the release
 #
-# Steps: clean-tree + green build/tests gate → bump package.json → commit +
-# push main → tag vX.Y.Z + push tag → update formula url+sha256 in the
-# homebrew-layers tap → push tap → sync the tap clone Homebrew itself reads →
-# tell you to run release verification.
+# Steps: clean-tree + green build/tests gate → bump package.json on a release
+# branch → PR → required checks → plain merge → tag the merge commit → update
+# the Homebrew formula → sync the tap clone → verify this Mac.
 #
 # Every step writes into a durable release receipt (see scripts/release-receipt.mjs)
 # so "did this release actually gate, ship, and land?" is answered by a file and
@@ -34,6 +33,8 @@ REQUIRE_CONTRACT=0
 REQUIRE_CI=0
 CI_CONCLUSION="unknown"
 CI_COMMIT_LABEL="HEAD"
+REQUIRED_CHECKS_CONCLUSION="not-run"
+RELEASE_HEAD="not-created"
 for arg in "${@:2}"; do
   case "$arg" in
     --yes) YES=1 ;;
@@ -86,6 +87,7 @@ receipt_record() { receipt record "$VERSION" "$1" "$2"; }
 
 cd "$REPO_DIR"
 TAG="v$VERSION"
+RELEASE_BRANCH="wt/release-$VERSION"
 
 # --- preflight gates -------------------------------------------------------
 if [ "$DRY" -ne 1 ]; then
@@ -207,16 +209,65 @@ if [ "$YES" -ne 1 ] && [ "$DRY" -ne 1 ]; then
   [ "$ans" = "y" ] || [ "$ans" = "Y" ] || die "aborted"
 fi
 
-# --- bump + commit + tag (cmuxlayer) --------------------------------------
+# --- bump on a protected-branch PR ----------------------------------------
+run "git switch -c '$RELEASE_BRANCH'"
 run "sed_inplace 's/^(  \"version\": \")[^\"]+(\",)\$/\\1$VERSION\\2/' package.json"
 run "git commit -aqm 'chore: release $TAG'"
-run "git push origin main"
-run "git tag -a '$TAG' -m 'cmuxlayer $TAG'"
-run "git push origin '$TAG'"
-if [ "$DRY" -ne 1 ]; then
-  receipt_record "commit" "$(git rev-parse HEAD)"
-  receipt_record "pushed" "true"
+run "git push -u origin '$RELEASE_BRANCH'"
+
+if [ "$DRY" -eq 1 ]; then
+  PR_URL="<release-pr-url>"
+  RELEASE_HEAD="<release-head>"
+  MERGE_COMMIT="<merge-commit>"
+  printf 'DRY  %s\n' "gh pr create --base main --head $RELEASE_BRANCH --title 'chore: release $TAG'"
+  printf 'DRY  %s\n' "gh pr checks $PR_URL --required --watch --fail-fast"
+  printf 'DRY  %s\n' "gh pr merge $PR_URL --merge"
+  printf 'DRY  %s\n' "wait for $PR_URL state=MERGED and read mergeCommit.oid"
+else
+  RELEASE_HEAD="$(git rev-parse HEAD)"
+  PR_URL="$(gh pr create \
+    --base main \
+    --head "$RELEASE_BRANCH" \
+    --title "chore: release $TAG" \
+    --body "Automated version-bump PR for cmuxlayer $TAG. The release tag is created only after required checks pass and this PR merges.")"
+  [ -n "$PR_URL" ] || die "gh pr create returned no PR URL"
+  receipt_record "notes.release_pr" "$PR_URL"
+  receipt_record "gates.required_checks_commit" "$RELEASE_HEAD"
+
+  if ! gh pr checks "$PR_URL" --required --watch --fail-fast; then
+    REQUIRED_CHECKS_CONCLUSION="fail"
+    receipt_record "gates.required_checks" "fail"
+    die "required checks failed for $PR_URL; refusing to tag $TAG"
+  fi
+  REQUIRED_CHECKS_CONCLUSION="pass"
+  receipt_record "gates.required_checks" "pass"
+  gh pr merge "$PR_URL" --merge
+
+  MERGE_COMMIT=""
+  for _ in {1..60}; do
+    PR_STATUS="$(gh pr view "$PR_URL" --json state,mergeCommit --jq '[.state, (.mergeCommit.oid // "")] | @tsv')"
+    IFS=$'\t' read -r PR_STATE MERGE_COMMIT <<<"$PR_STATUS"
+    if [ "$PR_STATE" = "MERGED" ] && [ -n "$MERGE_COMMIT" ]; then
+      break
+    fi
+    sleep 10
+  done
+  [ "${PR_STATE:-}" = "MERGED" ] && [ -n "$MERGE_COMMIT" ] || \
+    die "release PR did not reach MERGED with a merge commit: $PR_URL"
+
+  git fetch -q origin main
+  git show "$MERGE_COMMIT:package.json" | grep -q "\"version\": \"$VERSION\"" || \
+    die "package.json at merge commit $MERGE_COMMIT is not $VERSION"
+  git merge-base --is-ancestor "$MERGE_COMMIT" origin/main || \
+    die "merge commit $MERGE_COMMIT is not on origin/main"
 fi
+
+# Tag the merge commit, never the unmerged bump commit.
+run "git tag -a '$TAG' -m 'cmuxlayer $TAG' '$MERGE_COMMIT'"
+run "git push origin '$TAG'"
+receipt_record "commit" "$MERGE_COMMIT"
+receipt_record "pushed" "true"
+receipt_record "notes.release_path" "pr-merge"
 
 # --- compute tarball sha256 -----------------------------------------------
 URL="$TARBALL_URL_BASE/$TAG.tar.gz"
@@ -304,6 +355,7 @@ cat <<EOF
 
 release: done — cmuxlayer $TAG is tagged and the formula is bumped.
 CI: $CI_CONCLUSION (ci.yml on $CI_COMMIT_LABEL — the commit this release was cut from)
+Release PR required checks: $REQUIRED_CHECKS_CONCLUSION (head $RELEASE_HEAD)
 Receipt: $RECEIPT_LABEL
 This Mac was upgraded and verified above. On EACH additional Mac (each run appends its own install evidence):
   $REPO_DIR/scripts/release-verify.sh "$VERSION"

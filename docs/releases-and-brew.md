@@ -94,10 +94,12 @@ One command does the whole pipeline:
 ```
 
 It will: verify a clean tree + green typecheck/tests, run the real-cmux
-contract gate, bump `package.json`, commit, push `main`, tag `vX.Y.Z`, update
-the Homebrew formula's `url` + `sha256` in `~/Gits/homebrew-layers`, push the
-tap, and **sync the tap clone Homebrew itself reads**. Afterwards, run the
-verification helper on **each** Mac:
+contract gate, bump `package.json` on `wt/release-<version>`, open a PR, wait
+for every required check, plain-merge the PR, and tag the resulting merge
+commit. Only then does it update the Homebrew formula's `url` + `sha256`, push
+the tap, **sync the tap clone Homebrew itself reads**, upgrade/verify the Mac
+that cut the release, and run the reconnect sweep. Run the verification helper
+on each additional Mac:
 
 ```bash
 ~/Gits/cmuxlayer/scripts/release-verify.sh 0.4.44                # sync clone → upgrade → assert
@@ -113,7 +115,8 @@ scrollback.
 
 - Location: `$CMUXLAYER_RELEASE_RECEIPTS_DIR`, defaulting to
   `~/.local/state/cmuxlayer/release-receipts/release-<version>.json`.
-- `release.sh` records: version, tag, release commit SHA, timestamps,
+- `release.sh` records: version, tag, release PR, required-check verdict and
+  checked head, merge commit SHA, timestamps,
   tarball URL + `sha256`, each gate's result (`gates.typecheck`,
   `gates.tests`, `gates.contract` — `pass` / `skip` / `fail`, with
   `gates.contract_reason` on a skip), the tap push, and the tap-clone sync
@@ -328,7 +331,7 @@ explicit `workspace` only when you deliberately want a different one.
 | `~/.golems/config.yaml` → `mcpServers.cmuxlayer` | wires the launcher into the fleet |
 | `~/.golems/bin/cmuxlayer-mcp` | launcher: brew (default) vs live source (`CMUXLAYER_DEV=1`) |
 | `EtanHey/homebrew-layers` → `Formula/cmuxlayer.rb` | the brew formula (stable tag + `head`) |
-| `scripts/release.sh` | one-command release: gate → bump → tag → formula bump → push → sync tap clone → upgrade/verify this Mac → receipt |
+| `scripts/release.sh` | one-command release: gate → bump PR → required checks → plain merge → tag merge commit → formula/tap → verify this Mac → receipt |
 | `scripts/release-verify.sh` | sync Homebrew's tap clone → upgrade → assert installed version (`--verify-only` asserts without upgrading) |
 | `scripts/post-release-reconnect-sweep.sh` | report stale or missing cmuxlayer children after each per-Mac verification |
 | `scripts/release-receipt.mjs` | the release receipts ledger (`CMUXLAYER_RELEASE_RECEIPTS_DIR`) |

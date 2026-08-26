@@ -154,6 +154,7 @@ case "\${args[0]:-}" in
       v*) exit 1 ;;
       *) echo "1111111111111111111111111111111111111111" ;;
     esac ;;
+  show) printf '  "version": "%s",\n' "\${STUB_RELEASE_VERSION:-0.4.1}" ;;
   rev-list) echo "\${STUB_BEHIND:-0}" ;;
   *) exit 0 ;;
 esac
@@ -218,10 +219,20 @@ exit 0
     join(binDir, "gh"),
     `#!/usr/bin/env bash
 printf 'gh %s\\n' "$*" >>"$STUB_LOG"
-# An unusable gh (absent, unauthenticated, offline) must read as "unknown",
-# never as "clean" -- so this stub fails the way the real one does.
-[ -n "$STUB_CI_CONCLUSION" ] || exit 1
-printf '%s\\n' "$STUB_CI_CONCLUSION"
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "list" ]; then
+  [ -n "$STUB_CI_CONCLUSION" ] || exit 1
+  printf '%s\\n' "$STUB_CI_CONCLUSION"
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "create" ]; then
+  printf '%s\\n' "\${STUB_PR_URL:-https://github.com/EtanHey/cmuxlayer/pull/999}"
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "checks" ]; then
+  exit "\${STUB_REQUIRED_CHECKS_EXIT:-0}"
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "merge" ]; then
+  exit 0
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "view" ]; then
+  printf 'MERGED\\t%s\\n' "\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}"
+else
+  exit 1
+fi
 `,
   );
 
@@ -440,7 +451,7 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     const receipt = readReceipt(fixture, "0.4.1");
     expect(receipt.version).toBe("0.4.1");
     expect(receipt.tag).toBe("v0.4.1");
-    expect(receipt.commit).toBe("1".repeat(40));
+    expect(receipt.commit).toBe("2".repeat(40));
     expect(receipt.created_at).toMatch(/Z$/);
     expect(receipt.artifact.sha256).toBe("a".repeat(64));
     expect(receipt.artifact.url).toContain("v0.4.1.tar.gz");
@@ -524,14 +535,61 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     expect(result.log).not.toContain("git push origin main");
   });
 
+  it("routes the version bump through a required-check PR and tags its merge commit", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(result.log).toContain("git switch -c wt/release-0.4.1");
+    expect(result.log).toContain("git push -u origin wt/release-0.4.1");
+    expect(result.log).toContain("gh pr create");
+    expect(result.log).toContain("gh pr checks");
+    expect(result.log).toContain("--required --watch --fail-fast");
+    expect(result.log).toContain("gh pr merge");
+    expect(result.log).toContain("--merge");
+    expect(result.log).toContain(
+      `git tag -a v0.4.1 -m cmuxlayer v0.4.1 ${"2".repeat(40)}`,
+    );
+    expect(result.log).not.toContain("git push origin main");
+    expect(readReceipt(fixture, "0.4.1").commit).toBe("2".repeat(40));
+  });
+
+  it("stops on a red required check before creating the release tag", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(
+      fixture,
+      "release.sh",
+      ["0.4.1", "--yes"],
+      { STUB_REQUIRED_CHECKS_EXIT: "1" },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.log).toContain("gh pr checks");
+    expect(result.log).not.toContain("git tag -a v0.4.1");
+    expect(result.log).not.toContain("git push origin v0.4.1");
+  });
+
+  it("dry-run has no direct-main refusal path", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--dry-run"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("git push -u origin 'wt/release-0.4.1'");
+    expect(result.stdout).toContain("gh pr checks");
+    expect(result.stdout).not.toContain("git push origin main");
+  });
+
   it("preserves the happy-path release commands (receipts stay additive)", () => {
     const fixture = makeReleaseFixture();
     const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
 
     expect(result.status).toBe(0);
     expect(result.log).toContain("git commit -aqm chore: release v0.4.1");
-    expect(result.log).toContain("git push origin main");
-    expect(result.log).toContain("git tag -a v0.4.1 -m cmuxlayer v0.4.1");
+    expect(result.log).toContain("git push -u origin wt/release-0.4.1");
+    expect(result.log).not.toContain("git push origin main");
+    expect(result.log).toContain(
+      `git tag -a v0.4.1 -m cmuxlayer v0.4.1 ${"2".repeat(40)}`,
+    );
     expect(result.log).toContain("git push origin v0.4.1");
     expect(result.log).toContain("brew audit etanhey/layers/cmuxlayer");
     expect(
@@ -573,7 +631,7 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
 
     expect(result.status).toBe(0);
     expect(readReceipt(fixture, "0.4.1").gates.contract).toBe("pass");
-    expect(result.log).toContain("git push origin main");
+    expect(result.log).toContain("gh pr merge");
   });
 
   it("classifies a SKIP that is followed by cleanup output", () => {
@@ -600,7 +658,7 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("WARNING");
     expect(readReceipt(fixture, "0.4.1").gates.contract).toBe("unknown");
-    expect(result.log).toContain("git push origin main");
+    expect(result.log).toContain("gh pr merge");
   });
 
   it("still aborts when the contract lane exits non-zero", () => {
@@ -672,7 +730,7 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     const fixture = makeReleaseFixture({ withBrewTapClone: false });
     const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
 
-    expect(result.status).toBe(0);
+    expect(result.status).not.toBe(0);
     const receipt = readReceipt(fixture, "0.4.1");
     expect(receipt.tap.clone_sync).toBe("skipped");
     expect(receipt.tap.clone_reason).toBeTruthy();
