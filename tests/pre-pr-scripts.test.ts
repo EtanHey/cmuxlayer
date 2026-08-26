@@ -16,8 +16,23 @@ describe("pre-PR script ladder", () => {
 
     expect(scripts["pre-pr"]).toContain("bun run typecheck");
     expect(scripts["pre-pr"]).toContain("bun run pre-pr:harness");
+    expect(scripts["pre-pr"]).toContain("bun run bench:daemon:check:fast");
     expect(scripts["pre-pr"]).not.toContain("live:harness");
     expect(scripts["pre-pr"]).not.toContain("pre-pr:live");
+  });
+
+  it("exposes full, fast, and refresh daemon budget commands", () => {
+    const scripts = packageScripts();
+
+    expect(scripts["bench:daemon:check"]).toContain(
+      "scripts/check-daemon-benchmark.mjs",
+    );
+    expect(scripts["bench:daemon:check:fast"]).toContain(
+      "CMUXLAYER_BENCH_ROUNDS=3",
+    );
+    expect(scripts["bench:daemon:refresh"]).toContain(
+      "scripts/refresh-daemon-baseline.mjs",
+    );
   });
 
   it("includes the production-shaped replay coverage in the deterministic harness tier", () => {

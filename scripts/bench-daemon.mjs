@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -55,6 +62,17 @@ function compact(value) {
   return JSON.stringify(value);
 }
 
+function requestBytes(name, args) {
+  return Buffer.byteLength(
+    serializeMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
+  );
+}
+
 async function execCapture(command, args) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -83,7 +101,12 @@ async function execCapture(command, args) {
 
 async function processStats(pid) {
   try {
-    const stdout = await execCapture("ps", ["-o", "rss=,pcpu=", "-p", String(pid)]);
+    const stdout = await execCapture("ps", [
+      "-o",
+      "rss=,pcpu=",
+      "-p",
+      String(pid),
+    ]);
     const [rssKbRaw, cpuPctRaw] = stdout.trim().split(/\s+/);
     return {
       rssKb: Number(rssKbRaw) || 0,
@@ -96,10 +119,7 @@ async function processStats(pid) {
 
 async function totalRssMb(pids) {
   const stats = await Promise.all(pids.map((pid) => processStats(pid)));
-  return round(
-    stats.reduce((sum, stat) => sum + stat.rssKb, 0) / 1024,
-    2,
-  );
+  return round(stats.reduce((sum, stat) => sum + stat.rssKb, 0) / 1024, 2);
 }
 
 function waitForSocket(path, timeoutMs = 5_000) {
@@ -361,9 +381,12 @@ if (command === "list-workspaces") {
 async function startClients(label, count, env) {
   const clients = [];
   for (let index = 0; index < count; index += 1) {
-    const client = new McpProcess(`${label}-${index}`, process.execPath, [
-      distIndex,
-    ], env);
+    const client = new McpProcess(
+      `${label}-${index}`,
+      process.execPath,
+      [distIndex],
+      env,
+    );
     clients.push(client);
   }
   await Promise.all(clients.map((client) => client.initialize()));
@@ -375,24 +398,26 @@ async function measureLatency(clients) {
   const readSamples = [];
   let listResult = null;
   let readResult = null;
+  const listArgs = {
+    verbose: false,
+    include_screen_preview: false,
+  };
+  const readArgs = {
+    surface: "surface:bench-0",
+    workspace: "workspace:bench",
+    lines: 5,
+  };
 
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     await Promise.all(
       clients.map(async (client) => {
         let startedAt = nowMs();
-        const list = await client.callTool("list_surfaces", {
-          verbose: false,
-          include_screen_preview: false,
-        });
+        const list = await client.callTool("list_surfaces", listArgs);
         listSamples.push(nowMs() - startedAt);
         listResult ??= list;
 
         startedAt = nowMs();
-        const read = await client.callTool("read_screen", {
-          surface: "surface:bench-0",
-          workspace: "workspace:bench",
-          lines: 5,
-        });
+        const read = await client.callTool("read_screen", readArgs);
         readSamples.push(nowMs() - startedAt);
         readResult ??= read;
       }),
@@ -401,11 +426,15 @@ async function measureLatency(clients) {
 
   return {
     list_surfaces: {
+      request_bytes: requestBytes("list_surfaces", listArgs),
       p50_ms: round(percentile(listSamples, 50)),
+      p95_ms: round(percentile(listSamples, 95)),
       p99_ms: round(percentile(listSamples, 99)),
     },
     read_screen: {
+      request_bytes: requestBytes("read_screen", readArgs),
       p50_ms: round(percentile(readSamples, 50)),
+      p95_ms: round(percentile(readSamples, 95)),
       p99_ms: round(percentile(readSamples, 99)),
     },
     firstResults: { listResult, readResult },
@@ -489,7 +518,12 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
   const measureSend = async (args) => {
     const startedAt = nowMs();
     const receipt = toolData(await client.callTool("send_to", args), "send_to");
-    return { elapsed_ms: round(nowMs() - startedAt), receipt };
+    return {
+      elapsed_ms: round(nowMs() - startedAt),
+      request_bytes: requestBytes("send_to", args),
+      lock_hold_ms: receipt.timings_ms?.lock ?? null,
+      receipt,
+    };
   };
 
   // The daemon sweep acknowledges this unique token only after it owns the
@@ -536,7 +570,10 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
       };
     }
   } else {
-    surfaceWaitFor = { ok: false, error: "surface receipt omitted delivery_id" };
+    surfaceWaitFor = {
+      ok: false,
+      error: "surface receipt omitted delivery_id",
+    };
   }
 
   return {
@@ -550,7 +587,9 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
 
 async function main() {
   if (!existsSync(distIndex) || !existsSync(distDaemon)) {
-    throw new Error("dist/index.js and dist/daemon.js are required; run bun run build first");
+    throw new Error(
+      "dist/index.js and dist/daemon.js are required; run bun run build first",
+    );
   }
   ({ JsonRpcLineBuffer } = await import("../dist/json-rpc-line-buffer.js"));
 
@@ -650,7 +689,9 @@ async function main() {
       sweepHoldState,
     );
     const daemonRssMb = await totalRssMb(
-      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
+      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(
+        Boolean,
+      ),
     );
     const daemonStats = await processStats(daemon.pid);
     const truthfulState =
@@ -695,6 +736,16 @@ async function main() {
       verdict: green ? "GREEN" : "RED",
       clients: clientCount,
       rounds,
+      replay: {
+        clients: clientCount,
+        rounds,
+        operations: ["list_surfaces", "read_screen", "first_send_after_spawn"],
+        bytes: {
+          list_surfaces: daemonLatency.list_surfaces.request_bytes,
+          read_screen: daemonLatency.read_screen.request_bytes,
+          first_send_after_spawn: firstSendAfterSpawn.first.request_bytes,
+        },
+      },
       rss: {
         baseline_inprocess_total_mb: baselineRssMb,
         daemon_total_mb: daemonRssMb,
@@ -723,16 +774,22 @@ async function main() {
       `N=${result.clients} rounds=${result.rounds} RSS baseline=${result.rss.baseline_inprocess_total_mb}MB daemon=${result.rss.daemon_total_mb}MB reduction=${result.rss.reduction_mb}MB (${result.rss.reduction_pct}%)`,
     );
     console.log(
-      `list_surfaces p50/p99 baseline=${result.latency.baseline_inprocess.list_surfaces.p50_ms}/${result.latency.baseline_inprocess.list_surfaces.p99_ms}ms daemon=${result.latency.daemon_path.list_surfaces.p50_ms}/${result.latency.daemon_path.list_surfaces.p99_ms}ms`,
+      `list_surfaces p50/p95/p99 baseline=${result.latency.baseline_inprocess.list_surfaces.p50_ms}/${result.latency.baseline_inprocess.list_surfaces.p95_ms}/${result.latency.baseline_inprocess.list_surfaces.p99_ms}ms daemon=${result.latency.daemon_path.list_surfaces.p50_ms}/${result.latency.daemon_path.list_surfaces.p95_ms}/${result.latency.daemon_path.list_surfaces.p99_ms}ms`,
     );
     console.log(
-      `read_screen p50/p99 baseline=${result.latency.baseline_inprocess.read_screen.p50_ms}/${result.latency.baseline_inprocess.read_screen.p99_ms}ms daemon=${result.latency.daemon_path.read_screen.p50_ms}/${result.latency.daemon_path.read_screen.p99_ms}ms`,
+      `read_screen p50/p95/p99 baseline=${result.latency.baseline_inprocess.read_screen.p50_ms}/${result.latency.baseline_inprocess.read_screen.p95_ms}/${result.latency.baseline_inprocess.read_screen.p99_ms}ms daemon=${result.latency.daemon_path.read_screen.p50_ms}/${result.latency.daemon_path.read_screen.p95_ms}/${result.latency.daemon_path.read_screen.p99_ms}ms`,
     );
     console.log(
       `send_to first/second/surface=${result.latency.first_send_after_spawn.first.elapsed_ms}/${result.latency.first_send_after_spawn.second.elapsed_ms}/${result.latency.first_send_after_spawn.surface.elapsed_ms}ms`,
     );
     console.log(`daemon CPU=${result.daemon_cpu_pct}%`);
     console.log(JSON.stringify(result, null, 2));
+
+    if (process.env.CMUXLAYER_BENCH_JSON_PATH) {
+      const outputPath = resolve(process.env.CMUXLAYER_BENCH_JSON_PATH);
+      await mkdir(dirname(outputPath), { recursive: true });
+      await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`);
+    }
 
     if (!green) {
       process.exitCode = 1;

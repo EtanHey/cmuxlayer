@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "source": {
+    "git_sha": "f0ca937ccf16d81b0383a88de79d70b3a10d672e",
+    "measured_at": "2026-08-26T05:07:28Z"
+  },
+  "runner_margin_ratio": 2.8,
+  "replay": {
+    "clients": 8,
+    "rounds": 12,
+    "operations": ["list_surfaces", "read_screen", "first_send_after_spawn"],
+    "bytes": {
+      "list_surfaces": 142,
+      "read_screen": 161,
+      "first_send_after_spawn": 273
+    }
+  },
+  "measurements": {
+    "list_surfaces": {
+      "p50_ms": 135.18,
+      "p95_ms": 155.18
+    },
+    "read_screen": {
+      "p50_ms": 148.02,
+      "p95_ms": 154.23
+    },
+    "first_send_after_spawn": {
+      "p50_ms": 949.06,
+      "p95_ms": 949.06,
+      "lock_hold_ms": 21
+    }
+  },
+  "ceilings": {
+    "list_surfaces": {
+      "p50_ms": 378.51,
+      "p95_ms": 434.5
+    },
+    "read_screen": {
+      "p50_ms": 250,
+      "p95_ms": 431.84
+    },
+    "first_send_after_spawn": {
+      "p50_ms": 2000,
+      "p95_ms": 2000,
+      "lock_hold_ms": 100
+    },
+    "cli_send_ms": 4000
+  }
+}
