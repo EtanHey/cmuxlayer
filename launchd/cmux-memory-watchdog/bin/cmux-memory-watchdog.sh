@@ -343,7 +343,7 @@ notify_breach() {
     return 0
   fi
 
-  if post_error="$(curl -sS --connect-timeout 1 --max-time 3 -X POST "$CMUX_MEM_WATCHDOG_NOTIFY_URL" \
+  if post_error="$(curl -sS --fail --connect-timeout 1 --max-time 3 -X POST "$CMUX_MEM_WATCHDOG_NOTIFY_URL" \
       -H 'Content-Type: application/json' \
       --data-binary "$payload" 2>&1 >/dev/null)"; then
     return 0

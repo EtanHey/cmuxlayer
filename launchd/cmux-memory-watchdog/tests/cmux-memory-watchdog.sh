@@ -471,7 +471,8 @@ EOF
   export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
   export CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="$brainbar_sock"
   export PATH="$root_dir/bin:$PATH"
-  # Exceed the pipe buffer so jq is still producing when the peer closes.
+  # Keep the payload larger than a typical pipe buffer while the test transport
+  # fully drains stdin before attempting the deliberately closed socket.
   large_value="$(awk 'BEGIN { for (i = 0; i < 98304; i++) printf "x" }')"
 
   # shellcheck disable=SC1090
@@ -533,6 +534,84 @@ EOF
   rm -rf "$root_dir"
 )
 run_early_close_notifiers_case
+
+# Environment changes are intentionally isolated from the remaining cases.
+# shellcheck disable=SC2030,SC2031
+run_notify_http_error_case() (
+  local repo_root scratch_root root_dir stderr_log port_file server_pid port status
+  repo_root="$(cd "$ROOT_DIR/../.." && pwd)"
+  scratch_root="$repo_root/docs.local/scratch/hotfix-launchd"
+  mkdir -p "$scratch_root"
+  root_dir="$(mktemp -d "$scratch_root/http-error.XXXXXX")"
+  stderr_log="$root_dir/stderr.log"
+  port_file="$root_dir/notify.port"
+  mkdir -p "$root_dir/bin"
+
+  cat >"$root_dir/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "$root_dir/bin/nc"
+
+  python3 - "$port_file" <<'PY' &
+import socket
+import sys
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))
+server.listen(1)
+with open(sys.argv[1], "w") as port_file:
+    port_file.write(str(server.getsockname()[1]))
+connection, _ = server.accept()
+request = b""
+while b"\r\n\r\n" not in request:
+    request += connection.recv(4096)
+headers, body = request.split(b"\r\n\r\n", 1)
+content_length = 0
+for header in headers.split(b"\r\n"):
+    if header.lower().startswith(b"content-length:"):
+        content_length = int(header.split(b":", 1)[1].strip())
+while len(body) < content_length:
+    body += connection.recv(4096)
+connection.sendall(
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n\r\n"
+)
+connection.close()
+server.close()
+PY
+  server_pid="$!"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$port_file" ]] && break
+    /bin/sleep 0.1
+  done
+  [[ -s "$port_file" ]] || fail "HTTP error listener did not become ready"
+  port="$(<"$port_file")"
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_NOTIFY_URL="http://127.0.0.1:$port/notify"
+  export PATH="$root_dir/bin:$PATH"
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  if notify_breach 4242 footprint 1073741824 4294967296 \
+    "$root_dir/snapshot.log" 2>"$stderr_log"; then
+    status=0
+  else
+    status="$?"
+  fi
+  wait "$server_pid"
+
+  assert_eq "0" "$status"
+  assert_file_contains "$stderr_log" "notify post failed"
+  assert_file_contains "$stderr_log" "exit 22"
+
+  printf 'PASS: watchdog logs HTTP error responses as warning-only notification failures\n'
+  rm -rf "$root_dir"
+)
+run_notify_http_error_case
 
 # Matcher coverage regression guard (2026-06-09): the PID matcher must catch
 # BOTH cmux bundles — stable "cmux.app" AND nightly "cmux NIGHTLY.app". The old
