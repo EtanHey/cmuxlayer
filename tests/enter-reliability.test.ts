@@ -113,6 +113,7 @@ class FakeClaudeSurfaceClient {
   readonly pane = "pane:1";
   readonly surface = "surface:agent";
   readonly title = "brainlayerClaude";
+  stableSurfaceIdentity: string | null = null;
   readonly sendCalls: string[] = [];
   readonly sendKeyCalls: string[] = [];
   readonly screenReads: string[] = [];
@@ -177,6 +178,9 @@ class FakeClaudeSurfaceClient {
       surfaces: [
         {
           ref: this.surface,
+          ...(this.stableSurfaceIdentity
+            ? { id: this.stableSurfaceIdentity }
+            : {}),
           title: this.title,
           type: "terminal",
           index: 0,
@@ -816,6 +820,222 @@ describe("enter reliability", () => {
     await held;
   });
 
+  it("associates a recycled-ref surface receipt by stable UUID", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client);
+    registerAgent(server, {
+      agent_id: "live-agent",
+      surface_uuid: client.stableSurfaceIdentity,
+      version: 1,
+    });
+    registerAgent(server, {
+      agent_id: "stale-agent",
+      surface_uuid: "22222222-2222-4222-8222-222222222222",
+      version: 99,
+    });
+
+    const result = await callTool(server, "send_to", {
+      mode: "surface",
+      surface: client.surface,
+      text: "stable receipt owner",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const waited = await callTool(server, "wait_for", {
+      delivery_id: parsed.delivery_id,
+      timeout_ms: 1_000,
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(parseResult(waited)).toMatchObject({
+      agent_id: "live-agent",
+      delivery_id: parsed.delivery_id,
+      delivery_state: "submitted",
+      terminal: true,
+    });
+  });
+
+  it("returns a terminal typed receipt when surface mode does not press Enter", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_to", {
+      mode: "surface",
+      surface: client.surface,
+      text: "leave this in the composer",
+      press_enter: false,
+    });
+    const parsed = parseResult(result);
+    const waited = await callTool(server, "wait_for", {
+      delivery_id: parsed.delivery_id,
+      timeout_ms: 1_000,
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      delivery: "typed",
+      delivery_state: "typed",
+      delivered: false,
+      terminal: true,
+      typed: true,
+      submit_attempted: false,
+    });
+    expect(parseResult(waited)).toMatchObject({
+      delivery_id: parsed.delivery_id,
+      delivery_state: "typed",
+      terminal: true,
+      submit_verified: null,
+    });
+  });
+
+  it("resolves agent-mode composer-only delivery as terminal typed on the same ID", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";
+    server = createReliabilityServer(client);
+    registerAgent(server, {
+      surface_uuid: client.stableSurfaceIdentity,
+    });
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "leave this in the agent composer",
+      press_enter: false,
+    });
+    const parsed = parseResult(result);
+    const waited = await callTool(server, "wait_for", {
+      delivery_id: parsed.delivery_id,
+      timeout_ms: 1_000,
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      delivery: "typed",
+      delivery_state: "typed",
+      terminal: true,
+      typed: true,
+      submit_attempted: false,
+      submit_verified: null,
+    });
+    expect(parseResult(waited)).toMatchObject({
+      agent_id: "agent-1",
+      delivery_id: parsed.delivery_id,
+      delivery_state: "typed",
+      terminal: true,
+      submit_verified: null,
+    });
+  });
+
+  it("registers background surface delivery IDs with wait_for", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await server._registeredTools.send_to.handler(
+      {
+        mode: "surface",
+        surface: client.surface,
+        text: "background receipt",
+        press_enter: true,
+        background: true,
+      },
+      {} as any,
+    );
+    const parsed = parseResult(result);
+    const waitedPromise = server._registeredTools.wait_for.handler(
+      { delivery_id: parsed.delivery_id, timeout_ms: 1_000 },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    const waited = await waitedPromise;
+
+    expect(result.isError).not.toBe(true);
+    expect(parseResult(waited)).toMatchObject({
+      agent_id: "agent-1",
+      delivery_id: parsed.delivery_id,
+      delivery_state: "submitted",
+      terminal: true,
+    });
+  });
+
+  it("bounds the first agent-mode send while the startup sweep holds the lifecycle lock", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "idle" });
+    const engine = server._registeredTools["interact"]._engine;
+    let releaseLock!: () => void;
+    const held = engine.runLifecycleMutation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseLock = resolve;
+        }),
+      { label: "startup-sweep" },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    let settled = false;
+    const resultPromise = server._registeredTools.send_to
+      .handler(
+        {
+          agent_id: "agent-1",
+          text: "Read and follow /tmp/run5-first-send.md",
+          press_enter: true,
+        },
+        {} as any,
+      )
+      .then((result: any) => {
+        settled = true;
+        return result;
+      });
+    await vi.advanceTimersByTimeAsync(1_900);
+    const settledBeforeSweepRelease = settled;
+
+    releaseLock();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await resultPromise;
+    await held;
+
+    expect(settledBeforeSweepRelease).toBe(true);
+    expect(result.isError).not.toBe(true);
+    expect(parseResult(result).submit_verified).toBe(true);
+  });
+
+  it.each([
+    ["agent", { agent_id: "agent-1" }],
+    ["surface", { mode: "surface", surface: "surface:agent" }],
+  ] as const)(
+    "returns lean phase timings for %s-mode send_to",
+    async (_mode, target) => {
+      const client = new FakeClaudeSurfaceClient();
+      client.requiredReturns = 1;
+      client.completionMode = "idle";
+      server = createReliabilityServer(client);
+      registerAgent(server, { state: "idle" });
+
+      const result = await callTool(server, "send_to", {
+        ...target,
+        text: "timed send",
+        press_enter: true,
+      });
+      const parsed = parseResult(result);
+
+      expect(parsed.timings_ms).toEqual({
+        route: expect.any(Number),
+        lock: expect.any(Number),
+        enumerate: expect.any(Number),
+        type: expect.any(Number),
+        verify: expect.any(Number),
+      });
+    },
+  );
+
   it("reports send_to input as still pending when the composer never clears", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
@@ -1169,10 +1389,28 @@ describe("enter reliability", () => {
     expect(parsed.delivery).toBe("queued");
     expect(parsed.delivery_state).toBe("queued");
     expect(parsed.terminal).toBe(false);
+    expect(parsed.delivery_id).toEqual(expect.any(String));
     expect(parsed.submit_verified).toBeNull();
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
+
+    // Simulate Codex consuming its accepted follow-up, then let the real
+    // background verifier resolve the surface-mode receipt.
+    client.requiredReturns = 1;
+    await client.sendKey(client.surface, "return");
+    const engine = server._registeredTools["interact"]._engine;
+    await engine.verifyPendingDeliveries();
+    const waited = await callTool(server, "wait_for", {
+      delivery_id: parsed.delivery_id,
+      timeout_ms: 1_000,
+    });
+    expect(parseResult(waited)).toMatchObject({
+      delivery_id: parsed.delivery_id,
+      delivery_state: "submitted",
+      terminal: true,
+      submit_verified: true,
+    });
   }, 10_000);
 
   it("routes send_to_agent through the truthful queued receipt path", async () => {
@@ -1836,7 +2074,14 @@ describe("enter reliability", () => {
     );
 
     expect(parsed.ok).toBe(true);
+    expect(parsed.delivery_id).toBeUndefined();
+    expect(parsed.delivery).toBe("typed");
+    expect(parsed.delivery_state).toBe("typed");
+    expect(parsed.terminal).toBe(true);
+    expect(parsed.typed).toBe(true);
+    expect(parsed.submit_attempted).toBe(true);
     expect(parsed.submit_verified).toBeNull();
+    expect(parsed.WARNING).toMatch(/NOT VERIFIED.*Return.*not verified/i);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,

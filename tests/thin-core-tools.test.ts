@@ -234,7 +234,7 @@ describe("send_to consolidated modes", () => {
     );
   });
 
-  it("does not claim a terminal submission when surface mode only types text", async () => {
+  it("returns a terminal typed state when surface mode only types text", async () => {
     const exec = makeExec();
     const server = createServer({
       exec,
@@ -257,16 +257,16 @@ describe("send_to consolidated modes", () => {
     expect(result.isError).toBeUndefined();
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.delivery).not.toBe("submitted");
-    expect(parsed.delivery_state).not.toBe("submitted");
-    expect(parsed.terminal).not.toBe(true);
+    expect(parsed.delivery).toBe("typed");
+    expect(parsed.delivery_state).toBe("typed");
+    expect(parsed.terminal).toBe(true);
     expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
     expect(result.content[0].text).toContain("typed into");
     expect(result.content[0].text).toContain("not submitted");
   });
 
-  it("does not claim a terminal submission when surface verification was skipped", async () => {
+  it("returns terminal typed truth when raw surface Return was unverified", async () => {
     const exec = makeExec();
     const server = createServer({
       exec,
@@ -290,9 +290,9 @@ describe("send_to consolidated modes", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_attempted).toBe(true);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.delivery).not.toBe("submitted");
-    expect(parsed.delivery_state).not.toBe("submitted");
-    expect(parsed.terminal).not.toBe(true);
+    expect(parsed.delivery).toBe("typed");
+    expect(parsed.delivery_state).toBe("typed");
+    expect(parsed.terminal).toBe(true);
     expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
     expect(result.content[0].text).toContain("submission attempted");
@@ -376,8 +376,9 @@ describe("consolidated compatibility", () => {
     expect(warn).not.toHaveBeenCalled();
     expect(parseResult(result)).toMatchObject({
       delivered: false,
-      terminal: false,
+      terminal: true,
       typed: true,
+      delivery_state: "typed",
     });
     const second = await server._registeredTools.send_input.handler(
       { surface: "surface:1", text: "legacy again", press_enter: false },

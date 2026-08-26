@@ -3221,6 +3221,7 @@ describe("tool handler integration", () => {
     stateMgr.writeState({
       agent_id: "bl-lead-1",
       surface_id: "surface:95",
+      surface_uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       state: "idle",
       repo: "brainlayer",
       model: "Opus 4.8",
@@ -3318,7 +3319,8 @@ describe("tool handler integration", () => {
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(data.delivered).toBe(false);
-    expect(data.terminal).toBe(false);
+    expect(data.terminal).toBe(true);
+    expect(data.delivery_state).toBe("typed");
     expect(data.typed).toBe(true);
     expect(data.submit_attempted).toBe(false);
     expect(data.surface).toBe("surface:95");
@@ -3342,7 +3344,8 @@ describe("tool handler integration", () => {
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(data.delivered).toBe(false);
-    expect(data.terminal).toBe(false);
+    expect(data.terminal).toBe(true);
+    expect(data.delivery_state).toBe("typed");
     expect(data.typed).toBe(true);
     expect(data.submit_attempted).toBe(false);
     expect(data.surface).toBe("surface:unknown");
@@ -3419,6 +3422,7 @@ describe("tool handler integration", () => {
     stateMgr.writeState({
       agent_id: "codex-positive-1",
       surface_id: "surface:positive",
+      surface_uuid: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
       state: "idle",
       repo: "cmuxlayer",
       model: "GPT-5.5",
@@ -3632,11 +3636,13 @@ describe("tool handler integration", () => {
     expect(receiptShape(publicKeyResult)).toEqual(receiptShape(keyResult));
     expect(receiptShape(commandResult)).toEqual({
       delivered: false,
-      terminal: false,
+      terminal: true,
       typed: true,
       submit_attempted: true,
       submit_verified: null,
       retry_count: 0,
+      delivery: "typed",
+      delivery_state: "typed",
     });
     expect(receiptShape(keyResult)).toEqual({
       delivered: false,

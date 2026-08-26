@@ -259,6 +259,7 @@ import {
 } from "./process-liveness.js";
 
 export type AgentDeliveryState =
+  | "typed"
   | "submitted"
   | "queued"
   | "queued_followup"
@@ -311,6 +312,8 @@ export interface AgentDeliveryReceipt {
   unchanged_screen_retry_count?: number;
   /** Internal digest for comparing retry snapshots without persisting screen text. */
   retry_screen_fingerprint?: string | null;
+  /** Delivery is owned by an already-running direct surface write, not the retry drain. */
+  externally_managed?: boolean;
 }
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
@@ -6711,11 +6714,45 @@ export class AgentEngine {
   }
 
   async runSweep(): Promise<void> {
-    await this.runLifecycleMutation(() => this.runSweepOnce(), {
+    await this.runLifecycleMutation(async () => {
+      await this.holdBenchmarkSweepIfArmed();
+      await this.runSweepOnce();
+    }, {
       label: "sweep",
     });
     await this.drainDeliveryQueue();
     await this.verifyPendingDeliveries();
+  }
+
+  private async holdBenchmarkSweepIfArmed(): Promise<void> {
+    const statePath =
+      process.env.CMUXLAYER_BENCH_SWEEP_HOLD_STATE?.trim() ?? "";
+    if (!statePath) return;
+
+    let armed: { token?: unknown; state?: unknown };
+    try {
+      armed = JSON.parse(readFileSync(statePath, "utf8"));
+    } catch {
+      return;
+    }
+    if (armed.state !== "armed" || typeof armed.token !== "string") return;
+
+    const token = armed.token;
+    writeFileSync(statePath, JSON.stringify({ token, state: "held" }));
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      try {
+        const current = JSON.parse(readFileSync(statePath, "utf8"));
+        if (current.token === token && current.state === "release") {
+          writeFileSync(statePath, JSON.stringify({ token, state: "complete" }));
+          return;
+        }
+      } catch {
+        // The benchmark owns this opt-in state file and may be between writes.
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+    throw new Error(`benchmark lifecycle sweep hold timed out: ${token}`);
   }
 
   setDeliverySubmitter(submitter: DeliverySubmitter | null): void {
@@ -6849,6 +6886,39 @@ export class AgentEngine {
       throw error;
     }
     this.appendDeliveryReceiptEventBestEffort(receipt);
+    return { ...receipt };
+  }
+
+  registerExternalDelivery(input: {
+    delivery_id: string;
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+    source_event: DeliveryEventType;
+  }): AgentDeliveryReceipt {
+    const now = new Date().toISOString();
+    const receipt: AgentDeliveryReceipt = {
+      ...input,
+      delivery_state: "queued",
+      terminal: false,
+      created_at: now,
+      resolved_at: null,
+      retry_count: 0,
+      submit_verified: null,
+      error: null,
+      submission_started_at: now,
+      next_attempt_at: null,
+      composer_accepted: false,
+      verify_deadline_at: null,
+      externally_managed: true,
+    };
+    this.deliveryReceipts.set(receipt.delivery_id, receipt);
+    try {
+      this.persistDeliveryReceipts();
+    } catch (error) {
+      this.deliveryReceipts.delete(receipt.delivery_id);
+      throw error;
+    }
     return { ...receipt };
   }
 
@@ -7276,6 +7346,7 @@ export class AgentEngine {
     try {
       for (const receipt of this.deliveryReceipts.values()) {
         if (receipt.delivery_state !== "queued") continue;
+        if (receipt.externally_managed === true) continue;
         if (receipt.composer_accepted === true) continue;
         const agent = this.getAgentState(receipt.agent_id);
         if (!agent) {
