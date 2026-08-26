@@ -532,7 +532,10 @@ describe("runDoctor — report shape", () => {
   });
 
   it("reports healthy pane liveness and monitor reconciliation state", async () => {
-    const path = join("/tmp", `cmuxlayer-doctor-self-heal-green-${process.pid}.sock`);
+    const path = join(
+      "/tmp",
+      `cmuxlayer-doctor-self-heal-green-${process.pid}.sock`,
+    );
     await startDoctorDaemon(path, {
       version: "0.3.33",
       selfHeal: {
@@ -563,7 +566,10 @@ describe("runDoctor — report shape", () => {
   });
 
   it("rejects impossible monitor summary counters as unavailable", async () => {
-    const path = join("/tmp", `cmuxlayer-doctor-self-heal-invalid-${process.pid}.sock`);
+    const path = join(
+      "/tmp",
+      `cmuxlayer-doctor-self-heal-invalid-${process.pid}.sock`,
+    );
     await startDoctorDaemon(path, {
       version: "0.3.33",
       selfHeal: {
@@ -593,7 +599,10 @@ describe("runDoctor — report shape", () => {
   });
 
   it("preserves and renders truncation when daemon detail arrays exceed the bound", async () => {
-    const path = join("/tmp", `cmuxlayer-doctor-self-heal-truncated-${process.pid}.sock`);
+    const path = join(
+      "/tmp",
+      `cmuxlayer-doctor-self-heal-truncated-${process.pid}.sock`,
+    );
     await startDoctorDaemon(path, {
       version: "0.3.33",
       selfHeal: {
@@ -636,13 +645,14 @@ describe("runDoctor — report shape", () => {
     });
     expect(report.selfHeal.monitorRegistry.collapsedMonitors).toHaveLength(100);
     expect(renderDoctorText(report)).toMatch(/pane_pty_dead: 101.*truncated/i);
-    expect(renderDoctorText(report)).toMatch(
-      /collapsed monitors:.*truncated/i,
-    );
+    expect(renderDoctorText(report)).toMatch(/collapsed monitors:.*truncated/i);
   });
 
   it("rejects self-heal counters that contradict their detail rows", async () => {
-    const path = join("/tmp", `cmuxlayer-doctor-self-heal-contradiction-${process.pid}.sock`);
+    const path = join(
+      "/tmp",
+      `cmuxlayer-doctor-self-heal-contradiction-${process.pid}.sock`,
+    );
     await startDoctorDaemon(path, {
       version: "0.3.33",
       selfHeal: {
@@ -749,7 +759,10 @@ describe("runDoctor — report shape", () => {
 
   it("flags degraded daemon transport while the reported cmux socket is live", async () => {
     const path = join("/tmp", `cmuxlayer-doctor-degraded-${process.pid}.sock`);
-    const cmuxPath = join("/tmp", `cmuxlayer-doctor-live-cmux-${process.pid}.sock`);
+    const cmuxPath = join(
+      "/tmp",
+      `cmuxlayer-doctor-live-cmux-${process.pid}.sock`,
+    );
     await startDoctorDaemon(path, {
       version: "0.3.33",
       degraded: true,
@@ -779,8 +792,14 @@ describe("runDoctor — report shape", () => {
   });
 
   it("never reports a degraded daemon healthy when the cmux socket is down", async () => {
-    const path = join("/tmp", `cmuxlayer-doctor-degraded-down-${process.pid}.sock`);
-    const cmuxPath = join("/tmp", `cmuxlayer-doctor-down-cmux-${process.pid}.sock`);
+    const path = join(
+      "/tmp",
+      `cmuxlayer-doctor-degraded-down-${process.pid}.sock`,
+    );
+    const cmuxPath = join(
+      "/tmp",
+      `cmuxlayer-doctor-down-cmux-${process.pid}.sock`,
+    );
     await startDoctorDaemon(path, {
       version: "0.3.33",
       degraded: true,
@@ -811,9 +830,18 @@ describe("runDoctor — report shape", () => {
   });
 
   it("probes the CMUX_SOCKET_PATH pin instead of the daemon-reported default", async () => {
-    const path = join("/tmp", `cmuxlayer-doctor-degraded-pin-${process.pid}.sock`);
-    const reportedPath = join("/tmp", `cmuxlayer-doctor-reported-${process.pid}.sock`);
-    const pinnedPath = join("/tmp", `cmuxlayer-doctor-pinned-${process.pid}.sock`);
+    const path = join(
+      "/tmp",
+      `cmuxlayer-doctor-degraded-pin-${process.pid}.sock`,
+    );
+    const reportedPath = join(
+      "/tmp",
+      `cmuxlayer-doctor-reported-${process.pid}.sock`,
+    );
+    const pinnedPath = join(
+      "/tmp",
+      `cmuxlayer-doctor-pinned-${process.pid}.sock`,
+    );
     await startDoctorDaemon(path, {
       version: "0.3.33",
       degraded: true,
@@ -947,7 +975,9 @@ describe("runDoctor — report shape", () => {
     expect(report.sleepGuard.systemSleepPrevented).toBe(false);
     expect(report.sleepGuard.keepAliveLoaded).toBe(false);
     expect(report.sleepGuard.durable).toBe(false);
-    expect(report.sleepGuard.note).toMatch(/launchd\/cmux-caffeinate\/README\.md/);
+    expect(report.sleepGuard.note).toMatch(
+      /launchd\/cmux-caffeinate\/README\.md/,
+    );
     expect(report.healthy).toBe(true);
   });
 
@@ -956,7 +986,11 @@ describe("runDoctor — report shape", () => {
       version: "0.3.0",
       env: {},
       brew: makeBrew({ tapList: "etanhey/layers\n" }),
-      pmset: async () => ({ ok: true, stdout: PMSET_GREEN_FIXTURE, stderr: "" }),
+      pmset: async () => ({
+        ok: true,
+        stdout: PMSET_GREEN_FIXTURE,
+        stderr: "",
+      }),
       launchctl: async () => ({
         ok: true,
         stdout: "gui/501/com.golems.cmux-caffeinate = {\n  active count = 1\n}",
@@ -1036,8 +1070,7 @@ describe("runDoctor — report shape", () => {
 
     expect(report.runtimeProvenance).toMatchObject({
       distEntrypoint: true,
-      entrypoint:
-        "/opt/homebrew/Cellar/cmuxlayer/0.3.1/libexec/dist/index.js",
+      entrypoint: "/opt/homebrew/Cellar/cmuxlayer/0.3.1/libexec/dist/index.js",
       mode: "dist",
       ok: true,
     });
@@ -1129,10 +1162,7 @@ describe("runDoctor — report shape", () => {
       brew: makeBrew({}),
       runtimeProvenance: () =>
         detectRuntimeProvenance({
-          argv: [
-            "/opt/homebrew/opt/node/bin/node",
-            "/tmp/cmuxlayer-wrapper",
-          ],
+          argv: ["/opt/homebrew/opt/node/bin/node", "/tmp/cmuxlayer-wrapper"],
           env: {},
           execPath: "/opt/homebrew/opt/node/bin/node",
         }),
@@ -1528,7 +1558,7 @@ describe("renderDoctorText", () => {
 
     expect(text).toMatch(/doctor .* healthy/i);
     expect(text).toMatch(/1 drifted/i);
-    expect(text).toMatch(/\/Users\/etanheyman\/Gits\/drift\/\.mcp\.json/);
+    expect(text).toMatch(/\/home\/test-user\/Gits\/drift\/\.mcp\.json/);
     expect(text).toMatch(/cmuxlayer/);
   });
 });

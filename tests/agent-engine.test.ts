@@ -87,14 +87,17 @@ function mockSpawnExit(code: number): {
 function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
   return {
     getTransportHealth: () => ({ mode: "socket", degraded: false }),
-    newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
-      workspace: opts?.workspace ?? "ws:1",
-      surface: "surface:new",
-      surface_id: "11111111-2222-4333-8444-555555555555",
-      pane: "pane:1",
-      title: "",
-      type: "terminal",
-    }) satisfies CmuxNewSplitResult),
+    newSplit: vi.fn().mockImplementation(
+      async (_direction, opts) =>
+        ({
+          workspace: opts?.workspace ?? "ws:1",
+          surface: "surface:new",
+          surface_id: "11111111-2222-4333-8444-555555555555",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }) satisfies CmuxNewSplitResult,
+    ),
     newSurface: vi.fn().mockImplementation(async (opts) => ({
       workspace: opts?.workspace ?? "ws:1",
       surface: "surface:new",
@@ -214,9 +217,8 @@ describe("AgentEngine", () => {
     liveSurfaces = [];
     const workspaceForSurface = (surface: CmuxSurface): string =>
       surface.workspace_ref ??
-      stateMgr
-        .listStates()
-        .find((record) => record.surface_id === surface.ref)?.workspace_id ??
+      stateMgr.listStates().find((record) => record.surface_id === surface.ref)
+        ?.workspace_id ??
       "";
     (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockImplementation(
       async () => ({
@@ -262,7 +264,10 @@ describe("AgentEngine", () => {
     (
       mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
     ).mockImplementation(
-      async ({ workspace, pane }: { workspace?: string; pane?: string } = {}) => {
+      async ({
+        workspace,
+        pane,
+      }: { workspace?: string; pane?: string } = {}) => {
         const workspaceRef = workspace ?? "";
         return {
           workspace_ref: workspaceRef,
@@ -499,18 +504,14 @@ describe("AgentEngine", () => {
     );
 
     it("assigns each managed surface a launcher-preserving unique seat title", async () => {
-      (
-        mockClient.newSplit as ReturnType<typeof vi.fn>
-      ).mockResolvedValueOnce({
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         workspace: "ws:1",
         surface: "surface:first-worker",
         pane: "pane:1",
         title: "",
         type: "terminal",
       });
-      (
-        mockClient.newSplit as ReturnType<typeof vi.fn>
-      ).mockResolvedValueOnce({
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         workspace: "ws:1",
         surface: "surface:second-worker",
         pane: "pane:1",
@@ -816,9 +817,7 @@ describe("AgentEngine", () => {
       expect(launchCmd).toBe("agenthtmlhostCursor -s");
       const state = resolvingEngine.getAgentState(result.agent_id);
       expect(state?.launcher_name).toBe("agenthtmlhostCursor");
-      expect(state?.launch_cwd).toBe(
-        "/home/test-user/Gits/agent-html-host",
-      );
+      expect(state?.launch_cwd).toBe("/home/test-user/Gits/agent-html-host");
 
       resolvingEngine.dispose();
     });
@@ -1071,9 +1070,7 @@ describe("AgentEngine", () => {
       });
       (mockClient.renameTab as ReturnType<typeof vi.fn>).mockImplementation(
         async () => {
-          liveSurfaces = [
-            { ...makeSpawnSurface(), workspace_ref: "ws:1" },
-          ];
+          liveSurfaces = [{ ...makeSpawnSurface(), workspace_ref: "ws:1" }];
         },
       );
 
@@ -1400,24 +1397,26 @@ describe("AgentEngine", () => {
           workspace_ref: "workspace:new",
         },
       ];
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [
-          {
-            ref: "workspace:old",
-            title: "Old",
-            index: 0,
-            selected: false,
-            pinned: false,
-          },
-          {
-            ref: "workspace:new",
-            title: "New",
-            index: 1,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [
+            {
+              ref: "workspace:old",
+              title: "Old",
+              index: 0,
+              selected: false,
+              pinned: false,
+            },
+            {
+              ref: "workspace:new",
+              title: "New",
+              index: 1,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
         async ({ workspace }: { workspace?: string } = {}) => {
           const isNew = workspace === "workspace:new";
@@ -1459,7 +1458,10 @@ describe("AgentEngine", () => {
       (
         mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
       ).mockImplementation(
-        async ({ workspace, pane }: { workspace?: string; pane?: string } = {}) => {
+        async ({
+          workspace,
+          pane,
+        }: { workspace?: string; pane?: string } = {}) => {
           const isNew = workspace === "workspace:new";
           const isLead = pane === "pane:new-lead";
           return {
@@ -1544,20 +1546,22 @@ describe("AgentEngine", () => {
           workspace_ref: "workspace:voice",
         },
       ];
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [
-          {
-            ref: "workspace:parent",
-            title: "BrainLayer",
-            current_directory: "/home/test-user/Gits/brainlayer",
-          },
-          {
-            ref: "workspace:voice",
-            title: "VoiceLayer",
-            current_directory: "/home/test-user/Gits/voicelayer",
-          },
-        ],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [
+            {
+              ref: "workspace:parent",
+              title: "BrainLayer",
+              current_directory: "/home/test-user/Gits/brainlayer",
+            },
+            {
+              ref: "workspace:voice",
+              title: "VoiceLayer",
+              current_directory: "/home/test-user/Gits/voicelayer",
+            },
+          ],
+        },
+      );
       (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
         workspace: "workspace:voice",
         surface: "surface:voice-child",
@@ -1664,9 +1668,11 @@ describe("AgentEngine", () => {
       engine.getRegistry().set(parent.agent_id, parent);
       liveSurfaces = [makeSurface("surface:parent")];
 
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [],
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         workspace_ref: "workspace:parent",
         window_ref: "window:1",
@@ -1680,7 +1686,9 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
         workspace_ref: "workspace:parent",
         window_ref: "window:1",
         pane_ref: "pane:parent",
@@ -1967,12 +1975,8 @@ describe("AgentEngine", () => {
       }));
       (mockClient.renameTab as ReturnType<typeof vi.fn>).mockImplementation(
         async () => {
-          liveSurfaces = [
-            { ...makeSpawnSurface(), workspace_ref: "ws:1" },
-          ];
-          (
-            mockClient.listPanes as ReturnType<typeof vi.fn>
-          ).mockResolvedValue({
+          liveSurfaces = [{ ...makeSpawnSurface(), workspace_ref: "ws:1" }];
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
             workspace_ref: "ws:1",
             window_ref: "window:1",
             panes: [
@@ -2211,9 +2215,7 @@ describe("AgentEngine", () => {
       ).rejects.toThrow(/surface observer changed.*placement/i);
 
       expect(scopedRegistry.getObserverId()).toBe(ownerId);
-      expect(scopedRegistry.getObserverEpoch()).toBe(
-        `${ownerId}@socket:2`,
-      );
+      expect(scopedRegistry.getObserverEpoch()).toBe(`${ownerId}@socket:2`);
       expect(mockClient.newSurface).not.toHaveBeenCalled();
       expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
@@ -2313,17 +2315,19 @@ describe("AgentEngine", () => {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
       });
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [
-          {
-            ref: "ws:1",
-            title: "cmuxlayer",
-            index: 0,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [
+            {
+              ref: "ws:1",
+              title: "cmuxlayer",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
         async () => ({
           workspace_ref: "ws:1",
@@ -2426,17 +2430,19 @@ describe("AgentEngine", () => {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
       });
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [
-          {
-            ref: "ws:1",
-            title: "cmuxlayer",
-            index: 0,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [
+            {
+              ref: "ws:1",
+              title: "cmuxlayer",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
         new Error("placement listing failed"),
       );
@@ -3044,10 +3050,15 @@ describe("AgentEngine", () => {
       vi.spyOn(guardedRegistry, "hasLiveSurface").mockRejectedValue(
         new Error("surface listing failed"),
       );
-      const guardedEngine = new AgentEngine(stateMgr, guardedRegistry, mockClient, {
-        spawnPreflight: async () => {},
-        sessionIdentityResolver: () => null,
-      });
+      const guardedEngine = new AgentEngine(
+        stateMgr,
+        guardedRegistry,
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+        },
+      );
       try {
         stateMgr.writeState(
           makeRecord({
@@ -3237,7 +3248,7 @@ describe("AgentEngine", () => {
         expect(mockClient.clearStatus).not.toHaveBeenCalled();
         expect(mockClient.setStatus).toHaveBeenCalledWith(
           "worker-archived-before-status",
-          "brainlayer | role=worker | state=done | health=unhealthy(closure_without_artifact:blocking) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+          "brainlayer | role=worker | state=done | health=unhealthy(inbox_monitor_not_alive:info,closure_without_artifact:blocking) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
           expect.objectContaining({
             surface: "surface:archived-before-status",
           }),
@@ -3294,7 +3305,10 @@ describe("AgentEngine", () => {
 
       const row = (mockClient.setStatus as ReturnType<typeof vi.fn>).mock
         .calls[0]?.[1] as string | undefined;
-      expect(row, JSON.stringify((mockClient.setStatus as any).mock.calls)).toBeTruthy();
+      expect(
+        row,
+        JSON.stringify((mockClient.setStatus as any).mock.calls),
+      ).toBeTruthy();
       expect(row).not.toContain("closure_without_artifact");
       // The pre-read shares `sweepCtx` with the health input's own read, so
       // resolving closure from the screen costs nothing extra.
@@ -3649,8 +3663,7 @@ describe("AgentEngine", () => {
       await engine.getRegistry().reconstitute();
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:compact-old",
-        text:
-          "gpt-5.4 high · 5% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)",
+        text: "gpt-5.4 high · 5% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)",
         lines: 20,
         scrollback_used: false,
       });
@@ -3700,7 +3713,9 @@ describe("AgentEngine", () => {
         "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
-      expect(engine.getAgentState("agent-stable-resume")?.state).toBe("booting");
+      expect(engine.getAgentState("agent-stable-resume")?.state).toBe(
+        "booting",
+      );
     });
 
     it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
@@ -3786,16 +3801,17 @@ describe("AgentEngine", () => {
       );
       harnessHome.give("codex", sessionId);
       await engine.getRegistry().reconstitute();
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          if (pid === 34567 && signal === 0) {
-            throw Object.assign(new Error("operation not permitted"), {
-              code: "EPERM",
-            });
-          }
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        if (pid === 34567 && signal === 0) {
+          throw Object.assign(new Error("operation not permitted"), {
+            code: "EPERM",
+          });
+        }
+        return true;
+      }) as typeof process.kill);
 
       try {
         const resumed = await engine.resumeAgent(agentId, { force: true });
@@ -4041,7 +4057,6 @@ describe("AgentEngine", () => {
 
       expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
-
   });
 
   describe("boot session capture", () => {
@@ -4084,9 +4099,7 @@ describe("AgentEngine", () => {
       });
       await engine.getRegistry().reconstitute();
 
-      await engine.captureBootSessionId(
-        "cmuxlayerCodex-pending-rollout-only",
-      );
+      await engine.captureBootSessionId("cmuxlayerCodex-pending-rollout-only");
 
       expect(
         engine.getAgentState("cmuxlayerCodex-pending-rollout-only"),
@@ -4671,14 +4684,15 @@ Session ID: ${sessionId}`,
         },
       ];
       await registry.reconstitute();
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          if (pid === oldPid && signal === 0) {
-            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
-          }
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        if (pid === oldPid && signal === 0) {
+          throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+        }
+        return true;
+      }) as typeof process.kill);
 
       try {
         await engine.captureBootSessionId(agentId);
@@ -4733,14 +4747,15 @@ Session ID: ${sessionId}`,
         },
       ];
       await registry.reconstitute();
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          if (pid === oldPid && signal === 0) {
-            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
-          }
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        if (pid === oldPid && signal === 0) {
+          throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+        }
+        return true;
+      }) as typeof process.kill);
 
       try {
         await engine.captureBootSessionId(agentId);
@@ -4922,7 +4937,9 @@ Session ID: ${sessionId}`,
         cli_session_id: sessionId,
         cli_session_path: sessionPath,
       });
-      expect(engine.getAgentState(result.agent_id)?.agent_id).toBe(result.agent_id);
+      expect(engine.getAgentState(result.agent_id)?.agent_id).toBe(
+        result.agent_id,
+      );
     });
 
     it("captures transcript session identity after boot has already reached ready", async () => {
@@ -4974,7 +4991,9 @@ Session ID: ${sessionId}`,
         cli_session_id: sessionId,
         cli_session_path: sessionPath,
       });
-      expect(engine.resolveAgentRoute("cmuxlayerClaude-019f0100")).toMatchObject({
+      expect(
+        engine.resolveAgentRoute("cmuxlayerClaude-019f0100"),
+      ).toMatchObject({
         session_id: sessionId,
         resumable: true,
       });
@@ -5013,13 +5032,17 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(engine.getAgentState("cmuxlayerCodex-pending-late")).toMatchObject({
-        agent_id: "cmuxlayerCodex-pending-late",
-        state: "ready",
-        cli_session_id: null,
-      });
+      expect(engine.getAgentState("cmuxlayerCodex-pending-late")).toMatchObject(
+        {
+          agent_id: "cmuxlayerCodex-pending-late",
+          state: "ready",
+          cli_session_id: null,
+        },
+      );
       expect(engine.getAgentState("cmuxlayerCodex-019f0010")).toBeNull();
-      expect(engine.resolveAgentRoute("cmuxlayerCodex-pending-late")).toMatchObject({
+      expect(
+        engine.resolveAgentRoute("cmuxlayerCodex-pending-late"),
+      ).toMatchObject({
         session_id: null,
         resumable: false,
       });
@@ -5063,7 +5086,9 @@ Session ID: ${sessionId}`,
       await engine.runSweep();
 
       expect(transcriptResolver).not.toHaveBeenCalled();
-      expect(engine.getAgentState("cmuxlayerCodex-pending-blank")).toMatchObject({
+      expect(
+        engine.getAgentState("cmuxlayerCodex-pending-blank"),
+      ).toMatchObject({
         agent_id: "cmuxlayerCodex-pending-blank",
         state: "ready",
         cli_session_id: null,
@@ -5305,17 +5330,22 @@ Session ID: ${sessionId}`,
         vi.stubEnv("CODEX_HOME", codexHome);
         try {
           engine.dispose();
-          const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+          const registry = new AgentRegistry(
+            stateMgr,
+            async () => liveSurfaces,
+          );
           engine = new AgentEngine(stateMgr, registry, mockClient, {
             spawnPreflight: async () => {},
           });
           liveSurfaces = [makeSurface("surface:new")];
-          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
-            surface: "surface:new",
-            text: `${cli}> `,
-            lines: 80,
-            scrollback_used: true,
-          });
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+            {
+              surface: "surface:new",
+              text: `${cli}> `,
+              lines: 80,
+              scrollback_used: true,
+            },
+          );
           stateMgr.writeState(
             makeRecord({
               agent_id: `${repo}${cli}-pending-jsonl`,
@@ -5333,7 +5363,9 @@ Session ID: ${sessionId}`,
           );
           await engine.getRegistry().reconstitute();
 
-          expect(engine.resolveAgentRoute(`${repo}${cli}-pending-jsonl`)).toMatchObject({
+          expect(
+            engine.resolveAgentRoute(`${repo}${cli}-pending-jsonl`),
+          ).toMatchObject({
             session_id: null,
             resumable: false,
           });
@@ -5434,17 +5466,22 @@ Session ID: ${sessionId}`,
         vi.stubEnv("CODEX_HOME", codexHome);
         try {
           engine.dispose();
-          const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+          const registry = new AgentRegistry(
+            stateMgr,
+            async () => liveSurfaces,
+          );
           engine = new AgentEngine(stateMgr, registry, mockClient, {
             spawnPreflight: async () => {},
           });
           liveSurfaces = [makeSurface("surface:mismatch")];
-          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
-            surface: "surface:mismatch",
-            text: `${cli}> `,
-            lines: 80,
-            scrollback_used: true,
-          });
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+            {
+              surface: "surface:mismatch",
+              text: `${cli}> `,
+              lines: 80,
+              scrollback_used: true,
+            },
+          );
           stateMgr.writeState(
             makeRecord({
               agent_id: pendingAgentId,
@@ -5531,7 +5568,10 @@ Session ID: ${sessionId}`,
         engine = new AgentEngine(stateMgr, registry, mockClient, {
           spawnPreflight: async () => {},
         });
-        liveSurfaces = [makeSurface("surface:first"), makeSurface("surface:second")];
+        liveSurfaces = [
+          makeSurface("surface:first"),
+          makeSurface("surface:second"),
+        ];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:first",
           text: "codex> ",
@@ -5810,15 +5850,17 @@ Session ID: ${sessionId}`,
       const otherUuid = "033F0B64-780F-4F0B-BCF1-3B8E085A7383";
       let failTargetWorkspace = false;
       const workspaces = ["workspace:one", "workspace:two"];
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: workspaces.map((ref, index) => ({
-          ref,
-          title: ref,
-          index,
-          selected: index === 0,
-          pinned: false,
-        })),
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: workspaces.map((ref, index) => ({
+            ref,
+            title: ref,
+            index,
+            selected: index === 0,
+            pinned: false,
+          })),
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
         async ({ workspace }: { workspace: string }) => ({
           workspace_ref: workspace,
@@ -5840,28 +5882,26 @@ Session ID: ${sessionId}`,
       );
       (
         mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
-      ).mockImplementation(
-        async ({ workspace }: { workspace: string }) => {
-          if (workspace === "workspace:two" && failTargetWorkspace) {
-            throw new Error("workspace topology unavailable");
-          }
-          return {
-            workspace_ref: workspace,
-            window_ref: "window:one",
-            pane_ref: `pane:${workspace}`,
-            surfaces: [
-              {
-                ...makeSurface(
-                  workspace === "workspace:one"
-                    ? "surface:other"
-                    : "surface:target",
-                ),
-                id: workspace === "workspace:one" ? otherUuid : targetUuid,
-              },
-            ],
-          };
-        },
-      );
+      ).mockImplementation(async ({ workspace }: { workspace: string }) => {
+        if (workspace === "workspace:two" && failTargetWorkspace) {
+          throw new Error("workspace topology unavailable");
+        }
+        return {
+          workspace_ref: workspace,
+          window_ref: "window:one",
+          pane_ref: `pane:${workspace}`,
+          surfaces: [
+            {
+              ...makeSurface(
+                workspace === "workspace:one"
+                  ? "surface:other"
+                  : "surface:target",
+              ),
+              id: workspace === "workspace:one" ? otherUuid : targetUuid,
+            },
+          ],
+        };
+      });
       stateMgr.writeState(
         makeRecord({
           agent_id: "partial-topology-agent",
@@ -5894,17 +5934,19 @@ Session ID: ${sessionId}`,
       const targetUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
       const neighborUuid = "033F0B64-780F-4F0B-BCF1-3B8E085A7383";
       let includeTargetUuid = true;
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [
-          {
-            ref: "workspace:mixed",
-            title: "Mixed",
-            index: 0,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [
+            {
+              ref: "workspace:mixed",
+              title: "Mixed",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         workspace_ref: "workspace:mixed",
         window_ref: "window:mixed",
@@ -6013,17 +6055,19 @@ Session ID: ${sessionId}`,
 
     it("does not use a UUID mapping from a contradictory topology snapshot", async () => {
       const duplicateUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [
-          {
-            ref: "workspace:contradictory",
-            title: "Contradictory",
-            index: 0,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [
+            {
+              ref: "workspace:contradictory",
+              title: "Contradictory",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         workspace_ref: "workspace:contradictory",
         window_ref: "window:contradictory",
@@ -6189,12 +6233,14 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(mockClient.moveSurface).toHaveBeenCalledWith(expect.objectContaining({
-        surface: record.surface_id,
-        pane: "pane:right",
-        workspace: "ws:placement",
-        focus: false,
-      }));
+      expect(mockClient.moveSurface).toHaveBeenCalledWith(
+        expect.objectContaining({
+          surface: record.surface_id,
+          pane: "pane:right",
+          workspace: "ws:placement",
+          focus: false,
+        }),
+      );
     });
 
     it("corrects the just-created programmatic surface at the spawn trigger", async () => {
@@ -6215,12 +6261,14 @@ Session ID: ${sessionId}`,
         agentIds: new Set([record.agent_id]),
       });
 
-      expect(mockClient.moveSurface).toHaveBeenCalledWith(expect.objectContaining({
-        surface: record.surface_id,
-        pane: "pane:right",
-        workspace: "ws:placement",
-        focus: false,
-      }));
+      expect(mockClient.moveSurface).toHaveBeenCalledWith(
+        expect.objectContaining({
+          surface: record.surface_id,
+          pane: "pane:right",
+          workspace: "ws:placement",
+          focus: false,
+        }),
+      );
     });
 
     it("leaves an unknown-provenance leftover untouched during boot sweep", async () => {
@@ -6276,20 +6324,20 @@ Session ID: ${sessionId}`,
       engine.getRegistry().set(record.agent_id, record);
       installTwoColumnTopology(record);
       let mutated = false;
-      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (opts) => {
-          const working = stateMgr.transition(record.agent_id, "working");
-          engine.getRegistry().set(record.agent_id, working);
-          await opts.beforeMutation?.();
-          mutated = true;
-          return {
-            ok: true,
-            workspace: opts.workspace ?? "ws:placement",
-            surface: opts.surface,
-            pane: opts.pane ?? "pane:right",
-          };
-        },
-      );
+      (
+        mockClient.moveSurface as ReturnType<typeof vi.fn>
+      ).mockImplementationOnce(async (opts) => {
+        const working = stateMgr.transition(record.agent_id, "working");
+        engine.getRegistry().set(record.agent_id, working);
+        await opts.beforeMutation?.();
+        mutated = true;
+        return {
+          ok: true,
+          workspace: opts.workspace ?? "ws:placement",
+          surface: opts.surface,
+          pane: opts.pane ?? "pane:right",
+        };
+      });
 
       const summary = await engine.reconcileRolePlacements("idle");
 
@@ -6319,73 +6367,73 @@ Session ID: ${sessionId}`,
       engine.getRegistry().set(record.agent_id, record);
       installTwoColumnTopology(record);
       let mutated = false;
-      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (opts) => {
-          liveSurfaces = [
-            {
-              ...makeSurface(record.surface_id),
-              id: foreignUuid,
-              workspace_ref: "ws:placement",
-            },
-            {
-              ...makeSurface("surface:moved-stable-worker"),
-              id: record.surface_uuid ?? undefined,
-              workspace_ref: "ws:placement",
-            },
-            {
-              ...makeSurface("surface:right-target"),
-              id: targetUuid,
-              workspace_ref: "ws:placement",
-            },
-          ];
-          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (
+        mockClient.moveSurface as ReturnType<typeof vi.fn>
+      ).mockImplementationOnce(async (opts) => {
+        liveSurfaces = [
+          {
+            ...makeSurface(record.surface_id),
+            id: foreignUuid,
             workspace_ref: "ws:placement",
-            window_ref: "window:placement",
-            panes: [
-              {
-                ref: "pane:left",
-                index: 0,
-                focused: true,
-                surface_count: 1,
-                surface_refs: [record.surface_id],
-                surface_ids: [foreignUuid],
-                pixel_frame: leftFrame,
-              },
-              {
-                ref: "pane:right",
-                index: 1,
-                focused: false,
-                surface_count: 2,
-                surface_refs: [
-                  "surface:moved-stable-worker",
-                  "surface:right-target",
-                ],
-                surface_ids: [record.surface_uuid, targetUuid],
-                pixel_frame: rightFrame,
-              },
-            ],
-          });
-          (
-            mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
-          ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+          },
+          {
+            ...makeSurface("surface:moved-stable-worker"),
+            id: record.surface_uuid ?? undefined,
             workspace_ref: "ws:placement",
-            window_ref: "window:placement",
-            pane_ref: pane,
-            surfaces:
-              pane === "pane:left"
-                ? [liveSurfaces[0]]
-                : [liveSurfaces[1], liveSurfaces[2]],
-          }));
-          await opts.beforeMutation?.();
-          mutated = true;
-          return {
-            ok: true,
-            workspace: opts.workspace ?? "ws:placement",
-            surface: opts.surface,
-            pane: opts.pane ?? "pane:right",
-          };
-        },
-      );
+          },
+          {
+            ...makeSurface("surface:right-target"),
+            id: targetUuid,
+            workspace_ref: "ws:placement",
+          },
+        ];
+        (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+          workspace_ref: "ws:placement",
+          window_ref: "window:placement",
+          panes: [
+            {
+              ref: "pane:left",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: [record.surface_id],
+              surface_ids: [foreignUuid],
+              pixel_frame: leftFrame,
+            },
+            {
+              ref: "pane:right",
+              index: 1,
+              focused: false,
+              surface_count: 2,
+              surface_refs: [
+                "surface:moved-stable-worker",
+                "surface:right-target",
+              ],
+              surface_ids: [record.surface_uuid, targetUuid],
+              pixel_frame: rightFrame,
+            },
+          ],
+        });
+        (
+          mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+        ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "ws:placement",
+          window_ref: "window:placement",
+          pane_ref: pane,
+          surfaces:
+            pane === "pane:left"
+              ? [liveSurfaces[0]]
+              : [liveSurfaces[1], liveSurfaces[2]],
+        }));
+        await opts.beforeMutation?.();
+        mutated = true;
+        return {
+          ok: true,
+          workspace: opts.workspace ?? "ws:placement",
+          surface: opts.surface,
+          pane: opts.pane ?? "pane:right",
+        };
+      });
 
       const summary = await engine.reconcileRolePlacements("idle");
 
@@ -6460,17 +6508,17 @@ Session ID: ${sessionId}`,
           };
         },
       );
-      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (opts) => {
-          await opts.beforeMutation?.();
-          return {
-            ok: true,
-            workspace: "ws:placement",
-            surface: opts.surface,
-            pane: "pane:right",
-          };
-        },
-      );
+      (
+        mockClient.moveSurface as ReturnType<typeof vi.fn>
+      ).mockImplementationOnce(async (opts) => {
+        await opts.beforeMutation?.();
+        return {
+          ok: true,
+          workspace: "ws:placement",
+          surface: opts.surface,
+          pane: "pane:right",
+        };
+      });
 
       const summary = await engine.reconcileRolePlacements("idle");
 
@@ -6629,25 +6677,25 @@ Session ID: ${sessionId}`,
           };
         },
       );
-      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (opts) => {
-          await opts.beforeMutation?.();
-          workerPane = "pane:right";
-          return {
-            ok: true,
-            workspace: "ws:placement",
-            surface: opts.surface,
-            pane: "pane:right",
-          };
-        },
-      );
-      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (_surface, opts) => {
-          await opts.beforeMutation?.();
-          seedOpen = false;
-          refreshLiveSurfaces();
-        },
-      );
+      (
+        mockClient.moveSurface as ReturnType<typeof vi.fn>
+      ).mockImplementationOnce(async (opts) => {
+        await opts.beforeMutation?.();
+        workerPane = "pane:right";
+        return {
+          ok: true,
+          workspace: "ws:placement",
+          surface: opts.surface,
+          pane: "pane:right",
+        };
+      });
+      (
+        mockClient.closeSurface as ReturnType<typeof vi.fn>
+      ).mockImplementationOnce(async (_surface, opts) => {
+        await opts.beforeMutation?.();
+        seedOpen = false;
+        refreshLiveSurfaces();
+      });
 
       const summary = await engine.reconcileRolePlacements("idle");
 
@@ -6815,7 +6863,9 @@ Session ID: ${sessionId}`,
         expect(result.matched).toBe(true);
         expect(result.source).toBe("screen");
         expect(result.state).toBe("ready");
-        expect(engine.getAgentState("claude-screen-ready")?.state).toBe("ready");
+        expect(engine.getAgentState("claude-screen-ready")?.state).toBe(
+          "ready",
+        );
         expect(mockClient.moveSurface).not.toHaveBeenCalled();
         expect(mockClient.readScreen).toHaveBeenCalledWith(
           "surface:claude-screen-ready",
@@ -7002,12 +7052,7 @@ Session ID: ${sessionId}`,
         liveSurfaces = [makeSurface("surface:codex-pending-ready")];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:codex-pending-ready",
-          text: [
-            "OpenAI Codex",
-            "Model: gpt-5.5",
-            "",
-            "›",
-          ].join("\n"),
+          text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
           lines: 80,
           scrollback_used: false,
         });
@@ -7166,7 +7211,11 @@ Session ID: ${sessionId}`,
         });
         await engine.getRegistry().reconstitute();
 
-        const pending = engine.waitFor("kiro-bare-screen-ready", "ready", 1_000);
+        const pending = engine.waitFor(
+          "kiro-bare-screen-ready",
+          "ready",
+          1_000,
+        );
         await vi.advanceTimersByTimeAsync(1_500);
         const result = await pending;
 
@@ -7331,11 +7380,7 @@ Session ID: ${sessionId}`,
           lines: 80,
           scrollback_used: false,
         });
-        const pending = engine.waitFor(
-          "gemini-sweep-progress",
-          "ready",
-          1_500,
-        );
+        const pending = engine.waitFor("gemini-sweep-progress", "ready", 1_500);
         await vi.advanceTimersByTimeAsync(2_000);
         const waitResult = await pending;
         expect(waitResult.matched).toBe(false);
@@ -7564,7 +7609,9 @@ Session ID: ${sessionId}`,
             task_done_candidate_at: candidateAt.toISOString(),
           }),
         );
-        liveSurfaces = [makeSurface("surface:incident-recoverable-blocker-done")];
+        liveSurfaces = [
+          makeSurface("surface:incident-recoverable-blocker-done"),
+        ];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:incident-recoverable-blocker-done",
           text: [
@@ -7868,7 +7915,10 @@ Session ID: ${sessionId}`,
         const now = new Date("2026-06-26T20:35:00.000Z");
         const stale = new Date(now.getTime() - 2_000);
         vi.setSystemTime(now);
-        const transcript = join(TEST_DIR, "stale-codex-done-active-screen.jsonl");
+        const transcript = join(
+          TEST_DIR,
+          "stale-codex-done-active-screen.jsonl",
+        );
         writeCodexDoneTranscript(transcript);
         utimesSync(transcript, stale, stale);
         stateMgr.writeState(
@@ -7920,7 +7970,10 @@ Session ID: ${sessionId}`,
         const now = new Date("2026-06-26T20:36:00.000Z");
         const stale = new Date(now.getTime() - 2_000);
         vi.setSystemTime(now);
-        const transcript = join(TEST_DIR, "stale-codex-done-waiting-screen.jsonl");
+        const transcript = join(
+          TEST_DIR,
+          "stale-codex-done-waiting-screen.jsonl",
+        );
         writeCodexDoneTranscript(transcript);
         utimesSync(transcript, stale, stale);
         stateMgr.writeState(
@@ -7933,7 +7986,9 @@ Session ID: ${sessionId}`,
             cli_session_path: transcript,
           }),
         );
-        liveSurfaces = [makeSurface("surface:worker-transcript-waiting-screen")];
+        liveSurfaces = [
+          makeSurface("surface:worker-transcript-waiting-screen"),
+        ];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:worker-transcript-waiting-screen",
           text: [
@@ -7986,7 +8041,9 @@ Session ID: ${sessionId}`,
             cli_session_path: transcript,
           }),
         );
-        liveSurfaces = [makeSurface("surface:worker-transcript-recoverable-blocker")];
+        liveSurfaces = [
+          makeSurface("surface:worker-transcript-recoverable-blocker"),
+        ];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:worker-transcript-recoverable-blocker",
           text: [
@@ -8010,7 +8067,9 @@ Session ID: ${sessionId}`,
 
         expect(result.matched).toBe(false);
         expect(result.source).toBe("timeout");
-        const agent = engine.getAgentState("worker-transcript-recoverable-blocker");
+        const agent = engine.getAgentState(
+          "worker-transcript-recoverable-blocker",
+        );
         expect(agent?.state).toBe("working");
         expect(agent?.task_done_detected_at ?? null).toBeNull();
       } finally {
@@ -8024,7 +8083,10 @@ Session ID: ${sessionId}`,
         const now = new Date("2026-06-26T20:37:00.000Z");
         const stale = new Date(now.getTime() - 2_000);
         vi.setSystemTime(now);
-        const transcript = join(TEST_DIR, "stale-codex-done-read-failure.jsonl");
+        const transcript = join(
+          TEST_DIR,
+          "stale-codex-done-read-failure.jsonl",
+        );
         writeCodexDoneTranscript(transcript);
         utimesSync(transcript, stale, stale);
         stateMgr.writeState(
@@ -8146,9 +8208,7 @@ Session ID: ${sessionId}`,
         await vi.advanceTimersByTimeAsync(1_100);
         expect(engine.getAgentState("agent-surface-gone")?.state).toBe("ready");
 
-        await vi.advanceTimersByTimeAsync(
-          SURFACE_EVICTION_CONFIRMATION_MS + 1,
-        );
+        await vi.advanceTimersByTimeAsync(SURFACE_EVICTION_CONFIRMATION_MS + 1);
         const result = await pending;
 
         expect(result.matched).toBe(false);
@@ -8453,26 +8513,26 @@ Session ID: ${sessionId}`,
           id: stableUuid,
         },
       ];
-      (
-        mockClient.readScreen as ReturnType<typeof vi.fn>
-      ).mockImplementation(async (surface: string) => {
-        liveSurfaces = [
-          {
-            ...makeSurface("surface:old-read-route"),
-            id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-          },
-          {
-            ...makeSurface("surface:new-read-route"),
-            id: stableUuid,
-          },
-        ];
-        return {
-          surface,
-          text: "codex> ",
-          lines: 80,
-          scrollback_used: false,
-        };
-      });
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => {
+          liveSurfaces = [
+            {
+              ...makeSurface("surface:old-read-route"),
+              id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            },
+            {
+              ...makeSurface("surface:new-read-route"),
+              id: stableUuid,
+            },
+          ];
+          return {
+            surface,
+            text: "codex> ",
+            lines: 80,
+            scrollback_used: false,
+          };
+        },
+      );
       await engine.getRegistry().reconstitute();
 
       await engine.runSweep();
@@ -8578,10 +8638,12 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(engine.getAgentState("agent-boot-wrapped-composer")).toMatchObject({
-        state: "booting",
-        boot_prompt_pending: true,
-      });
+      expect(engine.getAgentState("agent-boot-wrapped-composer")).toMatchObject(
+        {
+          state: "booting",
+          boot_prompt_pending: true,
+        },
+      );
     });
 
     it("does not clear prompt-pending when a narrow pane wraps the prompt outside the tail window", async () => {
@@ -8665,10 +8727,7 @@ Session ID: ${sessionId}`,
 
     it.each([
       ["cursor", "Cursor Agent\ncursor> Read and follow docs.local/phase-3.md"],
-      [
-        "cursor",
-        "Cursor Agent\nAuto\n→ Read and follow docs.local/phase-3.md",
-      ],
+      ["cursor", "Cursor Agent\nAuto\n→ Read and follow docs.local/phase-3.md"],
       [
         "gemini",
         "Gemini CLI\ngemini> Read and follow docs.local/phase-3.md\n> ",
@@ -8700,12 +8759,12 @@ Session ID: ${sessionId}`,
         await engine.runSweep();
         await engine.runSweep();
 
-        expect(engine.getAgentState(`agent-boot-${cli}-composer`)).toMatchObject(
-          {
-            state: "booting",
-            boot_prompt_pending: true,
-          },
-        );
+        expect(
+          engine.getAgentState(`agent-boot-${cli}-composer`),
+        ).toMatchObject({
+          state: "booting",
+          boot_prompt_pending: true,
+        });
       },
     );
 
@@ -8797,12 +8856,7 @@ Session ID: ${sessionId}`,
       liveSurfaces = [makeSurface("surface:cleared")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:cleared",
-        text: [
-          "OpenAI Codex",
-          "Model: gpt-5.5",
-          "",
-          "›",
-        ].join("\n"),
+        text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
         lines: 20,
         scrollback_used: false,
       });
@@ -8831,12 +8885,7 @@ Session ID: ${sessionId}`,
       liveSurfaces = [makeSurface("surface:empty-summary-fresh")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:empty-summary-fresh",
-        text: [
-          "OpenAI Codex",
-          "Model: gpt-5.5",
-          "",
-          "›",
-        ].join("\n"),
+        text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
         lines: 20,
         scrollback_used: false,
       });
@@ -8844,12 +8893,12 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(engine.getAgentState("agent-boot-empty-summary-fresh")).toMatchObject(
-        {
-          state: "booting",
-          boot_prompt_pending: true,
-        },
-      );
+      expect(
+        engine.getAgentState("agent-boot-empty-summary-fresh"),
+      ).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+      });
     });
 
     it("recovers stale prompt-pending booting agents with no stored prompt text once ready evidence is visible", async () => {
@@ -8867,12 +8916,7 @@ Session ID: ${sessionId}`,
       liveSurfaces = [makeSurface("surface:empty-summary-ready")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:empty-summary-ready",
-        text: [
-          "OpenAI Codex",
-          "Model: gpt-5.5",
-          "",
-          "›",
-        ].join("\n"),
+        text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
         lines: 20,
         scrollback_used: false,
       });
@@ -8880,12 +8924,12 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(engine.getAgentState("agent-boot-empty-summary-ready")).toMatchObject(
-        {
-          state: "ready",
-          boot_prompt_pending: false,
-        },
-      );
+      expect(
+        engine.getAgentState("agent-boot-empty-summary-ready"),
+      ).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+      });
     });
 
     it("does not treat old scrollback prompt text as pending once the current prompt is ready", async () => {
@@ -8920,12 +8964,12 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(engine.getAgentState("agent-boot-prompt-scrollback")).toMatchObject(
-        {
-          state: "ready",
-          boot_prompt_pending: false,
-        },
-      );
+      expect(
+        engine.getAgentState("agent-boot-prompt-scrollback"),
+      ).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+      });
     });
 
     it("does not promote an idle managed pane when its boot prompt was never delivered", async () => {
@@ -9327,12 +9371,12 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(
-        engine.getAgentState("cmuxlayerCodex-intermittent"),
-      ).toMatchObject({
-        state: "error",
-        error: "Agent CLI exited to shell without done evidence",
-      });
+      expect(engine.getAgentState("cmuxlayerCodex-intermittent")).toMatchObject(
+        {
+          state: "error",
+          error: "Agent CLI exited to shell without done evidence",
+        },
+      );
     });
 
     it("dispatches the CLI-exit notification to the parent when set", async () => {
@@ -9513,8 +9557,7 @@ Session ID: ${sessionId}`,
           .readEntries()
           .filter(
             (entry) =>
-              "event_type" in entry &&
-              entry.event_type === "agent_cli_exit",
+              "event_type" in entry && entry.event_type === "agent_cli_exit",
           ),
       ).toEqual([]);
     });
@@ -9945,7 +9988,9 @@ Session ID: ${sessionId}`,
         prompt,
       );
 
-      expect(readInbox(fallback.agent_id, { baseDir: TEST_DIR })).toHaveLength(1);
+      expect(readInbox(fallback.agent_id, { baseDir: TEST_DIR })).toHaveLength(
+        1,
+      );
       expect(engine.getAgentState(child.agent_id)).toMatchObject({
         halt_notification_sent_at: expect.any(String),
         halt_notified_ancestor_id: fallback.agent_id,
@@ -9984,7 +10029,9 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: parent.surface_id,
         text: "Claude Code\nWorking (2s • esc to interrupt)",
@@ -10003,7 +10050,9 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState(child.agent_id)).toMatchObject({
         halt_notification_sent_at: null,
         halt_delivery_failure_count: 1,
-        halt_last_delivery_error: expect.stringMatching(/not a directory|ENOTDIR/i),
+        halt_last_delivery_error: expect.stringMatching(
+          /not a directory|ENOTDIR/i,
+        ),
       });
       expect(stateMgr.getEventLog().readEntries()).toContainEqual(
         expect.objectContaining({
@@ -10020,7 +10069,9 @@ Session ID: ${sessionId}`,
         prompt,
       );
 
-      expect(readInbox(parent.agent_id, { baseDir: failedInboxBase })).toHaveLength(1);
+      expect(
+        readInbox(parent.agent_id, { baseDir: failedInboxBase }),
+      ).toHaveLength(1);
       expect(engine.getAgentState(child.agent_id)).toMatchObject({
         halt_notification_sent_at: expect.any(String),
         halt_delivery_failure_count: 1,
@@ -10159,8 +10210,12 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
-      let childScreen = "OpenAI Codex\nModel: gpt-5.6\nWorking (2s • esc to interrupt)";
+      liveSurfaces = [
+        makeSurface(parent.surface_id),
+        makeSurface(child.surface_id),
+      ];
+      let childScreen =
+        "OpenAI Codex\nModel: gpt-5.6\nWorking (2s • esc to interrupt)";
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
         async (surface: string) => ({
           surface,
@@ -10238,7 +10293,10 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      liveSurfaces = [
+        makeSurface(parent.surface_id),
+        makeSurface(child.surface_id),
+      ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: parent.surface_id,
         text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
@@ -10296,7 +10354,8 @@ Session ID: ${sessionId}`,
       stateMgr.writeState(child);
       await engine.getRegistry().reconstitute();
 
-      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      const idleScreen =
+        "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
       await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
 
       expect(engine.getAgentState(child.agent_id)).toMatchObject({
@@ -10337,7 +10396,10 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      liveSurfaces = [
+        makeSurface(parent.surface_id),
+        makeSurface(child.surface_id),
+      ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: parent.surface_id,
         text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
@@ -10392,7 +10454,8 @@ Session ID: ${sessionId}`,
       stateMgr.writeState(child);
       await engine.getRegistry().reconstitute();
 
-      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      const idleScreen =
+        "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
       await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
 
       expect(engine.getAgentState(child.agent_id)).toMatchObject({
@@ -10411,9 +10474,7 @@ Session ID: ${sessionId}`,
           message: {
             model: "claude-opus-5",
             stop_reason: "end_turn",
-            content: [
-              { type: "text", text: "Looking into the failing spec." },
-            ],
+            content: [{ type: "text", text: "Looking into the failing spec." }],
             usage: { input_tokens: 10, output_tokens: 5 },
           },
         }),
@@ -10450,7 +10511,10 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      liveSurfaces = [
+        makeSurface(parent.surface_id),
+        makeSurface(child.surface_id),
+      ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: parent.surface_id,
         text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
@@ -10488,68 +10552,74 @@ Session ID: ${sessionId}`,
         footer: "⏵⏵ bypass permissions on · ← 1 agent",
         expectedType: "idle_without_done" as const,
       },
-    ])("classifies $label by its durable role", async ({ role, footer, expectedType }) => {
-      let nowMs = Date.parse("2026-08-13T14:00:00.000Z");
-      engine.dispose();
-      engine = new AgentEngine(
-        stateMgr,
-        new AgentRegistry(stateMgr, async () => liveSurfaces),
-        mockClient,
-        {
-          sessionIdentityResolver: () => null,
-          inboxOpts: { baseDir: TEST_DIR },
-          haltNow: () => nowMs,
-          haltIdleWithoutDoneDwellMs: 0,
-        },
-      );
-      const parent = makeRecord({
-        agent_id: `idle-lead-parent-${role}`,
-        surface_id: `surface:idle-lead-parent-${role}`,
-        state: "working",
-        role: "orchestrator",
-      });
-      const child = makeRecord({
-        agent_id: `idle-lead-${role}`,
-        surface_id: `surface:idle-lead-${role}`,
-        state: "working",
-        cli: "claude",
-        role,
-        parent_agent_id: parent.agent_id,
-        spawn_depth: 1,
-        halt_last_active_at: new Date(nowMs - 1_800_000).toISOString(),
-      });
-      stateMgr.writeState(parent);
-      stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
-      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
-        surface: parent.surface_id,
-        text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
-        lines: 80,
-        scrollback_used: false,
-      });
-      await engine.getRegistry().reconstitute();
+    ])(
+      "classifies $label by its durable role",
+      async ({ role, footer, expectedType }) => {
+        let nowMs = Date.parse("2026-08-13T14:00:00.000Z");
+        engine.dispose();
+        engine = new AgentEngine(
+          stateMgr,
+          new AgentRegistry(stateMgr, async () => liveSurfaces),
+          mockClient,
+          {
+            sessionIdentityResolver: () => null,
+            inboxOpts: { baseDir: TEST_DIR },
+            haltNow: () => nowMs,
+            haltIdleWithoutDoneDwellMs: 0,
+          },
+        );
+        const parent = makeRecord({
+          agent_id: `idle-lead-parent-${role}`,
+          surface_id: `surface:idle-lead-parent-${role}`,
+          state: "working",
+          role: "orchestrator",
+        });
+        const child = makeRecord({
+          agent_id: `idle-lead-${role}`,
+          surface_id: `surface:idle-lead-${role}`,
+          state: "working",
+          cli: "claude",
+          role,
+          parent_agent_id: parent.agent_id,
+          spawn_depth: 1,
+          halt_last_active_at: new Date(nowMs - 1_800_000).toISOString(),
+        });
+        stateMgr.writeState(parent);
+        stateMgr.writeState(child);
+        liveSurfaces = [
+          makeSurface(parent.surface_id),
+          makeSurface(child.surface_id),
+        ];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: parent.surface_id,
+          text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
 
-      const idleScreen = `Claude Code\nCompleted the previous turn.\n❯\n${footer}`;
-      await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
-      nowMs += 1;
-      await (engine as any).maybeEscalateLiveHalt(
-        engine.getAgentState(child.agent_id) as AgentRecord,
-        idleScreen,
-      );
+        const idleScreen = `Claude Code\nCompleted the previous turn.\n❯\n${footer}`;
+        await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
+        nowMs += 1;
+        await (engine as any).maybeEscalateLiveHalt(
+          engine.getAgentState(child.agent_id) as AgentRecord,
+          idleScreen,
+        );
 
-      expect(
-        engine.getAgentState(child.agent_id)?.halt_episode_type ?? null,
-      ).toBe(expectedType);
-      expect(
-        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
-          message.tag.startsWith("agent_halt_"),
-        ),
-      ).toEqual(
-        expectedType === null
-          ? []
-          : [expect.objectContaining({ tag: `agent_halt_${expectedType}` })],
-      );
-    });
+        expect(
+          engine.getAgentState(child.agent_id)?.halt_episode_type ?? null,
+        ).toBe(expectedType);
+        expect(
+          readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
+            message.tag.startsWith("agent_halt_"),
+          ),
+        ).toEqual(
+          expectedType === null
+            ? []
+            : [expect.objectContaining({ tag: `agent_halt_${expectedType}` })],
+        );
+      },
+    );
 
     it("suppresses idle escalation after the child reports to its parent", async () => {
       let nowMs = Date.parse("2026-08-13T15:00:00.000Z");
@@ -10580,7 +10650,10 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      liveSurfaces = [
+        makeSurface(parent.surface_id),
+        makeSurface(child.surface_id),
+      ];
       dispatch(
         parent.agent_id,
         {
@@ -10595,7 +10668,8 @@ Session ID: ${sessionId}`,
       );
       await engine.getRegistry().reconstitute();
 
-      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      const idleScreen =
+        "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
       await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
       nowMs += 1;
       await (engine as any).maybeEscalateLiveHalt(
@@ -10603,7 +10677,9 @@ Session ID: ${sessionId}`,
         idleScreen,
       );
 
-      expect(engine.getAgentState(child.agent_id)?.halt_episode_type).toBeNull();
+      expect(
+        engine.getAgentState(child.agent_id)?.halt_episode_type,
+      ).toBeNull();
       expect(
         readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
           message.tag.startsWith("agent_halt_"),
@@ -10639,7 +10715,10 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      liveSurfaces = [
+        makeSurface(parent.surface_id),
+        makeSurface(child.surface_id),
+      ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: parent.surface_id,
         text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
@@ -10648,7 +10727,8 @@ Session ID: ${sessionId}`,
       });
       await engine.getRegistry().reconstitute();
 
-      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      const idleScreen =
+        "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
       await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
       nowMs += 899_999;
       await (engine as any).maybeEscalateLiveHalt(
@@ -10656,8 +10736,8 @@ Session ID: ${sessionId}`,
         idleScreen,
       );
       expect(
-        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
-          message.tag === "agent_halt_idle_without_done",
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_idle_without_done",
         ),
       ).toEqual([]);
 
@@ -10667,8 +10747,8 @@ Session ID: ${sessionId}`,
         idleScreen,
       );
       expect(
-        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
-          message.tag === "agent_halt_idle_without_done",
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_idle_without_done",
         ),
       ).toHaveLength(1);
     });
@@ -10708,7 +10788,8 @@ Session ID: ${sessionId}`,
         parent_agent_id: parent.agent_id,
         spawn_depth: 1,
       });
-      for (const record of [parent, wedged, healthy]) stateMgr.writeState(record);
+      for (const record of [parent, wedged, healthy])
+        stateMgr.writeState(record);
       liveSurfaces = [parent, wedged, healthy].map((record) =>
         makeSurface(record.surface_id),
       );
@@ -10761,7 +10842,9 @@ Session ID: ${sessionId}`,
           ),
         }),
       ]);
-      expect(messages.some((message) => message.task.includes(healthy.agent_id))).toBe(false);
+      expect(
+        messages.some((message) => message.task.includes(healthy.agent_id)),
+      ).toBe(false);
     });
 
     it("routes past a halted parent to the nearest live ancestor and honors opt-out", async () => {
@@ -10816,7 +10899,8 @@ Session ID: ${sessionId}`,
       });
       // Persist the child first so ancestor routing cannot depend on the parent
       // having already been processed during this sweep.
-      for (const record of [child, optedOut, parent, root]) stateMgr.writeState(record);
+      for (const record of [child, optedOut, parent, root])
+        stateMgr.writeState(record);
       liveSurfaces = [root, parent, child, optedOut].map((record) =>
         makeSurface(record.surface_id),
       );
@@ -10838,15 +10922,18 @@ Session ID: ${sessionId}`,
       const awaitingScreen =
         "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
       await (engine as any).maybeEscalateLiveHalt(child, awaitingScreen);
-      await (engine as any).maybeEscalateLiveHalt(
-        optedOut,
-        awaitingScreen,
-      );
+      await (engine as any).maybeEscalateLiveHalt(optedOut, awaitingScreen);
 
       const rootMessages = readInbox(root.agent_id, { baseDir: TEST_DIR });
-      expect(rootMessages.some((message) => message.task.includes(child.agent_id))).toBe(true);
+      expect(
+        rootMessages.some((message) => message.task.includes(child.agent_id)),
+      ).toBe(true);
       expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([]);
-      expect(rootMessages.some((message) => message.task.includes(optedOut.agent_id))).toBe(false);
+      expect(
+        rootMessages.some((message) =>
+          message.task.includes(optedOut.agent_id),
+        ),
+      ).toBe(false);
     });
 
     it("starts a fresh durable episode when the halt class changes", async () => {
@@ -10883,7 +10970,10 @@ Session ID: ${sessionId}`,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
-      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      liveSurfaces = [
+        makeSurface(parent.surface_id),
+        makeSurface(child.surface_id),
+      ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: parent.surface_id,
         text: "Claude Code\nProcessed child status\nWorking (2s • esc to interrupt)",
@@ -11221,10 +11311,7 @@ Session ID: ${sessionId}`,
       const registryPath = join(TEST_DIR, "launchers.zsh");
       const registeredRoot = join(TEST_DIR, "registered", "matchmat");
       mkdirSync(registeredRoot, { recursive: true });
-      writeFileSync(
-        registryPath,
-        `repoGolem mm "${registeredRoot}"\n`,
-      );
+      writeFileSync(registryPath, `repoGolem mm "${registeredRoot}"\n`);
       vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
 
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -11349,11 +11436,9 @@ Session ID: ${sessionId}`,
     ): AgentRecord {
       engine.dispose();
       liveSurfaces = surfaces;
-      const registry = new AgentRegistry(
-        stateMgr,
-        async () => liveSurfaces,
-        { observerId },
-      );
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerId,
+      });
       engine = new AgentEngine(stateMgr, registry, mockClient, {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
@@ -11443,17 +11528,16 @@ Session ID: ${sessionId}`,
     });
 
     it("keeps owned UUID-less compatibility when fresh topology is entirely ref-only", async () => {
-      const record = installLegacyAgent(
-        { workspace_id: "workspace:stale" },
-        [
-          {
-            ...makeSurface("surface:legacy"),
-            workspace_ref: "workspace:fresh",
-          },
-        ],
-      );
+      const record = installLegacyAgent({ workspace_id: "workspace:stale" }, [
+        {
+          ...makeSurface("surface:legacy"),
+          workspace_ref: "workspace:fresh",
+        },
+      ]);
 
-      await expect(engine.resolveAgentIoRoute(record.agent_id)).resolves.toMatchObject({
+      await expect(
+        engine.resolveAgentIoRoute(record.agent_id),
+      ).resolves.toMatchObject({
         agent_id: record.agent_id,
         surface_id: "surface:legacy",
         surface_uuid: null,
@@ -11468,11 +11552,9 @@ Session ID: ${sessionId}`,
     it("refuses UUID-less I/O when observer enforcement has no current observer", async () => {
       engine.dispose();
       liveSurfaces = [makeSurface("surface:legacy")];
-      const registry = new AgentRegistry(
-        stateMgr,
-        async () => liveSurfaces,
-        { observerId: null },
-      );
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerId: null,
+      });
       engine = new AgentEngine(stateMgr, registry, mockClient, {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
@@ -11504,11 +11586,9 @@ Session ID: ${sessionId}`,
           workspace_ref: "workspace:fresh",
         },
       ];
-      const registry = new AgentRegistry(
-        stateMgr,
-        async () => liveSurfaces,
-        { observerIdProvider: () => currentObserverId },
-      );
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerIdProvider: () => currentObserverId,
+      });
       engine = new AgentEngine(stateMgr, registry, mockClient, {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
@@ -11599,16 +11679,17 @@ Session ID: ${sessionId}`,
 
   describe("evictDeadProcessAgents", () => {
     it("keeps active agents registered when passive liveness is unknown", async () => {
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          if (signal === 0) {
-            throw Object.assign(new Error("operation not permitted"), {
-              code: "EPERM",
-            });
-          }
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        if (signal === 0) {
+          throw Object.assign(new Error("operation not permitted"), {
+            code: "EPERM",
+          });
+        }
+        return true;
+      }) as typeof process.kill);
 
       try {
         stateMgr.writeState(
@@ -11677,14 +11758,10 @@ Session ID: ${sessionId}`,
     it("refuses socketless teardown when another record claims the same stable UUID", async () => {
       engine.dispose();
       const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-      const registry = new AgentRegistry(
-        stateMgr,
-        async () => liveSurfaces,
-        {
-          observerIdProvider: () => null,
-          observerEpochProvider: () => null,
-        },
-      );
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerIdProvider: () => null,
+        observerEpochProvider: () => null,
+      });
       engine = new AgentEngine(stateMgr, registry, mockClient, {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
@@ -11719,7 +11796,9 @@ Session ID: ${sessionId}`,
 
       await expect(
         engine.stopAgent("agent-stop-stale-duplicate"),
-      ).rejects.toThrow(/same stable surface UUID|claimed by.*canonical-owner/i);
+      ).rejects.toThrow(
+        /same stable surface UUID|claimed by.*canonical-owner/i,
+      );
 
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.closeSurface).not.toHaveBeenCalled();
@@ -12193,9 +12272,9 @@ Session ID: ${sessionId}`,
 
       await engine.stopAgent("agent-stop-postcondition-uuid");
 
-      expect(
-        engine.getAgentState("agent-stop-postcondition-uuid")?.state,
-      ).toBe("done");
+      expect(engine.getAgentState("agent-stop-postcondition-uuid")?.state).toBe(
+        "done",
+      );
     });
 
     it("refuses stop I/O when a stable UUID is absent from fresh topology", async () => {
@@ -12210,13 +12289,11 @@ Session ID: ${sessionId}`,
       );
       liveSurfaces = [{ ...makeSurface("surface:old"), id: stableUuid }];
       await engine.getRegistry().reconstitute();
-      liveSurfaces = [
-        { ...makeSurface("surface:old"), id: "uuid-foreign" },
-      ];
+      liveSurfaces = [{ ...makeSurface("surface:old"), id: "uuid-foreign" }];
 
-      await expect(
-        engine.stopAgent("agent-stop-missing-uuid"),
-      ).rejects.toThrow(/stable surface UUID|fresh topology/i);
+      await expect(engine.stopAgent("agent-stop-missing-uuid")).rejects.toThrow(
+        /stable surface UUID|fresh topology/i,
+      );
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.closeSurface).not.toHaveBeenCalled();
     });
@@ -12292,9 +12369,7 @@ Session ID: ${sessionId}`,
         }),
         closeSurface: vi.fn().mockImplementation(async () => {
           liveSurfaces = [makeSurface("surface:fresh-idle")];
-          (
-            mockClient.listPanes as ReturnType<typeof vi.fn>
-          ).mockResolvedValue({
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
             workspace_ref: "ws:1",
             window_ref: "window:1",
             panes: [
@@ -12339,7 +12414,9 @@ Session ID: ${sessionId}`,
       await expect(engine.stopAgent("agent-respawned-pane")).rejects.toThrow(
         /post-condition/i,
       );
-      expect(stateMgr.readState("agent-respawned-pane")?.state).not.toBe("done");
+      expect(stateMgr.readState("agent-respawned-pane")?.state).not.toBe(
+        "done",
+      );
     });
 
     it("closes only the stopped agent surface when another live agent shares the pane", async () => {
@@ -12356,14 +12433,13 @@ Session ID: ${sessionId}`,
         window_ref: "window:1",
         panes: [pane],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
         workspace_ref: "ws:1",
         window_ref: "window:1",
         pane_ref: "pane:shared",
-        surfaces: [
-          makeSurface("surface:dying"),
-          makeSurface("surface:other"),
-        ],
+        surfaces: [makeSurface("surface:dying"), makeSurface("surface:other")],
       });
       stateMgr.writeState(
         makeRecord({
@@ -12381,7 +12457,10 @@ Session ID: ${sessionId}`,
           workspace_id: "ws:1",
         }),
       );
-      liveSurfaces = [makeSurface("surface:dying"), makeSurface("surface:other")];
+      liveSurfaces = [
+        makeSurface("surface:dying"),
+        makeSurface("surface:other"),
+      ];
       await engine.getRegistry().reconstitute();
 
       await engine.stopAgent("agent-dying");
@@ -12445,9 +12524,7 @@ Session ID: ${sessionId}`,
           workspace_ref: "ws:1",
           window_ref: "window:1",
           pane_ref: "pane:worker",
-          surfaces: [
-            { ...makeSurface("surface:worker"), id: stableUuid },
-          ],
+          surfaces: [{ ...makeSurface("surface:worker"), id: stableUuid }],
         };
       });
 
@@ -12654,15 +12731,13 @@ Session ID: ${sessionId}`,
       async (force) => {
         const pid = 45678;
         const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
-        const killSpy = vi
-          .spyOn(process, "kill")
-          .mockImplementation(((
-            targetPid: number,
-            signal?: NodeJS.Signals | 0,
-          ) => {
-            killCalls.push([targetPid, signal ?? 0]);
-            return true;
-          }) as typeof process.kill);
+        const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+          targetPid: number,
+          signal?: NodeJS.Signals | 0,
+        ) => {
+          killCalls.push([targetPid, signal ?? 0]);
+          return true;
+        }) as typeof process.kill);
 
         try {
           await persistProductionProcessRecord({
@@ -12692,18 +12767,24 @@ Session ID: ${sessionId}`,
           expect(killCalls).toContainEqual([pid, 0]);
           expect(killCalls).not.toContainEqual([pid, "SIGKILL"]);
           if (force) {
-            expect(stateMgr.readState("agent-force-recycled-pid")).toMatchObject({
+            expect(
+              stateMgr.readState("agent-force-recycled-pid"),
+            ).toMatchObject({
               cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
               state: "done",
               user_killed: true,
             });
-            expect(engine.getAgentState("agent-force-recycled-pid")).toMatchObject({
+            expect(
+              engine.getAgentState("agent-force-recycled-pid"),
+            ).toMatchObject({
               cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
               state: "done",
               user_killed: true,
             });
           } else {
-            expect(stateMgr.readState("agent-force-recycled-pid")).toMatchObject({
+            expect(
+              stateMgr.readState("agent-force-recycled-pid"),
+            ).toMatchObject({
               state: "done",
               user_killed: true,
             });
@@ -12768,19 +12849,20 @@ Session ID: ${sessionId}`,
       const agentId = "terminal-live-resumable";
       const pid = 54321;
       let processAlive = true;
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((targetPid: number, signal?: NodeJS.Signals | 0) => {
-          expect(targetPid).toBe(pid);
-          if (signal === "SIGKILL") {
-            processAlive = false;
-            return true;
-          }
-          if (!processAlive) {
-            throw Object.assign(new Error("no such process"), { code: "ESRCH" });
-          }
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        targetPid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        expect(targetPid).toBe(pid);
+        if (signal === "SIGKILL") {
+          processAlive = false;
           return true;
-        }) as typeof process.kill);
+        }
+        if (!processAlive) {
+          throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+        }
+        return true;
+      }) as typeof process.kill);
       stateMgr.writeState(
         makeRecord({
           agent_id: agentId,
@@ -12823,12 +12905,13 @@ Session ID: ${sessionId}`,
 
     it("rejects force stop when the pid remains alive after SIGKILL", async () => {
       const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          killCalls.push([pid, signal ?? 0]);
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        killCalls.push([pid, signal ?? 0]);
+        return true;
+      }) as typeof process.kill);
 
       try {
         stateMgr.writeState(
@@ -12845,9 +12928,9 @@ Session ID: ${sessionId}`,
         await engine.getRegistry().reconstitute();
         execFileSyncMock.mockReturnValue("2026-08-23T11:00:02.000Z\n");
 
-        await expect(engine.stopAgent("agent-force-live", true)).rejects.toThrow(
-          /post-condition/i,
-        );
+        await expect(
+          engine.stopAgent("agent-force-live", true),
+        ).rejects.toThrow(/post-condition/i);
         expect(killCalls).toContainEqual([12345, "SIGKILL"]);
         expect(killCalls).toContainEqual([12345, 0]);
         expect(stateMgr.readState("agent-force-live")?.state).not.toBe("done");
@@ -12858,17 +12941,18 @@ Session ID: ${sessionId}`,
 
     it("does not SIGKILL when process identity qualification is unknown", async () => {
       const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          killCalls.push([pid, signal ?? 0]);
-          if (signal === 0) {
-            throw Object.assign(new Error("operation not permitted"), {
-              code: "EPERM",
-            });
-          }
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        killCalls.push([pid, signal ?? 0]);
+        if (signal === 0) {
+          throw Object.assign(new Error("operation not permitted"), {
+            code: "EPERM",
+          });
+        }
+        return true;
+      }) as typeof process.kill);
 
       try {
         stateMgr.writeState(
@@ -12911,17 +12995,18 @@ Session ID: ${sessionId}`,
         stopPostConditionTimeoutMs: 20,
       });
       const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          killCalls.push([pid, signal ?? 0]);
-          if (signal === "SIGKILL") {
-            throw Object.assign(new Error("operation not permitted"), {
-              code: "EPERM",
-            });
-          }
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        killCalls.push([pid, signal ?? 0]);
+        if (signal === "SIGKILL") {
+          throw Object.assign(new Error("operation not permitted"), {
+            code: "EPERM",
+          });
+        }
+        return true;
+      }) as typeof process.kill);
 
       try {
         stateMgr.writeState(
@@ -12938,9 +13023,9 @@ Session ID: ${sessionId}`,
         await engine.getRegistry().reconstitute();
         execFileSyncMock.mockReturnValue("2026-08-23T11:00:02.000Z\n");
 
-        await expect(engine.stopAgent("agent-force-eperm", true)).rejects.toThrow(
-          /process still alive/i,
-        );
+        await expect(
+          engine.stopAgent("agent-force-eperm", true),
+        ).rejects.toThrow(/process still alive/i);
 
         expect(killCalls).toContainEqual([56789, "SIGKILL"]);
         expect(killCalls).toContainEqual([56789, 0]);
@@ -12966,17 +13051,18 @@ Session ID: ${sessionId}`,
         stopPostConditionTimeoutMs: 20,
       });
       const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
-          killCalls.push([pid, signal ?? 0]);
-          if (signal === 0) {
-            throw Object.assign(new Error("operation not permitted"), {
-              code: "EPERM",
-            });
-          }
-          return true;
-        }) as typeof process.kill);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        killCalls.push([pid, signal ?? 0]);
+        if (signal === 0) {
+          throw Object.assign(new Error("operation not permitted"), {
+            code: "EPERM",
+          });
+        }
+        return true;
+      }) as typeof process.kill);
 
       try {
         stateMgr.writeState(
@@ -13158,9 +13244,7 @@ Session ID: ${sessionId}`,
           surface_uuid: stableUuid,
         }),
       );
-      liveSurfaces = [
-        { ...makeSurface("surface:send-old"), id: stableUuid },
-      ];
+      liveSurfaces = [{ ...makeSurface("surface:send-old"), id: stableUuid }];
       await engine.getRegistry().reconstitute();
       (mockClient.send as ReturnType<typeof vi.fn>).mockImplementationOnce(
         async () => {
@@ -13233,9 +13317,7 @@ Session ID: ${sessionId}`,
         "return",
         expect.anything(),
       );
-      expect(engine.getAgentState("agent-idle-submit")?.state).toBe(
-        "working",
-      );
+      expect(engine.getAgentState("agent-idle-submit")?.state).toBe("working");
     });
 
     it("leaves an idle agent idle when submitted delivery fails", async () => {
@@ -13377,11 +13459,13 @@ Session ID: ${sessionId}`,
         mockClient,
       );
       try {
-        expect(restarted.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
-          delivery_state: "queued",
-          terminal: false,
-          composer_accepted: true,
-        });
+        expect(restarted.getDeliveryReceipt(receipt.delivery_id)).toMatchObject(
+          {
+            delivery_state: "queued",
+            terminal: false,
+            composer_accepted: true,
+          },
+        );
       } finally {
         restarted.dispose();
       }
@@ -13658,9 +13742,7 @@ Session ID: ${sessionId}`,
         });
 
         await boundedEngine.drainDeliveryQueue();
-        const deferred = boundedEngine.getDeliveryReceipt(
-          receipt.delivery_id,
-        )!;
+        const deferred = boundedEngine.getDeliveryReceipt(receipt.delivery_id)!;
         expect(deferred).toMatchObject({
           delivery_state: "queued",
           terminal: false,
@@ -13714,11 +13796,13 @@ Session ID: ${sessionId}`,
         mockClient,
       );
       try {
-        expect(restarted.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
-          delivery_state: "failed",
-          terminal: true,
-          error: expect.stringMatching(/uncertain|restart/i),
-        });
+        expect(restarted.getDeliveryReceipt(receipt.delivery_id)).toMatchObject(
+          {
+            delivery_state: "failed",
+            terminal: true,
+            error: expect.stringMatching(/uncertain|restart/i),
+          },
+        );
       } finally {
         restarted.dispose();
       }
@@ -13760,9 +13844,9 @@ describe("buildLaunchCommand", () => {
   });
 
   it("passes an explicit Codex model with the launcher override env", () => {
-    expect(
-      buildLaunchCommand("codex", "brainlayer", "gpt-5.6-luna"),
-    ).toBe("REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.6-luna");
+    expect(buildLaunchCommand("codex", "brainlayer", "gpt-5.6-luna")).toBe(
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.6-luna",
+    );
   });
 
   it("passes an explicit Codex effort to the repoGolem launcher", () => {
@@ -13779,9 +13863,7 @@ describe("buildLaunchCommand", () => {
     );
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
-    ).toBe(
-      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark",
-    );
+    ).toBe("REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark");
     expect(
       buildLaunchCommand(
         "codex",
@@ -13790,9 +13872,7 @@ describe("buildLaunchCommand", () => {
         undefined,
         { allowModelOverride: true },
       ),
-    ).toBe(
-      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark",
-    );
+    ).toBe("REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark");
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
       "brainlayerCodex -s",
     );
@@ -14047,10 +14127,7 @@ describe("launcherNameCandidates", () => {
           repoBasename: "orchestrator",
         },
       ]),
-    ).toEqual([
-      "orchestratorCursor",
-      "orcCursor",
-    ]);
+    ).toEqual(["orchestratorCursor", "orcCursor"]);
   });
 
   it("adds the lowercased hyphen-stripped form for hyphenated repos", () => {
@@ -14134,9 +14211,7 @@ describe("buildResumeCommand", () => {
         sessionId,
         "brainlayerClaude",
       ),
-    ).toBe(
-      "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-    );
+    ).toBe("brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
   });
 
   it("falls back to the clean repo launcher when launcher_name is decorated", () => {

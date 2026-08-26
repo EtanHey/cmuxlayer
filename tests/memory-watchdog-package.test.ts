@@ -1,16 +1,15 @@
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("cmux memory watchdog package", () => {
-  const root = join(import.meta.dirname, "..", "launchd", "cmux-memory-watchdog");
+  const root = join(
+    import.meta.dirname,
+    "..",
+    "launchd",
+    "cmux-memory-watchdog",
+  );
 
   it("contains no developer-specific absolute paths", () => {
     const literalHome = ["", "Users", "etanheyman"].join("/");
@@ -47,6 +46,7 @@ describe("cmux memory watchdog package", () => {
         {
           encoding: "utf8",
           env: { ...process.env, HOME: "/home/test-user" },
+        },
       );
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
@@ -67,6 +67,7 @@ describe("cmux memory watchdog package", () => {
     const result = spawnSync("bash", [installer, "--dry-run"], {
       encoding: "utf8",
       env: { ...process.env, HOME: "/home/test-user & partner" },
+    });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
       join(root, "bin", "cmux-memory-watchdog.sh"),

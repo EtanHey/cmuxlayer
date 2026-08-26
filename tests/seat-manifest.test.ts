@@ -21,21 +21,26 @@ describe("seat manifest", () => {
   it("keeps the legacy monitor-state directory when that checkout exists", () => {
     expect(
       defaultSeatManifestDir(
-        { HOME: "/home/test-user        (path) => path === "/home/test-user/Gits/orchestrator/docs.local",
+        { HOME: "/home/test-user" },
+        (path) => path === "/home/test-user/Gits/orchestrator/docs.local",
       ),
-    ).toBe("/home/test-user/Gits/orchestrator/docs.local/monitor-state/seat-manifests");
+    ).toBe(
+      "/home/test-user/Gits/orchestrator/docs.local/monitor-state/seat-manifests",
+    );
   });
 
   it("falls back to the state directory on a machine without that checkout", () => {
-    expect(defaultSeatManifestDir({ HOME: "/home/test-user      "/home/test-user/.local/state/cmuxlayer/seat-manifests",
-    );
+    expect(
+      defaultSeatManifestDir({ HOME: "/home/test-user" }, () => false),
+    ).toBe("/home/test-user/.local/state/cmuxlayer/seat-manifests");
   });
 
   it("honours the env override ahead of both", () => {
     expect(
       defaultSeatManifestDir(
         {
-          HOME: "/home/test-user          CMUXLAYER_SEAT_MANIFEST_DIR: "/tmp/seat-state",
+          HOME: "/home/test-user",
+          CMUXLAYER_SEAT_MANIFEST_DIR: "/tmp/seat-state",
         },
         () => true,
       ),

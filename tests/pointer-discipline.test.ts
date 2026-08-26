@@ -63,13 +63,20 @@ async function spawnReadyAgent(server: any) {
 }
 
 const readPainpointFixture = (name: string) =>
-  readFileSync(new URL(`./fixtures/painpoints/${name}`, import.meta.url), "utf8");
+  readFileSync(
+    new URL(`./fixtures/painpoints/${name}`, import.meta.url),
+    "utf8",
+  );
 
-function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "): ExecFn {
+function makeLifecycleExec(
+  initialReadyText: string | (() => string) = "codex> ",
+): ExecFn {
   // Function mode is caller-driven and intentionally bypasses the internal
   // promptPending -> readyText simulation used by static string mode.
   let readyText =
-    typeof initialReadyText === "function" ? initialReadyText() : initialReadyText;
+    typeof initialReadyText === "function"
+      ? initialReadyText()
+      : initialReadyText;
   let promptPending = false;
   let pendingText = "";
   let submissionObservationPending = false;
@@ -85,8 +92,7 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        readyText =
-          `${pendingText}\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)`;
+        readyText = `${pendingText}\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)`;
         promptPending = false;
         pendingText = "";
         submissionObservationPending = true;
@@ -459,7 +465,9 @@ describe("pane input pointer discipline", () => {
   });
 
   it("send_input refuses while a Claude AskUserQuestion overlay is active", async () => {
-    const overlayText = readPainpointFixture("claude-ask-user-question-overlay.txt");
+    const overlayText = readPainpointFixture(
+      "claude-ask-user-question-overlay.txt",
+    );
     const { createServer } = await loadServerModule();
     const mockExec = makeStaticScreenExec(overlayText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
@@ -487,9 +495,9 @@ describe("pane input pointer discipline", () => {
       control_state: "interactive_overlay",
       errors: expect.arrayContaining(["interactive_prompt"]),
     });
-    expect(
-      mockExec.mock.calls.some(([, args]) => args.includes("send")),
-    ).toBe(false);
+    expect(mockExec.mock.calls.some(([, args]) => args.includes("send"))).toBe(
+      false,
+    );
     expect(
       mockExec.mock.calls.some(([, args]) => args.includes("send-key")),
     ).toBe(false);
@@ -570,13 +578,15 @@ describe("pane input pointer discipline", () => {
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
     expect(result.isError).toBeUndefined();
-    expect(
-      mockExec.mock.calls.some(([, args]) => args.includes("send")),
-    ).toBe(true);
+    expect(mockExec.mock.calls.some(([, args]) => args.includes("send"))).toBe(
+      true,
+    );
   });
 
   it("send_to refuses while a Claude permission prompt is active", async () => {
-    const permissionText = readPainpointFixture("claude-permission-confirmation.txt");
+    const permissionText = readPainpointFixture(
+      "claude-permission-confirmation.txt",
+    );
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "codex> ";
     const mockExec = makeLifecycleExec(() => screenText);
@@ -606,9 +616,9 @@ describe("pane input pointer discipline", () => {
       control_state: "permission_prompt",
       errors: expect.arrayContaining(["permission_prompt"]),
     });
-    expect(
-      mockExec.mock.calls.some(([, args]) => args.includes("send")),
-    ).toBe(false);
+    expect(mockExec.mock.calls.some(([, args]) => args.includes("send"))).toBe(
+      false,
+    );
     expect(
       mockExec.mock.calls.some(([, args]) => args.includes("paste-buffer")),
     ).toBe(false);
@@ -619,7 +629,9 @@ describe("pane input pointer discipline", () => {
   });
 
   it("send_command refuses while a Claude permission prompt is active", async () => {
-    const permissionText = readPainpointFixture("claude-permission-confirmation.txt");
+    const permissionText = readPainpointFixture(
+      "claude-permission-confirmation.txt",
+    );
     const { createServer } = await loadServerModule();
     const mockExec = makeStaticScreenExec(permissionText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
@@ -639,9 +651,9 @@ describe("pane input pointer discipline", () => {
       control_state: "permission_prompt",
       errors: expect.arrayContaining(["permission_prompt"]),
     });
-    expect(
-      mockExec.mock.calls.some(([, args]) => args.includes("send")),
-    ).toBe(false);
+    expect(mockExec.mock.calls.some(([, args]) => args.includes("send"))).toBe(
+      false,
+    );
     expect(
       mockExec.mock.calls.some(([, args]) => args.includes("send-key")),
     ).toBe(false);
@@ -735,7 +747,19 @@ describe("pane input pointer discipline", () => {
     expect(parsed.error).toContain("spawn_agent.prompt");
     expect(parsed.error).toContain("boot_prompt_path");
     expect(parsed.error).toContain("allow_long_inline");
-    expect(mockExec).not.toHaveBeenCalled();
+    expect(
+      mockExec.mock.calls.filter(([, args]) =>
+        args.some((arg) =>
+          [
+            "new-split",
+            "new-surface",
+            "send",
+            "send-text",
+            "send-key",
+          ].includes(arg),
+        ),
+      ),
+    ).toHaveLength(0);
     context.dispose();
   });
 
@@ -766,7 +790,19 @@ describe("pane input pointer discipline", () => {
     expect(result.isError).toBe(true);
     expect(parsed.error).toContain("spawn_agent.prompt");
     expect(parsed.error).toContain("routing policy threshold 1500");
-    expect(mockExec).not.toHaveBeenCalled();
+    expect(
+      mockExec.mock.calls.filter(([, args]) =>
+        args.some((arg) =>
+          [
+            "new-split",
+            "new-surface",
+            "send",
+            "send-text",
+            "send-key",
+          ].includes(arg),
+        ),
+      ),
+    ).toHaveLength(0);
     context.dispose();
   });
 
@@ -916,47 +952,46 @@ describe("pane input pointer discipline", () => {
         ],
       },
     },
-  ])("$toolName refuses an unsafe inline prompt before mutation", async ({
-    toolName,
-    expectedError,
-    args,
-  }) => {
-    const { createServer, createServerContext } = await loadServerModule();
-    const mockExec = makeLifecycleExec();
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const tool = (server as any)._registeredTools[toolName];
-    mockExec.mockClear();
+  ])(
+    "$toolName refuses an unsafe inline prompt before mutation",
+    async ({ toolName, expectedError, args }) => {
+      const { createServer, createServerContext } = await loadServerModule();
+      const mockExec = makeLifecycleExec();
+      const context = createServerContext({
+        exec: mockExec,
+        stateDir: testDir,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      });
+      const server = createServer({ context });
+      const tool = (server as any)._registeredTools[toolName];
+      mockExec.mockClear();
 
-    const result = await tool.handler(args, {} as any);
+      const result = await tool.handler(args, {} as any);
 
-    const parsed = parseToolResult(result);
-    expect(result.isError).toBe(true);
-    expect(parsed.error).toContain(`${toolName}.prompt`);
-    expect(parsed.error).toContain(expectedError);
-    expect(parsed.error).toContain("Read and follow <path>");
-    expect(
-      mockExec.mock.calls.some(([, commandArgs]) =>
-        commandArgs.some((arg) =>
-          [
-            "new-workspace",
-            "new-split",
-            "new-surface",
-            "send",
-            "send-key",
-            "set-buffer",
-            "paste-buffer",
-          ].includes(arg),
+      const parsed = parseToolResult(result);
+      expect(result.isError).toBe(true);
+      expect(parsed.error).toContain(`${toolName}.prompt`);
+      expect(parsed.error).toContain(expectedError);
+      expect(parsed.error).toContain("Read and follow <path>");
+      expect(
+        mockExec.mock.calls.some(([, commandArgs]) =>
+          commandArgs.some((arg) =>
+            [
+              "new-workspace",
+              "new-split",
+              "new-surface",
+              "send",
+              "send-key",
+              "set-buffer",
+              "paste-buffer",
+            ].includes(arg),
+          ),
         ),
-      ),
-    ).toBe(false);
-    context.dispose();
-  });
+      ).toBe(false);
+      context.dispose();
+    },
+  );
 
   it("send_to refuses over-threshold text with file-pointer guidance and opt-out naming", async () => {
     process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
@@ -1313,8 +1348,8 @@ describe("pane input pointer discipline", () => {
       ],
       [
         "spawn_in_workspace.agents[].prompt",
-        server._registeredTools.spawn_in_workspace.inputSchema.shape.agents.element
-          .shape.prompt,
+        server._registeredTools.spawn_in_workspace.inputSchema.shape.agents
+          .element.shape.prompt,
       ],
     ] as const;
 

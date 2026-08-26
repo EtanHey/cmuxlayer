@@ -117,10 +117,7 @@ import {
   toAgentStatePayload,
   toObservedPublicAgent,
 } from "./agent-facade.js";
-import {
-  evaluateAgentHealth,
-  type AgentHealth,
-} from "./agent-health.js";
+import { evaluateAgentHealth, type AgentHealth } from "./agent-health.js";
 import {
   AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
   AGENT_HEALTH_MONITOR_MAX_AGE_MS,
@@ -412,11 +409,15 @@ const WatchSpecArgsSchema = {
     .string()
     .min(1)
     .optional()
-    .describe("Literal file marker; mutually exclusive with predicate and change"),
+    .describe(
+      "Literal file marker; mutually exclusive with predicate and change",
+    ),
   change: z
     .literal("content")
     .optional()
-    .describe("Persistent file-content change watch; mutually exclusive with predicate and marker"),
+    .describe(
+      "Persistent file-content change watch; mutually exclusive with predicate and marker",
+    ),
   watermark: z
     .number()
     .int()
@@ -430,19 +431,17 @@ const WatchSpecArgsSchema = {
     .describe("Absolute Unix deadline in milliseconds"),
 } as const;
 
-const WatchSpecSchema = z
-  .object(WatchSpecArgsSchema)
-  .refine(
-    (watch) => {
-      const selectors = [watch.predicate, watch.marker, watch.change].filter(
-        (value) => value !== undefined,
-      );
-      return selectors.length === 1;
-    },
-    {
-      message: "WatchSpec requires exactly one of predicate, marker, or change",
-    },
-  );
+const WatchSpecSchema = z.object(WatchSpecArgsSchema).refine(
+  (watch) => {
+    const selectors = [watch.predicate, watch.marker, watch.change].filter(
+      (value) => value !== undefined,
+    );
+    return selectors.length === 1;
+  },
+  {
+    message: "WatchSpec requires exactly one of predicate, marker, or change",
+  },
+);
 
 // Re-export for test access
 export { sanitizeTerminalInput } from "./sanitize.js";
@@ -656,12 +655,7 @@ const DeliveryOutputShape = {
   submit_attempted: z.boolean().optional(),
   submit_verified: z.boolean().nullable().optional(),
   submit_evidence: z
-    .enum([
-      "token_delta",
-      "transcript_echo",
-      "cleared_composer",
-      "status_only",
-    ])
+    .enum(["token_delta", "transcript_echo", "cleared_composer", "status_only"])
     .nullable()
     .optional(),
   delivery_id: z.string().optional(),
@@ -984,10 +978,7 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
 ] as const;
 
 export type SubmitEvidence =
-  | "token_delta"
-  | "transcript_echo"
-  | "cleared_composer"
-  | "status_only";
+  "token_delta" | "transcript_echo" | "cleared_composer" | "status_only";
 
 type PublicDeliveryState =
   | "typed"
@@ -1025,12 +1016,7 @@ export interface PublicDeliveryReceipt {
 }
 
 type DeliveryPhase =
-  | "route"
-  | "lock"
-  | "lock_hold"
-  | "enumerate"
-  | "type"
-  | "verify";
+  "route" | "lock" | "lock_hold" | "enumerate" | "type" | "verify";
 type DeliveryPhaseTimings = Record<DeliveryPhase, number>;
 
 function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
@@ -1099,8 +1085,7 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "failed_confirmed";
   const warning = input.WARNING ?? defaultNonDeliveryWarning(evidencedState);
   return {
-    delivered:
-      evidencedState === "submitted" && input.submit_verified === true,
+    delivered: evidencedState === "submitted" && input.submit_verified === true,
     terminal,
     typed: input.typed,
     submit_attempted: input.submit_attempted,
@@ -1121,9 +1106,7 @@ export function buildPublicDeliveryReceipt(input: {
             : {}),
         }
       : {}),
-    ...(input.queued_behind_turn === true
-      ? { queued_behind_turn: true }
-      : {}),
+    ...(input.queued_behind_turn === true ? { queued_behind_turn: true } : {}),
     ...(input.timings_ms ? { timings_ms: { ...input.timings_ms } } : {}),
     ...(input.observation ? { observation: input.observation } : {}),
     ...(warning ? { WARNING: warning } : {}),
@@ -1252,8 +1235,7 @@ type SubmitVerificationFailureReason =
  * available positive evidence.
  */
 type SubmitKeyVerificationReason =
-  | "surface_read_unavailable"
-  | "submit_evidence_absent";
+  "surface_read_unavailable" | "submit_evidence_absent";
 
 class SubmitVerificationError extends Error {
   readonly retry_safe = false;
@@ -4080,7 +4062,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     coordination: CoordinationContract | null,
   ): { text: string; contract_path: string | null } => {
     if (bootContractMode() === "inline") {
-      return { text: mailboxBootContract(agentId, monitorBoot), contract_path: null };
+      return {
+        text: mailboxBootContract(agentId, monitorBoot),
+        contract_path: null,
+      };
     }
     try {
       const written = writeBootContractFile(
@@ -4103,7 +4088,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // A contract-file write failure must not fail an otherwise-successful
       // spawn. Fall back to the pre-P11b inline mailbox contract: the worker
       // loses the report half (exactly as before P11b), not its mailbox.
-      return { text: mailboxBootContract(agentId, monitorBoot), contract_path: null };
+      return {
+        text: mailboxBootContract(agentId, monitorBoot),
+        contract_path: null,
+      };
     }
   };
 
@@ -4231,9 +4219,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // absence is ambiguous.
     const observerOwnerId = context.surfaceObserverId?.trim() || null;
     const ownsRefBinding = (agent: AgentRecord): boolean =>
-      Boolean(
-        observerOwnerId && agent.surface_observer_id === observerOwnerId,
-      );
+      Boolean(observerOwnerId && agent.surface_observer_id === observerOwnerId);
     const live = (agent: AgentRecord): boolean =>
       !isLiveTerminal(liveStateFor(agent));
     return (
@@ -4599,10 +4585,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ...(warnings.length > 0 ? { warnings } : {}),
       ...(Array.isArray(structured.receipts)
         ? {
-            receipts: structured.receipts.map((receipt) =>
-              receipt && typeof receipt === "object"
-                ? { ...(receipt as Record<string, unknown>), ...provenance }
-                : receipt,
+            receipts: Object.freeze(
+              structured.receipts.map((receipt) =>
+                receipt && typeof receipt === "object"
+                  ? Object.freeze({
+                      ...(receipt as Record<string, unknown>),
+                      ...provenance,
+                    })
+                  : receipt,
+              ),
             ),
           }
         : {}),
@@ -5033,8 +5024,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     } finally {
       addDeliveryPhaseTiming(opts.timings, "lock_hold", lockHoldStartedAt);
       const timedResult = result as
-        | { timings_ms?: DeliveryPhaseTimings }
-        | undefined;
+        { timings_ms?: DeliveryPhaseTimings } | undefined;
       if (timedResult?.timings_ms && opts.timings) {
         timedResult.timings_ms.lock_hold = opts.timings.lock_hold;
       }
@@ -5546,11 +5536,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verification_reason: SubmitVerificationFailureReason | null;
     retry_count: number;
     delivery:
-      | "submitted"
-      | "queued"
-      | "queued_followup"
-      | "rescued"
-      | "pending_verify";
+      "submitted" | "queued" | "queued_followup" | "rescued" | "pending_verify";
   }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -5903,10 +5889,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         delivery: "rescued",
       };
     }
-    if (
-      sawClearedComposerEvidence &&
-      sawAllowedClearedComposerEvidence
-    ) {
+    if (sawClearedComposerEvidence && sawAllowedClearedComposerEvidence) {
       return {
         submit_verified: true,
         submit_evidence: "cleared_composer",
@@ -6199,24 +6182,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       | "queued"
       | "queued_followup"
       | "rescued"
-      | "pending_verify" =
-      "submitted";
+      | "pending_verify" = "submitted";
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
-        requireObservedPayloadBeforeEnter &&
-        (opts.verify_submit ?? false)
+        requireObservedPayloadBeforeEnter && (opts.verify_submit ?? false)
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
               workspace: opts.workspace,
               text: submittedText,
-              timeout_ms:
-                Math.min(
-                  opts.submit_verify_timeout_ms ??
-                    SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
-                  BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
-                ),
+              timeout_ms: Math.min(
+                opts.submit_verify_timeout_ms ??
+                  SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+                BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
+              ),
               beforeRead: opts.beforeMutation,
             })
           : null;
@@ -6329,10 +6309,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ...(opts.delivery_id
           ? {
               delivery_id: opts.delivery_id,
-              delivery_state:
-                !opts.press_enter
-                  ? ("typed" as const)
-                  : deliveryOutcome === "queued"
+              delivery_state: !opts.press_enter
+                ? ("typed" as const)
+                : deliveryOutcome === "queued"
                   ? ("queued" as const)
                   : deliveryOutcome === "queued_followup"
                     ? ("queued_followup" as const)
@@ -6340,19 +6319,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       ? ("pending_verify" as const)
                       : deliveryOutcome === "rescued"
                         ? ("rescued" as const)
-                      : submit_verified === false
-                        ? ("failed" as const)
-                        : ("submitted" as const),
+                        : submit_verified === false
+                          ? ("failed" as const)
+                          : ("submitted" as const),
             }
           : {}),
       });
     }
 
     const receipt = buildPublicDeliveryReceipt({
-      delivery_state:
-        !opts.press_enter
-          ? "typed"
-          : deliveryOutcome === "queued"
+      delivery_state: !opts.press_enter
+        ? "typed"
+        : deliveryOutcome === "queued"
           ? "queued"
           : deliveryOutcome === "queued_followup"
             ? "queued_followup"
@@ -6360,11 +6338,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? "pending_verify"
               : deliveryOutcome === "rescued"
                 ? "rescued"
-              : submit_verified === true
-                ? "submitted"
-                : opts.verify_submit !== true
-                  ? "typed"
-                : undefined,
+                : submit_verified === true
+                  ? "submitted"
+                  : opts.verify_submit !== true
+                    ? "typed"
+                    : undefined,
       delivery_id: opts.delivery_id,
       typed: bytes > 0,
       submit_attempted: Boolean(opts.press_enter),
@@ -6618,9 +6596,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? (consecutiveMatches.get(candidate) ?? 0) + 1
             : 0;
           consecutiveMatches.set(candidate, count);
-          if (
-            count >= requiredBootReadyObservations(candidate, screen.text)
-          ) {
+          if (count >= requiredBootReadyObservations(candidate, screen.text)) {
             return {
               delivery_state: "ready",
               metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
@@ -7641,8 +7617,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         )?.ref;
       }
       const connectorWorkspaces = await client.listWorkspaces();
-      return connectorWorkspaces.workspaces.find((workspace) => workspace.selected)
-        ?.ref;
+      return connectorWorkspaces.workspaces.find(
+        (workspace) => workspace.selected,
+      )?.ref;
     } catch {
       return undefined;
     }
@@ -10910,7 +10887,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 10. close_surface
   server.tool(
     "close_surface",
-    "Close one surface, managed agent, or workspace with live-agent guards. scope=\"agent\" stops the agent AND closes its pane, and reports the two halves separately (agent_stopped, surface_closed) so a pane that survives is never reported as closed. The pane close obeys the same live-agent guard as scope=\"surface\": without force:true a still-live agent keeps its pane, and the receipt says so.",
+    'Close one surface, managed agent, or workspace with live-agent guards. scope="agent" stops the agent AND closes its pane, and reports the two halves separately (agent_stopped, surface_closed) so a pane that survives is never reported as closed. The pane close obeys the same live-agent guard as scope="surface": without force:true a still-live agent keeps its pane, and the receipt says so.',
     {
       scope: z
         .enum(["surface", "agent", "workspace"])
@@ -10943,7 +10920,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // harvesting panes got success and kept every one of them. Resolve
           // the bound surface BEFORE stopping (the stop can evict the record),
           // stop, then close the pane for real and say which halves happened.
-          const boundAgent = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+          const boundAgent =
+            context.lifecycleRegistry?.get(args.agent_id) ?? null;
           const boundSurface = boundAgent?.surface_id?.trim() || null;
           const boundWorkspace = boundAgent?.workspace_id ?? undefined;
           if (
@@ -10965,8 +10943,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 surface: boundSurface,
                 surface_closed: false,
                 surface_close_skipped: "live_process",
-                WARNING:
-                  `Live process ${boundAgent?.pid} was not stopped and its surface was not closed; pass force:true for deliberate teardown.`,
+                WARNING: `Live process ${boundAgent?.pid} was not stopped and its surface was not closed; pass force:true for deliberate teardown.`,
               },
             );
           }
@@ -10982,8 +10959,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // Drop the stop receipt's own envelope fields; this response owns
           // ok/error, and letting stop_agent's ok:true through was exactly how
           // a half-done close reported success.
-          const { ok: _stopOk, error: _stopError, ...stopContent } =
-            rawStopContent;
+          const {
+            ok: _stopOk,
+            error: _stopError,
+            ...stopContent
+          } = rawStopContent;
           if (!agentStopped) {
             // The stop itself failed: keep its verbatim ok:false/error and add
             // the surface half, which was never attempted.
@@ -10993,16 +10973,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 : "Agent stop could not establish a safe terminal I/O route";
             const remedy =
               "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
-            return err(new Error(`close_surface scope=agent refused: ${reason}`), {
-              ...rawStopContent,
-              scope: "agent",
-              agent_stopped: false,
-              surface_closed: false,
-              surface_close_skipped: "agent_stop_failed",
-              reason,
-              remedy,
-              WARNING: remedy,
-            });
+            return err(
+              new Error(`close_surface scope=agent refused: ${reason}`),
+              {
+                ...rawStopContent,
+                scope: "agent",
+                agent_stopped: false,
+                surface_closed: false,
+                surface_close_skipped: "agent_stop_failed",
+                reason,
+                remedy,
+                WARNING: remedy,
+              },
+            );
           }
           const watchCleanup = {
             watch_cleanup: lifecycleScheduleChildReportWatchPrune
@@ -12303,8 +12286,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sessionIdentityResolver: context.sessionIdentityResolver,
           selfRegistrationSessionResolver:
             context.selfRegistrationSessionResolver,
-          selfRegistrationSessionLookup:
-            context.selfRegistrationSessionLookup,
+          selfRegistrationSessionLookup: context.selfRegistrationSessionLookup,
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
           inboxOpts,
           launchCommandSender: async ({
@@ -12345,9 +12327,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 stateMgr.readState(event.subject_agent_id);
               return Boolean(
                 subject &&
-                  subject.parent_agent_id === event.owner &&
-                  subject.user_killed !== true &&
-                  !subject.deletion_intent,
+                subject.parent_agent_id === event.owner &&
+                subject.user_killed !== true &&
+                !subject.deletion_intent,
               );
             };
             if (!subjectStillBelongsToOwner()) {
@@ -12990,9 +12972,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               args.source_event === "send_to" ||
               args.source_event === "dispatch_nudge" ||
               args.source_event === "report_to_parent",
-            submit_verify_timeout_ms: bypassLifecycleGate
-              ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
-              : shortPointerVerifyTimeoutMs,
+            submit_verify_timeout_ms:
+              args.allow_busy || queuedBehindTurn
+                ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
+                : shortPointerVerifyTimeoutMs,
             beforeMutation: assertDeliveryRouteCurrent,
             timings: args.timings,
           });
@@ -13214,17 +13197,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           message: `report_path ${reportPath} is already reserved by another child spawn; each child requires a distinct report path`,
         };
       }
-      const existingLiveChild = stateMgr.listStates().find(
-        (candidate) =>
-          candidate.agent_id !== childAgentId &&
-          candidate.parent_agent_id === parentAgentId &&
-          candidate.report_path !== null &&
-          candidate.report_path !== undefined &&
-          resolve(candidate.report_path) === reportPath &&
-          candidate.user_killed !== true &&
-          !candidate.deletion_intent &&
-          !TERMINAL_AGENT_STATES.has(candidate.state),
-      );
+      const existingLiveChild = stateMgr
+        .listStates()
+        .find(
+          (candidate) =>
+            candidate.agent_id !== childAgentId &&
+            candidate.parent_agent_id === parentAgentId &&
+            candidate.report_path !== null &&
+            candidate.report_path !== undefined &&
+            resolve(candidate.report_path) === reportPath &&
+            candidate.user_killed !== true &&
+            !candidate.deletion_intent &&
+            !TERMINAL_AGENT_STATES.has(candidate.state),
+        );
       if (existingLiveChild) {
         return {
           ok: false,
@@ -13300,11 +13285,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
 
           const parent =
-            registry.get(intendedParentId) ?? stateMgr.readState(intendedParentId);
+            registry.get(intendedParentId) ??
+            stateMgr.readState(intendedParentId);
           let directError = "parent is absent from the lifecycle registry";
           if (parent) {
             try {
-              const wake = await deliverReportInboxPointer(parent, directMessage);
+              const wake = await deliverReportInboxPointer(
+                parent,
+                directMessage,
+              );
               return okFormatted(
                 `report_to_parent ${parent.agent_id}: ${wake.delivery}`,
                 {
@@ -13317,7 +13306,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 },
               );
             } catch (error) {
-              directError = error instanceof Error ? error.message : String(error);
+              directError =
+                error instanceof Error ? error.message : String(error);
             }
           }
 
@@ -13362,7 +13352,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 },
               );
             } catch (error) {
-              directError = error instanceof Error ? error.message : String(error);
+              directError =
+                error instanceof Error ? error.message : String(error);
               ancestorId = ancestor.parent_agent_id;
             }
           }
@@ -13641,7 +13632,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
           .optional()
           .describe(
-            "Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and points the boot prompt at it, so the worker is told; check `coordination_footer_delivered` -- if false the contract file could not be written and YOU must relay report_path and done_marker, or a done worker renders closure:\"artifact_missing\". Pass this only to place the report somewhere you already watch (e.g. a collab dir).",
+            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and points the boot prompt at it, so the worker is told; check `coordination_footer_delivered` -- if false the contract file could not be written and YOU must relay report_path and done_marker, or a done worker renders closure:"artifact_missing". Pass this only to place the report somewhere you already watch (e.g. a collab dir).',
           ),
         force_new: z
           .boolean()
@@ -16076,9 +16067,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             requestedState !== undefined ||
             (args.agent_ids?.length ?? 0) > 0
               ? records
-              : records.filter(
-                  (agent) => !isDeliberateCloseTombstone(agent),
-                );
+              : records.filter((agent) => !isDeliberateCloseTombstone(agent));
           const uuidKey = (value: string | null | undefined) =>
             value?.trim().toLowerCase() || null;
           const rows = await Promise.all(
@@ -16270,51 +16259,54 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ) {
             return renderListAgentsResponse(cached);
           }
-          const live = await engine.runLifecycleMutation(async () => {
-            discovery.invalidate();
-            const discovered = await discovery.scan(true);
-            const observedAtMs = Date.now();
-            registry.repairFromDiscovery(discovered, {
-              seatRegistry,
-              orphansOnly: true,
-            });
-            // #481: `createLiveSeatDiscoveryProof` had exactly one call site --
-            // inside the removed resync tool's unreachable body -- so
-            // `hasLiveManagedSeatSibling` returned false unconditionally and
-            // every crash-recovery-eligible ghost was retained forever. This is
-            // the live path that already holds a same-cycle, observer-pinned
-            // scan, so the proof belongs here.
-            // #480: it is also the only reconciliation callers actually
-            // trigger. Without an eviction here `list_agents` was the one
-            // reader that never dropped a row: 17 agents against 13 surfaces.
-            const liveSeatProof = registry.createLiveSeatDiscoveryProof(
-              discovered,
-              {
+          const live = await engine.runLifecycleMutation(
+            async () => {
+              discovery.invalidate();
+              const discovered = await discovery.scan(true);
+              const observedAtMs = Date.now();
+              registry.repairFromDiscovery(discovered, {
                 seatRegistry,
-                expectedObserverId: registry.getObserverId(),
-                expectedObserverEpoch: registry.getObserverEpoch(),
-              },
-            );
-            await registry.evictSurfaceless({
-              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
-              now: observedAtMs,
-              liveSeatProof,
-            });
-            const merged = await registry.listMerged(discovery, {
-              filter,
-              force: true,
-              discovered,
-            });
-            const requestedIds = args.agent_ids
-              ? new Set(args.agent_ids)
-              : null;
-            const scoped = merged.filter(
-              (agent) =>
-                (!parentAgentId || agent.parent_agent_id === parentAgentId) &&
-                (!requestedIds || requestedIds.has(agent.agent_id)),
-            );
-            return { merged: scoped, discovered, observedAtMs };
-          }, { label: "list-agents" });
+                orphansOnly: true,
+              });
+              // #481: `createLiveSeatDiscoveryProof` had exactly one call site --
+              // inside the removed resync tool's unreachable body -- so
+              // `hasLiveManagedSeatSibling` returned false unconditionally and
+              // every crash-recovery-eligible ghost was retained forever. This is
+              // the live path that already holds a same-cycle, observer-pinned
+              // scan, so the proof belongs here.
+              // #480: it is also the only reconciliation callers actually
+              // trigger. Without an eviction here `list_agents` was the one
+              // reader that never dropped a row: 17 agents against 13 surfaces.
+              const liveSeatProof = registry.createLiveSeatDiscoveryProof(
+                discovered,
+                {
+                  seatRegistry,
+                  expectedObserverId: registry.getObserverId(),
+                  expectedObserverEpoch: registry.getObserverEpoch(),
+                },
+              );
+              await registry.evictSurfaceless({
+                confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+                now: observedAtMs,
+                liveSeatProof,
+              });
+              const merged = await registry.listMerged(discovery, {
+                filter,
+                force: true,
+                discovered,
+              });
+              const requestedIds = args.agent_ids
+                ? new Set(args.agent_ids)
+                : null;
+              const scoped = merged.filter(
+                (agent) =>
+                  (!parentAgentId || agent.parent_agent_id === parentAgentId) &&
+                  (!requestedIds || requestedIds.has(agent.agent_id)),
+              );
+              return { merged: scoped, discovered, observedAtMs };
+            },
+            { label: "list-agents" },
+          );
           invalidateSurfaceTopologyCallScope(client as object);
           const reconciledTopology = await collectSurfaceTopology();
           const reconciledTopologySignature =
@@ -16419,22 +16411,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const collectTargetRecords = async (): Promise<AgentRecord[]> => {
       try {
-        return await engine.runLifecycleMutation(async () => {
-          try {
-            discovery.invalidate();
-            const discovered = await discovery.scan(true);
-            return await registry.listMerged(discovery, {
-              force: true,
-              discovered,
-            });
-          } catch (error) {
-            if (!(error instanceof SurfaceBindingChangedDuringDiscoveryError)) {
-              throw error;
+        return await engine.runLifecycleMutation(
+          async () => {
+            try {
+              discovery.invalidate();
+              const discovered = await discovery.scan(true);
+              return await registry.listMerged(discovery, {
+                force: true,
+                discovered,
+              });
+            } catch (error) {
+              if (
+                !(error instanceof SurfaceBindingChangedDuringDiscoveryError)
+              ) {
+                throw error;
+              }
+              discovery.invalidate();
+              return registry.listMerged(discovery, { force: true });
             }
-            discovery.invalidate();
-            return registry.listMerged(discovery, { force: true });
-          }
-        }, { label: "collect-target-records" });
+          },
+          { label: "collect-target-records" },
+        );
       } catch (e) {
         if (isSurfaceEnumerationError(e)) {
           throw new Error(
@@ -16537,8 +16534,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 submit_verified: delivery.submit_verified,
                 ...(delivery.delivery_state === "rescued"
                   ? {
-                      error:
-                        "Prompt appeared only after an external interrupt",
+                      error: "Prompt appeared only after an external interrupt",
                     }
                   : {}),
               });
@@ -17057,20 +17053,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             error:
                               "Prompt appeared only after an external interrupt",
                           })
-                      : delivery.delivery === "submitted"
-                        ? engine.resolveDelivery({
-                            delivery_id: deliveryId,
-                            agent_id: agent.agent_id,
-                            text: args.text,
-                            press_enter: args.press_enter,
-                            source_event: "send_to",
-                            delivery_state: "submitted",
-                            terminal: true,
-                            retry_count: delivery.retry_count,
-                            submit_verified: delivery.submit_verified,
-                            error: null,
-                          })
-                        : null;
+                        : delivery.delivery === "submitted"
+                          ? engine.resolveDelivery({
+                              delivery_id: deliveryId,
+                              agent_id: agent.agent_id,
+                              text: args.text,
+                              press_enter: args.press_enter,
+                              source_event: "send_to",
+                              delivery_state: "submitted",
+                              terminal: true,
+                              retry_count: delivery.retry_count,
+                              submit_verified: delivery.submit_verified,
+                              error: null,
+                            })
+                          : null;
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
@@ -17398,33 +17394,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       submit_verified: false,
                       error: "Prompt appeared only after an external interrupt",
                     })
-                : delivery.delivery === "typed"
-                  ? engine.resolveDelivery({
-                      delivery_id: deliveryId,
-                      agent_id: agentId,
-                      text: args.text,
-                      press_enter: args.press_enter,
-                      source_event: "send_to",
-                      delivery_state: "typed",
-                      terminal: true,
-                      retry_count: delivery.retry_count,
-                      submit_verified: null,
-                      error: null,
-                    })
-                : delivery.delivery === "submitted"
-                  ? engine.resolveDelivery({
-                      delivery_id: deliveryId,
-                      agent_id: agentId,
-                      text: args.text,
-                      press_enter: args.press_enter,
-                      source_event: "send_to",
-                      delivery_state: "submitted",
-                      terminal: true,
-                      retry_count: delivery.retry_count,
-                      submit_verified: delivery.submit_verified,
-                      error: null,
-                    })
-                  : null;
+                  : delivery.delivery === "typed"
+                    ? engine.resolveDelivery({
+                        delivery_id: deliveryId,
+                        agent_id: agentId,
+                        text: args.text,
+                        press_enter: args.press_enter,
+                        source_event: "send_to",
+                        delivery_state: "typed",
+                        terminal: true,
+                        retry_count: delivery.retry_count,
+                        submit_verified: null,
+                        error: null,
+                      })
+                    : delivery.delivery === "submitted"
+                      ? engine.resolveDelivery({
+                          delivery_id: deliveryId,
+                          agent_id: agentId,
+                          text: args.text,
+                          press_enter: args.press_enter,
+                          source_event: "send_to",
+                          delivery_state: "submitted",
+                          terminal: true,
+                          retry_count: delivery.retry_count,
+                          submit_verified: delivery.submit_verified,
+                          error: null,
+                        })
+                      : null;
           // Preserve the already-terminal receipt if optional evidence
           // collection fails after the pane mutation has succeeded.
           const publicReceipt = buildPublicDeliveryReceipt({

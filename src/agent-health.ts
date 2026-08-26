@@ -155,6 +155,7 @@ function issueSeverity(
     autoDiscovered: boolean;
     lacksManagedPlacement: boolean;
     panePtyDead: boolean;
+    monitorHasUnread: boolean;
   },
 ): AgentHealthIssueSeverity {
   if (
@@ -174,6 +175,9 @@ function issueSeverity(
   if (code === "inbox_monitor_not_alive" && context.autoDiscovered) {
     return "info";
   }
+  if (code === "inbox_monitor_not_alive" && !context.monitorHasUnread) {
+    return "info";
+  }
   if (
     code === "inbox_monitor_not_alive" &&
     !context.inboxMonitorWithinBootGrace
@@ -191,6 +195,7 @@ function deriveIssueSeverities(
     autoDiscovered: boolean;
     lacksManagedPlacement: boolean;
     panePtyDead: boolean;
+    monitorHasUnread: boolean;
   },
 ): Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>> {
   const severities: Partial<
@@ -399,7 +404,7 @@ export function evaluateAgentHealth(
       "inbox_channel_dir_deleted",
       "agent inbox channel dir was deleted after creation; next inbox write will recreate it",
     );
-  } else if (input.monitor_alive === false && staleCount > 0) {
+  } else if (input.monitor_alive === false) {
     addIssue(
       issueCodes,
       issues,
@@ -547,10 +552,7 @@ export function evaluateAgentHealth(
     }
   }
 
-  if (
-    agent.cli !== "claude" &&
-    role === "orchestrator"
-  ) {
+  if (agent.cli !== "claude" && role === "orchestrator") {
     addIssue(
       issueCodes,
       issues,
@@ -613,6 +615,7 @@ export function evaluateAgentHealth(
     autoDiscovered,
     lacksManagedPlacement: lacksManagedPlacement(agent),
     panePtyDead,
+    monitorHasUnread: staleCount > 0,
     inboxMonitorWithinBootGrace: isWithinInboxMonitorBootGrace(
       agent,
       deps.now?.() ?? Date.now(),

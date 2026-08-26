@@ -2075,8 +2075,7 @@ describe("Sidebar Sync", () => {
         cli_session_id: "session-a1",
         task_summary: "Read and follow GOAL-p8-sidebar.md",
         role: "worker",
-        worktree_path:
-          "/home/test-user/Gits/cmuxlayer.wt/cmuxlayer-worker-p8",
+        worktree_path: "/home/test-user/Gits/cmuxlayer.wt/cmuxlayer-worker-p8",
         worktree_branch: "p8-sidebar",
       }),
     );
@@ -3583,9 +3582,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).not.toHaveBeenCalled();
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
-      expect.stringContaining(
-        "health=degraded(inbox_monitor_not_alive:degraded)",
-      ),
+      expect.stringContaining("health=healthy(inbox_monitor_not_alive:info)"),
       expect.any(Object),
     );
   });
@@ -3630,9 +3627,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).not.toHaveBeenCalled();
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
-      expect.stringContaining(
-        "health=degraded(inbox_monitor_not_alive:degraded)",
-      ),
+      expect.stringContaining("health=healthy(inbox_monitor_not_alive:info)"),
       expect.any(Object),
     );
   });
@@ -4033,7 +4028,9 @@ describe("Sidebar Sync", () => {
     );
     mockClient.setStatus.mockImplementation(async (key: string) => {
       if (key === "status-missing") {
-        throw new Error("Unable to resolve tab id for workspace workspace:missing");
+        throw new Error(
+          "Unable to resolve tab id for workspace workspace:missing",
+        );
       }
     });
     await engine.getRegistry().reconstitute();
@@ -4061,9 +4058,9 @@ describe("Sidebar Sync", () => {
 
     mockClient.setStatus.mockClear();
     await expect(engine.runSweep()).resolves.toBeUndefined();
-    expect(
-      mockClient.setStatus.mock.calls.map(([key]) => key),
-    ).toEqual(["status-missing"]);
+    expect(mockClient.setStatus.mock.calls.map(([key]) => key)).toEqual([
+      "status-missing",
+    ]);
   });
 
   it("logs spawned event on first sweep for each new agent", async () => {

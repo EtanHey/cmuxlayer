@@ -180,7 +180,7 @@ function makeLifecycleExec(opts?: {
             ? `${pendingText}\n${workingText()}`
             : activeCli === "cursor"
               ? `Cursor Agent\n${pendingText}\nWorking (1s • esc to interrupt)\ncursor> `
-            : workingText();
+              : workingText();
         promptPending = false;
         pendingText = "";
       }
@@ -1250,10 +1250,7 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining([
-        "send",
-        "cmuxlayerCodex -s --worker -E medium",
-      ]),
+      expect.arrayContaining(["send", "cmuxlayerCodex -s --worker -E medium"]),
     );
   });
 
@@ -1755,7 +1752,9 @@ function makeCrossWindowUuidRouteClient(initialSurfaces: UuidRouteSurface[]) {
       };
     },
   );
-  (routeClient.client as any).focusSurface = vi.fn().mockResolvedValue(undefined);
+  (routeClient.client as any).focusSurface = vi
+    .fn()
+    .mockResolvedValue(undefined);
   return routeClient;
 }
 
@@ -2561,7 +2560,10 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     try {
-      const result = await spawn.handler({ resume_agent_id: agentId }, {} as any);
+      const result = await spawn.handler(
+        { resume_agent_id: agentId },
+        {} as any,
+      );
       const parsed = parseToolResult(result) as Record<string, any>;
       expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
       expect(parsed.resumed).toBe(true);
@@ -2612,7 +2614,9 @@ describe("agent lifecycle tool handlers", () => {
     const agentId = "cmuxlayerCodex-resume-path-collision";
     const siblingId = "cmuxlayerCodex-live-sibling";
     const parentId = "cmuxlayerClaude-resume-collision-parent";
-    const resumeInboxDir = mkdtempSync(join(tmpdir(), "resume-path-collision-"));
+    const resumeInboxDir = mkdtempSync(
+      join(tmpdir(), "resume-path-collision-"),
+    );
     const watchRegistryPath = join(resumeInboxDir, "watch-specs.json");
     const sharedReportPath = join(resumeInboxDir, "shared", "report.md");
     const stateMgr = new StateManager(TEST_DIR);
@@ -4494,10 +4498,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherSentAt: number | null = null;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (
-          args.includes("send") &&
-          text === "voicelayerCodex -s --worker"
-        ) {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker") {
           launcherSentAt = Date.now();
           return { stdout: "{}", stderr: "" };
         }
@@ -4513,8 +4514,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text:
-                elapsed < 800 ? "$ voicelayerCodex -s --worker" : "codex> ",
+              text: elapsed < 800 ? "$ voicelayerCodex -s --worker" : "codex> ",
               lines: 20,
               scrollback_used: false,
             }),
@@ -5483,10 +5483,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherReturns = 0;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (
-          args.includes("send") &&
-          text === "voicelayerCodex -s --worker"
-        ) {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker") {
           launcherSent = true;
           return { stdout: "{}", stderr: "" };
         }
@@ -7928,7 +7925,8 @@ describe("agent lifecycle tool handlers", () => {
       expect.objectContaining({
         agent_id: "corrupt-agent",
         resumable: true,
-        resume_command: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
+        resume_command:
+          "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
       }),
     ]);
     expect(parsed.skipped_agents).toBeUndefined();
@@ -9043,7 +9041,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(sendCalls).toHaveLength(0);
   });
 
-  it("send_to targeting preserves queued as nonterminal", async () => {
+  it("send_to targeting delivers to a working agent without waiting for idle", async () => {
     const records = [
       makeServerAgentRecord({
         agent_id: "implementor-busy",
@@ -9056,7 +9054,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const result = await registeredTestTool(server, "send_to").handler(
       {
-        text: "Queue this instruction",
+        text: "Deliver this instruction",
         targeting: { agent_ids: ["implementor-busy"] },
       },
       {},
@@ -9067,13 +9065,14 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.receipts).toEqual([
       expect.objectContaining({
         agent_id: "implementor-busy",
-        delivery_state: "queued",
-        terminal: false,
+        delivery_state: "submitted",
+        terminal: true,
         accepted: true,
-        delivered: false,
+        delivered: true,
+        queued_behind_turn: true,
       }),
     ]);
-    expect(sendCalls).toHaveLength(0);
+    expect(sendCalls).toHaveLength(1);
   });
 
   it("send_to targeting counts a rescued target as failed", async () => {
@@ -10372,7 +10371,7 @@ codex>
             ? `OpenAI Codex\n› ${pendingBootText}\ngpt-5.5 high · ~/repo`
             : bootSubmitted
               ? `OpenAI Codex\n• ${pendingBootText}\nWorking\n${blockerScreen}`
-            : blockerScreen,
+              : blockerScreen,
         lines: 20,
         scrollback_used: false,
       })),
@@ -10530,7 +10529,7 @@ codex>
     expect(result.isError).toBe(true);
   });
 
-  it("send_to_agent rejects agents not in interactive state", async () => {
+  it("send_to_agent compatibility path inherits send_to's no-idle-wait behavior", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to_agent"];
@@ -10547,19 +10546,15 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    // Agent is in "booting" state — not interactive. The gate still fires and
-    // still names its reason, but a RETRYABLE refusal is not a terminal
-    // outcome (F1): send_to hands back the nonterminal queued receipt its own
-    // description promises, and the engine drains it once the agent is ready.
     const result = await sendTo.handler(
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
     );
     const parsed = parseToolResult(result);
     expect(result.isError).toBeFalsy();
-    expect(parsed.terminal).not.toBe(true);
-    expect(parsed.delivery_state).toBe("queued");
-    expect(JSON.stringify(parsed)).toMatch(/not in an interactive state/);
+    expect(parsed.terminal).toBe(true);
+    expect(parsed.delivery_state).toBe("submitted");
+    expect(parsed.submit_verified).toBe(true);
   });
 
   it("send_to_agent leaves an idle agent idle when submitted delivery fails", async () => {
@@ -11269,9 +11264,9 @@ codex>
     // D97 regression budget: one enumeration per stable phase -- initial
     // route proof, post-write evidence, and derived status publication --
     // instead of allowing the old route/read/guard multiplier to return.
-    expect(routeClient.client.listWindows.mock.calls.length).toBeLessThanOrEqual(
-      3,
-    );
+    expect(
+      routeClient.client.listWindows.mock.calls.length,
+    ).toBeLessThanOrEqual(3);
     expect(
       routeClient.client.listWorkspaces.mock.calls.length,
     ).toBeLessThanOrEqual(6);
@@ -11375,7 +11370,8 @@ codex>
             ref: "surface:spawned",
             id: spawnedUuid,
             workspace_ref: opts?.workspace ?? "workspace:A",
-            window_ref: opts?.workspace === "workspace:B" ? "window:B" : "window:A",
+            window_ref:
+              opts?.workspace === "workspace:B" ? "window:B" : "window:A",
           },
         ]);
         return {
@@ -12588,7 +12584,7 @@ codex>
     expect(routeClient.client.send).not.toHaveBeenCalled();
   });
 
-  it("send_to queues a busy composer and drains to a terminal submitted event", async () => {
+  it("send_to delivers to a busy agent immediately and records queued_behind_turn", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
@@ -12616,63 +12612,25 @@ codex>
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
     );
-    const queued = parseToolResult(result);
+    const delivered = parseToolResult(result);
     expect(result.isError).toBeFalsy();
-    expect(queued).toMatchObject({
+    expect(delivered).toMatchObject({
       ok: true,
       agent_id: agentId,
       delivery_id: expect.any(String),
-      delivery: "queued",
-      delivery_state: "queued",
-      terminal: false,
-      submit_verified: null,
+      delivery: "submitted",
+      delivery_state: "submitted",
+      terminal: true,
+      submit_verified: true,
+      queued_behind_turn: true,
     });
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("send")),
-    ).toHaveLength(0);
-
-    const restartedState = new StateManager(TEST_DIR);
-    const restartedRegistry = new AgentRegistry(restartedState, async () => []);
-    const restartedEngine = new AgentEngine(
-      restartedState,
-      restartedRegistry,
-      {} as any,
-    );
-    expect(
-      restartedEngine.getDeliveryReceipt(queued.delivery_id),
-    ).toMatchObject({
-      delivery_id: queued.delivery_id,
-      text: "hello",
-      delivery_state: "queued",
-      terminal: false,
-    });
-
-    await engine.drainDeliveryQueue();
-    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
-      delivery_state: "queued",
-      terminal: false,
-    });
-
-    const ready = engine.stateMgr.updateRecord(agentId, { state: "idle" });
-    registry.set(agentId, ready);
-    await new Promise((resolve) => setTimeout(resolve, 275));
-    await engine.drainDeliveryQueue();
-
-    const receipt = engine.getDeliveryReceipt(queued.delivery_id);
-    expect(receipt).toMatchObject({
-      delivery_id: queued.delivery_id,
+    ).not.toHaveLength(0);
+    expect(engine.getDeliveryReceipt(delivered.delivery_id)).toMatchObject({
+      delivery_id: delivered.delivery_id,
       delivery_state: "submitted",
       terminal: true,
-    });
-    expect(
-      engine.stateMgr
-        .getEventLog()
-        .readEntries()
-        .filter((entry: any) => entry.delivery_id === queued.delivery_id)
-        .at(-1),
-    ).toMatchObject({
-      delivery_state: "submitted",
-      delivery_id: queued.delivery_id,
     });
   });
 
@@ -13391,11 +13349,7 @@ codex>
         relayTyped = true;
         return { stdout: "{}", stderr: "" };
       }
-      if (
-        relayActive &&
-        args.includes("send-key") &&
-        args.includes("return")
-      ) {
+      if (relayActive && args.includes("send-key") && args.includes("return")) {
         relayReturned = true;
         return { stdout: "{}", stderr: "" };
       }
@@ -13487,11 +13441,7 @@ codex>
         relayTyped = true;
         return { stdout: "{}", stderr: "" };
       }
-      if (
-        relayActive &&
-        args.includes("send-key") &&
-        args.includes("return")
-      ) {
+      if (relayActive && args.includes("send-key") && args.includes("return")) {
         relayReturned = true;
         return { stdout: "{}", stderr: "" };
       }
@@ -13582,11 +13532,7 @@ codex>
         relayTyped = true;
         return { stdout: "{}", stderr: "" };
       }
-      if (
-        relayActive &&
-        args.includes("send-key") &&
-        args.includes("return")
-      ) {
+      if (relayActive && args.includes("send-key") && args.includes("return")) {
         relayReturned = true;
         return { stdout: "{}", stderr: "" };
       }
@@ -16792,11 +16738,7 @@ describe("P11 engine-issued coordination paths", () => {
       "utf8",
     );
     // The worker honored the ENGINE-issued contract it was told at boot.
-    writeFileSync(
-      engineReportPath,
-      "Status: COMPLETE\nDONE_P11_S3\n",
-      "utf8",
-    );
+    writeFileSync(engineReportPath, "Status: COMPLETE\nDONE_P11_S3\n", "utf8");
 
     const server = createLifecycleServer(makeLifecycleExec());
     const getState = registeredTestTool(server, "get_agent_state");
@@ -16811,7 +16753,9 @@ describe("P11 engine-issued coordination paths", () => {
     engine.stateMgr.writeState(record);
     engine.getRegistry().set(agentId, record);
 
-    const parsed = parseToolResult(await getState.handler({ agent_id: agentId }, {}));
+    const parsed = parseToolResult(
+      await getState.handler({ agent_id: agentId }, {}),
+    );
     // The engine-issued pair wins; the brief's invented pair is ignored.
     expect(parsed.harvestability).toMatchObject({
       report_path: engineReportPath,
@@ -16927,7 +16871,9 @@ describe("P11 engine-issued coordination paths", () => {
     engine.stateMgr.writeState(record);
     engine.getRegistry().set(agentId, record);
 
-    const parsed = parseToolResult(await getState.handler({ agent_id: agentId }, {}));
+    const parsed = parseToolResult(
+      await getState.handler({ agent_id: agentId }, {}),
+    );
     expect(parsed.harvestability).toMatchObject({
       report_path: reportPath,
       done_marker: "DONE_LEGACY_PROSE",
@@ -16950,7 +16896,9 @@ describe("P11 engine-issued coordination paths", () => {
     engine.stateMgr.writeState(record);
     engine.getRegistry().set(agentId, record);
 
-    const parsed = parseToolResult(await getState.handler({ agent_id: agentId }, {}));
+    const parsed = parseToolResult(
+      await getState.handler({ agent_id: agentId }, {}),
+    );
     expect(parsed.harvestability).toMatchObject({
       closure: "artifact_missing",
       closure_artifact_verified: false,
@@ -17032,7 +16980,11 @@ describe("P11 closure state at default list_agents detail", () => {
     // The issued path is stable per agent_id, so a resumed/recycled id could
     // otherwise inherit an old report and read `verified` without doing work.
     const reportPath = join(TEST_DIR, "p11-list-stale.md");
-    writeFileSync(reportPath, "Status: COMPLETE\nDONE_P11_LIST_STALE\n", "utf8");
+    writeFileSync(
+      reportPath,
+      "Status: COMPLETE\nDONE_P11_LIST_STALE\n",
+      "utf8",
+    );
     const stale = new Date("2026-07-05T05:00:00.000Z");
     utimesSync(reportPath, stale, stale);
 
