@@ -198,7 +198,7 @@ run_case() {
   local pgrep_cmux="$6"
   local pgrep_pids="$7"
 
-  local root_dir log_dir snapshot brainbar_sock brainbar_pid
+  local root_dir log_dir snapshot brainbar_sock brainbar_pid run_status
   root_dir="$(mktemp -d)"
   log_dir="$root_dir/logs"
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
@@ -228,9 +228,14 @@ run_case() {
 
   # shellcheck disable=SC1090
   source "$SCRIPT_PATH"
-  trap 'cat "$log_dir/stderr.log" >&2' ERR
+  set +e
   run_once 2>"$log_dir/stderr.log"
-  trap - ERR
+  run_status="$?"
+  set -e
+  if [[ "$run_status" -ne 0 ]]; then
+    cat "$log_dir/stderr.log" >&2
+    exit "$run_status"
+  fi
 
   if [[ "$expect_breach" == "1" ]]; then
     assert_file_contains "$log_dir/curl.log" "http://localhost:3847/notify"
