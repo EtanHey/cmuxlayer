@@ -4123,10 +4123,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   let lifecycleScheduleChildReportWatchPrune: (() => void) | null = null;
   const pruneChildReportWatchesFor = (agentId: string): void => {
     lifecycleScheduleChildReportWatchPrune?.();
-    removeWatches((watch) => watch.subject_agent_id === agentId, {
-      registryPath:
-        opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
-    }).catch((error) => {
+    removeWatches(
+      (watch) =>
+        watch.subject_agent_id === agentId &&
+        watch.target_kind === "file" &&
+        watch.change === "content",
+      {
+        registryPath:
+          opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+      },
+    ).catch((error) => {
       console.error(
         `[cmuxlayer] deferred child watch cleanup for ${agentId}:`,
         error instanceof Error ? error.message : String(error),

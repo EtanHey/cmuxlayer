@@ -525,6 +525,15 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         change: "content",
         deadline: Number.MAX_SAFE_INTEGER,
       });
+      const markerPath = join(inboxDir, toolName, "marker.md");
+      writeFileSync(markerPath, "working\n", "utf8");
+      await engine.armWatch({
+        owner: "lead-parent",
+        subject_agent_id: child.agent_id,
+        target: markerPath,
+        marker: "DONE_MARKER",
+        deadline: Number.MAX_SAFE_INTEGER,
+      });
 
       const args =
         toolName === "stop_agent"
@@ -541,7 +550,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       await vi.waitFor(() =>
         expect(
           readWatchRegistry({ registryPath: watchRegistryPath }).watches,
-        ).toEqual([]),
+        ).toEqual([
+          expect.objectContaining({
+            subject_agent_id: child.agent_id,
+            target: markerPath,
+            marker: "DONE_MARKER",
+            state: "armed",
+          }),
+        ]),
       );
     },
   );
