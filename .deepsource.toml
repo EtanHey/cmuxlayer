@@ -24,7 +24,7 @@ enabled = true
   [analyzers.meta]
   dialect = "typescript"
   module_system = "es-modules"
-  environment = ["nodejs"]
+  environment = ["nodejs", "browser"]
   plugins = ["react"]
 
 [[analyzers]]

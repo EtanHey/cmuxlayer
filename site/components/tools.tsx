@@ -4,84 +4,45 @@ interface Tool {
 }
 
 const coreTools: Tool[] = [
-  { name: "list_surfaces", desc: "Enumerate all surfaces across workspaces" },
-  {
-    name: "new_split",
-    desc: "Create terminal or browser splits in any direction",
-  },
-  {
-    name: "send_input",
-    desc: "Type text into a surface as if from the keyboard",
-  },
-  {
-    name: "send_key",
-    desc: "Send key combos \u2014 Enter, Ctrl-C, Escape, arrows",
-  },
   {
     name: "read_screen",
-    desc: "Capture visible terminal output with optional scrollback",
-  },
-  { name: "rename_tab", desc: "Set the workspace tab title" },
-  { name: "notify", desc: "Push macOS notifications from any surface" },
-  {
-    name: "set_status",
-    desc: "Update sidebar status entries with icons and colors",
+    desc: "Read terminal output with parsed agent status",
   },
   {
-    name: "set_progress",
-    desc: "Show a progress bar with label in the sidebar",
+    name: "control_health",
+    desc: "Inspect socket, binary, process, and control-plane health",
   },
-  { name: "close_surface", desc: "Close a terminal or browser surface" },
   {
-    name: "browser_surface",
-    desc: "Open a scriptable browser alongside terminal panes",
+    name: "close_surface",
+    desc: "Close a surface or managed agent with live-agent guards",
   },
+  {
+    name: "update_surface",
+    desc: "Rename or move a terminal surface",
+  },
+  { name: "list_surfaces", desc: "List workspace, pane, and surface topology" },
 ];
 
 const agentTools: Tool[] = [
   {
     name: "spawn_agent",
-    desc: "Launch a Claude, Codex, Gemini, Cursor, or Kiro agent in a new pane",
+    desc: "Launch a Claude, Codex, Gemini, Cursor, or Kiro agent in a pane",
   },
   {
-    name: "send_to_agent",
-    desc: "Deliver a message to a running agent",
+    name: "report_to_parent",
+    desc: "Escalate a blocker to the direct parent agent",
   },
   {
-    name: "read_agent_output",
-    desc: "Capture an agent\u2019s latest terminal output",
-  },
-  {
-    name: "get_agent_state",
-    desc: "Check agent status: running, idle, waiting, done, error",
+    name: "send_to",
+    desc: "Send text, commands, or keys to an agent or surface",
   },
   {
     name: "list_agents",
-    desc: "Enumerate all active agents across workspaces",
+    desc: "List addressable agents with lifecycle state",
   },
   {
     name: "wait_for",
     desc: "Block until an agent reaches a target state",
-  },
-  {
-    name: "wait_for_all",
-    desc: "Block until multiple agents finish in parallel",
-  },
-  {
-    name: "stop_agent",
-    desc: "Gracefully stop a running agent",
-  },
-  {
-    name: "kill",
-    desc: "Force-kill an unresponsive agent process",
-  },
-  {
-    name: "my_agents",
-    desc: "Get all children of a parent agent with live screen status",
-  },
-  {
-    name: "interact",
-    desc: "Send interactive input to an agent waiting for a response",
   },
 ];
 
@@ -111,7 +72,7 @@ export function Tools() {
 
         <div className="max-w-[640px] mx-auto mb-12">
           <div className="text-xs uppercase tracking-[0.1em] text-text-dim mb-4 pl-0.5 font-medium">
-            Core &mdash; terminal operations
+            Terminal and control
           </div>
           {coreTools.map((tool) => (
             <ToolItem key={tool.name} tool={tool} />

@@ -84,18 +84,18 @@ ID so distinct identities cannot collide after filename sanitization.
 
 ## Cutting a release (versioning, on the go)
 
-One command does the whole pipeline:
+The current tagged release is `0.4.65`. One command cuts the next version:
 
 ```bash
-~/Gits/cmuxlayer/scripts/release.sh 0.4.44                     # asks once before pushing
-~/Gits/cmuxlayer/scripts/release.sh 0.4.44 --yes               # no prompt
-~/Gits/cmuxlayer/scripts/release.sh 0.4.44 --dry-run           # print every step, change nothing
-~/Gits/cmuxlayer/scripts/release.sh 0.4.44 --require-contract  # a skipped real-cmux gate aborts
+~/Gits/cmuxlayer/scripts/release.sh X.Y.Z                     # asks once before pushing
+~/Gits/cmuxlayer/scripts/release.sh X.Y.Z --yes               # no prompt
+~/Gits/cmuxlayer/scripts/release.sh X.Y.Z --dry-run           # print every step, change nothing
+~/Gits/cmuxlayer/scripts/release.sh X.Y.Z --require-contract  # a skipped real-cmux gate aborts
 ```
 
 It will: verify a clean tree + green typecheck/tests, run the real-cmux
 contract gate, bump `package.json` on `wt/release-<version>`, open a PR, wait
-for both required contexts to register, watch them, re-check the exact PR head,
+for the required `perf-budget` and `test` contexts, re-check the exact PR head,
 and plain-merge with that head pinned. It fast-forwards the checkout back to
 `main` before tagging the resulting merge commit. Only then does it update the Homebrew formula's `url` + `sha256`, push
 the tap, **sync the tap clone Homebrew itself reads**, upgrade/verify the Mac
@@ -103,8 +103,8 @@ that cut the release, and run the reconnect sweep. Run the verification helper
 on each additional Mac:
 
 ```bash
-~/Gits/cmuxlayer/scripts/release-verify.sh 0.4.44                # sync clone → upgrade → assert
-~/Gits/cmuxlayer/scripts/release-verify.sh 0.4.44 --verify-only  # assert only; never upgrades
+~/Gits/cmuxlayer/scripts/release-verify.sh 0.4.65                # sync clone → upgrade → assert
+~/Gits/cmuxlayer/scripts/release-verify.sh 0.4.65 --verify-only  # assert only; never upgrades
 ```
 
 ### The release receipt (stop trusting scrollback)
@@ -154,8 +154,8 @@ until locking lands.
 Read one directly:
 
 ```bash
-node ~/Gits/cmuxlayer/scripts/release-receipt.mjs show 0.4.44
-node ~/Gits/cmuxlayer/scripts/release-receipt.mjs path 0.4.44
+node ~/Gits/cmuxlayer/scripts/release-receipt.mjs show 0.4.65
+node ~/Gits/cmuxlayer/scripts/release-receipt.mjs path 0.4.65
 ```
 
 Receipt writes are never a gate: a failed receipt write warns and the release
@@ -238,16 +238,18 @@ pushed by then, so a missing brew or missing clone is recorded as
 Manual equivalent, if you prefer:
 
 1. `package.json` → bump `version`.
-2. Commit + open PR + merge to `main`.
-3. `git tag -a vX.Y.Z -m "..." <merge-sha> && git push origin vX.Y.Z`.
+2. Commit + open a bump PR, wait for required checks `perf-budget` and `test`,
+   confirm its head has not changed, then plain-merge to `main`.
+3. `git tag -a vX.Y.Z -m "..." <merge-sha> && git push origin vX.Y.Z`. The
+   tag target is the PR merge commit.
 4. `curl -fsSL https://github.com/EtanHey/cmuxlayer/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256`.
 5. In `~/Gits/homebrew-layers/Formula/cmuxlayer.rb` set `url` to the new tag and
    `sha256` to the value from step 4; `brew audit etanhey/layers/cmuxlayer`;
    commit + push.
 6. Sync the tap Homebrew reads:
    `git -C "$(brew --repository)/Library/Taps/etanhey/homebrew-layers" fetch origin && git -C "$(brew --repository)/Library/Taps/etanhey/homebrew-layers" reset --hard origin/main`.
-7. `brew upgrade etanhey/layers/cmuxlayer`.
-8. Assert `brew list --versions cmuxlayer` is exactly `cmuxlayer X.Y.Z`.
+7. Run `scripts/release-verify.sh X.Y.Z` on each Mac. Use `--verify-only` when
+   that Mac must not upgrade.
 
 The formula also carries a `head` block, so `--HEAD` installs always track
 `main` with **no** sha/tag bump — that is the on-the-go dogfood path.

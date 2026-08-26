@@ -26,11 +26,11 @@ export const metadata: Metadata = {
   alternates: { canonical: "/" },
   title: "cmuxLayer — Terminal MCP for AI Agents",
   description:
-    "MCP server that gives AI agents programmatic control over terminal panes. 29 tools. Split, read, send, automate. One Unix socket.",
+    "MCP server with 10 public tools for controlling terminal panes and managing CLI agents through one Unix socket.",
   openGraph: {
     title: "cmuxLayer — Terminal MCP for AI Agents",
     description:
-      "29 MCP tools. 0.2ms socket latency. Spawn agents, split panes, read screens. One Unix socket.",
+      "10 public MCP tools. 0.2ms socket latency. Spawn agents, send input, and read screens through one Unix socket.",
     url: "https://cmuxlayer.etanheyman.com",
     siteName: "cmuxLayer",
     type: "website",
@@ -47,7 +47,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "cmuxLayer — Terminal MCP for AI Agents",
     description:
-      "22 MCP tools. 0.2ms socket latency. Spawn agents, split panes, read screens.",
+      "10 public MCP tools. 0.2ms socket latency. Spawn agents, send input, and read screens.",
     images: ["/og.png"],
   },
   icons: {

@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that with a focused 10-tool public MCP surface for terminal workspaces.
+cmuxLayer exposes a 10-tool public MCP surface for controlling cmux terminal workspaces and managing CLI agents.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -11,17 +11,16 @@
 [![MCP Tools](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-3023%20passing-brightgreen.svg)](#testing)
 
-## Quick Start
+## Quick start
 
 ```bash
 brew install etanhey/layers/cmuxlayer       # stable, pinned release
 brew install --HEAD etanhey/layers/cmuxlayer # or: dogfood the latest main
 ```
 
-This installs the `cmuxlayer` command (plus `cmuxlayer-app-server` /
-`cmuxlayer-proxy`). Requires [cmux](https://github.com/manaflow-ai/cmux) to be
-running. For how the golem fleet wires, versions, and dogfoods it — and the
-`CMUX_SOCKET_PATH` instance pin — see
+This installs the `cmuxlayer` command plus `cmuxlayer-app-server` and
+`cmuxlayer-proxy`. [cmux](https://github.com/manaflow-ai/cmux) must be running.
+For fleet wiring, versions, dogfooding, and the `CMUX_SOCKET_PATH` pin, see
 [docs/releases-and-brew.md](docs/releases-and-brew.md).
 
 Then set up this machine:
@@ -30,35 +29,31 @@ Then set up this machine:
 cmuxlayer init
 ```
 
-The wizard asks which repositories agents may be spawned in, whether cmuxlayer
-should call per-repo shell launcher functions or the agent CLIs directly, and
-whether agents run unattended or stop to ask for tool approval. It writes the
-config those answers produce (`~/.config/cmuxlayer/env.sh`, plus a launcher
-registry in launcher mode), which cmuxlayer reads at startup — so a GUI-launched
-MCP client gets the same configuration as a terminal one, without sourcing
-anything. It never rewrites an existing file without asking, and backs one up
-before it does.
-`--yes` with `--repo <name>=<path>` does the same non-interactively for scripted
-installs. Nothing else in cmuxlayer assumes a particular directory layout — see
+The wizard selects spawnable repositories, per-repo launchers or direct CLI
+launches, and approval behavior. It writes `~/.config/cmuxlayer/env.sh` and, in
+launcher mode, a launcher registry. cmuxlayer reads both at startup, including
+when an MCP client starts it from a GUI. The wizard asks before replacing a file
+and creates a backup first.
+
+For scripted installs, pass `--yes` with `--repo <name>=<path>`. cmuxlayer does
+not assume a fixed repository layout. See
 [docs/fresh-install.md](docs/fresh-install.md) for the walkthrough and
 [docs/registry-optional-spawn.md](docs/registry-optional-spawn.md) for how each
 lane behaves.
 
 ### Optional fleet sidebar
 
-The lane-grouped fleet view is opt-in. Install its fallback file with:
+Install the optional lane-grouped fleet view with:
 
 ```bash
 bun run install:fleet-sidebar
 ```
 
-cmuxLayer then refreshes `~/.config/cmux/sidebars/fleet.swift` from its
-reconciled live-agent snapshot. It does not change cmux settings or replace the
-stock sidebar. To activate it, right-click the sidebar toggle and choose
-`fleet`; choose the stock entry there whenever you want the fallback UI.
+cmuxLayer refreshes `~/.config/cmux/sidebars/fleet.swift` from its reconciled
+live-agent snapshot. It does not change cmux settings or replace the stock
+sidebar. Activate it from the sidebar toggle by choosing `fleet`.
 
-Development and screenshot QA use a separate picker entry and never publish to
-the live `fleet.swift` path:
+Development and screenshot QA use a separate picker entry:
 
 ```bash
 bun run install:fleet-sidebar:dev
@@ -100,15 +95,15 @@ When unset or blank, the signed 10-tool thin-core default applies. When set, the
 environment value overrides that default for the session. Unknown names are
 warned and ignored while valid names still load.
 
-Autonomous prompt resolution is experimental and disabled by default. With the
-default policy, cmuxlayer still detects prompt choosers, marks the agent
-`blocked_on_prompt`, and escalates without sending any key. Setting
+Autonomous prompt resolution is experimental and disabled by default.
+cmuxlayer detects prompt choosers, marks the agent `blocked_on_prompt`, and
+escalates without sending a key. Setting
 `CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE=1` restores the known-imperfect
 Escape-based resolver for isolated testing only; do not enable it for fleet use.
 
 > **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
 
-## What You Can Do
+## What you can do
 
 Tell your AI agent things like:
 
@@ -118,21 +113,21 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer retains 45 internal tool definitions, but only 10 are registered and callable through MCP. The other 35 are not exposed through ToolSearch or any other MCP path. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+cmuxLayer retains 45 internal tool definitions; only 10 are registered and callable through MCP. The other 35 are not exposed through ToolSearch or any other MCP path. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
-## Agent Routing Workflow
+## Agent routing workflow
 
 For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. `send_to` also preserves the registry-independent escape hatch: use `mode:"surface"`, `mode:"command"`, or `mode:"key"` with a raw surface ref for shells, launch/resume commands, and stuck-pane recovery.
 
 See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
-## MCP Tools (10 registered and callable)
+## MCP tools (10 registered and callable)
 
-All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
+All public tools include [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) that clients can use in safety policy.
 
 **Public MCP surface** — `spawn_agent` `report_to_parent` `send_to` `read_screen` `list_agents` `wait_for` `control_health` `close_surface` `update_surface` `list_surfaces`
 
-The other 35 internal definitions, including `interact`, are not callable. The detailed inventory below names 44 live definitions; the 45th source registration is a removed error-only tombstone and is intentionally omitted from operator guidance. This boundary is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
+The other 35 internal definitions, including `interact`, are not callable. The detailed inventory below names 44 live definitions; the 45th source registration is a removed error-only tombstone and is omitted from operator guidance.
 
 **Terminal control (16)** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `update_surface` `browser_surface`
 
@@ -208,7 +203,7 @@ The other 35 internal definitions, including `interact`, are not callable. The d
 
 </details>
 
-## Supported Agents
+## Supported agents
 
 | CLI | Command | Auto-detected |
 |-----|---------|---------------|
@@ -216,6 +211,7 @@ The other 35 internal definitions, including `interact`, are not callable. The d
 | Codex | `codex` | status, model, context % |
 | Gemini CLI | `gemini` | status, model, tokens, context % |
 | Cursor | `cursor agent` | status, model, tokens, context % |
+| Kiro CLI | `kiro-cli` | status |
 `read_screen` auto-detects agent type and parses metadata from terminal output.
 
 ## Architecture
@@ -230,7 +226,7 @@ AI Agent  ─── MCP ───>  cmuxLayer  ─── Unix socket ───> 
                          └── Metacomm WRITE — per-agent inbox file + Monitor dispatch
 ```
 
-The socket client connects to cmux via Unix socket. Auto-reconnects on disconnect, falls back to CLI subprocess if socket is unavailable.
+The socket client connects to cmux through a Unix socket. It reconnects after a disconnect and falls back to a CLI subprocess when the socket is unavailable.
 
 | Connection | Latency | Speedup |
 |------------|---------|---------|

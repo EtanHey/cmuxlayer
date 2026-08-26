@@ -514,13 +514,17 @@ export function AnimatedDemo() {
     );
     await sleep(1000);
 
-    // Phase 7 — wait_for_all
+    // Phase 7 — wait_for
     appendOrc("");
     appendOrc(
       dim("\u250C\u2500") +
         " " +
-        brg("wait_for_all") +
+        brg("wait_for") +
         "(" +
+        cyn("ids") +
+        "=" +
+        amb('["opus-voice-a3f7", "sonnet-brain-c1d4"]') +
+        ", " +
         cyn("target") +
         "=" +
         amb('"done"') +
