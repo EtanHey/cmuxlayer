@@ -32,7 +32,7 @@
   },
   "ceilings": {
     "list_surfaces": {
-      "p50_ms": 378.51,
+      "p50_ms": 1,
       "p95_ms": 434.5
     },
     "read_screen": {
