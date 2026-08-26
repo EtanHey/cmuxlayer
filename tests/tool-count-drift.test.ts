@@ -3,9 +3,9 @@ import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
-const EXPECTED_TOOL_COUNT = 42;
-const EXPECTED_DEFAULT_PALETTE_COUNT = 12;
-// 42 is the callable-tool count; 12 is the signed default-palette count.
+const EXPECTED_TOOL_COUNT = 45;
+const EXPECTED_DEFAULT_PALETTE_COUNT = 10;
+// 45 is the callable-tool count; 10 is the ratified default-palette registry.
 const EXPECTED_DOCUMENTED_COUNTS = new Set([
   EXPECTED_TOOL_COUNT,
   EXPECTED_DEFAULT_PALETTE_COUNT,
@@ -138,8 +138,8 @@ describe("tool-count drift guard", () => {
   );
 
   it("goes red when a fixture count is mutated", () => {
-    const fixture = "The server exposes 42 tools.\n";
-    const mutatedFixture = fixture.replace("42", "41");
+    const fixture = "The server exposes 45 tools.\n";
+    const mutatedFixture = fixture.replace("45", "44");
 
     expect(() =>
       assertDocumentedCounts(
@@ -147,7 +147,7 @@ describe("tool-count drift guard", () => {
         EXPECTED_TOOL_COUNT,
       ),
     ).toThrow(
-      "fixtures/tool-count.md:1 documents 41; source registers 42 (The server exposes 41 tools.)",
+      "fixtures/tool-count.md:1 documents 44; source registers 45 (The server exposes 44 tools.)",
     );
   });
 
@@ -156,19 +156,19 @@ describe("tool-count drift guard", () => {
       assertDocumentedCounts(
         [{
           path: "fixtures/tool-count-badge.md",
-          content: "badge/MCP-41%20tools-green.svg",
+          content: "badge/MCP-44%20tools-green.svg",
         }],
         EXPECTED_TOOL_COUNT,
       ),
-    ).toThrow("fixtures/tool-count-badge.md:1 documents 41; source registers 42");
+    ).toThrow("fixtures/tool-count-badge.md:1 documents 44; source registers 45");
   });
 
   it("recognizes hyphenated singular tool counts", () => {
     expect(() =>
       assertDocumentedCounts(
-        [{ path: "fixtures/tool-count-hyphen.md", content: "The server exposes 41-tool default.\n" }],
+        [{ path: "fixtures/tool-count-hyphen.md", content: "The server exposes 44-tool default.\n" }],
         EXPECTED_TOOL_COUNT,
       ),
-    ).toThrow("fixtures/tool-count-hyphen.md:1 documents 41; source registers 42");
+    ).toThrow("fixtures/tool-count-hyphen.md:1 documents 44; source registers 45");
   });
 });

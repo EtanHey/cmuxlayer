@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 35 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 45 MCP tools that give AI agents programmatic control over terminal workspaces.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -8,7 +8,7 @@
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-35%20tools-green.svg)](https://modelcontextprotocol.io)
+[![MCP Tools](https://img.shields.io/badge/MCP-45%20tools-green.svg)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-3023%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
@@ -96,7 +96,7 @@ To keep only a per-session resident subset of tools, set
 `CMUXLAYER_DEFAULT_PALETTE` to comma-separated bare tool names, for example
 `list_surfaces,spawn_agent,send_to`. The server also exposes `expand_palette`,
 which makes every deferred tool available for the rest of that MCP session.
-When unset or blank, the signed 12-tool thin-core default applies. When set, the
+When unset or blank, the signed 10-tool thin-core default applies. When set, the
 environment value overrides that default for the session. Unknown names are
 warned and ignored while valid names still load.
 
@@ -118,7 +118,7 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer keeps 42 MCP tools callable for terminal control, screen reading, layout management, and multi-agent orchestration. The default palette is intentionally limited to 12; the remaining tools are loaded through ToolSearch. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer keeps 45 MCP tools callable for terminal control, screen reading, layout management, and multi-agent orchestration. The default palette is intentionally limited to 10; the remaining tools are loaded through ToolSearch. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent Routing Workflow
 
@@ -126,7 +126,7 @@ For managed agents, use the agent-first path: `list_agents` to find the target, 
 
 See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
-## MCP Tools (42 registered, 12 default)
+## MCP Tools (45 registered, 10 default)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 

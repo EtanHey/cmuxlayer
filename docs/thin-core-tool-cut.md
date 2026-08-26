@@ -1,12 +1,12 @@
 # Thin-core tool cut
 
-This release keeps every cmuxlayer capability except the explicitly deleted `reorder_surface` tool registered while reducing the default MCP palette to 12 tools. The remaining definitions use `defer_loading` and stay ToolSearch-callable.
+The current surface keeps every cmuxlayer capability except the explicitly deleted `reorder_surface` tool registered while reducing the default MCP palette to 10 tools. The remaining definitions stay ToolSearch-callable.
 
 The deferral is **INTERIM and reversible**. A separate architecture decision will determine whether low-frequency operations remain MCP tools or move to CLI/programmatic surfaces.
 
 ## Default palette
 
-`spawn_agent` · `send_to` · `wait_for` · `read_screen` · `my_agents` · `list_agents` · `broadcast` · `close_surface` · `dispatch_to_agent` · `list_surfaces` · `control_health` · `stop_agent`
+`spawn_agent` · `report_to_parent` · `send_to` · `read_screen` · `list_agents` · `wait_for` · `control_health` · `close_surface` · `update_surface` · `list_surfaces`
 
 ## Consolidated contracts
 
@@ -16,7 +16,7 @@ The deferral is **INTERIM and reversible**. A separate architecture decision wil
 
 The enumerated legacy mapping contains eight names, despite the signed-off prose calling it “9→3”: `send_to_agent`, `send_input`, `send_command`, `send_key`, `new_worktree_split`, `spawn_in_workspace`, `new_split`, and `wait_for_all`. They remain callable for one release, are ToolSearch-deferred, emit runtime warnings, and carry replacement metadata. `// DRIFT: retire next release` in `src/server.ts` is the removal marker.
 
-The signed rethink moves `interact` off the default palette and deletes `reorder_surface` entirely. The signed disposition (orc 18:09) adds `stop_agent`; with `delete_workspace` landed upstream, the reconciled inventory is therefore 12 default + 22 interim-deferred operations + 8 interim-deferred aliases = 42 registered tools.
+The current validation registry in `src/palette.ts` has 10 default tool names. Source registration has 45 unique callable tools; the drift guard checks both numbers against current documentation in CI.
 
 ## Representative boot receipt
 
@@ -25,10 +25,9 @@ Measured from the exact MCP `tools/list` JSON using UTF-8 byte length:
 | | Definitions loaded at boot | Schema bytes |
 | --- | ---: | ---: |
 | Before (`v0.3.45`) | 42 | 50,126 |
-| After | 12 | 17,282 |
-| Reduction | 30 | 32,844 (65.5%) |
+| Current default | 10 | Re-measure before publishing a byte claim |
 
-All 42 remaining tools are present in `tools/list`; the 30 non-default definitions carry interim `defer_loading:true` metadata for ToolSearch. `reorder_surface` is absent.
+All 45 callable tools remain available; the 10-name default surface is defined in `src/palette.ts`. `reorder_surface` is absent.
 
 ## Reference sweep
 

@@ -93,6 +93,8 @@ jobs:
   test:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    env:
+      CMUXLAYER_RUN_TOOL_COUNT_DRIFT: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
