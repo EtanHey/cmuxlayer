@@ -32,6 +32,8 @@ export interface WatchObserved<T> {
 
 export interface WatchSpec {
   owner: string;
+  /** Managed child whose lifecycle owns this watch. */
+  subject_agent_id?: string;
   target: string;
   predicate?: WatchAgentPredicate;
   marker?: string;
@@ -47,6 +49,7 @@ export interface WatchRecord extends WatchSpec {
   target_kind: "file" | "agent";
   watermark?: number;
   fingerprint?: string;
+  missing_since_at_ms?: number;
   armed_at_ms: number;
   last_heartbeat_at_ms: number;
   liveness_source: string;
@@ -76,6 +79,7 @@ export type WatchNotificationReason =
 export interface WatchNotification {
   watch_id: string;
   owner: string;
+  subject_agent_id?: string;
   target: string;
   target_kind: "file" | "agent";
   reason: WatchNotificationReason;
@@ -153,6 +157,7 @@ const WRITE_LOCK_STALE_MS = 30_000;
 const WRITE_LOCK_RETRY_MS = 5;
 const NOTIFY_RETRY_BASE_MS = 1_000;
 const NOTIFY_RETRY_MAX_MS = 60_000;
+const FILE_MISSING_DEBOUNCE_MS = 2_000;
 
 interface WatchRegistryState {
   version: unknown;
@@ -229,6 +234,18 @@ function isWatchRecord(value: unknown): value is WatchRecord {
     return false;
   }
   if (value.fingerprint !== undefined && typeof value.fingerprint !== "string") {
+    return false;
+  }
+  if (
+    value.subject_agent_id !== undefined &&
+    typeof value.subject_agent_id !== "string"
+  ) {
+    return false;
+  }
+  if (
+    value.missing_since_at_ms !== undefined &&
+    !isFiniteNumber(value.missing_since_at_ms)
+  ) {
     return false;
   }
   if (
@@ -435,8 +452,16 @@ function contentFingerprint(
     content = io.read(path);
     after = io.stat(path);
   }
-  const digest = createHash("sha256").update(content).digest("hex");
-  return [digest, after.mtimeNs, after.ctimeNs, after.ino, after.size].join(":");
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function storedContentDigest(
+  fingerprint: string | undefined,
+): string | undefined {
+  const legacy = fingerprint?.match(
+    /^([a-f\d]{64}):[^:]+:[^:]+:[^:]+:[^:]+$/i,
+  );
+  return legacy?.[1] ?? fingerprint;
 }
 
 function assertSpec(
@@ -561,9 +586,11 @@ export async function armWatch(
   }
   const source: WatchObservedSource =
     checked.targetKind === "file" ? "process" : "screen";
+  const subjectAgentId = cleanString(spec.subject_agent_id);
   const record: WatchRecord = {
     watch_id: randomUUID(),
     owner: checked.owner,
+    ...(subjectAgentId ? { subject_agent_id: subjectAgentId } : {}),
     target,
     ...(checked.predicate ? { predicate: checked.predicate } : {}),
     ...(checked.marker ? { marker: checked.marker } : {}),
@@ -587,6 +614,45 @@ export async function armWatch(
   return record;
 }
 
+export function removeWatches(
+  predicate: (watch: WatchRecord) => boolean,
+  opts: WatchRegistryOptions = {},
+): Promise<number> {
+  const path = registryPathFor(opts);
+  return withWriteLock(path, () => {
+    const registry = readRegistryState(path);
+    let removed = 0;
+    const rows = registry.rows.filter((row) => {
+      if (!isWatchRecord(row) || !predicate(row)) return true;
+      removed += 1;
+      return false;
+    });
+    if (removed > 0) writeRegistry(path, registry.version, rows);
+    return removed;
+  });
+}
+
+export function scopeWatchToSubject(
+  watchId: string,
+  subjectAgentId: string,
+  opts: WatchRegistryOptions = {},
+): Promise<boolean> {
+  const subject = cleanString(subjectAgentId);
+  if (!subject) return Promise.resolve(false);
+  const path = registryPathFor(opts);
+  return withWriteLock(path, () => {
+    const registry = readRegistryState(path);
+    let updated = false;
+    const rows = registry.rows.map((row) => {
+      if (!isWatchRecord(row) || row.watch_id !== watchId) return row;
+      updated = true;
+      return { ...row, subject_agent_id: subject };
+    });
+    if (updated) writeRegistry(path, registry.version, rows);
+    return updated;
+  });
+}
+
 function notificationFor(
   record: WatchRecord,
   reason: WatchNotificationReason,
@@ -596,6 +662,9 @@ function notificationFor(
   return {
     watch_id: record.watch_id,
     owner: record.owner,
+    ...(record.subject_agent_id
+      ? { subject_agent_id: record.subject_agent_id }
+      : {}),
     target: record.target,
     target_kind: record.target_kind,
     reason,
@@ -696,6 +765,17 @@ export async function sweepWatches(
       >;
 
       if (!exists) {
+        if (record.target_kind === "file") {
+          const missingSince = record.missing_since_at_ms ?? observedAt;
+          if (observedAt - missingSince < FILE_MISSING_DEBOUNCE_MS) {
+            result.armed.push(record.watch_id);
+            return {
+              ...record,
+              ...heartbeat,
+              missing_since_at_ms: missingSince,
+            };
+          }
+        }
         const reason: WatchNotificationReason =
           record.target_kind === "agent" ? "consumer_died" : "target_missing";
         const notification = notificationFor(record, reason, observedAt);
@@ -743,7 +823,7 @@ export async function sweepWatches(
         record.target_kind === "file"
           ? record.change === "content"
             ? typeof observedValue === "string" &&
-              observedValue !== record.fingerprint
+              observedValue !== storedContentDigest(record.fingerprint)
             : typeof observedValue === "number" &&
               observedValue > (record.watermark ?? 0)
           : observedValue === record.predicate;
@@ -797,7 +877,15 @@ export async function sweepWatches(
       }
 
       result.armed.push(record.watch_id);
-      return { ...record, ...heartbeat, observed_value: observedValue };
+      return {
+        ...record,
+        ...heartbeat,
+        missing_since_at_ms: undefined,
+        observed_value: observedValue,
+        ...(record.change === "content" && typeof observedValue === "string"
+          ? { fingerprint: observedValue }
+          : {}),
+      };
     });
     if (registry.watches.length > 0) {
       writeRegistry(path, registry.version, watches);

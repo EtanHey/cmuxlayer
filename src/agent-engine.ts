@@ -121,6 +121,7 @@ import type { CloseForensicsSweepResult } from "./close-forensics.js";
 import {
   armWatch as armDeclaredWatch,
   readWatchRegistry,
+  removeWatches,
   sweepWatches,
   type WatchAgentObservation,
   type WatchNotify,
@@ -1658,6 +1659,7 @@ export class AgentEngine {
   private watchRegistryNow?: () => number;
   private watchNotify: WatchNotify;
   private watchSweepInFlight = false;
+  private childReportWatchPrunePending = false;
   /** Best-effort close-forensics ingest; null when disabled. */
   private closeForensicsRunner:
     | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
@@ -1828,6 +1830,7 @@ export class AgentEngine {
     this.watchRegistryPath = opts?.watchRegistryPath;
     this.watchRegistryNow = opts?.watchRegistryNow;
     this.watchNotify = opts?.watchNotify ?? (async () => {});
+    this.childReportWatchPrunePending = Boolean(this.watchRegistryPath);
     // Default DISABLED: bare construction (tests, libraries) must never read the
     // real `~/.cmuxterm/events.jsonl`. Production entrypoints inject the real
     // runner (see app-server-runtime / server.ts createServer). `null` keeps it
@@ -6466,6 +6469,7 @@ export class AgentEngine {
         newlySurfacelessAgentIds.add(finalized.agent_id);
       }
     }
+    await this.retryClosedChildReportWatchPrune();
     const discovered = await discovery.scan(true);
     await this.registry.listMerged(discovery, {
       force: true,
@@ -6500,6 +6504,64 @@ export class AgentEngine {
     } catch {
       // Sidebar/status publication is auxiliary. Boot placement may go live
       // once registry ingestion and the provenance-gated sweep have completed.
+    }
+  }
+
+  /**
+   * A daemon restart must not re-arm report watches owned by children that are
+   * already closed or no longer belong to the recorded parent. New rows carry
+   * subject_agent_id; legacy rows are pruned only when their target exactly
+   * matches a persisted child's engine-issued report_path.
+   */
+  private async pruneClosedChildReportWatches(): Promise<void> {
+    if (!this.watchRegistryPath) return;
+    const agents = this.registry.list();
+    const byReportPath = new Map<string, AgentRecord[]>();
+    for (const agent of agents) {
+      if (!agent.report_path) continue;
+      const path = resolve(agent.report_path);
+      byReportPath.set(path, [...(byReportPath.get(path) ?? []), agent]);
+    }
+    await removeWatches(
+      (watch) => {
+        if (watch.target_kind !== "file" || watch.change !== "content") {
+          return false;
+        }
+        const subjects = watch.subject_agent_id
+          ? [
+              this.registry.get(watch.subject_agent_id) ??
+                this.stateMgr.readState(watch.subject_agent_id),
+            ].filter((subject): subject is AgentRecord => Boolean(subject))
+          : (byReportPath.get(resolve(watch.target)) ?? []);
+        if (subjects.length === 0) return Boolean(watch.subject_agent_id);
+        return !subjects.some(
+          (subject) =>
+            subject.user_killed !== true &&
+            !subject.deletion_intent &&
+            !TERMINAL_STATES.has(subject.state) &&
+            subject.parent_agent_id === watch.owner,
+        );
+      },
+      { registryPath: this.watchRegistryPath },
+    );
+  }
+
+  scheduleClosedChildReportWatchPrune(): void {
+    if (this.watchRegistryPath) this.childReportWatchPrunePending = true;
+  }
+
+  private async retryClosedChildReportWatchPrune(): Promise<void> {
+    if (!this.childReportWatchPrunePending) return;
+    this.childReportWatchPrunePending = false;
+    try {
+      await this.pruneClosedChildReportWatches();
+    } catch (error) {
+      this.childReportWatchPrunePending = true;
+      this.sweepDebugLog(
+        `[cmuxlayer] child report watch prune deferred: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -7690,7 +7752,10 @@ export class AgentEngine {
       // before normal terminal cleanup can act on a closed pane.
       await time("transcript_ms", () => this.retryDeferredTranscriptCaptures());
       if (this.shouldYieldSweep()) return;
-      await time("watches_ms", () => this.sweepWatchesBestEffort());
+      await time("watches_ms", async () => {
+        await this.retryClosedChildReportWatchPrune();
+        await this.sweepWatchesBestEffort();
+      });
       if (this.shouldYieldSweep()) return;
       if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
         await time("terminal_purge_ms", () =>

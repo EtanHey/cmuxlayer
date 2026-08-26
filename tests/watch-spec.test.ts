@@ -15,6 +15,7 @@ import {
   WatchArmError,
   armWatch,
   readWatchRegistry,
+  removeWatches,
   sweepWatches,
 } from "../src/watch-spec.js";
 
@@ -102,6 +103,147 @@ describe("WatchSpec arm contract", () => {
     expect(changed.fired).toEqual([armed.watch_id]);
     expect(unchanged.fired).toEqual([]);
     expect(notify).toHaveBeenCalledOnce();
+  });
+
+  it("does not wake when only file metadata changes", async () => {
+    const target = join(TEST_DIR, "metadata-only.md");
+    writeFileSync(target, "same report", "utf8");
+    let revision = 1n;
+    const contentFingerprintIo = {
+      stat: () => ({
+        mtimeNs: revision,
+        ctimeNs: revision,
+        ino: revision,
+        size: 11n,
+      }),
+      read: () => Buffer.from("same report"),
+    };
+    const notify = vi.fn().mockResolvedValue(true);
+    await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        change: "content",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000, contentFingerprintIo },
+    );
+
+    revision = 2n;
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+      contentFingerprintIo,
+    });
+
+    expect(result.fired).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("migrates a legacy revision-suffixed content fingerprint without waking", async () => {
+    const target = join(TEST_DIR, "legacy-fingerprint.md");
+    writeFileSync(target, "same report", "utf8");
+    const notify = vi.fn().mockResolvedValue(true);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        change: "content",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const registry = readWatchRegistry({ registryPath: registryPath() });
+    writeFileSync(
+      registryPath(),
+      JSON.stringify({
+        ...registry,
+        watches: registry.watches.map((watch) => ({
+          ...watch,
+          fingerprint: `${watch.fingerprint}:1:2:3:4`,
+        })),
+      }),
+      "utf8",
+    );
+
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+
+    expect(result.fired).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0]
+        ?.fingerprint,
+    ).toBe(armed.fingerprint);
+  });
+
+  it("debounces delete then identical rewrite without a missing or changed wake", async () => {
+    const target = join(TEST_DIR, "atomic-rewrite.md");
+    writeFileSync(target, "same report", "utf8");
+    const notify = vi.fn().mockResolvedValue(true);
+    await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        change: "content",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    rmSync(target);
+    const missing = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 1_500,
+      notify,
+    });
+    writeFileSync(target, "same report", "utf8");
+    const restored = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+
+    expect(missing.failed).toEqual([]);
+    expect(restored.fired).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("removes scoped watches before a closed child can wake its parent", async () => {
+    const target = join(TEST_DIR, "closed-child.md");
+    writeFileSync(target, "before", "utf8");
+    const notify = vi.fn().mockResolvedValue(true);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        subject_agent_id: "worker-a",
+        target,
+        change: "content",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    await removeWatches(
+      (watch) => watch.subject_agent_id === "worker-a",
+      { registryPath: registryPath() },
+    );
+    writeFileSync(target, "after", "utf8");
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+
+    expect(result.fired).not.toContain(armed.watch_id);
+    expect(readWatchRegistry({ registryPath: registryPath() }).watches).toEqual(
+      [],
+    );
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it("rejects an agent watch without an independent observation provider", async () => {

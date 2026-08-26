@@ -89,6 +89,8 @@ import {
 import {
   WATCH_AGENT_PREDICATES,
   readWatchRegistry,
+  removeWatches,
+  scopeWatchToSubject,
   WatchArmError,
   type WatchNotify,
   type WatchSpec,
@@ -3652,6 +3654,7 @@ export interface CmuxServerContext {
   /** Lifecycle-lock truth for `control_health`, published by the live engine. */
   lifecycleLockStateProvider: (() => LifecycleLockState) | null;
   lifecycleSweepEngine: AgentEngine | null;
+  parentReportPathReservations: Set<string>;
   lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null;
   lifecycleAgentInputDelivererReadyListeners: Set<() => void>;
   setLifecycleAgentInputDeliverer(
@@ -3802,6 +3805,7 @@ export function createServerContext(
     lifecycleStartLastTimeoutAt: null,
     lifecycleLockStateProvider: null,
     lifecycleSweepEngine: null,
+    parentReportPathReservations: new Set(),
     lifecycleAgentInputDeliverer: null,
     lifecycleAgentInputDelivererReadyListeners: new Set(),
     setLifecycleAgentInputDeliverer(deliverer) {
@@ -3827,6 +3831,7 @@ export function createServerContext(
         context.controlHealthTimer = null;
       }
       context.lifecycleSweepEngine = null;
+      context.parentReportPathReservations.clear();
       context.lifecycleAgentInputDeliverer = null;
       context.lifecycleAgentInputDelivererReadyListeners.clear();
       context.originalLaunchCommandsBySurface.clear();
@@ -4118,6 +4123,37 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     model?: string;
   }) => Promise<void> = async () => {};
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
+  let lifecycleScheduleChildReportWatchPrune: (() => void) | null = null;
+  const pruneChildReportWatchesFor = (agentId: string): void => {
+    lifecycleScheduleChildReportWatchPrune?.();
+    removeWatches(
+      (watch) => {
+        if (
+          watch.subject_agent_id !== agentId ||
+          watch.target_kind !== "file" ||
+          watch.change !== "content"
+        ) {
+          return false;
+        }
+        const current = stateMgr.readState(agentId);
+        return (
+          !current ||
+          current.user_killed === true ||
+          current.deletion_intent ||
+          TERMINAL_AGENT_STATES.has(current.state)
+        );
+      },
+      {
+        registryPath:
+          opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+      },
+    ).catch((error) => {
+      console.error(
+        `[cmuxlayer] deferred child watch cleanup for ${agentId}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  };
   let lifecycleRefreshManagedMetadata:
     ((agentId?: string) => Promise<void>) | null = null;
   let lifecycleHealthEngine: AgentEngine | null = null;
@@ -10881,9 +10917,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               WARNING: remedy,
             });
           }
+          const watchCleanup = {
+            watch_cleanup: lifecycleScheduleChildReportWatchPrune
+              ? ("scheduled" as const)
+              : ("best_effort" as const),
+          };
           if (!boundSurface) {
             const data = {
               ...stopContent,
+              ...watchCleanup,
               scope: "agent",
               agent_stopped: true,
               surface_closed: false,
@@ -10916,6 +10958,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
               {
                 ...stopContent,
+                ...watchCleanup,
                 scope: "agent",
                 agent_stopped: true,
                 surface: boundSurface,
@@ -10927,6 +10970,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (boundSurfaceAfterStop === null) {
             const data = {
               ...stopContent,
+              ...watchCleanup,
               scope: "agent",
               agent_stopped: true,
               surface: boundSurface,
@@ -10968,6 +11012,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
               {
                 ...stopContent,
+                ...watchCleanup,
                 scope: "agent",
                 agent_stopped: true,
                 surface: boundSurface,
@@ -10981,6 +11026,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const surfaceClosed = closeContent.surface_closed === true;
           const data = {
             ...stopContent,
+            ...watchCleanup,
             scope: "agent",
             agent_stopped: true,
             surface: boundSurface,
@@ -11292,6 +11338,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const stopped = stateMgr.transition(record.agent_id, "done");
               context.lifecycleRegistry?.set(record.agent_id, stopped);
             }
+            pruneChildReportWatchesFor(record.agent_id);
           } catch (error) {
             if (
               error instanceof Error &&
@@ -12204,6 +12251,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
+            const subjectStillBelongsToOwner = (): boolean => {
+              if (!event.subject_agent_id) return true;
+              const subject =
+                registry.get(event.subject_agent_id) ??
+                stateMgr.readState(event.subject_agent_id);
+              return Boolean(
+                subject &&
+                  subject.parent_agent_id === event.owner &&
+                  subject.user_killed !== true &&
+                  !subject.deletion_intent,
+              );
+            };
+            if (!subjectStillBelongsToOwner()) {
+              return true;
+            }
             let externalDelivered = true;
             if (event.reason !== "predicate_matched" && opts?.watchNotify) {
               try {
@@ -12211,6 +12273,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               } catch {
                 externalDelivered = false;
               }
+            }
+            if (!subjectStillBelongsToOwner()) {
+              return true;
             }
             const owner =
               registry.get(event.owner) ?? stateMgr.readState(event.owner);
@@ -12337,6 +12402,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     context.lifecycleSweepEngine = engine;
     lifecycleHealthEngine = engine;
+    lifecycleScheduleChildReportWatchPrune = () =>
+      engine.scheduleClosedChildReportWatchPrune();
     // F1: closure, harvestability and the health report all resolve state
     // through the same live probe the caller/delivery paths use.
     engine.setLiveStateResolver(liveAgentStateProbe.current);
@@ -12996,24 +13063,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const armParentReportWatch = async (
       parentAgentId: string,
+      childAgentId: string,
       coordination: { report_path: string; done_marker: string },
     ): Promise<string | null> => {
       try {
+        const child =
+          registry.get(childAgentId) ?? stateMgr.readState(childAgentId);
+        if (!child || child.parent_agent_id !== parentAgentId) {
+          return `Report watch was not armed: ${childAgentId} is not a direct child of ${parentAgentId}`;
+        }
         const reportPath = resolve(coordination.report_path);
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
         }).watches.find(
           (watch) =>
             watch.owner === parentAgentId &&
+            (!watch.subject_agent_id ||
+              watch.subject_agent_id === childAgentId) &&
             watch.target === reportPath &&
             watch.change === "content" &&
             watch.state !== "failed",
         );
-        if (existing) return null;
+        if (existing) {
+          if (!existing.subject_agent_id) {
+            await scopeWatchToSubject(existing.watch_id, childAgentId, {
+              registryPath: watchRegistryPath,
+            });
+          }
+          return null;
+        }
         await mkdir(dirname(reportPath), { recursive: true });
         await appendFile(reportPath, "", "utf8");
         await engine.armWatch({
           owner: parentAgentId,
+          subject_agent_id: childAgentId,
           target: reportPath,
           change: "content",
           deadline: Number.MAX_SAFE_INTEGER,
@@ -13023,6 +13106,59 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const detail = error instanceof Error ? error.message : String(error);
         return `Report watch was not armed for ${coordination.report_path}: ${detail}`;
       }
+    };
+    const parentReportPathReservations = context.parentReportPathReservations;
+    const reserveParentReportPath = (
+      parentAgentId: string,
+      reportPath: string,
+      childAgentId?: string,
+    ):
+      | { ok: true; key: string }
+      | { ok: false; message: string } => {
+      const key = JSON.stringify([parentAgentId, reportPath]);
+      if (parentReportPathReservations.has(key)) {
+        return {
+          ok: false,
+          message: `report_path ${reportPath} is already reserved by another child spawn; each child requires a distinct report path`,
+        };
+      }
+      const existingLiveChild = stateMgr.listStates().find(
+        (candidate) =>
+          candidate.agent_id !== childAgentId &&
+          candidate.parent_agent_id === parentAgentId &&
+          candidate.report_path !== null &&
+          candidate.report_path !== undefined &&
+          resolve(candidate.report_path) === reportPath &&
+          candidate.user_killed !== true &&
+          !candidate.deletion_intent &&
+          !TERMINAL_AGENT_STATES.has(candidate.state),
+      );
+      if (existingLiveChild) {
+        return {
+          ok: false,
+          message: `report_path ${reportPath} is already assigned to live child ${existingLiveChild.agent_id}; each child requires a distinct report path`,
+        };
+      }
+      const existingReportWatch = readWatchRegistry({
+        registryPath: watchRegistryPath,
+      }).watches.find(
+        (watch) =>
+          watch.owner === parentAgentId &&
+          watch.target === reportPath &&
+          watch.change === "content" &&
+          watch.state !== "failed" &&
+          (childAgentId === undefined ||
+            (watch.subject_agent_id !== undefined &&
+              watch.subject_agent_id !== childAgentId)),
+      );
+      if (existingReportWatch) {
+        return {
+          ok: false,
+          message: `report_path ${reportPath} is already assigned to child ${existingReportWatch.subject_agent_id ?? "through an existing report watch"}; each child requires a distinct report path`,
+        };
+      }
+      parentReportPathReservations.add(key);
+      return { ok: true, key };
     };
 
     server.tool(
@@ -13447,6 +13583,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         const creation = new CreatedIdentityScope();
+        let reportPathReservationKey: string | null = null;
         try {
           // P11 finding 2: reject a relative override BEFORE anything launches.
           // The zod .refine() covers real MCP calls; this covers direct handler
@@ -13498,6 +13635,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (!existing) {
               return err(new Error(`Agent not found: ${args.resume_agent_id}`));
             }
+            const resumeCoordination = issueSpawnCoordination(
+              existing.agent_id,
+              args.report_path,
+            );
+            if (existing.parent_agent_id) {
+              const reservation = reserveParentReportPath(
+                existing.parent_agent_id,
+                resolve(resumeCoordination.report_path),
+                existing.agent_id,
+              );
+              if (!reservation.ok) {
+                return err(new Error(reservation.message), {
+                  error_code: "REPORT_PATH_IN_USE",
+                });
+              }
+              reportPathReservationKey = reservation.key;
+            }
             const workspace = await canonicalWorkspaceRef(
               args.workspace ?? existing.workspace_id ?? undefined,
             );
@@ -13543,10 +13697,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // the most incident-prone path in this repo -- the exact thing this
             // PR exists to move work OFF. That sliver stays open on #462.
             const resumeMonitorBoot = ensureMonitorBoot(result.agent_id);
-            const resumeCoordination = issueSpawnCoordination(
-              result.agent_id,
-              args.report_path,
-            );
             const resumeContract = buildBootContractInjection(
               result.agent_id,
               resumeMonitorBoot,
@@ -13577,6 +13727,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const reportWatchWarning = result.parent_agent_id
               ? await armParentReportWatch(
                   result.parent_agent_id,
+                  result.agent_id,
                   resumeCoordination,
                 )
               : null;
@@ -13760,6 +13911,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? await readFile(bootPromptPath, "utf8")
             : null;
 
+          if (args.parent_agent_id && args.report_path) {
+            const earlyReservation = reserveParentReportPath(
+              args.parent_agent_id,
+              resolve(args.report_path.trim()),
+            );
+            if (!earlyReservation.ok) {
+              return err(new Error(earlyReservation.message), {
+                error_code: "REPORT_PATH_IN_USE",
+              });
+            }
+            reportPathReservationKey = earlyReservation.key;
+          }
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
           await refreshManagedMetadataBestEffort();
           const callerAgent = resolveCurrentCallerAgent();
@@ -13770,6 +13933,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const effectiveParentAgentId = callerIsWorker
             ? callerAgent!.agent_id
             : (args.parent_agent_id ?? callerAgent?.agent_id);
+          if (effectiveParentAgentId && args.report_path) {
+            const requestedReportPath = resolve(args.report_path.trim());
+            const effectiveReservationKey = JSON.stringify([
+              effectiveParentAgentId,
+              requestedReportPath,
+            ]);
+            if (
+              reportPathReservationKey &&
+              reportPathReservationKey !== effectiveReservationKey
+            ) {
+              parentReportPathReservations.delete(reportPathReservationKey);
+              reportPathReservationKey = null;
+            }
+            if (!reportPathReservationKey) {
+              const reservation = reserveParentReportPath(
+                effectiveParentAgentId,
+                requestedReportPath,
+              );
+              if (!reservation.ok) {
+                return err(new Error(reservation.message), {
+                  error_code: "REPORT_PATH_IN_USE",
+                });
+              }
+              reportPathReservationKey = reservation.key;
+            }
+          }
           const effectiveRole = callerIsWorker ? "worker" : normalizedRole.role;
           const workerCallerWarning = callerIsWorker
             ? `Worker caller ${callerAgent!.agent_id} forced child role to worker and recorded itself as parent; worker-spawned agents cannot claim orchestrator placement.`
@@ -14036,6 +14225,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (result.parent_agent_id) {
             const reportWatchWarning = await armParentReportWatch(
               result.parent_agent_id,
+              result.agent_id,
               coordination,
             );
             if (reportWatchWarning) {
@@ -14346,6 +14536,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(caught, surfaceGonePayload(caught));
           }
           return err(caught);
+        } finally {
+          if (reportPathReservationKey) {
+            parentReportPathReservations.delete(reportPathReservationKey);
+          }
         }
       },
     );
@@ -16322,6 +16516,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 route.workspace_id ?? undefined,
               ),
           });
+          pruneChildReportWatchesFor(args.agent_id);
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({
             event: "stop_agent",
@@ -17702,6 +17897,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     route.workspace_id ?? undefined,
                   ),
               });
+              pruneChildReportWatchesFor(agentId);
               killed.push(agentId);
               appendCloseEvent({
                 event: "kill",
