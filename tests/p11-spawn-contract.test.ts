@@ -497,6 +497,55 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
+  it.each(["stop_agent", "kill", "close_surface"] as const)(
+    "drops a child-scoped report watch after %s terminates the child",
+    async (toolName) => {
+      await server._registeredTools.list_agents.handler({}, {} as never);
+      const engine = server._registeredTools.interact._engine;
+      const reportPath = join(inboxDir, toolName, "report.md");
+      const child: AgentRecord = {
+        ...parentRecord(),
+        agent_id: `terminated-by-${toolName}`,
+        surface_id: "surface:new",
+        surface_uuid: null,
+        state: "done",
+        parent_agent_id: "lead-parent",
+        spawn_depth: 1,
+        role: "worker",
+        report_path: reportPath,
+      };
+      mkdirSync(join(inboxDir, toolName), { recursive: true });
+      writeFileSync(reportPath, "done\n", "utf8");
+      engine.stateMgr.writeState(child);
+      engine.getRegistry().set(child.agent_id, child);
+      await engine.armWatch({
+        owner: "lead-parent",
+        subject_agent_id: child.agent_id,
+        target: reportPath,
+        change: "content",
+        deadline: Number.MAX_SAFE_INTEGER,
+      });
+
+      const args =
+        toolName === "stop_agent"
+          ? { agent_id: child.agent_id, force: true }
+          : toolName === "kill"
+            ? { target: child.agent_id, force: true }
+            : { scope: "surface", surface: child.surface_id, force: true };
+      const result = await server._registeredTools[toolName].handler(
+        args,
+        {} as never,
+      );
+
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      await vi.waitFor(() =>
+        expect(
+          readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+        ).toEqual([]),
+      );
+    },
+  );
+
   it("closes the pane and schedules watch cleanup when the registry lock is contended", async () => {
     await server.close();
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -738,6 +787,82 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         state: "armed",
       }),
     ]);
+  });
+
+  it("leaves non-report subject watches alone when pruning a closed child", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "closed-child-with-marker-watch",
+      state: "done",
+      user_killed: true,
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+    };
+    const target = join(inboxDir, child.agent_id, "marker.md");
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(target, "working\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target,
+      marker: "DONE_MARKER",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    engine.scheduleClosedChildReportWatchPrune();
+    await engine.runSweep();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        subject_agent_id: child.agent_id,
+        marker: "DONE_MARKER",
+        state: "armed",
+      }),
+    ]);
+  });
+
+  it("preserves a prune request scheduled while the previous prune is in flight", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const controlled = engine as unknown as {
+      pruneClosedChildReportWatches: () => Promise<void>;
+      retryClosedChildReportWatchPrune: () => Promise<void>;
+    };
+    let releaseFirstPrune: (() => void) | undefined;
+    const prune = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseFirstPrune = resolve;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    controlled.pruneClosedChildReportWatches = prune;
+
+    engine.scheduleClosedChildReportWatchPrune();
+    const firstRetry = controlled.retryClosedChildReportWatchPrune();
+    await vi.waitFor(() => expect(prune).toHaveBeenCalledOnce());
+    engine.scheduleClosedChildReportWatchPrune();
+    releaseFirstPrune?.();
+    await firstRetry;
+    await controlled.retryClosedChildReportWatchPrune();
+
+    expect(prune).toHaveBeenCalledTimes(2);
   });
 
   it("does not wake a lead for another parent's child report", async () => {

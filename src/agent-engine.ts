@@ -6525,6 +6525,9 @@ export class AgentEngine {
     );
     await removeWatches(
       (watch) => {
+        if (watch.target_kind !== "file" || watch.change !== "content") {
+          return false;
+        }
         const subject = watch.subject_agent_id
           ? (this.registry.get(watch.subject_agent_id) ??
             this.stateMgr.readState(watch.subject_agent_id))
@@ -6546,10 +6549,11 @@ export class AgentEngine {
 
   private async retryClosedChildReportWatchPrune(): Promise<void> {
     if (!this.childReportWatchPrunePending) return;
+    this.childReportWatchPrunePending = false;
     try {
       await this.pruneClosedChildReportWatches();
-      this.childReportWatchPrunePending = false;
     } catch (error) {
+      this.childReportWatchPrunePending = true;
       this.sweepDebugLog(
         `[cmuxlayer] child report watch prune deferred: ${
           error instanceof Error ? error.message : String(error)

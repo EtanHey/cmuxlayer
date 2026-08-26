@@ -4121,6 +4121,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   }) => Promise<void> = async () => {};
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
   let lifecycleScheduleChildReportWatchPrune: (() => void) | null = null;
+  const pruneChildReportWatchesFor = (agentId: string): void => {
+    lifecycleScheduleChildReportWatchPrune?.();
+    removeWatches((watch) => watch.subject_agent_id === agentId, {
+      registryPath:
+        opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+    }).catch((error) => {
+      console.error(
+        `[cmuxlayer] deferred child watch cleanup for ${agentId}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  };
   let lifecycleRefreshManagedMetadata:
     ((agentId?: string) => Promise<void>) | null = null;
   let lifecycleHealthEngine: AgentEngine | null = null;
@@ -10884,20 +10896,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               WARNING: remedy,
             });
           }
-          lifecycleScheduleChildReportWatchPrune?.();
-          removeWatches(
-            (watch) => watch.subject_agent_id === args.agent_id,
-            {
-              registryPath:
-                opts?.watchRegistryPath ??
-                join(context.stateDir, "watch-specs.json"),
-            },
-          ).catch((error) => {
-            console.error(
-              `[cmuxlayer] close_surface deferred child watch cleanup for ${args.agent_id}:`,
-              error instanceof Error ? error.message : String(error),
-            );
-          });
           const watchCleanup = {
             watch_cleanup: lifecycleScheduleChildReportWatchPrune
               ? ("scheduled" as const)
@@ -11319,6 +11317,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const stopped = stateMgr.transition(record.agent_id, "done");
               context.lifecycleRegistry?.set(record.agent_id, stopped);
             }
+            pruneChildReportWatchesFor(record.agent_id);
           } catch (error) {
             if (
               error instanceof Error &&
@@ -16402,6 +16401,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 route.workspace_id ?? undefined,
               ),
           });
+          pruneChildReportWatchesFor(args.agent_id);
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({
             event: "stop_agent",
@@ -17782,6 +17782,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     route.workspace_id ?? undefined,
                   ),
               });
+              pruneChildReportWatchesFor(agentId);
               killed.push(agentId);
               appendCloseEvent({
                 event: "kill",
