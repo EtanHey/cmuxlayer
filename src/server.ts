@@ -10885,7 +10885,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           }
           lifecycleScheduleChildReportWatchPrune?.();
-          void removeWatches(
+          removeWatches(
             (watch) => watch.subject_agent_id === args.agent_id,
             {
               registryPath:
@@ -13829,6 +13829,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const effectiveParentAgentId = callerIsWorker
             ? callerAgent!.agent_id
             : (args.parent_agent_id ?? callerAgent?.agent_id);
+          if (effectiveParentAgentId && args.report_path) {
+            const requestedReportPath = resolve(args.report_path.trim());
+            const existingReportWatch = readWatchRegistry({
+              registryPath: watchRegistryPath,
+            }).watches.find(
+              (watch) =>
+                watch.owner === effectiveParentAgentId &&
+                watch.target === requestedReportPath &&
+                watch.change === "content" &&
+                watch.state !== "failed",
+            );
+            if (existingReportWatch) {
+              return err(
+                new Error(
+                  `report_path ${requestedReportPath} is already assigned to child ${existingReportWatch.subject_agent_id ?? "through an existing report watch"}; each child requires a distinct report path`,
+                ),
+                { error_code: "REPORT_PATH_IN_USE" },
+              );
+            }
+          }
           const effectiveRole = callerIsWorker ? "worker" : normalizedRole.role;
           const workerCallerWarning = callerIsWorker
             ? `Worker caller ${callerAgent!.agent_id} forced child role to worker and recorded itself as parent; worker-spawned agents cannot claim orchestrator placement.`

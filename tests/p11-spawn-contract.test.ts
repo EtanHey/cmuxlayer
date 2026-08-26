@@ -33,8 +33,9 @@ import {
   issueCoordinationContract,
 } from "../src/coordination-paths.js";
 import { recommendedMonitorCommand } from "../src/inbox.js";
-import { readWatchRegistry } from "../src/watch-spec.js";
+import { armWatch, readWatchRegistry } from "../src/watch-spec.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { StateManager } from "../src/state-manager.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -1237,5 +1238,99 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const state = await getState.handler({ agent_id: parsed.agent_id }, {} as never);
     const detail = state.structuredContent ?? JSON.parse(state.content[0].text);
     expect(detail.report_path).toBe(override);
+  });
+
+  it("rejects a shared explicit report_path before launching a second child", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const existingChildUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const spawnedChildUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const baseExec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: existingChildUuid,
+          ref: "surface:existing",
+          title: "existing-child",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+        {
+          id: spawnedChildUuid,
+          ref: "surface:spawned",
+          title: "spawned-child",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:spawned",
+            surface_id: spawnedChildUuid,
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    const parent = parentRecord(parentUuid);
+    const existingChild: AgentRecord = {
+      ...parentRecord(existingChildUuid),
+      agent_id: "existing-child",
+      surface_id: "surface:existing",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+    };
+    const stateMgr = new StateManager(STATE_DIR);
+    stateMgr.writeState(parent);
+    stateMgr.writeState(existingChild);
+    const override = join(inboxDir, "collab", "shared-report.md");
+    mkdirSync(join(inboxDir, "collab"), { recursive: true });
+    writeFileSync(override, "", "utf8");
+    await armWatch(
+      {
+        owner: parent.agent_id,
+        subject_agent_id: existingChild.agent_id,
+        target: override,
+        change: "content",
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: watchRegistryPath },
+    );
+    const splitCalls = () =>
+      (exec as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([, args]: [string, string[]]) => args.includes("new-split"),
+      ).length;
+    const before = splitCalls();
+
+    const second = await spawn({
+      parent_agent_id: parent.agent_id,
+      report_path: override,
+    });
+
+    expect(second.ok).toBe(false);
+    expect(String(second.error)).toMatch(/report_path.*already.*child/i);
+    expect(splitCalls()).toBe(before);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(1);
   });
 });

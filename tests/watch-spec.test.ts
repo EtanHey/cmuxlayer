@@ -141,6 +141,46 @@ describe("WatchSpec arm contract", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it("migrates a legacy revision-suffixed content fingerprint without waking", async () => {
+    const target = join(TEST_DIR, "legacy-fingerprint.md");
+    writeFileSync(target, "same report", "utf8");
+    const notify = vi.fn().mockResolvedValue(true);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        change: "content",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const registry = readWatchRegistry({ registryPath: registryPath() });
+    writeFileSync(
+      registryPath(),
+      JSON.stringify({
+        ...registry,
+        watches: registry.watches.map((watch) => ({
+          ...watch,
+          fingerprint: `${watch.fingerprint}:1:2:3:4`,
+        })),
+      }),
+      "utf8",
+    );
+
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+
+    expect(result.fired).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0]
+        ?.fingerprint,
+    ).toBe(armed.fingerprint);
+  });
+
   it("debounces delete then identical rewrite without a missing or changed wake", async () => {
     const target = join(TEST_DIR, "atomic-rewrite.md");
     writeFileSync(target, "same report", "utf8");

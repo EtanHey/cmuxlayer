@@ -455,6 +455,15 @@ function contentFingerprint(
   return createHash("sha256").update(content).digest("hex");
 }
 
+function storedContentDigest(
+  fingerprint: string | undefined,
+): string | undefined {
+  const legacy = fingerprint?.match(
+    /^([a-f\d]{64}):[^:]+:[^:]+:[^:]+:[^:]+$/i,
+  );
+  return legacy?.[1] ?? fingerprint;
+}
+
 function assertSpec(
   spec: WatchSpec,
   opts: WatchRegistryOptions,
@@ -814,7 +823,7 @@ export async function sweepWatches(
         record.target_kind === "file"
           ? record.change === "content"
             ? typeof observedValue === "string" &&
-              observedValue !== record.fingerprint
+              observedValue !== storedContentDigest(record.fingerprint)
             : typeof observedValue === "number" &&
               observedValue > (record.watermark ?? 0)
           : observedValue === record.predicate;
@@ -873,6 +882,9 @@ export async function sweepWatches(
         ...heartbeat,
         missing_since_at_ms: undefined,
         observed_value: observedValue,
+        ...(record.change === "content" && typeof observedValue === "string"
+          ? { fingerprint: observedValue }
+          : {}),
       };
     });
     if (registry.watches.length > 0) {
