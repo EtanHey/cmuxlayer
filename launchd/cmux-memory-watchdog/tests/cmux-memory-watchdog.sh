@@ -244,7 +244,7 @@ run_case() {
     assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
     assert_file_contains "$log_dir/stderr.log" "breached memory thresholds"
     assert_file_missing_or_empty "$log_dir/kill.log"
-    snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
+    snapshot="$(find "$log_dir" -type f -name '20*.log' -print -quit)"
     if [[ -n "$expected_signals" ]]; then
       assert_file_contains "$snapshot" "breached_signals=$expected_signals"
     fi
@@ -400,6 +400,219 @@ EOF
 }
 run_notify_reprobe_after_post_failure_case
 
+# Environment changes are intentionally isolated from the remaining cases.
+# shellcheck disable=SC2030,SC2031
+run_early_close_notifiers_case() (
+  local repo_root scratch_root root_dir log_dir stderr_log
+  local brainbar_sock brainbar_ready brainbar_pid brainbar_status
+  local notify_port_file notify_pid notify_port notify_status large_value
+  repo_root="$(cd "$ROOT_DIR/../.." && pwd)"
+  scratch_root="$repo_root/docs.local/scratch/hotfix-launchd"
+  mkdir -p "$scratch_root"
+  root_dir="$(mktemp -d "$scratch_root/early-close.XXXXXX")"
+  log_dir="$root_dir/logs"
+  stderr_log="$log_dir/stderr.log"
+  mkdir -p "$root_dir/bin" "$log_dir"
+
+  cd "$repo_root"
+  brainbar_sock="${root_dir#"$repo_root/"}/brainbar.sock"
+  brainbar_ready="$root_dir/brainbar.ready"
+  python3 - "$brainbar_sock" "$brainbar_ready" <<'PY' &
+import os
+import socket
+import sys
+
+socket_path, ready_path = sys.argv[1:]
+try:
+    os.unlink(socket_path)
+except FileNotFoundError:
+    pass
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(socket_path)
+server.listen(1)
+open(ready_path, "w").close()
+connection, _ = server.accept()
+connection.close()
+server.close()
+PY
+  brainbar_pid="$!"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -f "$brainbar_ready" && -S "$brainbar_sock" ]] && break
+    /bin/sleep 0.1
+  done
+  [[ -f "$brainbar_ready" && -S "$brainbar_sock" ]] \
+    || fail "early-close BrainBar listener did not become ready"
+
+  cat >"$root_dir/bin/socat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+socket_path="${*: -1}"
+socket_path="${socket_path#UNIX-CONNECT:}"
+python3 -c '
+import socket
+import sys
+import time
+
+payload = sys.stdin.buffer.read()
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(sys.argv[1])
+time.sleep(0.1)
+try:
+    client.sendall(payload)
+except (BrokenPipeError, ConnectionResetError) as error:
+    print(f"early-close socket send failed: {error}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    client.close()
+' "$socket_path"
+EOF
+  chmod +x "$root_dir/bin/socat"
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="$brainbar_sock"
+  export PATH="$root_dir/bin:$PATH"
+  # Keep the payload larger than a typical pipe buffer while the test transport
+  # fully drains stdin before attempting the deliberately closed socket.
+  large_value="$(awk 'BEGIN { for (i = 0; i < 98304; i++) printf "x" }')"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  if brain_store_breach 4242 1073741824 4294967296 \
+    "$root_dir/snapshot.log" "$large_value" footprint 2>>"$stderr_log"; then
+    brainbar_status=0
+  else
+    brainbar_status="$?"
+  fi
+  wait "$brainbar_pid"
+
+  notify_port_file="$root_dir/notify.port"
+  python3 - "$notify_port_file" <<'PY' &
+import socket
+import sys
+
+port_path = sys.argv[1]
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))
+server.listen(1)
+with open(port_path, "w") as port_file:
+    port_file.write(str(server.getsockname()[1]))
+connection, _ = server.accept()
+connection.close()
+server.close()
+PY
+  notify_pid="$!"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$notify_port_file" ]] && break
+    /bin/sleep 0.1
+  done
+  [[ -s "$notify_port_file" ]] || fail "early-close HTTP listener did not become ready"
+  notify_port="$(<"$notify_port_file")"
+
+  cat >"$root_dir/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "$root_dir/bin/nc"
+  export CMUX_MEM_WATCHDOG_NOTIFY_URL="http://127.0.0.1:$notify_port/notify"
+  if notify_breach 4242 footprint 1073741824 4294967296 "$large_value" \
+    2>>"$stderr_log"; then
+    notify_status=0
+  else
+    notify_status="$?"
+  fi
+  wait "$notify_pid"
+
+  assert_eq "0" "$brainbar_status"
+  assert_eq "0" "$notify_status"
+  assert_file_contains "$stderr_log" "brainbar notification failed"
+  assert_file_contains "$stderr_log" "notify post failed"
+  assert_file_not_contains "$stderr_log" "jq: error"
+
+  printf 'PASS: notifier transports are warning-only when peers close before reading\n'
+  rm -rf "$root_dir"
+)
+run_early_close_notifiers_case
+
+# Environment changes are intentionally isolated from the remaining cases.
+# shellcheck disable=SC2030,SC2031
+run_notify_http_error_case() (
+  local repo_root scratch_root root_dir stderr_log port_file server_pid port status
+  repo_root="$(cd "$ROOT_DIR/../.." && pwd)"
+  scratch_root="$repo_root/docs.local/scratch/hotfix-launchd"
+  mkdir -p "$scratch_root"
+  root_dir="$(mktemp -d "$scratch_root/http-error.XXXXXX")"
+  stderr_log="$root_dir/stderr.log"
+  port_file="$root_dir/notify.port"
+  mkdir -p "$root_dir/bin"
+
+  cat >"$root_dir/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "$root_dir/bin/nc"
+
+  python3 - "$port_file" <<'PY' &
+import socket
+import sys
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))
+server.listen(1)
+with open(sys.argv[1], "w") as port_file:
+    port_file.write(str(server.getsockname()[1]))
+connection, _ = server.accept()
+request = b""
+while b"\r\n\r\n" not in request:
+    request += connection.recv(4096)
+headers, body = request.split(b"\r\n\r\n", 1)
+content_length = 0
+for header in headers.split(b"\r\n"):
+    if header.lower().startswith(b"content-length:"):
+        content_length = int(header.split(b":", 1)[1].strip())
+while len(body) < content_length:
+    body += connection.recv(4096)
+connection.sendall(
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n\r\n"
+)
+connection.close()
+server.close()
+PY
+  server_pid="$!"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$port_file" ]] && break
+    /bin/sleep 0.1
+  done
+  [[ -s "$port_file" ]] || fail "HTTP error listener did not become ready"
+  port="$(<"$port_file")"
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_NOTIFY_URL="http://127.0.0.1:$port/notify"
+  export PATH="$root_dir/bin:$PATH"
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  if notify_breach 4242 footprint 1073741824 4294967296 \
+    "$root_dir/snapshot.log" 2>"$stderr_log"; then
+    status=0
+  else
+    status="$?"
+  fi
+  wait "$server_pid"
+
+  assert_eq "0" "$status"
+  assert_file_contains "$stderr_log" "notify post failed"
+  assert_file_contains "$stderr_log" "exit 22"
+
+  printf 'PASS: watchdog logs HTTP error responses as warning-only notification failures\n'
+  rm -rf "$root_dir"
+)
+run_notify_http_error_case
+
 # Matcher coverage regression guard (2026-06-09): the PID matcher must catch
 # BOTH cmux bundles — stable "cmux.app" AND nightly "cmux NIGHTLY.app". The old
 # `cmux\.app` pattern silently skipped nightly, so a nightly-only fleet (the
@@ -432,6 +645,8 @@ run_matcher_coverage() {
 }
 run_matcher_coverage
 
+# The preceding notifier case is a subshell, so its exports cannot affect this case.
+# shellcheck disable=SC2031
 run_ps_fallback_case() {
   local root_dir log_dir snapshot brainbar_sock brainbar_pid
   root_dir="$(mktemp -d)"
@@ -470,7 +685,7 @@ EOF
 
   assert_file_missing_or_empty "$log_dir/kill.log"
   assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
-  snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
+  snapshot="$(find "$log_dir" -type f -name '20*.log' -print -quit)"
   assert_file_contains "$snapshot" "breached_signals=footprint"
 
   printf 'PASS: watchdog falls back to ps command discovery when pgrep misses GUI apps\n'
@@ -518,7 +733,7 @@ EOF
   run_once
 
   assert_file_missing_or_empty "$log_dir/kill.log"
-  snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
+  snapshot="$(find "$log_dir" -type f -name '20*.log' -print -quit)"
   assert_file_contains "$snapshot" "[top_rss_offenders]"
   assert_file_contains "$snapshot" "command=python3.11"
   assert_file_contains "$snapshot" "command=ugrep"
@@ -527,6 +742,39 @@ EOF
   rm -rf "$root_dir"
 }
 run_top_rss_offenders_case
+
+run_top_rss_limit_validation_case() (
+  local root_dir output status stderr_log
+  root_dir="$(mktemp -d)"
+  stderr_log="$root_dir/stderr.log"
+  cat >"$root_dir/top-ps.fixture" <<'EOF'
+  PID   RSS COMM
+ 9001 2097152 python3.11
+EOF
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_PS_TOP_FIXTURE="$root_dir/top-ps.fixture"
+  export CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT=0
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  if output="$(top_rss_offenders 2>"$stderr_log")"; then
+    status=0
+  else
+    status="$?"
+  fi
+  assert_eq "0" "$status"
+  assert_eq "" "$output"
+
+  CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT=invalid
+  if top_rss_offenders 2>"$stderr_log"; then
+    fail "invalid watchdog top-RSS limit unexpectedly succeeded"
+  fi
+  assert_file_contains "$stderr_log" "invalid top RSS limit"
+
+  printf 'PASS: watchdog top RSS limit accepts zero and rejects invalid values\n'
+  rm -rf "$root_dir"
+)
+run_top_rss_limit_validation_case
 
 run_installer_plist_lint_case() {
   local root_dir rendered

@@ -496,6 +496,15 @@ nearcrash_reason() {
 }
 
 top_rss_offenders_json() {
+  if [[ ! "$CMUX_RAM_SAMPLER_TOP_RSS_LIMIT" =~ ^[0-9]+$ ]]; then
+    log "invalid top RSS limit: $CMUX_RAM_SAMPLER_TOP_RSS_LIMIT"
+    return 1
+  fi
+  if (( 10#$CMUX_RAM_SAMPLER_TOP_RSS_LIMIT == 0 )); then
+    printf '[]\n'
+    return 0
+  fi
+
   ps -axo pid=,rss=,command= 2>/dev/null | awk -v limit="$CMUX_RAM_SAMPLER_TOP_RSS_LIMIT" '
     NF >= 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
       pid = $1
@@ -504,7 +513,7 @@ top_rss_offenders_json() {
       $2 = ""
       sub(/^[[:space:]]+/, "", $0)
       printf "%s\t%s\t%s\n", rss, pid, $0
-    }' | sort -rn | head -n "$CMUX_RAM_SAMPLER_TOP_RSS_LIMIT" | jq -Rs '
+    }' | sort -rn | sed -n "1,${CMUX_RAM_SAMPLER_TOP_RSS_LIMIT}p" | jq -Rs '
       split("\n")[:-1]
       | map(split("\t") | {pid:(.[1]|tonumber),rss_mb:((.[0]|tonumber / 1024)|floor),command:.[2]})'
 }
