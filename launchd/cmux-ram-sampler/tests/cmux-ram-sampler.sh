@@ -782,6 +782,40 @@ run_plist_case() {
   printf 'PASS: sampler launchd plist is armable with expected structure\n'
 }
 
+run_top_rss_limit_validation_case() (
+  local root_dir output status stderr_log
+  root_dir="$(mktemp -d)"
+  stderr_log="$root_dir/stderr.log"
+  mkdir -p "$root_dir/bin"
+  cat >"$root_dir/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '9001 2097152 python3.11\n'
+EOF
+  chmod +x "$root_dir/bin/ps"
+
+  export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
+  export CMUX_RAM_SAMPLER_TOP_RSS_LIMIT=0
+  export PATH="$root_dir/bin:$PATH"
+  source_sampler
+  if output="$(top_rss_offenders_json 2>"$stderr_log")"; then
+    status=0
+  else
+    status="$?"
+  fi
+  assert_eq "0" "$status"
+  assert_eq "[]" "$output"
+
+  CMUX_RAM_SAMPLER_TOP_RSS_LIMIT=invalid
+  if top_rss_offenders_json 2>"$stderr_log"; then
+    fail "invalid sampler top-RSS limit unexpectedly succeeded"
+  fi
+  assert_file_contains "$stderr_log" "invalid top RSS limit"
+
+  printf 'PASS: sampler top RSS limit accepts zero and rejects invalid values\n'
+  rm -rf "$root_dir"
+)
+
 run_vmstat_page_size_case
 run_routine_high_records_without_alert_case
 run_nearcrash_routed_alert_edge_case
@@ -798,3 +832,4 @@ run_plist_case
 run_prediction_case
 run_sampling_case
 run_ps_fallback_sampling_case
+run_top_rss_limit_validation_case

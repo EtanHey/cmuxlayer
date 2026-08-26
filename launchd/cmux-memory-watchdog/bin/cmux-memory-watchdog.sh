@@ -169,6 +169,14 @@ top_rss_offenders() {
   local limit="$CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT"
   local ps_output
 
+  if [[ ! "$limit" =~ ^[0-9]+$ ]]; then
+    log "invalid top RSS limit: $limit"
+    return 1
+  fi
+  if (( 10#$limit == 0 )); then
+    return 0
+  fi
+
   if [[ -n "${CMUX_MEM_WATCHDOG_PS_TOP_FIXTURE:-}" ]]; then
     ps_output="$(cat "$CMUX_MEM_WATCHDOG_PS_TOP_FIXTURE")"
   else
@@ -186,7 +194,7 @@ top_rss_offenders() {
       print rss "\t" pid "\t" $0
     }' \
     | sort -rn \
-    | head -n "$limit" \
+    | sed -n "1,${limit}p" \
     | awk -F '\t' '{ printf "pid=%s rss_mb=%.0f command=%s\n", $2, $1 / 1024, $3 }'
 }
 
@@ -238,6 +246,9 @@ brain_store_breach() {
   local cmux_footprint_gb
   local compressor_gb
   local content
+  local payload
+  local send_error
+  local send_status
 
   cmux_footprint_gb="$(bytes_to_gb "$cmux_footprint_bytes")"
   compressor_gb="$(bytes_to_gb "$vmstat_compressor_bytes_value")"
@@ -245,13 +256,24 @@ brain_store_breach() {
 
   if [[ ! -S "$CMUX_MEM_WATCHDOG_BRAINBAR_SOCK" ]]; then
     log "brainbar socket missing at $CMUX_MEM_WATCHDOG_BRAINBAR_SOCK"
-    return
+    return 0
   fi
 
-  jq -cn \
+  if ! payload="$(jq -cn \
     --arg content "$content" \
-    '{"jsonrpc":"2.0","id":"cmux-watchdog","method":"tools/call","params":{"name":"brain_store","arguments":{"content":$content,"project":"systems","tags":["cmux","watchdog","memory-leak"],"importance":8}}}' \
-    | socat - UNIX-CONNECT:"$CMUX_MEM_WATCHDOG_BRAINBAR_SOCK" >/dev/null
+    '{"jsonrpc":"2.0","id":"cmux-watchdog","method":"tools/call","params":{"name":"brain_store","arguments":{"content":$content,"project":"systems","tags":["cmux","watchdog","memory-leak"],"importance":8}}}')"; then
+    log "brainbar notification payload build failed"
+    return 0
+  fi
+
+  if send_error="$(socat - UNIX-CONNECT:"$CMUX_MEM_WATCHDOG_BRAINBAR_SOCK" \
+    <<<"$payload" 2>&1 >/dev/null)"; then
+    return 0
+  else
+    send_status="$?"
+    log "brainbar notification failed at $CMUX_MEM_WATCHDOG_BRAINBAR_SOCK (exit $send_status): ${send_error:-no error output}"
+    return 0
+  fi
 }
 
 notify_url_host_port() {
@@ -293,6 +315,9 @@ notify_breach() {
   local snapshot="$5"
   local cmux_footprint_gb
   local compressor_gb
+  local payload
+  local post_error
+  local post_status
 
   cmux_footprint_gb="$(bytes_to_gb "$cmux_footprint_bytes")"
   compressor_gb="$(bytes_to_gb "$vmstat_compressor_bytes_value")"
@@ -308,21 +333,29 @@ notify_breach() {
     return 0
   fi
 
-  jq -cn \
+  if ! payload="$(jq -cn \
     --arg title "cmux watchdog" \
     --arg body "cmux hit $cmux_footprint_gb GB phys_footprint / $compressor_gb GB compressed memory, tripped $tripped. Snapshot: $snapshot. Warning only; cmux was not terminated." \
     --arg source "$CMUX_MEM_WATCHDOG_SOURCE" \
     --arg priority "$CMUX_MEM_WATCHDOG_PRIORITY" \
-    '{title:$title,body:$body,source:$source,priority:$priority}' \
-    | curl -sS --connect-timeout 1 --max-time 3 -X POST "$CMUX_MEM_WATCHDOG_NOTIFY_URL" \
+    '{title:$title,body:$body,source:$source,priority:$priority}')"; then
+    log "notify payload build failed for $CMUX_MEM_WATCHDOG_NOTIFY_URL"
+    return 0
+  fi
+
+  if post_error="$(curl -sS --connect-timeout 1 --max-time 3 -X POST "$CMUX_MEM_WATCHDOG_NOTIFY_URL" \
       -H 'Content-Type: application/json' \
-      --data-binary @- >/dev/null 2>&1 || {
-        if ! notify_listener_available "$CMUX_MEM_WATCHDOG_NOTIFY_URL"; then
-          log "notify listener unavailable at $host:$port; skipping notification"
-        else
-          log "notify post failed at $CMUX_MEM_WATCHDOG_NOTIFY_URL"
-        fi
-      }
+      --data-binary "$payload" 2>&1 >/dev/null)"; then
+    return 0
+  else
+    post_status="$?"
+    if ! notify_listener_available "$CMUX_MEM_WATCHDOG_NOTIFY_URL"; then
+      log "notify listener unavailable at $host:$port; skipping notification after post failure (exit $post_status): ${post_error:-no error output}"
+    else
+      log "notify post failed at $CMUX_MEM_WATCHDOG_NOTIFY_URL (exit $post_status): ${post_error:-no error output}"
+    fi
+    return 0
+  fi
 }
 
 handle_breach() {
