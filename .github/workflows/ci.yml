@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      baseline_source_run_id:
+        description: Optional same-branch perf-budget run to rebase runner measurements
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -162,6 +167,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CMUXLAYER_BENCH_RUNNER_CLASS: github-actions-ubuntu-latest
+      GH_TOKEN: ${{ github.token }}
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -171,6 +180,24 @@ jobs:
 
       - run: rm -f package-lock.json
       - run: bun install
+
+      - name: Import verified runner evidence
+        if: inputs.baseline_source_run_id != ''
+        env:
+          SOURCE_RUN_ID: ${{ inputs.baseline_source_run_id }}
+        run: |
+          source_run="$(gh run view "$SOURCE_RUN_ID" --json event,headSha,name)"
+          source_sha="$(jq -r .headSha <<<"$source_run")"
+          test "$(jq -r .event <<<"$source_run")" = pull_request
+          test "$(jq -r .name <<<"$source_run")" = CI
+          test "$source_sha" = "$GITHUB_SHA"
+          mkdir -p docs.local/scratch/imported-perf-budget
+          gh run download "$SOURCE_RUN_ID" -n daemon-perf-budget -D docs.local/scratch/imported-perf-budget
+          result_path="$(find docs.local/scratch/imported-perf-budget -name result.json -print -quit)"
+          test -n "$result_path"
+          echo "CMUXLAYER_BENCH_IMPORT_RESULT_PATH=$result_path" >> "$GITHUB_ENV"
+          echo "CMUXLAYER_BENCH_SOURCE_RUN_ID=$SOURCE_RUN_ID" >> "$GITHUB_ENV"
+          echo "CMUXLAYER_BENCH_SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
       - name: Produce canonical CI-runner baseline
         run: bun run bench:daemon:refresh
 

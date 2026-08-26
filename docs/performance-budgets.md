@@ -16,4 +16,12 @@ gh workflow run CI --ref <branch-or-sha>
 
 The workflow-dispatch job collects three canonical 8-client x 12-round samples on one GitHub runner and uses the per-metric maximum as the measured baseline. It refuses changed request identities or byte counts, non-finite measurements, an over-budget sample, and any proposed measurement that would raise the committed baseline. It writes the source commit, workflow-run ID, and refresh content hash, then uploads the candidate baseline plus all raw samples. Download and inspect that artifact, then commit its `benchmarks/daemon-baseline.json`. The refresh command requires the GitHub Actions workflow-dispatch environment and an exact checked-out `GITHUB_SHA`.
 
+If a later `ubuntu-latest` runner is demonstrably slower than the runner that produced the committed baseline, first run the normal pull-request CI at the calibration commit. Then dispatch the same commit and import that exact perf artifact:
+
+```bash
+gh workflow run CI --ref <calibration-commit> -f baseline_source_run_id=<ci-run-id>
+```
+
+This explicit runner rebase accepts only a `CI` pull-request run whose head SHA exactly matches the dispatched `GITHUB_SHA`. It verifies the canonical replay identity and retains the larger of each committed and imported measurement, so unrelated metrics cannot silently tighten. The source run and SHA remain in the attested baseline. This is only for reviewed runner-class drift; the ordinary no-input refresh remains improvement-only and refuses every baseline increase.
+
 Do not hand-edit or refresh a baseline merely to make a regression green. A code-regression proof must turn `perf-budget` RED; a baseline-only measurement edit must fail the consistency assertion.

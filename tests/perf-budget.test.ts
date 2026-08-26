@@ -425,6 +425,9 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("perf-budget:");
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("perf-baseline-refresh:");
+    expect(workflow).toContain("baseline_source_run_id:");
+    expect(workflow).toContain('test "$source_sha" = "$GITHUB_SHA"');
+    expect(workflow).toContain("gh run download");
     expect(workflow).toContain("pull-requests: write");
     expect(workflow).toContain("bun run bench:daemon:check");
     expect(workflow).toContain(
@@ -454,11 +457,14 @@ describe("daemon performance budget", () => {
     expect(source).toContain("canonical 8x12 replay");
     expect(source).toContain("GITHUB_RUN_ID");
     expect(source).toContain('GITHUB_ACTIONS !== "true"');
-    expect(source).toContain("compareBenchmark(existing, run.result)");
+    expect(source).toContain("compareBenchmark(existing, sample)");
     expect(source).toContain("replay?.bytes?.[operation]");
     expect(source).toContain(
       "refusing to raise a committed performance baseline",
     );
+    expect(source).toContain("CMUXLAYER_BENCH_IMPORT_RESULT_PATH");
+    expect(source).toContain("runnerRebase");
+    expect(source).toContain("Math.max(");
   });
 
   it("keeps scratch artifacts out of default Vitest collection", () => {
