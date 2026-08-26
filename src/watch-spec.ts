@@ -276,6 +276,24 @@ function hasValidNotificationMetadata(
   );
 }
 
+function hasValidTerminalMetadata(value: Record<string, unknown>): boolean {
+  if (
+    value.terminal_at_ms !== undefined &&
+    !isFiniteNumber(value.terminal_at_ms)
+  ) {
+    return false;
+  }
+  if (
+    value.terminal_reason !== undefined &&
+    !isWatchNotificationReason(value.terminal_reason)
+  ) {
+    return false;
+  }
+  return (
+    value.state === "armed" || isWatchNotificationReason(value.terminal_reason)
+  );
+}
+
 function isWatchRecord(value: unknown): value is WatchRecord {
   if (!isRecord(value) || !isRecord(value.liveness)) return false;
   if (
@@ -325,25 +343,8 @@ function isWatchRecord(value: unknown): value is WatchRecord {
   ) {
     return false;
   }
-  if (
-    value.terminal_at_ms !== undefined &&
-    !isFiniteNumber(value.terminal_at_ms)
-  ) {
-    return false;
-  }
+  if (!hasValidTerminalMetadata(value)) return false;
   if (!hasValidNotificationMetadata(value)) return false;
-  if (
-    value.terminal_reason !== undefined &&
-    !isWatchNotificationReason(value.terminal_reason)
-  ) {
-    return false;
-  }
-  if (
-    value.state !== "armed" &&
-    !isWatchNotificationReason(value.terminal_reason)
-  ) {
-    return false;
-  }
   if (value.target_kind === "file") {
     const hasMarker = Boolean(cleanString(value.marker));
     const hasChange = value.change === "content";
