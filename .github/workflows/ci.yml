@@ -146,6 +146,19 @@ jobs:
 
       - run: bun run test:parity
 
+  launchd-units:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - run: bash launchd/cmux-caffeinate/tests/run-tests.sh
+      - run: bash launchd/cmux-contract-nightly/tests/run-tests.sh
+      - run: bash launchd/cmux-memory-watchdog/tests/run-tests.sh
+      - run: bash launchd/cmux-ram-sampler/tests/run-tests.sh
+
   build-site:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
