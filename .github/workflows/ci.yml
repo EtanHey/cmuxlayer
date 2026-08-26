@@ -175,6 +175,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
@@ -190,7 +191,9 @@ jobs:
           source_sha="$(jq -r .headSha <<<"$source_run")"
           test "$(jq -r .event <<<"$source_run")" = pull_request
           test "$(jq -r .name <<<"$source_run")" = CI
-          test "$source_sha" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$source_sha" HEAD
+          unexpected_changes="$(git diff --name-only "$source_sha" HEAD | rg -v '^(\.github/workflows/ci\.yml|benchmarks/daemon-baseline\.json|docs/performance-budgets\.md|scripts/(check|refresh)-daemon-baseline\.mjs|tests/perf-budget\.test\.ts)$' || true)"
+          test -z "$unexpected_changes"
           mkdir -p docs.local/scratch/imported-perf-budget
           gh run download "$SOURCE_RUN_ID" -n daemon-perf-budget -D docs.local/scratch/imported-perf-budget
           result_path="$(find docs.local/scratch/imported-perf-budget -name result.json -print -quit)"

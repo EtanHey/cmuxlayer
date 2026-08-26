@@ -22,6 +22,6 @@ If a later `ubuntu-latest` runner is demonstrably slower than the runner that pr
 gh workflow run CI --ref <calibration-commit> -f baseline_source_run_id=<ci-run-id>
 ```
 
-This explicit runner rebase accepts only a `CI` pull-request run whose head SHA exactly matches the dispatched `GITHUB_SHA`. It verifies the canonical replay identity and retains the larger of each committed and imported measurement, so unrelated metrics cannot silently tighten. The source run and SHA remain in the attested baseline. This is only for reviewed runner-class drift; the ordinary no-input refresh remains improvement-only and refuses every baseline increase.
+This explicit runner rebase accepts only a `CI` pull-request run from the dispatched commit or an ancestor separated solely by the baseline workflow, checker, refresh script, baseline JSON, documentation, or tests. Runtime-source changes are refused. It verifies the canonical replay identity and retains the larger of each committed and imported measurement, so unrelated metrics cannot silently tighten. The source run and SHA remain in the attested baseline. This is only for reviewed runner-class drift; the ordinary no-input refresh remains improvement-only and refuses every baseline increase.
 
 Do not hand-edit or refresh a baseline merely to make a regression green. A code-regression proof must turn `perf-budget` RED; a baseline-only measurement edit must fail the consistency assertion.

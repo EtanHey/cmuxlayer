@@ -426,7 +426,8 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("perf-baseline-refresh:");
     expect(workflow).toContain("baseline_source_run_id:");
-    expect(workflow).toContain('test "$source_sha" = "$GITHUB_SHA"');
+    expect(workflow).toContain('git merge-base --is-ancestor "$source_sha" HEAD');
+    expect(workflow).toContain("unexpected_changes=");
     expect(workflow).toContain("gh run download");
     expect(workflow).toContain("pull-requests: write");
     expect(workflow).toContain("bun run bench:daemon:check");
