@@ -144,7 +144,13 @@ export function maximumBenchmarkMeasurements(results) {
     throw new Error("at least one benchmark result is required");
   }
   const measurements = results.map(currentMetrics);
-  const maximum = (read) => Math.max(...measurements.map(read));
+  const maximum = (read) => {
+    const values = measurements.map(read);
+    if (values.some((value) => !Number.isFinite(value))) {
+      throw new Error("benchmark measurements must be finite");
+    }
+    return Math.max(...values);
+  };
   return {
     list_surfaces: {
       p50_ms: maximum((entry) => entry.list_surfaces?.p50_ms),

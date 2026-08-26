@@ -14,6 +14,6 @@ Dispatch the `CI` workflow on the commit whose performance should become the new
 gh workflow run CI --ref <branch-or-sha>
 ```
 
-The workflow-dispatch job collects three canonical 8-client x 12-round samples on one GitHub runner and uses the per-metric maximum as the measured baseline. It refuses changed request identities or an over-budget lock hold, writes the source commit, workflow-run ID, and refresh content hash, and uploads the candidate baseline plus all raw samples. Download and inspect that artifact, then commit its `benchmarks/daemon-baseline.json`. The refresh command refuses to run outside this GitHub Actions job.
+The workflow-dispatch job collects three canonical 8-client x 12-round samples on one GitHub runner and uses the per-metric maximum as the measured baseline. It refuses changed request identities or byte counts, non-finite measurements, an over-budget sample, and any proposed measurement that would raise the committed baseline. It writes the source commit, workflow-run ID, and refresh content hash, then uploads the candidate baseline plus all raw samples. Download and inspect that artifact, then commit its `benchmarks/daemon-baseline.json`. The refresh command requires the GitHub Actions workflow-dispatch environment and an exact checked-out `GITHUB_SHA`.
 
 Do not hand-edit or refresh a baseline merely to make a regression green. A code-regression proof must turn `perf-budget` RED; a baseline-only measurement edit must fail the consistency assertion.

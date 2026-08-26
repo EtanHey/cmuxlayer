@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   baselineContentSha256,
   baselinePath,
+  compareBenchmark,
   maximumBenchmarkMeasurements,
   runBenchmark,
   validateBaseline,
@@ -16,10 +17,17 @@ const existing = validateBaseline(
 );
 const runnerClass = process.env.CMUXLAYER_BENCH_RUNNER_CLASS;
 const workflowRunId = Number(process.env.GITHUB_RUN_ID);
+const headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+  encoding: "utf8",
+}).trim();
 const refreshSampleCount = 3;
 if (
+  process.env.GITHUB_ACTIONS !== "true" ||
+  process.env.GITHUB_EVENT_NAME !== "workflow_dispatch" ||
+  process.env.GITHUB_SHA !== headSha ||
   runnerClass !== "github-actions-ubuntu-latest" ||
-  !Number.isFinite(workflowRunId)
+  !Number.isSafeInteger(workflowRunId) ||
+  workflowRunId <= 0
 ) {
   throw new Error(
     "baseline refresh must run from the GitHub Actions workflow_dispatch job",
@@ -49,6 +57,8 @@ for (let index = 0; index < refreshSampleCount; index += 1) {
   }
   for (const operation of existing.replay.operations) {
     if (
+      run.result.replay?.bytes?.[operation] !==
+        existing.replay.bytes[operation] ||
       run.result.replay?.request_sha256?.[operation] !==
       existing.replay.request_sha256[operation]
     ) {
@@ -56,6 +66,12 @@ for (let index = 0; index < refreshSampleCount; index += 1) {
         `refusing to refresh changed canonical request ${operation}`,
       );
     }
+  }
+  const comparison = compareBenchmark(existing, run.result);
+  if (!comparison.passed) {
+    throw new Error(
+      `refusing to refresh from an over-budget benchmark: ${comparison.failures.join("; ")}`,
+    );
   }
   samples.push(run.result);
 }
@@ -69,12 +85,26 @@ if (
 ) {
   throw new Error("refusing to refresh from an over-budget lock hold");
 }
+const measurementPairs = [
+  ...existing.replay.operations.flatMap((operation) =>
+    ["p50_ms", "p95_ms"].map((metric) => [
+      measurements[operation][metric],
+      existing.measurements[operation][metric],
+    ]),
+  ),
+  [
+    measurements.first_send_after_spawn.lock_hold_ms,
+    existing.measurements.first_send_after_spawn.lock_hold_ms,
+  ],
+  [measurements.cli_send_ms, existing.measurements.cli_send_ms],
+];
+if (measurementPairs.some(([proposed, committed]) => proposed > committed)) {
+  throw new Error("refusing to raise a committed performance baseline");
+}
 const refreshed = {
   ...existing,
   source: {
-    git_sha: execFileSync("git", ["rev-parse", "HEAD"], {
-      encoding: "utf8",
-    }).trim(),
+    git_sha: headSha,
     measured_at: new Date().toISOString(),
     runner_class: runnerClass,
     workflow_run_id: workflowRunId,

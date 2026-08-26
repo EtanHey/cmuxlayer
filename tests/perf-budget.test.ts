@@ -192,6 +192,24 @@ describe("daemon performance budget", () => {
       },
       cli_send_ms: 900,
     });
+    expect(() =>
+      maximumBenchmarkMeasurements([
+        {
+          ...result,
+          latency: {
+            ...result.latency,
+            first_send_after_spawn: {
+              ...result.latency.first_send_after_spawn,
+              first: {
+                ...result.latency.first_send_after_spawn.first,
+                lock_hold_ms: null,
+                receipt: { timings_ms: { lock_hold: null } },
+              },
+            },
+          },
+        },
+      ]),
+    ).toThrow(/measurements must be finite/);
   });
 
   it("derives every runner ceiling from the committed CI measurement at 1.25x", () => {
@@ -435,6 +453,12 @@ describe("daemon performance budget", () => {
     expect(source).toContain('CMUXLAYER_BENCH_ROUNDS: "12"');
     expect(source).toContain("canonical 8x12 replay");
     expect(source).toContain("GITHUB_RUN_ID");
+    expect(source).toContain('GITHUB_ACTIONS !== "true"');
+    expect(source).toContain("compareBenchmark(existing, run.result)");
+    expect(source).toContain("replay?.bytes?.[operation]");
+    expect(source).toContain(
+      "refusing to raise a committed performance baseline",
+    );
   });
 
   it("keeps scratch artifacts out of default Vitest collection", () => {
