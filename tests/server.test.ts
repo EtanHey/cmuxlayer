@@ -820,6 +820,35 @@ describe("tool registration", () => {
     }
     expect(toolNames).toHaveLength(EXPECTED_TOOLS.length);
   });
+
+  it("documents allow_busy as a deprecated no-op for immediate send delivery", () => {
+    const source = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf8");
+    expect(source.match(/Deprecated no-op retained for compatibility/g)).toHaveLength(2);
+    expect(source.match(/queued_behind_turn, not a nonterminal queued state/g)).toHaveLength(2);
+  });
+
+  it("warns when the active socket transport reports degraded health", async () => {
+    const server = createServer({
+      skipAgentLifecycle: true,
+      client: {
+        getTransportHealth: () => ({
+          mode: "socket",
+          degraded: true,
+          current_socket_path: "/tmp/cmux.sock",
+        }),
+      } as any,
+      controlHealthCollector: async () => ({ status: "ok" }) as any,
+    });
+    const controlHealth = (server as any)._registeredTools.control_health;
+
+    const result = await controlHealth.handler({}, {} as any);
+
+    expect(result.structuredContent).toMatchObject({
+      transport: "socket",
+      socket_path_state: "active",
+      warnings: expect.arrayContaining(["socket_degraded"]),
+    });
+  });
 });
 
 describe("Claude channels", () => {

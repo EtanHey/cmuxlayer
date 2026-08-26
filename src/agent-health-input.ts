@@ -14,6 +14,7 @@ import {
   channelDirDeletedAfterCreate,
   monitorAlive,
   pendingDispatches,
+  replayUndelivered,
   type InboxOpts,
 } from "./inbox.js";
 
@@ -98,11 +99,13 @@ export async function buildAgentHealthInput(
       : !alive && channelDirDeletedAfterCreate(agent.agent_id, deps.inboxOpts);
   const staleCount =
     overrides.stale_count ??
-    pendingDispatches(
-      agent.agent_id,
-      deps.dispatchAckTimeoutMs ?? AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
-      deps.inboxOpts,
-    ).length;
+    (alive === false
+      ? replayUndelivered(agent.agent_id, deps.inboxOpts).length
+      : pendingDispatches(
+          agent.agent_id,
+          deps.dispatchAckTimeoutMs ?? AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
+          deps.inboxOpts,
+        ).length);
   const needsScreen =
     overrides.screen_status === undefined ||
     overrides.screen_agent_type === undefined ||

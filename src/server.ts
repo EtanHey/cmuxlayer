@@ -4550,7 +4550,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : socketPath
             ? "fallback"
             : "unavailable",
-      ...(transport === "cli" ? { warnings: ["cli_fallback_active"] } : {}),
+      ...(transport === "cli"
+        ? { warnings: ["cli_fallback_active"] }
+        : health?.degraded
+          ? { warnings: ["socket_degraded"] }
+          : {}),
       ...(currentCliFallbackUsed()
         ? { transport_fallbacks: currentCliFallbackSources() }
         : {}),
@@ -4563,6 +4567,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (
       toolName !== "spawn_agent" &&
       toolName !== "send_to" &&
+      toolName !== "close_surface" &&
       toolName !== "control_health"
     ) {
       return result;
@@ -10947,9 +10952,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             );
           }
-          const result = await handler(
-            { agent_id: args.agent_id, force: args.force },
-            {},
+          const lifecycleEngine = context.lifecycleSweepEngine;
+          if (!lifecycleEngine) {
+            throw new Error("Agent lifecycle engine is unavailable");
+          }
+          const result = await lifecycleEngine.runLifecycleMutation(
+            () =>
+              handler(
+                { agent_id: args.agent_id, force: args.force },
+                {},
+              ),
+            { label: "close-agent" },
           );
           const agentStopped = result.isError !== true;
           const rawStopContent = (result.structuredContent ?? {}) as Record<
@@ -16691,7 +16704,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "If true, bypass the lifecycle-state queue so a working agent receives an immediate interjection. Omit it to receive a nonterminal queued receipt that resolves through delivery events. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
+          "Deprecated no-op retained for compatibility: send_to always attempts immediate delivery. Input landing behind an active turn is reported as queued_behind_turn, not a nonterminal queued state. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
@@ -17287,9 +17300,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // AIDEV-NOTE (F1): a RetryableDeliveryError is, by name and by the
             // drain loop's own handling, NOT a terminal outcome -- the engine
             // backs it off and tries again. Flattening it into a terminal
-            // `failed` receipt here contradicted send_to's own published
-            // promise ("Omit it to receive a nonterminal queued receipt") and
-            // was the fleet's #1 receipt lie: a lead told its live worker was
+            // `failed` receipt here would contradict the delivery engine's
+            // retryable queue semantics and tell a lead its live worker was
             // dead. Hand back the queued receipt the drain loop will honour.
             if (error instanceof RetryableDeliveryError) {
               const receipt = engine.queueDelivery({
@@ -17475,7 +17487,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state. Queued-but-unsubmitted input returns an error and must not be retried blindly.",
+          "Deprecated no-op retained for compatibility: send_to_agent uses send_to and always attempts immediate delivery. Input landing behind an active turn is reported as queued_behind_turn, not a nonterminal queued state.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",

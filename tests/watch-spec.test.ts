@@ -16,6 +16,8 @@ import {
   WatchArmError,
   armWatch,
   readWatchRegistry,
+  reserveWatchReportPath,
+  releaseWatchReportPathReservation,
   removeWatches,
   sweepWatches,
 } from "../src/watch-spec.js";
@@ -616,6 +618,94 @@ describe("WatchSpec arm contract", () => {
     expect(existsSync(`${registryPath()}.report-path-reservations.json`)).toBe(
       false,
     );
+  }, 30_000);
+
+  it("self-heals a malformed report-path reservation sidecar", async () => {
+    const target = join(TEST_DIR, "malformed-reservation-report.md");
+    const sidecar = `${registryPath()}.report-path-reservations.json`;
+    writeFileSync(target, "", "utf8");
+    writeFileSync(sidecar, "{truncated", "utf8");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await reserveWatchReportPath(
+      { owner: "lead-a", target, subject_agent_id: "child-a" },
+      { registryPath: registryPath() },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("ignoring malformed report-path reservations"),
+    );
+    if (result.ok) {
+      await releaseWatchReportPathReservation(
+        result.reservation.reservation_id,
+        { registryPath: registryPath() },
+      );
+    }
+    writeFileSync(sidecar, "{truncated-again", "utf8");
+    await expect(
+      releaseWatchReportPathReservation("missing", {
+        registryPath: registryPath(),
+      }),
+    ).resolves.toBe(false);
+    expect(existsSync(sidecar)).toBe(false);
+    warning.mockRestore();
+  });
+
+  it("treats a subject-less legacy content watch as a reservation conflict", async () => {
+    const target = join(TEST_DIR, "legacy-watch-report.md");
+    writeFileSync(target, "before", "utf8");
+    await armWatch(
+      { owner: "lead-a", target, change: "content", deadline: 60_000 },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    await expect(
+      reserveWatchReportPath(
+        { owner: "lead-a", target, subject_agent_id: "child-new" },
+        { registryPath: registryPath() },
+      ),
+    ).resolves.toMatchObject({ ok: false, conflict_kind: "watch" });
+  });
+
+  it("reclaims a reservation whose PID was recycled after it was created", async () => {
+    const target = join(TEST_DIR, "recycled-pid-report.md");
+    const sidecar = `${registryPath()}.report-path-reservations.json`;
+    writeFileSync(target, "", "utf8");
+    writeFileSync(
+      sidecar,
+      `${JSON.stringify({
+        version: 2,
+        reservations: [
+          {
+            reservation_id: "stale-reservation",
+            owner: "lead-a",
+            target,
+            subject_agent_id: "closed-child",
+            pid: process.pid,
+            created_at_ms: 1_000,
+          },
+        ],
+      })}\n`,
+      "utf8",
+    );
+
+    const result = await reserveWatchReportPath(
+      { owner: "lead-a", target, subject_agent_id: "new-child" },
+      {
+        registryPath: registryPath(),
+        reservationProcessAlive: () => true,
+        reservationProcessStartedAtMs: () => 3_000,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      await releaseWatchReportPathReservation(
+        result.reservation.reservation_id,
+        { registryPath: registryPath() },
+      );
+    }
   });
 
   it("drops a malformed persisted row without aborting valid watch evaluation", async () => {

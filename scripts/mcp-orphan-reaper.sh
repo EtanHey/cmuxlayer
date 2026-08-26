@@ -17,10 +17,8 @@
 #
 # launchd install:
 #   1. Run `bun run build` so dist/mcp-reaper.js exists.
-#   2. Copy scripts/com.cmuxlayer.mcp-reaper.plist to ~/Library/LaunchAgents/.
-#   3. Replace @CMUXLAYER_REPO@ in ProgramArguments with this checkout path.
-#   4. Run:
-#      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist
+#   2. Inspect `scripts/install-mcp-reaper.sh --dry-run`.
+#   3. Run `scripts/install-mcp-reaper.sh --install` after approval.
 #
 # This is a standalone process cleanup tool. It does not alter cmuxlayer agent
 # lifecycle or orphan-survival behavior.

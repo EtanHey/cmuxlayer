@@ -10,6 +10,7 @@ import {
   compareBenchmark,
   maximumBenchmarkMeasurements,
   performanceCeiling,
+  requireBaselineIncreaseReason,
   runBenchmark,
   validateBaseline,
 } from "./check-daemon-benchmark.mjs";
@@ -39,6 +40,12 @@ const importedResultPath = process.env.CMUXLAYER_BENCH_IMPORT_RESULT_PATH;
 const importedSourceRunId = Number(process.env.CMUXLAYER_BENCH_SOURCE_RUN_ID);
 const importedSourceSha = process.env.CMUXLAYER_BENCH_SOURCE_SHA;
 const runnerRebase = Boolean(importedResultPath);
+const reasonIndex = process.argv.indexOf("--reason");
+const increaseReason =
+  reasonIndex >= 0 ? process.argv[reasonIndex + 1]?.trim() ?? "" : "";
+if (reasonIndex >= 0 && !increaseReason) {
+  throw new Error('--reason requires a non-empty explanation');
+}
 if (
   process.env.GITHUB_ACTIONS !== "true" ||
   process.env.GITHUB_EVENT_NAME !== "workflow_dispatch" ||
@@ -185,9 +192,13 @@ const measurementPairs = [
   ),
   [measurements.cli_send_ms, existing.measurements.cli_send_ms],
 ];
+const raisesCommittedBaseline = requireBaselineIncreaseReason(
+  measurementPairs,
+  increaseReason,
+);
 if (
   !runnerRebase &&
-  measurementPairs.some(([proposed, committed]) => proposed > committed)
+  raisesCommittedBaseline
 ) {
   throw new Error("refusing to raise a committed performance baseline");
 }
@@ -198,6 +209,7 @@ const refreshed = {
     measured_at: new Date().toISOString(),
     runner_class: runnerClass,
     workflow_run_id: runnerRebase ? importedSourceRunId : workflowRunId,
+    ...(raisesCommittedBaseline ? { increase_reason: increaseReason } : {}),
   },
   sanity_caps_ms: { all_rows: 1_000, cli_send: 1_000 },
   replay: samples[0].replay,

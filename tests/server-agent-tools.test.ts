@@ -2531,6 +2531,7 @@ describe("agent lifecycle tool handlers", () => {
     const oldWatch = await armWatch(
       {
         owner: parentId,
+        subject_agent_id: agentId,
         target: expected.report_path,
         change: "content",
         deadline: Number.MAX_SAFE_INTEGER,
@@ -2601,7 +2602,7 @@ describe("agent lifecycle tool handlers", () => {
       );
       expect(reportWatches).toHaveLength(1);
       expect(reportWatches[0]).toMatchObject({
-        watch_id: oldWatch.watch_id,
+        subject_agent_id: agentId,
         change: "content",
         state: "armed",
       });

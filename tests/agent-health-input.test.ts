@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentHealthInput } from "../src/agent-health-input.js";
+import { dispatch } from "../src/inbox.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 function makeAgent(overrides?: Partial<AgentRecord>): AgentRecord {
@@ -30,6 +31,28 @@ function makeAgent(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("buildAgentHealthInput", () => {
+  it("counts a fresh unacked message when the monitor is dead", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "cmux-agent-health-input-"));
+    const inboxOpts = { baseDir: tmp, now: () => 10_000 };
+    try {
+      dispatch(
+        "agent-health-input-test",
+        { from: "lead", task: "fresh work", ts_ms: 9_999 },
+        inboxOpts,
+      );
+
+      const input = await buildAgentHealthInput(
+        makeAgent(),
+        { inboxOpts, dispatchAckTimeoutMs: 120_000 },
+        { monitor_alive: false },
+      );
+
+      expect(input.stale_count).toBe(1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("preserves explicit null monitor overrides", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "cmux-agent-health-input-"));
     try {

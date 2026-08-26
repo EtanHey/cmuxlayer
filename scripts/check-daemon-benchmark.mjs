@@ -72,6 +72,13 @@ export function validateBaseline(baseline) {
       "baseline source.workflow_run_id must be a positive integer",
     );
   }
+  if (
+    baseline.source?.increase_reason !== undefined &&
+    (typeof baseline.source.increase_reason !== "string" ||
+      !baseline.source.increase_reason.trim())
+  ) {
+    throw new Error("baseline source.increase_reason must be non-empty");
+  }
   if (baseline.regression_ratio !== REQUIRED_REGRESSION_RATIO) {
     throw new Error("baseline regression_ratio must remain 1.25");
   }
@@ -137,6 +144,18 @@ export function performanceCeiling(baselineValue, ratio, sanityCap = 1_000) {
       100,
     sanityCap,
   );
+}
+
+export function requireBaselineIncreaseReason(measurementPairs, reason) {
+  const raisesCommittedBaseline = measurementPairs.some(
+    ([proposed, committed]) => proposed > committed,
+  );
+  if (raisesCommittedBaseline && !reason?.trim()) {
+    throw new Error(
+      'refusing to raise a committed performance baseline without --reason "<text>"',
+    );
+  }
+  return raisesCommittedBaseline;
 }
 
 function currentMetrics(result) {
@@ -319,6 +338,11 @@ export function compareBenchmark(
         `${operation} transport: ${current[operation]?.transport ?? "missing"}; cli fallback active`,
       );
     }
+  }
+  if (current.cli_send_transport !== "socket") {
+    failures.push(
+      `cli_send_ms transport: ${current.cli_send_transport ?? "missing"}; cli fallback active`,
+    );
   }
   if (result?.replay?.clients !== baseline.replay.clients) {
     failures.push(

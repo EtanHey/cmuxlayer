@@ -180,7 +180,10 @@ describe("segment matching is anchored to worktree shapes (no ancestor false-pos
       workspaceDirectoryRepoMatchScore("Gits", "/home/test-user/Gits/brainlayer"),
     ).toBe(0);
     expect(
-      workspaceDirectoryRepoMatchScore("x", "/home/test-user/Gits/brainlayer"),
+      workspaceDirectoryRepoMatchScore(
+        "test-user",
+        "/home/test-user/Gits/brainlayer",
+      ),
     ).toBe(0);
   });
 

@@ -7,6 +7,7 @@ import {
   compareBenchmark,
   maximumBenchmarkMeasurements,
   performanceCeiling,
+  requireBaselineIncreaseReason,
   renderMarkdownComparison,
   runBenchmark,
   validateBaseline,
@@ -164,6 +165,16 @@ const result = {
 };
 
 describe("daemon performance budget", () => {
+  it("requires an explicit reason for any committed-row increase", () => {
+    expect(() => requireBaselineIncreaseReason([[101, 100]], "")).toThrow(
+      /without --reason/,
+    );
+    expect(requireBaselineIncreaseReason([[101, 100]], "runner migration")).toBe(
+      true,
+    );
+    expect(requireBaselineIncreaseReason([[99, 100]], "")).toBe(false);
+  });
+
   it("requires a CI-runner source, canonical requests, and the 1.25 ratio", () => {
     expect(() => validateBaseline(baseline)).not.toThrow();
     expect(() =>
@@ -258,6 +269,27 @@ describe("daemon performance budget", () => {
     );
     expect(renderMarkdownComparison(baseline, result, fallback)).toContain(
       "| Operation | Transport | Metric |",
+    );
+  });
+
+  it("fails the benchmark when the intrinsic CLI-send sample used fallback", () => {
+    const fallback = compareBenchmark(baseline, {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          surface: {
+            ...result.latency.first_send_after_spawn.surface,
+            transport: "cli",
+          },
+        },
+      },
+    });
+
+    expect(fallback.passed).toBe(false);
+    expect(fallback.failures).toContain(
+      "cli_send_ms transport: cli; cli fallback active",
     );
   });
 
@@ -539,6 +571,10 @@ describe("daemon performance budget", () => {
     expect(source).toContain("lock_hold_ms");
     expect(source).toContain("timings_ms?.lock_hold");
     expect(source).toContain("CMUXLAYER_BENCH_JSON_PATH");
+    expect(source).toContain(
+      "await waitForLifecycleWaiter(sweepHoldState, closeHoldToken)",
+    );
+    expect(source).toContain("transport: closeReceipt.transport");
   });
 
   it("wires a required PR/main job and edits a single comment even on RED", () => {
@@ -596,6 +632,8 @@ describe("daemon performance budget", () => {
     expect(source).toContain("CMUXLAYER_BENCH_IMPORT_RESULT_PATH");
     expect(source).toContain("runnerRebase");
     expect(source).toContain("runnerRebase ? Math.max : Math.min");
+    expect(source).toContain('--reason');
+    expect(source).toContain("increase_reason");
   });
 
   it("keeps scratch artifacts out of default Vitest collection", () => {

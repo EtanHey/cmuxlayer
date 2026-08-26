@@ -52,16 +52,12 @@ Do not arm this from automation. After reviewing the ancestry finding and the
 canonical checkout path, Etan can install it with:
 
 ```bash
-CMUXLAYER_REPO="$(git rev-parse --show-toplevel)"
-launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist"
+launchd/cmux-contract-nightly/install.sh --dry-run
+launchd/cmux-contract-nightly/install.sh --install
 ```
 
-To reload after changes:
-
-```bash
-launchctl bootout gui/$UID "$CMUXLAYER_REPO/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist" 2>/dev/null || true
-launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist"
-```
+The installer renders and XML-escapes checkout/home tokens, lints the staged
+plist, and reloads the rendered copy under `~/Library/LaunchAgents`.
 
 Inspect the last receipt first. A `fail` means an admitted contract check found
 a regression or the wrapper could not complete; a `skip` means the continuous

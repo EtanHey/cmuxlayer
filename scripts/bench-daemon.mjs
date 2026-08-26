@@ -731,7 +731,30 @@ async function waitForSweepHoldState(
   );
 }
 
-async function measureFirstSendAfterSpawn(client, sweepHoldState) {
+async function waitForLifecycleWaiter(
+  statePath,
+  holdToken,
+  timeoutMs = 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readFakeState(statePath);
+    if (
+      state.token === holdToken &&
+      state.state === "held" &&
+      state.waiter === "close-agent"
+    ) {
+      return;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  throw new Error("close_surface never queued behind the held lifecycle sweep");
+}
+
+async function measureFirstSendAfterSpawn(
+  client,
+  sweepHoldState,
+) {
   const spawnResult = toolData(
     await client.callTool(
       "spawn_agent",
@@ -875,12 +898,18 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
   await armSweepHold(sweepHoldState, closeHoldToken);
   await waitForSweepHoldState(sweepHoldState, closeHoldToken, "held");
   const closeStartedAt = nowMs();
-  const closePromise = client.callTool("close_surface", closeArgs);
+  const closePromise = client.callTool("close_surface", closeArgs).then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  await waitForLifecycleWaiter(sweepHoldState, closeHoldToken);
   await writeFile(
     sweepHoldState,
     JSON.stringify({ token: closeHoldToken, state: "release" }),
   );
-  const closeReceipt = toolData(await closePromise, "close_surface");
+  const closeOutcome = await closePromise;
+  if ("error" in closeOutcome) throw closeOutcome.error;
+  const closeReceipt = toolData(closeOutcome.value, "close_surface");
   await waitForSweepHoldState(sweepHoldState, closeHoldToken, "complete");
   const spawnCloseDuringSweep = {
     elapsed_ms: round(nowMs() - closeStartedAt),
@@ -890,8 +919,8 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
       agent_id: "$SPAWNED_AGENT_ID",
     }),
     lock_hold_ms: closeReceipt.timings_ms?.lock_hold ?? 0,
-    transport: spawnResult.transport,
-    transport_fallbacks: spawnResult.transport_fallbacks ?? [],
+    transport: closeReceipt.transport,
+    transport_fallbacks: closeReceipt.transport_fallbacks ?? [],
     receipt: closeReceipt,
   };
 

@@ -11,6 +11,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { httpDeliver } from "./outbox-drainer.js";
 
 export type WatchState = "armed" | "firing" | "fired" | "failed";
@@ -76,6 +77,7 @@ export interface WatchReportPathReservation {
   subject_agent_id?: string;
   pid: number;
   created_at_ms: number;
+  process_started_at_ms?: number;
 }
 
 export type WatchReportPathReservationResult =
@@ -130,6 +132,9 @@ export interface WatchRegistryOptions {
   agentObservation?: (
     agentId: string,
   ) => Promise<WatchAgentObservation> | WatchAgentObservation;
+  /** Injectable reservation-owner probes for deterministic PID-reuse tests. */
+  reservationProcessAlive?: (pid: number) => boolean;
+  reservationProcessStartedAtMs?: (pid: number) => number | null;
 }
 
 export interface WatchContentFingerprintIo {
@@ -401,7 +406,9 @@ function isReportPathReservation(
       Boolean(cleanString(value.subject_agent_id))) &&
     Number.isInteger(value.pid) &&
     (value.pid as number) > 0 &&
-    isFiniteNumber(value.created_at_ms)
+    isFiniteNumber(value.created_at_ms) &&
+    (value.process_started_at_ms === undefined ||
+      isFiniteNumber(value.process_started_at_ms))
   );
 }
 
@@ -409,11 +416,18 @@ function readReportPathReservations(
   path: string,
 ): WatchReportPathReservation[] {
   if (!existsSync(path)) return [];
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-  if (!isRecord(parsed) || !Array.isArray(parsed.reservations)) {
-    throw new Error(`Invalid report-path reservation registry: ${path}`);
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (isRecord(parsed) && Array.isArray(parsed.reservations)) {
+      return parsed.reservations.filter(isReportPathReservation);
+    }
+  } catch {
+    // The caller holds the registry lock and will rewrite canonical state.
   }
-  return parsed.reservations.filter(isReportPathReservation);
+  console.warn(
+    `[cmuxlayer] ignoring malformed report-path reservations: ${path}`,
+  );
+  return [];
 }
 
 function writeReportPathReservations(
@@ -434,14 +448,46 @@ function writeReportPathReservations(
   renameSync(temporary, path);
 }
 
-function reservationProcessIsLive(pid: number): boolean {
-  if (pid === process.pid) return true;
+function processStartedAtMs(pid: number): number | null {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+    }).trim();
+    const parsed = Date.parse(started);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
+}
+
+function reservationProcessIsLive(
+  reservation: WatchReportPathReservation,
+  opts: WatchRegistryOptions,
+): boolean {
+  const { pid } = reservation;
+  const alive = opts.reservationProcessAlive ?? ((candidatePid: number) => {
+    if (candidatePid === process.pid) return true;
+    try {
+      process.kill(candidatePid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  });
+  if (!alive(pid)) return false;
+  const startedAt =
+    (opts.reservationProcessStartedAtMs ?? processStartedAtMs)(pid);
+  if (startedAt === null) return true;
+  if (reservation.process_started_at_ms !== undefined) {
+    return reservation.process_started_at_ms === startedAt;
+  }
+  // Legacy rows can still be reclaimed when the current PID owner started
+  // after the reservation was written, proving that the PID was recycled.
+  return startedAt <= reservation.created_at_ms + 1_000;
+}
+
+function currentProcessStartedAtMs(opts: WatchRegistryOptions): number | null {
+  return (opts.reservationProcessStartedAtMs ?? processStartedAtMs)(process.pid);
 }
 
 async function withWriteLock<T>(path: string, operation: () => T): Promise<T> {
@@ -659,7 +705,7 @@ export function reserveWatchReportPath(
   return withWriteLock(registryPath, () => {
     const activeReservations = readReportPathReservations(
       reservationPath,
-    ).filter((reservation) => reservationProcessIsLive(reservation.pid));
+    ).filter((reservation) => reservationProcessIsLive(reservation, opts));
     const conflictingReservation = activeReservations.find(
       (reservation) =>
         reservation.owner === owner && reservation.target === normalizedTarget,
@@ -683,9 +729,7 @@ export function reserveWatchReportPath(
         watch.target === normalizedTarget &&
         watch.change === "content" &&
         watch.state !== "failed" &&
-        (subjectAgentId === null ||
-          (watch.subject_agent_id !== undefined &&
-            watch.subject_agent_id !== subjectAgentId)),
+        watch.subject_agent_id !== subjectAgentId,
     );
     if (conflictingWatch) {
       writeReportPathReservations(reservationPath, activeReservations);
@@ -697,6 +741,7 @@ export function reserveWatchReportPath(
           : {}),
       };
     }
+    const processStartedAt = currentProcessStartedAtMs(opts);
     const reservation: WatchReportPathReservation = {
       reservation_id: randomUUID(),
       owner,
@@ -704,6 +749,9 @@ export function reserveWatchReportPath(
       ...(subjectAgentId ? { subject_agent_id: subjectAgentId } : {}),
       pid: process.pid,
       created_at_ms: nowMs(opts),
+      ...(processStartedAt !== null
+        ? { process_started_at_ms: processStartedAt }
+        : {}),
     };
     writeReportPathReservations(reservationPath, [
       ...activeReservations,
@@ -725,7 +773,9 @@ export function releaseWatchReportPathReservation(
       (reservation) => reservation.reservation_id !== reservationId,
     );
     const released = retained.length !== reservations.length;
-    if (released) writeReportPathReservations(reservationPath, retained);
+    // Always rewrite while holding the lock so a malformed sidecar also
+    // self-heals when the first operation after a crash is a release.
+    writeReportPathReservations(reservationPath, retained);
     return released;
   });
 }

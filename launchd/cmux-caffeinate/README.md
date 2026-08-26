@@ -27,16 +27,12 @@ the tradeoff.
 Do not arm this from automation. Etan-gated install command:
 
 ```bash
-CMUXLAYER_REPO="$(git rev-parse --show-toplevel)"
-launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist"
+launchd/cmux-caffeinate/install.sh --dry-run
+launchd/cmux-caffeinate/install.sh --install
 ```
 
-To reload after changes:
-
-```bash
-launchctl bootout gui/$UID "$CMUXLAYER_REPO/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist" 2>/dev/null || true
-launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist"
-```
+The installer renders and XML-escapes checkout/home tokens, lints the staged
+plist, and reloads the rendered copy under `~/Library/LaunchAgents`.
 
 ## AC caveat
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 describe("portable committed paths", () => {
   it("rejects machine-literal macOS home paths outside documentation", () => {
-    const pattern = ["", "Users", "[^/]+", ""].join("/");
+    const pattern = ["", "Users", "[^/]+(/|$)"].join("/");
     let matches = "";
     try {
       matches = execFileSync(

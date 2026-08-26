@@ -816,6 +816,17 @@ EOF
   rm -rf "$root_dir"
 )
 
+run_installer_plist_lint_case() {
+  local root_dir rendered
+  root_dir="$(mktemp -d)"; rendered="$root_dir/rendered.plist"
+  HOME="$root_dir/home & operator" bash "$ROOT_DIR/install.sh" >"$rendered"
+  /usr/bin/plutil -lint "$rendered" >/dev/null
+  assert_file_contains "$rendered" "home &amp; operator"
+  if grep -F '@CMUXLAYER_' "$rendered" >/dev/null; then fail "installer left template tokens"; fi
+  printf 'PASS: sampler installer renders and lints an XML-safe plist\n'
+  rm -rf "$root_dir"
+}
+
 run_vmstat_page_size_case
 run_routine_high_records_without_alert_case
 run_nearcrash_routed_alert_edge_case
@@ -833,3 +844,4 @@ run_prediction_case
 run_sampling_case
 run_ps_fallback_sampling_case
 run_top_rss_limit_validation_case
+run_installer_plist_lint_case

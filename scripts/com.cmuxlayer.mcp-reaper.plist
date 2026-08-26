@@ -2,12 +2,8 @@
 <!--
   cmuxlayer MCP orphan reaper launchd template.
 
-  Install:
-    1. Run `bun run build` in the cmuxlayer checkout.
-    2. Copy this file to ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist.
-    3. Replace @CMUXLAYER_REPO@ with the absolute checkout path.
-    4. Load it with:
-       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist
+  Install: see scripts/README-mcp-reaper.md and use
+  scripts/install-mcp-reaper.sh. Never bootstrap this tokenized template.
 
   Safety:
     REAPER_DRY_RUN defaults to 1 here and in the CLI. Set it to 0 only after
