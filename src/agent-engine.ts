@@ -121,6 +121,7 @@ import type { CloseForensicsSweepResult } from "./close-forensics.js";
 import {
   armWatch as armDeclaredWatch,
   readWatchRegistry,
+  removeWatches,
   sweepWatches,
   type WatchAgentObservation,
   type WatchNotify,
@@ -6466,6 +6467,7 @@ export class AgentEngine {
         newlySurfacelessAgentIds.add(finalized.agent_id);
       }
     }
+    await this.pruneClosedChildReportWatches();
     const discovered = await discovery.scan(true);
     await this.registry.listMerged(discovery, {
       force: true,
@@ -6501,6 +6503,38 @@ export class AgentEngine {
       // Sidebar/status publication is auxiliary. Boot placement may go live
       // once registry ingestion and the provenance-gated sweep have completed.
     }
+  }
+
+  /**
+   * A daemon restart must not re-arm report watches owned by children that are
+   * already closed or no longer belong to the recorded parent. New rows carry
+   * subject_agent_id; legacy rows are pruned only when their target exactly
+   * matches a persisted child's engine-issued report_path.
+   */
+  private async pruneClosedChildReportWatches(): Promise<void> {
+    if (!this.watchRegistryPath) return;
+    const agents = this.registry.list();
+    const byReportPath = new Map(
+      agents.flatMap((agent) =>
+        agent.report_path
+          ? [[resolve(agent.report_path), agent] as const]
+          : [],
+      ),
+    );
+    await removeWatches(
+      (watch) => {
+        const subject = watch.subject_agent_id
+          ? this.registry.get(watch.subject_agent_id)
+          : byReportPath.get(resolve(watch.target));
+        if (!subject) return Boolean(watch.subject_agent_id);
+        return (
+          subject.user_killed === true ||
+          subject.deletion_intent ||
+          subject.parent_agent_id !== watch.owner
+        );
+      },
+      { registryPath: this.watchRegistryPath },
+    );
   }
 
   private async purgeStartupTerminalAgents(

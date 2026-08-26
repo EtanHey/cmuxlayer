@@ -89,6 +89,8 @@ import {
 import {
   WATCH_AGENT_PREDICATES,
   readWatchRegistry,
+  removeWatches,
+  scopeWatchToSubject,
   WatchArmError,
   type WatchNotify,
   type WatchSpec,
@@ -10881,6 +10883,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               WARNING: remedy,
             });
           }
+          await removeWatches(
+            (watch) => watch.subject_agent_id === args.agent_id,
+            {
+              registryPath:
+                opts?.watchRegistryPath ??
+                join(context.stateDir, "watch-specs.json"),
+            },
+          );
           if (!boundSurface) {
             const data = {
               ...stopContent,
@@ -12212,6 +12222,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 externalDelivered = false;
               }
             }
+            if (event.subject_agent_id) {
+              const subject =
+                registry.get(event.subject_agent_id) ??
+                stateMgr.readState(event.subject_agent_id);
+              if (
+                !subject ||
+                subject.parent_agent_id !== event.owner ||
+                subject.user_killed === true ||
+                subject.deletion_intent
+              ) {
+                return true;
+              }
+            }
             const owner =
               registry.get(event.owner) ?? stateMgr.readState(event.owner);
             if (owner && lifecycleAgentInputDeliverer) {
@@ -12996,24 +13019,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const armParentReportWatch = async (
       parentAgentId: string,
+      childAgentId: string,
       coordination: { report_path: string; done_marker: string },
     ): Promise<string | null> => {
       try {
+        const child =
+          registry.get(childAgentId) ?? stateMgr.readState(childAgentId);
+        if (!child || child.parent_agent_id !== parentAgentId) {
+          return `Report watch was not armed: ${childAgentId} is not a direct child of ${parentAgentId}`;
+        }
         const reportPath = resolve(coordination.report_path);
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
         }).watches.find(
           (watch) =>
             watch.owner === parentAgentId &&
+            (!watch.subject_agent_id ||
+              watch.subject_agent_id === childAgentId) &&
             watch.target === reportPath &&
             watch.change === "content" &&
             watch.state !== "failed",
         );
-        if (existing) return null;
+        if (existing) {
+          if (!existing.subject_agent_id) {
+            await scopeWatchToSubject(existing.watch_id, childAgentId, {
+              registryPath: watchRegistryPath,
+            });
+          }
+          return null;
+        }
         await mkdir(dirname(reportPath), { recursive: true });
         await appendFile(reportPath, "", "utf8");
         await engine.armWatch({
           owner: parentAgentId,
+          subject_agent_id: childAgentId,
           target: reportPath,
           change: "content",
           deadline: Number.MAX_SAFE_INTEGER,
@@ -13577,6 +13616,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const reportWatchWarning = result.parent_agent_id
               ? await armParentReportWatch(
                   result.parent_agent_id,
+                  result.agent_id,
                   resumeCoordination,
                 )
               : null;
@@ -14036,6 +14076,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (result.parent_agent_id) {
             const reportWatchWarning = await armParentReportWatch(
               result.parent_agent_id,
+              result.agent_id,
               coordination,
             );
             if (reportWatchWarning) {
