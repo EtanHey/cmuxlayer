@@ -2,7 +2,7 @@
   v2026.07.23-e383d2b
 
   Read and follow
-  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso
+  /home/test-user/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso
   r.mdCURSOR_WORKING_PROBE
 
   ┌──────────────────────────────────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@
   Running the probe test, then I'll reply with the exact ACK.
 
  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-  → Read and follow /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime
+  → Read and follow /home/test-user/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime
     -target-cursor.mdCURSOR_WORKING_PROBE
  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
   Auto · 11.3%                                                              Run Everything

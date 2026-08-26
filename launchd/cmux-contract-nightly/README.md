@@ -52,14 +52,15 @@ Do not arm this from automation. After reviewing the ancestry finding and the
 canonical checkout path, Etan can install it with:
 
 ```bash
-launchctl bootstrap gui/$UID /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist
+CMUXLAYER_REPO="$(git rev-parse --show-toplevel)"
+launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist"
 ```
 
 To reload after changes:
 
 ```bash
-launchctl bootout gui/$UID /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist 2>/dev/null || true
-launchctl bootstrap gui/$UID /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist
+launchctl bootout gui/$UID "$CMUXLAYER_REPO/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist" 2>/dev/null || true
+launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-contract-nightly/launchd/com.golems.cmux-contract-nightly.plist"
 ```
 
 Inspect the last receipt first. A `fail` means an admitted contract check found

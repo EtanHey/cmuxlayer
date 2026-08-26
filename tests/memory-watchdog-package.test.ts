@@ -46,8 +46,7 @@ describe("cmux memory watchdog package", () => {
         [join(collisionRoot, "install.sh"), "--dry-run"],
         {
           encoding: "utf8",
-          env: { ...process.env, HOME: "/Users/example" },
-        },
+          env: { ...process.env, HOME: "/home/test-user" },
       );
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain(
@@ -67,14 +66,13 @@ describe("cmux memory watchdog package", () => {
 
     const result = spawnSync("bash", [installer, "--dry-run"], {
       encoding: "utf8",
-      env: { ...process.env, HOME: "/Users/example & partner" },
-    });
+      env: { ...process.env, HOME: "/home/test-user & partner" },
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
       join(root, "bin", "cmux-memory-watchdog.sh"),
     );
     expect(result.stdout).toContain(
-      "/Users/example &amp; partner/Library/Logs/cmux-watchdog/launchd.stdout.log",
+      "/home/test-user &amp; partner/Library/Logs/cmux-watchdog/launchd.stdout.log",
     );
     expect(result.stdout).toContain(
       "<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",

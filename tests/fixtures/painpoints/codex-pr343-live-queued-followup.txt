@@ -17,11 +17,11 @@
   skill),
          SKILL.md (test-driven-development skill), SKILL.md (never-fabricate skill)
 
-• Ran wc -l /Users/etanheyman/.codex/superpowers/skills/verification-before-completion/
-  │ SKILL.md /Users/etanheyman/Gits/golems/skills/golem-powers/never-fabricate/SKILL.md
-  └      139 /Users/etanheyman/.codex/superpowers/skills/verification-before-completion/
+• Ran wc -l /home/test-user/.codex/superpowers/skills/verification-before-completion/
+  │ SKILL.md /home/test-user/Gits/golems/skills/golem-powers/never-fabricate/SKILL.md
+  └      139 /home/test-user/.codex/superpowers/skills/verification-before-completion/
     SKILL.md
-         448 /Users/etanheyman/Gits/golems/skills/golem-powers/never-fabricate/SKILL.md
+         448 /home/test-user/Gits/golems/skills/golem-powers/never-fabricate/SKILL.md
          587 total
 
 • Explored

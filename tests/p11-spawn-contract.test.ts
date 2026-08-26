@@ -127,16 +127,14 @@ function makeExec(
           workspace_ref: "workspace:1",
           window_ref: "window:1",
           pane_ref: "pane:1",
-          surfaces: surfaces.map((surface, index) =>
-            ({
-              id: surface.id,
-              ref: surface.ref,
-              title: surface.title,
-              type: "terminal",
-              index,
-              selected: index === 0,
-            }),
-          ),
+          surfaces: surfaces.map((surface, index) => ({
+            id: surface.id,
+            ref: surface.ref,
+            title: surface.title,
+            type: "terminal",
+            index,
+            selected: index === 0,
+          })),
         }),
         stderr: "",
       };
@@ -284,18 +282,20 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     targetServer = server,
   ) {
     const tool = targetServer._registeredTools["spawn_agent"];
-    const result = await runWithCallerContext({ workspaceId: "workspace:1" }, () =>
-      tool.handler(
-        {
-          repo: "brainlayer",
-          model: "sonnet",
-          cli: "claude",
-          role: "worker",
-          prompt: "task",
-          ...extra,
-        },
-        {} as never,
-      ),
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1" },
+      () =>
+        tool.handler(
+          {
+            repo: "brainlayer",
+            model: "sonnet",
+            cli: "claude",
+            role: "worker",
+            prompt: "task",
+            ...extra,
+          },
+          {} as never,
+        ),
     );
     return result.structuredContent ?? JSON.parse(result.content[0].text);
   }
@@ -313,7 +313,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   it("persists the contract on the record, so the consumer reads what was issued", async () => {
     const parsed = await spawn();
     const getState = server._registeredTools["get_agent_state"];
-    const state = await getState.handler({ agent_id: parsed.agent_id }, {} as never);
+    const state = await getState.handler(
+      { agent_id: parsed.agent_id },
+      {} as never,
+    );
     const detail = state.structuredContent ?? JSON.parse(state.content[0].text);
     expect(detail.report_path).toBe(parsed.report_path);
     expect(detail.done_marker).toBe(parsed.done_marker);
@@ -375,7 +378,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(child.ok, JSON.stringify(child)).toBe(true);
     expect(child.parent_agent_id).toBe(parent.agent_id);
     expect(existsSync(child.report_path)).toBe(true);
-    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches).toEqual([
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
       expect.objectContaining({
         owner: parent.agent_id,
         subject_agent_id: child.agent_id,
@@ -406,12 +411,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "utf8",
     );
     await engine.sweepWatchesBestEffort();
-    const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      before,
+    );
     expect(
       afterCalls.some(([, args]: [string, string[]]) =>
         args.some(
-          (arg) =>
-            arg.includes("[report]") && arg.includes(child.report_path),
+          (arg) => arg.includes("[report]") && arg.includes(child.report_path),
         ),
       ),
     ).toBe(true);
@@ -447,7 +453,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toBe(false);
 
-    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches).toEqual([
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
       expect.objectContaining({
         owner: parent.agent_id,
         target: child.report_path,
@@ -877,7 +885,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   it("prunes a terminal child's report watch when stop left user_killed unset", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
-    const target = join(inboxDir, "terminal-child-without-stop-flag", "report.md");
+    const target = join(
+      inboxDir,
+      "terminal-child-without-stop-flag",
+      "report.md",
+    );
     const child: AgentRecord = {
       ...parentRecord(),
       agent_id: "terminal-child-without-stop-flag",
@@ -1083,7 +1095,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     writeFileSync(reportPath, "after\n", "utf8");
     await engine.sweepWatchesBestEffort();
 
-    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      before,
+    );
     expect(
       wakeCalls.some(([, args]: [string, string[]]) =>
         args.some((arg) => arg.includes("[report]")),
@@ -1147,7 +1161,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     await engine.sweepWatchesBestEffort();
 
     expect(externalNotify).toHaveBeenCalledOnce();
-    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      before,
+    );
     expect(
       wakeCalls.some(([, args]: [string, string[]]) =>
         args.some((arg) => arg.includes("[report]")),
@@ -1290,9 +1306,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     const file = readFileSync(parsed.contract_path, "utf8");
     // Mailbox half -- the ~479 chars that used to ride the wire.
-    expect(file).toContain(recommendedMonitorCommand(parsed.agent_id, {
-      baseDir: inboxDir,
-    }));
+    expect(file).toContain(
+      recommendedMonitorCommand(parsed.agent_id, {
+        baseDir: inboxDir,
+      }),
+    );
     expect(file).toContain("CMUX_INBOX_MSG_ID=<handled-message-id>");
     expect(file).toContain(`cmuxlayer inbox-cursor '${parsed.agent_id}'`);
     // Report half -- the #454-issued contract that never fit inline. Byte-equal
@@ -1332,7 +1350,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const longPointer = bootContractPointer(
       longId,
       coordinationContractPath(longId, {
-        baseDir: "/Users/someone-with-a-long-name/.cmux/agents",
+        baseDir: "/home/someone-with-a-long-name/.cmux/agents",
       }),
     );
     expect(longPointer.length).toBeLessThan(BOOT_INJECTION_CHUNK_THRESHOLD);
@@ -1347,7 +1365,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     await spawn();
     const writes = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls
       .filter(([, args]: [string, string[]]) =>
-        (args ?? []).some((arg) => String(arg).includes("cmuxlayer contract for")),
+        (args ?? []).some((arg) =>
+          String(arg).includes("cmuxlayer contract for"),
+        ),
       )
       .map(([, args]: [string, string[]]) => String((args ?? []).at(-1) ?? ""));
     expect(writes).toHaveLength(1);
@@ -1591,7 +1611,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const parsed = await spawn({ report_path: override });
     expect(parsed.report_path).toBe(override);
     const getState = server._registeredTools["get_agent_state"];
-    const state = await getState.handler({ agent_id: parsed.agent_id }, {} as never);
+    const state = await getState.handler(
+      { agent_id: parsed.agent_id },
+      {} as never,
+    );
     const detail = state.structuredContent ?? JSON.parse(state.content[0].text);
     expect(detail.report_path).toBe(override);
   });
@@ -1626,6 +1649,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (args.includes("new-split")) {
         if (holdNextSplit) {
+          holdNextSplit = false;
           await new Promise<void>((resolve) => {
             releaseSplit = resolve;
           });
@@ -1714,9 +1738,53 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     // and launch. A third call would prove that the rejected socket launched.
     expect(splitCalls() - beforeConcurrent).toBe(2);
     expect(concurrent.map((result) => result.ok).sort()).toEqual([false, true]);
+    expect(concurrent.find((result) => result.ok === false)?.error_code).toBe(
+      "REPORT_PATH_IN_USE",
+    );
+
+    const isolatedServerA = createServer({
+      ...serverOptions,
+      context: createServerContext(serverOptions),
+    });
+    const isolatedServerB = createServer({
+      ...serverOptions,
+      context: createServerContext(serverOptions),
+    });
+    const processSharedOverride = join(
+      inboxDir,
+      "collab",
+      "forced-inprocess-shared-report.md",
+    );
+    const beforeIsolated = splitCalls();
+    holdNextSplit = true;
+    const isolatedWinner = spawn(
+      {
+        parent_agent_id: parent.agent_id,
+        report_path: processSharedOverride,
+      },
+      isolatedServerA,
+    );
+    await vi.waitFor(() => expect(splitCalls()).toBe(beforeIsolated + 1));
+    const isolatedLoser = spawn(
+      {
+        parent_agent_id: parent.agent_id,
+        report_path: processSharedOverride,
+      },
+      isolatedServerB,
+    );
+    await Promise.resolve();
+    releaseSplit?.();
+    const isolated = await Promise.all([isolatedWinner, isolatedLoser]);
+    expect(isolated.map((result) => result.ok).sort()).toEqual([false, true]);
+    expect(isolated.find((result) => result.ok === false)?.error_code).toBe(
+      "REPORT_PATH_IN_USE",
+    );
+    expect(splitCalls() - beforeIsolated).toBe(2);
+    await isolatedServerA.close();
+    await isolatedServerB.close();
     expect(
-      concurrent.find((result) => result.ok === false)?.error_code,
-    ).toBe("REPORT_PATH_IN_USE");
+      existsSync(`${watchRegistryPath}.report-path-reservations.json`),
+    ).toBe(false);
     await siblingServer.close();
   });
 });

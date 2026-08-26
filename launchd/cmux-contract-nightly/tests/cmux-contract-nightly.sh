@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$ROOT_DIR/bin/cmux-contract-nightly.sh"
 PLIST_PATH="$ROOT_DIR/launchd/com.golems.cmux-contract-nightly.plist"
-DEPLOY_SCRIPT_PATH="/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-contract-nightly/bin/cmux-contract-nightly.sh"
+DEPLOY_SCRIPT_PATH="@CMUXLAYER_REPO@/launchd/cmux-contract-nightly/bin/cmux-contract-nightly.sh"
 
 fail() {
   echo "FAIL: $*" >&2

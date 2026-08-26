@@ -316,7 +316,7 @@ describe("fleet sidebar reconciled snapshot", () => {
         agentId: "mm-worktree",
         surfaceRef: "surface:mm-worktree",
         surfaceTitle: "worktree worker",
-        repo: "/Users/etanheyman/Gits/mm.wt/clickable-leads",
+        repo: "/home/test-user/Gits/mm.wt/clickable-leads",
         launcherName: null,
       }),
       candidate({

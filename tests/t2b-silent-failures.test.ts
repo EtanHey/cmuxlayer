@@ -587,8 +587,8 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
         surface_observer_id: "cmux:test",
         surface_provenance: "cmuxlayer_spawn",
         role: "orchestrator",
-        launch_cwd: "/Users/e/Gits/golems/.worktrees/run3",
-        worktree_path: "/Users/e/Gits/golems/.worktrees/run3",
+        launch_cwd: "/home/test-user/Gits/golems/.worktrees/run3",
+        worktree_path: "/home/test-user/Gits/golems/.worktrees/run3",
       });
 
       const closed = (await getTool(server, "close_surface").handler(

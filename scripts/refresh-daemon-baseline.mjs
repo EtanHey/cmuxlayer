@@ -6,15 +6,29 @@ import { dirname, join } from "node:path";
 import {
   baselineContentSha256,
   baselinePath,
+  CANONICAL_OPERATIONS,
   compareBenchmark,
   maximumBenchmarkMeasurements,
+  performanceCeiling,
   runBenchmark,
   validateBaseline,
 } from "./check-daemon-benchmark.mjs";
 
-const existing = validateBaseline(
-  JSON.parse(await readFile(baselinePath, "utf8")),
-);
+const rawExisting = JSON.parse(await readFile(baselinePath, "utf8"));
+let existing;
+let migratingLegacyBaseline = false;
+try {
+  existing = validateBaseline(rawExisting);
+} catch (error) {
+  const legacyAttestationIsValid =
+    rawExisting?.schema_version === 2 &&
+    rawExisting?.refresh_attestation?.algorithm === "sha256" &&
+    rawExisting.refresh_attestation.content_sha256 ===
+      baselineContentSha256(rawExisting);
+  if (!legacyAttestationIsValid) throw error;
+  existing = rawExisting;
+  migratingLegacyBaseline = true;
+}
 const runnerClass = process.env.CMUXLAYER_BENCH_RUNNER_CLASS;
 const workflowRunId = Number(process.env.GITHUB_RUN_ID);
 const headSha = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -49,11 +63,7 @@ const samples = runnerRebase
   ? [JSON.parse(await readFile(importedResultPath, "utf8"))]
   : [];
 let artifactDir;
-for (
-  let index = 0;
-  !runnerRebase && index < refreshSampleCount;
-  index += 1
-) {
+for (let index = 0; !runnerRebase && index < refreshSampleCount; index += 1) {
   const run = await runBenchmark({
     benchmarkEnv: {
       CMUXLAYER_BENCH_N: "8",
@@ -69,16 +79,21 @@ for (
     run.result.replay?.clients !== 8 ||
     run.result.replay?.rounds !== 12 ||
     JSON.stringify(run.result.replay?.operations) !==
-      JSON.stringify(existing.replay.operations)
+      JSON.stringify(CANONICAL_OPERATIONS)
   ) {
     throw new Error("refusing to refresh without the canonical 8x12 replay");
   }
-  for (const operation of existing.replay.operations) {
+  for (const operation of CANONICAL_OPERATIONS) {
     if (
-      run.result.replay?.bytes?.[operation] !==
-        existing.replay.bytes[operation] ||
-      run.result.replay?.request_sha256?.[operation] !==
-      existing.replay.request_sha256[operation]
+      !Number.isFinite(run.result.replay?.bytes?.[operation]) ||
+      !/^[0-9a-f]{64}$/.test(
+        run.result.replay?.request_sha256?.[operation] ?? "",
+      ) ||
+      (!migratingLegacyBaseline &&
+        (run.result.replay.bytes[operation] !==
+          existing.replay.bytes[operation] ||
+          run.result.replay.request_sha256[operation] !==
+            existing.replay.request_sha256[operation]))
     ) {
       throw new Error(
         `refusing to refresh changed canonical request ${operation}`,
@@ -96,22 +111,27 @@ for (const sample of samples) {
     sample.replay?.clients !== 8 ||
     sample.replay?.rounds !== 12 ||
     JSON.stringify(sample.replay?.operations) !==
-      JSON.stringify(existing.replay.operations)
+      JSON.stringify(CANONICAL_OPERATIONS)
   ) {
     throw new Error("refusing to refresh without the canonical 8x12 replay");
   }
-  for (const operation of existing.replay.operations) {
+  for (const operation of CANONICAL_OPERATIONS) {
     if (
-      sample.replay?.bytes?.[operation] !== existing.replay.bytes[operation] ||
-      sample.replay?.request_sha256?.[operation] !==
-        existing.replay.request_sha256[operation]
+      !Number.isFinite(sample.replay?.bytes?.[operation]) ||
+      !/^[0-9a-f]{64}$/.test(
+        sample.replay?.request_sha256?.[operation] ?? "",
+      ) ||
+      (!migratingLegacyBaseline &&
+        (sample.replay.bytes[operation] !== existing.replay.bytes[operation] ||
+          sample.replay.request_sha256[operation] !==
+            existing.replay.request_sha256[operation]))
     ) {
       throw new Error(
         `refusing to refresh changed canonical request ${operation}`,
       );
     }
   }
-  if (!runnerRebase) {
+  if (!runnerRebase && !migratingLegacyBaseline) {
     const comparison = compareBenchmark(existing, sample);
     if (!comparison.passed) {
       throw new Error(
@@ -122,67 +142,47 @@ for (const sample of samples) {
 }
 
 const measured = maximumBenchmarkMeasurements(samples);
-const measurements = runnerRebase
-  ? {
-      list_surfaces: {
-        p50_ms: Math.max(
-          existing.measurements.list_surfaces.p50_ms,
-          measured.list_surfaces.p50_ms,
-        ),
-        p95_ms: Math.max(
-          existing.measurements.list_surfaces.p95_ms,
-          measured.list_surfaces.p95_ms,
-        ),
-      },
-      read_screen: {
-        p50_ms: Math.max(
-          existing.measurements.read_screen.p50_ms,
-          measured.read_screen.p50_ms,
-        ),
-        p95_ms: Math.max(
-          existing.measurements.read_screen.p95_ms,
-          measured.read_screen.p95_ms,
-        ),
-      },
-      first_send_after_spawn: {
-        p50_ms: Math.max(
-          existing.measurements.first_send_after_spawn.p50_ms,
-          measured.first_send_after_spawn.p50_ms,
-        ),
-        p95_ms: Math.max(
-          existing.measurements.first_send_after_spawn.p95_ms,
-          measured.first_send_after_spawn.p95_ms,
-        ),
-        lock_hold_ms: Math.max(
-          existing.measurements.first_send_after_spawn.lock_hold_ms,
-          measured.first_send_after_spawn.lock_hold_ms,
-        ),
-      },
-      cli_send_ms: Math.max(
-        existing.measurements.cli_send_ms,
-        measured.cli_send_ms,
+const chooseMetric = runnerRebase ? Math.max : Math.min;
+const measurements = {
+  ...Object.fromEntries(
+    CANONICAL_OPERATIONS.map((operation) => [
+      operation,
+      Object.fromEntries(
+        ["p50_ms", "p95_ms", "lock_hold_ms"].map((metric) => [
+          metric,
+          Number.isFinite(existing.measurements?.[operation]?.[metric])
+            ? chooseMetric(
+                existing.measurements[operation][metric],
+                measured[operation][metric],
+              )
+            : measured[operation][metric],
+        ]),
       ),
-    }
-  : measured;
+    ]),
+  ),
+  cli_send_ms: chooseMetric(
+    existing.measurements.cli_send_ms,
+    measured.cli_send_ms,
+  ),
+};
 if (
   !Number.isFinite(measurements.first_send_after_spawn.lock_hold_ms) ||
   measurements.first_send_after_spawn.lock_hold_ms >
-    existing.measurements.first_send_after_spawn.lock_hold_ms *
-      existing.regression_ratio
+    performanceCeiling(
+      existing.measurements.first_send_after_spawn.lock_hold_ms,
+      existing.regression_ratio,
+      1_000,
+    )
 ) {
   throw new Error("refusing to refresh from an over-budget lock hold");
 }
 const measurementPairs = [
-  ...existing.replay.operations.flatMap((operation) =>
-    ["p50_ms", "p95_ms"].map((metric) => [
+  ...CANONICAL_OPERATIONS.flatMap((operation) =>
+    ["p50_ms", "p95_ms", "lock_hold_ms"].map((metric) => [
       measurements[operation][metric],
-      existing.measurements[operation][metric],
+      existing.measurements?.[operation]?.[metric] ?? Infinity,
     ]),
   ),
-  [
-    measurements.first_send_after_spawn.lock_hold_ms,
-    existing.measurements.first_send_after_spawn.lock_hold_ms,
-  ],
   [measurements.cli_send_ms, existing.measurements.cli_send_ms],
 ];
 if (
@@ -199,6 +199,7 @@ const refreshed = {
     runner_class: runnerClass,
     workflow_run_id: runnerRebase ? importedSourceRunId : workflowRunId,
   },
+  sanity_caps_ms: { all_rows: 1_000, cli_send: 1_000 },
   replay: samples[0].replay,
   measurements,
 };

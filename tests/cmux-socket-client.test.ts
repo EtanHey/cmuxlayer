@@ -1452,26 +1452,27 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(result.surface).toBe("surface:cli-tab");
   });
 
-  it("pasteText fails loudly without a CLI fallback instead of sending raw markers", async () => {
+  it("pasteText sends one atomic multiline V2 payload without a CLI fallback", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,
       timeoutMs: 1000,
     });
 
-    await expect(
-      client.pasteText("surface:1", "line one\nline two", {
-        workspace: "workspace:1",
-      }),
-    ).rejects.toMatchObject({
-      name: "CmuxSocketError",
-      code: "method_not_found",
-      message: expect.stringContaining("requires the cmux CLI"),
+    await client.pasteText("surface:1", "line one\nline two", {
+      workspace: "workspace:1",
     });
 
-    expect(lastV2Request).toBeNull();
+    expect(lastV2Request).toMatchObject({
+      method: "surface.send_text",
+      params: {
+        surface_id: "surface:1",
+        workspace_id: "workspace:1",
+        text: "line one\nline two",
+      },
+    });
   });
 
-  it("pasteText uses CLI paste-buffer fallback without sending bracketed markers over the socket", async () => {
+  it("pasteText stays on the socket even when a CLI fallback exists", async () => {
     const execCalls: Array<{
       cmd: string;
       args: string[];
@@ -1492,28 +1493,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       workspace: "workspace:1",
     });
 
-    expect(lastV2Request).toBeNull();
-    expect(execCalls).toHaveLength(2);
-    expect(execCalls[0].args).toEqual([
-      "--json", "--id-format", "both",
-      "set-buffer",
-      "--name",
-      expect.stringMatching(/^cmuxlayer-workspace-1-surface-1-/),
-      "--",
-      "line one\nline two",
-    ]);
-    expect(execCalls[1].args).toEqual([
-      "--json", "--id-format", "both",
-      "paste-buffer",
-      "--name",
-      execCalls[0].args[5],
-      "--surface",
-      "surface:1",
-      "--workspace",
-      "workspace:1",
-    ]);
-    expect(execCalls[0].env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
-    expect(execCalls[1].env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
+    expect(execCalls).toHaveLength(0);
+    expect(lastV2Request).toMatchObject({
+      method: "surface.send_text",
+      params: { text: "line one\nline two" },
+    });
   });
 
   it("moveSurface uses CLI fallback", async () => {
@@ -1591,46 +1575,6 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(result.surface).toBe("surface:2"); // from MOCK_RESPONSES
   });
 
-  it("re-pins the shared CLI fallback to its own socket before pasting (collab O2 #8)", async () => {
-    // Reproduce the live failure: one CmuxClient is shared as cliFallback by
-    // BOTH socket clients (exactly what createCmuxClient does). A long paste to
-    // the nightly-pinned client must carry CMUX_SOCKET_PATH=nightly even though
-    // the prod-pinned client synced the shared fallback last.
-    const execEnvs: (NodeJS.ProcessEnv | undefined)[] = [];
-    const exec: ExecFn = vi.fn(async (_cmd, _args, env) => {
-      execEnvs.push(env);
-      return { stdout: "{}", stderr: "" };
-    });
-    const sharedCli = new CmuxClient({ exec });
-    const saved = MOCK_RESPONSES["surface.send_text"];
-    delete MOCK_RESPONSES["surface.send_text"];
-
-    try {
-      const firstClient = new CmuxSocketClient({
-        socketPath: MOCK_SOCKET_PATH,
-        cliFallback: sharedCli,
-      });
-      const secondClient = new CmuxSocketClient({
-        socketPath: MOCK_SOCKET_PATH,
-        cliFallback: sharedCli,
-      });
-      await secondClient.pasteText("surface:p", "second text", {
-        workspace: "workspace:1",
-      });
-
-      execEnvs.length = 0;
-      await firstClient.pasteText("surface:n", "first text", {
-        workspace: "workspace:1",
-      });
-
-      expect(execEnvs.length).toBeGreaterThan(0);
-      for (const env of execEnvs) {
-        expect(env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
-      }
-    } finally {
-      MOCK_RESPONSES["surface.send_text"] = saved;
-    }
-  });
 });
 
 describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {

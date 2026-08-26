@@ -26,7 +26,7 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     cli: "claude",
     cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     launcher_name: "brainlayerClaude",
-    launch_cwd: "/Users/etanheyman/Gits/brainlayer",
+    launch_cwd: "/home/test-user/Gits/brainlayer",
     task_summary: "Fix the bug",
     pid: null,
     version: 1,

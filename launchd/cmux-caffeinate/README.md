@@ -27,14 +27,15 @@ the tradeoff.
 Do not arm this from automation. Etan-gated install command:
 
 ```bash
-launchctl bootstrap gui/$UID /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist
+CMUXLAYER_REPO="$(git rev-parse --show-toplevel)"
+launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist"
 ```
 
 To reload after changes:
 
 ```bash
-launchctl bootout gui/$UID /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist 2>/dev/null || true
-launchctl bootstrap gui/$UID /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist
+launchctl bootout gui/$UID "$CMUXLAYER_REPO/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist" 2>/dev/null || true
+launchctl bootstrap gui/$UID "$CMUXLAYER_REPO/launchd/cmux-caffeinate/launchd/com.golems.cmux-caffeinate.plist"
 ```
 
 ## AC caveat

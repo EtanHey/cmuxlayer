@@ -414,16 +414,28 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
   });
 
-  it("marks an absent monitor as degraded evidence, not a wedged live pane", () => {
+  it("does not degrade a missing monitor when the inbox has no unread lines", () => {
     const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
       monitor_alive: false,
       stale_count: 0,
       screen_status: "working",
     });
 
-    expect(health.status).toBe("degraded");
-    expect(health.issue_codes).toContain("inbox_monitor_not_alive");
+    expect(health.status).toBe("healthy");
+    expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
     expect(health.issue_codes).not.toContain("agent_wedged");
+  });
+
+  it("degrades a missing monitor when unread inbox lines exist", () => {
+    const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
+      monitor_alive: false,
+      stale_count: 1,
+      screen_status: "working",
+    });
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("inbox_monitor_not_alive");
+    expect(health.issue_severities?.inbox_monitor_not_alive).toBe("degraded");
   });
 
   it("marks registry workspace mismatch against the live surface as unhealthy", () => {

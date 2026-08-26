@@ -638,7 +638,7 @@ describe("real cmux contract runner helpers", () => {
     expect(() =>
       assertOwnedDaemonSocket(
         root,
-        "/Users/example/.local/state/cmux/cmuxlayer-stated.sock",
+        "/home/test-user/.local/state/cmux/cmuxlayer-stated.sock",
       ),
     ).toThrow(/outside owned contract root/);
     expect(() => assertOwnedDaemonSocket(root, root)).toThrow(

@@ -91,7 +91,7 @@ function fakeMcpConfigReaders(files: Record<string, string>) {
   return {
     listMcpConfigPaths: async () => [
       ...Object.keys(files),
-      "/Users/etanheyman/Gits/missing/.mcp.json",
+      "/home/test-user/Gits/missing/.mcp.json",
     ],
     readMcpConfigFile: async (path: string) => {
       if (!(path in files)) {
@@ -979,11 +979,11 @@ describe("runDoctor — report shape", () => {
       pmset: emptyPmset,
       launchctl: missingLaunchctl,
       ...fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/one/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/one/.mcp.json": mcpConfig({
           mcpServers: {
             cmuxlayer: {
               command: "node",
-              args: ["/Users/etanheyman/Gits/cmuxlayer/dist/index.js"],
+              args: ["/home/test-user/Gits/cmuxlayer/dist/index.js"],
             },
           },
         }),
@@ -994,7 +994,7 @@ describe("runDoctor — report shape", () => {
     expect(report.mcpConfigDrift.scanned).toBe(1);
     expect(report.mcpConfigDrift.drifted).toEqual([
       {
-        path: "/Users/etanheyman/Gits/one/.mcp.json",
+        path: "/home/test-user/Gits/one/.mcp.json",
         serverKey: "cmuxlayer",
         reason: expect.stringMatching(/cmuxlayer-mcp/i),
       },
@@ -1008,7 +1008,7 @@ describe("runDoctor — report shape", () => {
       env: {},
       brew: makeBrew({}),
       ...fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/missing-launcher/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/missing-launcher/.mcp.json": mcpConfig({
           mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
         }),
       }),
@@ -1079,11 +1079,11 @@ describe("runDoctor — report shape", () => {
       runtimeProvenance: () =>
         detectRuntimeProvenance({
           argv: [
-            "/Users/etanheyman/.bun/bin/bun",
-            "/Users/etanheyman/Gits/cmuxlayer/src/index.ts",
+            "/home/test-user/.bun/bin/bun",
+            "/home/test-user/Gits/cmuxlayer/src/index.ts",
           ],
           env: { CMUXLAYER_DEV: "1" },
-          execPath: "/Users/etanheyman/.bun/bin/bun",
+          execPath: "/home/test-user/.bun/bin/bun",
         }),
     });
 
@@ -1105,7 +1105,7 @@ describe("runDoctor — report shape", () => {
         detectRuntimeProvenance({
           argv: [
             "/opt/homebrew/opt/node/bin/node",
-            "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+            "/home/test-user/.golems/bin/cmuxlayer-mcp",
           ],
           env: { CMUXLAYER_DEV: "1" },
           execPath: "/opt/homebrew/opt/node/bin/node",
@@ -1114,7 +1114,7 @@ describe("runDoctor — report shape", () => {
 
     expect(report.runtimeProvenance).toMatchObject({
       distEntrypoint: false,
-      entrypoint: "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+      entrypoint: "/home/test-user/.golems/bin/cmuxlayer-mcp",
       mode: "launcher",
       ok: false,
     });
@@ -1185,7 +1185,7 @@ describe("checkMcpConfigDrift", () => {
     const launcherPath = launcherFixture("healthy");
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/clean/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/clean/.mcp.json": mcpConfig({
           mcpServers: {
             cmuxlayer: {
               command: launcherPath,
@@ -1209,7 +1209,7 @@ describe("checkMcpConfigDrift", () => {
     const launcherPath = launcherFixture("missing");
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/missing-launcher/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/missing-launcher/.mcp.json": mcpConfig({
           mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
         }),
       }),
@@ -1224,7 +1224,7 @@ describe("checkMcpConfigDrift", () => {
     const launcherPath = launcherFixture("dangling");
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/dangling-launcher/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/dangling-launcher/.mcp.json": mcpConfig({
           mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
         }),
       }),
@@ -1238,7 +1238,7 @@ describe("checkMcpConfigDrift", () => {
     const launcherPath = launcherFixture("non-executable");
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/non-executable-launcher/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/non-executable-launcher/.mcp.json": mcpConfig({
           mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
         }),
       }),
@@ -1251,11 +1251,11 @@ describe("checkMcpConfigDrift", () => {
   it("flags a cmuxlayer entry that bypasses the launcher via node dist/index.js", async () => {
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/drift/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/drift/.mcp.json": mcpConfig({
           mcpServers: {
             cmuxlayer: {
               command: "node",
-              args: ["/Users/etanheyman/Gits/cmuxlayer/dist/index.js"],
+              args: ["/home/test-user/Gits/cmuxlayer/dist/index.js"],
             },
           },
         }),
@@ -1265,7 +1265,7 @@ describe("checkMcpConfigDrift", () => {
     expect(report.scanned).toBe(1);
     expect(report.drifted).toEqual([
       {
-        path: "/Users/etanheyman/Gits/drift/.mcp.json",
+        path: "/home/test-user/Gits/drift/.mcp.json",
         serverKey: "cmuxlayer",
         reason: expect.stringMatching(/cmuxlayer-mcp/i),
       },
@@ -1275,11 +1275,11 @@ describe("checkMcpConfigDrift", () => {
   it("does not treat unrelated paths containing cmuxlayer-mcp as the launcher", async () => {
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/substring/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/substring/.mcp.json": mcpConfig({
           mcpServers: {
             cmuxlayer: {
               command: "node",
-              args: ["/Users/etanheyman/Gits/cmuxlayer-mcp/dist/index.js"],
+              args: ["/home/test-user/Gits/cmuxlayer-mcp/dist/index.js"],
             },
           },
         }),
@@ -1289,7 +1289,7 @@ describe("checkMcpConfigDrift", () => {
     expect(report.scanned).toBe(1);
     expect(report.drifted).toEqual([
       {
-        path: "/Users/etanheyman/Gits/substring/.mcp.json",
+        path: "/home/test-user/Gits/substring/.mcp.json",
         serverKey: "cmuxlayer",
         reason: expect.stringMatching(/cmuxlayer-mcp/i),
       },
@@ -1299,10 +1299,10 @@ describe("checkMcpConfigDrift", () => {
   it("flags the stale cmux server key even when it points at the launcher", async () => {
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/stale/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/stale/.mcp.json": mcpConfig({
           mcpServers: {
             cmux: {
-              command: "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+              command: "/home/test-user/.golems/bin/cmuxlayer-mcp",
               args: [],
             },
           },
@@ -1313,7 +1313,7 @@ describe("checkMcpConfigDrift", () => {
     expect(report.scanned).toBe(1);
     expect(report.drifted).toEqual([
       {
-        path: "/Users/etanheyman/Gits/stale/.mcp.json",
+        path: "/home/test-user/Gits/stale/.mcp.json",
         serverKey: "cmux",
         reason: expect.stringMatching(/stale.*cmux/i),
       },
@@ -1323,7 +1323,7 @@ describe("checkMcpConfigDrift", () => {
   it("ignores repos with no cmux or cmuxlayer server entry", async () => {
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/other/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/other/.mcp.json": mcpConfig({
           mcpServers: {
             other: { command: "node", args: ["server.js"] },
           },
@@ -1338,10 +1338,10 @@ describe("checkMcpConfigDrift", () => {
   it("skips missing and invalid JSON files without throwing", async () => {
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
-        "/Users/etanheyman/Gits/valid/.mcp.json": mcpConfig({
+        "/home/test-user/Gits/valid/.mcp.json": mcpConfig({
           mcpServers: {},
         }),
-        "/Users/etanheyman/Gits/invalid/.mcp.json": "{ not json",
+        "/home/test-user/Gits/invalid/.mcp.json": "{ not json",
       }),
     );
 
@@ -1515,7 +1515,7 @@ describe("renderDoctorText", () => {
         scanned: 2,
         drifted: [
           {
-            path: "/Users/etanheyman/Gits/drift/.mcp.json",
+            path: "/home/test-user/Gits/drift/.mcp.json",
             serverKey: "cmuxlayer",
             reason: "does not reference launcher cmuxlayer-mcp",
           },
@@ -1601,7 +1601,7 @@ describe("renderDoctorJson", () => {
         scanned: 1,
         drifted: [
           {
-            path: "/Users/etanheyman/Gits/drift/.mcp.json",
+            path: "/home/test-user/Gits/drift/.mcp.json",
             serverKey: "cmuxlayer",
             reason: "does not reference launcher cmuxlayer-mcp",
           },

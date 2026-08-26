@@ -18,8 +18,7 @@
 # launchd install:
 #   1. Run `bun run build` so dist/mcp-reaper.js exists.
 #   2. Copy scripts/com.cmuxlayer.mcp-reaper.plist to ~/Library/LaunchAgents/.
-#   3. Edit the ProgramArguments path if this checkout is not
-#      /Users/etanheyman/Gits/cmuxlayer/scripts/mcp-orphan-reaper.sh.
+#   3. Replace @CMUXLAYER_REPO@ in ProgramArguments with this checkout path.
 #   4. Run:
 #      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist
 #

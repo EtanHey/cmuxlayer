@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$ROOT_DIR/bin/cmux-caffeinate.sh"
 PLIST_PATH="$ROOT_DIR/launchd/com.golems.cmux-caffeinate.plist"
-DEPLOY_SCRIPT_PATH="/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-caffeinate/bin/cmux-caffeinate.sh"
+DEPLOY_SCRIPT_PATH="@CMUXLAYER_REPO@/launchd/cmux-caffeinate/bin/cmux-caffeinate.sh"
 
 fail() {
   echo "FAIL: $*" >&2

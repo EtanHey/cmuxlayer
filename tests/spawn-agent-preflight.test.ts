@@ -103,7 +103,7 @@ describe("spawn_agent launcher preflight", () => {
     const registryPath = join(TEST_DIR, "launchers.zsh");
     writeFileSync(
       registryPath,
-      'repoGolem cmuxlayer "/Users/etanheyman/Gits/cmuxlayer"\n',
+      'repoGolem cmuxlayer "/home/test-user/Gits/cmuxlayer"\n',
     );
     vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
     const defaultEngine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => []), mockClient, {

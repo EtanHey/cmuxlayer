@@ -388,6 +388,7 @@ export function evaluateAgentHealth(
     );
   }
 
+  const staleCount = input.stale_count ?? 0;
   if (
     input.monitor_alive === false &&
     input.inbox_channel_dir_deleted === true
@@ -398,7 +399,7 @@ export function evaluateAgentHealth(
       "inbox_channel_dir_deleted",
       "agent inbox channel dir was deleted after creation; next inbox write will recreate it",
     );
-  } else if (input.monitor_alive === false) {
+  } else if (input.monitor_alive === false && staleCount > 0) {
     addIssue(
       issueCodes,
       issues,
@@ -407,7 +408,6 @@ export function evaluateAgentHealth(
     );
   }
 
-  const staleCount = input.stale_count ?? 0;
   if (staleCount > 0) {
     addIssue(
       issueCodes,

@@ -23,6 +23,11 @@ export const CANONICAL_ROUNDS = 12;
 export const CANONICAL_OPERATIONS = [
   "list_surfaces",
   "read_screen",
+  "send_to_surface_warm",
+  "send_to_agent_warm",
+  "list_agents",
+  "control_health",
+  "spawn_close_during_sweep",
   "first_send_after_spawn",
 ];
 const REQUIRED_REGRESSION_RATIO = 1.25;
@@ -63,15 +68,17 @@ export function validateBaseline(baseline) {
     !Number.isSafeInteger(baseline.source?.workflow_run_id) ||
     baseline.source.workflow_run_id <= 0
   ) {
-    throw new Error("baseline source.workflow_run_id must be a positive integer");
+    throw new Error(
+      "baseline source.workflow_run_id must be a positive integer",
+    );
   }
   if (baseline.regression_ratio !== REQUIRED_REGRESSION_RATIO) {
     throw new Error("baseline regression_ratio must remain 1.25");
   }
-  finite(
-    baseline.sanity_caps_ms?.first_send_after_spawn,
-    "sanity_caps_ms.first_send_after_spawn",
-  );
+  finite(baseline.sanity_caps_ms?.all_rows, "sanity_caps_ms.all_rows");
+  if (baseline.sanity_caps_ms.all_rows !== 1_000) {
+    throw new Error("baseline sanity_caps_ms.all_rows must remain 1000");
+  }
   finite(baseline.sanity_caps_ms?.cli_send, "sanity_caps_ms.cli_send");
   finite(baseline.replay?.clients, "replay.clients");
   finite(baseline.replay?.rounds, "replay.rounds");
@@ -89,7 +96,14 @@ export function validateBaseline(baseline) {
   for (const operation of baseline.replay.operations) {
     finite(baseline.replay?.bytes?.[operation], `replay.bytes.${operation}`);
     if (!/^[0-9a-f]{64}$/.test(baseline.replay?.request_sha256?.[operation])) {
-      throw new Error(`baseline replay.request_sha256.${operation} is required`);
+      throw new Error(
+        `baseline replay.request_sha256.${operation} is required`,
+      );
+    }
+    if (baseline.replay?.transport?.[operation] !== "socket") {
+      throw new Error(
+        `baseline replay.transport.${operation} must attest socket`,
+      );
     }
     finite(
       baseline.measurements?.[operation]?.p50_ms,
@@ -99,11 +113,11 @@ export function validateBaseline(baseline) {
       baseline.measurements?.[operation]?.p95_ms,
       `measurements.${operation}.p95_ms`,
     );
+    finite(
+      baseline.measurements?.[operation]?.lock_hold_ms,
+      `measurements.${operation}.lock_hold_ms`,
+    );
   }
-  finite(
-    baseline.measurements?.first_send_after_spawn?.lock_hold_ms,
-    "measurements.first_send_after_spawn.lock_hold_ms",
-  );
   finite(baseline.measurements?.cli_send_ms, "measurements.cli_send_ms");
   if (baseline.refresh_attestation?.algorithm !== "sha256") {
     throw new Error("baseline refresh_attestation.algorithm must be sha256");
@@ -117,9 +131,10 @@ export function validateBaseline(baseline) {
   return baseline;
 }
 
-function ceiling(baselineValue, ratio, sanityCap = Infinity) {
+export function performanceCeiling(baselineValue, ratio, sanityCap = 1_000) {
   return Math.min(
-    Math.round(baselineValue * ratio * 100) / 100,
+    Math.round(Math.max(baselineValue * ratio, baselineValue + 300) * 100) /
+      100,
     sanityCap,
   );
 }
@@ -127,14 +142,31 @@ function ceiling(baselineValue, ratio, sanityCap = Infinity) {
 function currentMetrics(result) {
   const first = result?.latency?.first_send_after_spawn?.first;
   return {
-    list_surfaces: result?.latency?.daemon_path?.list_surfaces,
-    read_screen: result?.latency?.daemon_path?.read_screen,
+    list_surfaces: {
+      ...result?.latency?.daemon_path?.list_surfaces,
+      lock_hold_ms:
+        result?.latency?.daemon_path?.list_surfaces?.lock_hold_ms ?? 0,
+    },
+    read_screen: {
+      ...result?.latency?.daemon_path?.read_screen,
+      lock_hold_ms:
+        result?.latency?.daemon_path?.read_screen?.lock_hold_ms ?? 0,
+    },
+    send_to_surface_warm: result?.latency?.send_to_surface_warm,
+    send_to_agent_warm: result?.latency?.send_to_agent_warm,
+    list_agents: result?.latency?.daemon_path?.list_agents,
+    control_health: result?.latency?.daemon_path?.control_health,
+    spawn_close_during_sweep: result?.latency?.spawn_close_during_sweep,
     first_send_after_spawn: {
       p50_ms: first?.elapsed_ms,
       p95_ms: first?.elapsed_ms,
       lock_hold_ms:
         first?.lock_hold_ms ?? first?.receipt?.timings_ms?.lock_hold,
+      transport: first?.transport ?? first?.receipt?.transport,
     },
+    cli_send_transport:
+      result?.latency?.first_send_after_spawn?.surface?.transport ??
+      result?.latency?.first_send_after_spawn?.surface?.receipt?.transport,
     cli_send_ms: result?.latency?.first_send_after_spawn?.surface?.elapsed_ms,
   };
 }
@@ -152,28 +184,40 @@ export function maximumBenchmarkMeasurements(results) {
     return Math.max(...values);
   };
   return {
-    list_surfaces: {
-      p50_ms: maximum((entry) => entry.list_surfaces?.p50_ms),
-      p95_ms: maximum((entry) => entry.list_surfaces?.p95_ms),
-    },
-    read_screen: {
-      p50_ms: maximum((entry) => entry.read_screen?.p50_ms),
-      p95_ms: maximum((entry) => entry.read_screen?.p95_ms),
-    },
-    first_send_after_spawn: {
-      p50_ms: maximum((entry) => entry.first_send_after_spawn.p50_ms),
-      p95_ms: maximum((entry) => entry.first_send_after_spawn.p95_ms),
-      lock_hold_ms: maximum(
-        (entry) => entry.first_send_after_spawn.lock_hold_ms,
-      ),
-    },
+    ...Object.fromEntries(
+      CANONICAL_OPERATIONS.map((operation) => [
+        operation,
+        {
+          p50_ms: maximum((entry) => entry[operation]?.p50_ms),
+          p95_ms: maximum((entry) => entry[operation]?.p95_ms),
+          lock_hold_ms: maximum((entry) => entry[operation]?.lock_hold_ms),
+        },
+      ]),
+    ),
     cli_send_ms: maximum((entry) => entry.cli_send_ms),
   };
 }
 
-function row(operation, metric, baseline, current, ceiling, unit = "ms") {
+function row(
+  operation,
+  metric,
+  baseline,
+  current,
+  ceiling,
+  unit = "ms",
+  transport,
+) {
   const passed = Number.isFinite(current) && current <= ceiling;
-  return { operation, metric, baseline, current, ceiling, unit, passed };
+  return {
+    operation,
+    metric,
+    baseline,
+    current,
+    ceiling,
+    unit,
+    transport,
+    passed,
+  };
 }
 
 function exactRow(operation, metric, committed, current, unit) {
@@ -207,38 +251,47 @@ export function compareBenchmark(
           metric,
           baseline.measurements[operation][metric],
           current[operation]?.[metric],
-          ceiling(
+          performanceCeiling(
             baseline.measurements[operation][metric],
             ratio,
-            operation === "first_send_after_spawn"
-              ? baseline.sanity_caps_ms.first_send_after_spawn
-              : Infinity,
+            baseline.sanity_caps_ms.all_rows,
           ),
+          "ms",
+          current[operation]?.transport,
         ),
       );
     }
   }
-  rows.push(
-    row(
-      "first_send_after_spawn",
-      "lock_hold_ms",
-      baseline.measurements.first_send_after_spawn.lock_hold_ms,
-      current.first_send_after_spawn.lock_hold_ms,
-      ceiling(
-        baseline.measurements.first_send_after_spawn.lock_hold_ms,
-        ratio,
+  for (const operation of baseline.replay.operations) {
+    rows.push(
+      row(
+        operation,
+        "lock_hold_ms",
+        baseline.measurements[operation].lock_hold_ms,
+        current[operation]?.lock_hold_ms,
+        performanceCeiling(
+          baseline.measurements[operation].lock_hold_ms,
+          ratio,
+          baseline.sanity_caps_ms.all_rows,
+        ),
+        "ms",
+        current[operation]?.transport,
       ),
-    ),
+    );
+  }
+  rows.push(
     row(
       "first_send_after_spawn",
       "cli_send_ms",
       baseline.measurements.cli_send_ms,
       current.cli_send_ms,
-      ceiling(
+      performanceCeiling(
         baseline.measurements.cli_send_ms,
         ratio,
         baseline.sanity_caps_ms.cli_send,
       ),
+      "ms",
+      current.cli_send_transport,
     ),
   );
   for (const operation of baseline.replay.operations) {
@@ -260,6 +313,13 @@ export function compareBenchmark(
         ? `${entry.operation} ${metric}: ${entry.current} ${entry.unit} does not match committed ${entry.baseline} ${entry.unit}`
         : `${entry.operation} ${metric}: ${entry.current}${entry.unit} exceeds ${entry.ceiling}${entry.unit}`;
     });
+  for (const operation of baseline.replay.operations) {
+    if (current[operation]?.transport !== "socket") {
+      failures.push(
+        `${operation} transport: ${current[operation]?.transport ?? "missing"}; cli fallback active`,
+      );
+    }
+  }
   if (result?.replay?.clients !== baseline.replay.clients) {
     failures.push(
       `replay clients: ${result?.replay?.clients} does not match committed ${baseline.replay.clients}`,
@@ -300,14 +360,14 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "<!-- cmuxlayer-perf-budget -->",
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
-    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. CI ceilings derive from the committed ${baseline.source.runner_class} measurements; first-send and CLI retain 10,000 ms sanity caps.`,
+    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Every CI row uses max(baseline x ratio, baseline + 300 ms) with a 1,000 ms sanity cap.`,
     "",
-    "| Operation | Metric | Baseline | Current | Ceiling | Status |",
-    "|---|---:|---:|---:|---:|:---:|",
+    "| Operation | Transport | Metric | Baseline | Current | Ceiling | Status |",
+    "|---|:---:|---:|---:|---:|---:|:---:|",
   ];
   for (const entry of comparison.rows) {
     lines.push(
-      `| ${entry.operation} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`,
+      `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`,
     );
   }
   if (comparison.failures.length) {
@@ -341,20 +401,16 @@ export async function runBenchmark({
   const invocationNonce = randomUUID();
   await mkdir(resolvedArtifactDir, { recursive: true });
   await rm(resultPath, { force: true });
-  const code = await run(
-    process.execPath,
-    [benchmarkScript],
-    {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        ...benchmarkEnv,
-        CMUXLAYER_BENCH_INVOCATION_NONCE: invocationNonce,
-        CMUXLAYER_BENCH_JSON_PATH: resultPath,
-        CMUXLAYER_BENCH_SCRATCH: join(resolvedArtifactDir, "scratch"),
-      },
+  const code = await run(process.execPath, [benchmarkScript], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      ...benchmarkEnv,
+      CMUXLAYER_BENCH_INVOCATION_NONCE: invocationNonce,
+      CMUXLAYER_BENCH_JSON_PATH: resultPath,
+      CMUXLAYER_BENCH_SCRATCH: join(resolvedArtifactDir, "scratch"),
     },
-  );
+  });
   let result;
   try {
     result = JSON.parse(await readFile(resultPath, "utf8"));

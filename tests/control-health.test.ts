@@ -57,8 +57,8 @@ afterEach(() => {
 
 describe("control health", () => {
   it.each([
-    "/opt/homebrew/bin/node /Users/x/dist/daemon.js --cli /Applications/cmux.app/Contents/MacOS/cmux",
-    "/opt/homebrew/bin/node /Users/x/dist/daemon.js /Applications/cmux.app/Contents/MacOS/cmux",
+    "/opt/homebrew/bin/node /home/test-user/dist/daemon.js --cli /Applications/cmux.app/Contents/MacOS/cmux",
+    "/opt/homebrew/bin/node /home/test-user/dist/daemon.js /Applications/cmux.app/Contents/MacOS/cmux",
   ])("ignores app bundle paths passed only as ancestor arguments", (command) => {
     expect(resolveSpawnerAncestry(`700 1 ${command}\n1 0 /sbin/launchd`, 700)).toEqual({
       app_bundle_path: null,
@@ -95,7 +95,7 @@ describe("control health", () => {
     });
     expect(
       resolveSpawnerAncestry(
-        "700 1 /opt/homebrew/bin/node /Users/x/dist/daemon.js --cli /Applications/Google Drive.app/Contents/MacOS/Google Drive\n1 0 /sbin/launchd",
+        "700 1 /opt/homebrew/bin/node /home/test-user/dist/daemon.js --cli /Applications/Google Drive.app/Contents/MacOS/Google Drive\n1 0 /sbin/launchd",
         700,
       ),
     ).toEqual({
@@ -671,7 +671,7 @@ describe("control health", () => {
   it("control_health tool appends prod and Nightly snapshot data to events.jsonl", async () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     mkdirSync(TEST_ROOT, { recursive: true });
-    const prodSocket = "/Users/etanheyman/.local/state/cmux/cmux-501.sock";
+    const prodSocket = "/home/test-user/.local/state/cmux/cmux-501.sock";
     const nightlySocket = "/tmp/cmux-nightly.sock";
     const health = {
       generated_at: "2026-06-13T13:00:00.000Z",
@@ -804,6 +804,12 @@ describe("control health", () => {
       expect(parsed.health.warnings).toContain(
         "cmuxlayer daemon unavailable; using heavy in-process runtime",
       );
+      expect(parsed).toMatchObject({
+        transport: "cli",
+        socket_path: null,
+        socket_path_state: "unavailable",
+        warnings: expect.arrayContaining(["cli_fallback_active"]),
+      });
       expect(result.content[0].text).toContain("daemon unavailable");
     } finally {
       await server.close();
@@ -885,7 +891,7 @@ describe("control health", () => {
     vi.useFakeTimers();
     rmSync(TEST_ROOT, { recursive: true, force: true });
     mkdirSync(TEST_ROOT, { recursive: true });
-    const prodSocket = "/Users/etanheyman/.local/state/cmux/cmux-501.sock";
+    const prodSocket = "/home/test-user/.local/state/cmux/cmux-501.sock";
     const nightlySocket = "/tmp/cmux-nightly.sock";
     let count = 0;
     const makeHealth = (): ControlHealth => {

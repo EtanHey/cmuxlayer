@@ -7903,6 +7903,7 @@ export class AgentEngine {
           user_killed: true,
         });
         this.registry.set(agent.agent_id, terminal);
+        this.scheduleClosedChildReportWatchPrune();
       } catch {
         // A concurrently removed record cannot be recovered, so no suppression
         // is needed. Preserve best-effort lifecycle reconciliation.

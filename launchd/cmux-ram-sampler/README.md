@@ -83,8 +83,9 @@ Prediction is logged only; it does not notify.
 Do not arm this from automation. Etan-gated arm command:
 
 ```bash
-launchctl bootout gui/$(id -u) /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist
+CMUXLAYER_REPO="$(git rev-parse --show-toplevel)"
+launchctl bootout gui/$(id -u) "$CMUXLAYER_REPO/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist" 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) "$CMUXLAYER_REPO/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist"
 ```
 
 ## Test

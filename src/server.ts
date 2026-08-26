@@ -34,6 +34,8 @@ import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { agentProcessMayBeAlive } from "./process-liveness.js";
 import {
+  currentCliFallbackSources,
+  currentCliFallbackUsed,
   currentTransportRetryCount,
   withTransportRetryTracking,
 } from "./transport-retry-context.js";
@@ -89,7 +91,9 @@ import {
 import {
   WATCH_AGENT_PREDICATES,
   readWatchRegistry,
+  releaseWatchReportPathReservation,
   removeWatches,
+  reserveWatchReportPath,
   scopeWatchToSubject,
   WatchArmError,
   type WatchNotify,
@@ -976,6 +980,7 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
   "retry_count",
   "needs_attention",
   "attention_reason",
+  "queued_behind_turn",
 ] as const;
 
 export type SubmitEvidence =
@@ -1008,6 +1013,7 @@ export interface PublicDeliveryReceipt {
   duplicate_of?: string;
   needs_attention?: boolean;
   attention_reason?: string;
+  queued_behind_turn?: boolean;
   timings_ms?: DeliveryPhaseTimings;
   observation?: {
     status: ParsedScreenResult["status"];
@@ -1068,6 +1074,7 @@ export function buildPublicDeliveryReceipt(input: {
   retry_count: number;
   needs_attention?: boolean;
   attention_reason?: string | null;
+  queued_behind_turn?: boolean;
   timings_ms?: DeliveryPhaseTimings;
   observation?: PublicDeliveryReceipt["observation"];
   WARNING?: string;
@@ -1113,6 +1120,9 @@ export function buildPublicDeliveryReceipt(input: {
             ? { attention_reason: input.attention_reason }
             : {}),
         }
+      : {}),
+    ...(input.queued_behind_turn === true
+      ? { queued_behind_turn: true }
       : {}),
     ...(input.timings_ms ? { timings_ms: { ...input.timings_ms } } : {}),
     ...(input.observation ? { observation: input.observation } : {}),
@@ -4539,6 +4549,78 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     config: Record<string, unknown>,
     handler: (...args: unknown[]) => unknown,
   ) => unknown;
+  const transportProvenance = (): Record<string, unknown> => {
+    const health = getTransportHealth(client);
+    const transport = currentCliFallbackUsed()
+      ? "cli"
+      : (health?.mode ?? "cli");
+    const socketPath = health?.current_socket_path ?? null;
+    return {
+      transport,
+      socket_path: socketPath,
+      socket_path_state:
+        transport === "socket"
+          ? "active"
+          : socketPath
+            ? "fallback"
+            : "unavailable",
+      ...(transport === "cli" ? { warnings: ["cli_fallback_active"] } : {}),
+      ...(currentCliFallbackUsed()
+        ? { transport_fallbacks: currentCliFallbackSources() }
+        : {}),
+    };
+  };
+  const attachTransportProvenance = (
+    result: unknown,
+    toolName: string,
+  ): unknown => {
+    if (
+      toolName !== "spawn_agent" &&
+      toolName !== "send_to" &&
+      toolName !== "control_health"
+    ) {
+      return result;
+    }
+    if (!result || typeof result !== "object") return result;
+    const toolResult = result as ToolReturn;
+    const structured = toolResult.structuredContent;
+    if (!structured || typeof structured !== "object") return result;
+    const provenance = transportProvenance();
+    const existingWarnings = Array.isArray(structured.warnings)
+      ? structured.warnings
+      : [];
+    const provenanceWarnings = Array.isArray(provenance.warnings)
+      ? provenance.warnings
+      : [];
+    const warnings = [...new Set([...existingWarnings, ...provenanceWarnings])];
+    const nextStructured = {
+      ...structured,
+      ...provenance,
+      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(Array.isArray(structured.receipts)
+        ? {
+            receipts: structured.receipts.map((receipt) =>
+              receipt && typeof receipt === "object"
+                ? { ...(receipt as Record<string, unknown>), ...provenance }
+                : receipt,
+            ),
+          }
+        : {}),
+    };
+    const content = toolResult.content.map((entry) => {
+      if (entry.type !== "text") return entry;
+      try {
+        const parsed = JSON.parse(entry.text);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return entry;
+        }
+        return { ...entry, text: JSON.stringify(nextStructured) };
+      } catch {
+        return entry;
+      }
+    });
+    return { ...toolResult, content, structuredContent: nextStructured };
+  };
   const registerLegacyToolWithOutputSchema = (
     args: unknown[],
     outputSchema: z.ZodTypeAny,
@@ -4611,7 +4693,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (typeof handler === "function") {
       const trackedHandler = (...handlerArgs: unknown[]) =>
         runWithSurfaceTopologyCallScope(() =>
-          withTransportRetryTracking(() => handler(...handlerArgs)),
+          withTransportRetryTracking(async () =>
+            attachTransportProvenance(
+              await handler(...handlerArgs),
+              typeof toolName === "string" ? toolName : "",
+            ),
+          ),
         );
       args[handlerIndex] = trackedHandler;
       if (typeof toolName === "string") {
@@ -12785,8 +12872,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
           : null,
       );
+      const queuedBehindTurn =
+        args.source_event === "send_to" && liveRouteState.state === "working";
+      const bypassLifecycleGate =
+        args.allow_busy === true || args.source_event === "send_to";
       if (
-        !args.allow_busy &&
+        !bypassLifecycleGate &&
         !isLiveDeliverable(liveRouteState) &&
         !routeSurfaceAlive
       ) {
@@ -12887,7 +12978,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // never corrected and every later send repeated the unverified path.
             verify_submit:
               args.press_enter &&
-              (args.allow_busy || isLiveDeliverable(liveRouteState)),
+              (bypassLifecycleGate || isLiveDeliverable(liveRouteState)),
             // A single recovery Return is part of verified sends and inbox
             // wakeups. Other lifecycle mutations (notably goal supersession)
             // retain their stricter no-retry evidence semantics.
@@ -12899,7 +12990,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               args.source_event === "send_to" ||
               args.source_event === "dispatch_nudge" ||
               args.source_event === "report_to_parent",
-            submit_verify_timeout_ms: args.allow_busy
+            submit_verify_timeout_ms: bypassLifecycleGate
               ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
               : shortPointerVerifyTimeoutMs,
             beforeMutation: assertDeliveryRouteCurrent,
@@ -12908,7 +12999,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (args.press_enter && delivery.submit_verified === true) {
             engine.markAgentWorking(args.agent_id);
           }
-          return delivery;
+          return { ...delivery, queued_behind_turn: queuedBehindTurn };
         },
         {
           toolName: args.source_event,
@@ -13108,13 +13199,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     };
     const parentReportPathReservations = context.parentReportPathReservations;
-    const reserveParentReportPath = (
+    const reserveParentReportPath = async (
       parentAgentId: string,
       reportPath: string,
       childAgentId?: string,
-    ):
-      | { ok: true; key: string }
-      | { ok: false; message: string } => {
+    ): Promise<
+      | { ok: true; key: string; reservation_id: string }
+      | { ok: false; message: string }
+    > => {
       const key = JSON.stringify([parentAgentId, reportPath]);
       if (parentReportPathReservations.has(key)) {
         return {
@@ -13139,26 +13231,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           message: `report_path ${reportPath} is already assigned to live child ${existingLiveChild.agent_id}; each child requires a distinct report path`,
         };
       }
-      const existingReportWatch = readWatchRegistry({
-        registryPath: watchRegistryPath,
-      }).watches.find(
-        (watch) =>
-          watch.owner === parentAgentId &&
-          watch.target === reportPath &&
-          watch.change === "content" &&
-          watch.state !== "failed" &&
-          (childAgentId === undefined ||
-            (watch.subject_agent_id !== undefined &&
-              watch.subject_agent_id !== childAgentId)),
+      const registryReservation = await reserveWatchReportPath(
+        {
+          owner: parentAgentId,
+          target: reportPath,
+          ...(childAgentId ? { subject_agent_id: childAgentId } : {}),
+        },
+        { registryPath: watchRegistryPath },
       );
-      if (existingReportWatch) {
+      if (!registryReservation.ok) {
         return {
           ok: false,
-          message: `report_path ${reportPath} is already assigned to child ${existingReportWatch.subject_agent_id ?? "through an existing report watch"}; each child requires a distinct report path`,
+          message: `report_path ${reportPath} is already assigned to child ${registryReservation.conflict_subject_agent_id ?? `through an existing ${registryReservation.conflict_kind}`}; each child requires a distinct report path`,
         };
       }
       parentReportPathReservations.add(key);
-      return { ok: true, key };
+      return {
+        ok: true,
+        key,
+        reservation_id: registryReservation.reservation.reservation_id,
+      };
     };
 
     server.tool(
@@ -13584,6 +13676,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         const creation = new CreatedIdentityScope();
         let reportPathReservationKey: string | null = null;
+        let reportPathReservationId: string | null = null;
         try {
           // P11 finding 2: reject a relative override BEFORE anything launches.
           // The zod .refine() covers real MCP calls; this covers direct handler
@@ -13640,7 +13733,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               args.report_path,
             );
             if (existing.parent_agent_id) {
-              const reservation = reserveParentReportPath(
+              const reservation = await reserveParentReportPath(
                 existing.parent_agent_id,
                 resolve(resumeCoordination.report_path),
                 existing.agent_id,
@@ -13651,6 +13744,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
               }
               reportPathReservationKey = reservation.key;
+              reportPathReservationId = reservation.reservation_id;
             }
             const workspace = await canonicalWorkspaceRef(
               args.workspace ?? existing.workspace_id ?? undefined,
@@ -13912,7 +14006,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : null;
 
           if (args.parent_agent_id && args.report_path) {
-            const earlyReservation = reserveParentReportPath(
+            const earlyReservation = await reserveParentReportPath(
               args.parent_agent_id,
               resolve(args.report_path.trim()),
             );
@@ -13922,6 +14016,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               });
             }
             reportPathReservationKey = earlyReservation.key;
+            reportPathReservationId = earlyReservation.reservation_id;
           }
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
           await refreshManagedMetadataBestEffort();
@@ -13944,10 +14039,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               reportPathReservationKey !== effectiveReservationKey
             ) {
               parentReportPathReservations.delete(reportPathReservationKey);
+              if (reportPathReservationId) {
+                await releaseWatchReportPathReservation(
+                  reportPathReservationId,
+                  { registryPath: watchRegistryPath },
+                );
+              }
               reportPathReservationKey = null;
+              reportPathReservationId = null;
             }
             if (!reportPathReservationKey) {
-              const reservation = reserveParentReportPath(
+              const reservation = await reserveParentReportPath(
                 effectiveParentAgentId,
                 requestedReportPath,
               );
@@ -13957,6 +14059,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
               }
               reportPathReservationKey = reservation.key;
+              reportPathReservationId = reservation.reservation_id;
             }
           }
           const effectiveRole = callerIsWorker ? "worker" : normalizedRole.role;
@@ -14539,6 +14642,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         } finally {
           if (reportPathReservationKey) {
             parentReportPathReservations.delete(reportPathReservationKey);
+          }
+          if (reportPathReservationId) {
+            try {
+              await releaseWatchReportPathReservation(reportPathReservationId, {
+                registryPath: watchRegistryPath,
+              });
+            } catch (error) {
+              console.error(
+                `[cmuxlayer] failed to release report-path reservation ${reportPathReservationId}:`,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
           }
         }
       },
@@ -16967,6 +17082,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_verified: delivery.submit_verified,
                     submit_evidence: delivery.submit_evidence,
                     retry_count: delivery.retry_count,
+                    queued_behind_turn: delivery.queued_behind_turn,
                   }),
                   accepted: true,
                 });
@@ -17319,6 +17435,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             submit_verified: delivery.submit_verified,
             submit_evidence: delivery.submit_evidence,
             retry_count: delivery.retry_count,
+            queued_behind_turn: delivery.queued_behind_turn,
             timings_ms: timings,
           });
           failedReceiptPayload = { ...publicReceipt };

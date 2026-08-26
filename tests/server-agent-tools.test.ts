@@ -1051,6 +1051,10 @@ describe("lean spawn tool responses", () => {
       agent_id: expect.any(String),
       parent_agent_id: parent.agent_id,
       role: "reviewer",
+      transport: "cli",
+      socket_path: null,
+      socket_path_state: "unavailable",
+      warnings: expect.arrayContaining(["cli_fallback_active"]),
     });
     expect(result.structuredContent.agent_id).not.toContain("-pending-");
     expect(
@@ -3044,13 +3048,13 @@ describe("agent lifecycle tool handlers", () => {
                 ref: "workspace:brainlayer",
                 title: "brainlayer",
                 selected: false,
-                current_directory: "/Users/etanheyman/Gits/brainlayer",
+                current_directory: "/home/test-user/Gits/brainlayer",
               },
               {
                 ref: "workspace:t3layer",
                 title: "t3layer",
                 selected: true,
-                current_directory: "/Users/etanheyman/Gits/t3layer",
+                current_directory: "/home/test-user/Gits/t3layer",
               },
             ],
           }),
@@ -3098,7 +3102,7 @@ describe("agent lifecycle tool handlers", () => {
                 ref: "workspace:brainlayer",
                 title: "brainlayerClaude",
                 selected: true,
-                current_directory: "/Users/etanheyman",
+                current_directory: "/home/test-user",
               },
             ],
           }),
@@ -5338,7 +5342,7 @@ describe("agent lifecycle tool handlers", () => {
               {
                 ref: "workspace:voice",
                 title: "VoiceLayer",
-                current_directory: "/Users/etanheyman/Gits/voicelayer",
+                current_directory: "/home/test-user/Gits/voicelayer",
               },
             ],
           }),
@@ -6386,7 +6390,7 @@ describe("agent lifecycle tool handlers", () => {
               {
                 ref: "workspace:voice",
                 title: "VoiceLayer",
-                current_directory: "/Users/etanheyman/Gits/voicelayer",
+                current_directory: "/home/test-user/Gits/voicelayer",
               },
             ],
           }),
@@ -9537,7 +9541,7 @@ describe("agent lifecycle tool handlers", () => {
     const updated = stateMgr.updateRecord(currentAgentId, {
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       launcher_name: "brainlayerClaude",
-      launch_cwd: "/Users/etanheyman/Gits/brainlayer",
+      launch_cwd: "/home/test-user/Gits/brainlayer",
     });
     engine.getRegistry().set(currentAgentId, updated);
 
@@ -10306,7 +10310,7 @@ codex>
             ref: "workspace:1",
             title: "Main",
             selected: true,
-            current_directory: "/Users/etanheyman/Gits/cmuxlayer",
+            current_directory: "/home/test-user/Gits/cmuxlayer",
           },
         ],
       }),
@@ -10729,7 +10733,7 @@ codex>
     },
   );
 
-  it("send_to with allow_busy=true delivers to agents in working state", async () => {
+  it("send_to delivers to a working agent without an idle gate", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
@@ -10758,7 +10762,6 @@ codex>
         agent_id: agentId,
         text: "interject while working",
         press_enter: true,
-        allow_busy: true,
       },
       {} as any,
     );
@@ -10772,6 +10775,11 @@ codex>
     expect(result.isError).toBeFalsy();
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
+    expect(parsed.queued_behind_turn).toBe(true);
+    expect(parsed.transport).toBe("cli");
+    expect(parsed.socket_path).toBeNull();
+    expect(parsed.socket_path_state).toBe("unavailable");
+    expect(parsed.warnings).toContain("cli_fallback_active");
     expect(deliveredText).toBe("interject while working");
     expect(sendCalls[0]?.[1]).toEqual(
       expect.arrayContaining(["--workspace", "workspace:1"]),

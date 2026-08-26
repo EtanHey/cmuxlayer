@@ -5,7 +5,7 @@
   Install:
     1. Run `bun run build` in the cmuxlayer checkout.
     2. Copy this file to ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist.
-    3. Edit ProgramArguments if the checkout is not /Users/etanheyman/Gits/cmuxlayer.
+    3. Replace @CMUXLAYER_REPO@ with the absolute checkout path.
     4. Load it with:
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist
 
@@ -22,7 +22,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/etanheyman/Gits/cmuxlayer/scripts/mcp-orphan-reaper.sh</string>
+    <string>@CMUXLAYER_REPO@/scripts/mcp-orphan-reaper.sh</string>
   </array>
 
   <key>EnvironmentVariables</key>

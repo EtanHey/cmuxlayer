@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -228,10 +229,9 @@ describe("WatchSpec arm contract", () => {
       { registryPath: registryPath(), now: () => 1_000 },
     );
 
-    await removeWatches(
-      (watch) => watch.subject_agent_id === "worker-a",
-      { registryPath: registryPath() },
-    );
+    await removeWatches((watch) => watch.subject_agent_id === "worker-a", {
+      registryPath: registryPath(),
+    });
     writeFileSync(target, "after", "utf8");
     const result = await sweepWatches({
       registryPath: registryPath(),
@@ -545,6 +545,77 @@ describe("WatchSpec arm contract", () => {
       if (releaser.exitCode === null) await once(releaser, "exit");
     }
     expect(timerTicks).toBeGreaterThan(0);
+  });
+
+  it("serializes report-path reservations across forced-inprocess processes", async () => {
+    const target = join(TEST_DIR, "forced-inprocess-shared-report.md");
+    const splitLog = join(TEST_DIR, "new-split.log");
+    const conflictMarker = join(TEST_DIR, "reservation-conflict");
+    writeFileSync(target, "", "utf8");
+    const moduleUrl = new URL("../src/watch-spec.ts", import.meta.url).href;
+    const childScript = `
+      import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+      const { reserveWatchReportPath, releaseWatchReportPathReservation } = await import(process.env.TEST_WATCH_MODULE_URL);
+      const options = { registryPath: process.env.TEST_WATCH_REGISTRY_PATH };
+      const result = await reserveWatchReportPath({ owner: "lead-parent", target: process.env.TEST_REPORT_PATH }, options);
+      if (!result.ok) {
+        writeFileSync(process.env.TEST_CONFLICT_MARKER, "conflict", "utf8");
+        process.stdout.write(JSON.stringify({ ok: false, error_code: "REPORT_PATH_IN_USE" }));
+      } else {
+        appendFileSync(process.env.TEST_SPLIT_LOG, "new-split\\n", "utf8");
+        const deadline = Date.now() + 5000;
+        while (!existsSync(process.env.TEST_CONFLICT_MARKER) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        try {
+          if (!existsSync(process.env.TEST_CONFLICT_MARKER)) throw new Error("peer never observed reservation conflict");
+          process.stdout.write(JSON.stringify({ ok: true }));
+        } finally {
+          await releaseWatchReportPathReservation(result.reservation.reservation_id, options);
+        }
+      }
+    `;
+    const launch = () =>
+      spawn(
+        process.execPath,
+        ["--import", "tsx", "--input-type=module", "-e", childScript],
+        {
+          env: {
+            ...process.env,
+            CMUXLAYER_FORCE_INPROCESS: "1",
+            TEST_WATCH_MODULE_URL: moduleUrl,
+            TEST_WATCH_REGISTRY_PATH: registryPath(),
+            TEST_REPORT_PATH: target,
+            TEST_SPLIT_LOG: splitLog,
+            TEST_CONFLICT_MARKER: conflictMarker,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    const collect = async (child: ReturnType<typeof launch>) => {
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const [exitCode] = (await once(child, "exit")) as [number | null];
+      expect(exitCode, stderr).toBe(0);
+      return JSON.parse(stdout) as { ok: boolean; error_code?: string };
+    };
+
+    const results = await Promise.all([collect(launch()), collect(launch())]);
+
+    expect(results.map((result) => result.ok).sort()).toEqual([false, true]);
+    expect(results.find((result) => !result.ok)?.error_code).toBe(
+      "REPORT_PATH_IN_USE",
+    );
+    expect(readFileSync(splitLog, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(existsSync(`${registryPath()}.report-path-reservations.json`)).toBe(
+      false,
+    );
   });
 
   it("drops a malformed persisted row without aborting valid watch evaluation", async () => {

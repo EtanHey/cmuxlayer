@@ -7,7 +7,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-caffeinate/bin/cmux-caffeinate.sh</string>
+    <string>@CMUXLAYER_REPO@/launchd/cmux-caffeinate/bin/cmux-caffeinate.sh</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -17,9 +17,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/etanheyman/.local/state/cmux/cmux-caffeinate.stdout.log</string>
+  <string>@CMUXLAYER_HOME@/.local/state/cmux/cmux-caffeinate.stdout.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/etanheyman/.local/state/cmux/cmux-caffeinate.stderr.log</string>
+  <string>@CMUXLAYER_HOME@/.local/state/cmux/cmux-caffeinate.stderr.log</string>
 </dict>
 </plist>

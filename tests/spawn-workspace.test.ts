@@ -452,7 +452,7 @@ describe("workspace spawn tools", () => {
         {
           ref: "workspace:t3layer",
           title: "t3layer",
-          current_directory: "/Users/etanheyman/Gits/t3layer",
+          current_directory: "/home/test-user/Gits/t3layer",
         },
       ],
     });

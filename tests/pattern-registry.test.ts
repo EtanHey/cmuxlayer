@@ -340,7 +340,7 @@ gpt-5.5 xhigh · /workspaces/cmuxlayer
 ╭──────────────────────────╮
 │ OpenAI Codex             │
 │ Model: gpt-5.5 xhigh     │
-│ Directory: /Users/etanheyman/Gits/voicelayer │
+│ Directory: /home/test-user/Gits/voicelayer │
 │ Permissions: YOLO        │
 ╰──────────────────────────╯
 

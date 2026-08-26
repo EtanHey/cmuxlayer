@@ -29,6 +29,7 @@ import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
+import { recordCliFallback } from "./transport-retry-context.js";
 import { listAllWindowWorkspaces } from "./surface-topology.js";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
@@ -217,8 +218,9 @@ export class CmuxSocketClient {
    * delegation guarantees the `cmux` subprocess carries CMUX_SOCKET_PATH =
    * this.socketPath and cannot leak onto another live instance (collab O2 #8).
    */
-  private cliFallbackPinned(): CmuxClient | undefined {
+  private cliFallbackPinned(source = "unspecified"): CmuxClient | undefined {
     if (!this.cliFallback) return undefined;
+    recordCliFallback(source);
     this.syncCliFallbackSocketEnv();
     return this.cliFallback;
   }
@@ -367,7 +369,10 @@ export class CmuxSocketClient {
   async listTerminalMetadata(): Promise<{
     terminals: CmuxTerminalMetadata[];
   }> {
-    return this.cliFallbackPinned()?.listTerminalMetadata() ?? { terminals: [] };
+    // The V2 socket has no debug-terminals RPC. Surface/workspace payloads
+    // already carry the directory fallback used by callers, so do not hide a
+    // CLI subprocess inside an otherwise socket-only observation.
+    return { terminals: [] };
   }
 
   private async resolvePaneAnchorSurface(opts: {
@@ -567,15 +572,11 @@ export class CmuxSocketClient {
     text: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    const cliFallback = this.cliFallbackPinned();
-    if (cliFallback) {
-      return cliFallback.pasteText(surface, text, opts);
-    }
-
-    throw new CmuxSocketError(
-      "Atomic multiline paste requires the cmux CLI paste-buffer path; the socket protocol has no paste RPC, so pasteText is unavailable on a socket-only transport.",
-      "method_not_found",
-    );
+    // V2 frames the full payload as one JSON string, so surface.send_text is
+    // already atomic for multiline input and does not need the CLI's global
+    // paste buffer. Keeping this on-socket also prevents concurrent clients
+    // from sharing mutable clipboard state.
+    return this.send(surface, text, opts);
   }
 
   async sendKey(

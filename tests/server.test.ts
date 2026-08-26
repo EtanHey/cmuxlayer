@@ -2172,9 +2172,9 @@ describe("tool handler integration", () => {
   });
 
   it("list_surfaces reports terminal metadata cwd instead of workspace fallback cwd", async () => {
-    const workspaceCwd = "/Users/etanheyman/Gits/golems";
+    const workspaceCwd = "/home/test-user/Gits/golems";
     const realSurfaceCwd =
-      "/Users/etanheyman/Gits/cmuxlayer.wt/adopted-pane-binding";
+      "/home/test-user/Gits/cmuxlayer.wt/adopted-pane-binding";
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
         return {
@@ -2268,7 +2268,7 @@ describe("tool handler integration", () => {
   });
 
   it("list_surfaces reports degraded terminal metadata when debug-terminals fails", async () => {
-    const workspaceCwd = "/Users/etanheyman/Gits/golems";
+    const workspaceCwd = "/home/test-user/Gits/golems";
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
         return {
@@ -6190,13 +6190,13 @@ describe("tool handler integration", () => {
             id: "golems-workspace-uuid",
             ref: "workspace:golems",
             title: "golems",
-            current_directory: "/Users/etanheyman/Gits/golems",
+            current_directory: "/home/test-user/Gits/golems",
           },
           {
             id: "t3layer-workspace-uuid",
             ref: "workspace:t3layer",
             title: "t3layer",
-            current_directory: "/Users/etanheyman/Gits/t3layer",
+            current_directory: "/home/test-user/Gits/t3layer",
           },
         ],
       }),
@@ -6264,13 +6264,13 @@ describe("tool handler integration", () => {
             id: "golems-workspace-uuid",
             ref: "workspace:golems",
             title: "golems",
-            current_directory: "/Users/etanheyman/Gits/golems",
+            current_directory: "/home/test-user/Gits/golems",
           },
           {
             id: "t3layer-workspace-uuid",
             ref: "workspace:t3layer",
             title: "t3layer",
-            current_directory: "/Users/etanheyman/Gits/t3layer",
+            current_directory: "/home/test-user/Gits/t3layer",
           },
         ],
       }),
@@ -6331,7 +6331,7 @@ describe("tool handler integration", () => {
             id: "golems-workspace-uuid",
             ref: "workspace:golems",
             title: "golems",
-            current_directory: "/Users/etanheyman/Gits/golems",
+            current_directory: "/home/test-user/Gits/golems",
           },
         ],
       }),
@@ -6454,12 +6454,12 @@ describe("tool handler integration", () => {
           {
             ref: "workspace:brainlayer",
             title: "BrainLayer",
-            current_directory: "/Users/etanheyman/Gits/brainlayer",
+            current_directory: "/home/test-user/Gits/brainlayer",
           },
           {
             ref: "workspace:voice",
             title: "VoiceLayer",
-            current_directory: "/Users/etanheyman/Gits/voicelayer",
+            current_directory: "/home/test-user/Gits/voicelayer",
           },
         ],
       }),
@@ -6541,12 +6541,12 @@ describe("tool handler integration", () => {
           {
             ref: "workspace:brainlayer",
             title: "BrainLayer",
-            current_directory: "/Users/etanheyman/Gits/brainlayer",
+            current_directory: "/home/test-user/Gits/brainlayer",
           },
           {
             ref: "workspace:voice",
             title: "VoiceLayer",
-            current_directory: "/Users/etanheyman/Gits/voicelayer",
+            current_directory: "/home/test-user/Gits/voicelayer",
           },
         ],
       }),
@@ -8139,7 +8139,7 @@ describe("tool handler integration", () => {
               {
                 ref: "workspace:1",
                 title: "brainlayer",
-                current_directory: "/Users/etanheyman/Gits/brainlayer",
+                current_directory: "/home/test-user/Gits/brainlayer",
               },
             ],
           }),
@@ -11040,13 +11040,13 @@ describe("tool handler integration", () => {
             id: "golems-workspace-uuid",
             ref: "workspace:golems",
             title: "golems",
-            current_directory: "/Users/etanheyman/Gits/golems",
+            current_directory: "/home/test-user/Gits/golems",
           },
           {
             id: "t3layer-workspace-uuid",
             ref: "workspace:t3layer",
             title: "t3layer",
-            current_directory: "/Users/etanheyman/Gits/t3layer",
+            current_directory: "/home/test-user/Gits/t3layer",
           },
         ],
       }),

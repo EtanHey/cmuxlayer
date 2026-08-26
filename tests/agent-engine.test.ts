@@ -179,7 +179,7 @@ function writeCodexDoneTranscript(path: string): void {
         type: "session_meta",
         payload: {
           id: "019eab06-57d6-72b1-b3a8-6cf98a30a3f6",
-          cwd: "/Users/etanheyman/Gits/cmuxlayer",
+          cwd: "/home/test-user/Gits/cmuxlayer",
         },
       }),
       JSON.stringify({
@@ -800,7 +800,7 @@ describe("AgentEngine", () => {
         // agent-html-host registered only as the hyphen-stripped form.
         spawnPreflight: async () => ({
           launcherName: "agenthtmlhostCursor",
-          repoRoot: "/Users/etanheyman/Gits/agent-html-host",
+          repoRoot: "/home/test-user/Gits/agent-html-host",
         }),
         sessionIdentityResolver: () => null,
       });
@@ -817,7 +817,7 @@ describe("AgentEngine", () => {
       const state = resolvingEngine.getAgentState(result.agent_id);
       expect(state?.launcher_name).toBe("agenthtmlhostCursor");
       expect(state?.launch_cwd).toBe(
-        "/Users/etanheyman/Gits/agent-html-host",
+        "/home/test-user/Gits/agent-html-host",
       );
 
       resolvingEngine.dispose();
@@ -1244,12 +1244,12 @@ describe("AgentEngine", () => {
             {
               ref: "workspace:brainlayer",
               title: "BrainLayer",
-              current_directory: "/Users/etanheyman/Gits/brainlayer",
+              current_directory: "/home/test-user/Gits/brainlayer",
             },
             {
               ref: "workspace:voice",
               title: "VoiceLayer",
-              current_directory: "/Users/etanheyman/Gits/voicelayer",
+              current_directory: "/home/test-user/Gits/voicelayer",
             },
           ],
         },
@@ -1356,7 +1356,7 @@ describe("AgentEngine", () => {
         cli: "codex",
         prompt: "Fix the watcher",
         parent_agent_id: "parent-claude",
-        cwd: "/Users/etanheyman/Gits/brainlayer.wt/watcher-fix",
+        cwd: "/home/test-user/Gits/brainlayer.wt/watcher-fix",
       });
 
       expect(result.workspace_id).toBe("workspace:parent");
@@ -1549,12 +1549,12 @@ describe("AgentEngine", () => {
           {
             ref: "workspace:parent",
             title: "BrainLayer",
-            current_directory: "/Users/etanheyman/Gits/brainlayer",
+            current_directory: "/home/test-user/Gits/brainlayer",
           },
           {
             ref: "workspace:voice",
             title: "VoiceLayer",
-            current_directory: "/Users/etanheyman/Gits/voicelayer",
+            current_directory: "/home/test-user/Gits/voicelayer",
           },
         ],
       });
@@ -1700,7 +1700,7 @@ describe("AgentEngine", () => {
         cli: "codex",
         prompt: "Fix the watcher",
         parent_agent_id: "parent-claude",
-        cwd: "/Users/etanheyman/Gits/brainlayer.wt/watcher-fix",
+        cwd: "/home/test-user/Gits/brainlayer.wt/watcher-fix",
         worktree_branch: "fix/watcher",
       });
 
@@ -3237,7 +3237,7 @@ describe("AgentEngine", () => {
         expect(mockClient.clearStatus).not.toHaveBeenCalled();
         expect(mockClient.setStatus).toHaveBeenCalledWith(
           "worker-archived-before-status",
-          "brainlayer | role=worker | state=done | health=unhealthy(inbox_monitor_not_alive:degraded,closure_without_artifact:blocking) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+          "brainlayer | role=worker | state=done | health=unhealthy(closure_without_artifact:blocking) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
           expect.objectContaining({
             surface: "surface:archived-before-status",
           }),
@@ -3857,8 +3857,14 @@ describe("AgentEngine", () => {
       async (closeOrigin) => {
         engine.dispose();
         const closedSurfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        const reportPath = join(TEST_DIR, `${closeOrigin}-child-report.md`);
+        const watchRegistryPath = join(
+          TEST_DIR,
+          `${closeOrigin}-watch-specs.json`,
+        );
+        writeFileSync(reportPath, "working\n", "utf8");
         const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
-        let closePending = true;
+        let closePending = false;
         const tabClose: CloseForensicsEvent = {
           ts: "2026-07-14T16:23:48.900Z",
           event_type: "close_forensics",
@@ -3884,7 +3890,13 @@ describe("AgentEngine", () => {
             closePending = false;
             return { emitted: events.length, events };
           },
+          watchRegistryPath,
         });
+        // Consume the daemon-start prune before this managed child exists. The
+        // regression targets a later UI close, when only explicit scheduling
+        // can make the next sweep prune the report watch.
+        liveSurfaces = [];
+        await engine.runSweep();
         stateMgr.writeState(
           makeRecord({
             agent_id: "agent-user-closed",
@@ -3896,6 +3908,8 @@ describe("AgentEngine", () => {
             model: "gpt-5.4",
             cli: "codex",
             cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+            parent_agent_id: "lead-parent",
+            report_path: reportPath,
           }),
         );
         liveSurfaces = [
@@ -3906,6 +3920,14 @@ describe("AgentEngine", () => {
           },
         ];
         await registry.reconstitute();
+        await engine.armWatch({
+          owner: "lead-parent",
+          subject_agent_id: "agent-user-closed",
+          target: reportPath,
+          change: "content",
+          deadline: Number.MAX_SAFE_INTEGER,
+        });
+        closePending = true;
 
         liveSurfaces = [
           {
@@ -3923,6 +3945,9 @@ describe("AgentEngine", () => {
             user_killed: true,
             surface_uuid: closedSurfaceUuid,
           });
+          expect(
+            readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+          ).toEqual([]);
           nowSpy.mockReturnValue(
             firstObservedAt + SURFACE_EVICTION_CONFIRMATION_MS + 1,
           );
@@ -4043,7 +4068,7 @@ describe("AgentEngine", () => {
           task_summary: "Fix rollout-only capture",
           created_at: "2026-08-11T10:00:00.000Z",
           updated_at: "2026-08-11T10:00:00.000Z",
-          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
+          launch_cwd: "/home/test-user/Gits/cmuxlayer",
         }),
       );
       liveSurfaces = [makeSurface("surface:rollout-only")];
@@ -4168,7 +4193,7 @@ describe("AgentEngine", () => {
       const rolloutSessionId = "019fec96-588d-7000-8000-000000000000";
       const registeredSessionId = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
       const rolloutPath =
-        "/Users/etanheyman/.codex/sessions/2026/08/11/rollout-2026-08-11T10-05-00-019fec96-588d-7000-8000-000000000000.jsonl";
+        "/home/test-user/.codex/sessions/2026/08/11/rollout-2026-08-11T10-05-00-019fec96-588d-7000-8000-000000000000.jsonl";
       const transcriptResolver = vi.fn(() => ({
         session_id: rolloutSessionId,
         path: rolloutPath,
@@ -4194,7 +4219,7 @@ describe("AgentEngine", () => {
           surface_id: "surface:rollout-source",
           surface_uuid: "11111111-2222-4333-8444-555555555555",
           task_summary: "Fix rollout identity source",
-          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
+          launch_cwd: "/home/test-user/Gits/cmuxlayer",
         }),
       );
       liveSurfaces = [
@@ -4864,7 +4889,7 @@ Session ID: ${sessionId}`,
     it("captures the real session id from transcript metadata when the screen has no UUID", async () => {
       const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
       const sessionPath =
-        "/Users/etanheyman/.codex/sessions/2026/06/05/rollout.jsonl";
+        "/home/test-user/.codex/sessions/2026/06/05/rollout.jsonl";
       engine.dispose();
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
       engine = new AgentEngine(stateMgr, registry, mockClient, {
@@ -4905,7 +4930,7 @@ Session ID: ${sessionId}`,
       const sessionId = "019f0100-051b-4c8a-b836-28ab64144c85";
       harnessHome.give("claude", sessionId);
       const sessionPath =
-        "/Users/etanheyman/.claude/projects/-Users-etanheyman-Gits-cmuxlayer/019f0100-051b-4c8a-b836-28ab64144c85.jsonl";
+        "/home/test-user/.claude/projects/-Users-etanheyman-Gits-cmuxlayer/019f0100-051b-4c8a-b836-28ab64144c85.jsonl";
       const transcriptResolver = vi.fn(() => ({
         session_id: sessionId,
         path: sessionPath,
@@ -4927,8 +4952,8 @@ Session ID: ${sessionId}`,
           task_summary: "Session-capture live probe",
           created_at: "2026-07-05T19:16:13.285Z",
           updated_at: "2026-07-05T19:17:17.739Z",
-          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
-          worktree_path: "/Users/etanheyman/Gits/cmuxlayer",
+          launch_cwd: "/home/test-user/Gits/cmuxlayer",
+          worktree_path: "/home/test-user/Gits/cmuxlayer",
         }),
       );
       liveSurfaces = [makeSurface("surface:ready-jsonl")];
@@ -5005,7 +5030,7 @@ Session ID: ${sessionId}`,
       const sessionId = "019f0020-1111-7222-8333-444455556666";
       const transcriptResolver = vi.fn(() => ({
         session_id: sessionId,
-        path: "/Users/etanheyman/.codex/sessions/unrelated.jsonl",
+        path: "/home/test-user/.codex/sessions/unrelated.jsonl",
       }));
       engine.dispose();
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -5049,7 +5074,7 @@ Session ID: ${sessionId}`,
     it("captures a blank-prompt managed launch when transcript identity is launch-attributed", async () => {
       vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
       const sessionId = "019f0022-1111-7222-8333-444455556666";
-      const sessionPath = "/Users/etanheyman/.codex/sessions/promptless.jsonl";
+      const sessionPath = "/home/test-user/.codex/sessions/promptless.jsonl";
       const transcriptResolver = vi.fn(() => ({
         session_id: sessionId,
         path: sessionPath,
@@ -5071,8 +5096,8 @@ Session ID: ${sessionId}`,
           task_summary: "",
           created_at: "2026-06-25T08:00:00.000Z",
           updated_at: "2026-06-25T08:01:00.000Z",
-          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
-          worktree_path: "/Users/etanheyman/Gits/cmuxlayer",
+          launch_cwd: "/home/test-user/Gits/cmuxlayer",
+          worktree_path: "/home/test-user/Gits/cmuxlayer",
         }),
       );
       liveSurfaces = [makeSurface("surface:promptless-session")];
@@ -9055,7 +9080,7 @@ Session ID: ${sessionId}`,
           "╭──────────────────────────╮",
           "│ OpenAI Codex             │",
           "│ Model: gpt-5.5 xhigh     │",
-          "│ Directory: /Users/etanheyman/Gits/voicelayer │",
+          "│ Directory: /home/test-user/Gits/voicelayer │",
           "│ Permissions: YOLO        │",
           "╰──────────────────────────╯",
           "",
@@ -9095,7 +9120,7 @@ Session ID: ${sessionId}`,
           "╭──────────────────────────╮",
           "│ OpenAI Codex             │",
           "│ Model: gpt-5.5 xhigh     │",
-          "│ Directory: /Users/etanheyman/Gits/voicelayer │",
+          "│ Directory: /home/test-user/Gits/voicelayer │",
           "│ Permissions: YOLO        │",
           "╰──────────────────────────╯",
           "",
@@ -10223,7 +10248,7 @@ Session ID: ${sessionId}`,
       await engine.getRegistry().reconstitute();
 
       const ambientFooterScreen = [
-        "• Waited for background terminal · tail -n0 -F /Users/example/.cmux/agents/probe-c-child/inbox.jsonl",
+        "• Waited for background terminal · tail -n0 -F /home/test-user/.cmux/agents/probe-c-child/inbox.jsonl",
         "• OK",
         "─ Worked for 3m 44s ─",
         "1 background terminal running · /ps to view · /stop to close",
@@ -11093,7 +11118,7 @@ Session ID: ${sessionId}`,
         const registryPath = join(TEST_DIR, `missing-${cli}-launchers.zsh`);
         writeFileSync(
           registryPath,
-          'repoGolem mm "/Users/etanheyman/Gits/matchmat"\n',
+          'repoGolem mm "/home/test-user/Gits/matchmat"\n',
         );
         vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
 
@@ -11127,7 +11152,7 @@ Session ID: ${sessionId}`,
       const registryPath = join(TEST_DIR, "raw-fallback-launchers.zsh");
       writeFileSync(
         registryPath,
-        'repoGolem mm "/Users/etanheyman/Gits/matchmat"\n',
+        'repoGolem mm "/home/test-user/Gits/matchmat"\n',
       );
       const repoHome = join(TEST_DIR, "raw-repos");
       mkdirSync(join(repoHome, "freshrepo"), { recursive: true });
@@ -11164,7 +11189,7 @@ Session ID: ${sessionId}`,
       const registryPath = join(TEST_DIR, "strict-launchers.zsh");
       writeFileSync(
         registryPath,
-        'repoGolem mm "/Users/etanheyman/Gits/matchmat"\n',
+        'repoGolem mm "/home/test-user/Gits/matchmat"\n',
       );
       const repoHome = join(TEST_DIR, "strict-repos");
       mkdirSync(join(repoHome, "freshrepo"), { recursive: true });
@@ -13837,20 +13862,20 @@ describe("buildLaunchCommand", () => {
   });
 
   it("passes cwd as -w to launcher CLIs while keeping kiro on cd", () => {
-    const cwd = "/Users/x/Gits/golems.wt/t";
+    const cwd = "/home/test-user/Gits/golems.wt/t";
 
     expect(
       buildLaunchCommand("claude", "golems", undefined, undefined, { cwd }),
-    ).toBe("golemsClaude -s -w '/Users/x/Gits/golems.wt/t'");
+    ).toBe("golemsClaude -s -w '/home/test-user/Gits/golems.wt/t'");
     expect(
       buildLaunchCommand("codex", "golems", undefined, undefined, { cwd }),
-    ).toBe("golemsCodex -s -w '/Users/x/Gits/golems.wt/t'");
+    ).toBe("golemsCodex -s -w '/home/test-user/Gits/golems.wt/t'");
     expect(
       buildLaunchCommand("cursor", "golems", undefined, undefined, { cwd }),
-    ).toBe("golemsCursor -s -w '/Users/x/Gits/golems.wt/t'");
+    ).toBe("golemsCursor -s -w '/home/test-user/Gits/golems.wt/t'");
     expect(
       buildLaunchCommand("gemini", "golems", undefined, undefined, { cwd }),
-    ).toBe("golemsGemini -s -w '/Users/x/Gits/golems.wt/t'");
+    ).toBe("golemsGemini -s -w '/home/test-user/Gits/golems.wt/t'");
     expect(
       buildLaunchCommand("claude", "golems", "sonnet", undefined, {
         cwd: "/p/wt",
@@ -13865,9 +13890,9 @@ describe("buildLaunchCommand", () => {
     );
     expect(
       buildLaunchCommand("claude", "golems", undefined, undefined, {
-        cwd: "/Users/x/Gits/worktree launch",
+        cwd: "/home/test-user/Gits/worktree launch",
       }),
-    ).toBe("golemsClaude -s -w '/Users/x/Gits/worktree launch'");
+    ).toBe("golemsClaude -s -w '/home/test-user/Gits/worktree launch'");
   });
 
   it("uses an explicitly resolved launcher name for launcher CLIs", () => {
@@ -13970,9 +13995,9 @@ describe("assertLauncherAvailable", () => {
     writeFileSync(
       registryPath,
       [
-        'repoGolem brainlayer "/Users/etanheyman/Gits/brainlayer"',
-        'repoGolem agenthtmlhost "/Users/etanheyman/Gits/agent-html-host"',
-        'repoGolem orc "/Users/etanheyman/Gits/orchestrator"',
+        'repoGolem brainlayer "/home/test-user/Gits/brainlayer"',
+        'repoGolem agenthtmlhost "/home/test-user/Gits/agent-html-host"',
+        'repoGolem orc "/home/test-user/Gits/orchestrator"',
       ].join("\n"),
     );
     vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
@@ -14018,7 +14043,7 @@ describe("launcherNameCandidates", () => {
       launcherNameCandidates("orchestrator", "Cursor", [
         {
           prefix: "orc",
-          path: "/Users/etanheyman/Gits/orchestrator",
+          path: "/home/test-user/Gits/orchestrator",
           repoBasename: "orchestrator",
         },
       ]),

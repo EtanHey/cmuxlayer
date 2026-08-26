@@ -11,9 +11,9 @@ import {
 
 const REGISTRY = `
 # comments and blanks are ignored
-repoGolem mm "/Users/etanheyman/Gits/matchmat"
-repoGolem cmuxlayer "/Users/etanheyman/Gits/cmuxlayer"
-repoGolem hyphen "/Users/etanheyman/Gits/hyphen-repo"
+repoGolem mm "/home/test-user/Gits/matchmat"
+repoGolem cmuxlayer "/home/test-user/Gits/cmuxlayer"
+repoGolem hyphen "/home/test-user/Gits/hyphen-repo"
 `;
 
 describe("launcher registry", () => {
@@ -21,17 +21,17 @@ describe("launcher registry", () => {
     expect(parseLauncherRegistry(REGISTRY, "/tmp/launchers.zsh")).toEqual([
       {
         prefix: "mm",
-        path: "/Users/etanheyman/Gits/matchmat",
+        path: "/home/test-user/Gits/matchmat",
         repoBasename: "matchmat",
       },
       {
         prefix: "cmuxlayer",
-        path: "/Users/etanheyman/Gits/cmuxlayer",
+        path: "/home/test-user/Gits/cmuxlayer",
         repoBasename: "cmuxlayer",
       },
       {
         prefix: "hyphen",
-        path: "/Users/etanheyman/Gits/hyphen-repo",
+        path: "/home/test-user/Gits/hyphen-repo",
         repoBasename: "hyphen-repo",
       },
     ]);
@@ -70,7 +70,7 @@ describe("launcher registry", () => {
         entries,
         sourcePath: "/tmp/launchers.zsh",
       }),
-    ).toBe("/Users/etanheyman/Gits/hyphen-repo");
+    ).toBe("/home/test-user/Gits/hyphen-repo");
   });
 
   it("prefers an exact registry prefix over an earlier basename alias", () => {

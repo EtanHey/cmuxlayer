@@ -55,7 +55,7 @@ function agent(overrides: Partial<AgentRecord>): AgentRecord {
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
-    launch_cwd: "/Users/e/Gits/cmuxlayer",
+    launch_cwd: "/home/test-user/Gits/cmuxlayer",
     ...overrides,
   } as AgentRecord;
 }
@@ -761,13 +761,13 @@ describe("makeSelfRegistrationSessionResolver", () => {
     const resolve = resolverFor(
       jsonl({
         session_id: "sid-exact",
-        cwd: "/Users/e/Gits/cmuxlayer",
+        cwd: "/home/test-user/Gits/cmuxlayer",
         pid: 111,
         session_path: "/rollout/exact.jsonl",
         ts: 5000,
       }),
     );
-    expect(resolve(agent({ launch_cwd: "/Users/e/Gits/cmuxlayer" }))).toEqual({
+    expect(resolve(agent({ launch_cwd: "/home/test-user/Gits/cmuxlayer" }))).toEqual({
       session_id: "sid-exact",
       path: "/rollout/exact.jsonl",
       pid: 111,
@@ -788,9 +788,9 @@ describe("makeSelfRegistrationSessionResolver", () => {
   });
 
   it("uses exact cwd as an optional secondary among records for one surface", () => {
-    const cwdA = "/Users/e/Gits/repo.wt/alpha";
-    const cwdB = "/Users/e/Gits/repo.wt/beta";
-    const cwdC = "/Users/e/Gits/repo";
+    const cwdA = "/home/test-user/Gits/repo.wt/alpha";
+    const cwdB = "/home/test-user/Gits/repo.wt/beta";
+    const cwdC = "/home/test-user/Gits/repo";
     const resolve = resolverFor(
       jsonl(
         { session_id: "sid-A", cwd: cwdA, pid: 1, ts: 1000 },
