@@ -95,6 +95,8 @@ describe("pre-PR script ladder", () => {
     expect(hook).toContain(
       "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bash scripts/run_tests.sh",
     );
+    const runner = readFileSync(join(repoRoot, "scripts", "run_tests.sh"), "utf8");
+    expect(runner).toContain("bun run test --maxWorkers=1");
   });
 
   it("syncs the brew tap clone and verifies the installed release version", () => {

@@ -15,14 +15,17 @@ describe("cmux memory watchdog package", () => {
 
     const result = spawnSync("bash", [installer, "--dry-run"], {
       encoding: "utf8",
-      env: { ...process.env, HOME: "/Users/example" },
+      env: { ...process.env, HOME: "/Users/example & partner" },
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
       join(root, "bin", "cmux-memory-watchdog.sh"),
     );
     expect(result.stdout).toContain(
-      "/Users/example/Library/Logs/cmux-watchdog/launchd.stdout.log",
+      "/Users/example &amp; partner/Library/Logs/cmux-watchdog/launchd.stdout.log",
+    );
+    expect(result.stdout).toContain(
+      "<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
     );
     expect(result.stdout).not.toContain(
       "/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-memory-watchdog/",

@@ -1,6 +1,6 @@
 # Thin-core tool cut
 
-The current surface keeps every cmuxlayer capability except the explicitly deleted `reorder_surface` tool registered while reducing the default MCP palette to 10 tools. The remaining definitions stay ToolSearch-callable.
+The current surface registers a 10-tool public MCP palette. The remaining 35 internal definitions are not registered and are not ToolSearch-callable; `reorder_surface` is explicitly deleted.
 
 The deferral is **INTERIM and reversible**. A separate architecture decision will determine whether low-frequency operations remain MCP tools or move to CLI/programmatic surfaces.
 
@@ -14,9 +14,9 @@ The deferral is **INTERIM and reversible**. A separate architecture decision wil
 - `spawn_agent` accepts role-driven `placement`, `workspace`, and `worktree` arguments.
 - `wait_for` accepts one `agent_id` or several `ids`.
 
-The enumerated legacy mapping contains eight names, despite the signed-off prose calling it “9→3”: `send_to_agent`, `send_input`, `send_command`, `send_key`, `new_worktree_split`, `spawn_in_workspace`, `new_split`, and `wait_for_all`. They remain callable for one release, are ToolSearch-deferred, emit runtime warnings, and carry replacement metadata. `// DRIFT: retire next release` in `src/server.ts` is the removal marker.
+The enumerated legacy mapping contains eight names, despite the signed-off prose calling it “9→3”: `send_to_agent`, `send_input`, `send_command`, `send_key`, `new_worktree_split`, `spawn_in_workspace`, `new_split`, and `wait_for_all`. Their internal definitions remain for one release, but they are not registered or callable through MCP. `// DRIFT: retire next release` in `src/server.ts` is the removal marker.
 
-The current validation registry in `src/palette.ts` has 10 default tool names. Source registration has 45 unique callable tools; the drift guard checks both numbers against current documentation in CI.
+The public registry has 10 names. Source retains 45 unique internal definitions; the drift guard checks the exact public names and both counts against current documentation in CI.
 
 ## Representative boot receipt
 
@@ -27,7 +27,7 @@ Measured from the exact MCP `tools/list` JSON using UTF-8 byte length:
 | Before (`v0.3.45`) | 42 | 50,126 |
 | Current default | 10 | Re-measure before publishing a byte claim |
 
-All 45 callable tools remain available; the 10-name default surface is defined in `src/palette.ts`. `reorder_surface` is absent.
+Only the exact 10-name public surface is callable; 35 internal definitions are unavailable through MCP. `reorder_surface` is absent.
 
 ## Reference sweep
 

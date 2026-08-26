@@ -5,7 +5,19 @@
 # vanished entirely, so this reports agent CLIs with no cmuxlayer child too.
 set -uo pipefail
 
-INSTALLED="$(/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer --version 2>/dev/null | awk '{print $2}')"
+# This is a mandatory evidence report, not a release gate: casualties are
+# surfaced for operator action, while the script exits zero if the sweep ran.
+CMUXLAYER_BIN=""
+if command -v brew >/dev/null 2>&1; then
+  FORMULA_PREFIX="$(brew --prefix cmuxlayer 2>/dev/null || true)"
+  if [ -n "$FORMULA_PREFIX" ] && [ -x "$FORMULA_PREFIX/bin/cmuxlayer" ]; then
+    CMUXLAYER_BIN="$FORMULA_PREFIX/bin/cmuxlayer"
+  fi
+fi
+if [ -z "$CMUXLAYER_BIN" ]; then
+  CMUXLAYER_BIN="$(command -v cmuxlayer 2>/dev/null || true)"
+fi
+INSTALLED="$([ -n "$CMUXLAYER_BIN" ] && "$CMUXLAYER_BIN" --version 2>/dev/null | awk '{print $2}' || true)"
 echo "installed cmuxlayer: ${INSTALLED:-UNKNOWN}"
 echo
 
@@ -34,10 +46,9 @@ fi
 echo
 echo "=== agents with NO cmuxlayer child (THE ones the naive check misses) ==="
 found=0
-while read -r pid; do
+while read -r pid cli; do
   [ -n "$pid" ] || continue
   cut -f1 "$PARENTS" | grep -qx "$pid" && continue
-  cli="$(ps -p "$pid" -o command= 2>/dev/null | grep -oE 'bin/(claude|codex)' | cut -d/ -f2)"
   cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)"
   cfg="?"
   if [ -n "$cwd" ] && [ -f "$cwd/.mcp.json" ]; then
@@ -55,7 +66,13 @@ while read -r pid; do
   else
     echo "  $mark pid=$pid claude $cwd — run: /mcp reconnect cmuxlayer"
   fi
-done < <(ps -eo pid,command | grep -E "\.local/bin/(claude|codex)( |$)" | grep -v grep | awk '{print $1}')
+done < <(ps -eo pid=,comm= | awk '
+  {
+    executable = $2
+    sub(/^.*\//, "", executable)
+    if (executable == "claude" || executable == "codex") print $1, executable
+  }
+')
 [ "$found" -eq 0 ] && echo "  (none — every configured seat has a live child)"
 
 cat <<'NOTE'

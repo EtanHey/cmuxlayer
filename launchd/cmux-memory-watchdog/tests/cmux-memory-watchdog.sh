@@ -525,3 +525,16 @@ EOF
   rm -rf "$root_dir"
 }
 run_top_rss_offenders_case
+
+run_installer_plist_lint_case() {
+  local root_dir rendered
+  root_dir="$(mktemp -d)"
+  rendered="$root_dir/rendered.plist"
+  HOME="$root_dir/home & operator" bash "$ROOT_DIR/install.sh" --dry-run >"$rendered"
+  /usr/bin/plutil -lint "$rendered" >/dev/null
+  assert_file_contains "$rendered" "<key>PATH</key>"
+  assert_file_contains "$rendered" "home &amp; operator"
+  printf 'PASS: installer emits XML-safe plist with an explicit launchd PATH\n'
+  rm -rf "$root_dir"
+}
+run_installer_plist_lint_case

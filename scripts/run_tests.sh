@@ -46,7 +46,11 @@ if ! bun test ./tests/regression/test_terminal_state.ts; then
   ((EXIT_STATUS |= 8))
 fi
 
-if ! bun run test; then
+# The 60+ second release-receipt file can trigger Vitest's worker-RPC timeout
+# under the local pre-push fan-out even though every test passes. The hook is a
+# correctness gate, so prefer deterministic serial execution here; CI keeps the
+# normal parallel package script.
+if ! bun run test --maxWorkers=1; then
   ((EXIT_STATUS |= 4))
 fi
 

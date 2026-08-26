@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 45 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that with a focused 10-tool public MCP surface for terminal workspaces.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -8,7 +8,7 @@
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-45%20tools-green.svg)](https://modelcontextprotocol.io)
+[![MCP Tools](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-3023%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
@@ -118,7 +118,7 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer keeps 45 MCP tools callable for terminal control, screen reading, layout management, and multi-agent orchestration. The default palette is intentionally limited to 10; the remaining tools are loaded through ToolSearch. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer retains 45 internal tool definitions, but only 10 are registered and callable through MCP. The other 35 are not exposed through ToolSearch or any other MCP path. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent Routing Workflow
 
@@ -126,13 +126,13 @@ For managed agents, use the agent-first path: `list_agents` to find the target, 
 
 See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
-## MCP Tools (45 registered, 10 default)
+## MCP Tools (10 registered and callable)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
-**Default palette** — `spawn_agent` `send_to` `wait_for` `read_screen` `my_agents` `list_agents` `broadcast` `close_surface` `dispatch_to_agent` `list_surfaces` `control_health` `stop_agent`
+**Public MCP surface** — `spawn_agent` `report_to_parent` `send_to` `read_screen` `list_agents` `wait_for` `control_health` `close_surface` `update_surface` `list_surfaces`
 
-The other 30 definitions, including `interact`, are interim ToolSearch-deferred and remain callable. This metadata split is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
+The other 35 internal definitions, including `interact`, are not callable. This boundary is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
 
 **Terminal control** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
 

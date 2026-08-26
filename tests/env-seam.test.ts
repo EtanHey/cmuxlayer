@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentEngine } from "../src/agent-engine.js";
@@ -12,13 +12,13 @@ import {
 import { readInbox } from "../src/inbox.js";
 import { StateManager } from "../src/state-manager.js";
 
-const TEST_DIR = join(
+const SCRATCH_ROOT = join(
   process.cwd(),
   "docs.local",
   "scratch",
   "run7",
-  "env-seam-test",
 );
+let testDir = "";
 
 const ENV_KEYS = [
   "CMUXLAYER_HEAP_GUARD_BYTES",
@@ -90,8 +90,8 @@ describe("production environment seams", () => {
 
   beforeEach(() => {
     for (const key of ENV_KEYS) originalEnv.set(key, process.env[key]);
-    rmSync(TEST_DIR, { recursive: true, force: true });
-    mkdirSync(TEST_DIR, { recursive: true });
+    mkdirSync(SCRATCH_ROOT, { recursive: true });
+    testDir = mkdtempSync(join(SCRATCH_ROOT, "env-seam-test-"));
   });
 
   afterEach(() => {
@@ -101,7 +101,8 @@ describe("production environment seams", () => {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    rmSync(TEST_DIR, { recursive: true, force: true });
+    rmSync(testDir, { recursive: true, force: true });
+    testDir = "";
   });
 
   it("uses heap and old-space environment limits in their runtime guards", () => {
@@ -131,7 +132,7 @@ describe("production environment seams", () => {
   it("delays the post-spawn liveness assertion by the configured interval", async () => {
     vi.useFakeTimers();
     process.env.CMUXLAYER_POST_SPAWN_LIVENESS_MS = "25";
-    const state = new StateManager(TEST_DIR);
+    const state = new StateManager(testDir);
     const worker = record({ state: "booting" });
     state.writeState(worker);
     const registry = new AgentRegistry(state, async () => []);
@@ -153,7 +154,7 @@ describe("production environment seams", () => {
     process.env.CMUXLAYER_HALT_WEDGED_DWELL_MS = "1000";
     process.env.CMUXLAYER_HALT_WEDGED_SWEEPS = "3";
     let now = Date.parse("2026-08-26T00:00:00.000Z");
-    const state = new StateManager(TEST_DIR);
+    const state = new StateManager(testDir);
     const parent = record({
       agent_id: "env-seam-parent",
       surface_id: "surface:env-seam-parent",
@@ -179,7 +180,7 @@ describe("production environment seams", () => {
         [parent.surface_id]: activeScreen,
         [worker.surface_id]: activeScreen,
       }) as never,
-      { haltNow: () => now, inboxOpts: { baseDir: TEST_DIR } },
+      { haltNow: () => now, inboxOpts: { baseDir: testDir } },
     );
     const escalate = () =>
       (engine as unknown as {
@@ -194,10 +195,10 @@ describe("production environment seams", () => {
     await escalate();
     now += 501;
     await escalate();
-    expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([]);
+    expect(readInbox(parent.agent_id, { baseDir: testDir })).toEqual([]);
     await escalate();
     expect(
-      readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+      readInbox(parent.agent_id, { baseDir: testDir }).filter(
         (message) => message.tag === "agent_halt_wedged",
       ),
     ).toHaveLength(1);
@@ -207,7 +208,7 @@ describe("production environment seams", () => {
   it("bounds stop post-condition polling with the configured timeout", async () => {
     vi.useFakeTimers();
     process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS = "100";
-    const state = new StateManager(TEST_DIR);
+    const state = new StateManager(testDir);
     const registry = new AgentRegistry(state, async () => []);
     const engine = new AgentEngine(state, registry, client() as never);
     const readCondition = vi.fn().mockResolvedValue({

@@ -19,5 +19,7 @@ describe("Vercel configuration ownership", () => {
 
     expect(pages).toMatch(/path:\s*landing\b/);
     expect(ci).toContain("run: test -s landing/index.html");
+    expect(ci).toContain("uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa");
+    expect(ci).toMatch(/Package exact GitHub Pages artifact[\s\S]*?path:\s*landing\b/);
   });
 });

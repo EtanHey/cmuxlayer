@@ -178,6 +178,13 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      # Pages currently deploys landing/, not the Next build above. Package the
+      # exact deploy input here so required CI validates artifact creation too.
+      - name: Package exact GitHub Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: landing
       - name: Check the static Pages deploy artifact
         working-directory: .
         run: test -s landing/index.html
