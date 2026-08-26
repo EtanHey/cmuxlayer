@@ -1,0 +1,35 @@
+version = 1
+
+exclude_patterns = [
+  "**/node_modules/**",
+  "dist/**",
+  "site/.next/**",
+  "site/out/**",
+  "landing/**",
+  "docs.local/**",
+  ".worktrees/**",
+  "benchmarks/**",
+  "**/*.generated.*",
+]
+
+test_patterns = [
+  "tests/**",
+  "**/*.test.ts",
+]
+
+[[analyzers]]
+name = "javascript"
+enabled = true
+
+  [analyzers.meta]
+  dialect = "typescript"
+  module_system = "es-modules"
+  environment = ["nodejs"]
+  plugins = ["react"]
+
+[[analyzers]]
+name = "shell"
+enabled = true
+
+  [analyzers.meta]
+  dialect = "bash"
