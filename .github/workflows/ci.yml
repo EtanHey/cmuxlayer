@@ -192,7 +192,7 @@ jobs:
           test "$(jq -r .event <<<"$source_run")" = pull_request
           test "$(jq -r .name <<<"$source_run")" = CI
           git merge-base --is-ancestor "$source_sha" HEAD
-          unexpected_changes="$(git diff --name-only "$source_sha" HEAD | rg -v '^(\.github/workflows/ci\.yml|benchmarks/daemon-baseline\.json|docs/performance-budgets\.md|scripts/(check|refresh)-daemon-baseline\.mjs|tests/perf-budget\.test\.ts)$' || true)"
+          unexpected_changes="$(git diff --name-only "$source_sha" HEAD | rg -v '^(\.github/workflows/ci\.yml|benchmarks/daemon-baseline\.json|docs/performance-budgets\.md|scripts/(check-daemon-benchmark|refresh-daemon-baseline)\.mjs|tests/perf-budget\.test\.ts)$' || true)"
           test -z "$unexpected_changes"
           mkdir -p docs.local/scratch/imported-perf-budget
           gh run download "$SOURCE_RUN_ID" -n daemon-perf-budget -D docs.local/scratch/imported-perf-budget
