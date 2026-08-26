@@ -892,6 +892,43 @@ describe("enter reliability", () => {
     });
   });
 
+  it("resolves agent-mode composer-only delivery as terminal typed on the same ID", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";
+    server = createReliabilityServer(client);
+    registerAgent(server, {
+      surface_uuid: client.stableSurfaceIdentity,
+    });
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "leave this in the agent composer",
+      press_enter: false,
+    });
+    const parsed = parseResult(result);
+    const waited = await callTool(server, "wait_for", {
+      delivery_id: parsed.delivery_id,
+      timeout_ms: 1_000,
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      delivery: "typed",
+      delivery_state: "typed",
+      terminal: true,
+      typed: true,
+      submit_attempted: false,
+      submit_verified: null,
+    });
+    expect(parseResult(waited)).toMatchObject({
+      agent_id: "agent-1",
+      delivery_id: parsed.delivery_id,
+      delivery_state: "typed",
+      terminal: true,
+      submit_verified: null,
+    });
+  });
+
   it("registers background surface delivery IDs with wait_for", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
@@ -2038,12 +2075,13 @@ describe("enter reliability", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.delivery_id).toBeUndefined();
-    expect(parsed.delivery).toBe("submitted");
-    expect(parsed.delivery_state).toBe("submitted");
+    expect(parsed.delivery).toBe("typed");
+    expect(parsed.delivery_state).toBe("typed");
     expect(parsed.terminal).toBe(true);
     expect(parsed.typed).toBe(true);
     expect(parsed.submit_attempted).toBe(true);
     expect(parsed.submit_verified).toBeNull();
+    expect(parsed.WARNING).toMatch(/NOT VERIFIED.*Return.*not verified/i);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,

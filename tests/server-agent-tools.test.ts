@@ -12871,14 +12871,14 @@ codex>
     expect(receipt).toMatchObject({
       delivery_id: expect.any(String),
       delivered: false,
-      terminal: false,
+      terminal: true,
       typed: true,
       submit_attempted: false,
       submit_verified: null,
       error: expect.stringContaining("post-delivery topology unavailable"),
     });
-    expect(receipt).not.toHaveProperty("delivery");
-    expect(receipt).not.toHaveProperty("delivery_state");
+    expect(receipt.delivery).toBe("typed");
+    expect(receipt.delivery_state).toBe("typed");
   });
 
   it("send_to omits evidence when a UUID-less row becomes foreign after delivery", async () => {

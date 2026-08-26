@@ -6714,11 +6714,45 @@ export class AgentEngine {
   }
 
   async runSweep(): Promise<void> {
-    await this.runLifecycleMutation(() => this.runSweepOnce(), {
+    await this.runLifecycleMutation(async () => {
+      await this.holdBenchmarkSweepIfArmed();
+      await this.runSweepOnce();
+    }, {
       label: "sweep",
     });
     await this.drainDeliveryQueue();
     await this.verifyPendingDeliveries();
+  }
+
+  private async holdBenchmarkSweepIfArmed(): Promise<void> {
+    const statePath =
+      process.env.CMUXLAYER_BENCH_SWEEP_HOLD_STATE?.trim() ?? "";
+    if (!statePath) return;
+
+    let armed: { token?: unknown; state?: unknown };
+    try {
+      armed = JSON.parse(readFileSync(statePath, "utf8"));
+    } catch {
+      return;
+    }
+    if (armed.state !== "armed" || typeof armed.token !== "string") return;
+
+    const token = armed.token;
+    writeFileSync(statePath, JSON.stringify({ token, state: "held" }));
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      try {
+        const current = JSON.parse(readFileSync(statePath, "utf8"));
+        if (current.token === token && current.state === "release") {
+          writeFileSync(statePath, JSON.stringify({ token, state: "complete" }));
+          return;
+        }
+      } catch {
+        // The benchmark owns this opt-in state file and may be between writes.
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+    throw new Error(`benchmark lifecycle sweep hold timed out: ${token}`);
   }
 
   setDeliverySubmitter(submitter: DeliverySubmitter | null): void {

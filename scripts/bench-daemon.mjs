@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
@@ -304,11 +305,6 @@ function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
 if (command === "list-workspaces") {
-  if (state.hold_next_sweep === true) {
-    patchState({ hold_next_sweep: false, sweep_hold_started: true });
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3500);
-    patchState({ sweep_hold_finished: true });
-  }
   write({ workspaces: [{ ref: "workspace:bench", title: "Bench", index: 0, selected: true, pinned: false, current_directory: cwd }] });
 } else if (command === "list-windows") {
   write({ windows: [{ ref: "window:bench", title: "Bench", index: 0, selected: true, workspace_refs: ["workspace:bench"] }] });
@@ -442,38 +438,33 @@ async function readFakeState(statePath) {
   }
 }
 
-async function armSweepHold(statePath) {
-  const current = await readFakeState(statePath);
+async function armSweepHold(statePath, holdToken) {
   await writeFile(
     statePath,
-    JSON.stringify({
-      ...current,
-      hold_next_sweep: true,
-      sweep_hold_started: false,
-      sweep_hold_finished: false,
-    }),
+    JSON.stringify({ token: holdToken, state: "armed" }),
   );
 }
 
-async function waitForSweepHoldStarted(statePath, timeoutMs = 5_000) {
+async function waitForSweepHoldState(
+  statePath,
+  holdToken,
+  expectedState,
+  timeoutMs = 5_000,
+) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if ((await readFakeState(statePath)).sweep_hold_started === true) return;
+    const state = await readFakeState(statePath);
+    if (state.token === holdToken && state.state === expectedState) {
+      return;
+    }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
   }
-  throw new Error("timed out waiting for the benchmark startup sweep hold");
+  throw new Error(
+    `timed out waiting for benchmark hold ${holdToken} state ${expectedState}`,
+  );
 }
 
-async function waitForSweepHoldFinished(statePath, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if ((await readFakeState(statePath)).sweep_hold_finished === true) return;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
-  }
-  throw new Error("timed out waiting for the benchmark startup sweep release");
-}
-
-async function measureFirstSendAfterSpawn(client, lockClient, fakeCmuxState) {
+async function measureFirstSendAfterSpawn(client, sweepHoldState) {
   const spawnResult = toolData(
     await client.callTool("spawn_agent", {
       repo: "cmuxlayer",
@@ -501,23 +492,21 @@ async function measureFirstSendAfterSpawn(client, lockClient, fakeCmuxState) {
     return { elapsed_ms: round(nowMs() - startedAt), receipt };
   };
 
-  // Simulate the startup sweep with the same daemon lifecycle lock: a second
-  // client starts a real managed-metadata refresh whose topology enumeration is
-  // held for 3.5s. Removing the target-scoped send path must push this over 2s.
-  await armSweepHold(fakeCmuxState);
-  const heldRefresh = lockClient.callTool("wait_for", {
-    agent_id: spawnResult.agent_id,
-    target_state: "ready",
-    timeout_ms: 1_000,
-  });
-  await waitForSweepHoldStarted(fakeCmuxState);
+  // The daemon sweep acknowledges this unique token only after it owns the
+  // lifecycle mutex. Restoring the fleet refresh must push first send over 2s.
+  const holdToken = `sweep-daemon-owner-${Date.now()}`;
+  await armSweepHold(sweepHoldState, holdToken);
+  await waitForSweepHoldState(sweepHoldState, holdToken, "held");
   const first = await measureSend({
     agent_id: spawnResult.agent_id,
     text: `Read and follow ${repoRoot}/docs.local/scratch/run5r3/bench-first-send.md`,
     press_enter: true,
   });
-  await waitForSweepHoldFinished(fakeCmuxState);
-  toolData(await heldRefresh, "held lifecycle refresh");
+  await writeFile(
+    sweepHoldState,
+    JSON.stringify({ token: holdToken, state: "release" }),
+  );
+  await waitForSweepHoldState(sweepHoldState, holdToken, "complete");
   const second = await measureSend({
     agent_id: spawnResult.agent_id,
     text: `Read and follow ${repoRoot}/docs.local/scratch/run5r3/bench-second-send.md`,
@@ -570,18 +559,28 @@ async function main() {
     : join(repoRoot, "docs.local", "scratch", "run5r3");
   await mkdir(scratchRoot, { recursive: true });
   const tempRoot = await mkdtemp(join(scratchRoot, "b-"));
+  const socketScratchRoot = join(
+    homedir(),
+    ".local",
+    "state",
+    "cmuxlayer",
+    "bench",
+  );
+  await mkdir(socketScratchRoot, { recursive: true });
+  const socketRoot = await mkdtemp(join(socketScratchRoot, "b-"));
   const binDir = join(tempRoot, "bin");
   await mkdir(binDir, { recursive: true });
   await writeFile(join(binDir, "package.json"), '{"type":"commonjs"}\n');
   await writeFakeCmux(binDir);
-  const daemonSocket = join(tempRoot, "d.sock");
-  const missingCmuxSocket = join(tempRoot, "m.sock");
+  const daemonSocket = join(socketRoot, "d.sock");
+  const missingCmuxSocket = join(socketRoot, "m.sock");
   const fakeCmuxSocketServer = net.createServer((socket) => socket.destroy());
   await new Promise((resolvePromise, reject) => {
     fakeCmuxSocketServer.once("error", reject);
     fakeCmuxSocketServer.listen(missingCmuxSocket, resolvePromise);
   });
   const fakeCmuxState = join(tempRoot, "fake-cmux-state.json");
+  const sweepHoldState = join(tempRoot, "sweep-hold-state.json");
   const baseEnv = {
     ...process.env,
     CMUX_AGENT_ID: "",
@@ -594,8 +593,8 @@ async function main() {
     CMUXLAYER_BENCH_STATE: fakeCmuxState,
     CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
     CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
-    CMUXLAYER_SWEEP_INTERVAL_MS: "60000",
-    CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "60000",
+    CMUXLAYER_SWEEP_INTERVAL_MS: "1000",
+    CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "1000",
     CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "1536",
   };
 
@@ -606,7 +605,7 @@ async function main() {
     baselineClients = await startClients("baseline", clientCount, {
       ...baseEnv,
       CMUXLAYER_FORCE_INPROCESS: "1",
-      CMUXLAYER_DAEMON_SOCKET: join(tempRoot, "baseline-unused.sock"),
+      CMUXLAYER_DAEMON_SOCKET: join(socketRoot, "u.sock"),
     });
     const baselineLatency = await measureLatency(baselineClients);
     const baselineRssMb = await totalRssMb(
@@ -617,6 +616,7 @@ async function main() {
       cwd: repoRoot,
       env: {
         ...baseEnv,
+        CMUXLAYER_BENCH_SWEEP_HOLD_STATE: sweepHoldState,
         CMUXLAYER_DAEMON_SOCKET: daemonSocket,
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -647,8 +647,7 @@ async function main() {
     const daemonLatency = await measureLatency(daemonClients);
     const firstSendAfterSpawn = await measureFirstSendAfterSpawn(
       daemonClients[0],
-      daemonClients[1],
-      fakeCmuxState,
+      sweepHoldState,
     );
     const daemonRssMb = await totalRssMb(
       [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
@@ -747,6 +746,7 @@ async function main() {
       fakeCmuxSocketServer.close(resolvePromise),
     );
     await rm(tempRoot, { recursive: true, force: true });
+    await rm(socketRoot, { recursive: true, force: true });
   }
 }
 

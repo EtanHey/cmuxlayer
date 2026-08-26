@@ -3641,8 +3641,8 @@ describe("tool handler integration", () => {
       submit_attempted: true,
       submit_verified: null,
       retry_count: 0,
-      delivery: "submitted",
-      delivery_state: "submitted",
+      delivery: "typed",
+      delivery_state: "typed",
     });
     expect(receiptShape(keyResult)).toEqual({
       delivered: false,

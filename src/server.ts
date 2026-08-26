@@ -1073,7 +1073,7 @@ export function buildPublicDeliveryReceipt(input: {
     input.delivery_state === "pending_verify" ||
     input.delivery_state === "failed_confirmed"
       ? input.delivery_state
-      : input.delivery_state === "submitted"
+      : input.delivery_state === "submitted" && input.submit_verified === true
         ? "submitted"
         : undefined;
   const terminal =
@@ -6219,8 +6219,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? "pending_verify"
               : deliveryOutcome === "rescued"
                 ? "rescued"
-              : submit_verified === true || opts.verify_submit !== true
+              : submit_verified === true
                 ? "submitted"
+                : opts.verify_submit !== true
+                  ? "typed"
                 : undefined,
       delivery_id: opts.delivery_id,
       typed: bytes > 0,
@@ -6229,6 +6231,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_evidence,
       retry_count,
       timings_ms: opts.timings,
+      WARNING:
+        opts.press_enter &&
+        submit_verified === null &&
+        opts.verify_submit !== true
+          ? "NOT VERIFIED — Return was dispatched, but submission was not verified; this receipt confirms only that text was typed."
+          : undefined,
     });
 
     if (
@@ -17062,6 +17070,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       retry_count: delivery.retry_count,
                       submit_verified: false,
                       error: "Prompt appeared only after an external interrupt",
+                    })
+                : delivery.delivery === "typed"
+                  ? engine.resolveDelivery({
+                      delivery_id: deliveryId,
+                      agent_id: agentId,
+                      text: args.text,
+                      press_enter: args.press_enter,
+                      source_event: "send_to",
+                      delivery_state: "typed",
+                      terminal: true,
+                      retry_count: delivery.retry_count,
+                      submit_verified: null,
+                      error: null,
                     })
                 : delivery.delivery === "submitted"
                   ? engine.resolveDelivery({

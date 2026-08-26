@@ -266,7 +266,7 @@ describe("send_to consolidated modes", () => {
     expect(result.content[0].text).toContain("not submitted");
   });
 
-  it("returns a terminal unverified submission when raw surface Return was dispatched", async () => {
+  it("returns terminal typed truth when raw surface Return was unverified", async () => {
     const exec = makeExec();
     const server = createServer({
       exec,
@@ -290,8 +290,8 @@ describe("send_to consolidated modes", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_attempted).toBe(true);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.delivery).toBe("submitted");
-    expect(parsed.delivery_state).toBe("submitted");
+    expect(parsed.delivery).toBe("typed");
+    expect(parsed.delivery_state).toBe("typed");
     expect(parsed.terminal).toBe(true);
     expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
