@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer } from "../src/server.js";
+import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { runWithCallerContext } from "../src/caller-context.js";
@@ -279,8 +279,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     rmSync(inboxDir, { recursive: true, force: true });
   });
 
-  async function spawn(extra: Record<string, unknown> = {}) {
-    const tool = server._registeredTools["spawn_agent"];
+  async function spawn(
+    extra: Record<string, unknown> = {},
+    targetServer = server,
+  ) {
+    const tool = targetServer._registeredTools["spawn_agent"];
     const result = await runWithCallerContext({ workspaceId: "workspace:1" }, () =>
       tool.handler(
         {
@@ -1008,14 +1011,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       report_path: reportPath,
       task_summary: "reparent race fixture",
     };
-    let engine: ReturnType<
-      typeof createServer
-    >["_registeredTools"]["interact"]["_engine"];
-    const externalNotify = vi.fn().mockImplementation(async () => {
+    const externalNotify = vi.fn().mockImplementation(() => {
       const reparented = { ...child, parent_agent_id: nextParent.agent_id };
       engine.stateMgr.writeState(reparented);
       engine.getRegistry().set(reparented.agent_id, reparented);
-      return true;
+      return Promise.resolve(true);
     });
     server = createServer(
       withTestSurfaceObserver({
@@ -1027,7 +1027,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchNotify: externalNotify,
       }),
     );
-    engine = server._registeredTools.interact._engine;
+    const engine = server._registeredTools.interact._engine;
     mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
     writeFileSync(reportPath, "before\n", "utf8");
     for (const record of [owner, nextParent, child]) {
@@ -1537,15 +1537,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
       return baseExec(cmd, args);
     });
-    server = createServer(
-      withTestSurfaceObserver({
-        exec,
-        stateDir: STATE_DIR,
-        disableSpawnPreflight: true,
-        inboxBaseDir: inboxDir,
-        watchRegistryPath,
-      }),
-    );
+    const serverOptions = withTestSurfaceObserver({
+      exec,
+      stateDir: STATE_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir,
+      watchRegistryPath,
+    });
+    const context = createServerContext(serverOptions);
+    server = createServer({ ...serverOptions, context });
+    const siblingServer = createServer({ ...serverOptions, context });
     const parent = parentRecord(parentUuid);
     const existingChild: AgentRecord = {
       ...parentRecord(existingChildUuid),
@@ -1600,12 +1601,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         parent_agent_id: parent.agent_id,
         report_path: concurrentOverride,
       }),
-      spawn({
-        parent_agent_id: parent.agent_id,
-        report_path: concurrentOverride,
-      }),
+      spawn(
+        {
+          parent_agent_id: parent.agent_id,
+          report_path: concurrentOverride,
+        },
+        siblingServer,
+      ),
     ]);
     expect(splitCalls() - beforeConcurrent).toBe(2);
     expect(concurrent.map((result) => result.ok).sort()).toEqual([false, true]);
+    await siblingServer.close();
   });
 });

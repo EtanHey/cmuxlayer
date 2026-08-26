@@ -3654,6 +3654,7 @@ export interface CmuxServerContext {
   /** Lifecycle-lock truth for `control_health`, published by the live engine. */
   lifecycleLockStateProvider: (() => LifecycleLockState) | null;
   lifecycleSweepEngine: AgentEngine | null;
+  parentReportPathReservations: Set<string>;
   lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null;
   lifecycleAgentInputDelivererReadyListeners: Set<() => void>;
   setLifecycleAgentInputDeliverer(
@@ -3804,6 +3805,7 @@ export function createServerContext(
     lifecycleStartLastTimeoutAt: null,
     lifecycleLockStateProvider: null,
     lifecycleSweepEngine: null,
+    parentReportPathReservations: new Set(),
     lifecycleAgentInputDeliverer: null,
     lifecycleAgentInputDelivererReadyListeners: new Set(),
     setLifecycleAgentInputDeliverer(deliverer) {
@@ -3829,6 +3831,7 @@ export function createServerContext(
         context.controlHealthTimer = null;
       }
       context.lifecycleSweepEngine = null;
+      context.parentReportPathReservations.clear();
       context.lifecycleAgentInputDeliverer = null;
       context.lifecycleAgentInputDelivererReadyListeners.clear();
       context.originalLaunchCommandsBySurface.clear();
@@ -13092,7 +13095,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return `Report watch was not armed for ${coordination.report_path}: ${detail}`;
       }
     };
-    const parentReportPathReservations = new Set<string>();
+    const parentReportPathReservations = context.parentReportPathReservations;
+    const reserveParentReportPath = (
+      parentAgentId: string,
+      reportPath: string,
+      childAgentId?: string,
+    ):
+      | { ok: true; key: string }
+      | { ok: false; message: string } => {
+      const key = JSON.stringify([parentAgentId, reportPath]);
+      if (parentReportPathReservations.has(key)) {
+        return {
+          ok: false,
+          message: `report_path ${reportPath} is already reserved by another child spawn; each child requires a distinct report path`,
+        };
+      }
+      const existingReportWatch = readWatchRegistry({
+        registryPath: watchRegistryPath,
+      }).watches.find(
+        (watch) =>
+          watch.owner === parentAgentId &&
+          watch.target === reportPath &&
+          watch.change === "content" &&
+          watch.state !== "failed" &&
+          (childAgentId === undefined ||
+            watch.subject_agent_id !== childAgentId),
+      );
+      if (existingReportWatch) {
+        return {
+          ok: false,
+          message: `report_path ${reportPath} is already assigned to child ${existingReportWatch.subject_agent_id ?? "through an existing report watch"}; each child requires a distinct report path`,
+        };
+      }
+      parentReportPathReservations.add(key);
+      return { ok: true, key };
+    };
 
     server.tool(
       "report_to_parent",
@@ -13568,6 +13605,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (!existing) {
               return err(new Error(`Agent not found: ${args.resume_agent_id}`));
             }
+            const resumeCoordination = issueSpawnCoordination(
+              existing.agent_id,
+              args.report_path,
+            );
+            if (existing.parent_agent_id) {
+              const reservation = reserveParentReportPath(
+                existing.parent_agent_id,
+                resolve(resumeCoordination.report_path),
+                existing.agent_id,
+              );
+              if (!reservation.ok) {
+                return err(new Error(reservation.message), {
+                  error_code: "REPORT_PATH_IN_USE",
+                });
+              }
+              reportPathReservationKey = reservation.key;
+            }
             const workspace = await canonicalWorkspaceRef(
               args.workspace ?? existing.workspace_id ?? undefined,
             );
@@ -13613,10 +13667,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // the most incident-prone path in this repo -- the exact thing this
             // PR exists to move work OFF. That sliver stays open on #462.
             const resumeMonitorBoot = ensureMonitorBoot(result.agent_id);
-            const resumeCoordination = issueSpawnCoordination(
-              result.agent_id,
-              args.report_path,
-            );
             const resumeContract = buildBootContractInjection(
               result.agent_id,
               resumeMonitorBoot,
@@ -13843,36 +13893,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : (args.parent_agent_id ?? callerAgent?.agent_id);
           if (effectiveParentAgentId && args.report_path) {
             const requestedReportPath = resolve(args.report_path.trim());
-            reportPathReservationKey = JSON.stringify([
+            const reservation = reserveParentReportPath(
               effectiveParentAgentId,
               requestedReportPath,
-            ]);
-            if (parentReportPathReservations.has(reportPathReservationKey)) {
-              return err(
-                new Error(
-                  `report_path ${requestedReportPath} is already reserved by another child spawn; each child requires a distinct report path`,
-                ),
-                { error_code: "REPORT_PATH_IN_USE" },
-              );
-            }
-            const existingReportWatch = readWatchRegistry({
-              registryPath: watchRegistryPath,
-            }).watches.find(
-              (watch) =>
-                watch.owner === effectiveParentAgentId &&
-                watch.target === requestedReportPath &&
-                watch.change === "content" &&
-                watch.state !== "failed",
             );
-            if (existingReportWatch) {
+            if (!reservation.ok) {
               return err(
-                new Error(
-                  `report_path ${requestedReportPath} is already assigned to child ${existingReportWatch.subject_agent_id ?? "through an existing report watch"}; each child requires a distinct report path`,
-                ),
+                new Error(reservation.message),
                 { error_code: "REPORT_PATH_IN_USE" },
               );
             }
-            parentReportPathReservations.add(reportPathReservationKey);
+            reportPathReservationKey = reservation.key;
           }
           const effectiveRole = callerIsWorker ? "worker" : normalizedRole.role;
           const workerCallerWarning = callerIsWorker

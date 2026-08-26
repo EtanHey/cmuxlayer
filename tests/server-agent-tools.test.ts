@@ -2604,6 +2604,85 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("rejects a resumed agent's report path when a live sibling owns it", async () => {
+    const agentId = "cmuxlayerCodex-resume-path-collision";
+    const siblingId = "cmuxlayerCodex-live-sibling";
+    const parentId = "cmuxlayerClaude-resume-collision-parent";
+    const resumeInboxDir = mkdtempSync(join(tmpdir(), "resume-path-collision-"));
+    const watchRegistryPath = join(resumeInboxDir, "watch-specs.json");
+    const sharedReportPath = join(resumeInboxDir, "shared", "report.md");
+    const stateMgr = new StateManager(TEST_DIR);
+    for (const record of [
+      makeServerAgentRecord({
+        agent_id: parentId,
+        role: "orchestrator",
+        state: "ready",
+        surface_id: "surface:parent",
+      }),
+      makeServerAgentRecord({
+        agent_id: agentId,
+        state: "done",
+        surface_id: "surface:old",
+        cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        parent_agent_id: parentId,
+        spawn_depth: 1,
+      }),
+      makeServerAgentRecord({
+        agent_id: siblingId,
+        state: "ready",
+        surface_id: "surface:sibling",
+        parent_agent_id: parentId,
+        spawn_depth: 1,
+      }),
+    ]) {
+      stateMgr.writeState(record);
+    }
+    mkdirSync(join(resumeInboxDir, "shared"), { recursive: true });
+    writeFileSync(sharedReportPath, "working\n", "utf8");
+    await armWatch(
+      {
+        owner: parentId,
+        subject_agent_id: siblingId,
+        target: sharedReportPath,
+        change: "content",
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: watchRegistryPath },
+    );
+    const exec = makeLifecycleExec();
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      inboxBaseDir: resumeInboxDir,
+      watchRegistryPath,
+    });
+    await serverContexts.at(-1)?.lifecycleStartPromise;
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const splitCalls = () =>
+      exec.mock.calls.filter(([, args]) => args.includes("new-split")).length;
+    const before = splitCalls();
+
+    try {
+      const result = await spawn.handler(
+        { resume_agent_id: agentId, report_path: sharedReportPath },
+        {} as any,
+      );
+      const parsed = parseToolResult(result) as Record<string, unknown>;
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error_code).toBe("REPORT_PATH_IN_USE");
+      expect(String(parsed.error)).toMatch(/already assigned.*sibling/i);
+      expect(splitCalls()).toBe(before);
+      expect(
+        readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+      ).toHaveLength(1);
+    } finally {
+      rmSync(resumeInboxDir, { recursive: true, force: true });
+    }
+  });
+
   it("spawn_agent accepts placement as the canonical role-placement argument", async () => {
     const server = createLifecycleServer(makeLifecycleExec());
     const spawn = (server as any)._registeredTools["spawn_agent"];
