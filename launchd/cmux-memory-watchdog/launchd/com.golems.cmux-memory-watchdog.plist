@@ -7,7 +7,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-memory-watchdog/bin/cmux-memory-watchdog.sh</string>
+    <string>@CMUX_WATCHDOG_SCRIPT@</string>
   </array>
 
   <key>EnvironmentVariables</key>
@@ -27,9 +27,9 @@
   <integer>60</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/etanheyman/Library/Logs/cmux-watchdog/launchd.stdout.log</string>
+  <string>@CMUX_WATCHDOG_HOME@/Library/Logs/cmux-watchdog/launchd.stdout.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/etanheyman/Library/Logs/cmux-watchdog/launchd.stderr.log</string>
+  <string>@CMUX_WATCHDOG_HOME@/Library/Logs/cmux-watchdog/launchd.stderr.log</string>
 </dict>
 </plist>

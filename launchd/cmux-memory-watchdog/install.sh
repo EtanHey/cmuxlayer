@@ -28,12 +28,12 @@ xml_escape() {
 }
 
 render_plist() {
-  local script_path log_dir
+  local script_path watchdog_home
   script_path="$(sed_escape "$(xml_escape "$SCRIPT_PATH")")"
-  log_dir="$(sed_escape "$(xml_escape "$LOG_DIR")")"
+  watchdog_home="$(sed_escape "$(xml_escape "$HOME")")"
   sed \
-    -e "s|/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-memory-watchdog/bin/cmux-memory-watchdog.sh|$script_path|g" \
-    -e "s|/Users/etanheyman/Library/Logs/cmux-watchdog|$log_dir|g" \
+    -e "s|@CMUX_WATCHDOG_SCRIPT@|$script_path|g" \
+    -e "s|@CMUX_WATCHDOG_HOME@|$watchdog_home|g" \
     "$SOURCE_PLIST"
 }
 
