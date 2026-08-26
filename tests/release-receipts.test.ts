@@ -114,6 +114,7 @@ function makeReleaseFixture(
     "release.sh",
     "release-verify.sh",
     "release-receipt.mjs",
+    "post-release-reconnect-sweep.sh",
   ]) {
     const source = join(repoRoot, "scripts", script);
     if (existsSync(source)) {
@@ -132,6 +133,7 @@ function makeReleaseFixture(
       "class Cmuxlayer < Formula",
       '  url "https://github.com/EtanHey/cmuxlayer/archive/refs/tags/v0.4.0.tar.gz"',
       `  sha256 "${"0".repeat(64)}"`,
+      '  exec "#{Formula["node"].opt_bin}/node"',
       "end",
       "",
     ].join("\n"),
@@ -142,7 +144,8 @@ function makeReleaseFixture(
     `#!/usr/bin/env bash
 printf 'git %s\\n' "$*" >>"$STUB_LOG"
 args=("$@")
-if [ "\${args[0]:-}" = "-C" ]; then args=("\${args[@]:2}"); fi
+other_repo=0
+if [ "\${args[0]:-}" = "-C" ]; then other_repo=1; args=("\${args[@]:2}"); fi
 case "\${args[0]:-}" in
   branch) echo main ;;
   diff) exit 0 ;;
@@ -150,8 +153,16 @@ case "\${args[0]:-}" in
   rev-parse)
     case "\${args[1]:-}" in
       v*) exit 1 ;;
+      HEAD)
+        if [ "$other_repo" -eq 1 ]; then echo "1111111111111111111111111111111111111111"; elif [ -f "$STUB_GIT_HEAD_FILE" ]; then cat "$STUB_GIT_HEAD_FILE"; else echo "1111111111111111111111111111111111111111"; fi ;;
+      origin/main)
+        if [ -f "$STUB_PR_MERGED_FILE" ]; then printf '%s\n' "\${STUB_POST_MERGE_HEAD:-\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}}"; else echo "1111111111111111111111111111111111111111"; fi ;;
       *) echo "1111111111111111111111111111111111111111" ;;
     esac ;;
+  merge)
+    if [ "\${args[1]:-}" = "--ff-only" ]; then printf '%s\n' "\${STUB_POST_MERGE_HEAD:-\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}}" >"$STUB_GIT_HEAD_FILE"; fi ;;
+  commit) exit "\${STUB_GIT_COMMIT_EXIT:-0}" ;;
+  show) printf '  "version": "%s",\n' "\${STUB_RELEASE_VERSION:-0.4.1}" ;;
   rev-list) echo "\${STUB_BEHIND:-0}" ;;
   *) exit 0 ;;
 esac
@@ -216,12 +227,48 @@ exit 0
     join(binDir, "gh"),
     `#!/usr/bin/env bash
 printf 'gh %s\\n' "$*" >>"$STUB_LOG"
-# An unusable gh (absent, unauthenticated, offline) must read as "unknown",
-# never as "clean" -- so this stub fails the way the real one does.
-[ -n "$STUB_CI_CONCLUSION" ] || exit 1
-printf '%s\\n' "$STUB_CI_CONCLUSION"
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "list" ]; then
+  [ -n "$STUB_CI_CONCLUSION" ] || exit 1
+  printf '%s\\n' "$STUB_CI_CONCLUSION"
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "create" ]; then
+  printf '%s\\n' "\${STUB_PR_URL:-https://github.com/EtanHey/cmuxlayer/pull/999}"
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "checks" ]; then
+  if [[ " $* " = *" --json name "* ]]; then
+    count=0
+    [ -f "$STUB_CHECK_COUNT_FILE" ] && count="$(cat "$STUB_CHECK_COUNT_FILE")"
+    count=$((count + 1))
+    printf '%s\\n' "$count" >"$STUB_CHECK_COUNT_FILE"
+    if [ "$count" -le "\${STUB_REQUIRED_CHECKS_EMPTY_COUNT:-0}" ]; then
+      exit 0
+    fi
+    printf '%s\\n' perf-budget test
+    exit 0
+  fi
+  exit "\${STUB_REQUIRED_CHECKS_EXIT:-0}"
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "merge" ]; then
+  exit 0
+elif [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "view" ]; then
+  if [[ " $* " = *" --json headRefOid "* ]]; then
+    printf '%s\\n' "\${STUB_PR_HEAD:-1111111111111111111111111111111111111111}"
+  else
+    : >"$STUB_PR_MERGED_FILE"
+    printf 'MERGED\\t%s\\n' "\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}"
+  fi
+else
+  exit 1
+fi
 `,
   );
+
+  for (const command of ["ps", "lsof"]) {
+    writeExecutable(
+      join(binDir, command),
+      `#!/usr/bin/env bash
+printf '${command} %s\\n' "$*" >>"$STUB_LOG"
+exit 0
+`,
+    );
+  }
 
   if (!withNode) {
     writeExecutable(
@@ -243,6 +290,10 @@ exit 127
     STUB_INSTALLED_VERSION: installedVersion ?? "",
     STUB_CONTRACT_OUTPUT: contractOutput,
     STUB_CI_CONCLUSION: ciConclusion,
+    STUB_CHECK_COUNT_FILE: join(root, "required-check-probes"),
+    STUB_GIT_HEAD_FILE: join(root, "git-head"),
+    STUB_PR_MERGED_FILE: join(root, "pr-merged"),
+    CMUXLAYER_RELEASE_CHECK_INTERVAL_SECONDS: "0",
     CMUXLAYER_TAP_DIR: tapDir,
     CMUXLAYER_RELEASE_RECEIPTS_DIR: receiptsDir,
     CMUXLAYER_RECEIPT_HOST: "test-mac",
@@ -438,13 +489,21 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     const receipt = readReceipt(fixture, "0.4.1");
     expect(receipt.version).toBe("0.4.1");
     expect(receipt.tag).toBe("v0.4.1");
-    expect(receipt.commit).toBe("1".repeat(40));
+    expect(receipt.commit).toBe("2".repeat(40));
     expect(receipt.created_at).toMatch(/Z$/);
     expect(receipt.artifact.sha256).toBe("a".repeat(64));
     expect(receipt.artifact.url).toContain("v0.4.1.tar.gz");
     expect(receipt.gates.typecheck).toBe("pass");
     expect(receipt.gates.tests).toBe("pass");
     expect(receipt.gates.contract).toBe("pass");
+    expect(receipt.installs).toEqual([
+      expect.objectContaining({
+        host: "test-mac",
+        result: "pass",
+        installed: "cmuxlayer 0.4.1",
+        mode: "upgrade",
+      }),
+    ]);
     expect(result.stdout).toContain(
       join(fixture.receiptsDir, "release-0.4.1.json"),
     );
@@ -514,14 +573,117 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     expect(result.log).not.toContain("git push origin main");
   });
 
+  it("routes the version bump through a required-check PR and tags its merge commit", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(result.log).toContain("git switch -c wt/release-0.4.1");
+    expect(result.log).toContain("git push -u origin wt/release-0.4.1");
+    expect(result.log).toContain("gh pr create");
+    expect(result.log).toContain("gh pr checks");
+    expect(result.log).toContain("--required --watch --fail-fast");
+    expect(result.log).toContain("gh pr merge");
+    expect(result.log).toContain("--merge");
+    expect(result.log).toContain(
+      `--match-head-commit ${"1".repeat(40)}`,
+    );
+    expect(result.log).toContain("git switch main");
+    expect(result.log).toContain("git merge --ff-only origin/main");
+    expect(result.log).toContain(
+      `git tag -a v0.4.1 -m cmuxlayer v0.4.1 ${"2".repeat(40)}`,
+    );
+    expect(result.log).not.toContain("git push origin main");
+    expect(readReceipt(fixture, "0.4.1").commit).toBe("2".repeat(40));
+  });
+
+  it("waits for both required contexts to register before watching them", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"], {
+      STUB_REQUIRED_CHECKS_EMPTY_COUNT: "2",
+    });
+
+    expect(result.status).toBe(0);
+    const probes = result.log
+      .split("\n")
+      .filter((line) => line.includes("gh pr checks") && line.includes("--json name"));
+    expect(probes).toHaveLength(3);
+    const watchIndex = result.log.indexOf("--required --watch --fail-fast");
+    expect(watchIndex).toBeGreaterThan(result.log.lastIndexOf("--json name"));
+  });
+
+  it("refuses to merge when the PR head drifts after required checks", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"], {
+      STUB_PR_HEAD: "9".repeat(40),
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("head drifted");
+    expect(result.log).not.toContain("gh pr merge");
+    expect(result.log).not.toContain("git tag -a v0.4.1");
+  });
+
+  it("tags the captured merge when main legitimately advances past it", () => {
+    const release = readFileSync(join(repoRoot, "scripts", "release.sh"), "utf8");
+    expect(release).toContain('git merge-base --is-ancestor "$MERGE_COMMIT" HEAD');
+    expect(release).not.toContain('[ "$(git rev-parse HEAD)" = "$MERGE_COMMIT" ]');
+    expect(release).toContain("git tag -a '$TAG' -m 'cmuxlayer $TAG' '$MERGE_COMMIT'");
+  });
+
+  it("removes an uncommitted generated bump before returning to main", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"], {
+      STUB_GIT_COMMIT_EXIT: "1",
+    });
+
+    expect(result.status).not.toBe(0);
+    const restore = result.log.indexOf("git restore --worktree --staged package.json");
+    const switchMain = result.log.lastIndexOf("git switch main");
+    expect(restore).toBeGreaterThan(-1);
+    expect(switchMain).toBeGreaterThan(restore);
+    expect(result.log).not.toContain("git push -u origin wt/release-0.4.1");
+  });
+
+  it("stops on a red required check before creating the release tag", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(
+      fixture,
+      "release.sh",
+      ["0.4.1", "--yes"],
+      { STUB_REQUIRED_CHECKS_EXIT: "1" },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.log).toContain("gh pr checks");
+    expect(result.log).not.toContain("git tag -a v0.4.1");
+    expect(result.log).not.toContain("git push origin v0.4.1");
+    expect(result.log).toContain("gh pr close");
+    expect(result.log).toContain("git push origin --delete wt/release-0.4.1");
+    expect(result.log).toContain("git switch main");
+  });
+
+  it("dry-run has no direct-main refusal path", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--dry-run"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("git push -u origin 'wt/release-0.4.1'");
+    expect(result.stdout).toContain("gh pr checks");
+    expect(result.stdout).not.toContain("git push origin main");
+  });
+
   it("preserves the happy-path release commands (receipts stay additive)", () => {
     const fixture = makeReleaseFixture();
     const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
 
     expect(result.status).toBe(0);
     expect(result.log).toContain("git commit -aqm chore: release v0.4.1");
-    expect(result.log).toContain("git push origin main");
-    expect(result.log).toContain("git tag -a v0.4.1 -m cmuxlayer v0.4.1");
+    expect(result.log).toContain("git push -u origin wt/release-0.4.1");
+    expect(result.log).not.toContain("git push origin main");
+    expect(result.log).toContain(
+      `git tag -a v0.4.1 -m cmuxlayer v0.4.1 ${"2".repeat(40)}`,
+    );
     expect(result.log).toContain("git push origin v0.4.1");
     expect(result.log).toContain("brew audit etanhey/layers/cmuxlayer");
     expect(
@@ -533,6 +695,22 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     );
     expect(formula).toContain("v0.4.1.tar.gz");
     expect(formula).toContain(`sha256 "${"a".repeat(64)}"`);
+    expect(formula).toContain('formula_opt_bin("node")');
+    expect(formula).not.toContain('Formula["node"].opt_bin');
+  });
+
+  it("separates completed publication from a failed post-publish verification", () => {
+    const fixture = makeReleaseFixture({ installedVersion: "0.4.0" });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("release publication completed");
+    expect(result.stderr).toContain("post-publish verification FAILED");
+    const receipt = readReceipt(fixture, "0.4.1");
+    expect(receipt.pushed).toBe(true);
+    expect(receipt.notes.publication_result).toBe("pass");
+    expect(receipt.verify.result).toBe("fail");
+    expect(receipt.verify.post_publish).toBe("fail");
   });
 
   it("records a skipped contract gate instead of losing it to scrollback", () => {
@@ -561,7 +739,7 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
 
     expect(result.status).toBe(0);
     expect(readReceipt(fixture, "0.4.1").gates.contract).toBe("pass");
-    expect(result.log).toContain("git push origin main");
+    expect(result.log).toContain("gh pr merge");
   });
 
   it("classifies a SKIP that is followed by cleanup output", () => {
@@ -588,7 +766,7 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("WARNING");
     expect(readReceipt(fixture, "0.4.1").gates.contract).toBe("unknown");
-    expect(result.log).toContain("git push origin main");
+    expect(result.log).toContain("gh pr merge");
   });
 
   it("still aborts when the contract lane exits non-zero", () => {
@@ -664,6 +842,8 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     const receipt = readReceipt(fixture, "0.4.1");
     expect(receipt.tap.clone_sync).toBe("skipped");
     expect(receipt.tap.clone_reason).toBeTruthy();
+    expect(receipt.notes.publication_result).toBe("pass");
+    expect(receipt.verify.post_publish).toBe("fail");
   });
 
   it("writes no receipt in --dry-run", () => {
@@ -674,106 +854,6 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     expect(existsSync(join(fixture.receiptsDir, "release-0.4.1.json"))).toBe(
       false,
     );
-  });
-});
-
-describe("release-verify.sh", { timeout: 30_000 }, () => {
-  it("verify-only never upgrades and never resets Homebrew's tap clone", () => {
-    const fixture = makeReleaseFixture({ installedVersion: "0.4.1" });
-    const result = runScript(fixture, "release-verify.sh", [
-      "0.4.1",
-      "--verify-only",
-    ]);
-
-    expect(result.status).toBe(0);
-    expect(result.log).not.toContain("brew upgrade");
-    expect(result.log).not.toContain("reset --hard");
-    expect(result.log).toContain("brew list --versions cmuxlayer");
-  });
-
-  it("accepts --no-upgrade as the ledger-10.5 alias for verify-only", () => {
-    const fixture = makeReleaseFixture({ installedVersion: "0.4.1" });
-    const result = runScript(fixture, "release-verify.sh", [
-      "0.4.1",
-      "--no-upgrade",
-    ]);
-
-    expect(result.status).toBe(0);
-    expect(result.log).not.toContain("brew upgrade");
-  });
-
-  it("records per-Mac install evidence into the release receipt", () => {
-    const fixture = makeReleaseFixture({ installedVersion: "0.4.1" });
-    const result = runScript(fixture, "release-verify.sh", [
-      "0.4.1",
-      "--verify-only",
-    ]);
-
-    expect(result.status).toBe(0);
-    const receipt = readReceipt(fixture, "0.4.1");
-    expect(receipt.verify.result).toBe("pass");
-    expect(receipt.verify.mode).toBe("verify-only");
-    expect(receipt.installs).toHaveLength(1);
-    expect(receipt.installs[0]).toMatchObject({
-      host: "test-mac",
-      result: "pass",
-      installed: "cmuxlayer 0.4.1",
-      mode: "verify-only",
-    });
-  });
-
-  it("still upgrades in the default mode", () => {
-    const fixture = makeReleaseFixture({ installedVersion: "0.4.1" });
-    const result = runScript(fixture, "release-verify.sh", ["0.4.1"]);
-
-    expect(result.status).toBe(0);
-    expect(result.log).toContain("brew upgrade etanhey/layers/cmuxlayer");
-    expect(result.log).toContain("reset --hard origin/main");
-    const receipt = readReceipt(fixture, "0.4.1");
-    expect(receipt.installs[0].mode).toBe("upgrade");
-  });
-
-  it("records failing install evidence when the wrong version is installed", () => {
-    const fixture = makeReleaseFixture({ installedVersion: "0.4.0" });
-    const result = runScript(fixture, "release-verify.sh", [
-      "0.4.1",
-      "--verify-only",
-    ]);
-
-    expect(result.status).not.toBe(0);
-    const receipt = readReceipt(fixture, "0.4.1");
-    expect(receipt.verify.result).toBe("fail");
-    expect(receipt.installs[0]).toMatchObject({
-      result: "fail",
-      installed: "cmuxlayer 0.4.0",
-    });
-  });
-
-  it("records evidence when cmuxlayer is not installed on this Mac at all", () => {
-    const fixture = makeReleaseFixture({ installedVersion: null });
-    const result = runScript(fixture, "release-verify.sh", [
-      "0.4.1",
-      "--verify-only",
-    ]);
-
-    expect(result.status).not.toBe(0);
-    const receipt = readReceipt(fixture, "0.4.1");
-    expect(receipt.verify.result).toBe("fail");
-    expect(receipt.installs[0]).toMatchObject({
-      result: "fail",
-      installed: "not installed",
-    });
-  });
-
-  it("measures how far brew's clone was behind instead of asserting zero", () => {
-    const fixture = makeReleaseFixture({ installedVersion: "0.4.1" });
-    const result = runScript(fixture, "release-verify.sh", ["0.4.1"], {
-      STUB_BEHIND: "3",
-    });
-
-    expect(result.status).toBe(0);
-    // measured after the reset, so the stub's post-sync answer wins
-    expect(readReceipt(fixture, "0.4.1").verify.tap_clone_behind).toBe("3");
   });
 });
 

@@ -757,7 +757,9 @@ run_plist_case() {
   interval="$(/usr/libexec/PlistBuddy -c 'Print :StartInterval' "$plist")"
   run_at_load="$(/usr/libexec/PlistBuddy -c 'Print :RunAtLoad' "$plist")"
 
-  [[ -x "$program" ]] || fail "plist ProgramArguments path is not executable: $program"
+  [[ "$program" == */launchd/cmux-ram-sampler/bin/cmux-ram-sampler.sh ]] \
+    || fail "plist ProgramArguments does not target the sampler: $program"
+  [[ -x "$SCRIPT_PATH" ]] || fail "sampler is not executable in this checkout: $SCRIPT_PATH"
   assert_eq "1800" "$interval"
   assert_eq "true" "$run_at_load"
   /usr/libexec/PlistBuddy -c 'Print :StandardOutPath' "$plist" | grep -F 'cmux-ram-sampler' >/dev/null \

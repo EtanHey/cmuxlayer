@@ -35,6 +35,19 @@ describe("pre-PR script ladder", () => {
     );
   });
 
+  it("runs the bounded event-log RSS guard in CI", () => {
+    const scripts = packageScripts();
+    const workflow = readFileSync(
+      join(repoRoot, ".github", "workflows", "ci.yml"),
+      "utf8",
+    );
+
+    expect(scripts["check:event-log-rss"]).toBe(
+      "bun run build && node --expose-gc scripts/event-log-bounded-rss-check.mjs",
+    );
+    expect(workflow).toContain("bun run check:event-log-rss");
+  });
+
   it("includes the production-shaped replay coverage in the deterministic harness tier", () => {
     const scripts = packageScripts();
 
@@ -55,7 +68,7 @@ describe("pre-PR script ladder", () => {
     expect(scripts["test:contract"]).toBe(
       "bun run build && tsx scripts/run-real-cmux-contract.ts",
     );
-    expect(scripts.test).toBe("vitest run");
+    expect(scripts.test).toBe("vitest run --maxWorkers=1");
     expect(scripts.test).not.toContain("contract");
   });
 
@@ -82,6 +95,8 @@ describe("pre-PR script ladder", () => {
     expect(hook).toContain(
       "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bash scripts/run_tests.sh",
     );
+    const runner = readFileSync(join(repoRoot, "scripts", "run_tests.sh"), "utf8");
+    expect(runner).toContain("bun run test");
   });
 
   it("syncs the brew tap clone and verifies the installed release version", () => {

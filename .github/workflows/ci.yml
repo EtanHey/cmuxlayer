@@ -93,6 +93,8 @@ jobs:
   test:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    env:
+      CMUXLAYER_RUN_TOOL_COUNT_DRIFT: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -105,6 +107,8 @@ jobs:
       - run: bun install
       - run: bun run typecheck
       - run: bun run test
+      - name: Check bounded event-log RSS
+        run: bun run check:event-log-rss
 
   # Issue #392: spawn/resume must behave equivalently with AND without a
   # repoGolem launcher registry. Runners have none by default, so the "absent"
@@ -142,6 +146,19 @@ jobs:
 
       - run: bun run test:parity
 
+  launchd-units:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - run: bash launchd/cmux-caffeinate/tests/run-tests.sh
+      - run: bash launchd/cmux-contract-nightly/tests/run-tests.sh
+      - run: bash launchd/cmux-memory-watchdog/tests/run-tests.sh
+      - run: bash launchd/cmux-ram-sampler/tests/run-tests.sh
+
   build-site:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -161,6 +178,16 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      # Pages currently deploys landing/, not the Next build above. Package the
+      # exact deploy input here so required CI validates artifact creation too.
+      - name: Package exact GitHub Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: landing
+      - name: Check the static Pages deploy artifact
+        working-directory: .
+        run: test -s landing/index.html
 
   perf-baseline-refresh:
     if: github.event_name == 'workflow_dispatch'

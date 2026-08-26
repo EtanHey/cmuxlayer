@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 35 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that with a focused 10-tool public MCP surface for terminal workspaces.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -8,7 +8,7 @@
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-35%20tools-green.svg)](https://modelcontextprotocol.io)
+[![MCP Tools](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-3023%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
@@ -96,7 +96,7 @@ To keep only a per-session resident subset of tools, set
 `CMUXLAYER_DEFAULT_PALETTE` to comma-separated bare tool names, for example
 `list_surfaces,spawn_agent,send_to`. The server also exposes `expand_palette`,
 which makes every deferred tool available for the rest of that MCP session.
-When unset or blank, the signed 12-tool thin-core default applies. When set, the
+When unset or blank, the signed 10-tool thin-core default applies. When set, the
 environment value overrides that default for the session. Unknown names are
 warned and ignored while valid names still load.
 
@@ -118,7 +118,7 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer keeps 42 MCP tools callable for terminal control, screen reading, layout management, and multi-agent orchestration. The default palette is intentionally limited to 12; the remaining tools are loaded through ToolSearch. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer retains 45 internal tool definitions, but only 10 are registered and callable through MCP. The other 35 are not exposed through ToolSearch or any other MCP path. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent Routing Workflow
 
@@ -126,23 +126,23 @@ For managed agents, use the agent-first path: `list_agents` to find the target, 
 
 See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
-## MCP Tools (42 registered, 12 default)
+## MCP Tools (10 registered and callable)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
-**Default palette** — `spawn_agent` `send_to` `wait_for` `read_screen` `my_agents` `list_agents` `broadcast` `close_surface` `dispatch_to_agent` `list_surfaces` `control_health` `stop_agent`
+**Public MCP surface** — `spawn_agent` `report_to_parent` `send_to` `read_screen` `list_agents` `wait_for` `control_health` `close_surface` `update_surface` `list_surfaces`
 
-The other 30 definitions, including `interact`, are interim ToolSearch-deferred and remain callable. This metadata split is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
+The other 35 internal definitions, including `interact`, are not callable. The detailed inventory below names 44 live definitions; the 45th source registration is a removed error-only tombstone and is intentionally omitted from operator guidance. This boundary is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
 
-**Terminal control** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
+**Terminal control (16)** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `update_surface` `browser_surface`
 
-**Agent lifecycle** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast`
+**Agent lifecycle (13)** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast` `report_to_parent`
 
-**Metacomm (agent inbox)** — `dispatch_to_agent` `inbox_check`
+**Metacomm (agent inbox, 2)** — `dispatch_to_agent` `inbox_check`
 
-**Workspace state** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
+**Workspace state (7)** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
-**Monitor registry** — `register_monitor` `signal_monitor` `deregister_monitor` `list_monitors` `query_monitor_registry`
+**Monitor registry (6)** — `register_monitor` `signal_monitor` `deregister_monitor` `list_monitors` `query_monitor_registry` `arm_watch`
 
 <details>
 <summary>Full tool reference</summary>
@@ -162,7 +162,7 @@ The other 30 definitions, including `interact`, are interim ToolSearch-deferred 
 | `list_monitors` | List shared monitor-registry records |
 | `query_monitor_registry` | Query monitor gates and liveness metadata |
 
-### Mutating (29)
+### Mutating (32)
 
 | Tool | What it does |
 |------|-------------|
@@ -176,6 +176,7 @@ The other 30 definitions, including `interact`, are interim ToolSearch-deferred 
 | `send_command` | Deprecated one-release alias for `send_to(mode:"command")` |
 | `send_key` | Deprecated one-release alias for `send_to(mode:"key")` |
 | `rename_tab` | Rename a surface tab |
+| `update_surface` | Update a surface title or metadata |
 | `notify` | Show a cmux notification banner |
 | `set_status` | Set sidebar status key-value pair |
 | `set_progress` | Set progress indicator (0.0-1.0) |
@@ -190,10 +191,12 @@ The other 30 definitions, including `interact`, are interim ToolSearch-deferred 
 | `wait_for_all` | Deprecated one-release alias for `wait_for(ids:[...])` |
 | `interact` | Send interactive input (confirm, cancel, resume) |
 | `broadcast` | Fan out a guarded message to agents by role |
+| `report_to_parent` | Report structured completion to a parent agent |
 | `supersede_agent_goal` | Replace a managed agent's active file-backed goal |
 | `register_monitor` | Register or re-arm a monitor deadman record |
 | `signal_monitor` | Refresh a monitor heartbeat |
 | `deregister_monitor` | Mark a monitor intentionally stopped |
+| `arm_watch` | Arm a lifecycle watch for an agent transition |
 
 ### Destructive (3)
 

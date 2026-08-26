@@ -198,7 +198,7 @@ run_case() {
   local pgrep_cmux="$6"
   local pgrep_pids="$7"
 
-  local root_dir log_dir snapshot brainbar_sock brainbar_pid
+  local root_dir log_dir snapshot brainbar_sock brainbar_pid run_status
   root_dir="$(mktemp -d)"
   log_dir="$root_dir/logs"
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
@@ -208,7 +208,7 @@ run_case() {
   brainbar_pid="$!"
   for _ in 1 2 3 4 5; do
     [[ -S "$brainbar_sock" ]] && break
-    sleep 0.1
+    /bin/sleep 0.1
   done
 
   printf '%s' "$footprint_fixture" >"$root_dir/fixtures/footprint.fixture"
@@ -228,14 +228,23 @@ run_case() {
 
   # shellcheck disable=SC1090
   source "$SCRIPT_PATH"
+  set +e
   run_once 2>"$log_dir/stderr.log"
+  run_status="$?"
+  set -e
+  if [[ "$run_status" -ne 0 ]]; then
+    cat "$log_dir/stderr.log" >&2
+    stop_brainbar_socket "$brainbar_pid"
+    rm -rf "$root_dir"
+    exit "$run_status"
+  fi
 
   if [[ "$expect_breach" == "1" ]]; then
     assert_file_contains "$log_dir/curl.log" "http://localhost:3847/notify"
     assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
     assert_file_contains "$log_dir/stderr.log" "breached memory thresholds"
     assert_file_missing_or_empty "$log_dir/kill.log"
-    snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+    snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
     if [[ -n "$expected_signals" ]]; then
       assert_file_contains "$snapshot" "breached_signals=$expected_signals"
     fi
@@ -434,7 +443,7 @@ run_ps_fallback_case() {
   brainbar_pid="$!"
   for _ in 1 2 3 4 5; do
     [[ -S "$brainbar_sock" ]] && break
-    sleep 0.1
+    /bin/sleep 0.1
   done
 
   cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
@@ -461,7 +470,7 @@ EOF
 
   assert_file_missing_or_empty "$log_dir/kill.log"
   assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
-  snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+  snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
   assert_file_contains "$snapshot" "breached_signals=footprint"
 
   printf 'PASS: watchdog falls back to ps command discovery when pgrep misses GUI apps\n'
@@ -509,7 +518,7 @@ EOF
   run_once
 
   assert_file_missing_or_empty "$log_dir/kill.log"
-  snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+  snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
   assert_file_contains "$snapshot" "[top_rss_offenders]"
   assert_file_contains "$snapshot" "command=python3.11"
   assert_file_contains "$snapshot" "command=ugrep"
@@ -518,3 +527,16 @@ EOF
   rm -rf "$root_dir"
 }
 run_top_rss_offenders_case
+
+run_installer_plist_lint_case() {
+  local root_dir rendered
+  root_dir="$(mktemp -d)"
+  rendered="$root_dir/rendered.plist"
+  HOME="$root_dir/home & operator" bash "$ROOT_DIR/install.sh" --dry-run >"$rendered"
+  /usr/bin/plutil -lint "$rendered" >/dev/null
+  assert_file_contains "$rendered" "<key>PATH</key>"
+  assert_file_contains "$rendered" "home &amp; operator"
+  printf 'PASS: installer emits XML-safe plist with an explicit launchd PATH\n'
+  rm -rf "$root_dir"
+}
+run_installer_plist_lint_case

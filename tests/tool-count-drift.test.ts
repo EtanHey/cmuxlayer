@@ -3,9 +3,14 @@ import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
-const EXPECTED_TOOL_COUNT = 42;
-const EXPECTED_DEFAULT_PALETTE_COUNT = 12;
-// 42 is the callable-tool count; 12 is the signed default-palette count.
+const EXPECTED_TOOL_COUNT = 45;
+const EXPECTED_DEFAULT_PALETTE_COUNT = 10;
+const EXPECTED_PUBLIC_TOOL_NAMES = [
+  "spawn_agent", "report_to_parent", "send_to", "read_screen", "list_agents",
+  "wait_for", "control_health", "close_surface", "update_surface", "list_surfaces",
+];
+// 45 is the internal-definition count; only the exact 10-name public registry
+// is callable through MCP.
 const EXPECTED_DOCUMENTED_COUNTS = new Set([
   EXPECTED_TOOL_COUNT,
   EXPECTED_DEFAULT_PALETTE_COUNT,
@@ -91,7 +96,7 @@ function claimsIn(documents: Document[]): CountClaim[] {
       for (const match of line.matchAll(DOCUMENTED_COUNT_PATTERN)) {
         const count = Number(match[1]);
         const isDefaultPaletteClaim =
-          /default (?:MCP )?palette|thin-core default|palette/i.test(line) &&
+          /default (?:MCP )?palette|thin-core default|palette|public|registered|callable|badge\/MCP-/i.test(line) &&
           count === EXPECTED_DEFAULT_PALETTE_COUNT;
         claims.push({
           path,
@@ -137,9 +142,37 @@ describe("tool-count drift guard", () => {
     },
   );
 
+  it("keeps the documented public names aligned with the callable registry", () => {
+    const source = readFileSync(join(REPO_ROOT, "src", "server.ts"), "utf8");
+    const block = source.match(/export const PUBLIC_TOOL_NAMES = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
+    const names = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    expect(names).toEqual(EXPECTED_PUBLIC_TOOL_NAMES);
+
+    const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+    const publicLine = readme.split("\n").find((line) => line.startsWith("**Public MCP surface**")) ?? "";
+    expect([...publicLine.matchAll(/`([^`]+)`/g)].map((match) => match[1])).toEqual(names);
+    expect(readme).toContain("only 10 are registered and callable through MCP");
+    expect(readme).toContain("other 35 are not exposed through ToolSearch");
+    expect(readme).toContain("retains 45 internal tool definitions");
+
+    const inventory = readme.slice(
+      readme.indexOf("**Terminal control (16)**"),
+      readme.indexOf("<details>"),
+    );
+    const documentedInventory = [
+      ...inventory.matchAll(/`([^`]+)`/g),
+    ].map((match) => match[1]);
+    const liveDocumentedNames = registeredToolNames().filter(
+      (name) => name !== "resync_agents",
+    );
+    expect(documentedInventory).toHaveLength(EXPECTED_TOOL_COUNT - 1);
+    expect(new Set(documentedInventory)).toEqual(new Set(liveDocumentedNames));
+    expect(readme).toContain("45th source registration is a removed");
+  });
+
   it("goes red when a fixture count is mutated", () => {
-    const fixture = "The server exposes 42 tools.\n";
-    const mutatedFixture = fixture.replace("42", "41");
+    const fixture = "The server exposes 45 tools.\n";
+    const mutatedFixture = fixture.replace("45", "44");
 
     expect(() =>
       assertDocumentedCounts(
@@ -147,7 +180,7 @@ describe("tool-count drift guard", () => {
         EXPECTED_TOOL_COUNT,
       ),
     ).toThrow(
-      "fixtures/tool-count.md:1 documents 41; source registers 42 (The server exposes 41 tools.)",
+      "fixtures/tool-count.md:1 documents 44; source registers 45 (The server exposes 44 tools.)",
     );
   });
 
@@ -156,19 +189,19 @@ describe("tool-count drift guard", () => {
       assertDocumentedCounts(
         [{
           path: "fixtures/tool-count-badge.md",
-          content: "badge/MCP-41%20tools-green.svg",
+          content: "badge/MCP-44%20tools-green.svg",
         }],
         EXPECTED_TOOL_COUNT,
       ),
-    ).toThrow("fixtures/tool-count-badge.md:1 documents 41; source registers 42");
+    ).toThrow("fixtures/tool-count-badge.md:1 documents 44; source registers 45");
   });
 
   it("recognizes hyphenated singular tool counts", () => {
     expect(() =>
       assertDocumentedCounts(
-        [{ path: "fixtures/tool-count-hyphen.md", content: "The server exposes 41-tool default.\n" }],
+        [{ path: "fixtures/tool-count-hyphen.md", content: "The server exposes 44-tool default.\n" }],
         EXPECTED_TOOL_COUNT,
       ),
-    ).toThrow("fixtures/tool-count-hyphen.md:1 documents 41; source registers 42");
+    ).toThrow("fixtures/tool-count-hyphen.md:1 documents 44; source registers 45");
   });
 });
