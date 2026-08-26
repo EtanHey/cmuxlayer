@@ -12360,8 +12360,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   (row) => row.agent_id === candidate.agent_id,
                 ) === index &&
                 candidate.user_killed !== true &&
-                !candidate.deletion_intent &&
-                !TERMINAL_AGENT_STATES.has(candidate.state),
+                !candidate.deletion_intent,
             );
             const owner =
               liveOwnerCandidates.find(

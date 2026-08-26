@@ -867,6 +867,65 @@ describe("WatchSpec arm contract", () => {
     });
   });
 
+  it("re-arms a persistent content watch after retry exhaustion", async () => {
+    const target = join(TEST_DIR, "persistent-retry-exhaustion.md");
+    writeFileSync(target, "before\n", "utf8");
+    const notify = vi.fn(async () => notify.mock.calls.length > 8);
+    const onNotificationExhausted = vi.fn();
+    let now = 1_000;
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        change: "content",
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: registryPath(), now: () => now },
+    );
+    writeFileSync(target, "first revision\n", "utf8");
+
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      now += 60_000;
+      await sweepWatches({
+        registryPath: registryPath(),
+        now: () => now,
+        notify,
+        onNotificationExhausted,
+      });
+    }
+
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      watch_id: armed.watch_id,
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 8,
+      notification_exhausted_reason: "retry_limit_exhausted",
+    });
+
+    writeFileSync(target, "second revision\n", "utf8");
+    now += 60_000;
+    const secondRevision = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => now,
+      notify,
+      onNotificationExhausted,
+    });
+
+    expect(secondRevision.fired).toEqual([armed.watch_id]);
+    expect(notify).toHaveBeenCalledTimes(9);
+    expect(onNotificationExhausted).toHaveBeenCalledOnce();
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+      notification_delivered_at_ms: now,
+    });
+  });
+
   it("persists and delivers deadline_elapsed through the retryable transition", async () => {
     const target = join(TEST_DIR, "deadline.md");
     writeFileSync(target, "", "utf8");

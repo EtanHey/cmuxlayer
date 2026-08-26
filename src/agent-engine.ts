@@ -6523,21 +6523,49 @@ export class AgentEngine {
       const path = resolve(agent.report_path);
       byReportPath.set(path, [...(byReportPath.get(path) ?? []), agent]);
     }
-    const rearmedLiveSubjects = new Set<string>();
     const persistedWatches = readWatchRegistry({
       registryPath: this.watchRegistryPath,
     }).watches;
-    const rearmedSubjectIds = new Set(
-      persistedWatches.flatMap((watch) =>
-        watch.change === "content" &&
-        watch.notification_delivered_at_ms !== undefined &&
-        watch.subject_agent_id
-          ? [watch.subject_agent_id]
-          : [],
-      ),
+    const persistedWatchSnapshots = new Map(
+      persistedWatches.map((watch) => [watch.watch_id, JSON.stringify(watch)]),
     );
+    const subjectIdsByWatch = new Map<string, string[]>();
+    const missingLegacyChannelWatchIds = new Set<string>();
+    const channelBaseDir = resolve(
+      dirname(agentDir("__cmuxlayer_channel_probe__", this.inboxOpts)),
+    );
+    for (const watch of persistedWatches) {
+      if (watch.target_kind !== "file" || watch.change !== "content") continue;
+      let subjects = watch.subject_agent_id
+        ? [
+            this.registry.get(watch.subject_agent_id) ??
+              this.stateMgr.readState(watch.subject_agent_id),
+          ].filter((subject): subject is AgentRecord => Boolean(subject))
+        : (byReportPath.get(resolve(watch.target)) ?? []);
+      if (subjects.length === 0 && !watch.subject_agent_id) {
+        const targetDir = resolve(dirname(watch.target));
+        const targetLooksEngineIssued =
+          basename(watch.target) === "report.md" &&
+          resolve(dirname(targetDir)) === channelBaseDir;
+        if (targetLooksEngineIssued) {
+          const inferredAgentId = basename(targetDir);
+          const inferred =
+            this.registry.get(inferredAgentId) ??
+            this.stateMgr.readState(inferredAgentId);
+          if (inferred) subjects = [inferred];
+          else if (!existsSync(targetDir)) {
+            missingLegacyChannelWatchIds.add(watch.watch_id);
+          }
+        }
+      }
+      subjectIdsByWatch.set(watch.watch_id, [
+        ...new Set(subjects.map((subject) => subject.agent_id)),
+      ]);
+    }
+    const liveSubjectIds = new Set<string>();
+    const candidateSubjectIds = new Set([...subjectIdsByWatch.values()].flat());
     await Promise.all(
-      [...rearmedSubjectIds].map(async (subjectAgentId) => {
+      [...candidateSubjectIds].map(async (subjectAgentId) => {
         const subject =
           this.registry.get(subjectAgentId) ??
           this.stateMgr.readState(subjectAgentId);
@@ -6547,12 +6575,9 @@ export class AgentEngine {
           !subject.deletion_intent &&
           (await this.registry.isSurfaceAlive(subject))
         ) {
-          rearmedLiveSubjects.add(subjectAgentId);
+          liveSubjectIds.add(subjectAgentId);
         }
       }),
-    );
-    const channelBaseDir = resolve(
-      dirname(agentDir("__cmuxlayer_channel_probe__", this.inboxOpts)),
     );
     await removeWatches(
       (watch) => {
@@ -6560,25 +6585,26 @@ export class AgentEngine {
           return false;
         }
         if (watch.notification_pending) return false;
-        let subjects = watch.subject_agent_id
-          ? [
-              this.registry.get(watch.subject_agent_id) ??
-                this.stateMgr.readState(watch.subject_agent_id),
-            ].filter((subject): subject is AgentRecord => Boolean(subject))
-          : (byReportPath.get(resolve(watch.target)) ?? []);
-        if (subjects.length === 0 && !watch.subject_agent_id) {
-          const targetDir = resolve(dirname(watch.target));
-          const targetLooksEngineIssued =
-            basename(watch.target) === "report.md" &&
-            resolve(dirname(targetDir)) === channelBaseDir;
-          if (targetLooksEngineIssued) {
-            const inferredAgentId = basename(targetDir);
-            const inferred =
-              this.registry.get(inferredAgentId) ??
-              this.stateMgr.readState(inferredAgentId);
-            if (inferred) subjects = [inferred];
-            else if (!existsSync(targetDir)) return true;
-          }
+        // The predicate runs under the watch-registry write lock. If a sweep
+        // re-armed or otherwise changed this row after our liveness snapshot,
+        // retain it and let the next prune evaluate the fresh revision.
+        if (
+          persistedWatchSnapshots.get(watch.watch_id) !== JSON.stringify(watch)
+        ) {
+          return false;
+        }
+        const subjects = (subjectIdsByWatch.get(watch.watch_id) ?? [])
+          .map(
+            (subjectAgentId) =>
+              this.registry.get(subjectAgentId) ??
+              this.stateMgr.readState(subjectAgentId),
+          )
+          .filter((subject): subject is AgentRecord => Boolean(subject));
+        if (
+          subjects.length === 0 &&
+          missingLegacyChannelWatchIds.has(watch.watch_id)
+        ) {
+          return true;
         }
         if (subjects.length === 0) return Boolean(watch.subject_agent_id);
         return !subjects.some(
@@ -6586,8 +6612,7 @@ export class AgentEngine {
             subject.user_killed !== true &&
             !subject.deletion_intent &&
             (!TERMINAL_STATES.has(subject.state) ||
-              (watch.notification_delivered_at_ms !== undefined &&
-                rearmedLiveSubjects.has(subject.agent_id))) &&
+              liveSubjectIds.has(subject.agent_id)) &&
             subject.parent_agent_id === watch.owner,
         );
       },

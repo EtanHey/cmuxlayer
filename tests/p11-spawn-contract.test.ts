@@ -977,6 +977,218 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
   });
 
+  it("delivers to a live owner whose persisted state is terminal", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(parentUuid), state: "done" as const };
+    const reportPath = join(inboxDir, "terminal-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "terminal-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      before,
+    );
+    expect(
+      wakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+  });
+
+  it("keeps a first-delivery watch while its terminal child pane is live", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    const reportPath = join(inboxDir, "live-first-delivery", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(childUuid),
+      agent_id: "live-first-delivery",
+      surface_id: "surface:child",
+      surface_uuid: childUuid,
+      state: "done",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        subject_agent_id: child.agent_id,
+        state: "armed",
+      }),
+    ]);
+  });
+
+  it("keeps a subjectless legacy watch while its terminal child pane is live", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    const reportPath = join(inboxDir, "legacy-live-terminal", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(childUuid),
+      agent_id: "legacy-live-terminal",
+      surface_id: "surface:child",
+      surface_uuid: childUuid,
+      state: "done",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        target: reportPath,
+        state: "armed",
+      }),
+    ]);
+  });
+
   it("keeps a delivered content watch armed while a terminal record still has a live pane", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -1061,6 +1273,89 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_pending: false,
       notification_delivered_at_ms: expect.any(Number),
     });
+  });
+
+  it("does not prune a watch revision that re-arms during liveness probing", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "concurrent-rearm", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "concurrent-rearm",
+      surface_id: "surface:closed-child",
+      state: "done",
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    const watch = await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const initialRegistry = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    initialRegistry.watches[0] = {
+      ...initialRegistry.watches[0],
+      notification_delivered_at_ms: 2_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(initialRegistry, null, 2)}\n`,
+      "utf8",
+    );
+    let releaseLivenessProbe: (() => void) | undefined;
+    let markProbeStarted: (() => void) | undefined;
+    const probeStarted = new Promise<void>((resolve) => {
+      markProbeStarted = resolve;
+    });
+    const livenessGate = new Promise<void>((resolve) => {
+      releaseLivenessProbe = resolve;
+    });
+    vi.spyOn(engine.getRegistry(), "isSurfaceAlive").mockImplementation(
+      async () => {
+        markProbeStarted?.();
+        await livenessGate;
+        return false;
+      },
+    );
+
+    const pruning = (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+    await probeStarted;
+    const rearmedRegistry = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    rearmedRegistry.watches[0] = {
+      ...rearmedRegistry.watches[0],
+      fingerprint: "concurrent-revision",
+      observed_value: "concurrent-revision",
+      notification_delivered_at_ms: 3_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(rearmedRegistry, null, 2)}\n`,
+      "utf8",
+    );
+    releaseLivenessProbe?.();
+    await pruning;
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        watch_id: watch.watch_id,
+        fingerprint: "concurrent-revision",
+        notification_delivered_at_ms: 3_000,
+      }),
+    ]);
   });
 
   it("keeps lifecycle initialization live and retries startup pruning after lock contention", async () => {
@@ -1185,8 +1480,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "report.md",
     );
     const child: AgentRecord = {
-      ...parentRecord(),
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
       agent_id: "terminal-child-without-stop-flag",
+      surface_id: "surface:closed-child",
       state: "done",
       user_killed: false,
       parent_agent_id: "lead-parent",
