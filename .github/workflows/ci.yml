@@ -178,6 +178,9 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - name: Check the static Pages deploy artifact
+        working-directory: .
+        run: test -s landing/index.html
 
   perf-baseline-refresh:
     if: github.event_name == 'workflow_dispatch'
