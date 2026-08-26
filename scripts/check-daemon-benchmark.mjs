@@ -139,6 +139,32 @@ function currentMetrics(result) {
   };
 }
 
+export function maximumBenchmarkMeasurements(results) {
+  if (!Array.isArray(results) || results.length === 0) {
+    throw new Error("at least one benchmark result is required");
+  }
+  const measurements = results.map(currentMetrics);
+  const maximum = (read) => Math.max(...measurements.map(read));
+  return {
+    list_surfaces: {
+      p50_ms: maximum((entry) => entry.list_surfaces?.p50_ms),
+      p95_ms: maximum((entry) => entry.list_surfaces?.p95_ms),
+    },
+    read_screen: {
+      p50_ms: maximum((entry) => entry.read_screen?.p50_ms),
+      p95_ms: maximum((entry) => entry.read_screen?.p95_ms),
+    },
+    first_send_after_spawn: {
+      p50_ms: maximum((entry) => entry.first_send_after_spawn.p50_ms),
+      p95_ms: maximum((entry) => entry.first_send_after_spawn.p95_ms),
+      lock_hold_ms: maximum(
+        (entry) => entry.first_send_after_spawn.lock_hold_ms,
+      ),
+    },
+    cli_send_ms: maximum((entry) => entry.cli_send_ms),
+  };
+}
+
 function row(operation, metric, baseline, current, ceiling, unit = "ms") {
   const passed = Number.isFinite(current) && current <= ceiling;
   return { operation, metric, baseline, current, ceiling, unit, passed };

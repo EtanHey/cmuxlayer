@@ -181,3 +181,4 @@ jobs:
           path: |
             benchmarks/daemon-baseline.json
             docs.local/scratch/perf-budget/result.json
+            docs.local/scratch/perf-budget/refresh-samples.json

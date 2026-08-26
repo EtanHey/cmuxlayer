@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   baselineContentSha256,
   compareBenchmark,
+  maximumBenchmarkMeasurements,
   renderMarkdownComparison,
   runBenchmark,
   validateBaseline,
@@ -163,6 +164,34 @@ describe("daemon performance budget", () => {
     expect(comparison.failures).toContain(
       "read_screen p50: 176ms exceeds 175ms",
     );
+  });
+
+  it("builds a CI refresh baseline from the per-metric maximum of its samples", () => {
+    const slower = {
+      ...result,
+      latency: {
+        ...result.latency,
+        daemon_path: {
+          list_surfaces: { p50_ms: 90, p95_ms: 200 },
+          read_screen: { p50_ms: 190, p95_ms: 140 },
+        },
+        first_send_after_spawn: {
+          first: { elapsed_ms: 1_100, lock_hold_ms: 18 },
+          surface: { elapsed_ms: 900 },
+        },
+      },
+    };
+
+    expect(maximumBenchmarkMeasurements([result, slower])).toEqual({
+      list_surfaces: { p50_ms: 110, p95_ms: 200 },
+      read_screen: { p50_ms: 190, p95_ms: 170 },
+      first_send_after_spawn: {
+        p50_ms: 1_100,
+        p95_ms: 1_100,
+        lock_hold_ms: 21,
+      },
+      cli_send_ms: 900,
+    });
   });
 
   it("derives every runner ceiling from the committed CI measurement at 1.25x", () => {
