@@ -13119,7 +13119,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watch.change === "content" &&
           watch.state !== "failed" &&
           (childAgentId === undefined ||
-            watch.subject_agent_id !== childAgentId),
+            (watch.subject_agent_id !== undefined &&
+              watch.subject_agent_id !== childAgentId)),
       );
       if (existingReportWatch) {
         return {
