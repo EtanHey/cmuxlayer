@@ -132,17 +132,17 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 
 **Public MCP surface** — `spawn_agent` `report_to_parent` `send_to` `read_screen` `list_agents` `wait_for` `control_health` `close_surface` `update_surface` `list_surfaces`
 
-The other 35 internal definitions, including `interact`, are not callable. This boundary is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
+The other 35 internal definitions, including `interact`, are not callable. The detailed inventory below names 44 live definitions; the 45th source registration is a removed error-only tombstone and is intentionally omitted from operator guidance. This boundary is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
 
-**Terminal control** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
+**Terminal control (16)** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `update_surface` `browser_surface`
 
-**Agent lifecycle** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast`
+**Agent lifecycle (13)** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast` `report_to_parent`
 
-**Metacomm (agent inbox)** — `dispatch_to_agent` `inbox_check`
+**Metacomm (agent inbox, 2)** — `dispatch_to_agent` `inbox_check`
 
-**Workspace state** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
+**Workspace state (7)** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
-**Monitor registry** — `register_monitor` `signal_monitor` `deregister_monitor` `list_monitors` `query_monitor_registry`
+**Monitor registry (6)** — `register_monitor` `signal_monitor` `deregister_monitor` `list_monitors` `query_monitor_registry` `arm_watch`
 
 <details>
 <summary>Full tool reference</summary>
@@ -162,7 +162,7 @@ The other 35 internal definitions, including `interact`, are not callable. This 
 | `list_monitors` | List shared monitor-registry records |
 | `query_monitor_registry` | Query monitor gates and liveness metadata |
 
-### Mutating (29)
+### Mutating (32)
 
 | Tool | What it does |
 |------|-------------|
@@ -176,6 +176,7 @@ The other 35 internal definitions, including `interact`, are not callable. This 
 | `send_command` | Deprecated one-release alias for `send_to(mode:"command")` |
 | `send_key` | Deprecated one-release alias for `send_to(mode:"key")` |
 | `rename_tab` | Rename a surface tab |
+| `update_surface` | Update a surface title or metadata |
 | `notify` | Show a cmux notification banner |
 | `set_status` | Set sidebar status key-value pair |
 | `set_progress` | Set progress indicator (0.0-1.0) |
@@ -190,10 +191,12 @@ The other 35 internal definitions, including `interact`, are not callable. This 
 | `wait_for_all` | Deprecated one-release alias for `wait_for(ids:[...])` |
 | `interact` | Send interactive input (confirm, cancel, resume) |
 | `broadcast` | Fan out a guarded message to agents by role |
+| `report_to_parent` | Report structured completion to a parent agent |
 | `supersede_agent_goal` | Replace a managed agent's active file-backed goal |
 | `register_monitor` | Register or re-arm a monitor deadman record |
 | `signal_monitor` | Refresh a monitor heartbeat |
 | `deregister_monitor` | Mark a monitor intentionally stopped |
+| `arm_watch` | Arm a lifecycle watch for an agent transition |
 
 ### Destructive (3)
 

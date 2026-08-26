@@ -153,6 +153,21 @@ describe("tool-count drift guard", () => {
     expect([...publicLine.matchAll(/`([^`]+)`/g)].map((match) => match[1])).toEqual(names);
     expect(readme).toContain("only 10 are registered and callable through MCP");
     expect(readme).toContain("other 35 are not exposed through ToolSearch");
+    expect(readme).toContain("retains 45 internal tool definitions");
+
+    const inventory = readme.slice(
+      readme.indexOf("**Terminal control (16)**"),
+      readme.indexOf("<details>"),
+    );
+    const documentedInventory = [
+      ...inventory.matchAll(/`([^`]+)`/g),
+    ].map((match) => match[1]);
+    const liveDocumentedNames = registeredToolNames().filter(
+      (name) => name !== "resync_agents",
+    );
+    expect(documentedInventory).toHaveLength(EXPECTED_TOOL_COUNT - 1);
+    expect(new Set(documentedInventory)).toEqual(new Set(liveDocumentedNames));
+    expect(readme).toContain("45th source registration is a removed");
   });
 
   it("goes red when a fixture count is mutated", () => {

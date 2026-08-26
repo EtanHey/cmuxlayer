@@ -156,11 +156,12 @@ case "\${args[0]:-}" in
       HEAD)
         if [ "$other_repo" -eq 1 ]; then echo "1111111111111111111111111111111111111111"; elif [ -f "$STUB_GIT_HEAD_FILE" ]; then cat "$STUB_GIT_HEAD_FILE"; else echo "1111111111111111111111111111111111111111"; fi ;;
       origin/main)
-        if [ -f "$STUB_PR_MERGED_FILE" ]; then printf '%s\n' "\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}"; else echo "1111111111111111111111111111111111111111"; fi ;;
+        if [ -f "$STUB_PR_MERGED_FILE" ]; then printf '%s\n' "\${STUB_POST_MERGE_HEAD:-\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}}"; else echo "1111111111111111111111111111111111111111"; fi ;;
       *) echo "1111111111111111111111111111111111111111" ;;
     esac ;;
   merge)
-    if [ "\${args[1]:-}" = "--ff-only" ]; then printf '%s\n' "\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}" >"$STUB_GIT_HEAD_FILE"; fi ;;
+    if [ "\${args[1]:-}" = "--ff-only" ]; then printf '%s\n' "\${STUB_POST_MERGE_HEAD:-\${STUB_MERGE_COMMIT:-2222222222222222222222222222222222222222}}" >"$STUB_GIT_HEAD_FILE"; fi ;;
+  commit) exit "\${STUB_GIT_COMMIT_EXIT:-0}" ;;
   show) printf '  "version": "%s",\n' "\${STUB_RELEASE_VERSION:-0.4.1}" ;;
   rev-list) echo "\${STUB_BEHIND:-0}" ;;
   *) exit 0 ;;
@@ -258,6 +259,16 @@ else
 fi
 `,
   );
+
+  for (const command of ["ps", "lsof"]) {
+    writeExecutable(
+      join(binDir, command),
+      `#!/usr/bin/env bash
+printf '${command} %s\\n' "$*" >>"$STUB_LOG"
+exit 0
+`,
+    );
+  }
 
   if (!withNode) {
     writeExecutable(
@@ -611,6 +622,27 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     expect(result.stderr).toContain("head drifted");
     expect(result.log).not.toContain("gh pr merge");
     expect(result.log).not.toContain("git tag -a v0.4.1");
+  });
+
+  it("tags the captured merge when main legitimately advances past it", () => {
+    const release = readFileSync(join(repoRoot, "scripts", "release.sh"), "utf8");
+    expect(release).toContain('git merge-base --is-ancestor "$MERGE_COMMIT" HEAD');
+    expect(release).not.toContain('[ "$(git rev-parse HEAD)" = "$MERGE_COMMIT" ]');
+    expect(release).toContain("git tag -a '$TAG' -m 'cmuxlayer $TAG' '$MERGE_COMMIT'");
+  });
+
+  it("removes an uncommitted generated bump before returning to main", () => {
+    const fixture = makeReleaseFixture();
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"], {
+      STUB_GIT_COMMIT_EXIT: "1",
+    });
+
+    expect(result.status).not.toBe(0);
+    const restore = result.log.indexOf("git restore --worktree --staged package.json");
+    const switchMain = result.log.lastIndexOf("git switch main");
+    expect(restore).toBeGreaterThan(-1);
+    expect(switchMain).toBeGreaterThan(restore);
+    expect(result.log).not.toContain("git push -u origin wt/release-0.4.1");
   });
 
   it("stops on a red required check before creating the release tag", () => {

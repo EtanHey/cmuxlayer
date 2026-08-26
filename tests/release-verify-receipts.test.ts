@@ -67,6 +67,15 @@ printf 'git %s\\n' "$*" >>"$STUB_LOG"
 if [[ " $* " = *" rev-list "* ]]; then printf '%s\\n' "\${STUB_BEHIND:-0}"; fi
 `,
   );
+  for (const command of ["ps", "lsof"]) {
+    executable(
+      join(bin, command),
+      `#!/usr/bin/env bash
+printf '${command} %s\\n' "$*" >>"$STUB_LOG"
+exit 0
+`,
+    );
+  }
 
   const env = {
     ...process.env,

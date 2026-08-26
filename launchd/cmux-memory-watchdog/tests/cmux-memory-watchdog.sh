@@ -234,6 +234,8 @@ run_case() {
   set -e
   if [[ "$run_status" -ne 0 ]]; then
     cat "$log_dir/stderr.log" >&2
+    stop_brainbar_socket "$brainbar_pid"
+    rm -rf "$root_dir"
     exit "$run_status"
   fi
 

@@ -39,5 +39,8 @@ describe("cmux memory watchdog package", () => {
       "utf8",
     );
     expect(unitSuite).not.toContain("-maxdepth");
+    expect(unitSuite).toMatch(
+      /if \[\[ "\$run_status" -ne 0 \]\]; then[\s\S]*stop_brainbar_socket "\$brainbar_pid"[\s\S]*rm -rf "\$root_dir"[\s\S]*exit "\$run_status"/,
+    );
   });
 });

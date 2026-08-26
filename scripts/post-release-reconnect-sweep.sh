@@ -66,11 +66,14 @@ while read -r pid cli; do
   else
     echo "  $mark pid=$pid claude $cwd — run: /mcp reconnect cmuxlayer"
   fi
-done < <(ps -eo pid=,comm= | awk '
+done < <(ps -c -eo pid=,comm= | awk '
   {
-    executable = $2
+    pid = $1
+    $1 = ""
+    sub(/^[[:space:]]+/, "", $0)
+    executable = $0
     sub(/^.*\//, "", executable)
-    if (executable == "claude" || executable == "codex") print $1, executable
+    if (executable == "claude" || executable == "codex") print pid, executable
   }
 ')
 [ "$found" -eq 0 ] && echo "  (none — every configured seat has a live child)"

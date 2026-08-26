@@ -60,6 +60,12 @@ cleanup() {
   if [ "$DRY" -ne 1 ] && [ "$RELEASE_BRANCH_CREATED" -eq 1 ]; then
     # Never strand the operator on an aborted release branch. If the PR did
     # not merge, also close it and remove both temporary branch refs.
+    if [ "$status" -ne 0 ] && [ "$RELEASE_MERGED" -eq 0 ]; then
+      # The only pre-commit worktree edit made by this script is the version
+      # bump. Remove it on failure so it cannot follow the branch switch onto
+      # main and poison the next release preflight.
+      git restore --worktree --staged package.json >/dev/null 2>&1
+    fi
     git switch main >/dev/null 2>&1
     if [ "$status" -ne 0 ] && [ "$RELEASE_MERGED" -eq 0 ]; then
       [ -n "$PR_URL" ] && gh pr close "$PR_URL" >/dev/null 2>&1
@@ -307,8 +313,8 @@ else
     die "merge commit $MERGE_COMMIT is not on origin/main"
   git switch main
   git merge --ff-only origin/main
-  [ "$(git rev-parse HEAD)" = "$MERGE_COMMIT" ] || \
-    die "local main did not fast-forward to release merge $MERGE_COMMIT"
+  git merge-base --is-ancestor "$MERGE_COMMIT" HEAD || \
+    die "local main does not contain release merge $MERGE_COMMIT after fast-forward"
 fi
 
 # Tag the merge commit, never the unmerged bump commit.
