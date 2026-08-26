@@ -870,7 +870,7 @@ describe("WatchSpec arm contract", () => {
   it("re-arms a persistent content watch after retry exhaustion", async () => {
     const target = join(TEST_DIR, "persistent-retry-exhaustion.md");
     writeFileSync(target, "before\n", "utf8");
-    const notify = vi.fn(async () => notify.mock.calls.length > 8);
+    const notify = vi.fn(() => notify.mock.calls.length > 8);
     const onNotificationExhausted = vi.fn();
     let now = 1_000;
     const armed = await armWatch(

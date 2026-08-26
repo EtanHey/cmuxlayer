@@ -164,7 +164,7 @@ describe("WatchSpec MCP contract", () => {
     });
   });
 
-  it("returns a matched terminal verdict when the notification owner is not live", async () => {
+  it("tries external notification before returning owner-not-live exhaustion", async () => {
     const notify = vi.fn().mockResolvedValue(false);
     const server = createWatchServer(notify);
     const target = join(TEST_DIR, "delivery-down.md");
@@ -193,7 +193,7 @@ describe("WatchSpec MCP contract", () => {
         notification_exhausted_reason: "owner_not_live",
       },
     });
-    expect(notify).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledOnce();
   });
 
   it("D14 emits MCP progress before a long wait hits the harness silence cutoff", async () => {

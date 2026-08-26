@@ -12389,6 +12389,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return true;
             }
             if (!owner) {
+              if (event.reason === "predicate_matched" && opts?.watchNotify) {
+                try {
+                  externalDelivered =
+                    (await opts.watchNotify(event)) !== false;
+                } catch {
+                  externalDelivered = false;
+                }
+              }
+              if (opts?.watchNotify && externalDelivered) {
+                return true;
+              }
               return {
                 delivered: false,
                 retryable: false,
@@ -13074,10 +13085,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         | "queued"
         | "queued_followup"
         | "rescued"
-        | "pending_verify"
-        | "refused";
+        | "pending_verify";
       delivery_id?: string;
-      wake_error_code?: string;
     }> => {
       const pointer = formatInboxPing(
         message,
@@ -13104,15 +13113,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_id: deliveryId,
         });
       } catch (error) {
-        if (
-          error instanceof DeliverySafetyGateError &&
-          error.error_code === "blocked_by_foreign_draft"
-        ) {
-          return {
-            delivery: "refused",
-            wake_error_code: error.error_code,
-          };
-        }
         if (
           error instanceof RetryableDeliveryError ||
           (error instanceof Error && /\bis busy\b/.test(error.message))

@@ -18,7 +18,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -975,6 +975,75 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
+  });
+
+  it("accepts a successful external watch notification when the owner seat is absent", async () => {
+    await server.close();
+    const externalNotify = vi.fn().mockResolvedValue(true);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchNotify: externalNotify,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "externally-notified-child",
+      surface_id: "surface:child",
+      parent_agent_id: "missing-owner-seat",
+      spawn_depth: 1,
+      role: "worker",
+    };
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    const contentPath = join(inboxDir, child.agent_id, "content-report.md");
+    const markerPath = join(inboxDir, child.agent_id, "marker-report.md");
+    mkdirSync(dirname(contentPath), { recursive: true });
+    writeFileSync(contentPath, "before\n", "utf8");
+    writeFileSync(markerPath, "before\n", "utf8");
+    await engine.armWatch({
+      owner: child.parent_agent_id as string,
+      subject_agent_id: child.agent_id,
+      target: contentPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    await engine.armWatch({
+      owner: child.parent_agent_id as string,
+      subject_agent_id: child.agent_id,
+      target: markerPath,
+      marker: "DONE_EXTERNAL",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    writeFileSync(contentPath, "after\n", "utf8");
+    appendFileSync(markerPath, "DONE_EXTERNAL\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    expect(externalNotify).toHaveBeenCalledTimes(2);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: contentPath,
+          state: "armed",
+          notification_pending: false,
+          notification_attempts: 0,
+        }),
+        expect.objectContaining({
+          target: markerPath,
+          state: "fired",
+          notification_pending: false,
+          notification_attempts: 0,
+        }),
+      ]),
+    );
   });
 
   it("delivers to a live owner whose persisted state is terminal", async () => {
