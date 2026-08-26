@@ -445,6 +445,14 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     expect(receipt.gates.typecheck).toBe("pass");
     expect(receipt.gates.tests).toBe("pass");
     expect(receipt.gates.contract).toBe("pass");
+    expect(receipt.installs).toEqual([
+      expect.objectContaining({
+        host: "test-mac",
+        result: "pass",
+        installed: "cmuxlayer 0.4.1",
+        mode: "upgrade",
+      }),
+    ]);
     expect(result.stdout).toContain(
       join(fixture.receiptsDir, "release-0.4.1.json"),
     );

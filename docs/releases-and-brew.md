@@ -328,7 +328,7 @@ explicit `workspace` only when you deliberately want a different one.
 | `~/.golems/config.yaml` → `mcpServers.cmuxlayer` | wires the launcher into the fleet |
 | `~/.golems/bin/cmuxlayer-mcp` | launcher: brew (default) vs live source (`CMUXLAYER_DEV=1`) |
 | `EtanHey/homebrew-layers` → `Formula/cmuxlayer.rb` | the brew formula (stable tag + `head`) |
-| `scripts/release.sh` | one-command release: gate → bump → tag → formula bump → push → sync brew's tap clone → receipt |
+| `scripts/release.sh` | one-command release: gate → bump → tag → formula bump → push → sync tap clone → upgrade/verify this Mac → receipt |
 | `scripts/release-verify.sh` | sync Homebrew's tap clone → upgrade → assert installed version (`--verify-only` asserts without upgrading) |
 | `scripts/release-receipt.mjs` | the release receipts ledger (`CMUXLAYER_RELEASE_RECEIPTS_DIR`) |
 | `scripts/run-real-cmux-contract.ts` | the real-cmux contract lane (`CMUX_CONTRACT_REQUIRE_LIVE=1` makes a skip fatal) |

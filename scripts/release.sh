@@ -286,6 +286,13 @@ else
   fi
 fi
 
+# --- verify the release on the Mac that cut it ----------------------------
+# Printing this command used to leave the receipt with zero install rows. Run
+# it now so a successful release proves at least this Mac actually upgraded to
+# the tagged version. Additional Macs still run release-verify independently.
+echo "release: upgrading and verifying cmuxlayer $VERSION on this Mac…"
+run "'$REPO_DIR/scripts/release-verify.sh' '$VERSION'"
+
 if [ "$DRY" -eq 1 ]; then
   RECEIPT_LABEL="<dry-run: no receipt written>"
 else
@@ -297,7 +304,7 @@ cat <<EOF
 release: done — cmuxlayer $TAG is tagged and the formula is bumped.
 CI: $CI_CONCLUSION (ci.yml on $CI_COMMIT_LABEL — the commit this release was cut from)
 Receipt: $RECEIPT_LABEL
-Next (on EACH Mac — each run appends its own install evidence to the receipt):
+This Mac was upgraded and verified above. On EACH additional Mac (each run appends its own install evidence):
   $REPO_DIR/scripts/release-verify.sh "$VERSION"
   $REPO_DIR/scripts/release-verify.sh "$VERSION" --verify-only   # never upgrades
 
