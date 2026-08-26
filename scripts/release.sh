@@ -240,6 +240,7 @@ receipt_record "artifact.sha256" "$SHA"
 # --- bump formula (homebrew-layers) ---------------------------------------
 run "sed_inplace 's|archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|archive/refs/tags/$TAG.tar.gz|' '$FORMULA'"
 run "sed_inplace 's|^  sha256 \"[0-9a-f]{64}\"|  sha256 \"$SHA\"|' '$FORMULA'"
+run "sed_inplace 's|Formula\\[\"node\"\\]\\.opt_bin|formula_opt_bin(\"node\")|g' '$FORMULA'"
 run "brew audit etanhey/layers/cmuxlayer || true"
 run "git -C '$TAP_DIR' commit -aqm 'cmuxlayer $TAG'"
 run "git -C '$TAP_DIR' push origin main"

@@ -133,6 +133,7 @@ function makeReleaseFixture(
       "class Cmuxlayer < Formula",
       '  url "https://github.com/EtanHey/cmuxlayer/archive/refs/tags/v0.4.0.tar.gz"',
       `  sha256 "${"0".repeat(64)}"`,
+      '  exec "#{Formula["node"].opt_bin}/node"',
       "end",
       "",
     ].join("\n"),
@@ -542,6 +543,8 @@ describe("release.sh receipts", { timeout: 30_000 }, () => {
     );
     expect(formula).toContain("v0.4.1.tar.gz");
     expect(formula).toContain(`sha256 "${"a".repeat(64)}"`);
+    expect(formula).toContain('formula_opt_bin("node")');
+    expect(formula).not.toContain('Formula["node"].opt_bin');
   });
 
   it("records a skipped contract gate instead of losing it to scrollback", () => {
