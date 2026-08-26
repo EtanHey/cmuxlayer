@@ -51,7 +51,7 @@
     "daemon": "node dist/daemon.js",
     "proxy": "node dist/proxy.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
     "test:topology": "vitest run tests/topology-contract.test.ts",
     "test:parity": "vitest run tests/spawn-resume-parity.test.ts tests/launcher-registry.test.ts tests/repo-root-fallback.test.ts tests/registry-optional-resume.test.ts",
     "test:contract": "bun run build && tsx scripts/run-real-cmux-contract.ts",
