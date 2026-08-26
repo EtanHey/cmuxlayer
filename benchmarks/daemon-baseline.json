@@ -20,7 +20,7 @@
   },
   "measurements": {
     "list_surfaces": {
-      "p50_ms": 135.18,
+      "p50_ms": 1,
       "p95_ms": 155.18
     },
     "read_screen": {
