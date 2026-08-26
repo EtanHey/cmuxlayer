@@ -1,15 +1,15 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "545caf5adf10af6231256b6038308af58e82d4b4",
-    "measured_at": "2026-08-26T04:14:44.635Z",
+    "git_sha": "7e1bb96f9fc82d6f7676043b75dcaf1ed1c31837",
+    "measured_at": "2026-08-26T16:33:17.727Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 32928658291
+    "workflow_run_id": 32988968639
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
-    "first_send_after_spawn": 10000,
-    "cli_send": 10000
+    "all_rows": 1000,
+    "cli_send": 1000
   },
   "replay": {
     "clients": 8,
@@ -17,37 +17,89 @@
     "operations": [
       "list_surfaces",
       "read_screen",
+      "send_to_surface_warm",
+      "send_to_agent_warm",
+      "list_agents",
+      "control_health",
+      "spawn_close_during_sweep",
       "first_send_after_spawn"
     ],
     "bytes": {
       "list_surfaces": 142,
       "read_screen": 161,
+      "send_to_surface_warm": 214,
+      "send_to_agent_warm": 217,
+      "list_agents": 112,
+      "control_health": 97,
+      "spawn_close_during_sweep": 161,
       "first_send_after_spawn": 216
     },
     "request_sha256": {
       "list_surfaces": "29b9c66db4de170a41fdd8ad608f356201f747970e6f7fa74ae605f360f85a33",
       "read_screen": "0f6c57ad85b668c2ae73f651d9d44c41525b8f2fba3d2f7783e6acb592dc2137",
+      "send_to_surface_warm": "d2b6d478fff8c5cf8568d2c2caaa48cbe98314a700477cccbc20657a0ba3058e",
+      "send_to_agent_warm": "2d59a5a9a94bfa7b2fa6a23a16e91eab26dee814b37a6b4285f382303907593c",
+      "list_agents": "4f4fb87e95a8f7cded25a4fd1bb35d11492182997e1f7d14c856683f53cc0416",
+      "control_health": "56e5969d5764757c0775d59e7c65e83cbd91d6f4f4a3279f1cc910fe6854a10f",
+      "spawn_close_during_sweep": "1c7dfd23479835bd9d42cc8e74444cbac74e47aa8f288d3eb3278e777c96acdf",
       "first_send_after_spawn": "84b72f5cc76154d091394b15154b3dcc6aefd7e80d6027a2666c71c83a6194a6"
+    },
+    "transport": {
+      "list_surfaces": "socket",
+      "read_screen": "socket",
+      "send_to_surface_warm": "socket",
+      "send_to_agent_warm": "socket",
+      "list_agents": "socket",
+      "control_health": "socket",
+      "spawn_close_during_sweep": "socket",
+      "first_send_after_spawn": "socket"
     }
   },
   "measurements": {
     "list_surfaces": {
-      "p50_ms": 680.24,
-      "p95_ms": 964.74
+      "p50_ms": 9.41,
+      "p95_ms": 34.2,
+      "lock_hold_ms": 0
     },
     "read_screen": {
-      "p50_ms": 159.79,
-      "p95_ms": 386.21
+      "p50_ms": 12.71,
+      "p95_ms": 28.58,
+      "lock_hold_ms": 0
+    },
+    "send_to_surface_warm": {
+      "p50_ms": 69.58,
+      "p95_ms": 69.58,
+      "lock_hold_ms": 63
+    },
+    "send_to_agent_warm": {
+      "p50_ms": 104.01,
+      "p95_ms": 104.01,
+      "lock_hold_ms": 66
+    },
+    "list_agents": {
+      "p50_ms": 15.76,
+      "p95_ms": 63.22,
+      "lock_hold_ms": 0
+    },
+    "control_health": {
+      "p50_ms": 23.13,
+      "p95_ms": 32.24,
+      "lock_hold_ms": 0
+    },
+    "spawn_close_during_sweep": {
+      "p50_ms": 48.76,
+      "p95_ms": 48.76,
+      "lock_hold_ms": 0
     },
     "first_send_after_spawn": {
-      "p50_ms": 2082.09,
-      "p95_ms": 2082.09,
-      "lock_hold_ms": 640
+      "p50_ms": 134.91,
+      "p95_ms": 134.91,
+      "lock_hold_ms": 75
     },
-    "cli_send_ms": 1210.45
+    "cli_send_ms": 69.58
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "7d3c4687d222eb6f00d2e0a63e6eebfe46f1d2e35be424cc7d5c4245e359b6a1"
+    "content_sha256": "60864aaa599333a1ebcced00058d7c67f25ef412c36a09499aacf7f06c54362c"
   }
 }
