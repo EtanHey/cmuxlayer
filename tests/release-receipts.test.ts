@@ -114,6 +114,7 @@ function makeReleaseFixture(
     "release.sh",
     "release-verify.sh",
     "release-receipt.mjs",
+    "post-release-reconnect-sweep.sh",
   ]) {
     const source = join(repoRoot, "scripts", script);
     if (existsSync(source)) {
@@ -728,6 +729,10 @@ describe("release-verify.sh", { timeout: 30_000 }, () => {
       installed: "cmuxlayer 0.4.1",
       mode: "verify-only",
     });
+    expect(receipt.verify.reconnect_sweep).toBe("ran");
+    expect(result.stdout).toContain(
+      "agents with NO cmuxlayer child",
+    );
   });
 
   it("still upgrades in the default mode", () => {

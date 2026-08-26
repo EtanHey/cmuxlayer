@@ -330,5 +330,6 @@ explicit `workspace` only when you deliberately want a different one.
 | `EtanHey/homebrew-layers` → `Formula/cmuxlayer.rb` | the brew formula (stable tag + `head`) |
 | `scripts/release.sh` | one-command release: gate → bump → tag → formula bump → push → sync tap clone → upgrade/verify this Mac → receipt |
 | `scripts/release-verify.sh` | sync Homebrew's tap clone → upgrade → assert installed version (`--verify-only` asserts without upgrading) |
+| `scripts/post-release-reconnect-sweep.sh` | report stale or missing cmuxlayer children after each per-Mac verification |
 | `scripts/release-receipt.mjs` | the release receipts ledger (`CMUXLAYER_RELEASE_RECEIPTS_DIR`) |
 | `scripts/run-real-cmux-contract.ts` | the real-cmux contract lane (`CMUX_CONTRACT_REQUIRE_LIVE=1` makes a skip fatal) |

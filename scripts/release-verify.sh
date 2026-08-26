@@ -66,6 +66,12 @@ INSTALLED="$(brew list --versions cmuxlayer || true)"
 if [ "$INSTALLED" = "cmuxlayer $VERSION" ]; then
   receipt_record "verify.result" "pass"
   receipt install "$VERSION" --result pass --installed "$INSTALLED" --mode "$MODE"
+  if "$REPO_DIR/scripts/post-release-reconnect-sweep.sh"; then
+    receipt_record "verify.reconnect_sweep" "ran"
+  else
+    receipt_record "verify.reconnect_sweep" "failed"
+    die "post-release reconnect sweep failed"
+  fi
   echo "release-verify: cmuxlayer $VERSION is installed ($MODE mode); evidence appended to $(node "$RECEIPT_CLI" path "$VERSION")"
 else
   receipt_record "verify.result" "fail"
