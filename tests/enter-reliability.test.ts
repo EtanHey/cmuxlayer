@@ -1029,6 +1029,7 @@ describe("enter reliability", () => {
       expect(parsed.timings_ms).toEqual({
         route: expect.any(Number),
         lock: expect.any(Number),
+        lock_hold: expect.any(Number),
         enumerate: expect.any(Number),
         type: expect.any(Number),
         verify: expect.any(Number),

@@ -1016,11 +1016,17 @@ export interface PublicDeliveryReceipt {
   WARNING?: string;
 }
 
-type DeliveryPhase = "route" | "lock" | "enumerate" | "type" | "verify";
+type DeliveryPhase =
+  | "route"
+  | "lock"
+  | "lock_hold"
+  | "enumerate"
+  | "type"
+  | "verify";
 type DeliveryPhaseTimings = Record<DeliveryPhase, number>;
 
 function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
-  return { route: 0, lock: 0, enumerate: 0, type: 0, verify: 0 };
+  return { route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0 };
 }
 
 function addDeliveryPhaseTiming(
@@ -4857,6 +4863,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       observePtyWrite?: boolean;
       stableSurfaceIdentity?: string | null;
       lockKey?: string;
+      timings?: DeliveryPhaseTimings;
     } = {},
   ): Promise<T> => {
     if (opts.toolName) {
@@ -4875,9 +4882,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       (opts.stableSurfaceIdentity
         ? `uuid:${opts.stableSurfaceIdentity.toLowerCase()}`
         : surface);
+    const lockStartedAt = Date.now();
     acquireSurfaceWrite(lockKey, owner);
+    addDeliveryPhaseTiming(opts.timings, "lock", lockStartedAt);
+    const lockHoldStartedAt = Date.now();
+    let result: T | undefined;
     try {
-      const result = await fn();
+      result = await fn();
       if (opts.observePtyWrite) {
         recordSurfaceWriteSuccess(
           surface,
@@ -4897,6 +4908,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       throw error;
     } finally {
+      addDeliveryPhaseTiming(opts.timings, "lock_hold", lockHoldStartedAt);
+      const timedResult = result as
+        | { timings_ms?: DeliveryPhaseTimings }
+        | undefined;
+      if (timedResult?.timings_ms && opts.timings) {
+        timedResult.timings_ms.lock_hold = opts.timings.lock_hold;
+      }
       releaseSurfaceWrite(lockKey, owner);
     }
   };
@@ -9912,11 +9930,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         }
 
-        const lockStartedAt = Date.now();
         const delivery = await withSurfaceWrite(
           route.surface,
           async () => {
-            addDeliveryPhaseTiming(timings, "lock", lockStartedAt);
             await route.assertCurrent();
             return executeDeliveryEngine({
               surface: route.surface,
@@ -9939,6 +9955,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: route.workspace,
             observePtyWrite: true,
             stableSurfaceIdentity: route.stableSurfaceIdentity,
+            timings,
           },
         );
 
@@ -12773,11 +12790,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       };
 
-      const lockStartedAt = Date.now();
       return withSurfaceWrite(
         deliveryRoute.surface_id,
         async () => {
-          addDeliveryPhaseTiming(args.timings, "lock", lockStartedAt);
           await assertDeliveryRouteCurrent();
           const delivery = await executeDeliveryEngine({
             surface: deliveryRoute.surface_id,
@@ -12833,6 +12848,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: deliveryRoute.workspace_id ?? undefined,
           observePtyWrite: true,
           stableSurfaceIdentity: deliveryRoute.surface_uuid,
+          timings: args.timings,
         },
       );
     };

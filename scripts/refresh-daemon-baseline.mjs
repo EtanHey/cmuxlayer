@@ -17,6 +17,12 @@ if (code !== 0 || result.verdict !== "GREEN") {
 }
 
 const first = result.latency.first_send_after_spawn.first;
+if (
+  !Number.isFinite(first.lock_hold_ms) ||
+  first.lock_hold_ms > existing.ceilings.first_send_after_spawn.lock_hold_ms
+) {
+  throw new Error("refusing to refresh from an over-budget lock hold");
+}
 const measurements = {
   list_surfaces: {
     p50_ms: result.latency.daemon_path.list_surfaces.p50_ms,
@@ -31,6 +37,7 @@ const measurements = {
     p95_ms: first.elapsed_ms,
     lock_hold_ms: first.lock_hold_ms,
   },
+  cli_send_ms: result.latency.first_send_after_spawn.surface.elapsed_ms,
 };
 const listRatio = existing.runner_margins.list_surfaces;
 const readRatio = existing.runner_margins.read_screen;

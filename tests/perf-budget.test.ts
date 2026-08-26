@@ -11,7 +11,10 @@ const repoRoot = join(__dirname, "..");
 
 const baseline = {
   schema_version: 1,
-  source: { git_sha: "f0ca937", measured_at: "2026-08-26T00:00:00Z" },
+  source: {
+    git_sha: "f0ca937ccf16d81b0383a88de79d70b3a10d672e",
+    measured_at: "2026-08-26T00:00:00Z",
+  },
   runner_margins: { list_surfaces: 8, read_screen: 3.2 },
   replay: {
     clients: 8,
@@ -31,6 +34,7 @@ const baseline = {
       p95_ms: 900,
       lock_hold_ms: 20,
     },
+    cli_send_ms: 700,
   },
   ceilings: {
     list_surfaces: { p50_ms: 280, p95_ms: 336 },
@@ -58,8 +62,10 @@ const result = {
       first: {
         elapsed_ms: 950,
         request_bytes: 240,
-        receipt: { timings_ms: { lock: 21 } },
+        lock_hold_ms: 21,
+        receipt: { timings_ms: { lock: 4, lock_hold: 21 } },
       },
+      surface: { elapsed_ms: 710 },
     },
   },
 };
@@ -117,6 +123,54 @@ describe("daemon performance budget", () => {
     );
   });
 
+  it("fails closed on CLI send, replay-shape, and request-byte drift", () => {
+    const cli = compareBenchmark(baseline, {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          surface: { elapsed_ms: 4_001 },
+        },
+      },
+    });
+    expect(cli.failures).toContain(
+      "first_send_after_spawn cli_send: 4001ms exceeds 4000ms",
+    );
+
+    const replay = compareBenchmark(baseline, {
+      ...result,
+      clients: 7,
+      replay: {
+        ...result.replay,
+        clients: 7,
+        operations: ["list_surfaces", "first_send_after_spawn"],
+        bytes: { ...result.replay.bytes, read_screen: 999 },
+      },
+    });
+    expect(replay.failures).toEqual(
+      expect.arrayContaining([
+        "replay clients: 7 does not match committed 8",
+        "replay operations do not match the committed workload",
+        "read_screen request_bytes: 999 bytes does not match committed 170 bytes",
+      ]),
+    );
+  });
+
+  it("allows the explicit fast-round override but no implicit round drift", () => {
+    const fast = {
+      ...result,
+      rounds: 3,
+      replay: { ...result.replay, rounds: 3 },
+    };
+    expect(compareBenchmark(baseline, fast).failures).toContain(
+      "replay rounds: 3 does not match expected 12",
+    );
+    expect(compareBenchmark(baseline, fast, { expectedRounds: 3 }).passed).toBe(
+      true,
+    );
+  });
+
   it("renders one before/after table with the stable bot marker", () => {
     const markdown = renderMarkdownComparison(
       baseline,
@@ -143,7 +197,7 @@ describe("daemon performance budget", () => {
     );
 
     expect(() => validateBaseline(committed)).not.toThrow();
-    expect(committed.source.git_sha).toMatch(/^f0ca937/);
+    expect(committed.source.git_sha).toMatch(/^[0-9a-f]{40}$/);
     expect(committed.replay).toMatchObject({ clients: 8, rounds: 12 });
     expect(committed.replay.operations).toEqual([
       "list_surfaces",
@@ -163,6 +217,7 @@ describe("daemon performance budget", () => {
     expect(source).toContain("p95_ms");
     expect(source).toContain("request_bytes");
     expect(source).toContain("lock_hold_ms");
+    expect(source).toContain("timings_ms?.lock_hold");
     expect(source).toContain("CMUXLAYER_BENCH_JSON_PATH");
   });
 
@@ -175,13 +230,29 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("perf-budget:");
     expect(workflow).toContain("pull-requests: write");
     expect(workflow).toContain("bun run bench:daemon:check");
-    expect(workflow).toContain("actions/upload-artifact@");
     expect(workflow).toContain(
-      "if: always() && github.event_name == 'pull_request'",
+      "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
     );
+    expect(workflow).toContain(
+      "github.event.pull_request.head.repo.full_name == github.repository",
+    );
+    expect(workflow).toContain("comment.user?.login === 'github-actions[bot]'");
+    expect(workflow).toContain("context.payload.pull_request.head.sha");
+    expect(workflow).toContain("persist-credentials: false");
+    expect(workflow).toContain("concurrency:");
     expect(workflow).toContain("<!-- cmuxlayer-perf-budget -->");
     expect(workflow).toContain("updateComment");
     expect(workflow).toContain("createComment");
+  });
+
+  it("refuses to refresh a baseline from an over-budget lock hold", () => {
+    const source = readFileSync(
+      join(repoRoot, "scripts", "refresh-daemon-baseline.mjs"),
+      "utf8",
+    );
+    expect(source).toContain(
+      "refusing to refresh from an over-budget lock hold",
+    );
   });
 
   it("keeps scratch artifacts out of default Vitest collection", () => {

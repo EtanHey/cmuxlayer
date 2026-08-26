@@ -521,7 +521,7 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
     return {
       elapsed_ms: round(nowMs() - startedAt),
       request_bytes: requestBytes("send_to", args),
-      lock_hold_ms: receipt.timings_ms?.lock ?? null,
+      lock_hold_ms: receipt.timings_ms?.lock_hold ?? null,
       receipt,
     };
   };
@@ -533,7 +533,7 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
   await waitForSweepHoldState(sweepHoldState, holdToken, "held");
   const first = await measureSend({
     agent_id: spawnResult.agent_id,
-    text: `Read and follow ${repoRoot}/docs.local/scratch/run5r3/bench-first-send.md`,
+    text: "Read and follow docs.local/scratch/run5r3/bench-first-send.md",
     press_enter: true,
   });
   await writeFile(
@@ -543,7 +543,7 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
   await waitForSweepHoldState(sweepHoldState, holdToken, "complete");
   const second = await measureSend({
     agent_id: spawnResult.agent_id,
-    text: `Read and follow ${repoRoot}/docs.local/scratch/run5r3/bench-second-send.md`,
+    text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
     press_enter: true,
   });
   const surface = await measureSend({
@@ -725,6 +725,7 @@ async function main() {
       ),
       first_send_after_spawn_within_2s:
         firstSendAfterSpawn.first.elapsed_ms <= 2_000,
+      cli_send_within_4s: firstSendAfterSpawn.surface.elapsed_ms <= 4_000,
       surface_receipt_is_waitable:
         typeof firstSendAfterSpawn.surface.receipt.delivery_id === "string" &&
         firstSendAfterSpawn.surface.wait_for.delivery_id ===

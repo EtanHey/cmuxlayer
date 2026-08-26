@@ -15,7 +15,7 @@
     "bytes": {
       "list_surfaces": 142,
       "read_screen": 161,
-      "first_send_after_spawn": 273
+      "first_send_after_spawn": 216
     }
   },
   "measurements": {
@@ -30,8 +30,9 @@
     "first_send_after_spawn": {
       "p50_ms": 949.06,
       "p95_ms": 949.06,
-      "lock_hold_ms": 21
-    }
+      "lock_hold_ms": 366
+    },
+    "cli_send_ms": 566.25
   },
   "ceilings": {
     "list_surfaces": {
@@ -45,7 +46,7 @@
     "first_send_after_spawn": {
       "p50_ms": 2000,
       "p95_ms": 2000,
-      "lock_hold_ms": 100
+      "lock_hold_ms": 1200
     },
     "cli_send_ms": 4000
   }

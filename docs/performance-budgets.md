@@ -2,7 +2,7 @@
 
 `bun run bench:daemon:check` builds cmuxlayer, runs the production-shaped 8-client x 12-round daemon replay, and compares it with `benchmarks/daemon-baseline.json`. CI runs this command on every pull request and every push to `main`. `bun run pre-pr` runs the same gate with three rounds so regressions are visible before push.
 
-The baseline was measured from v0.4.63 after PR #550. Two exact-head CI runs showed that GitHub's shared runner was 4.7-6.6x slower for `list_surfaces` and 2.5-2.6x slower for `read_screen` p95 than the local main measurement. The frozen ceilings therefore use 8x and 3.2x margins respectively, leaving about 22-24% headroom over the observed runner maxima. The first send after spawn remains an absolute 2,000 ms socket ceiling, the CLI ceiling remains 4,000 ms, and daemon `read_screen` p50 remains at most 250 ms.
+The baseline was measured from v0.4.63 after PR #550. Two exact-head CI runs showed that GitHub's shared runner was 4.7-6.6x slower for `list_surfaces` and 2.5-2.6x slower for `read_screen` p95 than the local main measurement. The frozen ceilings therefore use 8x and 3.2x margins respectively, leaving about 22-24% headroom over the observed runner maxima. Actual time inside the first-send surface lock uses a 3.2x ceiling; lock-acquisition wait is reported separately and is not mislabeled as hold time. The first send after spawn remains an absolute 2,000 ms socket ceiling, the CLI ceiling remains 4,000 ms, and daemon `read_screen` p50 remains at most 250 ms.
 
 ## Refresh after a legitimate speedup
 

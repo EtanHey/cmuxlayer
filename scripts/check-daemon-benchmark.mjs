@@ -26,16 +26,14 @@ function finite(value, path) {
 export function validateBaseline(baseline) {
   if (baseline?.schema_version !== 1)
     throw new Error("baseline schema_version must be 1");
-  if (!baseline.source?.git_sha)
-    throw new Error("baseline source.git_sha is required");
+  if (!/^[0-9a-f]{40}$/.test(baseline.source?.git_sha ?? "")) {
+    throw new Error("baseline source.git_sha must be a full 40-hex commit");
+  }
   finite(
     baseline.runner_margins?.list_surfaces,
     "runner_margins.list_surfaces",
   );
-  finite(
-    baseline.runner_margins?.read_screen,
-    "runner_margins.read_screen",
-  );
+  finite(baseline.runner_margins?.read_screen, "runner_margins.read_screen");
   finite(baseline.replay?.clients, "replay.clients");
   finite(baseline.replay?.rounds, "replay.rounds");
   if (!Array.isArray(baseline.replay?.operations)) {
@@ -64,6 +62,7 @@ export function validateBaseline(baseline) {
     baseline.measurements?.first_send_after_spawn?.lock_hold_ms,
     "measurements.first_send_after_spawn.lock_hold_ms",
   );
+  finite(baseline.measurements?.cli_send_ms, "measurements.cli_send_ms");
   finite(
     baseline.ceilings?.first_send_after_spawn?.lock_hold_ms,
     "ceilings.first_send_after_spawn.lock_hold_ms",
@@ -92,17 +91,37 @@ function currentMetrics(result) {
     first_send_after_spawn: {
       p50_ms: first?.elapsed_ms,
       p95_ms: first?.elapsed_ms,
-      lock_hold_ms: first?.lock_hold_ms ?? first?.receipt?.timings_ms?.lock,
+      lock_hold_ms:
+        first?.lock_hold_ms ?? first?.receipt?.timings_ms?.lock_hold,
     },
+    cli_send_ms: result?.latency?.first_send_after_spawn?.surface?.elapsed_ms,
   };
 }
 
-function row(operation, metric, baseline, current, ceiling) {
+function row(operation, metric, baseline, current, ceiling, unit = "ms") {
   const passed = Number.isFinite(current) && current <= ceiling;
-  return { operation, metric, baseline, current, ceiling, passed };
+  return { operation, metric, baseline, current, ceiling, unit, passed };
 }
 
-export function compareBenchmark(baseline, result) {
+function exactRow(operation, metric, committed, current, unit) {
+  const passed = Number.isFinite(current) && current === committed;
+  return {
+    operation,
+    metric,
+    baseline: committed,
+    current,
+    ceiling: committed,
+    unit,
+    passed,
+    exact: true,
+  };
+}
+
+export function compareBenchmark(
+  baseline,
+  result,
+  { expectedRounds = baseline.replay.rounds } = {},
+) {
   validateBaseline(baseline);
   const current = currentMetrics(result);
   const rows = [];
@@ -127,20 +146,56 @@ export function compareBenchmark(baseline, result) {
       current.first_send_after_spawn.lock_hold_ms,
       baseline.ceilings.first_send_after_spawn.lock_hold_ms,
     ),
+    row(
+      "first_send_after_spawn",
+      "cli_send_ms",
+      baseline.measurements.cli_send_ms,
+      current.cli_send_ms,
+      baseline.ceilings.cli_send_ms,
+    ),
   );
+  for (const operation of baseline.replay.operations) {
+    rows.push(
+      exactRow(
+        operation,
+        "request_bytes",
+        baseline.replay.bytes[operation],
+        result?.replay?.bytes?.[operation],
+        "bytes",
+      ),
+    );
+  }
   const failures = rows
     .filter((entry) => !entry.passed)
-    .map(
-      (entry) =>
-        `${entry.operation} ${entry.metric.replace("_ms", "")}: ${entry.current}ms exceeds ${entry.ceiling}ms`,
+    .map((entry) => {
+      const metric = entry.metric.replace("_ms", "");
+      return entry.exact
+        ? `${entry.operation} ${metric}: ${entry.current} ${entry.unit} does not match committed ${entry.baseline} ${entry.unit}`
+        : `${entry.operation} ${metric}: ${entry.current}${entry.unit} exceeds ${entry.ceiling}${entry.unit}`;
+    });
+  if (result?.replay?.clients !== baseline.replay.clients) {
+    failures.push(
+      `replay clients: ${result?.replay?.clients} does not match committed ${baseline.replay.clients}`,
     );
+  }
+  if (result?.replay?.rounds !== expectedRounds) {
+    failures.push(
+      `replay rounds: ${result?.replay?.rounds} does not match expected ${expectedRounds}`,
+    );
+  }
+  if (
+    JSON.stringify(result?.replay?.operations) !==
+    JSON.stringify(baseline.replay.operations)
+  ) {
+    failures.push("replay operations do not match the committed workload");
+  }
   if (result?.verdict !== "GREEN")
     failures.push("benchmark intrinsic gates returned RED");
   return { passed: failures.length === 0, rows, failures };
 }
 
-function ms(value) {
-  return Number.isFinite(value) ? `${value} ms` : "missing";
+function formatted(value, unit) {
+  return Number.isFinite(value) ? `${value} ${unit}` : "missing";
 }
 
 export function renderMarkdownComparison(baseline, result, comparison) {
@@ -155,13 +210,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
   ];
   for (const entry of comparison.rows) {
     lines.push(
-      `| ${entry.operation} | ${entry.metric} | ${ms(entry.baseline)} | ${ms(entry.current)} | ${ms(entry.ceiling)} | ${entry.passed ? "PASS" : "FAIL"} |`,
-    );
-  }
-  lines.push("", "Request bytes (committed replay):");
-  for (const operation of baseline.replay.operations) {
-    lines.push(
-      `- ${operation}: baseline ${baseline.replay.bytes[operation]}, current ${result.replay?.bytes?.[operation] ?? "missing"}`,
+      `| ${entry.operation} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`,
     );
   }
   if (comparison.failures.length) {
@@ -217,7 +266,12 @@ async function main() {
   const runResult = await runBenchmark({
     artifactDir: process.env.CMUXLAYER_PERF_ARTIFACT_DIR,
   });
-  const comparison = compareBenchmark(baseline, runResult.result);
+  const expectedRounds = Number(
+    process.env.CMUXLAYER_BENCH_ROUNDS ?? baseline.replay.rounds,
+  );
+  const comparison = compareBenchmark(baseline, runResult.result, {
+    expectedRounds,
+  });
   const markdown = renderMarkdownComparison(
     baseline,
     runResult.result,
