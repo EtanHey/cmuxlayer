@@ -235,7 +235,7 @@ run_case() {
     assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
     assert_file_contains "$log_dir/stderr.log" "breached memory thresholds"
     assert_file_missing_or_empty "$log_dir/kill.log"
-    snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+    snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
     if [[ -n "$expected_signals" ]]; then
       assert_file_contains "$snapshot" "breached_signals=$expected_signals"
     fi
@@ -461,7 +461,7 @@ EOF
 
   assert_file_missing_or_empty "$log_dir/kill.log"
   assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
-  snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+  snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
   assert_file_contains "$snapshot" "breached_signals=footprint"
 
   printf 'PASS: watchdog falls back to ps command discovery when pgrep misses GUI apps\n'
@@ -509,7 +509,7 @@ EOF
   run_once
 
   assert_file_missing_or_empty "$log_dir/kill.log"
-  snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+  snapshot="$(find "$log_dir" -type f -name '20*.log' | head -n 1)"
   assert_file_contains "$snapshot" "[top_rss_offenders]"
   assert_file_contains "$snapshot" "command=python3.11"
   assert_file_contains "$snapshot" "command=ugrep"

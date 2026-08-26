@@ -29,4 +29,12 @@ describe("cmux memory watchdog package", () => {
     );
     expect(result.stdout).not.toContain("launchctl bootstrap");
   });
+
+  it("keeps the macOS unit suite compatible with BSD find", () => {
+    const unitSuite = readFileSync(
+      join(root, "tests", "cmux-memory-watchdog.sh"),
+      "utf8",
+    );
+    expect(unitSuite).not.toContain("-maxdepth");
+  });
 });
