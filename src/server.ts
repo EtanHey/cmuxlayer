@@ -12557,6 +12557,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery_id?: string;
       timings?: DeliveryPhaseTimings;
     }) => {
+      await refreshManagedMetadataBestEffort(args.agent_id); // PROOF 1: D122 hot-path regression re-introduced
       const routeStartedAt = Date.now();
       const enumerateStartedAt = args.timings?.enumerate ?? 0;
       // Delivery already proves the UUID route from fresh topology and scans the
