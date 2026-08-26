@@ -6516,27 +6516,29 @@ export class AgentEngine {
   private async pruneClosedChildReportWatches(): Promise<void> {
     if (!this.watchRegistryPath) return;
     const agents = this.registry.list();
-    const byReportPath = new Map(
-      agents.flatMap((agent) =>
-        agent.report_path
-          ? [[resolve(agent.report_path), agent] as const]
-          : [],
-      ),
-    );
+    const byReportPath = new Map<string, AgentRecord[]>();
+    for (const agent of agents) {
+      if (!agent.report_path) continue;
+      const path = resolve(agent.report_path);
+      byReportPath.set(path, [...(byReportPath.get(path) ?? []), agent]);
+    }
     await removeWatches(
       (watch) => {
         if (watch.target_kind !== "file" || watch.change !== "content") {
           return false;
         }
-        const subject = watch.subject_agent_id
-          ? (this.registry.get(watch.subject_agent_id) ??
-            this.stateMgr.readState(watch.subject_agent_id))
-          : byReportPath.get(resolve(watch.target));
-        if (!subject) return Boolean(watch.subject_agent_id);
-        return (
-          subject.user_killed === true ||
-          subject.deletion_intent ||
-          subject.parent_agent_id !== watch.owner
+        const subjects = watch.subject_agent_id
+          ? [
+              this.registry.get(watch.subject_agent_id) ??
+                this.stateMgr.readState(watch.subject_agent_id),
+            ].filter((subject): subject is AgentRecord => Boolean(subject))
+          : (byReportPath.get(resolve(watch.target)) ?? []);
+        if (subjects.length === 0) return Boolean(watch.subject_agent_id);
+        return !subjects.some(
+          (subject) =>
+            subject.user_killed !== true &&
+            !subject.deletion_intent &&
+            subject.parent_agent_id === watch.owner,
         );
       },
       { registryPath: this.watchRegistryPath },

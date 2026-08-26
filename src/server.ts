@@ -13081,6 +13081,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return `Report watch was not armed for ${coordination.report_path}: ${detail}`;
       }
     };
+    const parentReportPathReservations = new Set<string>();
 
     server.tool(
       "report_to_parent",
@@ -13504,6 +13505,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         const creation = new CreatedIdentityScope();
+        let reportPathReservationKey: string | null = null;
         try {
           // P11 finding 2: reject a relative override BEFORE anything launches.
           // The zod .refine() covers real MCP calls; this covers direct handler
@@ -13830,6 +13832,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : (args.parent_agent_id ?? callerAgent?.agent_id);
           if (effectiveParentAgentId && args.report_path) {
             const requestedReportPath = resolve(args.report_path.trim());
+            reportPathReservationKey = JSON.stringify([
+              effectiveParentAgentId,
+              requestedReportPath,
+            ]);
+            if (parentReportPathReservations.has(reportPathReservationKey)) {
+              return err(
+                new Error(
+                  `report_path ${requestedReportPath} is already reserved by another child spawn; each child requires a distinct report path`,
+                ),
+                { error_code: "REPORT_PATH_IN_USE" },
+              );
+            }
             const existingReportWatch = readWatchRegistry({
               registryPath: watchRegistryPath,
             }).watches.find(
@@ -13847,6 +13861,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 { error_code: "REPORT_PATH_IN_USE" },
               );
             }
+            parentReportPathReservations.add(reportPathReservationKey);
           }
           const effectiveRole = callerIsWorker ? "worker" : normalizedRole.role;
           const workerCallerWarning = callerIsWorker
@@ -14425,6 +14440,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(caught, surfaceGonePayload(caught));
           }
           return err(caught);
+        } finally {
+          if (reportPathReservationKey) {
+            parentReportPathReservations.delete(reportPathReservationKey);
+          }
         }
       },
     );

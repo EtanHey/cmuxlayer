@@ -835,6 +835,55 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
   });
 
+  it("retains a legacy shared-path watch when any matching direct child is live", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const target = join(inboxDir, "legacy-shared", "report.md");
+    const liveChild: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "legacy-live-child",
+      parent_agent_id: "lead-live",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: target,
+    };
+    const closedChild: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "legacy-closed-child",
+      state: "done",
+      user_killed: true,
+      parent_agent_id: "lead-closed",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: target,
+    };
+    mkdirSync(join(inboxDir, "legacy-shared"), { recursive: true });
+    writeFileSync(target, "working\n", "utf8");
+    engine.stateMgr.writeState(liveChild);
+    engine.stateMgr.writeState(closedChild);
+    engine.getRegistry().set(liveChild.agent_id, liveChild);
+    engine.getRegistry().set(closedChild.agent_id, closedChild);
+    await engine.armWatch({
+      owner: liveChild.parent_agent_id,
+      target,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    engine.scheduleClosedChildReportWatchPrune();
+    await engine.runSweep();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        owner: liveChild.parent_agent_id,
+        target,
+        state: "armed",
+      }),
+    ]);
+  });
+
   it("preserves a prune request scheduled while the previous prune is in flight", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
@@ -1000,7 +1049,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ],
       parentUuid,
     );
-    exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+    exec = vi.fn().mockImplementation((cmd, args: string[]) => {
       if (args.includes("new-split")) {
         return {
           stdout: JSON.stringify({
@@ -1457,5 +1506,24 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toHaveLength(1);
+
+    const concurrentOverride = join(
+      inboxDir,
+      "collab",
+      "concurrent-shared-report.md",
+    );
+    const beforeConcurrent = splitCalls();
+    const concurrent = await Promise.all([
+      spawn({
+        parent_agent_id: parent.agent_id,
+        report_path: concurrentOverride,
+      }),
+      spawn({
+        parent_agent_id: parent.agent_id,
+        report_path: concurrentOverride,
+      }),
+    ]);
+    expect(splitCalls() - beforeConcurrent).toBe(2);
+    expect(concurrent.map((result) => result.ok).sort()).toEqual([false, true]);
   });
 });
