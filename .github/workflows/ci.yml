@@ -1,18 +1,104 @@
 name: CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      baseline_source_run_id:
+        description: Optional same-branch perf-budget run to rebase runner measurements
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
+  perf-budget:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: perf-budget-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - run: rm -f package-lock.json
+      - run: bun install
+      - name: Run daemon performance budget
+        run: bun run bench:daemon:check
+
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: daemon-perf-budget
+          path: docs.local/scratch/perf-budget/
+
+      - name: Create or update performance comment
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- cmuxlayer-perf-budget -->';
+            const reportPath = 'docs.local/scratch/perf-budget/comment.md';
+            const body = fs.existsSync(reportPath)
+              ? fs.readFileSync(reportPath, 'utf8')
+              : `${marker}\n## Daemon performance budget: ERROR\n\nThe benchmark did not produce a report. See the job log.`;
+            const pull = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            if (pull.data.head.sha !== context.payload.pull_request.head.sha) {
+              core.notice(`Skipping stale performance comment for ${context.payload.pull_request.head.sha}; current head is ${pull.data.head.sha}`);
+              return;
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       # package-lock.json is macOS-resolved; remove so bun resolves platform-correct optional deps (e.g. rollup linux binary)
       - run: rm -f package-lock.json
@@ -24,15 +110,18 @@ jobs:
   # repoGolem launcher registry. Runners have none by default, so the "absent"
   # leg is a genuine fresh-install environment rather than a stubbed one.
   launcher-parity:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         launcher_registry: [absent, present]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - run: rm -f package-lock.json
       - run: bun install
@@ -54,14 +143,17 @@ jobs:
       - run: bun run test:parity
 
   build-site:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: site
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
@@ -69,3 +161,54 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+  perf-baseline-refresh:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CMUXLAYER_BENCH_RUNNER_CLASS: github-actions-ubuntu-latest
+      GH_TOKEN: ${{ github.token }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - run: rm -f package-lock.json
+      - run: bun install
+
+      - name: Import verified runner evidence
+        if: inputs.baseline_source_run_id != ''
+        env:
+          SOURCE_RUN_ID: ${{ inputs.baseline_source_run_id }}
+        run: |
+          source_run="$(gh run view "$SOURCE_RUN_ID" --json event,headSha,name)"
+          source_sha="$(jq -r .headSha <<<"$source_run")"
+          test "$(jq -r .event <<<"$source_run")" = pull_request
+          test "$(jq -r .name <<<"$source_run")" = CI
+          git merge-base --is-ancestor "$source_sha" HEAD
+          unexpected_changes="$(git diff --name-only "$source_sha" HEAD | rg -v '^(\.github/workflows/ci\.yml|benchmarks/daemon-baseline\.json|docs/performance-budgets\.md|scripts/(check-daemon-benchmark|refresh-daemon-baseline)\.mjs|tests/perf-budget\.test\.ts)$' || true)"
+          test -z "$unexpected_changes"
+          mkdir -p docs.local/scratch/imported-perf-budget
+          gh run download "$SOURCE_RUN_ID" -n daemon-perf-budget -D docs.local/scratch/imported-perf-budget
+          result_path="$(find docs.local/scratch/imported-perf-budget -name result.json -print -quit)"
+          test -n "$result_path"
+          echo "CMUXLAYER_BENCH_IMPORT_RESULT_PATH=$result_path" >> "$GITHUB_ENV"
+          echo "CMUXLAYER_BENCH_SOURCE_RUN_ID=$SOURCE_RUN_ID" >> "$GITHUB_ENV"
+          echo "CMUXLAYER_BENCH_SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
+      - name: Produce canonical CI-runner baseline
+        run: bun run bench:daemon:refresh
+
+      - name: Upload candidate baseline
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: daemon-perf-baseline-${{ github.run_id }}
+          path: |
+            benchmarks/daemon-baseline.json
+            docs.local/scratch/perf-budget/result.json
+            docs.local/scratch/perf-budget/refresh-samples.json

@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "source": {
+    "git_sha": "545caf5adf10af6231256b6038308af58e82d4b4",
+    "measured_at": "2026-08-26T04:14:44.635Z",
+    "runner_class": "github-actions-ubuntu-latest",
+    "workflow_run_id": 32928658291
+  },
+  "regression_ratio": 1.25,
+  "sanity_caps_ms": {
+    "first_send_after_spawn": 10000,
+    "cli_send": 10000
+  },
+  "replay": {
+    "clients": 8,
+    "rounds": 12,
+    "operations": [
+      "list_surfaces",
+      "read_screen",
+      "first_send_after_spawn"
+    ],
+    "bytes": {
+      "list_surfaces": 142,
+      "read_screen": 161,
+      "first_send_after_spawn": 216
+    },
+    "request_sha256": {
+      "list_surfaces": "29b9c66db4de170a41fdd8ad608f356201f747970e6f7fa74ae605f360f85a33",
+      "read_screen": "0f6c57ad85b668c2ae73f651d9d44c41525b8f2fba3d2f7783e6acb592dc2137",
+      "first_send_after_spawn": "84b72f5cc76154d091394b15154b3dcc6aefd7e80d6027a2666c71c83a6194a6"
+    }
+  },
+  "measurements": {
+    "list_surfaces": {
+      "p50_ms": 680.24,
+      "p95_ms": 964.74
+    },
+    "read_screen": {
+      "p50_ms": 159.79,
+      "p95_ms": 386.21
+    },
+    "first_send_after_spawn": {
+      "p50_ms": 2082.09,
+      "p95_ms": 2082.09,
+      "lock_hold_ms": 640
+    },
+    "cli_send_ms": 1210.45
+  },
+  "refresh_attestation": {
+    "algorithm": "sha256",
+    "content_sha256": "7d3c4687d222eb6f00d2e0a63e6eebfe46f1d2e35be424cc7d5c4245e359b6a1"
+  }
+}
