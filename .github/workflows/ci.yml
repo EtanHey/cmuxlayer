@@ -107,6 +107,8 @@ jobs:
       - run: bun install
       - run: bun run typecheck
       - run: bun run test
+      - name: Check bounded event-log RSS
+        run: bun run check:event-log-rss
 
   # Issue #392: spawn/resume must behave equivalently with AND without a
   # repoGolem launcher registry. Runners have none by default, so the "absent"

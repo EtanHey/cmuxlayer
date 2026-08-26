@@ -66,6 +66,7 @@
     "bench:daemon:check": "bun run build && node scripts/check-daemon-benchmark.mjs",
     "bench:daemon:check:fast": "CMUXLAYER_BENCH_ROUNDS=3 CMUXLAYER_BENCH_LOCAL_GATE=1 bun run bench:daemon:check",
     "bench:daemon:refresh": "bun run build && node scripts/refresh-daemon-baseline.mjs",
+    "check:event-log-rss": "bun run build && node --expose-gc scripts/event-log-bounded-rss-check.mjs",
     "test:watch": "vitest",
     "live:harness": "node scripts/run-live-agent-harness.mjs",
     "qa:video": "node scripts/qa-video-harness.mjs",

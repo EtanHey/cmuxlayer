@@ -35,6 +35,19 @@ describe("pre-PR script ladder", () => {
     );
   });
 
+  it("runs the bounded event-log RSS guard in CI", () => {
+    const scripts = packageScripts();
+    const workflow = readFileSync(
+      join(repoRoot, ".github", "workflows", "ci.yml"),
+      "utf8",
+    );
+
+    expect(scripts["check:event-log-rss"]).toBe(
+      "bun run build && node --expose-gc scripts/event-log-bounded-rss-check.mjs",
+    );
+    expect(workflow).toContain("bun run check:event-log-rss");
+  });
+
   it("includes the production-shaped replay coverage in the deterministic harness tier", () => {
     const scripts = packageScripts();
 
