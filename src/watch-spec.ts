@@ -577,12 +577,11 @@ export async function armWatch(
   }
   const source: WatchObservedSource =
     checked.targetKind === "file" ? "process" : "screen";
+  const subjectAgentId = cleanString(spec.subject_agent_id);
   const record: WatchRecord = {
     watch_id: randomUUID(),
     owner: checked.owner,
-    ...(cleanString(spec.subject_agent_id)
-      ? { subject_agent_id: cleanString(spec.subject_agent_id)! }
-      : {}),
+    ...(subjectAgentId ? { subject_agent_id: subjectAgentId } : {}),
     target,
     ...(checked.predicate ? { predicate: checked.predicate } : {}),
     ...(checked.marker ? { marker: checked.marker } : {}),
@@ -606,7 +605,7 @@ export async function armWatch(
   return record;
 }
 
-export async function removeWatches(
+export function removeWatches(
   predicate: (watch: WatchRecord) => boolean,
   opts: WatchRegistryOptions = {},
 ): Promise<number> {
@@ -624,13 +623,13 @@ export async function removeWatches(
   });
 }
 
-export async function scopeWatchToSubject(
+export function scopeWatchToSubject(
   watchId: string,
   subjectAgentId: string,
   opts: WatchRegistryOptions = {},
 ): Promise<boolean> {
   const subject = cleanString(subjectAgentId);
-  if (!subject) return false;
+  if (!subject) return Promise.resolve(false);
   const path = registryPathFor(opts);
   return withWriteLock(path, () => {
     const registry = readRegistryState(path);

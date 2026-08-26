@@ -1659,6 +1659,7 @@ export class AgentEngine {
   private watchRegistryNow?: () => number;
   private watchNotify: WatchNotify;
   private watchSweepInFlight = false;
+  private childReportWatchPrunePending = false;
   /** Best-effort close-forensics ingest; null when disabled. */
   private closeForensicsRunner:
     | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
@@ -1829,6 +1830,7 @@ export class AgentEngine {
     this.watchRegistryPath = opts?.watchRegistryPath;
     this.watchRegistryNow = opts?.watchRegistryNow;
     this.watchNotify = opts?.watchNotify ?? (async () => {});
+    this.childReportWatchPrunePending = Boolean(this.watchRegistryPath);
     // Default DISABLED: bare construction (tests, libraries) must never read the
     // real `~/.cmuxterm/events.jsonl`. Production entrypoints inject the real
     // runner (see app-server-runtime / server.ts createServer). `null` keeps it
@@ -6467,7 +6469,7 @@ export class AgentEngine {
         newlySurfacelessAgentIds.add(finalized.agent_id);
       }
     }
-    await this.pruneClosedChildReportWatches();
+    await this.retryClosedChildReportWatchPrune();
     const discovered = await discovery.scan(true);
     await this.registry.listMerged(discovery, {
       force: true,
@@ -6524,7 +6526,8 @@ export class AgentEngine {
     await removeWatches(
       (watch) => {
         const subject = watch.subject_agent_id
-          ? this.registry.get(watch.subject_agent_id)
+          ? (this.registry.get(watch.subject_agent_id) ??
+            this.stateMgr.readState(watch.subject_agent_id))
           : byReportPath.get(resolve(watch.target));
         if (!subject) return Boolean(watch.subject_agent_id);
         return (
@@ -6535,6 +6538,24 @@ export class AgentEngine {
       },
       { registryPath: this.watchRegistryPath },
     );
+  }
+
+  scheduleClosedChildReportWatchPrune(): void {
+    if (this.watchRegistryPath) this.childReportWatchPrunePending = true;
+  }
+
+  private async retryClosedChildReportWatchPrune(): Promise<void> {
+    if (!this.childReportWatchPrunePending) return;
+    try {
+      await this.pruneClosedChildReportWatches();
+      this.childReportWatchPrunePending = false;
+    } catch (error) {
+      this.sweepDebugLog(
+        `[cmuxlayer] child report watch prune deferred: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private async purgeStartupTerminalAgents(
@@ -7724,7 +7745,10 @@ export class AgentEngine {
       // before normal terminal cleanup can act on a closed pane.
       await time("transcript_ms", () => this.retryDeferredTranscriptCaptures());
       if (this.shouldYieldSweep()) return;
-      await time("watches_ms", () => this.sweepWatchesBestEffort());
+      await time("watches_ms", async () => {
+        await this.retryClosedChildReportWatchPrune();
+        await this.sweepWatchesBestEffort();
+      });
       if (this.shouldYieldSweep()) return;
       if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
         await time("terminal_purge_ms", () =>

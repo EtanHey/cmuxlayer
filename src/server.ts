@@ -4120,6 +4120,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     model?: string;
   }) => Promise<void> = async () => {};
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
+  let lifecycleScheduleChildReportWatchPrune: (() => void) | null = null;
   let lifecycleRefreshManagedMetadata:
     ((agentId?: string) => Promise<void>) | null = null;
   let lifecycleHealthEngine: AgentEngine | null = null;
@@ -10883,17 +10884,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               WARNING: remedy,
             });
           }
-          await removeWatches(
+          lifecycleScheduleChildReportWatchPrune?.();
+          void removeWatches(
             (watch) => watch.subject_agent_id === args.agent_id,
             {
               registryPath:
                 opts?.watchRegistryPath ??
                 join(context.stateDir, "watch-specs.json"),
             },
-          );
+          ).catch((error) => {
+            console.error(
+              `[cmuxlayer] close_surface deferred child watch cleanup for ${args.agent_id}:`,
+              error instanceof Error ? error.message : String(error),
+            );
+          });
+          const watchCleanup = {
+            watch_cleanup: lifecycleScheduleChildReportWatchPrune
+              ? ("scheduled" as const)
+              : ("best_effort" as const),
+          };
           if (!boundSurface) {
             const data = {
               ...stopContent,
+              ...watchCleanup,
               scope: "agent",
               agent_stopped: true,
               surface_closed: false,
@@ -10926,6 +10939,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
               {
                 ...stopContent,
+                ...watchCleanup,
                 scope: "agent",
                 agent_stopped: true,
                 surface: boundSurface,
@@ -10937,6 +10951,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (boundSurfaceAfterStop === null) {
             const data = {
               ...stopContent,
+              ...watchCleanup,
               scope: "agent",
               agent_stopped: true,
               surface: boundSurface,
@@ -10978,6 +10993,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
               {
                 ...stopContent,
+                ...watchCleanup,
                 scope: "agent",
                 agent_stopped: true,
                 surface: boundSurface,
@@ -10991,6 +11007,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const surfaceClosed = closeContent.surface_closed === true;
           const data = {
             ...stopContent,
+            ...watchCleanup,
             scope: "agent",
             agent_stopped: true,
             surface: boundSurface,
@@ -12214,14 +12231,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
-            let externalDelivered = true;
-            if (event.reason !== "predicate_matched" && opts?.watchNotify) {
-              try {
-                externalDelivered = (await opts.watchNotify(event)) !== false;
-              } catch {
-                externalDelivered = false;
-              }
-            }
             if (event.subject_agent_id) {
               const subject =
                 registry.get(event.subject_agent_id) ??
@@ -12233,6 +12242,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 subject.deletion_intent
               ) {
                 return true;
+              }
+            }
+            let externalDelivered = true;
+            if (event.reason !== "predicate_matched" && opts?.watchNotify) {
+              try {
+                externalDelivered = (await opts.watchNotify(event)) !== false;
+              } catch {
+                externalDelivered = false;
               }
             }
             const owner =
@@ -12360,6 +12377,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     context.lifecycleSweepEngine = engine;
     lifecycleHealthEngine = engine;
+    lifecycleScheduleChildReportWatchPrune = () =>
+      engine.scheduleClosedChildReportWatchPrune();
     // F1: closure, harvestability and the health report all resolve state
     // through the same live probe the caller/delivery paths use.
     engine.setLiveStateResolver(liveAgentStateProbe.current);
