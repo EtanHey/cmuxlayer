@@ -6538,6 +6538,7 @@ export class AgentEngine {
           (subject) =>
             subject.user_killed !== true &&
             !subject.deletion_intent &&
+            !TERMINAL_STATES.has(subject.state) &&
             subject.parent_agent_id === watch.owner,
         );
       },

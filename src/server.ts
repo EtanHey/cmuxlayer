@@ -13122,6 +13122,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           message: `report_path ${reportPath} is already reserved by another child spawn; each child requires a distinct report path`,
         };
       }
+      const existingLiveChild = stateMgr.listStates().find(
+        (candidate) =>
+          candidate.agent_id !== childAgentId &&
+          candidate.parent_agent_id === parentAgentId &&
+          candidate.report_path !== null &&
+          candidate.report_path !== undefined &&
+          resolve(candidate.report_path) === reportPath &&
+          candidate.user_killed !== true &&
+          !candidate.deletion_intent &&
+          !TERMINAL_AGENT_STATES.has(candidate.state),
+      );
+      if (existingLiveChild) {
+        return {
+          ok: false,
+          message: `report_path ${reportPath} is already assigned to live child ${existingLiveChild.agent_id}; each child requires a distinct report path`,
+        };
+      }
       const existingReportWatch = readWatchRegistry({
         registryPath: watchRegistryPath,
       }).watches.find(

@@ -471,7 +471,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       parent_agent_id: parent.agent_id,
       spawn_depth: 1,
       role: "worker",
-      user_killed: true,
+      // stopAgent is a no-op for an already-terminal child, so deferred
+      // cleanup must not rely on user_killed being set by the stop path.
+      user_killed: false,
       report_path: reportPath,
       task_summary: "closed child fixture",
     };
@@ -870,6 +872,40 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         state: "armed",
       }),
     ]);
+  });
+
+  it("prunes a terminal child's report watch when stop left user_killed unset", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const target = join(inboxDir, "terminal-child-without-stop-flag", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "terminal-child-without-stop-flag",
+      state: "done",
+      user_killed: false,
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: target,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(target, "done\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    engine.scheduleClosedChildReportWatchPrune();
+    await engine.runSweep();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
   });
 
   it("leaves non-report subject watches alone when pruning a closed child", async () => {
@@ -1629,20 +1665,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     };
     const stateMgr = new StateManager(STATE_DIR);
     stateMgr.writeState(parent);
-    stateMgr.writeState(existingChild);
     const override = join(inboxDir, "collab", "shared-report.md");
+    stateMgr.writeState({ ...existingChild, report_path: override });
     mkdirSync(join(inboxDir, "collab"), { recursive: true });
     writeFileSync(override, "", "utf8");
-    await armWatch(
-      {
-        owner: parent.agent_id,
-        subject_agent_id: existingChild.agent_id,
-        target: override,
-        change: "content",
-        deadline: Number.MAX_SAFE_INTEGER,
-      },
-      { registryPath: watchRegistryPath },
-    );
     const splitCalls = () =>
       (exec as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([, args]: [string, string[]]) => args.includes("new-split"),
@@ -1659,7 +1685,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(splitCalls()).toBe(before);
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
-    ).toHaveLength(1);
+    ).toHaveLength(0);
 
     const concurrentOverride = join(
       inboxDir,
