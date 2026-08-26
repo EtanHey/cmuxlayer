@@ -1,15 +1,19 @@
 # Daemon performance budgets
 
-`bun run bench:daemon:check` builds cmuxlayer, runs the production-shaped 8-client x 12-round daemon replay, and compares it with `benchmarks/daemon-baseline.json`. CI runs this command on every pull request and every push to `main`. `bun run pre-pr` runs the same gate with three rounds so regressions are visible before push.
+`bun run bench:daemon:check` builds cmuxlayer, runs the production-shaped 8-client x 12-round daemon replay, and compares it with `benchmarks/daemon-baseline.json`. CI runs this command on every pull request and every push to `main`. `bun run pre-pr` uses the same requests with three rounds and retains the local 250 ms `read_screen`, 2,000 ms first-send, and 4,000 ms CLI gates so regressions are visible before push.
 
-The baseline was measured from v0.4.63 after PR #550. Two exact-head CI runs showed that GitHub's shared runner was 4.7-6.6x slower for `list_surfaces` and 2.5-2.6x slower for `read_screen` p95 than the local main measurement. The frozen ceilings therefore use 8x and 3.2x margins respectively, leaving about 22-24% headroom over the observed runner maxima. Actual time inside the first-send surface lock uses a 3.2x ceiling; lock-acquisition wait is reported separately and is not mislabeled as hold time. The first send after spawn remains an absolute 2,000 ms socket ceiling, the CLI ceiling remains 4,000 ms, and daemon `read_screen` p50 remains at most 250 ms.
+The committed baseline was measured by GitHub Actions on `ubuntu-latest` in workflow run `32923962535`. The checker derives every runner ceiling at check time from its committed measurement x `1.25`; the JSON has no separately editable `ceilings` block. First-send and CLI also have 10,000 ms far sanity caps. Actual time inside the first-send surface lock is compared separately from lock-acquisition wait.
+
+The replay records both request byte counts and SHA-256 identities of canonical `{name, arguments}` JSON. The checker rejects request drift even when the serialized length is unchanged. It also validates a refresh content hash over the baseline: editing measurements or replay data without a refresh makes the consistency assertion fail before the benchmark can pass.
 
 ## Refresh after a legitimate speedup
 
-Run this script from the commit whose performance should become the new floor:
+Dispatch the `CI` workflow on the commit whose performance should become the new floor:
 
 ```bash
-bun run bench:daemon:refresh
+gh workflow run CI --ref <branch-or-sha>
 ```
 
-The script refuses a benchmark whose intrinsic gates are RED. It updates measurements and can only lower runner-sensitive ceilings; it never raises the 2,000 ms first-send, 4,000 ms CLI, or 250 ms read-screen p50 hard ceilings. Commit the changed JSON with the performance change and repeat the deliberate RED proof in CI. Do not refresh merely to make a regression green.
+The workflow-dispatch job forces the canonical 8-client x 12-round replay, refuses changed request identities or an over-budget lock hold, writes the source commit, workflow-run ID, and refresh content hash, and uploads the candidate baseline plus raw result. Download and inspect that artifact, then commit its `benchmarks/daemon-baseline.json`. The refresh command refuses to run outside this GitHub Actions job.
+
+Do not hand-edit or refresh a baseline merely to make a regression green. A code-regression proof must turn `perf-budget` RED; a baseline-only measurement edit must fail the consistency assertion.

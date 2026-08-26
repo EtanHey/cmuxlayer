@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -17,30 +18,79 @@ const defaultArtifactDir = join(
   "scratch",
   "perf-budget",
 );
+export const CANONICAL_CLIENTS = 8;
+export const CANONICAL_ROUNDS = 12;
+export const CANONICAL_OPERATIONS = [
+  "list_surfaces",
+  "read_screen",
+  "first_send_after_spawn",
+];
+const REQUIRED_REGRESSION_RATIO = 1.25;
 
 function finite(value, path) {
   if (!Number.isFinite(value))
     throw new Error(`baseline ${path} must be a number`);
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function baselineContentSha256(baseline) {
+  const { refresh_attestation: _attestation, ...content } = baseline;
+  return createHash("sha256").update(canonicalJson(content)).digest("hex");
+}
+
 export function validateBaseline(baseline) {
-  if (baseline?.schema_version !== 1)
-    throw new Error("baseline schema_version must be 1");
+  if (baseline?.schema_version !== 2)
+    throw new Error("baseline schema_version must be 2");
   if (!/^[0-9a-f]{40}$/.test(baseline.source?.git_sha ?? "")) {
     throw new Error("baseline source.git_sha must be a full 40-hex commit");
   }
+  if (baseline.source?.runner_class !== "github-actions-ubuntu-latest") {
+    throw new Error(
+      "baseline source.runner_class must be github-actions-ubuntu-latest",
+    );
+  }
+  if (
+    !Number.isSafeInteger(baseline.source?.workflow_run_id) ||
+    baseline.source.workflow_run_id <= 0
+  ) {
+    throw new Error("baseline source.workflow_run_id must be a positive integer");
+  }
+  if (baseline.regression_ratio !== REQUIRED_REGRESSION_RATIO) {
+    throw new Error("baseline regression_ratio must remain 1.25");
+  }
   finite(
-    baseline.runner_margins?.list_surfaces,
-    "runner_margins.list_surfaces",
+    baseline.sanity_caps_ms?.first_send_after_spawn,
+    "sanity_caps_ms.first_send_after_spawn",
   );
-  finite(baseline.runner_margins?.read_screen, "runner_margins.read_screen");
+  finite(baseline.sanity_caps_ms?.cli_send, "sanity_caps_ms.cli_send");
   finite(baseline.replay?.clients, "replay.clients");
   finite(baseline.replay?.rounds, "replay.rounds");
   if (!Array.isArray(baseline.replay?.operations)) {
     throw new Error("baseline replay.operations is required");
   }
+  if (
+    baseline.replay.clients !== CANONICAL_CLIENTS ||
+    baseline.replay.rounds !== CANONICAL_ROUNDS ||
+    JSON.stringify(baseline.replay.operations) !==
+      JSON.stringify(CANONICAL_OPERATIONS)
+  ) {
+    throw new Error("baseline must use the canonical 8x12 replay");
+  }
   for (const operation of baseline.replay.operations) {
     finite(baseline.replay?.bytes?.[operation], `replay.bytes.${operation}`);
+    if (!/^[0-9a-f]{64}$/.test(baseline.replay?.request_sha256?.[operation])) {
+      throw new Error(`baseline replay.request_sha256.${operation} is required`);
+    }
     finite(
       baseline.measurements?.[operation]?.p50_ms,
       `measurements.${operation}.p50_ms`,
@@ -49,38 +99,29 @@ export function validateBaseline(baseline) {
       baseline.measurements?.[operation]?.p95_ms,
       `measurements.${operation}.p95_ms`,
     );
-    finite(
-      baseline.ceilings?.[operation]?.p50_ms,
-      `ceilings.${operation}.p50_ms`,
-    );
-    finite(
-      baseline.ceilings?.[operation]?.p95_ms,
-      `ceilings.${operation}.p95_ms`,
-    );
   }
   finite(
     baseline.measurements?.first_send_after_spawn?.lock_hold_ms,
     "measurements.first_send_after_spawn.lock_hold_ms",
   );
   finite(baseline.measurements?.cli_send_ms, "measurements.cli_send_ms");
-  finite(
-    baseline.ceilings?.first_send_after_spawn?.lock_hold_ms,
-    "ceilings.first_send_after_spawn.lock_hold_ms",
-  );
-  finite(baseline.ceilings?.cli_send_ms, "ceilings.cli_send_ms");
-  if (
-    baseline.ceilings.first_send_after_spawn.p50_ms > 2_000 ||
-    baseline.ceilings.first_send_after_spawn.p95_ms > 2_000
-  ) {
-    throw new Error("first-send ceilings must remain at or below 2,000ms");
+  if (baseline.refresh_attestation?.algorithm !== "sha256") {
+    throw new Error("baseline refresh_attestation.algorithm must be sha256");
   }
-  if (baseline.ceilings.cli_send_ms > 4_000) {
-    throw new Error("CLI send ceiling must remain at or below 4,000ms");
-  }
-  if (baseline.ceilings.read_screen.p50_ms > 250) {
-    throw new Error("read_screen p50 ceiling must remain at or below 250ms");
+  const expectedAttestation = baselineContentSha256(baseline);
+  if (baseline.refresh_attestation?.content_sha256 !== expectedAttestation) {
+    throw new Error(
+      "baseline consistency assertion failed: run the documented CI refresh command",
+    );
   }
   return baseline;
+}
+
+function ceiling(baselineValue, ratio, sanityCap = Infinity) {
+  return Math.min(
+    Math.round(baselineValue * ratio * 100) / 100,
+    sanityCap,
+  );
 }
 
 function currentMetrics(result) {
@@ -124,6 +165,7 @@ export function compareBenchmark(
 ) {
   validateBaseline(baseline);
   const current = currentMetrics(result);
+  const ratio = baseline.regression_ratio;
   const rows = [];
   for (const operation of baseline.replay.operations) {
     for (const metric of ["p50_ms", "p95_ms"]) {
@@ -133,7 +175,13 @@ export function compareBenchmark(
           metric,
           baseline.measurements[operation][metric],
           current[operation]?.[metric],
-          baseline.ceilings[operation][metric],
+          ceiling(
+            baseline.measurements[operation][metric],
+            ratio,
+            operation === "first_send_after_spawn"
+              ? baseline.sanity_caps_ms.first_send_after_spawn
+              : Infinity,
+          ),
         ),
       );
     }
@@ -144,14 +192,21 @@ export function compareBenchmark(
       "lock_hold_ms",
       baseline.measurements.first_send_after_spawn.lock_hold_ms,
       current.first_send_after_spawn.lock_hold_ms,
-      baseline.ceilings.first_send_after_spawn.lock_hold_ms,
+      ceiling(
+        baseline.measurements.first_send_after_spawn.lock_hold_ms,
+        ratio,
+      ),
     ),
     row(
       "first_send_after_spawn",
       "cli_send_ms",
       baseline.measurements.cli_send_ms,
       current.cli_send_ms,
-      baseline.ceilings.cli_send_ms,
+      ceiling(
+        baseline.measurements.cli_send_ms,
+        ratio,
+        baseline.sanity_caps_ms.cli_send,
+      ),
     ),
   );
   for (const operation of baseline.replay.operations) {
@@ -189,6 +244,16 @@ export function compareBenchmark(
   ) {
     failures.push("replay operations do not match the committed workload");
   }
+  for (const operation of baseline.replay.operations) {
+    if (
+      result?.replay?.request_sha256?.[operation] !==
+      baseline.replay.request_sha256[operation]
+    ) {
+      failures.push(
+        `${operation} request_sha256 does not match the committed workload`,
+      );
+    }
+  }
   if (result?.verdict !== "GREEN")
     failures.push("benchmark intrinsic gates returned RED");
   return { passed: failures.length === 0, rows, failures };
@@ -203,7 +268,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "<!-- cmuxlayer-perf-budget -->",
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
-    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner margins: list_surfaces ${baseline.runner_margins.list_surfaces}x; read_screen ${baseline.runner_margins.read_screen}x. First-send <=2,000 ms socket and CLI send <=4,000 ms remain hard ceilings.`,
+    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. CI ceilings derive from the committed ${baseline.source.runner_class} measurements; first-send and CLI retain 10,000 ms sanity caps.`,
     "",
     "| Operation | Metric | Baseline | Current | Ceiling | Status |",
     "|---|---:|---:|---:|---:|:---:|",
@@ -234,17 +299,25 @@ function run(command, args, options = {}) {
   });
 }
 
-export async function runBenchmark({ artifactDir = defaultArtifactDir } = {}) {
+export async function runBenchmark({
+  artifactDir = defaultArtifactDir,
+  benchmarkScript = join(repoRoot, "scripts", "bench-daemon.mjs"),
+  benchmarkEnv = {},
+} = {}) {
   const resolvedArtifactDir = resolve(artifactDir);
   const resultPath = join(resolvedArtifactDir, "result.json");
+  const invocationNonce = randomUUID();
   await mkdir(resolvedArtifactDir, { recursive: true });
+  await rm(resultPath, { force: true });
   const code = await run(
     process.execPath,
-    [join(repoRoot, "scripts", "bench-daemon.mjs")],
+    [benchmarkScript],
     {
       cwd: repoRoot,
       env: {
         ...process.env,
+        ...benchmarkEnv,
+        CMUXLAYER_BENCH_INVOCATION_NONCE: invocationNonce,
         CMUXLAYER_BENCH_JSON_PATH: resultPath,
         CMUXLAYER_BENCH_SCRATCH: join(resolvedArtifactDir, "scratch"),
       },
@@ -255,6 +328,9 @@ export async function runBenchmark({ artifactDir = defaultArtifactDir } = {}) {
     result = JSON.parse(await readFile(resultPath, "utf8"));
   } catch (error) {
     throw new Error(`benchmark did not write valid JSON (${error.message})`);
+  }
+  if (result.invocation_nonce !== invocationNonce) {
+    throw new Error("benchmark result failed this-invocation attestation");
   }
   return { code, result, resultPath, artifactDir: resolvedArtifactDir };
 }

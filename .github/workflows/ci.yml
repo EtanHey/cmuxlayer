@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -11,6 +12,7 @@ permissions:
 
 jobs:
   perf-budget:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     concurrency:
       group: perf-budget-${{ github.event.pull_request.number || github.ref }}
@@ -84,6 +86,7 @@ jobs:
             }
 
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -102,6 +105,7 @@ jobs:
   # repoGolem launcher registry. Runners have none by default, so the "absent"
   # leg is a genuine fresh-install environment rather than a stubbed one.
   launcher-parity:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -134,6 +138,7 @@ jobs:
       - run: bun run test:parity
 
   build-site:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -151,3 +156,28 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+  perf-baseline-refresh:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CMUXLAYER_BENCH_RUNNER_CLASS: github-actions-ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - run: rm -f package-lock.json
+      - run: bun install
+      - name: Produce canonical CI-runner baseline
+        run: bun run bench:daemon:refresh
+
+      - name: Upload candidate baseline
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: daemon-perf-baseline-${{ github.run_id }}
+          path: |
+            benchmarks/daemon-baseline.json
+            docs.local/scratch/perf-budget/result.json

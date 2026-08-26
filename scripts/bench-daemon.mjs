@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import net from "node:net";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 
@@ -24,6 +25,7 @@ const DEFAULT_ROUNDS = 12;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
 const READ_SCREEN_P50_BUDGET_MS = 250;
+const LOCAL_HARD_GATES = process.env.CMUXLAYER_BENCH_LOCAL_GATE === "1";
 let JsonRpcLineBuffer;
 
 function parsePositiveInt(raw, fallback) {
@@ -71,6 +73,24 @@ function requestBytes(name, args) {
       params: { name, arguments: args },
     }),
   );
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalize(value[key])]),
+    );
+  }
+  return value;
+}
+
+function requestSha256(name, args) {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalize({ name, arguments: args })))
+    .digest("hex");
 }
 
 async function execCapture(command, args) {
@@ -427,12 +447,14 @@ async function measureLatency(clients) {
   return {
     list_surfaces: {
       request_bytes: requestBytes("list_surfaces", listArgs),
+      request_sha256: requestSha256("list_surfaces", listArgs),
       p50_ms: round(percentile(listSamples, 50)),
       p95_ms: round(percentile(listSamples, 95)),
       p99_ms: round(percentile(listSamples, 99)),
     },
     read_screen: {
       request_bytes: requestBytes("read_screen", readArgs),
+      request_sha256: requestSha256("read_screen", readArgs),
       p50_ms: round(percentile(readSamples, 50)),
       p95_ms: round(percentile(readSamples, 95)),
       p99_ms: round(percentile(readSamples, 99)),
@@ -515,12 +537,16 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
     throw new Error(`spawn_agent omitted identity: ${compact(spawnResult)}`);
   }
 
-  const measureSend = async (args) => {
+  const measureSend = async (args, { normalizeAgentId = false } = {}) => {
     const startedAt = nowMs();
     const receipt = toolData(await client.callTool("send_to", args), "send_to");
     return {
       elapsed_ms: round(nowMs() - startedAt),
       request_bytes: requestBytes("send_to", args),
+      request_sha256: requestSha256("send_to", {
+        ...args,
+        ...(normalizeAgentId ? { agent_id: "$SPAWNED_AGENT_ID" } : {}),
+      }),
       lock_hold_ms: receipt.timings_ms?.lock_hold ?? null,
       receipt,
     };
@@ -531,21 +557,27 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
   const holdToken = `sweep-daemon-owner-${Date.now()}`;
   await armSweepHold(sweepHoldState, holdToken);
   await waitForSweepHoldState(sweepHoldState, holdToken, "held");
-  const first = await measureSend({
-    agent_id: spawnResult.agent_id,
-    text: "Read and follow docs.local/scratch/run5r3/bench-first-send.md",
-    press_enter: true,
-  });
+  const first = await measureSend(
+    {
+      agent_id: spawnResult.agent_id,
+      text: "Read and follow docs.local/scratch/run5r3/bench-first-send.md",
+      press_enter: true,
+    },
+    { normalizeAgentId: true },
+  );
   await writeFile(
     sweepHoldState,
     JSON.stringify({ token: holdToken, state: "release" }),
   );
   await waitForSweepHoldState(sweepHoldState, holdToken, "complete");
-  const second = await measureSend({
-    agent_id: spawnResult.agent_id,
-    text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
-    press_enter: true,
-  });
+  const second = await measureSend(
+    {
+      agent_id: spawnResult.agent_id,
+      text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
+      press_enter: true,
+    },
+    { normalizeAgentId: true },
+  );
   const surface = await measureSend({
     mode: "surface",
     surface: spawnResult.surface_id,
@@ -715,17 +747,23 @@ async function main() {
         "list_surfaces",
         "p99_ms",
       ),
-      read_screen_p50_within_250ms:
-        daemonLatency.read_screen.p50_ms <= READ_SCREEN_P50_BUDGET_MS,
       read_screen_p99_no_regression: latencyGate(
         baselineLatency,
         daemonLatency,
         "read_screen",
         "p99_ms",
       ),
-      first_send_after_spawn_within_2s:
-        firstSendAfterSpawn.first.elapsed_ms <= 2_000,
-      cli_send_within_4s: firstSendAfterSpawn.surface.elapsed_ms <= 4_000,
+      ...(LOCAL_HARD_GATES
+        ? {
+            local_read_screen_p50_within_250ms:
+              daemonLatency.read_screen.p50_ms <=
+              READ_SCREEN_P50_BUDGET_MS,
+            local_first_send_after_spawn_within_2s:
+              firstSendAfterSpawn.first.elapsed_ms <= 2_000,
+            local_cli_send_within_4s:
+              firstSendAfterSpawn.surface.elapsed_ms <= 4_000,
+          }
+        : {}),
       surface_receipt_is_waitable:
         typeof firstSendAfterSpawn.surface.receipt.delivery_id === "string" &&
         firstSendAfterSpawn.surface.wait_for.delivery_id ===
@@ -734,6 +772,7 @@ async function main() {
     };
     const green = Object.values(gates).every(Boolean);
     const result = {
+      invocation_nonce: process.env.CMUXLAYER_BENCH_INVOCATION_NONCE ?? null,
       verdict: green ? "GREEN" : "RED",
       clients: clientCount,
       rounds,
@@ -745,6 +784,12 @@ async function main() {
           list_surfaces: daemonLatency.list_surfaces.request_bytes,
           read_screen: daemonLatency.read_screen.request_bytes,
           first_send_after_spawn: firstSendAfterSpawn.first.request_bytes,
+        },
+        request_sha256: {
+          list_surfaces: daemonLatency.list_surfaces.request_sha256,
+          read_screen: daemonLatency.read_screen.request_sha256,
+          first_send_after_spawn:
+            firstSendAfterSpawn.first.request_sha256,
         },
       },
       rss: {

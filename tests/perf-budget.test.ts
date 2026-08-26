@@ -1,21 +1,44 @@
-import { readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  baselineContentSha256,
   compareBenchmark,
   renderMarkdownComparison,
+  runBenchmark,
   validateBaseline,
 } from "../scripts/check-daemon-benchmark.mjs";
 
 const repoRoot = join(__dirname, "..");
 
-const baseline = {
-  schema_version: 1,
+function attest<T extends Record<string, unknown>>(content: T) {
+  const baseline = {
+    ...content,
+    refresh_attestation: { algorithm: "sha256", content_sha256: "" },
+  };
+  baseline.refresh_attestation.content_sha256 = baselineContentSha256(baseline);
+  return baseline;
+}
+
+const baseline = attest({
+  schema_version: 2,
   source: {
     git_sha: "f0ca937ccf16d81b0383a88de79d70b3a10d672e",
     measured_at: "2026-08-26T00:00:00Z",
+    runner_class: "github-actions-ubuntu-latest",
+    workflow_run_id: 123456,
   },
-  runner_margins: { list_surfaces: 8, read_screen: 3.2 },
+  regression_ratio: 1.25,
+  sanity_caps_ms: {
+    first_send_after_spawn: 10_000,
+    cli_send: 10_000,
+  },
   replay: {
     clients: 8,
     rounds: 12,
@@ -24,6 +47,11 @@ const baseline = {
       list_surfaces: 140,
       read_screen: 170,
       first_send_after_spawn: 240,
+    },
+    request_sha256: {
+      list_surfaces: "1".repeat(64),
+      read_screen: "2".repeat(64),
+      first_send_after_spawn: "3".repeat(64),
     },
   },
   measurements: {
@@ -36,17 +64,7 @@ const baseline = {
     },
     cli_send_ms: 700,
   },
-  ceilings: {
-    list_surfaces: { p50_ms: 280, p95_ms: 336 },
-    read_screen: { p50_ms: 250, p95_ms: 448 },
-    first_send_after_spawn: {
-      p50_ms: 2_000,
-      p95_ms: 2_000,
-      lock_hold_ms: 100,
-    },
-    cli_send_ms: 4_000,
-  },
-};
+});
 
 const result = {
   verdict: "GREEN",
@@ -71,7 +89,7 @@ const result = {
 };
 
 describe("daemon performance budget", () => {
-  it("requires the committed replay, byte, percentile, lock, and hard-ceiling fields", () => {
+  it("requires a CI-runner source, canonical requests, and the 1.25 ratio", () => {
     expect(() => validateBaseline(baseline)).not.toThrow();
     expect(() =>
       validateBaseline({
@@ -89,17 +107,41 @@ describe("daemon performance budget", () => {
       }),
     ).toThrow(/lock_hold_ms/);
     expect(() =>
+      validateBaseline({ ...baseline, regression_ratio: 1.24 }),
+    ).toThrow(/1.25/);
+    expect(() =>
       validateBaseline({
         ...baseline,
-        ceilings: {
-          ...baseline.ceilings,
-          first_send_after_spawn: {
-            ...baseline.ceilings.first_send_after_spawn,
-            p50_ms: 2_001,
+        source: { ...baseline.source, runner_class: "local-macos" },
+      }),
+    ).toThrow(/runner_class/);
+    expect(() =>
+      validateBaseline({
+        ...baseline,
+        replay: { ...baseline.replay, request_sha256: undefined },
+      }),
+    ).toThrow(/request_sha256/);
+    expect(() =>
+      validateBaseline({
+        ...baseline,
+        replay: { ...baseline.replay, rounds: 3 },
+      }),
+    ).toThrow(/canonical 8x12 replay/);
+  });
+
+  it("fails the consistency assertion after a baseline-only hand edit", () => {
+    expect(() =>
+      validateBaseline({
+        ...baseline,
+        measurements: {
+          ...baseline.measurements,
+          list_surfaces: {
+            ...baseline.measurements.list_surfaces,
+            p50_ms: 1,
           },
         },
       }),
-    ).toThrow(/2,000/);
+    ).toThrow(/consistency assertion failed/);
   });
 
   it("fails closed when a measured operation exceeds its ceiling", () => {
@@ -111,7 +153,7 @@ describe("daemon performance budget", () => {
           ...result.latency.daemon_path,
           read_screen: {
             ...result.latency.daemon_path.read_screen,
-            p50_ms: 251,
+            p50_ms: 176,
           },
         },
       },
@@ -119,7 +161,57 @@ describe("daemon performance budget", () => {
 
     expect(comparison.passed).toBe(false);
     expect(comparison.failures).toContain(
-      "read_screen p50: 251ms exceeds 250ms",
+      "read_screen p50: 176ms exceeds 175ms",
+    );
+  });
+
+  it("derives every runner ceiling from the committed CI measurement at 1.25x", () => {
+    const comparison = compareBenchmark(baseline, {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          first: {
+            ...result.latency.first_send_after_spawn.first,
+            elapsed_ms: 1_126,
+          },
+        },
+      },
+    });
+    expect(comparison.failures).toContain(
+      "first_send_after_spawn p50: 1126ms exceeds 1125ms",
+    );
+    expect(
+      comparison.rows.find(
+        (entry) =>
+          entry.operation === "first_send_after_spawn" &&
+          entry.metric === "p50_ms",
+      )?.ceiling,
+    ).toBe(1_125);
+  });
+
+  it("tightens the enforced ceiling when a committed measurement is lowered", () => {
+    const loweredBaseline = attest({
+      ...baseline,
+      measurements: {
+        ...baseline.measurements,
+        list_surfaces: {
+          ...baseline.measurements.list_surfaces,
+          p50_ms: 1,
+        },
+      },
+    });
+    const comparison = compareBenchmark(loweredBaseline, result);
+
+    expect(
+      comparison.rows.find(
+        (entry) =>
+          entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+      )?.ceiling,
+    ).toBe(1.25);
+    expect(comparison.failures).toContain(
+      "list_surfaces p50: 110ms exceeds 1.25ms",
     );
   });
 
@@ -130,12 +222,12 @@ describe("daemon performance budget", () => {
         ...result.latency,
         first_send_after_spawn: {
           ...result.latency.first_send_after_spawn,
-          surface: { elapsed_ms: 4_001 },
+          surface: { elapsed_ms: 876 },
         },
       },
     });
     expect(cli.failures).toContain(
-      "first_send_after_spawn cli_send: 4001ms exceeds 4000ms",
+      "first_send_after_spawn cli_send: 876ms exceeds 875ms",
     );
 
     const replay = compareBenchmark(baseline, {
@@ -155,6 +247,56 @@ describe("daemon performance budget", () => {
         "read_screen request_bytes: 999 bytes does not match committed 170 bytes",
       ]),
     );
+  });
+
+  it("fails when canonical request identity drifts at the same byte length", () => {
+    const comparison = compareBenchmark(baseline, {
+      ...result,
+      replay: {
+        ...result.replay,
+        request_sha256: {
+          ...result.replay.request_sha256,
+          read_screen: "9".repeat(64),
+        },
+      },
+    });
+    expect(comparison.failures).toContain(
+      "read_screen request_sha256 does not match the committed workload",
+    );
+  });
+
+  it("cannot reuse a stale result when the benchmark process fails", async () => {
+    const artifactDir = mkdtempSync(join(tmpdir(), "cmuxlayer-stale-bench-"));
+    writeFileSync(
+      join(artifactDir, "result.json"),
+      JSON.stringify(result),
+    );
+    try {
+      await expect(
+        runBenchmark({
+          artifactDir,
+          benchmarkScript: join(repoRoot, "missing-benchmark-script.mjs"),
+        }),
+      ).rejects.toThrow(/did not write valid JSON/);
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects output that was not attested by this benchmark invocation", async () => {
+    const artifactDir = mkdtempSync(join(tmpdir(), "cmuxlayer-wrong-run-"));
+    const benchmarkScript = join(artifactDir, "wrong-run.mjs");
+    writeFileSync(
+      benchmarkScript,
+      `import { writeFile } from "node:fs/promises";\nawait writeFile(process.env.CMUXLAYER_BENCH_JSON_PATH, JSON.stringify({ verdict: "GREEN", invocation_nonce: "old-run" }));\n`,
+    );
+    try {
+      await expect(
+        runBenchmark({ artifactDir, benchmarkScript }),
+      ).rejects.toThrow(/this-invocation attestation/);
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+    }
   });
 
   it("allows the explicit fast-round override but no implicit round drift", () => {
@@ -183,9 +325,7 @@ describe("daemon performance budget", () => {
       "| Operation | Metric | Baseline | Current | Ceiling | Status |",
     );
     expect(markdown).toContain("first_send_after_spawn");
-    expect(markdown).toContain(
-      "Runner margins: list_surfaces 8x; read_screen 3.2x",
-    );
+    expect(markdown).toContain("Runner regression ratio: 1.25x");
   });
 
   it("commits a post-run-5 baseline with the full replay contract", () => {
@@ -204,6 +344,14 @@ describe("daemon performance budget", () => {
       "read_screen",
       "first_send_after_spawn",
     ]);
+    expect(committed.source.runner_class).toBe(
+      "github-actions-ubuntu-latest",
+    );
+    expect(committed.source.workflow_run_id).toBe(32923962535);
+    expect(committed).not.toHaveProperty("ceilings");
+    expect(committed.refresh_attestation.content_sha256).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
   });
 
   it("instruments the existing replay without changing its 8x12 defaults", () => {
@@ -228,6 +376,8 @@ describe("daemon performance budget", () => {
     );
 
     expect(workflow).toContain("perf-budget:");
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).toContain("perf-baseline-refresh:");
     expect(workflow).toContain("pull-requests: write");
     expect(workflow).toContain("bun run bench:daemon:check");
     expect(workflow).toContain(
@@ -253,6 +403,9 @@ describe("daemon performance budget", () => {
     expect(source).toContain(
       "refusing to refresh from an over-budget lock hold",
     );
+    expect(source).toContain('CMUXLAYER_BENCH_ROUNDS: "12"');
+    expect(source).toContain("canonical 8x12 replay");
+    expect(source).toContain("GITHUB_RUN_ID");
   });
 
   it("keeps scratch artifacts out of default Vitest collection", () => {
