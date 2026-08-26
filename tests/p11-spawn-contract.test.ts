@@ -900,7 +900,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
             releaseFirstPrune = resolve;
           }),
       )
-      .mockResolvedValue(undefined);
+      .mockResolvedValue();
     controlled.pruneClosedChildReportWatches = prune;
 
     engine.scheduleClosedChildReportWatchPrune();
@@ -971,6 +971,72 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toBe(false);
     expect(externalNotify).not.toHaveBeenCalled();
+  });
+
+  it("does not wake the former parent when a child is reparented during external notification", async () => {
+    await server.close();
+    const owner = parentRecord();
+    const nextParent: AgentRecord = {
+      ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+      agent_id: "next-parent",
+      surface_id: "surface:next-parent",
+    };
+    const reportPath = join(inboxDir, "reparented-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+      agent_id: "reparented-child",
+      surface_id: "surface:reparented-child",
+      parent_agent_id: owner.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+      task_summary: "reparent race fixture",
+    };
+    let engine: ReturnType<
+      typeof createServer
+    >["_registeredTools"]["interact"]["_engine"];
+    const externalNotify = vi.fn().mockImplementation(async () => {
+      const reparented = { ...child, parent_agent_id: nextParent.agent_id };
+      engine.stateMgr.writeState(reparented);
+      engine.getRegistry().set(reparented.agent_id, reparented);
+      return true;
+    });
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchNotify: externalNotify,
+      }),
+    );
+    engine = server._registeredTools.interact._engine;
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [owner, nextParent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: owner.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    writeFileSync(reportPath, "after\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+
+    expect(externalNotify).toHaveBeenCalledOnce();
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    expect(
+      wakeCalls.some(([, args]: [string, string[]]) =>
+        args.some((arg) => arg.includes("[report]")),
+      ),
+    ).toBe(false);
   });
 
   it("does not describe a missing report target as a done marker and preserves the reason-aware notifier", async () => {

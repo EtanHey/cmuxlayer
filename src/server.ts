@@ -12230,18 +12230,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
-            if (event.subject_agent_id) {
+            const subjectStillBelongsToOwner = (): boolean => {
+              if (!event.subject_agent_id) return true;
               const subject =
                 registry.get(event.subject_agent_id) ??
                 stateMgr.readState(event.subject_agent_id);
-              if (
-                !subject ||
-                subject.parent_agent_id !== event.owner ||
-                subject.user_killed === true ||
-                subject.deletion_intent
-              ) {
-                return true;
-              }
+              return Boolean(
+                subject &&
+                  subject.parent_agent_id === event.owner &&
+                  subject.user_killed !== true &&
+                  !subject.deletion_intent,
+              );
+            };
+            if (!subjectStillBelongsToOwner()) {
+              return true;
             }
             let externalDelivered = true;
             if (event.reason !== "predicate_matched" && opts?.watchNotify) {
@@ -12250,6 +12252,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               } catch {
                 externalDelivered = false;
               }
+            }
+            if (!subjectStillBelongsToOwner()) {
+              return true;
             }
             const owner =
               registry.get(event.owner) ?? stateMgr.readState(event.owner);
