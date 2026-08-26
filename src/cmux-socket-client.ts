@@ -225,6 +225,14 @@ export class CmuxSocketClient {
     return this.cliFallback;
   }
 
+  private requiredCliFallback(source: string): CmuxClient {
+    const fallback = this.cliFallbackPinned(source);
+    if (!fallback) {
+      throw new CmuxSocketError(`CLI fallback is unavailable for ${source}`);
+    }
+    return fallback;
+  }
+
   private async reconnectTransport(originalError: unknown): Promise<void> {
     if (!this.reconnecting) {
       this.reconnecting = (async () => {
@@ -261,7 +269,7 @@ export class CmuxSocketClient {
       return await this.call("window.list");
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallbackPinned("list_windows")!.listWindows();
+        return this.requiredCliFallback("list_windows").listWindows();
       }
       throw e;
     }
@@ -280,7 +288,7 @@ export class CmuxSocketClient {
       await this.call("workspace.select", { workspace_id: workspace });
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallbackPinned("select_workspace")!.selectWorkspace(
+        return this.requiredCliFallback("select_workspace").selectWorkspace(
           workspace,
         );
       }
@@ -299,7 +307,7 @@ export class CmuxSocketClient {
       });
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallbackPinned("focus_surface")!.focusSurface(
+        return this.requiredCliFallback("focus_surface").focusSurface(
           surface,
           opts,
         );
@@ -325,7 +333,7 @@ export class CmuxSocketClient {
       };
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallbackPinned("create_workspace")!.createWorkspace(
+        return this.requiredCliFallback("create_workspace").createWorkspace(
           title,
         );
       }
@@ -338,7 +346,7 @@ export class CmuxSocketClient {
       await this.call("workspace.close", { workspace_id: workspace });
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallbackPinned("delete_workspace")!.deleteWorkspace(
+        return this.requiredCliFallback("delete_workspace").deleteWorkspace(
           workspace,
         );
       }
@@ -451,7 +459,7 @@ export class CmuxSocketClient {
           "unsupported_focus_option",
         );
       }
-      return this.cliFallbackPinned("new_split")!.newSplit(direction, opts);
+      return this.requiredCliFallback("new_split").newSplit(direction, opts);
     }
 
     if (opts?.type === "browser") {
@@ -476,7 +484,7 @@ export class CmuxSocketClient {
         return this.mapSplitResult(result, "browser");
       } catch (e) {
         if (this.isMethodNotFound(e) && this.cliFallback) {
-          return this.cliFallbackPinned("new_split")!.newSplit(
+          return this.requiredCliFallback("new_split").newSplit(
             direction,
             opts,
           );
@@ -512,7 +520,7 @@ export class CmuxSocketClient {
       return this.mapSplitResult(result, "terminal");
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallbackPinned("new_split")!.newSplit(direction, opts);
+        return this.requiredCliFallback("new_split").newSplit(direction, opts);
       }
       throw e;
     }
@@ -530,7 +538,7 @@ export class CmuxSocketClient {
         "new-surface is only available through the CLI fallback",
       );
     }
-    return this.cliFallbackPinned("new_surface")!.newSurface(opts);
+    return this.requiredCliFallback("new_surface").newSurface(opts);
   }
 
   async moveSurface(opts: {
@@ -547,7 +555,7 @@ export class CmuxSocketClient {
         "move-surface is only available through the CLI fallback",
       );
     }
-    return this.cliFallbackPinned("move_surface")!.moveSurface(opts);
+    return this.requiredCliFallback("move_surface").moveSurface(opts);
   }
 
   async reorderSurface(opts: {
@@ -561,7 +569,7 @@ export class CmuxSocketClient {
         "reorder-surface is only available through the CLI fallback",
       );
     }
-    return this.cliFallbackPinned("reorder_surface")!.reorderSurface(opts);
+    return this.requiredCliFallback("reorder_surface").reorderSurface(opts);
   }
 
   async send(
@@ -771,7 +779,7 @@ export class CmuxSocketClient {
       await this.call("surface.close", params);
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallbackPinned("close_surface")!.closeSurface(
+        return this.requiredCliFallback("close_surface").closeSurface(
           surface,
           opts,
         );
