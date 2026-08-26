@@ -892,6 +892,29 @@ describe("enter reliability", () => {
     });
   });
 
+  it("returns surface-mode send_to as the same JSON receipt shape as agent mode", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_to", {
+      mode: "surface",
+      surface: client.surface,
+      text: "surface receipt parity",
+      press_enter: false,
+    });
+    const contentReceipt = JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
+    expect(contentReceipt).toMatchObject({
+      ok: true,
+      delivery_id: expect.any(String),
+      delivery_state: "typed",
+      timings_ms: expect.any(Object),
+    });
+    expect(contentReceipt).toEqual(result.structuredContent);
+  });
+
   it("resolves agent-mode composer-only delivery as terminal typed on the same ID", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";

@@ -769,6 +769,300 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
+  it("prunes at least 100 legacy rows whose agent channel directories are absent", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const watches = Array.from({ length: 120 }, (_, index) => ({
+      watch_id: `legacy-dead-${index}`,
+      owner: "lead-parent",
+      target: join(inboxDir, `legacy-dead-${index}`, "report.md"),
+      change: "content" as const,
+      deadline: Number.MAX_SAFE_INTEGER,
+      target_kind: "file" as const,
+      armed_at_ms: 1_000,
+      last_heartbeat_at_ms: 1_000,
+      liveness_source: "process",
+      liveness: {
+        value: true,
+        source: "process" as const,
+        observed_at_ms: 1_000,
+      },
+      state: "armed" as const,
+    }));
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify({ version: 1, watches }, null, 2)}\n`,
+      "utf8",
+    );
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(120);
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(0);
+  });
+
+  it("never lets terminal-child pruning remove an undelivered notification", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "pending-notification", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "pending-notification",
+      state: "done",
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "done\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    const watch = await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const registryFile = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    registryFile.watches[0] = {
+      ...registryFile.watches[0],
+      state: "fired",
+      terminal_reason: "target_changed",
+      terminal_at_ms: 2_000,
+      observed_value: "sha256:changed",
+      notification_pending: true,
+      notification_attempts: 8,
+      notification_next_attempt_at_ms: 2_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(registryFile, null, 2)}\n`,
+      "utf8",
+    );
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        watch_id: watch.watch_id,
+        notification_pending: true,
+        notification_attempts: 8,
+      }),
+    ]);
+  });
+
+  it("resolves a legacy bare owner seat to the live suffixed lead before delivery", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = {
+      ...parentRecord(),
+      agent_id: "cmuxlayerClaude-live-seat",
+      seat_id: "cmuxlayerClaude",
+    };
+    const reportPath = join(inboxDir, "bare-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "bare-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: "cmuxlayerClaude",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: "cmuxlayerClaude",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    expect(
+      wakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      owner: "cmuxlayerClaude",
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+  });
+
+  it("fails a missing owner seat fast without incrementing delivery attempts", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "missing-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "missing-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: "retired-lead-seat",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: "retired-lead-seat",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "fired",
+      notification_pending: false,
+      notification_attempts: 0,
+      notification_exhausted_reason: "owner_not_live",
+    });
+  });
+
+  it("keeps a delivered content watch armed while a terminal record still has a live pane", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord();
+    const reportPath = join(inboxDir, "live-terminal-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "live-terminal-child",
+      surface_id: "surface:child",
+      surface_uuid: childUuid,
+      state: "done",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    writeFileSync(reportPath, "first distinct change\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+    const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+    writeFileSync(reportPath, "second distinct change\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+
+    const secondWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      afterFirstWake,
+    );
+    expect(
+      secondWakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_delivered_at_ms: expect.any(Number),
+    });
+  });
+
   it("keeps lifecycle initialization live and retries startup pruning after lock contention", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;

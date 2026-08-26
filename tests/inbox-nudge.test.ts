@@ -1311,8 +1311,9 @@ describe("report_to_parent hierarchy-bound escalation", () => {
     expect(parsed).toMatchObject({
       ok: true,
       route: "direct",
-      delivery: "queued",
+      delivery: "refused",
       durable: true,
+      wake_error_code: "blocked_by_foreign_draft",
     });
     expect(sendCalls(exec)).toHaveLength(before);
     expect(readInbox(parent.agent_id, { baseDir: inboxDir })[0]?.task).toBe(

@@ -624,7 +624,7 @@ export function evaluateAgentHealth(
   }
 
   const issueSeverities = deriveIssueSeverities(issueCodes, {
-    screenActive,
+    screenActive: screenActive || screenConfirmedState === "ready",
     autoDiscovered,
     lacksManagedPlacement: lacksManagedPlacement(agent),
     panePtyDead,

@@ -164,7 +164,7 @@ describe("WatchSpec MCP contract", () => {
     });
   });
 
-  it("returns a matched terminal verdict when notification delivery is down", async () => {
+  it("returns a matched terminal verdict when the notification owner is not live", async () => {
     const notify = vi.fn().mockResolvedValue(false);
     const server = createWatchServer(notify);
     const target = join(TEST_DIR, "delivery-down.md");
@@ -188,11 +188,12 @@ describe("WatchSpec MCP contract", () => {
       watch: {
         state: "fired",
         terminal_reason: "predicate_matched",
-        notification_pending: true,
-        notification_attempts: 1,
+        notification_pending: false,
+        notification_attempts: 0,
+        notification_exhausted_reason: "owner_not_live",
       },
     });
-    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it("D14 emits MCP progress before a long wait hits the harness silence cutoff", async () => {

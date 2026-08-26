@@ -19,7 +19,7 @@ import {
   resolveClosureState,
   type ClosureState,
 } from "./coordination-paths.js";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
@@ -240,6 +240,7 @@ import {
 } from "./cmux-transport-self-heal.js";
 import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
+  agentDir,
   dispatchOnce,
   readInbox,
   reapOrphanedPendingChannelMarkers,
@@ -6522,23 +6523,71 @@ export class AgentEngine {
       const path = resolve(agent.report_path);
       byReportPath.set(path, [...(byReportPath.get(path) ?? []), agent]);
     }
+    const rearmedLiveSubjects = new Set<string>();
+    const persistedWatches = readWatchRegistry({
+      registryPath: this.watchRegistryPath,
+    }).watches;
+    const rearmedSubjectIds = new Set(
+      persistedWatches.flatMap((watch) =>
+        watch.change === "content" &&
+        watch.notification_delivered_at_ms !== undefined &&
+        watch.subject_agent_id
+          ? [watch.subject_agent_id]
+          : [],
+      ),
+    );
+    await Promise.all(
+      [...rearmedSubjectIds].map(async (subjectAgentId) => {
+        const subject =
+          this.registry.get(subjectAgentId) ??
+          this.stateMgr.readState(subjectAgentId);
+        if (
+          subject &&
+          subject.user_killed !== true &&
+          !subject.deletion_intent &&
+          (await this.registry.isSurfaceAlive(subject))
+        ) {
+          rearmedLiveSubjects.add(subjectAgentId);
+        }
+      }),
+    );
+    const channelBaseDir = resolve(
+      dirname(agentDir("__cmuxlayer_channel_probe__", this.inboxOpts)),
+    );
     await removeWatches(
       (watch) => {
         if (watch.target_kind !== "file" || watch.change !== "content") {
           return false;
         }
-        const subjects = watch.subject_agent_id
+        if (watch.notification_pending) return false;
+        let subjects = watch.subject_agent_id
           ? [
               this.registry.get(watch.subject_agent_id) ??
                 this.stateMgr.readState(watch.subject_agent_id),
             ].filter((subject): subject is AgentRecord => Boolean(subject))
           : (byReportPath.get(resolve(watch.target)) ?? []);
+        if (subjects.length === 0 && !watch.subject_agent_id) {
+          const targetDir = resolve(dirname(watch.target));
+          const targetLooksEngineIssued =
+            basename(watch.target) === "report.md" &&
+            resolve(dirname(targetDir)) === channelBaseDir;
+          if (targetLooksEngineIssued) {
+            const inferredAgentId = basename(targetDir);
+            const inferred =
+              this.registry.get(inferredAgentId) ??
+              this.stateMgr.readState(inferredAgentId);
+            if (inferred) subjects = [inferred];
+            else if (!existsSync(targetDir)) return true;
+          }
+        }
         if (subjects.length === 0) return Boolean(watch.subject_agent_id);
         return !subjects.some(
           (subject) =>
             subject.user_killed !== true &&
             !subject.deletion_intent &&
-            !TERMINAL_STATES.has(subject.state) &&
+            (!TERMINAL_STATES.has(subject.state) ||
+              (watch.notification_delivered_at_ms !== undefined &&
+                rearmedLiveSubjects.has(subject.agent_id))) &&
             subject.parent_agent_id === watch.owner,
         );
       },
@@ -8080,6 +8129,11 @@ export class AgentEngine {
         now: this.watchRegistryNow,
         agentObservation: this.watchAgentObservation,
         notify: this.watchNotify,
+        onNotificationExhausted: ({ notification, attempts, reason }) => {
+          this.sweepDebugLog(
+            `[cmuxlayer] watch notification exhausted: watch=${notification.watch_id} owner=${notification.owner} attempts=${attempts} reason=${reason}`,
+          );
+        },
       });
     } catch {
       // Declared watches are retried on the next lifecycle sweep.
@@ -9236,6 +9290,11 @@ export class AgentEngine {
         now: this.watchRegistryNow,
         agentObservation: this.watchAgentObservation,
         notify: this.watchNotify,
+        onNotificationExhausted: ({ notification, attempts, reason }) => {
+          this.sweepDebugLog(
+            `[cmuxlayer] watch notification exhausted: watch=${notification.watch_id} owner=${notification.owner} attempts=${attempts} reason=${reason}`,
+          );
+        },
       });
       const current = readWatchRegistry({
         registryPath: this.watchRegistryPath,

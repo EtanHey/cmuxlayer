@@ -820,6 +820,53 @@ describe("WatchSpec arm contract", () => {
     ).toMatchObject({ state: "fired", notification_pending: false });
   });
 
+  it("bounds notification retries and records one exhausted escalation", async () => {
+    const target = join(TEST_DIR, "retry-exhaustion.md");
+    writeFileSync(target, "", "utf8");
+    const notify = vi.fn().mockResolvedValue(false);
+    const onNotificationExhausted = vi.fn();
+    let now = 1_000;
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: registryPath(), now: () => now },
+    );
+    appendFileSync(target, "DONE\n", "utf8");
+
+    for (let attempt = 1; attempt <= 12; attempt += 1) {
+      now += 60_000;
+      await sweepWatches({
+        registryPath: registryPath(),
+        now: () => now,
+        notify,
+        onNotificationExhausted,
+      });
+    }
+
+    expect(notify).toHaveBeenCalledTimes(8);
+    expect(onNotificationExhausted).toHaveBeenCalledOnce();
+    expect(onNotificationExhausted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        notification: expect.objectContaining({ watch_id: armed.watch_id }),
+        attempts: 8,
+        reason: "retry_limit_exhausted",
+      }),
+    );
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      watch_id: armed.watch_id,
+      state: "fired",
+      notification_pending: false,
+      notification_attempts: 8,
+      notification_exhausted_reason: "retry_limit_exhausted",
+    });
+  });
+
   it("persists and delivers deadline_elapsed through the retryable transition", async () => {
     const target = join(TEST_DIR, "deadline.md");
     writeFileSync(target, "", "utf8");

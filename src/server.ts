@@ -705,7 +705,7 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       notified_agent_id: z.string().optional(),
       route: z.enum(["direct", "fallback"]).optional(),
       durable: z.boolean().optional(),
-      delivery: z.enum(["submitted", "queued"]).optional(),
+      delivery: z.enum(["submitted", "queued", "refused"]).optional(),
       delivery_id: z.string().optional(),
       error_code: z.string().optional(),
     })
@@ -1279,12 +1279,16 @@ class DeliverySafetyGateError extends Error {
 
   constructor(
     readonly error_code:
-      "blocked_by_interactive_prompt" | "blocked_by_permission_prompt",
+      | "blocked_by_interactive_prompt"
+      | "blocked_by_permission_prompt"
+      | "blocked_by_foreign_draft",
     readonly screen: ParsedScreenResult,
   ) {
     super(
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
+        : error_code === "blocked_by_foreign_draft"
+          ? "target composer already holds text this delivery did not write; refused before typing"
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -5436,21 +5440,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // the first keystroke -- a refused send is recoverable, a submitted draft
     // is not.
     //
-    // RETRYABLE, not terminal (T2 B1a): the same screen is produced by this
-    // delivery's OWN unflushed prior message (the queued_followup shape), and
-    // the guard cannot tell that from a human draft. For both, the right
-    // answer is "wait for the composer to flush", which the v2 queue already
-    // expresses -- and #467's bounded queue lifetime guarantees the caller
-    // still gets a terminal answer if it never does. A terminal `failed` here
-    // would be this PR's own disease: a verdict the engine did not observe.
+    // Refusal is terminal for this caller: the pre-type snapshot proves the
+    // requested bytes cannot be appended safely. Queuing that refusal reports
+    // `accepted:true` even though the guard deliberately performed no pane
+    // mutation, and can later submit text the caller never authorized.
     if (
       opts.draftGuardText !== undefined &&
       composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
     ) {
-      throw new RetryableDeliveryError(
-        "target composer already holds text this delivery did not write; " +
-          "refused to type (typing + Return would submit or mutate it). " +
-          "Delivery stays queued until the composer is clear.",
+      throw new DeliverySafetyGateError(
+        "blocked_by_foreign_draft",
+        snapshot.parsed,
       );
     }
 
@@ -12351,6 +12351,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (!subjectStillBelongsToOwner()) {
               return true;
             }
+            const liveOwnerCandidates = [
+              ...registry.list(),
+              ...stateMgr.listStates(),
+            ].filter(
+              (candidate, index, rows) =>
+                rows.findIndex(
+                  (row) => row.agent_id === candidate.agent_id,
+                ) === index &&
+                candidate.user_killed !== true &&
+                !candidate.deletion_intent &&
+                !TERMINAL_AGENT_STATES.has(candidate.state),
+            );
+            const owner =
+              liveOwnerCandidates.find(
+                (candidate) => candidate.agent_id === event.owner,
+              ) ??
+              liveOwnerCandidates.find(
+                (candidate) => candidate.seat_id?.trim() === event.owner,
+              ) ??
+              (() => {
+                const prefixMatches = liveOwnerCandidates.filter((candidate) =>
+                  candidate.agent_id.startsWith(`${event.owner}-`),
+                );
+                return prefixMatches.length === 1
+                  ? prefixMatches[0]
+                  : undefined;
+              })();
             let externalDelivered = true;
             if (event.reason !== "predicate_matched" && opts?.watchNotify) {
               try {
@@ -12362,8 +12389,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (!subjectStillBelongsToOwner()) {
               return true;
             }
-            const owner =
-              registry.get(event.owner) ?? stateMgr.readState(event.owner);
+            if (!owner) {
+              return {
+                delivered: false,
+                retryable: false,
+                reason: "owner_not_live",
+              };
+            }
             if (owner && lifecycleAgentInputDeliverer) {
               const text = (() => {
                 if (
@@ -13043,8 +13075,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         | "queued"
         | "queued_followup"
         | "rescued"
-        | "pending_verify";
+        | "pending_verify"
+        | "refused";
       delivery_id?: string;
+      wake_error_code?: string;
     }> => {
       const pointer = formatInboxPing(
         message,
@@ -13071,6 +13105,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_id: deliveryId,
         });
       } catch (error) {
+        if (
+          error instanceof DeliverySafetyGateError &&
+          error.error_code === "blocked_by_foreign_draft"
+        ) {
+          return {
+            delivery: "refused",
+            wake_error_code: error.error_code,
+          };
+        }
         if (
           error instanceof RetryableDeliveryError ||
           (error instanceof Error && /\bis busy\b/.test(error.message))
@@ -16751,7 +16794,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const deliveryId = randomUUID();
               const timings = createDeliveryPhaseTimings();
-              return legacyHandler("send_input")(
+              const result = await legacyHandler("send_input")(
                 {
                   surface,
                   workspace: args.workspace,
@@ -16767,6 +16810,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 },
                 {},
               );
+              if (
+                !result ||
+                typeof result !== "object" ||
+                !("structuredContent" in result) ||
+                !result.structuredContent ||
+                typeof result.structuredContent !== "object"
+              ) {
+                return result;
+              }
+              const structuredContent = {
+                ...(result.structuredContent as Record<string, unknown>),
+                timings_ms:
+                  (result.structuredContent as Record<string, unknown>)
+                    .timings_ms ?? timings,
+              };
+              return {
+                ...result,
+                content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+                structuredContent,
+              };
             }
             if (mode === "command") {
               const command = args.command ?? args.text;

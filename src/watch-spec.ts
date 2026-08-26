@@ -63,6 +63,8 @@ export interface WatchRecord extends WatchSpec {
   notification_attempts?: number;
   notification_next_attempt_at_ms?: number;
   notification_delivered_at_ms?: number;
+  notification_exhausted_at_ms?: number;
+  notification_exhausted_reason?: string;
 }
 
 export interface WatchRegistryFile {
@@ -111,6 +113,18 @@ export type WatchNotify = (
   event: WatchNotification,
 ) => Promise<unknown> | unknown;
 
+export interface WatchNotifyTerminalFailure {
+  delivered: false;
+  retryable: false;
+  reason: string;
+}
+
+export interface WatchNotificationExhausted {
+  notification: WatchNotification;
+  attempts: number;
+  reason: string;
+}
+
 export interface WatchAgentObservation {
   exists: boolean;
   state: string | null;
@@ -149,6 +163,9 @@ export interface WatchContentFingerprintIo {
 
 export interface WatchSweepOptions extends WatchRegistryOptions {
   notify?: WatchNotify;
+  onNotificationExhausted?: (
+    exhausted: WatchNotificationExhausted,
+  ) => Promise<unknown> | unknown;
 }
 
 export interface WatchSweepResult {
@@ -179,6 +196,7 @@ const WRITE_LOCK_STALE_MS = 30_000;
 const WRITE_LOCK_RETRY_MS = 5;
 const NOTIFY_RETRY_BASE_MS = 1_000;
 const NOTIFY_RETRY_MAX_MS = 60_000;
+const NOTIFY_RETRY_LIMIT = 8;
 const FILE_MISSING_DEBOUNCE_MS = 2_000;
 
 interface WatchRegistryState {
@@ -315,6 +333,18 @@ function isWatchRecord(value: unknown): value is WatchRecord {
   if (
     value.notification_delivered_at_ms !== undefined &&
     !isFiniteNumber(value.notification_delivered_at_ms)
+  ) {
+    return false;
+  }
+  if (
+    value.notification_exhausted_at_ms !== undefined &&
+    !isFiniteNumber(value.notification_exhausted_at_ms)
+  ) {
+    return false;
+  }
+  if (
+    value.notification_exhausted_reason !== undefined &&
+    !cleanString(value.notification_exhausted_reason)
   ) {
     return false;
   }
@@ -1117,11 +1147,23 @@ export async function sweepWatches(
 
   for (const notification of notifications) {
     let delivered = false;
+    let terminalFailureReason: string | null = null;
     try {
-      delivered = (await opts.notify?.(notification)) !== false;
+      const outcome = await opts.notify?.(notification);
+      if (
+        isRecord(outcome) &&
+        outcome.delivered === false &&
+        outcome.retryable === false &&
+        cleanString(outcome.reason)
+      ) {
+        terminalFailureReason = cleanString(outcome.reason);
+      } else {
+        delivered = outcome !== false;
+      }
     } catch {
       delivered = false;
     }
+    let exhausted: WatchNotificationExhausted | null = null;
     await withWriteLock(path, () => {
       const registry = readRegistryState(path);
       const watches = registry.rows.map((row) => {
@@ -1132,6 +1174,20 @@ export async function sweepWatches(
           !record.notification_pending
         ) {
           return record;
+        }
+        if (terminalFailureReason) {
+          exhausted = {
+            notification,
+            attempts: record.notification_attempts ?? 0,
+            reason: terminalFailureReason,
+          };
+          return {
+            ...record,
+            notification_pending: false,
+            notification_next_attempt_at_ms: undefined,
+            notification_exhausted_at_ms: observedAt,
+            notification_exhausted_reason: terminalFailureReason,
+          };
         }
         if (delivered) {
           if (
@@ -1162,6 +1218,21 @@ export async function sweepWatches(
           };
         }
         const attempts = (record.notification_attempts ?? 0) + 1;
+        if (attempts >= NOTIFY_RETRY_LIMIT) {
+          exhausted = {
+            notification,
+            attempts,
+            reason: "retry_limit_exhausted",
+          };
+          return {
+            ...record,
+            notification_pending: false,
+            notification_attempts: attempts,
+            notification_next_attempt_at_ms: undefined,
+            notification_exhausted_at_ms: observedAt,
+            notification_exhausted_reason: "retry_limit_exhausted",
+          };
+        }
         const retryDelay = Math.min(
           NOTIFY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 16),
           NOTIFY_RETRY_MAX_MS,
@@ -1174,6 +1245,13 @@ export async function sweepWatches(
       });
       writeRegistry(path, registry.version, watches);
     });
+    if (exhausted) {
+      try {
+        await opts.onNotificationExhausted?.(exhausted);
+      } catch {
+        // Exhaustion is already durable. Escalation/logging cannot reopen it.
+      }
+    }
   }
   return result;
 }
