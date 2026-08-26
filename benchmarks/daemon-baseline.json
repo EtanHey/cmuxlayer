@@ -40,7 +40,7 @@
       "p95_ms": 386.21
     },
     "first_send_after_spawn": {
-      "p50_ms": 2082.09,
+      "p50_ms": 8328.36,
       "p95_ms": 2082.09,
       "lock_hold_ms": 640
     },
