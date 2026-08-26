@@ -11,7 +11,11 @@
   "replay": {
     "clients": 8,
     "rounds": 12,
-    "operations": ["list_surfaces", "read_screen", "first_send_after_spawn"],
+    "operations": [
+      "list_surfaces",
+      "read_screen",
+      "first_send_after_spawn"
+    ],
     "bytes": {
       "list_surfaces": 142,
       "read_screen": 161,
@@ -36,7 +40,7 @@
   },
   "ceilings": {
     "list_surfaces": {
-      "p50_ms": 1081.44,
+      "p50_ms": 1,
       "p95_ms": 1241.44
     },
     "read_screen": {
