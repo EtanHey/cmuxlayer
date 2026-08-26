@@ -211,7 +211,7 @@ The other 35 internal definitions, including `interact`, are not callable. The d
 | Codex | `codex` | status, model, context % |
 | Gemini CLI | `gemini` | status, model, tokens, context % |
 | Cursor | `cursor agent` | status, model, tokens, context % |
-| Kiro CLI | `kiro-cli` | status |
+| Kiro CLI | `kiro-cli` | spawn and lifecycle only; no Kiro-specific screen parser |
 `read_screen` auto-detects agent type and parses metadata from terminal output.
 
 ## Architecture

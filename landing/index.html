@@ -1608,7 +1608,7 @@
 
         // Phase 7 — wait_for
         appendOrc('');
-        appendOrc(dim('\u250C\u2500') + ' ' + brg('wait_for') + '(' + cyn('ids') + '=' + amb('["opus-voice-a3f7", "sonnet-brain-c1d4"]') + ', ' + cyn('target') + '=' + amb('"done"') + ')');
+        appendOrc(dim('\u250C\u2500') + ' ' + brg('wait_for') + '(' + cyn('ids') + '=' + amb('["opus-voice-a3f7", "sonnet-brain-c1d4"]') + ', ' + cyn('target_state') + '=' + amb('"done"') + ')');
         await sleep(800);
         appendOrc(dim('\u2502') + '  ' + grn('\u2713') + ' ' + dim('opus-voice-a3f7:') + '  ' + grn('done') + ' ' + dim('(34s)'));
         await sleep(500);

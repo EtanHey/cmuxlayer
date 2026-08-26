@@ -525,7 +525,7 @@ export function AnimatedDemo() {
         "=" +
         amb('["opus-voice-a3f7", "sonnet-brain-c1d4"]') +
         ", " +
-        cyn("target") +
+        cyn("target_state") +
         "=" +
         amb('"done"') +
         ")",

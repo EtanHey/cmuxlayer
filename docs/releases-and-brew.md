@@ -239,7 +239,8 @@ Manual equivalent, if you prefer:
 
 1. `package.json` → bump `version`.
 2. Commit + open a bump PR, wait for required checks `perf-budget` and `test`,
-   confirm its head has not changed, then plain-merge to `main`.
+   confirm its head has not changed, then run
+   `gh pr merge <PR> --merge --match-head-commit <confirmed-head-sha>`.
 3. `git tag -a vX.Y.Z -m "..." <merge-sha> && git push origin vX.Y.Z`. The
    tag target is the PR merge commit.
 4. `curl -fsSL https://github.com/EtanHey/cmuxlayer/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256`.
