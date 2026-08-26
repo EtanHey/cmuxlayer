@@ -416,6 +416,10 @@ if (command === "list-workspaces") {
 
 async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
   const server = net.createServer((socket) => {
+    // Benchmark clients may disappear while the fake server is replying.
+    // Treat that expected teardown reset as connection-local evidence, not an
+    // uncaught process error that invalidates an otherwise GREEN sample.
+    socket.on("error", () => {});
     let buffer = "";
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8");

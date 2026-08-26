@@ -602,4 +602,12 @@ describe("daemon performance budget", () => {
     const config = readFileSync(join(repoRoot, "vitest.config.ts"), "utf8");
     expect(config).toContain('"**/docs.local/scratch/**"');
   });
+
+  it("contains fake-socket teardown resets inside the benchmark connection", () => {
+    const source = readFileSync(
+      join(repoRoot, "scripts", "bench-daemon.mjs"),
+      "utf8",
+    );
+    expect(source).toContain('socket.on("error", () => {})');
+  });
 });
