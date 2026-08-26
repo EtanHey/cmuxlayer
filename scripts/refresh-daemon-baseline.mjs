@@ -32,7 +32,8 @@ const measurements = {
     lock_hold_ms: first.lock_hold_ms,
   },
 };
-const ratio = existing.runner_margin_ratio;
+const listRatio = existing.runner_margins.list_surfaces;
+const readRatio = existing.runner_margins.read_screen;
 const refreshed = {
   ...existing,
   source: {
@@ -47,19 +48,19 @@ const refreshed = {
     ...existing.ceilings,
     list_surfaces: {
       p50_ms: Math.min(
-        existing.ceilings.list_surfaces.p50_ms,
-        measurements.list_surfaces.p50_ms * ratio,
+      existing.ceilings.list_surfaces.p50_ms,
+      measurements.list_surfaces.p50_ms * listRatio,
       ),
       p95_ms: Math.min(
-        existing.ceilings.list_surfaces.p95_ms,
-        measurements.list_surfaces.p95_ms * ratio,
+      existing.ceilings.list_surfaces.p95_ms,
+      measurements.list_surfaces.p95_ms * listRatio,
       ),
     },
     read_screen: {
       p50_ms: Math.min(250, existing.ceilings.read_screen.p50_ms),
       p95_ms: Math.min(
-        existing.ceilings.read_screen.p95_ms,
-        measurements.read_screen.p95_ms * ratio,
+      existing.ceilings.read_screen.p95_ms,
+      measurements.read_screen.p95_ms * readRatio,
       ),
     },
     first_send_after_spawn: {
@@ -67,7 +68,10 @@ const refreshed = {
       p95_ms: 2_000,
       lock_hold_ms: Math.min(
         existing.ceilings.first_send_after_spawn.lock_hold_ms,
-        Math.max(100, measurements.first_send_after_spawn.lock_hold_ms * ratio),
+        Math.max(
+          100,
+          measurements.first_send_after_spawn.lock_hold_ms * readRatio,
+        ),
       ),
     },
     cli_send_ms: 4_000,
