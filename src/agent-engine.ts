@@ -6660,6 +6660,23 @@ export class AgentEngine {
 
     const waitStartedAt = Date.now();
     this.lifecycleLockQueueDepth += 1;
+    const benchmarkSweepStatePath =
+      process.env.CMUXLAYER_BENCH_SWEEP_HOLD_STATE?.trim() ?? "";
+    if (benchmarkSweepStatePath && label === "close-agent") {
+      try {
+        const benchmarkState = JSON.parse(
+          readFileSync(benchmarkSweepStatePath, "utf8"),
+        ) as Record<string, unknown>;
+        if (benchmarkState.state === "held") {
+          writeFileSync(
+            benchmarkSweepStatePath,
+            JSON.stringify({ ...benchmarkState, waiter: label }),
+          );
+        }
+      } catch {
+        // Benchmark-only evidence may race its own atomic state transitions.
+      }
+    }
     try {
       await this.awaitLifecycleLock(previous, label, waitStartedAt);
     } catch (error) {
@@ -7903,6 +7920,7 @@ export class AgentEngine {
           user_killed: true,
         });
         this.registry.set(agent.agent_id, terminal);
+        this.scheduleClosedChildReportWatchPrune();
       } catch {
         // A concurrently removed record cannot be recovered, so no suppression
         // is needed. Preserve best-effort lifecycle reconciliation.

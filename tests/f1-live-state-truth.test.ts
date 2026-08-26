@@ -111,12 +111,14 @@ class LiveSurfaceClient {
   }
 
   async send(surface: string, text: string) {
-    if (!(surface in this.screens)) throw new Error(`Unknown surface: ${surface}`);
+    if (!(surface in this.screens))
+      throw new Error(`Unknown surface: ${surface}`);
     this.sendCalls.push(`${surface}:${text}`);
   }
 
   async sendKey(surface: string, key: string) {
-    if (!(surface in this.screens)) throw new Error(`Unknown surface: ${surface}`);
+    if (!(surface in this.screens))
+      throw new Error(`Unknown surface: ${surface}`);
     this.sendKeyCalls.push(`${surface}:${key}`);
   }
 
@@ -283,9 +285,7 @@ describe("F1 — live state, not the stale registry record", () => {
     expect(parsed.delivered, JSON.stringify(parsed)).toBe(true);
     expect(parsed.submit_verified, JSON.stringify(parsed)).toBe(true);
     expect(parsed.delivery_state ?? parsed.delivery).not.toBe("queued");
-    expect(client.sendCalls).toContain(
-      `${client.idleSurface}:Phase 1 now`,
-    );
+    expect(client.sendCalls).toContain(`${client.idleSurface}:Phase 1 now`);
   });
 
   it("send_to still refuses when the live screen agrees the surface is dead", async () => {
@@ -308,16 +308,15 @@ describe("F1 — live state, not the stale registry record", () => {
     expect(parsed.ok === false || parsed.delivery === "failed").toBe(true);
   });
 
-  it("send_to to a mid-turn agent never resolves as a terminal failure", async () => {
+  it("send_to to a mid-turn agent delivers immediately with queue provenance", async () => {
     registerAgent(
       server,
       makeAgent({
         agent_id: "cmuxlayerCodex-midturn",
         surface_id: client.workingSurface,
-        // Stale-done record on an agent that is demonstrably mid-turn. The gate
-        // refuses -- correctly, it is busy -- but that refusal is RETRYABLE, so
-        // flattening it into `failed`/`terminal:true` would be the same receipt
-        // lie in a different costume. The engine will drain it when the turn ends.
+        // Stale-done record on an agent that is demonstrably mid-turn. send_to
+        // must deliver without an idle gate and identify that it landed behind
+        // the active turn.
         state: "done",
       }),
     );
@@ -329,9 +328,10 @@ describe("F1 — live state, not the stale registry record", () => {
     });
     const parsed = parseResult(result);
 
-    expect(parsed.terminal, JSON.stringify(parsed)).not.toBe(true);
-    expect(parsed.delivery_state ?? parsed.delivery).not.toBe("failed");
-    expect(parsed.accepted ?? parsed.ok).toBe(true);
+    expect(parsed.terminal, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.delivery_state ?? parsed.delivery).toBe("submitted");
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.queued_behind_turn).toBe(true);
   });
 
   it("caller resolution prefers a live record over a stale one on the same surface", async () => {
@@ -374,7 +374,8 @@ describe("F1 — live state, not the stale registry record", () => {
 
     const parsed = await runWithCallerContext(
       { workspaceId: "workspace:1", surfaceId: client.workingSurface },
-      async () => parseResult(await callTool(server, "list_agents", { mine: true })),
+      async () =>
+        parseResult(await callTool(server, "list_agents", { mine: true })),
     );
 
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
@@ -450,7 +451,8 @@ describe("F1 — live state, not the stale registry record", () => {
 
     const parsed = await runWithCallerContext(
       { workspaceId: "workspace:1", surfaceId: client.idleSurface },
-      async () => parseResult(await callTool(server, "list_agents", { mine: true })),
+      async () =>
+        parseResult(await callTool(server, "list_agents", { mine: true })),
     );
 
     // An explicit refusal, not a confident wrong answer.
@@ -480,7 +482,8 @@ describe("F1 — live state, not the stale registry record", () => {
 
     const parsed = await runWithCallerContext(
       { workspaceId: "workspace:1", surfaceId: client.idleSurface },
-      async () => parseResult(await callTool(server, "list_agents", { mine: true })),
+      async () =>
+        parseResult(await callTool(server, "list_agents", { mine: true })),
     );
 
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);

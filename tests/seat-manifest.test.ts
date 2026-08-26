@@ -21,23 +21,25 @@ describe("seat manifest", () => {
   it("keeps the legacy monitor-state directory when that checkout exists", () => {
     expect(
       defaultSeatManifestDir(
-        { HOME: "/Users/test" },
-        (path) => path === "/Users/test/Gits/orchestrator/docs.local",
+        { HOME: "/home/test-user" },
+        (path) => path === "/home/test-user/Gits/orchestrator/docs.local",
       ),
-    ).toBe("/Users/test/Gits/orchestrator/docs.local/monitor-state/seat-manifests");
+    ).toBe(
+      "/home/test-user/Gits/orchestrator/docs.local/monitor-state/seat-manifests",
+    );
   });
 
   it("falls back to the state directory on a machine without that checkout", () => {
-    expect(defaultSeatManifestDir({ HOME: "/Users/test" }, () => false)).toBe(
-      "/Users/test/.local/state/cmuxlayer/seat-manifests",
-    );
+    expect(
+      defaultSeatManifestDir({ HOME: "/home/test-user" }, () => false),
+    ).toBe("/home/test-user/.local/state/cmuxlayer/seat-manifests");
   });
 
   it("honours the env override ahead of both", () => {
     expect(
       defaultSeatManifestDir(
         {
-          HOME: "/Users/test",
+          HOME: "/home/test-user",
           CMUXLAYER_SEAT_MANIFEST_DIR: "/tmp/seat-state",
         },
         () => true,
@@ -61,7 +63,7 @@ describe("seat manifest", () => {
       session_name: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       model: "fable-5",
       permission_mode: "skip-permissions",
-      cwd: "/Users/test/Gits/cmuxlayer",
+      cwd: "/home/test-user/Gits/cmuxlayer",
       repo: "cmuxlayer",
       cli: "codex",
       updated_at: "2026-07-12T12:00:00.000Z",

@@ -6,7 +6,7 @@
   <string>com.golems.cmux-contract-nightly</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-contract-nightly/bin/cmux-contract-nightly.sh</string>
+    <string>@CMUXLAYER_REPO@/launchd/cmux-contract-nightly/bin/cmux-contract-nightly.sh</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
@@ -16,8 +16,8 @@
     <integer>30</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>/Users/etanheyman/.local/state/cmux/cmux-contract-nightly.stdout.log</string>
+  <string>@CMUXLAYER_HOME@/.local/state/cmux/cmux-contract-nightly.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/etanheyman/.local/state/cmux/cmux-contract-nightly.stderr.log</string>
+  <string>@CMUXLAYER_HOME@/.local/state/cmux/cmux-contract-nightly.stderr.log</string>
 </dict>
 </plist>

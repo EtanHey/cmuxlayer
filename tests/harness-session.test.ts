@@ -368,23 +368,23 @@ describe("resolveSessionPath (cwd + sessionId → JSONL path)", () => {
   it("Claude: ~/.claude/projects/<enc-cwd>/<sessionId>.jsonl (leading dash)", () => {
     const p = resolveSessionPath(
       "claude",
-      "/Users/e/Gits/cmuxlayer",
+      "/home/test-user/Gits/cmuxlayer",
       "abc-123",
       {
         home,
       },
     );
     expect(p).toBe(
-      "/home/u/.claude/projects/-Users-e-Gits-cmuxlayer/abc-123.jsonl",
+      "/home/u/.claude/projects/-home-test-user-Gits-cmuxlayer/abc-123.jsonl",
     );
   });
 
   it("Cursor: ~/.cursor/projects/<enc-cwd-no-leading-dash>/agent-transcripts/<id>/<id>.jsonl", () => {
-    const p = resolveSessionPath("cursor", "/Users/e/Gits/golems", "id9", {
+    const p = resolveSessionPath("cursor", "/home/test-user/Gits/golems", "id9", {
       home,
     });
     expect(p).toBe(
-      "/home/u/.cursor/projects/Users-e-Gits-golems/agent-transcripts/id9/id9.jsonl",
+      "/home/u/.cursor/projects/home-test-user-Gits-golems/agent-transcripts/id9/id9.jsonl",
     );
   });
 });
@@ -444,7 +444,7 @@ describe("loadHarnessSessionWithMeta", () => {
       [
         JSON.stringify({
           type: "session_meta",
-          payload: { id: "sid-meta", cwd: "/Users/e/Gits/cmuxlayer" },
+          payload: { id: "sid-meta", cwd: "/home/test-user/Gits/cmuxlayer" },
         }),
         JSON.stringify({
           type: "event_msg",
@@ -564,7 +564,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
       type: "session_meta",
       payload: {
         id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        cwd: "/Users/etanheyman/Gits/other",
+        cwd: "/home/test-user/Gits/other",
       },
     }),
   );
@@ -586,7 +586,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
   it("Codex: scans transcripts for matching cwd and returns payload.session_meta id", () => {
     const identity = findLatestHarnessSessionIdentity(
       "codex",
-      "/Users/etanheyman/Gits/brainlayer",
+      "/home/test-user/Gits/brainlayer",
       { home },
     );
 
@@ -599,7 +599,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
 
   it("Codex: finds session_meta near the head of a large transcript", () => {
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-large-head-"));
-    const cwd = "/Users/e/Gits/cmuxlayer";
+    const cwd = "/home/test-user/Gits/cmuxlayer";
     const root = join(localHome, ".codex", "sessions", "2026", "07", "07");
     mkdirSync(root, { recursive: true });
     const file = join(root, "rollout-2026-07-07T00-00-00-large-head.jsonl");
@@ -631,7 +631,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
 
   it("Codex: matches a managed prompt with the appended mailbox contract", () => {
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-mailbox-prompt-"));
-    const cwd = "/Users/e/Gits/cmuxlayer";
+    const cwd = "/home/test-user/Gits/cmuxlayer";
     const root = join(localHome, ".codex", "sessions", "2026", "08", "13");
     mkdirSync(root, { recursive: true });
     const file = join(root, "rollout-managed.jsonl");
@@ -652,7 +652,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
                 type: "input_text",
                 text:
                   "Repair the agent automatically.\n\n" +
-                  "cmuxlayer mailbox contract for cmuxlayerCodex-abcd1234: monitor with tail -n0 -F /Users/e/.cmux/agents/cmuxlayerCodex-abcd1234/inbox.jsonl; after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> cmuxlayer inbox-cursor 'cmuxlayerCodex-abcd1234'",
+                  "cmuxlayer mailbox contract for cmuxlayerCodex-abcd1234: monitor with tail -n0 -F /home/test-user/.cmux/agents/cmuxlayerCodex-abcd1234/inbox.jsonl; after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> cmuxlayer inbox-cursor 'cmuxlayerCodex-abcd1234'",
               },
             ],
           },
@@ -684,7 +684,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
     // appends; if the stripper does not follow, every managed Codex spawn stops
     // resolving its session -- silently.
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-pointer-prompt-"));
-    const cwd = "/Users/e/Gits/cmuxlayer";
+    const cwd = "/home/test-user/Gits/cmuxlayer";
     const root = join(localHome, ".codex", "sessions", "2026", "08", "18");
     mkdirSync(root, { recursive: true });
     const file = join(root, "rollout-pointer.jsonl");
@@ -705,7 +705,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
                 type: "input_text",
                 text:
                   "Repair the agent automatically.\n\n" +
-                  "cmuxlayer contract for cmuxlayerCodex-abcd1234: Read and follow /Users/e/.cmux/agents/cmuxlayerCodex-abcd1234/contract.md",
+                  "cmuxlayer contract for cmuxlayerCodex-abcd1234: Read and follow /home/test-user/.cmux/agents/cmuxlayerCodex-abcd1234/contract.md",
               },
             ],
           },
@@ -733,7 +733,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
 
   it("Codex: matches a managed mailbox contract with a custom inbox base dir", () => {
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-custom-inbox-"));
-    const cwd = "/Users/e/Gits/cmuxlayer";
+    const cwd = "/home/test-user/Gits/cmuxlayer";
     const root = join(localHome, ".codex", "sessions", "2026", "08", "13");
     mkdirSync(root, { recursive: true });
     const file = join(root, "rollout-custom-inbox.jsonl");
@@ -784,13 +784,13 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
         "{not-json",
         JSON.stringify({
           type: "session_meta",
-          payload: { cwd: "/Users/etanheyman/Gits/brainlayer" },
+          payload: { cwd: "/home/test-user/Gits/brainlayer" },
         }),
         JSON.stringify({
           type: "session_meta",
           payload: {
             id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
-            cwd: "/Users/etanheyman/Gits/brainlayer",
+            cwd: "/home/test-user/Gits/brainlayer",
           },
         }),
       ].join("\n"),
@@ -799,7 +799,7 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
     try {
       const identity = findLatestHarnessSessionIdentity(
         "codex",
-        "/Users/etanheyman/Gits/brainlayer",
+        "/home/test-user/Gits/brainlayer",
         { home: localHome },
       );
 
@@ -813,13 +813,13 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
 
   it("Cursor: matches launch prompts wrapped in user_query tags", () => {
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-cursor-tags-"));
-    const cwd = "/Users/etanheyman/Gits/cmuxlayer";
+    const cwd = "/home/test-user/Gits/cmuxlayer";
     const sessionId = "cursor-tagged-prompt";
     const root = join(
       localHome,
       ".cursor",
       "projects",
-      "Users-etanheyman-Gits-cmuxlayer",
+      "home-test-user-Gits-cmuxlayer",
       "agent-transcripts",
       sessionId,
     );
@@ -856,13 +856,13 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
 
   it("Cursor: matches launch prompts split across adjacent text blocks", () => {
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-cursor-split-"));
-    const cwd = "/Users/etanheyman/Gits/cmuxlayer";
+    const cwd = "/home/test-user/Gits/cmuxlayer";
     const sessionId = "cursor-split-prompt";
     const root = join(
       localHome,
       ".cursor",
       "projects",
-      "Users-etanheyman-Gits-cmuxlayer",
+      "home-test-user-Gits-cmuxlayer",
       "agent-transcripts",
       sessionId,
     );

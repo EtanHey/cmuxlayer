@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -15,6 +16,8 @@ import {
   WatchArmError,
   armWatch,
   readWatchRegistry,
+  reserveWatchReportPath,
+  releaseWatchReportPathReservation,
   removeWatches,
   sweepWatches,
 } from "../src/watch-spec.js";
@@ -228,10 +231,9 @@ describe("WatchSpec arm contract", () => {
       { registryPath: registryPath(), now: () => 1_000 },
     );
 
-    await removeWatches(
-      (watch) => watch.subject_agent_id === "worker-a",
-      { registryPath: registryPath() },
-    );
+    await removeWatches((watch) => watch.subject_agent_id === "worker-a", {
+      registryPath: registryPath(),
+    });
     writeFileSync(target, "after", "utf8");
     const result = await sweepWatches({
       registryPath: registryPath(),
@@ -545,6 +547,165 @@ describe("WatchSpec arm contract", () => {
       if (releaser.exitCode === null) await once(releaser, "exit");
     }
     expect(timerTicks).toBeGreaterThan(0);
+  });
+
+  it("serializes report-path reservations across forced-inprocess processes", async () => {
+    const target = join(TEST_DIR, "forced-inprocess-shared-report.md");
+    const splitLog = join(TEST_DIR, "new-split.log");
+    const conflictMarker = join(TEST_DIR, "reservation-conflict");
+    writeFileSync(target, "", "utf8");
+    const moduleUrl = new URL("../src/watch-spec.ts", import.meta.url).href;
+    const childScript = `
+      import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+      const { reserveWatchReportPath, releaseWatchReportPathReservation } = await import(process.env.TEST_WATCH_MODULE_URL);
+      const options = { registryPath: process.env.TEST_WATCH_REGISTRY_PATH };
+      const result = await reserveWatchReportPath({ owner: "lead-parent", target: process.env.TEST_REPORT_PATH }, options);
+      if (!result.ok) {
+        writeFileSync(process.env.TEST_CONFLICT_MARKER, "conflict", "utf8");
+        process.stdout.write(JSON.stringify({ ok: false, error_code: "REPORT_PATH_IN_USE" }));
+      } else {
+        appendFileSync(process.env.TEST_SPLIT_LOG, "new-split\\n", "utf8");
+        const deadline = Date.now() + 5000;
+        while (!existsSync(process.env.TEST_CONFLICT_MARKER) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        try {
+          if (!existsSync(process.env.TEST_CONFLICT_MARKER)) throw new Error("peer never observed reservation conflict");
+          process.stdout.write(JSON.stringify({ ok: true }));
+        } finally {
+          await releaseWatchReportPathReservation(result.reservation.reservation_id, options);
+        }
+      }
+    `;
+    const launch = () =>
+      spawn(
+        process.execPath,
+        ["--import", "tsx", "--input-type=module", "-e", childScript],
+        {
+          env: {
+            ...process.env,
+            CMUXLAYER_FORCE_INPROCESS: "1",
+            TEST_WATCH_MODULE_URL: moduleUrl,
+            TEST_WATCH_REGISTRY_PATH: registryPath(),
+            TEST_REPORT_PATH: target,
+            TEST_SPLIT_LOG: splitLog,
+            TEST_CONFLICT_MARKER: conflictMarker,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    const collect = async (child: ReturnType<typeof launch>) => {
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const [exitCode] = (await once(child, "exit")) as [number | null];
+      expect(exitCode, stderr).toBe(0);
+      return JSON.parse(stdout) as { ok: boolean; error_code?: string };
+    };
+
+    const results = await Promise.all([collect(launch()), collect(launch())]);
+
+    expect(results.map((result) => result.ok).sort()).toEqual([false, true]);
+    expect(results.find((result) => !result.ok)?.error_code).toBe(
+      "REPORT_PATH_IN_USE",
+    );
+    expect(readFileSync(splitLog, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(existsSync(`${registryPath()}.report-path-reservations.json`)).toBe(
+      false,
+    );
+  }, 30_000);
+
+  it("self-heals a malformed report-path reservation sidecar", async () => {
+    const target = join(TEST_DIR, "malformed-reservation-report.md");
+    const sidecar = `${registryPath()}.report-path-reservations.json`;
+    writeFileSync(target, "", "utf8");
+    writeFileSync(sidecar, "{truncated", "utf8");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await reserveWatchReportPath(
+      { owner: "lead-a", target, subject_agent_id: "child-a" },
+      { registryPath: registryPath() },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("ignoring malformed report-path reservations"),
+    );
+    if (result.ok) {
+      await releaseWatchReportPathReservation(
+        result.reservation.reservation_id,
+        { registryPath: registryPath() },
+      );
+    }
+    writeFileSync(sidecar, "{truncated-again", "utf8");
+    await expect(
+      releaseWatchReportPathReservation("missing", {
+        registryPath: registryPath(),
+      }),
+    ).resolves.toBe(false);
+    expect(existsSync(sidecar)).toBe(false);
+    warning.mockRestore();
+  });
+
+  it("treats a subject-less legacy content watch as a reservation conflict", async () => {
+    const target = join(TEST_DIR, "legacy-watch-report.md");
+    writeFileSync(target, "before", "utf8");
+    await armWatch(
+      { owner: "lead-a", target, change: "content", deadline: 60_000 },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    await expect(
+      reserveWatchReportPath(
+        { owner: "lead-a", target, subject_agent_id: "child-new" },
+        { registryPath: registryPath() },
+      ),
+    ).resolves.toMatchObject({ ok: false, conflict_kind: "watch" });
+  });
+
+  it("reclaims a reservation whose PID was recycled after it was created", async () => {
+    const target = join(TEST_DIR, "recycled-pid-report.md");
+    const sidecar = `${registryPath()}.report-path-reservations.json`;
+    writeFileSync(target, "", "utf8");
+    writeFileSync(
+      sidecar,
+      `${JSON.stringify({
+        version: 2,
+        reservations: [
+          {
+            reservation_id: "stale-reservation",
+            owner: "lead-a",
+            target,
+            subject_agent_id: "closed-child",
+            pid: process.pid,
+            created_at_ms: 1_000,
+          },
+        ],
+      })}\n`,
+      "utf8",
+    );
+
+    const result = await reserveWatchReportPath(
+      { owner: "lead-a", target, subject_agent_id: "new-child" },
+      {
+        registryPath: registryPath(),
+        reservationProcessAlive: () => true,
+        reservationProcessStartedAtMs: () => 3_000,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      await releaseWatchReportPathReservation(
+        result.reservation.reservation_id,
+        { registryPath: registryPath() },
+      );
+    }
   });
 
   it("drops a malformed persisted row without aborting valid watch evaluation", async () => {

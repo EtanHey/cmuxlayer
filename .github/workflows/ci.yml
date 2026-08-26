@@ -7,6 +7,10 @@ on:
         description: Optional same-branch perf-budget run to rebase runner measurements
         required: false
         type: string
+      baseline_increase_reason:
+        description: Required audit reason if imported measurements raise any committed row
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -158,6 +162,7 @@ jobs:
       - run: bash launchd/cmux-contract-nightly/tests/run-tests.sh
       - run: bash launchd/cmux-memory-watchdog/tests/run-tests.sh
       - run: bash launchd/cmux-ram-sampler/tests/run-tests.sh
+      - run: bash scripts/tests/mcp-reaper-launchd.sh
 
   build-site:
     if: github.event_name != 'workflow_dispatch'
@@ -229,7 +234,14 @@ jobs:
           echo "CMUXLAYER_BENCH_SOURCE_RUN_ID=$SOURCE_RUN_ID" >> "$GITHUB_ENV"
           echo "CMUXLAYER_BENCH_SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
       - name: Produce canonical CI-runner baseline
-        run: bun run bench:daemon:refresh
+        env:
+          BASELINE_INCREASE_REASON: ${{ inputs.baseline_increase_reason }}
+        run: |
+          if [ -n "$BASELINE_INCREASE_REASON" ]; then
+            bun run bench:daemon:refresh -- --reason "$BASELINE_INCREASE_REASON"
+          else
+            bun run bench:daemon:refresh
+          fi
 
       - name: Upload candidate baseline
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -2857,7 +2857,7 @@ describe("AgentRegistry", () => {
           ...makeSurface("surface:416"),
           id: "11111111-2222-4333-8444-555555555555",
           current_directory:
-            "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+            "/home/test-user/Gits/cmuxlayer/.worktrees/id-churn",
           working_directory_source: "surface",
         },
       ]);
@@ -2870,7 +2870,7 @@ describe("AgentRegistry", () => {
             surface_uuid: "11111111-2222-4333-8444-555555555555",
             surface_title: "zsh",
             current_directory:
-              "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+              "/home/test-user/Gits/cmuxlayer/.worktrees/id-churn",
             working_directory_source: "surface",
             cli: "claude",
           }),

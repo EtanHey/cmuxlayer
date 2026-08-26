@@ -2075,8 +2075,7 @@ describe("Sidebar Sync", () => {
         cli_session_id: "session-a1",
         task_summary: "Read and follow GOAL-p8-sidebar.md",
         role: "worker",
-        worktree_path:
-          "/Users/etanheyman/Gits/cmuxlayer.wt/cmuxlayer-worker-p8",
+        worktree_path: "/home/test-user/Gits/cmuxlayer.wt/cmuxlayer-worker-p8",
         worktree_branch: "p8-sidebar",
       }),
     );
@@ -2088,7 +2087,7 @@ describe("Sidebar Sync", () => {
 
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       "a1",
-      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Read and follow GOAL-p8-sidebar.md | worktree=/Users/etanheyman/Gits/cmuxlayer.wt/cmuxlayer-worker-p8 | branch=p8-sidebar | report=n/a | pr=n/a",
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Read and follow GOAL-p8-sidebar.md | worktree=/home/test-user/Gits/cmuxlayer.wt/cmuxlayer-worker-p8 | branch=p8-sidebar | report=n/a | pr=n/a",
       expect.objectContaining({
         icon: "bolt.fill",
         color: "#3B82F6",
@@ -2320,7 +2319,7 @@ describe("Sidebar Sync", () => {
           "❯ 1. gpt-5.6-sol",
           "  2. gpt-5.6-terra",
           "",
-          "Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "Codex wants to run: rm -rf /home/test-user/Gits/cmuxlayer",
           "  1. Apply",
           "  2. Abort",
           "Press enter to confirm or esc to go back",
@@ -2527,7 +2526,7 @@ describe("Sidebar Sync", () => {
           "› 1. gpt-5.6-sol (current)",
           "  2. gpt-5.6-terra",
           "",
-          "⏺ Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "⏺ Codex wants to run: rm -rf /home/test-user/Gits/cmuxlayer",
           "",
           "❯ 1. Run it",
           "  2. Skip",
@@ -2584,7 +2583,7 @@ describe("Sidebar Sync", () => {
           "› /model",
           "",
           "Codex wants to run:",
-          "  rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "  rm -rf /home/test-user/Gits/cmuxlayer",
           "",
           "❯ 1. Yes, run it",
           "  2. No",
@@ -2626,7 +2625,7 @@ describe("Sidebar Sync", () => {
           "> Release notes",
           "  Skip until next version",
           "",
-          "Codex wants to run: rm -rf /Users/etanheyman/Gits",
+          "Codex wants to run: rm -rf /home/test-user/Gits",
           "❯ 1. Yes, run it",
           "  2. No",
           "",
@@ -2994,7 +2993,7 @@ describe("Sidebar Sync", () => {
         id: surfaceUuid,
         title: "cmuxlayerClaude [surface:1025]",
         workspace_ref: "workspace:cmuxlayer",
-        current_directory: "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+        current_directory: "/home/test-user/Gits/cmuxlayer/.worktrees/id-churn",
         working_directory_source: "surface",
       },
     ];
@@ -3583,9 +3582,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).not.toHaveBeenCalled();
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
-      expect.stringContaining(
-        "health=degraded(inbox_monitor_not_alive:degraded)",
-      ),
+      expect.stringContaining("health=healthy(inbox_monitor_not_alive:info)"),
       expect.any(Object),
     );
   });
@@ -3630,9 +3627,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).not.toHaveBeenCalled();
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
-      expect.stringContaining(
-        "health=degraded(inbox_monitor_not_alive:degraded)",
-      ),
+      expect.stringContaining("health=healthy(inbox_monitor_not_alive:info)"),
       expect.any(Object),
     );
   });
@@ -4033,7 +4028,9 @@ describe("Sidebar Sync", () => {
     );
     mockClient.setStatus.mockImplementation(async (key: string) => {
       if (key === "status-missing") {
-        throw new Error("Unable to resolve tab id for workspace workspace:missing");
+        throw new Error(
+          "Unable to resolve tab id for workspace workspace:missing",
+        );
       }
     });
     await engine.getRegistry().reconstitute();
@@ -4061,9 +4058,9 @@ describe("Sidebar Sync", () => {
 
     mockClient.setStatus.mockClear();
     await expect(engine.runSweep()).resolves.toBeUndefined();
-    expect(
-      mockClient.setStatus.mock.calls.map(([key]) => key),
-    ).toEqual(["status-missing"]);
+    expect(mockClient.setStatus.mock.calls.map(([key]) => key)).toEqual([
+      "status-missing",
+    ]);
   });
 
   it("logs spawned event on first sweep for each new agent", async () => {
@@ -4199,8 +4196,8 @@ describe("Sidebar Sync", () => {
         cli: "codex",
         model: "gpt-5.4",
         task_summary: "Fix late lifecycle rename",
-        launch_cwd: "/Users/etanheyman/Gits/brainlayer",
-        worktree_path: "/Users/etanheyman/Gits/brainlayer",
+        launch_cwd: "/home/test-user/Gits/brainlayer",
+        worktree_path: "/home/test-user/Gits/brainlayer",
       }),
     );
     liveSurfaces = [makeSurface("surface:late-jsonl")];

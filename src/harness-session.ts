@@ -399,12 +399,12 @@ export function parseHarnessSession(
 }
 
 function encodeClaudeCwd(cwd: string): string {
-  // "/Users/e/Gits/cmuxlayer" → "-Users-e-Gits-cmuxlayer"
+  // "/home/test-user/Gits/cmuxlayer" → "-Users-e-Gits-cmuxlayer"
   return cwd.replaceAll("/", "-");
 }
 
 function encodeCursorCwd(cwd: string): string {
-  // "/Users/e/Gits/golems" → "Users-e-Gits-golems" (no leading dash)
+  // "/home/test-user/Gits/golems" → "Users-e-Gits-golems" (no leading dash)
   return cwd.replace(/^\//, "").replaceAll("/", "-");
 }
 

@@ -9,7 +9,7 @@ function makeThread(overrides?: Partial<BridgeThread>): BridgeThread {
   return {
     threadId: "agent-1",
     agentId: "agent-1",
-    cwd: "/Users/etanheyman/Gits/brainlayer",
+    cwd: "/home/test-user/Gits/brainlayer",
     model: "gpt-5.4",
     createdAt: 1_776_484_800,
     sessionId: "session-1",
@@ -150,13 +150,13 @@ describe("CodexAppServerBridge thread lifecycle", () => {
       id: 2,
       method: "thread/start",
       params: {
-        cwd: "/Users/etanheyman/Gits/brainlayer",
+        cwd: "/home/test-user/Gits/brainlayer",
         model: "gpt-5.4",
       },
     });
 
     expect(runtime.startThread).toHaveBeenCalledWith({
-      cwd: "/Users/etanheyman/Gits/brainlayer",
+      cwd: "/home/test-user/Gits/brainlayer",
       model: "gpt-5.4",
     });
     expect(started).toEqual({
@@ -165,7 +165,7 @@ describe("CodexAppServerBridge thread lifecycle", () => {
         thread: expect.objectContaining({
           id: "agent-1",
           modelProvider: "cmuxlayer",
-          cwd: "/Users/etanheyman/Gits/brainlayer",
+          cwd: "/home/test-user/Gits/brainlayer",
         }),
       },
     });

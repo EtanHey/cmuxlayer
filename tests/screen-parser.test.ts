@@ -252,7 +252,7 @@ Claude Code
       "› 1. gpt-5.6-sol (current)",
       "  2. gpt-5.6-terra",
       "",
-      "⏺ Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+      "⏺ Codex wants to run: rm -rf /home/test-user/Gits/cmuxlayer",
       "",
       "❯ 1. Run it",
       "  2. Skip",
@@ -294,7 +294,7 @@ Claude Code
       "› /model",
       "",
       "Codex wants to run:",
-      "  rm -rf /Users/etanheyman/Gits/cmuxlayer",
+      "  rm -rf /home/test-user/Gits/cmuxlayer",
       "",
       "❯ 1. Yes, run it",
       "  2. No",
@@ -326,7 +326,7 @@ Claude Code
       "> Release notes",
       "  Skip until next version",
       "",
-      "Codex wants to run: rm -rf /Users/etanheyman/Gits",
+      "Codex wants to run: rm -rf /home/test-user/Gits",
       "❯ 1. Yes, run it",
       "  2. No",
       "",
@@ -1202,7 +1202,7 @@ TASK_DONE
 ╭──────────────────────────╮
 │ OpenAI Codex             │
 │ Model: gpt-5.5 xhigh     │
-│ Directory: /Users/etanheyman/Gits/voicelayer │
+│ Directory: /home/test-user/Gits/voicelayer │
 │ Permissions: YOLO        │
 ╰──────────────────────────╯
 

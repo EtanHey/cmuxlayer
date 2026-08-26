@@ -85,7 +85,7 @@ describe("P11 coordination contract issuance", () => {
 
 describe("P11 boot footer (Constraint 1: <=2 short lines, bytes declared)", () => {
   const contract = {
-    report_path: "/Users/x/.cmux/agents/w-1/report.md",
+    report_path: "/home/test-user/.cmux/agents/w-1/report.md",
     done_marker: "DONE_W_1",
   };
 

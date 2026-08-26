@@ -1,9 +1,4 @@
-import {
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,6 +6,8 @@ import {
   baselineContentSha256,
   compareBenchmark,
   maximumBenchmarkMeasurements,
+  performanceCeiling,
+  requireBaselineIncreaseReason,
   renderMarkdownComparison,
   runBenchmark,
   validateBaseline,
@@ -37,27 +34,61 @@ const baseline = attest({
   },
   regression_ratio: 1.25,
   sanity_caps_ms: {
-    first_send_after_spawn: 10_000,
-    cli_send: 10_000,
+    all_rows: 1_000,
+    cli_send: 1_000,
   },
   replay: {
     clients: 8,
     rounds: 12,
-    operations: ["list_surfaces", "read_screen", "first_send_after_spawn"],
+    operations: [
+      "list_surfaces",
+      "read_screen",
+      "send_to_surface_warm",
+      "send_to_agent_warm",
+      "list_agents",
+      "control_health",
+      "spawn_close_during_sweep",
+      "first_send_after_spawn",
+    ],
     bytes: {
       list_surfaces: 140,
       read_screen: 170,
+      send_to_surface_warm: 180,
+      send_to_agent_warm: 181,
+      list_agents: 182,
+      control_health: 183,
+      spawn_close_during_sweep: 184,
       first_send_after_spawn: 240,
     },
     request_sha256: {
       list_surfaces: "1".repeat(64),
       read_screen: "2".repeat(64),
+      send_to_surface_warm: "4".repeat(64),
+      send_to_agent_warm: "5".repeat(64),
+      list_agents: "6".repeat(64),
+      control_health: "7".repeat(64),
+      spawn_close_during_sweep: "8".repeat(64),
       first_send_after_spawn: "3".repeat(64),
+    },
+    transport: {
+      list_surfaces: "socket",
+      read_screen: "socket",
+      send_to_surface_warm: "socket",
+      send_to_agent_warm: "socket",
+      list_agents: "socket",
+      control_health: "socket",
+      spawn_close_during_sweep: "socket",
+      first_send_after_spawn: "socket",
     },
   },
   measurements: {
-    list_surfaces: { p50_ms: 100, p95_ms: 120 },
-    read_screen: { p50_ms: 140, p95_ms: 160 },
+    list_surfaces: { p50_ms: 100, p95_ms: 120, lock_hold_ms: 0 },
+    read_screen: { p50_ms: 140, p95_ms: 160, lock_hold_ms: 0 },
+    send_to_surface_warm: { p50_ms: 200, p95_ms: 220, lock_hold_ms: 20 },
+    send_to_agent_warm: { p50_ms: 210, p95_ms: 230, lock_hold_ms: 21 },
+    list_agents: { p50_ms: 110, p95_ms: 130, lock_hold_ms: 0 },
+    control_health: { p50_ms: 90, p95_ms: 100, lock_hold_ms: 0 },
+    spawn_close_during_sweep: { p50_ms: 300, p95_ms: 320, lock_hold_ms: 30 },
     first_send_after_spawn: {
       p50_ms: 900,
       p95_ms: 900,
@@ -74,22 +105,76 @@ const result = {
   replay: baseline.replay,
   latency: {
     daemon_path: {
-      list_surfaces: { p50_ms: 110, p95_ms: 130, p99_ms: 140 },
-      read_screen: { p50_ms: 150, p95_ms: 170, p99_ms: 180 },
+      list_surfaces: {
+        p50_ms: 110,
+        p95_ms: 130,
+        p99_ms: 140,
+        transport: "socket",
+      },
+      read_screen: {
+        p50_ms: 150,
+        p95_ms: 170,
+        p99_ms: 180,
+        transport: "socket",
+      },
+      list_agents: {
+        p50_ms: 120,
+        p95_ms: 140,
+        lock_hold_ms: 0,
+        transport: "socket",
+      },
+      control_health: {
+        p50_ms: 95,
+        p95_ms: 105,
+        lock_hold_ms: 0,
+        transport: "socket",
+      },
     },
     first_send_after_spawn: {
       first: {
         elapsed_ms: 950,
         request_bytes: 240,
         lock_hold_ms: 21,
-        receipt: { timings_ms: { lock: 4, lock_hold: 21 } },
+        transport: "socket",
+        receipt: {
+          timings_ms: { lock: 4, lock_hold: 21 },
+          transport: "socket",
+        },
       },
-      surface: { elapsed_ms: 710 },
+      surface: { elapsed_ms: 710, transport: "socket" },
+    },
+    send_to_surface_warm: {
+      p50_ms: 210,
+      p95_ms: 230,
+      lock_hold_ms: 21,
+      transport: "socket",
+    },
+    send_to_agent_warm: {
+      p50_ms: 220,
+      p95_ms: 240,
+      lock_hold_ms: 22,
+      transport: "socket",
+    },
+    spawn_close_during_sweep: {
+      p50_ms: 310,
+      p95_ms: 330,
+      lock_hold_ms: 31,
+      transport: "socket",
     },
   },
 };
 
 describe("daemon performance budget", () => {
+  it("requires an explicit reason for any committed-row increase", () => {
+    expect(() => requireBaselineIncreaseReason([[101, 100]], "")).toThrow(
+      /without --reason/,
+    );
+    expect(requireBaselineIncreaseReason([[101, 100]], "runner migration")).toBe(
+      true,
+    );
+    expect(requireBaselineIncreaseReason([[99, 100]], "")).toBe(false);
+  });
+
   it("requires a CI-runner source, canonical requests, and the 1.25 ratio", () => {
     expect(() => validateBaseline(baseline)).not.toThrow();
     expect(() =>
@@ -154,7 +239,7 @@ describe("daemon performance budget", () => {
           ...result.latency.daemon_path,
           read_screen: {
             ...result.latency.daemon_path.read_screen,
-            p50_ms: 176,
+            p50_ms: 441,
           },
         },
       },
@@ -162,7 +247,68 @@ describe("daemon performance budget", () => {
 
     expect(comparison.passed).toBe(false);
     expect(comparison.failures).toContain(
-      "read_screen p50: 176ms exceeds 175ms",
+      "read_screen p50: 441ms exceeds 440ms",
+    );
+  });
+
+  it("fails the table when read_screen alone used the CLI fallback", () => {
+    const fallback = compareBenchmark(baseline, {
+      ...result,
+      latency: {
+        ...result.latency,
+        daemon_path: {
+          ...result.latency.daemon_path,
+          read_screen: {
+            ...result.latency.daemon_path.read_screen,
+            transport: "cli",
+          },
+        },
+      },
+    });
+
+    expect(fallback.passed).toBe(false);
+    expect(fallback.failures).toContain(
+      "read_screen transport: cli; cli fallback active",
+    );
+    expect(
+      renderMarkdownComparison(
+        baseline,
+        {
+          ...result,
+          latency: {
+            ...result.latency,
+            daemon_path: {
+              ...result.latency.daemon_path,
+              read_screen: {
+                ...result.latency.daemon_path.read_screen,
+                transport: "cli",
+              },
+            },
+          },
+        },
+        fallback,
+      ),
+    ).toContain("| read_screen | cli |");
+  });
+
+  it("fails the benchmark when the intrinsic CLI-send sample used fallback", () => {
+    const fallback = compareBenchmark(baseline, {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          surface: {
+            ...result.latency.first_send_after_spawn.surface,
+            transport: "cli",
+          },
+        },
+      },
+    });
+
+    expect(fallback.passed).toBe(false);
+    expect(fallback.failures).toContain(
+      "cli_send_ms transport: cli; cli fallback active",
     );
   });
 
@@ -172,6 +318,7 @@ describe("daemon performance budget", () => {
       latency: {
         ...result.latency,
         daemon_path: {
+          ...result.latency.daemon_path,
           list_surfaces: { p50_ms: 90, p95_ms: 200 },
           read_screen: { p50_ms: 190, p95_ms: 140 },
         },
@@ -183,8 +330,25 @@ describe("daemon performance budget", () => {
     };
 
     expect(maximumBenchmarkMeasurements([result, slower])).toEqual({
-      list_surfaces: { p50_ms: 110, p95_ms: 200 },
-      read_screen: { p50_ms: 190, p95_ms: 170 },
+      list_surfaces: { p50_ms: 110, p95_ms: 200, lock_hold_ms: 0 },
+      read_screen: { p50_ms: 190, p95_ms: 170, lock_hold_ms: 0 },
+      send_to_surface_warm: {
+        p50_ms: 210,
+        p95_ms: 230,
+        lock_hold_ms: 21,
+      },
+      send_to_agent_warm: {
+        p50_ms: 220,
+        p95_ms: 240,
+        lock_hold_ms: 22,
+      },
+      list_agents: { p50_ms: 120, p95_ms: 140, lock_hold_ms: 0 },
+      control_health: { p50_ms: 95, p95_ms: 105, lock_hold_ms: 0 },
+      spawn_close_during_sweep: {
+        p50_ms: 310,
+        p95_ms: 330,
+        lock_hold_ms: 31,
+      },
       first_send_after_spawn: {
         p50_ms: 1_100,
         p95_ms: 1_100,
@@ -227,7 +391,7 @@ describe("daemon performance budget", () => {
       },
     });
     expect(comparison.failures).toContain(
-      "first_send_after_spawn p50: 1126ms exceeds 1125ms",
+      "first_send_after_spawn p50: 1126ms exceeds 1000ms",
     );
     expect(
       comparison.rows.find(
@@ -235,7 +399,7 @@ describe("daemon performance budget", () => {
           entry.operation === "first_send_after_spawn" &&
           entry.metric === "p50_ms",
       )?.ceiling,
-    ).toBe(1_125);
+    ).toBe(1_000);
   });
 
   it("tightens the enforced ceiling when a committed measurement is lowered", () => {
@@ -249,16 +413,28 @@ describe("daemon performance budget", () => {
         },
       },
     });
-    const comparison = compareBenchmark(loweredBaseline, result);
+    const comparison = compareBenchmark(loweredBaseline, {
+      ...result,
+      latency: {
+        ...result.latency,
+        daemon_path: {
+          ...result.latency.daemon_path,
+          list_surfaces: {
+            ...result.latency.daemon_path.list_surfaces,
+            p50_ms: 302,
+          },
+        },
+      },
+    });
 
     expect(
       comparison.rows.find(
         (entry) =>
           entry.operation === "list_surfaces" && entry.metric === "p50_ms",
       )?.ceiling,
-    ).toBe(1.25);
+    ).toBe(301);
     expect(comparison.failures).toContain(
-      "list_surfaces p50: 110ms exceeds 1.25ms",
+      "list_surfaces p50: 302ms exceeds 301ms",
     );
   });
 
@@ -269,12 +445,12 @@ describe("daemon performance budget", () => {
         ...result.latency,
         first_send_after_spawn: {
           ...result.latency.first_send_after_spawn,
-          surface: { elapsed_ms: 876 },
+          surface: { elapsed_ms: 1_001 },
         },
       },
     });
     expect(cli.failures).toContain(
-      "first_send_after_spawn cli_send: 876ms exceeds 875ms",
+      "first_send_after_spawn cli_send: 1001ms exceeds 1000ms",
     );
 
     const replay = compareBenchmark(baseline, {
@@ -314,10 +490,7 @@ describe("daemon performance budget", () => {
 
   it("cannot reuse a stale result when the benchmark process fails", async () => {
     const artifactDir = mkdtempSync(join(tmpdir(), "cmuxlayer-stale-bench-"));
-    writeFileSync(
-      join(artifactDir, "result.json"),
-      JSON.stringify(result),
-    );
+    writeFileSync(join(artifactDir, "result.json"), JSON.stringify(result));
     try {
       await expect(
         runBenchmark({
@@ -369,7 +542,7 @@ describe("daemon performance budget", () => {
 
     expect(markdown).toContain("<!-- cmuxlayer-perf-budget -->");
     expect(markdown).toContain(
-      "| Operation | Metric | Baseline | Current | Ceiling | Status |",
+      "| Operation | Transport | Metric | Baseline | Current | Ceiling | Status |",
     );
     expect(markdown).toContain("first_send_after_spawn");
     expect(markdown).toContain("Runner regression ratio: 1.25x");
@@ -389,12 +562,15 @@ describe("daemon performance budget", () => {
     expect(committed.replay.operations).toEqual([
       "list_surfaces",
       "read_screen",
+      "send_to_surface_warm",
+      "send_to_agent_warm",
+      "list_agents",
+      "control_health",
+      "spawn_close_during_sweep",
       "first_send_after_spawn",
     ]);
-    expect(committed.source.runner_class).toBe(
-      "github-actions-ubuntu-latest",
-    );
-    expect(committed.source.workflow_run_id).toBe(32928658291);
+    expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
+    expect(committed.source.workflow_run_id).toBe(32988968639);
     expect(committed).not.toHaveProperty("ceilings");
     expect(committed.refresh_attestation.content_sha256).toMatch(
       /^[0-9a-f]{64}$/,
@@ -414,6 +590,20 @@ describe("daemon performance budget", () => {
     expect(source).toContain("lock_hold_ms");
     expect(source).toContain("timings_ms?.lock_hold");
     expect(source).toContain("CMUXLAYER_BENCH_JSON_PATH");
+    expect(source).toContain(
+      "await waitForLifecycleWaiter(sweepHoldState, closeHoldToken)",
+    );
+    expect(source).toContain("transport: closeReceipt.transport");
+    expect(source).toContain(
+      'const listReceipt = toolData(list, "list_surfaces")',
+    );
+    expect(source).toContain(
+      'const readReceipt = toolData(read, "read_screen")',
+    );
+    expect(source).not.toContain(
+      'receipt.transport || name === "control_health"',
+    );
+    expect(source).not.toContain("const transportReceipts = await Promise.all");
   });
 
   it("wires a required PR/main job and edits a single comment even on RED", () => {
@@ -426,9 +616,13 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("perf-baseline-refresh:");
     expect(workflow).toContain("baseline_source_run_id:");
-    expect(workflow).toContain('git merge-base --is-ancestor "$source_sha" HEAD');
+    expect(workflow).toContain(
+      'git merge-base --is-ancestor "$source_sha" HEAD',
+    );
     expect(workflow).toContain("unexpected_changes=");
-    expect(workflow).toContain("check-daemon-benchmark|refresh-daemon-baseline");
+    expect(workflow).toContain(
+      "check-daemon-benchmark|refresh-daemon-baseline",
+    );
     expect(workflow).toContain("gh run download");
     expect(workflow).toContain("pull-requests: write");
     expect(workflow).toContain("bun run bench:daemon:check");
@@ -466,11 +660,21 @@ describe("daemon performance budget", () => {
     );
     expect(source).toContain("CMUXLAYER_BENCH_IMPORT_RESULT_PATH");
     expect(source).toContain("runnerRebase");
-    expect(source).toContain("Math.max(");
+    expect(source).toContain("runnerRebase ? Math.max : Math.min");
+    expect(source).toContain('--reason');
+    expect(source).toContain("increase_reason");
   });
 
   it("keeps scratch artifacts out of default Vitest collection", () => {
     const config = readFileSync(join(repoRoot, "vitest.config.ts"), "utf8");
     expect(config).toContain('"**/docs.local/scratch/**"');
+  });
+
+  it("contains fake-socket teardown resets inside the benchmark connection", () => {
+    const source = readFileSync(
+      join(repoRoot, "scripts", "bench-daemon.mjs"),
+      "utf8",
+    );
+    expect(source).toContain('socket.on("error", () => {})');
   });
 });

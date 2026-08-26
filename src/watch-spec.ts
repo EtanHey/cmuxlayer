@@ -11,6 +11,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { httpDeliver } from "./outbox-drainer.js";
 
 export type WatchState = "armed" | "firing" | "fired" | "failed";
@@ -69,6 +70,24 @@ export interface WatchRegistryFile {
   watches: WatchRecord[];
 }
 
+export interface WatchReportPathReservation {
+  reservation_id: string;
+  owner: string;
+  target: string;
+  subject_agent_id?: string;
+  pid: number;
+  created_at_ms: number;
+  process_started_at_ms?: number;
+}
+
+export type WatchReportPathReservationResult =
+  | { ok: true; reservation: WatchReportPathReservation }
+  | {
+      ok: false;
+      conflict_kind: "reservation" | "watch";
+      conflict_subject_agent_id?: string;
+    };
+
 export type WatchNotificationReason =
   | "predicate_matched"
   | "target_changed"
@@ -113,6 +132,9 @@ export interface WatchRegistryOptions {
   agentObservation?: (
     agentId: string,
   ) => Promise<WatchAgentObservation> | WatchAgentObservation;
+  /** Injectable reservation-owner probes for deterministic PID-reuse tests. */
+  reservationProcessAlive?: (pid: number) => boolean;
+  reservationProcessStartedAtMs?: (pid: number) => number | null;
 }
 
 export interface WatchContentFingerprintIo {
@@ -228,12 +250,16 @@ function isWatchRecord(value: unknown): value is WatchRecord {
     !isFiniteNumber(value.last_heartbeat_at_ms) ||
     !isWatchState(value.state) ||
     typeof value.liveness.value !== "boolean" ||
-    (value.liveness.source !== "process" && value.liveness.source !== "screen") ||
+    (value.liveness.source !== "process" &&
+      value.liveness.source !== "screen") ||
     !isFiniteNumber(value.liveness.observed_at_ms)
   ) {
     return false;
   }
-  if (value.fingerprint !== undefined && typeof value.fingerprint !== "string") {
+  if (
+    value.fingerprint !== undefined &&
+    typeof value.fingerprint !== "string"
+  ) {
     return false;
   }
   if (
@@ -364,10 +390,107 @@ function writeRegistry(
   renameSync(temporary, path);
 }
 
-async function withWriteLock<T>(
+function reportPathReservationFile(path: string): string {
+  return `${path}.report-path-reservations.json`;
+}
+
+function isReportPathReservation(
+  value: unknown,
+): value is WatchReportPathReservation {
+  return (
+    isRecord(value) &&
+    Boolean(cleanString(value.reservation_id)) &&
+    Boolean(cleanString(value.owner)) &&
+    Boolean(cleanString(value.target)) &&
+    (value.subject_agent_id === undefined ||
+      Boolean(cleanString(value.subject_agent_id))) &&
+    Number.isInteger(value.pid) &&
+    (value.pid as number) > 0 &&
+    isFiniteNumber(value.created_at_ms) &&
+    (value.process_started_at_ms === undefined ||
+      isFiniteNumber(value.process_started_at_ms))
+  );
+}
+
+function readReportPathReservations(
   path: string,
-  operation: () => T,
-): Promise<T> {
+): WatchReportPathReservation[] {
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (isRecord(parsed) && Array.isArray(parsed.reservations)) {
+      return parsed.reservations.filter(isReportPathReservation);
+    }
+  } catch {
+    // The caller holds the registry lock and will rewrite canonical state.
+  }
+  console.warn(
+    `[cmuxlayer] ignoring malformed report-path reservations: ${path}`,
+  );
+  return [];
+}
+
+function writeReportPathReservations(
+  path: string,
+  reservations: readonly WatchReportPathReservation[],
+): void {
+  if (reservations.length === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(
+    temporary,
+    `${JSON.stringify({ version: STATE_VERSION, reservations }, null, 2)}\n`,
+    "utf8",
+  );
+  renameSync(temporary, path);
+}
+
+function processStartedAtMs(pid: number): number | null {
+  try {
+    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+    }).trim();
+    const parsed = Date.parse(started);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function reservationProcessIsLive(
+  reservation: WatchReportPathReservation,
+  opts: WatchRegistryOptions,
+): boolean {
+  const { pid } = reservation;
+  const alive = opts.reservationProcessAlive ?? ((candidatePid: number) => {
+    if (candidatePid === process.pid) return true;
+    try {
+      process.kill(candidatePid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  });
+  if (!alive(pid)) return false;
+  const startedAt =
+    (opts.reservationProcessStartedAtMs ?? processStartedAtMs)(pid);
+  if (startedAt === null) return true;
+  if (reservation.process_started_at_ms !== undefined) {
+    return reservation.process_started_at_ms === startedAt;
+  }
+  // Legacy rows can still be reclaimed when the current PID owner started
+  // after the reservation was written, proving that the PID was recycled.
+  return startedAt <= reservation.created_at_ms + 1_000;
+}
+
+function currentProcessStartedAtMs(opts: WatchRegistryOptions): number | null {
+  return (opts.reservationProcessStartedAtMs ?? processStartedAtMs)(process.pid);
+}
+
+async function withWriteLock<T>(path: string, operation: () => T): Promise<T> {
   const lockPath = `${path}.lock`;
   const lockOwnerPath = join(
     lockPath,
@@ -458,9 +581,7 @@ function contentFingerprint(
 function storedContentDigest(
   fingerprint: string | undefined,
 ): string | undefined {
-  const legacy = fingerprint?.match(
-    /^([a-f\d]{64}):[^:]+:[^:]+:[^:]+:[^:]+$/i,
-  );
+  const legacy = fingerprint?.match(/^([a-f\d]{64}):[^:]+:[^:]+:[^:]+:[^:]+$/i);
   return legacy?.[1] ?? fingerprint;
 }
 
@@ -480,7 +601,10 @@ function assertSpec(
   const predicate = cleanString(spec.predicate);
   const marker = cleanString(spec.marker);
   const change = spec.change === "content" ? "content" : null;
-  const selectorCount = Number(predicate !== null) + Number(marker !== null) + Number(change !== null);
+  const selectorCount =
+    Number(predicate !== null) +
+    Number(marker !== null) +
+    Number(change !== null);
   if (!owner || !target || selectorCount !== 1) {
     throw new WatchArmError(
       "invalid_watch_spec",
@@ -509,7 +633,11 @@ function assertSpec(
 
   const targetKind = isAbsolute(target) ? "file" : "agent";
   if (targetKind === "file") {
-    if ((!marker && !change) || predicate || Boolean(marker) === Boolean(change)) {
+    if (
+      (!marker && !change) ||
+      predicate ||
+      Boolean(marker) === Boolean(change)
+    ) {
       throw new WatchArmError(
         "invalid_watch_spec",
         target,
@@ -555,6 +683,101 @@ export function readWatchRegistry(
   opts: WatchRegistryOptions = {},
 ): WatchRegistryFile {
   return readRegistry(registryPathFor(opts));
+}
+
+export function reserveWatchReportPath(
+  input: { owner: string; target: string; subject_agent_id?: string },
+  opts: WatchRegistryOptions = {},
+): Promise<WatchReportPathReservationResult> {
+  const owner = cleanString(input.owner);
+  const target = cleanString(input.target);
+  const subjectAgentId = cleanString(input.subject_agent_id);
+  if (!owner || !target || !isAbsolute(target)) {
+    return Promise.reject(
+      new Error(
+        "Report-path reservations require an owner and absolute target",
+      ),
+    );
+  }
+  const normalizedTarget = resolve(target);
+  const registryPath = registryPathFor(opts);
+  const reservationPath = reportPathReservationFile(registryPath);
+  return withWriteLock(registryPath, () => {
+    const activeReservations = readReportPathReservations(
+      reservationPath,
+    ).filter((reservation) => reservationProcessIsLive(reservation, opts));
+    const conflictingReservation = activeReservations.find(
+      (reservation) =>
+        reservation.owner === owner && reservation.target === normalizedTarget,
+    );
+    if (conflictingReservation) {
+      writeReportPathReservations(reservationPath, activeReservations);
+      return {
+        ok: false,
+        conflict_kind: "reservation",
+        ...(conflictingReservation.subject_agent_id
+          ? {
+              conflict_subject_agent_id:
+                conflictingReservation.subject_agent_id,
+            }
+          : {}),
+      };
+    }
+    const conflictingWatch = readRegistryState(registryPath).watches.find(
+      (watch) =>
+        watch.owner === owner &&
+        watch.target === normalizedTarget &&
+        watch.change === "content" &&
+        watch.state !== "failed" &&
+        watch.subject_agent_id !== subjectAgentId,
+    );
+    if (conflictingWatch) {
+      writeReportPathReservations(reservationPath, activeReservations);
+      return {
+        ok: false,
+        conflict_kind: "watch",
+        ...(conflictingWatch.subject_agent_id
+          ? { conflict_subject_agent_id: conflictingWatch.subject_agent_id }
+          : {}),
+      };
+    }
+    const processStartedAt = currentProcessStartedAtMs(opts);
+    const reservation: WatchReportPathReservation = {
+      reservation_id: randomUUID(),
+      owner,
+      target: normalizedTarget,
+      ...(subjectAgentId ? { subject_agent_id: subjectAgentId } : {}),
+      pid: process.pid,
+      created_at_ms: nowMs(opts),
+      ...(processStartedAt !== null
+        ? { process_started_at_ms: processStartedAt }
+        : {}),
+    };
+    writeReportPathReservations(reservationPath, [
+      ...activeReservations,
+      reservation,
+    ]);
+    return { ok: true, reservation };
+  });
+}
+
+export function releaseWatchReportPathReservation(
+  reservationId: string,
+  opts: WatchRegistryOptions = {},
+): Promise<boolean> {
+  const registryPath = registryPathFor(opts);
+  const reservationPath = reportPathReservationFile(registryPath);
+  return withWriteLock(registryPath, () => {
+    const reservations = readReportPathReservations(reservationPath);
+    const retained = reservations.filter(
+      (reservation) => reservation.reservation_id !== reservationId,
+    );
+    const released = retained.length !== reservations.length;
+    // Always rewrite while holding the lock so a malformed sidecar also
+    // self-heals when the first operation after a crash is a release.
+    writeReportPathReservations(reservationPath, retained);
+    return released;
+  });
 }
 
 export async function armWatch(
@@ -965,7 +1188,8 @@ export async function httpNotifyWatch(
       body: `Watch ${event.watch_id} for ${event.owner}: ${event.reason}; target=${event.target}`,
       source: "cmuxlayer-watch-spec",
       priority:
-        event.reason === "predicate_matched" || event.reason === "target_changed"
+        event.reason === "predicate_matched" ||
+        event.reason === "target_changed"
           ? "normal"
           : "high",
       dedupe_key: `${event.watch_id}:${event.reason}:${event.observed_value ?? ""}`,

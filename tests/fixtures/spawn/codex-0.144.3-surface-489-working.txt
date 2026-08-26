@@ -1,5 +1,5 @@
 Last login: Mon Jul 13 14:56:19 on ttys002
-etanheyman ~ [feature/coach-agent-boot-prompt-fix] $ CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'
+etanheyman ~ [feature/coach-agent-boot-prompt-fix] $ CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/home/test-user/Gits/cmuxlayer.wt/spawn-reliability-3head'CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/home/test-user/Gits/cmuxlayer.wt/spawn-reliability-3head'
 [4] 43007
 cmuxlayerCodex
 
@@ -24,8 +24,8 @@ Shellbook: run `shellbook tui` in another terminal for the social pane.
 • You have 2 usage limit resets available. Run /usage to use one.
 
 
-› Read and follow /Users/etanheyman/Gits/cmuxlayer/docs.local/design/2026-07-13-spawn-
-  reliability-mission.mdRead and follow /Users/etanheyman/Gits/cmuxlayer/docs.local/
+› Read and follow /home/test-user/Gits/cmuxlayer/docs.local/design/2026-07-13-spawn-
+  reliability-mission.mdRead and follow /home/test-user/Gits/cmuxlayer/docs.local/
   design/2026-07-13-spawn-reliability-mission.md
 
 

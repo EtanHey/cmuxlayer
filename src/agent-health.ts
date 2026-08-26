@@ -22,6 +22,7 @@ export type AgentHealthIssueCode =
   | "non_resumable"
   | "inbox_channel_dir_deleted"
   | "inbox_monitor_not_alive"
+  | "unread_inbox_dispatches"
   | "monitor_collapsed"
   | "stale_inbox_dispatches"
   | "agent_wedged"
@@ -71,6 +72,7 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   missing_cli_session_id: "info",
   non_resumable: "info",
   inbox_monitor_not_alive: "info",
+  unread_inbox_dispatches: "degraded",
   auto_discovered_agent: "info",
   ambiguous_repo_cwd_label: "info",
   registry_screen_disagreement: "degraded",
@@ -85,6 +87,7 @@ export interface AgentHealthInput {
   parent_role?: AgentRole | null;
   monitor_alive?: boolean | null;
   inbox_channel_dir_deleted?: boolean | null;
+  unread_count?: number;
   stale_count?: number;
   screen_status?: string | null;
   screen_agent_type?: ParsedScreenAgentType | null;
@@ -155,6 +158,7 @@ function issueSeverity(
     autoDiscovered: boolean;
     lacksManagedPlacement: boolean;
     panePtyDead: boolean;
+    monitorHasUnread: boolean;
   },
 ): AgentHealthIssueSeverity {
   if (
@@ -174,6 +178,9 @@ function issueSeverity(
   if (code === "inbox_monitor_not_alive" && context.autoDiscovered) {
     return "info";
   }
+  if (code === "inbox_monitor_not_alive" && !context.monitorHasUnread) {
+    return "info";
+  }
   if (
     code === "inbox_monitor_not_alive" &&
     !context.inboxMonitorWithinBootGrace
@@ -191,6 +198,7 @@ function deriveIssueSeverities(
     autoDiscovered: boolean;
     lacksManagedPlacement: boolean;
     panePtyDead: boolean;
+    monitorHasUnread: boolean;
   },
 ): Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>> {
   const severities: Partial<
@@ -388,6 +396,8 @@ export function evaluateAgentHealth(
     );
   }
 
+  const unreadCount = input.unread_count ?? 0;
+  const staleCount = input.stale_count ?? 0;
   if (
     input.monitor_alive === false &&
     input.inbox_channel_dir_deleted === true
@@ -407,7 +417,15 @@ export function evaluateAgentHealth(
     );
   }
 
-  const staleCount = input.stale_count ?? 0;
+  if (input.monitor_alive === false && unreadCount > 0) {
+    addIssue(
+      issueCodes,
+      issues,
+      "unread_inbox_dispatches",
+      "agent has unread inbox dispatches while its inbox monitor is not alive",
+    );
+  }
+
   if (staleCount > 0) {
     addIssue(
       issueCodes,
@@ -547,10 +565,7 @@ export function evaluateAgentHealth(
     }
   }
 
-  if (
-    agent.cli !== "claude" &&
-    role === "orchestrator"
-  ) {
+  if (agent.cli !== "claude" && role === "orchestrator") {
     addIssue(
       issueCodes,
       issues,
@@ -613,6 +628,7 @@ export function evaluateAgentHealth(
     autoDiscovered,
     lacksManagedPlacement: lacksManagedPlacement(agent),
     panePtyDead,
+    monitorHasUnread: unreadCount > 0 || staleCount > 0,
     inboxMonitorWithinBootGrace: isWithinInboxMonitorBootGrace(
       agent,
       deps.now?.() ?? Date.now(),

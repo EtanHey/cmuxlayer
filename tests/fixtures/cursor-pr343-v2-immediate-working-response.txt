@@ -6,7 +6,7 @@
 
                                                                                            
   Read and follow                                                                          
-  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  /home/test-user/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
   r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
   tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.           
                                                                                            
@@ -33,7 +33,7 @@
 
                                                                                            
   Read and follow                                                                          
-  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  /home/test-user/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
   r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
   tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run        
   the read-only command bun run test -- tests/screen-parser.test.ts now; respond           
@@ -60,7 +60,7 @@
 
                                                                                            
   Read and follow                                                                          
-  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  /home/test-user/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
   r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
   tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run        
   the read-only command bun run test -- tests/screen-parser.test.ts now; respond           
@@ -78,7 +78,7 @@
 
                                                                                            
   Read and follow                                                                          
-  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  /home/test-user/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
   r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
   tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run        
   the read-only command bun run test -- tests/screen-parser.test.ts now; respond           
@@ -90,7 +90,7 @@
     Tip: Use /debug to instrument and debug complex problems.
  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
   → Read and follow                                                                        
-    /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-cursor.m  
+    /home/test-user/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-cursor.m  
     dCURSOR_WORKING_PROBERun the read-only command bun run test --                         
     tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run the  
      read-only command bun run test -- tests/screen-parser.test.ts now; respond            

@@ -83,9 +83,12 @@ Prediction is logged only; it does not notify.
 Do not arm this from automation. Etan-gated arm command:
 
 ```bash
-launchctl bootout gui/$(id -u) /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist
+launchd/cmux-ram-sampler/install.sh --dry-run
+launchd/cmux-ram-sampler/install.sh --install
 ```
+
+The installer renders and XML-escapes checkout/home tokens, lints the staged
+plist, and reloads the rendered copy under `~/Library/LaunchAgents`.
 
 ## Test
 

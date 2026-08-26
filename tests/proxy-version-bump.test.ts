@@ -546,7 +546,7 @@ describe("proxy version-bump auto-reconnect", () => {
     {
       name: "source tree",
       env: { CMUXLAYER_DEV: "0" },
-      runningEntryScriptPath: "/Users/dev/Gits/cmuxlayer/dist/index.js",
+      runningEntryScriptPath: "/home/test-user/Gits/cmuxlayer/dist/index.js",
     },
   ])("never self-reexecs from $name", async ({ env, runningEntryScriptPath }) => {
     const execve = vi.fn();

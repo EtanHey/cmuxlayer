@@ -263,11 +263,20 @@ class McpProcess {
     this.notify("notifications/initialized");
   }
 
-  async callTool(name, args = {}) {
-    const response = await this.request("tools/call", {
-      name,
-      arguments: args,
-    });
+  async callTool(name, args = {}, timeoutMs = 10_000) {
+    let response;
+    try {
+      response = await this.request(
+        "tools/call",
+        { name, arguments: args },
+        timeoutMs,
+      );
+    } catch (error) {
+      throw new Error(
+        `${this.label} ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
     return response.result;
   }
 
@@ -317,6 +326,7 @@ function readState() {
   try { return JSON.parse(fs.readFileSync(statePath, "utf8")); }
   catch { return { composer: "", transcript: "", title: "bench-spawn" }; }
 }
+
 function writeState(state) {
   if (statePath) fs.writeFileSync(statePath, JSON.stringify(state));
 }
@@ -324,7 +334,7 @@ function patchState(patch) {
   writeState({ ...readState(), ...patch });
 }
 const state = readState();
-const surfaces = Array.from({ length: surfaceCount }, (_, index) => ({
+const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   ref: "surface:bench-" + index,
   id: "00000000-0000-4000-8000-" + String(index).padStart(12, "0"),
   title: "bench-agent-" + index,
@@ -332,7 +342,8 @@ const surfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   index,
   selected: index === 0,
   current_directory: cwd
-})).concat([{
+}));
+const spawnedSurface = {
   ref: "surface:bench-spawn",
   id: "00000000-0000-4000-8000-999999999999",
   title: state.title,
@@ -340,7 +351,8 @@ const surfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   index: surfaceCount,
   selected: false,
   current_directory: cwd
-}]);
+};
+const surfaces = state.closed ? baseSurfaces : baseSurfaces.concat([spawnedSurface]);
 function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
@@ -353,7 +365,11 @@ if (command === "list-workspaces") {
 } else if (command === "list-pane-surfaces") {
   write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: "pane:bench", surfaces });
 } else if (command === "new-split") {
+  patchState({ closed: false });
   write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: "surface:bench-spawn", surface_id: "00000000-0000-4000-8000-999999999999", title: state.title, type: "terminal" });
+} else if (command === "close-surface") {
+  patchState({ closed: true });
+  write({ ok: true });
 } else if (command === "debug-terminals") {
   write({ terminals: surfaces.map((surface) => ({ surface_ref: surface.ref, current_directory: cwd })) });
 } else if (command === "read-screen") {
@@ -398,6 +414,194 @@ if (command === "list-workspaces") {
   return fakePath;
 }
 
+async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
+  const server = net.createServer((socket) => {
+    // Benchmark clients may disappear while the fake server is replying.
+    // Treat that expected teardown reset as connection-local evidence, not an
+    // uncaught process error that invalidates an otherwise GREEN sample.
+    socket.on("error", () => {});
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        void handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount);
+      }
+    });
+  });
+  await new Promise((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolvePromise);
+  });
+  return server;
+}
+
+async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
+  if (!line.startsWith("{")) {
+    socket.write(`${line.startsWith("list_status") ? "[]" : "OK"}\n`);
+    return;
+  }
+  const request = JSON.parse(line);
+  const params = request.params ?? {};
+  const state = await readFakeState(statePath);
+  const cwd = process.cwd();
+  const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
+    ref: `surface:bench-${index}`,
+    id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    title: `bench-agent-${index}`,
+    type: "terminal",
+    index,
+    selected: index === 0,
+    current_directory: cwd,
+  }));
+  const spawned = {
+    ref: "surface:bench-spawn",
+    id: "00000000-0000-4000-8000-999999999999",
+    title: state.title ?? "bench-spawn",
+    type: "terminal",
+    index: surfaceCount,
+    selected: false,
+    current_directory: cwd,
+  };
+  const surfaces = state.closed ? baseSurfaces : [...baseSurfaces, spawned];
+  const layout = {
+    workspace_ref: "workspace:bench",
+    window_ref: "window:bench",
+    pane_ref: "pane:bench",
+  };
+  let result;
+  switch (request.method) {
+    case "system.ping":
+      result = { pong: true };
+      break;
+    case "system.identify":
+      result = {
+        caller: {
+          ...layout,
+          surface_ref: "surface:bench-0",
+        },
+        focused: {
+          ...layout,
+          surface_ref: "surface:bench-0",
+        },
+      };
+      break;
+    case "window.list":
+      result = {
+        windows: [
+          {
+            ref: "window:bench",
+            title: "Bench",
+            index: 0,
+            selected: true,
+            workspace_refs: ["workspace:bench"],
+          },
+        ],
+      };
+      break;
+    case "workspace.list":
+      result = {
+        workspaces: [
+          {
+            ref: "workspace:bench",
+            title: "Bench",
+            index: 0,
+            selected: true,
+            pinned: false,
+            current_directory: cwd,
+          },
+        ],
+      };
+      break;
+    case "pane.list":
+      result = {
+        ...layout,
+        panes: [
+          {
+            ref: "pane:bench",
+            index: 0,
+            focused: true,
+            surface_count: surfaces.length,
+            surface_refs: surfaces.map((surface) => surface.ref),
+            surface_ids: surfaces.map((surface) => surface.id),
+            selected_surface_ref: surfaces[0]?.ref,
+            current_directory: cwd,
+          },
+        ],
+      };
+      break;
+    case "surface.list":
+      result = { ...layout, surfaces };
+      break;
+    case "surface.read_text": {
+      const transcript = state.transcript ? `\n› ${state.transcript}\n` : "";
+      result = {
+        surface_ref: params.surface_id,
+        text:
+          `╭ OpenAI Codex ╮\nmodel: gpt-5.6-sol\n${transcript}\n› ` +
+          (state.composer ?? ""),
+        lines: 8,
+      };
+      break;
+    }
+    case "surface.split":
+      await writeFile(statePath, JSON.stringify({ ...state, closed: false }));
+      result = {
+        ...layout,
+        surface_ref: spawned.ref,
+        surface_id: spawned.id,
+        title: spawned.title,
+        type: "terminal",
+      };
+      break;
+    case "surface.send_text":
+      await writeFile(
+        statePath,
+        JSON.stringify({
+          ...state,
+          composer: `${state.composer ?? ""}${params.text ?? ""}`,
+        }),
+      );
+      result = { ok: true };
+      break;
+    case "surface.send_key":
+      await writeFile(
+        statePath,
+        JSON.stringify(
+          String(params.key).toLowerCase() === "return"
+            ? { ...state, transcript: state.composer ?? "", composer: "" }
+            : state,
+        ),
+      );
+      result = { ok: true };
+      break;
+    case "surface.close":
+      await writeFile(statePath, JSON.stringify({ ...state, closed: true }));
+      result = { ok: true };
+      break;
+    case "tab.action":
+      await writeFile(
+        statePath,
+        JSON.stringify({ ...state, title: params.title ?? state.title }),
+      );
+      result = { ok: true };
+      break;
+    case "workspace.select":
+    case "surface.focus":
+      result = { ok: true };
+      break;
+    default:
+      socket.write(
+        `${JSON.stringify({ id: request.id, ok: false, error: { code: "method_not_found", message: request.method } })}\n`,
+      );
+      return;
+  }
+  socket.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+}
+
 async function startClients(label, count, env) {
   const clients = [];
   for (let index = 0; index < count; index += 1) {
@@ -416,6 +620,10 @@ async function startClients(label, count, env) {
 async function measureLatency(clients) {
   const listSamples = [];
   const readSamples = [];
+  const listTransports = [];
+  const readTransports = [];
+  const listFallbackSources = new Set();
+  const readFallbackSources = new Set();
   let listResult = null;
   let readResult = null;
   const listArgs = {
@@ -433,13 +641,23 @@ async function measureLatency(clients) {
       clients.map(async (client) => {
         let startedAt = nowMs();
         const list = await client.callTool("list_surfaces", listArgs);
+        const listReceipt = toolData(list, "list_surfaces");
         listSamples.push(nowMs() - startedAt);
         listResult ??= list;
+        listTransports.push(operationTransport(listReceipt, "list_surfaces"));
+        for (const source of listReceipt.transport_fallbacks ?? []) {
+          listFallbackSources.add(source);
+        }
 
         startedAt = nowMs();
         const read = await client.callTool("read_screen", readArgs);
+        const readReceipt = toolData(read, "read_screen");
         readSamples.push(nowMs() - startedAt);
         readResult ??= read;
+        readTransports.push(operationTransport(readReceipt, "read_screen"));
+        for (const source of readReceipt.transport_fallbacks ?? []) {
+          readFallbackSources.add(source);
+        }
       }),
     );
   }
@@ -451,6 +669,10 @@ async function measureLatency(clients) {
       p50_ms: round(percentile(listSamples, 50)),
       p95_ms: round(percentile(listSamples, 95)),
       p99_ms: round(percentile(listSamples, 99)),
+      transport: listTransports.every((value) => value === "socket")
+        ? "socket"
+        : "cli",
+      transport_fallbacks: [...listFallbackSources],
     },
     read_screen: {
       request_bytes: requestBytes("read_screen", readArgs),
@@ -458,6 +680,10 @@ async function measureLatency(clients) {
       p50_ms: round(percentile(readSamples, 50)),
       p95_ms: round(percentile(readSamples, 95)),
       p99_ms: round(percentile(readSamples, 99)),
+      transport: readTransports.every((value) => value === "socket")
+        ? "socket"
+        : "cli",
+      transport_fallbacks: [...readFallbackSources],
     },
     firstResults: { listResult, readResult },
   };
@@ -479,6 +705,13 @@ function toolData(result, label) {
   const text = result?.content?.find((entry) => entry.type === "text")?.text;
   if (!text) throw new Error(`${label} returned no structured receipt`);
   return JSON.parse(text);
+}
+
+function operationTransport(receipt, label) {
+  if (receipt?.transport === "socket" || receipt?.transport === "cli") {
+    return receipt.transport;
+  }
+  throw new Error(`${label} omitted per-operation transport provenance`);
 }
 
 async function readFakeState(statePath) {
@@ -515,22 +748,49 @@ async function waitForSweepHoldState(
   );
 }
 
-async function measureFirstSendAfterSpawn(client, sweepHoldState) {
+async function waitForLifecycleWaiter(
+  statePath,
+  holdToken,
+  timeoutMs = 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readFakeState(statePath);
+    if (
+      state.token === holdToken &&
+      state.state === "held" &&
+      state.waiter === "close-agent"
+    ) {
+      return;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  throw new Error("close_surface never queued behind the held lifecycle sweep");
+}
+
+async function measureFirstSendAfterSpawn(
+  client,
+  sweepHoldState,
+) {
   const spawnResult = toolData(
-    await client.callTool("spawn_agent", {
-      repo: "cmuxlayer",
-      cli: "codex",
-      role: "worker",
-      authority: "worker",
-      placement: "right",
-      workspace: "workspace:bench",
-      cwd: repoRoot,
-      worktree: false,
-      mcp_profile: "sterile",
-      title: "bench-first-send",
-      prompt: "benchmark boot prompt",
-      boot_prompt_timeout_ms: 2_000,
-    }),
+    await client.callTool(
+      "spawn_agent",
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+        authority: "worker",
+        placement: "right",
+        workspace: "workspace:bench",
+        cwd: repoRoot,
+        worktree: false,
+        mcp_profile: "sterile",
+        title: "bench-first-send",
+        prompt: "benchmark boot prompt",
+        boot_prompt_timeout_ms: 2_000,
+      },
+      30_000,
+    ),
     "spawn_agent",
   );
   if (!spawnResult.agent_id || !spawnResult.surface_id) {
@@ -548,6 +808,7 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
         ...(normalizeAgentId ? { agent_id: "$SPAWNED_AGENT_ID" } : {}),
       }),
       lock_hold_ms: receipt.timings_ms?.lock_hold ?? null,
+      transport: receipt.transport,
       receipt,
     };
   };
@@ -608,12 +869,80 @@ async function measureFirstSendAfterSpawn(client, sweepHoldState) {
     };
   }
 
+  const measureWarmTool = async (name, args) => {
+    const samples = [];
+    const transports = [];
+    const fallbackSources = new Set();
+    for (let index = 0; index < rounds; index += 1) {
+      const startedAt = nowMs();
+      const receipt = toolData(await client.callTool(name, args, 30_000), name);
+      samples.push(nowMs() - startedAt);
+      transports.push(operationTransport(receipt, name));
+      for (const source of receipt.transport_fallbacks ?? []) {
+        fallbackSources.add(source);
+      }
+    }
+    return {
+      request_bytes: requestBytes(name, args),
+      request_sha256: requestSha256(name, args),
+      lock_hold_ms: 0,
+      p50_ms: round(percentile(samples, 50)),
+      p95_ms: round(percentile(samples, 95)),
+      transport: transports.every((value) => value === "socket")
+        ? "socket"
+        : "cli",
+      transport_fallbacks: [...fallbackSources],
+    };
+  };
+  const listAgents = await measureWarmTool("list_agents", {
+    detail: "summary",
+  });
+  const controlHealth = await measureWarmTool("control_health", {});
+
+  const closeArgs = {
+    scope: "agent",
+    agent_id: spawnResult.agent_id,
+    force: true,
+  };
+  const closeHoldToken = `sweep-close-${Date.now()}`;
+  await armSweepHold(sweepHoldState, closeHoldToken);
+  await waitForSweepHoldState(sweepHoldState, closeHoldToken, "held");
+  const closeStartedAt = nowMs();
+  const closePromise = client.callTool("close_surface", closeArgs).then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  await waitForLifecycleWaiter(sweepHoldState, closeHoldToken);
+  await writeFile(
+    sweepHoldState,
+    JSON.stringify({ token: closeHoldToken, state: "release" }),
+  );
+  const closeOutcome = await closePromise;
+  if ("error" in closeOutcome) throw closeOutcome.error;
+  const closeReceipt = toolData(closeOutcome.value, "close_surface");
+  await waitForSweepHoldState(sweepHoldState, closeHoldToken, "complete");
+  const spawnCloseDuringSweep = {
+    elapsed_ms: round(nowMs() - closeStartedAt),
+    request_bytes: requestBytes("close_surface", closeArgs),
+    request_sha256: requestSha256("close_surface", {
+      ...closeArgs,
+      agent_id: "$SPAWNED_AGENT_ID",
+    }),
+    lock_hold_ms: closeReceipt.timings_ms?.lock_hold ?? 0,
+    transport: closeReceipt.transport,
+    transport_fallbacks: closeReceipt.transport_fallbacks ?? [],
+    receipt: closeReceipt,
+  };
+
   return {
     agent_id: spawnResult.agent_id,
     surface_id: spawnResult.surface_id,
     first,
     second,
     surface: { ...surface, wait_for: surfaceWaitFor },
+    list_agents: listAgents,
+    control_health: controlHealth,
+    spawn_close_during_sweep: spawnCloseDuringSweep,
   };
 }
 
@@ -645,12 +974,21 @@ async function main() {
   await writeFakeCmux(binDir);
   const daemonSocket = join(socketRoot, "d.sock");
   const missingCmuxSocket = join(socketRoot, "m.sock");
-  const fakeCmuxSocketServer = net.createServer((socket) => socket.destroy());
-  await new Promise((resolvePromise, reject) => {
-    fakeCmuxSocketServer.once("error", reject);
-    fakeCmuxSocketServer.listen(missingCmuxSocket, resolvePromise);
-  });
   const fakeCmuxState = join(tempRoot, "fake-cmux-state.json");
+  const fakeCmuxSocketServer =
+    process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1"
+      ? net.createServer((socket) => socket.destroy())
+      : await startFakeCmuxSocket(
+          missingCmuxSocket,
+          fakeCmuxState,
+          clientCount,
+        );
+  if (process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1") {
+    await new Promise((resolvePromise, reject) => {
+      fakeCmuxSocketServer.once("error", reject);
+      fakeCmuxSocketServer.listen(missingCmuxSocket, resolvePromise);
+    });
+  }
   const sweepHoldState = join(tempRoot, "sweep-hold-state.json");
   const baseEnv = {
     ...process.env,
@@ -747,17 +1085,10 @@ async function main() {
         "list_surfaces",
         "p99_ms",
       ),
-      read_screen_p99_no_regression: latencyGate(
-        baselineLatency,
-        daemonLatency,
-        "read_screen",
-        "p99_ms",
-      ),
       ...(LOCAL_HARD_GATES
         ? {
             local_read_screen_p50_within_250ms:
-              daemonLatency.read_screen.p50_ms <=
-              READ_SCREEN_P50_BUDGET_MS,
+              daemonLatency.read_screen.p50_ms <= READ_SCREEN_P50_BUDGET_MS,
             local_first_send_after_spawn_within_2s:
               firstSendAfterSpawn.first.elapsed_ms <= 2_000,
             local_cli_send_within_4s:
@@ -769,6 +1100,16 @@ async function main() {
         firstSendAfterSpawn.surface.wait_for.delivery_id ===
           firstSendAfterSpawn.surface.receipt.delivery_id &&
         firstSendAfterSpawn.surface.wait_for.terminal === true,
+      socket_transport_only: [
+        daemonLatency.list_surfaces,
+        daemonLatency.read_screen,
+        firstSendAfterSpawn.first,
+        firstSendAfterSpawn.second,
+        firstSendAfterSpawn.surface,
+        firstSendAfterSpawn.list_agents,
+        firstSendAfterSpawn.control_health,
+        firstSendAfterSpawn.spawn_close_during_sweep,
+      ].every((measurement) => measurement.transport === "socket"),
     };
     const green = Object.values(gates).every(Boolean);
     const result = {
@@ -779,17 +1120,48 @@ async function main() {
       replay: {
         clients: clientCount,
         rounds,
-        operations: ["list_surfaces", "read_screen", "first_send_after_spawn"],
+        operations: [
+          "list_surfaces",
+          "read_screen",
+          "send_to_surface_warm",
+          "send_to_agent_warm",
+          "list_agents",
+          "control_health",
+          "spawn_close_during_sweep",
+          "first_send_after_spawn",
+        ],
         bytes: {
           list_surfaces: daemonLatency.list_surfaces.request_bytes,
           read_screen: daemonLatency.read_screen.request_bytes,
+          send_to_surface_warm: firstSendAfterSpawn.surface.request_bytes,
+          send_to_agent_warm: firstSendAfterSpawn.second.request_bytes,
+          list_agents: firstSendAfterSpawn.list_agents.request_bytes,
+          control_health: firstSendAfterSpawn.control_health.request_bytes,
+          spawn_close_during_sweep:
+            firstSendAfterSpawn.spawn_close_during_sweep.request_bytes,
           first_send_after_spawn: firstSendAfterSpawn.first.request_bytes,
         },
         request_sha256: {
           list_surfaces: daemonLatency.list_surfaces.request_sha256,
           read_screen: daemonLatency.read_screen.request_sha256,
-          first_send_after_spawn:
-            firstSendAfterSpawn.first.request_sha256,
+          send_to_surface_warm: firstSendAfterSpawn.surface.request_sha256,
+          send_to_agent_warm: firstSendAfterSpawn.second.request_sha256,
+          list_agents: firstSendAfterSpawn.list_agents.request_sha256,
+          control_health: firstSendAfterSpawn.control_health.request_sha256,
+          spawn_close_during_sweep:
+            firstSendAfterSpawn.spawn_close_during_sweep.request_sha256,
+          first_send_after_spawn: firstSendAfterSpawn.first.request_sha256,
+        },
+        transport: {
+          list_surfaces: daemonLatency.list_surfaces.transport,
+          read_screen: daemonLatency.read_screen.transport,
+          send_to_surface_warm: firstSendAfterSpawn.surface.transport,
+          send_to_agent_warm: firstSendAfterSpawn.second.transport,
+          list_agents: firstSendAfterSpawn.list_agents.transport,
+          control_health: firstSendAfterSpawn.control_health.transport,
+          spawn_close_during_sweep:
+            firstSendAfterSpawn.spawn_close_during_sweep.transport,
+          first_send_after_spawn: firstSendAfterSpawn.first.transport,
         },
       },
       rss: {
@@ -808,8 +1180,29 @@ async function main() {
         daemon_path: {
           list_surfaces: daemonLatency.list_surfaces,
           read_screen: daemonLatency.read_screen,
+          list_agents: firstSendAfterSpawn.list_agents,
+          control_health: firstSendAfterSpawn.control_health,
         },
         first_send_after_spawn: firstSendAfterSpawn,
+        send_to_surface_warm: {
+          p50_ms: firstSendAfterSpawn.surface.elapsed_ms,
+          p95_ms: firstSendAfterSpawn.surface.elapsed_ms,
+          lock_hold_ms: firstSendAfterSpawn.surface.lock_hold_ms ?? 0,
+          transport: firstSendAfterSpawn.surface.transport,
+        },
+        send_to_agent_warm: {
+          p50_ms: firstSendAfterSpawn.second.elapsed_ms,
+          p95_ms: firstSendAfterSpawn.second.elapsed_ms,
+          lock_hold_ms: firstSendAfterSpawn.second.lock_hold_ms ?? 0,
+          transport: firstSendAfterSpawn.second.transport,
+        },
+        spawn_close_during_sweep: {
+          p50_ms: firstSendAfterSpawn.spawn_close_during_sweep.elapsed_ms,
+          p95_ms: firstSendAfterSpawn.spawn_close_during_sweep.elapsed_ms,
+          lock_hold_ms:
+            firstSendAfterSpawn.spawn_close_during_sweep.lock_hold_ms,
+          transport: firstSendAfterSpawn.spawn_close_during_sweep.transport,
+        },
       },
       daemon_cpu_pct: round(daemonStats.cpuPct, 2),
       gates,

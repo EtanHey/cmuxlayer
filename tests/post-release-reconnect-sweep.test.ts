@@ -26,7 +26,7 @@ describe("post-release reconnect sweep portability", () => {
       [
         '{ pid = $1; $1 = ""; sub(/^[[:space:]]+/, "", $0); executable = $0; sub(/^.*\\//, "", executable); if (executable == "claude" || executable == "codex") print pid, executable }',
       ],
-      { input: "123 /Users/Alice Smith/.local/bin/claude\n", encoding: "utf8" },
+      { input: "123 /home/test-user/.local/bin/claude\n", encoding: "utf8" },
     );
     expect(parsed.status).toBe(0);
     expect(parsed.stdout.trim()).toBe("123 claude");

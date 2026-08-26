@@ -824,7 +824,7 @@ describe("CmuxAppServerRuntime", () => {
           ref: "workspace:app",
           title: "brainlayer",
           selected: true,
-          current_directory: "/Users/test/Gits/brainlayer",
+          current_directory: "/home/test-user/Gits/brainlayer",
         },
       ],
     });
@@ -838,7 +838,7 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
       ).rejects.toThrow(/manual mode/i);
       expect(spawnAgent).not.toHaveBeenCalled();
       expect(client.newSplit).not.toHaveBeenCalled();
@@ -867,14 +867,14 @@ describe("CmuxAppServerRuntime", () => {
                 {
                   ref: "workspace:B",
                   title: "brainlayer",
-                  current_directory: "/Users/test/Gits/brainlayer",
+                  current_directory: "/home/test-user/Gits/brainlayer",
                 },
               ]
             : [
                 {
                   ref: "workspace:A",
                   title: "cmuxlayer",
-                  current_directory: "/Users/test/Gits/cmuxlayer",
+                  current_directory: "/home/test-user/Gits/cmuxlayer",
                 },
               ],
       }),
@@ -907,7 +907,7 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
       ).resolves.toMatchObject({ threadId: record.agent_id });
       expect(spawnAgent).toHaveBeenCalledWith(
         expect.objectContaining({ workspace: "workspace:B" }),
@@ -934,7 +934,7 @@ describe("CmuxAppServerRuntime", () => {
           ref: "workspace:t3layer",
           title: "t3layer",
           selected: true,
-          current_directory: "/Users/test/Gits/t3layer",
+          current_directory: "/home/test-user/Gits/t3layer",
         },
       ],
     });
@@ -945,7 +945,7 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
       ).rejects.toThrow(/matching workspace.*brainlayer/i);
       expect(spawnAgent).not.toHaveBeenCalled();
       expect(client.newSplit).not.toHaveBeenCalled();
@@ -1007,7 +1007,7 @@ describe("CmuxAppServerRuntime", () => {
             ref: "workspace:app",
             title: "brainlayer",
             selected: true,
-            current_directory: "/Users/test/Gits/brainlayer",
+            current_directory: "/home/test-user/Gits/brainlayer",
           },
         ],
       });
@@ -1069,7 +1069,7 @@ describe("CmuxAppServerRuntime", () => {
 
       try {
         await expect(
-          runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+          runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
         ).resolves.toMatchObject({ threadId: record.agent_id });
         expect(client.identify).toHaveBeenCalledTimes(expectedIdentifyCalls);
         expect(client.focusSurface).toHaveBeenCalledTimes(expectedRestoreCalls);
@@ -1095,7 +1095,7 @@ describe("CmuxAppServerRuntime", () => {
           ref: "workspace:app",
           title: "brainlayer",
           selected: true,
-          current_directory: "/Users/test/Gits/brainlayer",
+          current_directory: "/home/test-user/Gits/brainlayer",
         },
       ],
     });
@@ -1134,7 +1134,7 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
       ).resolves.toMatchObject({ threadId: record.agent_id });
       expect(client.identify).toHaveBeenCalledTimes(3);
       expect(client.focusSurface).not.toHaveBeenCalled();

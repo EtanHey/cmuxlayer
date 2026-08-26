@@ -58,7 +58,7 @@ describe("AgentDiscovery", () => {
   it("derives a repo root instead of a nested cwd basename", () => {
     expect(
       inferRepoFromDiscovery({
-        current_directory: "/Users/example/Gits/cmuxlayer/src",
+        current_directory: "/home/test-user/Gits/cmuxlayer/src",
         working_directory_source: "surface",
         surface_title: "cmuxlayerClaude",
       }),
@@ -68,7 +68,7 @@ describe("AgentDiscovery", () => {
   it("ignores workspace fallback cwd when the title carries repo identity", () => {
     expect(
       inferRepoFromDiscovery({
-        current_directory: "/Users/example/Gits/unrelated-workspace",
+        current_directory: "/home/test-user/Gits/unrelated-workspace",
         working_directory_source: "workspace_fallback",
         surface_title: "cmuxlayerClaude",
       }),
@@ -78,7 +78,7 @@ describe("AgentDiscovery", () => {
   it("falls back to title when a trusted cwd has no recognizable repo root", () => {
     expect(
       inferRepoFromDiscovery({
-        current_directory: "/Users/example/scratch/misc",
+        current_directory: "/home/test-user/scratch/misc",
         working_directory_source: "surface",
         surface_title: "cmuxlayerClaude",
       }),
@@ -94,7 +94,7 @@ describe("AgentDiscovery", () => {
           type: "terminal",
           index: 0,
           selected: true,
-          current_directory: "/Users/example/Gits/cmuxlayer/src",
+          current_directory: "/home/test-user/Gits/cmuxlayer/src",
           working_directory_source: "terminal_metadata",
         },
       ],

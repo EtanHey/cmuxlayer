@@ -7,7 +7,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/bin/cmux-ram-sampler.sh</string>
+    <string>@CMUXLAYER_REPO@/launchd/cmux-ram-sampler/bin/cmux-ram-sampler.sh</string>
   </array>
 
   <key>EnvironmentVariables</key>
@@ -41,9 +41,9 @@
   <integer>1800</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/etanheyman/Library/Logs/cmux-ram-sampler/launchd.stdout.log</string>
+  <string>@CMUXLAYER_HOME@/Library/Logs/cmux-ram-sampler/launchd.stdout.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/etanheyman/Library/Logs/cmux-ram-sampler/launchd.stderr.log</string>
+  <string>@CMUXLAYER_HOME@/Library/Logs/cmux-ram-sampler/launchd.stderr.log</string>
 </dict>
 </plist>

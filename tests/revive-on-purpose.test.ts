@@ -401,7 +401,7 @@ describe("revive on purpose (#492)", () => {
           ? {
               session_id: CODEX_SESSION,
               surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-              cwd: "/Users/e/Gits/cmuxlayer/.worktrees/run3",
+              cwd: "/home/test-user/Gits/cmuxlayer/.worktrees/run3",
               pid: null,
               cli: "codex",
               launcher: "cmuxlayerCodex",

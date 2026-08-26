@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$ROOT_DIR/bin/cmux-contract-nightly.sh"
 PLIST_PATH="$ROOT_DIR/launchd/com.golems.cmux-contract-nightly.plist"
-DEPLOY_SCRIPT_PATH="/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-contract-nightly/bin/cmux-contract-nightly.sh"
+DEPLOY_SCRIPT_PATH="@CMUXLAYER_REPO@/launchd/cmux-contract-nightly/bin/cmux-contract-nightly.sh"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -149,6 +149,17 @@ run_syntax_case() {
   printf 'PASS: nightly contract script is executable and syntax-valid\n'
 }
 
+run_installer_plist_lint_case() {
+  local root_dir rendered
+  root_dir="$(mktemp -d)"; rendered="$root_dir/rendered.plist"
+  HOME="$root_dir/home & operator" bash "$ROOT_DIR/install.sh" >"$rendered"
+  /usr/bin/plutil -lint "$rendered" >/dev/null
+  assert_file_contains "$rendered" "home &amp; operator"
+  if grep -F '@CMUXLAYER_' "$rendered" >/dev/null; then fail "installer left template tokens"; fi
+  printf 'PASS: contract installer renders and lints an XML-safe plist\n'
+  rm -rf "$root_dir"
+}
+
 run_outcome_case pass pass 0
 run_outcome_case skip skip 0
 run_outcome_case fail fail 7
@@ -156,3 +167,4 @@ run_outcome_case pass_then_noise fail 1
 run_outcome_case double_terminal fail 1
 run_plist_case
 run_syntax_case
+run_installer_plist_lint_case

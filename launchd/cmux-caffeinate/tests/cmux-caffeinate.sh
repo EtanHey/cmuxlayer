@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$ROOT_DIR/bin/cmux-caffeinate.sh"
 PLIST_PATH="$ROOT_DIR/launchd/com.golems.cmux-caffeinate.plist"
-DEPLOY_SCRIPT_PATH="/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-caffeinate/bin/cmux-caffeinate.sh"
+DEPLOY_SCRIPT_PATH="@CMUXLAYER_REPO@/launchd/cmux-caffeinate/bin/cmux-caffeinate.sh"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -90,7 +90,19 @@ run_syntax_case() {
   printf 'PASS: caffeinate guard script is executable and syntax-valid\n'
 }
 
+run_installer_plist_lint_case() {
+  local root_dir rendered
+  root_dir="$(mktemp -d)"; rendered="$root_dir/rendered.plist"
+  HOME="$root_dir/home & operator" bash "$ROOT_DIR/install.sh" >"$rendered"
+  /usr/bin/plutil -lint "$rendered" >/dev/null
+  assert_file_contains "$rendered" "home &amp; operator"
+  if grep -F '@CMUXLAYER_' "$rendered" >/dev/null; then fail "installer left template tokens"; fi
+  printf 'PASS: caffeinate installer renders and lints an XML-safe plist\n'
+  rm -rf "$root_dir"
+}
+
 run_default_flags_case
 run_override_flags_case
 run_plist_case
 run_syntax_case
+run_installer_plist_lint_case

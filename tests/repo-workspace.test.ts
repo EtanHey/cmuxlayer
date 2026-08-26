@@ -21,7 +21,7 @@ describe("workspaceDirectoryRepoMatchScore", () => {
     expect(
       workspaceDirectoryRepoMatchScore(
         "brainlayer",
-        "/Users/x/Gits/brainlayer",
+        "/home/test-user/Gits/brainlayer",
       ),
     ).toBe(2);
   });
@@ -32,7 +32,7 @@ describe("workspaceDirectoryRepoMatchScore", () => {
     expect(
       workspaceDirectoryRepoMatchScore(
         "brainlayer",
-        "/Users/x/Gits/brainlayer.wt/watcher-fix",
+        "/home/test-user/Gits/brainlayer.wt/watcher-fix",
       ),
     ).toBe(1);
   });
@@ -41,14 +41,14 @@ describe("workspaceDirectoryRepoMatchScore", () => {
     expect(
       workspaceDirectoryRepoMatchScore(
         "brainlayer",
-        "/Users/x/Gits/brainlayer/.worktrees/wf1-popover",
+        "/home/test-user/Gits/brainlayer/.worktrees/wf1-popover",
       ),
     ).toBe(1);
   });
 
   it("is hyphen-insensitive", () => {
     expect(
-      workspaceDirectoryRepoMatchScore("cmux-layer", "/Users/x/Gits/cmuxlayer"),
+      workspaceDirectoryRepoMatchScore("cmux-layer", "/home/test-user/Gits/cmuxlayer"),
     ).toBe(2);
   });
 
@@ -70,14 +70,14 @@ describe("workspaceDirectoryRepoMatchScore", () => {
   it("treats a path under an unrelated .wt ancestor as the final repo basename", () => {
     expect(
       workspaceDirectoryRepoMatchScore(
-        "/Users/x/outer.wt/nestedrepo",
-        "/Users/x/outer.wt/nestedrepo",
+        "/home/test-user/outer.wt/nestedrepo",
+        "/home/test-user/outer.wt/nestedrepo",
       ),
     ).toBe(2);
     expect(
       workspaceDirectoryRepoMatchScore(
-        "/Users/x/outer.wt/nestedrepo",
-        "/Users/x/Gits/outer",
+        "/home/test-user/outer.wt/nestedrepo",
+        "/home/test-user/Gits/outer",
       ),
     ).toBe(0);
   });
@@ -86,13 +86,13 @@ describe("workspaceDirectoryRepoMatchScore", () => {
     expect(
       workspaceDirectoryRepoMatchScore(
         "cmuxlayer",
-        "/Users/x/Gits/cmuxlayer-fork",
+        "/home/test-user/Gits/cmuxlayer-fork",
       ),
     ).toBe(0);
     expect(
       repoNameMatchesWorkspaceDirectory(
         "cmuxlayer",
-        "/Users/x/Gits/cmuxlayer-fork",
+        "/home/test-user/Gits/cmuxlayer-fork",
       ),
     ).toBe(false);
   });
@@ -104,9 +104,9 @@ describe("findWorkspaceRefForRepo", () => {
       [
         {
           ref: "ws:worktree",
-          current_directory: "/Users/x/Gits/brainlayer.wt/a",
+          current_directory: "/home/test-user/Gits/brainlayer.wt/a",
         },
-        { ref: "ws:root", current_directory: "/Users/x/Gits/brainlayer" },
+        { ref: "ws:root", current_directory: "/home/test-user/Gits/brainlayer" },
       ],
       "brainlayer",
     );
@@ -116,10 +116,10 @@ describe("findWorkspaceRefForRepo", () => {
   it("honors a preferred ref (parent workspace) even across same-repo matches", () => {
     const ref = findWorkspaceRefForRepo(
       [
-        { ref: "ws:root", current_directory: "/Users/x/Gits/brainlayer" },
+        { ref: "ws:root", current_directory: "/home/test-user/Gits/brainlayer" },
         {
           ref: "ws:worktree",
-          current_directory: "/Users/x/Gits/brainlayer.wt/a",
+          current_directory: "/home/test-user/Gits/brainlayer.wt/a",
         },
       ],
       "brainlayer",
@@ -131,10 +131,10 @@ describe("findWorkspaceRefForRepo", () => {
   it("breaks ties on the selected workspace deterministically (not list order)", () => {
     const ref = findWorkspaceRefForRepo(
       [
-        { ref: "ws:a", current_directory: "/Users/x/Gits/brainlayer.wt/a" },
+        { ref: "ws:a", current_directory: "/home/test-user/Gits/brainlayer.wt/a" },
         {
           ref: "ws:b",
-          current_directory: "/Users/x/Gits/brainlayer.wt/b",
+          current_directory: "/home/test-user/Gits/brainlayer.wt/b",
           selected: true,
         },
       ],
@@ -146,7 +146,7 @@ describe("findWorkspaceRefForRepo", () => {
   it("returns undefined when no workspace matches the repo", () => {
     expect(
       findWorkspaceRefForRepo(
-        [{ ref: "ws:other", current_directory: "/Users/x/Gits/other" }],
+        [{ ref: "ws:other", current_directory: "/home/test-user/Gits/other" }],
         "brainlayer",
       ),
     ).toBeUndefined();
@@ -157,7 +157,7 @@ describe("resolveWorkspaceRefForRepo", () => {
   it("resolves a worktree worker to its repo workspace", async () => {
     const ref = await resolveWorkspaceRefForRepo("brainlayer", async () => ({
       workspaces: [
-        { ref: "ws:root", current_directory: "/Users/x/Gits/brainlayer" },
+        { ref: "ws:root", current_directory: "/home/test-user/Gits/brainlayer" },
       ],
     }));
     expect(ref).toBe("ws:root");
@@ -177,10 +177,13 @@ describe("segment matching is anchored to worktree shapes (no ancestor false-pos
     // A repo literally named "Gits" / the username must NOT claim an unrelated
     // workspace just because it nests under a same-named directory.
     expect(
-      workspaceDirectoryRepoMatchScore("Gits", "/Users/x/Gits/brainlayer"),
+      workspaceDirectoryRepoMatchScore("Gits", "/home/test-user/Gits/brainlayer"),
     ).toBe(0);
     expect(
-      workspaceDirectoryRepoMatchScore("x", "/Users/x/Gits/brainlayer"),
+      workspaceDirectoryRepoMatchScore(
+        "test-user",
+        "/home/test-user/Gits/brainlayer",
+      ),
     ).toBe(0);
   });
 
@@ -188,7 +191,7 @@ describe("segment matching is anchored to worktree shapes (no ancestor false-pos
     expect(
       workspaceDirectoryRepoMatchScore(
         "brainlayer",
-        "/Users/x/Gits/brainlayer/src/watcher",
+        "/home/test-user/Gits/brainlayer/src/watcher",
       ),
     ).toBe(0);
   });
@@ -197,13 +200,13 @@ describe("segment matching is anchored to worktree shapes (no ancestor false-pos
     expect(
       workspaceDirectoryRepoMatchScore(
         "brainlayer",
-        "/Users/x/Gits/brainlayer.wt/a",
+        "/home/test-user/Gits/brainlayer.wt/a",
       ),
     ).toBe(1);
     expect(
       workspaceDirectoryRepoMatchScore(
         "brainlayer",
-        "/Users/x/Gits/brainlayer/.worktrees/a",
+        "/home/test-user/Gits/brainlayer/.worktrees/a",
       ),
     ).toBe(1);
   });
@@ -212,8 +215,8 @@ describe("segment matching is anchored to worktree shapes (no ancestor false-pos
 describe("findWorkspaceRefForRepo determinism", () => {
   it("picks the lexicographically smallest ref among equal-rank ties, order-independent", () => {
     const candidates = [
-      { ref: "ws:b", current_directory: "/Users/x/Gits/brainlayer.wt/b" },
-      { ref: "ws:a", current_directory: "/Users/x/Gits/brainlayer.wt/a" },
+      { ref: "ws:b", current_directory: "/home/test-user/Gits/brainlayer.wt/b" },
+      { ref: "ws:a", current_directory: "/home/test-user/Gits/brainlayer.wt/a" },
     ];
     expect(findWorkspaceRefForRepo(candidates, "brainlayer")).toBe("ws:a");
     expect(
@@ -241,9 +244,9 @@ describe("reposEquivalent", () => {
 
   it("does not let an unrelated .wt ancestor replace the repo basename", () => {
     expect(
-      reposEquivalent("/Users/x/outer.wt/nestedrepo", "nestedrepo"),
+      reposEquivalent("/home/test-user/outer.wt/nestedrepo", "nestedrepo"),
     ).toBe(true);
-    expect(reposEquivalent("/Users/x/outer.wt/nestedrepo", "outer")).toBe(
+    expect(reposEquivalent("/home/test-user/outer.wt/nestedrepo", "outer")).toBe(
       false,
     );
   });

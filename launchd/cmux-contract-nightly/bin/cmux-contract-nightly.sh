@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo="${CMUX_CONTRACT_NIGHTLY_REPO:-/Users/etanheyman/Gits/cmuxlayer}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+default_repo="$(cd "${script_dir}/../../.." && pwd)"
+repo="${CMUX_CONTRACT_NIGHTLY_REPO:-$default_repo}"
 state_dir="${CMUX_CONTRACT_NIGHTLY_STATE_DIR:-$HOME/.local/state/cmux}"
 bun_bin="${BUN_BIN:-/opt/homebrew/bin/bun}"
 jq_bin="${JQ_BIN:-/usr/bin/jq}"

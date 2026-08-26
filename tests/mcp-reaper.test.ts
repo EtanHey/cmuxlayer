@@ -18,37 +18,37 @@ describe("selectReapablePids", () => {
         pid: 101,
         ppid: 1,
         etimes: 1200,
-        command: "node /Users/etan/Gits/brainlayer-mcp/dist/index.js",
+        command: "node /home/test-user/Gits/brainlayer-mcp/dist/index.js",
       },
       {
         pid: 102,
         ppid: 4242,
         etimes: 1200,
-        command: "node /Users/etan/Gits/brainlayer-mcp/dist/index.js",
+        command: "node /home/test-user/Gits/brainlayer-mcp/dist/index.js",
       },
       {
         pid: 103,
         ppid: 1,
         etimes: 120,
-        command: "node /Users/etan/Gits/voicelayer-mcp/dist/index.js",
+        command: "node /home/test-user/Gits/voicelayer-mcp/dist/index.js",
       },
       {
         pid: 104,
         ppid: 1,
         etimes: 1200,
-        command: "python /Users/etan/Gits/brainlayer-mcp/server.py",
+        command: "python /home/test-user/Gits/brainlayer-mcp/server.py",
       },
       {
         pid: 105,
         ppid: 1,
         etimes: 1200,
-        command: "node /Users/etan/Gits/some-mcp-adapter/dist/index.js",
+        command: "node /home/test-user/Gits/some-mcp-adapter/dist/index.js",
       },
       {
         pid: 106,
         ppid: 1,
         etimes: 1200,
-        command: "node /Users/etan/Gits/supervised-mcp/dist/index.js",
+        command: "node /home/test-user/Gits/supervised-mcp/dist/index.js",
         launchdManaged: true,
       },
     ];
@@ -83,13 +83,13 @@ describe("selectReapablePids", () => {
         ppid: 1,
         etimes: 1200,
         command:
-          "node /Users/etan/Gits/official/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+          "node /home/test-user/Gits/official/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
       },
       {
         pid: 205,
         ppid: 1,
         etimes: 1200,
-        command: "node /Users/etan/Gits/acme-mcp/scripts/dev.js",
+        command: "node /home/test-user/Gits/acme-mcp/scripts/dev.js",
       },
     ];
 
@@ -129,7 +129,7 @@ describe("selectReapablePids", () => {
         pid: 601,
         ppid: 1,
         etimes: 1200,
-        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+        command: "node /home/test-user/Gits/cmuxlayer/dist/index.js",
       },
       {
         // brew Cellar form
@@ -144,21 +144,21 @@ describe("selectReapablePids", () => {
         pid: 603,
         ppid: 4242,
         etimes: 1200,
-        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+        command: "node /home/test-user/Gits/cmuxlayer/dist/index.js",
       },
       {
         // too young
         pid: 604,
         ppid: 1,
         etimes: 120,
-        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+        command: "node /home/test-user/Gits/cmuxlayer/dist/index.js",
       },
       {
         // launchd-managed -> left alone
         pid: 605,
         ppid: 1,
         etimes: 1200,
-        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+        command: "node /home/test-user/Gits/cmuxlayer/dist/index.js",
         launchdManaged: true,
       },
     ];
@@ -179,13 +179,13 @@ describe("process table parsing", () => {
   it("parses pid, ppid, etime, and full argv from a ps row", () => {
     expect(
       parseProcessLine(
-        "  4242     1 2-03:04:05 node /Users/etan/Gits/brainlayer-mcp/dist/index.js",
+        "  4242     1 2-03:04:05 node /home/test-user/Gits/brainlayer-mcp/dist/index.js",
       ),
     ).toEqual({
       pid: 4242,
       ppid: 1,
       etimes: 183845,
-      command: "node /Users/etan/Gits/brainlayer-mcp/dist/index.js",
+      command: "node /home/test-user/Gits/brainlayer-mcp/dist/index.js",
     });
   });
 
@@ -289,7 +289,7 @@ describe("runReaper audit evidence", () => {
     pid: 701,
     ppid: 1,
     etimes: 1200,
-    command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+    command: "node /home/test-user/Gits/cmuxlayer/dist/index.js",
   };
 
   const baseOptions = {

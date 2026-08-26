@@ -124,10 +124,8 @@ describe("agent lifecycle health", () => {
 
     expect(withinGrace.issue_severities?.inbox_monitor_not_alive).toBe("info");
     expect(withinGrace.status).toBe("healthy");
-    expect(pastGrace.issue_severities?.inbox_monitor_not_alive).toBe(
-      "degraded",
-    );
-    expect(pastGrace.status).toBe("degraded");
+    expect(pastGrace.issue_severities?.inbox_monitor_not_alive).toBe("info");
+    expect(pastGrace.status).toBe("healthy");
     expect(pastGrace.reconciled_state).toBeUndefined();
   });
 
@@ -281,18 +279,15 @@ describe("agent lifecycle health", () => {
   });
 
   it("blocks a live-spinner pane after repeated recent broken-pipe writes", () => {
-    const health = evaluateAgentHealth(
-      makeRecord({ state: "done" }),
-      {
-        monitor_alive: true,
-        screen_status: "thinking",
-        surface_write_liveness: {
-          pty_dead: true,
-          consecutive_broken_pipe_failures: 2,
-          last_attempt_at: 2_000,
-        },
+    const health = evaluateAgentHealth(makeRecord({ state: "done" }), {
+      monitor_alive: true,
+      screen_status: "thinking",
+      surface_write_liveness: {
+        pty_dead: true,
+        consecutive_broken_pipe_failures: 2,
+        last_attempt_at: 2_000,
       },
-    );
+    });
 
     expect(health.status).toBe("unhealthy");
     expect(health.issue_codes).toContain("pane_pty_dead");
@@ -303,18 +298,15 @@ describe("agent lifecycle health", () => {
   });
 
   it("does not flag one transient broken-pipe write", () => {
-    const health = evaluateAgentHealth(
-      makeRecord({ state: "done" }),
-      {
-        monitor_alive: true,
-        screen_status: "working",
-        surface_write_liveness: {
-          pty_dead: false,
-          consecutive_broken_pipe_failures: 1,
-          last_attempt_at: 1_000,
-        },
+    const health = evaluateAgentHealth(makeRecord({ state: "done" }), {
+      monitor_alive: true,
+      screen_status: "working",
+      surface_write_liveness: {
+        pty_dead: false,
+        consecutive_broken_pipe_failures: 1,
+        last_attempt_at: 1_000,
       },
-    );
+    });
 
     expect(health.issue_codes).not.toContain("pane_pty_dead");
     expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
@@ -322,18 +314,15 @@ describe("agent lifecycle health", () => {
   });
 
   it("leaves active-screen health unchanged after a healthy write", () => {
-    const health = evaluateAgentHealth(
-      makeRecord({ state: "working" }),
-      {
-        monitor_alive: true,
-        screen_status: "thinking",
-        surface_write_liveness: {
-          pty_dead: false,
-          consecutive_broken_pipe_failures: 0,
-          last_attempt_at: 1_000,
-        },
+    const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
+      monitor_alive: true,
+      screen_status: "thinking",
+      surface_write_liveness: {
+        pty_dead: false,
+        consecutive_broken_pipe_failures: 0,
+        last_attempt_at: 1_000,
       },
-    );
+    });
 
     expect(health.issue_codes).not.toContain("pane_pty_dead");
     expect(health.status).toBe("healthy");
@@ -359,15 +348,12 @@ describe("agent lifecycle health", () => {
   });
 
   it("reconciles a ready registry agent whose pane fell back to a bare shell as errored", () => {
-    const health = evaluateAgentHealth(
-      makeRecord({ state: "ready" }),
-      {
-        monitor_alive: true,
-        screen_status: "idle",
-        screen_agent_type: "unknown",
-        screen_control_state: "shell",
-      },
-    );
+    const health = evaluateAgentHealth(makeRecord({ state: "ready" }), {
+      monitor_alive: true,
+      screen_status: "idle",
+      screen_agent_type: "unknown",
+      screen_control_state: "shell",
+    });
 
     expect(health.reconciled_state).toBe("error");
     expect(health.issue_codes).toContain("agent_shell_fallback");
@@ -375,15 +361,12 @@ describe("agent lifecycle health", () => {
   });
 
   it("reconciles a stale registry error when the screen confirms a ready agent", () => {
-    const health = evaluateAgentHealth(
-      makeRecord({ state: "error" }),
-      {
-        monitor_alive: true,
-        screen_status: "idle",
-        screen_agent_type: "codex",
-        screen_control_state: "ready",
-      },
-    );
+    const health = evaluateAgentHealth(makeRecord({ state: "error" }), {
+      monitor_alive: true,
+      screen_status: "idle",
+      screen_agent_type: "codex",
+      screen_control_state: "ready",
+    });
 
     expect(health.reconciled_state).toBe("ready");
     expect(health.issue_codes).toContain("registry_screen_disagreement");
@@ -414,16 +397,29 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
   });
 
-  it("marks an absent monitor as degraded evidence, not a wedged live pane", () => {
+  it("does not degrade a missing monitor when the inbox has no unread lines", () => {
     const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
       monitor_alive: false,
       stale_count: 0,
       screen_status: "working",
     });
 
-    expect(health.status).toBe("degraded");
+    expect(health.status).toBe("healthy");
     expect(health.issue_codes).toContain("inbox_monitor_not_alive");
+    expect(health.issue_severities?.inbox_monitor_not_alive).toBe("info");
     expect(health.issue_codes).not.toContain("agent_wedged");
+  });
+
+  it("degrades a missing monitor when unread inbox lines exist", () => {
+    const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
+      monitor_alive: false,
+      stale_count: 1,
+      screen_status: "working",
+    });
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("inbox_monitor_not_alive");
+    expect(health.issue_severities?.inbox_monitor_not_alive).toBe("degraded");
   });
 
   it("marks registry workspace mismatch against the live surface as unhealthy", () => {
