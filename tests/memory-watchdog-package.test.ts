@@ -1,10 +1,62 @@
-import { existsSync, readFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("cmux memory watchdog package", () => {
   const root = join(import.meta.dirname, "..", "launchd", "cmux-memory-watchdog");
+
+  it("contains no developer-specific absolute paths", () => {
+    const literalHome = ["", "Users", "etanheyman"].join("/");
+    const result = spawnSync(
+      "grep",
+      ["-rn", literalHome, root, import.meta.filename],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status, result.stdout || result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+  });
+
+  it("keeps rendered paths opaque when they contain another placeholder", () => {
+    const scratchRoot = join(
+      import.meta.dirname,
+      "..",
+      "docs.local",
+      "scratch",
+      "hotfix-watchdog",
+    );
+    const collisionRoot = join(
+      scratchRoot,
+      `package-@CMUX_WATCHDOG_HOME@-${process.pid}`,
+    );
+    rmSync(collisionRoot, { recursive: true, force: true });
+    mkdirSync(scratchRoot, { recursive: true });
+    cpSync(root, collisionRoot, { recursive: true });
+
+    try {
+      const result = spawnSync(
+        "bash",
+        [join(collisionRoot, "install.sh"), "--dry-run"],
+        {
+          encoding: "utf8",
+          env: { ...process.env, HOME: "/Users/example" },
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(
+        join(collisionRoot, "bin", "cmux-memory-watchdog.sh"),
+      );
+    } finally {
+      rmSync(collisionRoot, { recursive: true, force: true });
+    }
+  });
 
   it("documents the tested watchdog and ships a portable opt-in installer", () => {
     const readme = join(root, "README.md");
@@ -27,9 +79,8 @@ describe("cmux memory watchdog package", () => {
     expect(result.stdout).toContain(
       "<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
     );
-    expect(result.stdout).not.toContain(
-      "/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-memory-watchdog/",
-    );
+    expect(result.stdout).not.toContain("@CMUX_WATCHDOG_SCRIPT@");
+    expect(result.stdout).not.toContain("@CMUX_WATCHDOG_HOME@");
     expect(result.stdout).not.toContain("launchctl bootstrap");
   });
 
