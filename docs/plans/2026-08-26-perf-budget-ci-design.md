@@ -14,7 +14,7 @@
 
 The existing benchmark gains instrumentation only: p95 samples, request byte counts, first-send lock timing, and an optional JSON output path. Its current human output and intrinsic gates remain intact.
 
-A committed JSON baseline records the replay shape, measured post-run-5 values, and frozen ceilings. The comparison script validates the baseline schema, runs the benchmark, compares every budget, writes a Markdown before/after table, and exits non-zero on regression. Runner-sensitive relative budgets use explicit margin derived from the documented approximately 2.8x runner slowdown; first-send remains an absolute 2,000 ms ceiling and read-screen p50 remains an absolute 250 ms ceiling.
+A committed JSON baseline records the replay shape, measured post-run-5 values, and frozen ceilings. The comparison script validates the baseline schema, runs the benchmark, compares every budget, writes a Markdown before/after table, and exits non-zero on regression. Exact-head CI calibration uses per-operation runner margins: 8x for `list_surfaces` and 3.2x for `read_screen` p95, leaving about 22-24% over the two observed runner maxima. First-send remains an absolute 2,000 ms ceiling and read-screen p50 remains an absolute 250 ms ceiling.
 
 The CI job builds, runs the comparison, uploads its JSON/Markdown artifacts, and uses a stable HTML marker to find and edit one bot comment on pull requests. It runs on every `pull_request` and `main` push because it is a normal job in the existing CI workflow.
 
@@ -25,4 +25,3 @@ The local `pre-pr` chain invokes the same comparison in a reduced-round mode. Cl
 ## Failure handling and proof
 
 Malformed or missing baseline/result fields fail closed. The report is written before comparison failure so CI can still update the PR comment. A deliberate low-ceiling regression commit on a scratch branch must produce a real failing Actions run; reverting that commit must restore green. `docs.local/scratch/**` is excluded from Vitest collection in the same change.
-

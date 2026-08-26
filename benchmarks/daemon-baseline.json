@@ -4,7 +4,10 @@
     "git_sha": "f0ca937ccf16d81b0383a88de79d70b3a10d672e",
     "measured_at": "2026-08-26T05:07:28Z"
   },
-  "runner_margin_ratio": 2.8,
+  "runner_margins": {
+    "list_surfaces": 8,
+    "read_screen": 3.2
+  },
   "replay": {
     "clients": 8,
     "rounds": 12,
@@ -32,12 +35,12 @@
   },
   "ceilings": {
     "list_surfaces": {
-      "p50_ms": 378.51,
-      "p95_ms": 434.5
+      "p50_ms": 1081.44,
+      "p95_ms": 1241.44
     },
     "read_screen": {
       "p50_ms": 250,
-      "p95_ms": 431.84
+      "p95_ms": 493.54
     },
     "first_send_after_spawn": {
       "p50_ms": 2000,

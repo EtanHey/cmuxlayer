@@ -12,7 +12,7 @@ const repoRoot = join(__dirname, "..");
 const baseline = {
   schema_version: 1,
   source: { git_sha: "f0ca937", measured_at: "2026-08-26T00:00:00Z" },
-  runner_margin_ratio: 2.8,
+  runner_margins: { list_surfaces: 8, read_screen: 3.2 },
   replay: {
     clients: 8,
     rounds: 12,
@@ -129,7 +129,9 @@ describe("daemon performance budget", () => {
       "| Operation | Metric | Baseline | Current | Ceiling | Status |",
     );
     expect(markdown).toContain("first_send_after_spawn");
-    expect(markdown).toContain("Runner margin: 2.8x");
+    expect(markdown).toContain(
+      "Runner margins: list_surfaces 8x; read_screen 3.2x",
+    );
   });
 
   it("commits a post-run-5 baseline with the full replay contract", () => {

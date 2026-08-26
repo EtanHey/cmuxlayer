@@ -28,7 +28,14 @@ export function validateBaseline(baseline) {
     throw new Error("baseline schema_version must be 1");
   if (!baseline.source?.git_sha)
     throw new Error("baseline source.git_sha is required");
-  finite(baseline.runner_margin_ratio, "runner_margin_ratio");
+  finite(
+    baseline.runner_margins?.list_surfaces,
+    "runner_margins.list_surfaces",
+  );
+  finite(
+    baseline.runner_margins?.read_screen,
+    "runner_margins.read_screen",
+  );
   finite(baseline.replay?.clients, "replay.clients");
   finite(baseline.replay?.rounds, "replay.rounds");
   if (!Array.isArray(baseline.replay?.operations)) {
@@ -141,7 +148,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "<!-- cmuxlayer-perf-budget -->",
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
-    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner margin: ${baseline.runner_margin_ratio}x for runner-sensitive percentiles; first-send <=2,000 ms socket and CLI send <=4,000 ms remain hard ceilings.`,
+    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner margins: list_surfaces ${baseline.runner_margins.list_surfaces}x; read_screen ${baseline.runner_margins.read_screen}x. First-send <=2,000 ms socket and CLI send <=4,000 ms remain hard ceilings.`,
     "",
     "| Operation | Metric | Baseline | Current | Ceiling | Status |",
     "|---|---:|---:|---:|---:|:---:|",
