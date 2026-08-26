@@ -4127,10 +4127,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const pruneChildReportWatchesFor = (agentId: string): void => {
     lifecycleScheduleChildReportWatchPrune?.();
     removeWatches(
-      (watch) =>
-        watch.subject_agent_id === agentId &&
-        watch.target_kind === "file" &&
-        watch.change === "content",
+      (watch) => {
+        if (
+          watch.subject_agent_id !== agentId ||
+          watch.target_kind !== "file" ||
+          watch.change !== "content"
+        ) {
+          return false;
+        }
+        const current = stateMgr.readState(agentId);
+        return (
+          !current ||
+          current.user_killed === true ||
+          current.deletion_intent ||
+          TERMINAL_AGENT_STATES.has(current.state)
+        );
+      },
       {
         registryPath:
           opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
@@ -13882,6 +13894,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? await readFile(bootPromptPath, "utf8")
             : null;
 
+          if (args.parent_agent_id && args.report_path) {
+            const earlyReservation = reserveParentReportPath(
+              args.parent_agent_id,
+              resolve(args.report_path.trim()),
+            );
+            if (!earlyReservation.ok) {
+              return err(new Error(earlyReservation.message), {
+                error_code: "REPORT_PATH_IN_USE",
+              });
+            }
+            reportPathReservationKey = earlyReservation.key;
+          }
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
           await refreshManagedMetadataBestEffort();
           const callerAgent = resolveCurrentCallerAgent();
@@ -13894,17 +13918,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : (args.parent_agent_id ?? callerAgent?.agent_id);
           if (effectiveParentAgentId && args.report_path) {
             const requestedReportPath = resolve(args.report_path.trim());
-            const reservation = reserveParentReportPath(
+            const effectiveReservationKey = JSON.stringify([
               effectiveParentAgentId,
               requestedReportPath,
-            );
-            if (!reservation.ok) {
-              return err(
-                new Error(reservation.message),
-                { error_code: "REPORT_PATH_IN_USE" },
-              );
+            ]);
+            if (
+              reportPathReservationKey &&
+              reportPathReservationKey !== effectiveReservationKey
+            ) {
+              parentReportPathReservations.delete(reportPathReservationKey);
+              reportPathReservationKey = null;
             }
-            reportPathReservationKey = reservation.key;
+            if (!reportPathReservationKey) {
+              const reservation = reserveParentReportPath(
+                effectiveParentAgentId,
+                requestedReportPath,
+              );
+              if (!reservation.ok) {
+                return err(new Error(reservation.message), {
+                  error_code: "REPORT_PATH_IN_USE",
+                });
+              }
+              reportPathReservationKey = reservation.key;
+            }
           }
           const effectiveRole = callerIsWorker ? "worker" : normalizedRole.role;
           const workerCallerWarning = callerIsWorker

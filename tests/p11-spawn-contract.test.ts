@@ -645,6 +645,70 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     }
   });
 
+  it("keeps a report watch when the child resumes before deferred cleanup acquires the lock", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "resumed-during-cleanup", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "resumed-during-cleanup",
+      surface_id: "surface:new",
+      state: "done",
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+      user_killed: true,
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "done\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const lockPath = `${watchRegistryPath}.lock`;
+    mkdirSync(lockPath);
+    vi.useFakeTimers({ now: 10_000 });
+
+    try {
+      const closeResult = await server._registeredTools.close_surface.handler(
+        { scope: "agent", agent_id: child.agent_id, force: true },
+        {} as never,
+      );
+      expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+
+      const resumed = {
+        ...child,
+        state: "ready" as const,
+        user_killed: false,
+        deletion_intent: false,
+      };
+      engine.stateMgr.writeState(resumed);
+      engine.getRegistry().set(resumed.agent_id, resumed);
+      rmSync(lockPath, { recursive: true, force: true });
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(
+        readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+      ).toEqual([
+        expect.objectContaining({
+          subject_agent_id: child.agent_id,
+          target: reportPath,
+          change: "content",
+          state: "armed",
+        }),
+      ]);
+    } finally {
+      rmSync(lockPath, { recursive: true, force: true });
+      vi.useRealTimers();
+    }
+  });
+
   it("drops persisted closed-child report watches before the first daemon sweep", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
@@ -1501,6 +1565,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const existingChildUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const spawnedChildUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let holdNextSplit = false;
+    let releaseSplit: (() => void) | null = null;
     const baseExec = makeExec(
       "Claude Code\nWhat can I help you with?\n❯ ",
       "parent-pane",
@@ -1523,6 +1589,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (args.includes("new-split")) {
+        if (holdNextSplit) {
+          await new Promise<void>((resolve) => {
+            releaseSplit = resolve;
+          });
+        }
         return {
           stdout: JSON.stringify({
             workspace: "workspace:1",
@@ -1596,21 +1667,30 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "concurrent-shared-report.md",
     );
     const beforeConcurrent = splitCalls();
-    const concurrent = await Promise.all([
-      spawn({
+    holdNextSplit = true;
+    const winningSpawn = spawn({
+      parent_agent_id: parent.agent_id,
+      report_path: concurrentOverride,
+    });
+    await vi.waitFor(() => expect(splitCalls()).toBe(beforeConcurrent + 1));
+    const rejectedSpawn = spawn(
+      {
         parent_agent_id: parent.agent_id,
         report_path: concurrentOverride,
-      }),
-      spawn(
-        {
-          parent_agent_id: parent.agent_id,
-          report_path: concurrentOverride,
-        },
-        siblingServer,
-      ),
-    ]);
+      },
+      siblingServer,
+    );
+    await Promise.resolve();
+    holdNextSplit = false;
+    releaseSplit?.();
+    const concurrent = await Promise.all([winningSpawn, rejectedSpawn]);
+    // This fixture's one successful spawn uses two new-split calls: placement
+    // and launch. A third call would prove that the rejected socket launched.
     expect(splitCalls() - beforeConcurrent).toBe(2);
     expect(concurrent.map((result) => result.ok).sort()).toEqual([false, true]);
+    expect(
+      concurrent.find((result) => result.ok === false)?.error_code,
+    ).toBe("REPORT_PATH_IN_USE");
     await siblingServer.close();
   });
 });
