@@ -620,6 +620,10 @@ async function startClients(label, count, env) {
 async function measureLatency(clients) {
   const listSamples = [];
   const readSamples = [];
+  const listTransports = [];
+  const readTransports = [];
+  const listFallbackSources = new Set();
+  const readFallbackSources = new Set();
   let listResult = null;
   let readResult = null;
   const listArgs = {
@@ -637,26 +641,26 @@ async function measureLatency(clients) {
       clients.map(async (client) => {
         let startedAt = nowMs();
         const list = await client.callTool("list_surfaces", listArgs);
+        const listReceipt = toolData(list, "list_surfaces");
         listSamples.push(nowMs() - startedAt);
         listResult ??= list;
+        listTransports.push(operationTransport(listReceipt, "list_surfaces"));
+        for (const source of listReceipt.transport_fallbacks ?? []) {
+          listFallbackSources.add(source);
+        }
 
         startedAt = nowMs();
         const read = await client.callTool("read_screen", readArgs);
+        const readReceipt = toolData(read, "read_screen");
         readSamples.push(nowMs() - startedAt);
         readResult ??= read;
+        readTransports.push(operationTransport(readReceipt, "read_screen"));
+        for (const source of readReceipt.transport_fallbacks ?? []) {
+          readFallbackSources.add(source);
+        }
       }),
     );
   }
-  const transportReceipts = await Promise.all(
-    clients.map(async (client) =>
-      toolData(await client.callTool("control_health", {}), "control_health"),
-    ),
-  );
-  const transport = transportReceipts.every(
-    (receipt) => receipt.transport === "socket",
-  )
-    ? "socket"
-    : "cli";
 
   return {
     list_surfaces: {
@@ -665,7 +669,10 @@ async function measureLatency(clients) {
       p50_ms: round(percentile(listSamples, 50)),
       p95_ms: round(percentile(listSamples, 95)),
       p99_ms: round(percentile(listSamples, 99)),
-      transport,
+      transport: listTransports.every((value) => value === "socket")
+        ? "socket"
+        : "cli",
+      transport_fallbacks: [...listFallbackSources],
     },
     read_screen: {
       request_bytes: requestBytes("read_screen", readArgs),
@@ -673,7 +680,10 @@ async function measureLatency(clients) {
       p50_ms: round(percentile(readSamples, 50)),
       p95_ms: round(percentile(readSamples, 95)),
       p99_ms: round(percentile(readSamples, 99)),
-      transport,
+      transport: readTransports.every((value) => value === "socket")
+        ? "socket"
+        : "cli",
+      transport_fallbacks: [...readFallbackSources],
     },
     firstResults: { listResult, readResult },
   };
@@ -695,6 +705,13 @@ function toolData(result, label) {
   const text = result?.content?.find((entry) => entry.type === "text")?.text;
   if (!text) throw new Error(`${label} returned no structured receipt`);
   return JSON.parse(text);
+}
+
+function operationTransport(receipt, label) {
+  if (receipt?.transport === "socket" || receipt?.transport === "cli") {
+    return receipt.transport;
+  }
+  throw new Error(`${label} omitted per-operation transport provenance`);
 }
 
 async function readFakeState(statePath) {
@@ -860,15 +877,8 @@ async function measureFirstSendAfterSpawn(
       const startedAt = nowMs();
       const receipt = toolData(await client.callTool(name, args, 30_000), name);
       samples.push(nowMs() - startedAt);
-      const provenance =
-        receipt.transport || name === "control_health"
-          ? receipt
-          : toolData(
-              await client.callTool("control_health", {}),
-              "control_health",
-            );
-      transports.push(provenance.transport);
-      for (const source of provenance.transport_fallbacks ?? []) {
+      transports.push(operationTransport(receipt, name));
+      for (const source of receipt.transport_fallbacks ?? []) {
         fallbackSources.add(source);
       }
     }

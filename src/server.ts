@@ -4568,7 +4568,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       toolName !== "spawn_agent" &&
       toolName !== "send_to" &&
       toolName !== "close_surface" &&
-      toolName !== "control_health"
+      toolName !== "control_health" &&
+      toolName !== "list_surfaces" &&
+      toolName !== "read_screen" &&
+      toolName !== "list_agents"
     ) {
       return result;
     }

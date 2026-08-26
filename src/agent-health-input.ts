@@ -31,6 +31,7 @@ export interface ParsedSurfaceHealthInput {
 export interface AgentHealthInputOverrides {
   parent_role?: AgentRole | null;
   monitor_alive?: boolean | null;
+  unread_count?: number;
   stale_count?: number;
   screen_status?: string | null;
   screen_agent_type?: ParsedScreenAgentType | null;
@@ -97,15 +98,18 @@ export async function buildAgentHealthInput(
     overrides.inbox_channel_dir_deleted !== undefined
       ? overrides.inbox_channel_dir_deleted
       : !alive && channelDirDeletedAfterCreate(agent.agent_id, deps.inboxOpts);
-  const staleCount =
-    overrides.stale_count ??
+  const unreadCount =
+    overrides.unread_count ??
     (alive === false
       ? replayUndelivered(agent.agent_id, deps.inboxOpts).length
-      : pendingDispatches(
-          agent.agent_id,
-          deps.dispatchAckTimeoutMs ?? AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
-          deps.inboxOpts,
-        ).length);
+      : 0);
+  const staleCount =
+    overrides.stale_count ??
+    pendingDispatches(
+      agent.agent_id,
+      deps.dispatchAckTimeoutMs ?? AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
+      deps.inboxOpts,
+    ).length;
   const needsScreen =
     overrides.screen_status === undefined ||
     overrides.screen_agent_type === undefined ||
@@ -155,6 +159,7 @@ export async function buildAgentHealthInput(
     parent_role: overrides.parent_role,
     monitor_alive: alive,
     inbox_channel_dir_deleted: inboxChannelDirDeleted,
+    unread_count: unreadCount,
     stale_count: staleCount,
     screen_status: screenStatus,
     screen_agent_type: screenAgentType,

@@ -251,25 +251,44 @@ describe("daemon performance budget", () => {
     );
   });
 
-  it("fails the benchmark when any measured operation used the CLI fallback", () => {
+  it("fails the table when read_screen alone used the CLI fallback", () => {
     const fallback = compareBenchmark(baseline, {
       ...result,
       latency: {
         ...result.latency,
-        send_to_agent_warm: {
-          ...result.latency.send_to_agent_warm,
-          transport: "cli",
+        daemon_path: {
+          ...result.latency.daemon_path,
+          read_screen: {
+            ...result.latency.daemon_path.read_screen,
+            transport: "cli",
+          },
         },
       },
     });
 
     expect(fallback.passed).toBe(false);
     expect(fallback.failures).toContain(
-      "send_to_agent_warm transport: cli; cli fallback active",
+      "read_screen transport: cli; cli fallback active",
     );
-    expect(renderMarkdownComparison(baseline, result, fallback)).toContain(
-      "| Operation | Transport | Metric |",
-    );
+    expect(
+      renderMarkdownComparison(
+        baseline,
+        {
+          ...result,
+          latency: {
+            ...result.latency,
+            daemon_path: {
+              ...result.latency.daemon_path,
+              read_screen: {
+                ...result.latency.daemon_path.read_screen,
+                transport: "cli",
+              },
+            },
+          },
+        },
+        fallback,
+      ),
+    ).toContain("| read_screen | cli |");
   });
 
   it("fails the benchmark when the intrinsic CLI-send sample used fallback", () => {
@@ -575,6 +594,16 @@ describe("daemon performance budget", () => {
       "await waitForLifecycleWaiter(sweepHoldState, closeHoldToken)",
     );
     expect(source).toContain("transport: closeReceipt.transport");
+    expect(source).toContain(
+      'const listReceipt = toolData(list, "list_surfaces")',
+    );
+    expect(source).toContain(
+      'const readReceipt = toolData(read, "read_screen")',
+    );
+    expect(source).not.toContain(
+      'receipt.transport || name === "control_health"',
+    );
+    expect(source).not.toContain("const transportReceipts = await Promise.all");
   });
 
   it("wires a required PR/main job and edits a single comment even on RED", () => {

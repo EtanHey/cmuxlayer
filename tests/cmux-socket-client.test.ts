@@ -1452,27 +1452,24 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(result.surface).toBe("surface:cli-tab");
   });
 
-  it("pasteText sends one atomic multiline V2 payload without a CLI fallback", async () => {
+  it("pasteText fails closed without a CLI fallback and never sends multiline text", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,
       timeoutMs: 1000,
     });
 
-    await client.pasteText("surface:1", "line one\nline two", {
-      workspace: "workspace:1",
-    });
+    await expect(
+      client.pasteText("surface:1", "line one\nline two", {
+        workspace: "workspace:1",
+      }),
+    ).rejects.toMatchObject({ code: "method_not_found" });
 
-    expect(lastV2Request).toMatchObject({
-      method: "surface.send_text",
-      params: {
-        surface_id: "surface:1",
-        workspace_id: "workspace:1",
-        text: "line one\nline two",
-      },
-    });
+    expect(
+      mockEvents.map((event) => event.type === "v2" && event.method),
+    ).not.toContain("surface.send_text");
   });
 
-  it("pasteText stays on the socket even when a CLI fallback exists", async () => {
+  it("pasteText uses the pinned CLI paste-buffer path when available", async () => {
     const execCalls: Array<{
       cmd: string;
       args: string[];
@@ -1493,11 +1490,13 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       workspace: "workspace:1",
     });
 
-    expect(execCalls).toHaveLength(0);
-    expect(lastV2Request).toMatchObject({
-      method: "surface.send_text",
-      params: { text: "line one\nline two" },
-    });
+    expect(execCalls.map((call) => call.args[3])).toEqual([
+      "set-buffer",
+      "paste-buffer",
+    ]);
+    expect(
+      mockEvents.map((event) => event.type === "v2" && event.method),
+    ).not.toContain("surface.send_text");
   });
 
   it("moveSurface uses CLI fallback", async () => {

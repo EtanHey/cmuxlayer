@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentHealthInput } from "../src/agent-health-input.js";
+import { evaluateAgentHealth } from "../src/agent-health.js";
 import { dispatch } from "../src/inbox.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
@@ -31,7 +32,7 @@ function makeAgent(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("buildAgentHealthInput", () => {
-  it("counts a fresh unacked message when the monitor is dead", async () => {
+  it("keeps a fresh unread dead-monitor message separate from ACK-timeout staleness", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "cmux-agent-health-input-"));
     const inboxOpts = { baseDir: tmp, now: () => 10_000 };
     try {
@@ -47,7 +48,15 @@ describe("buildAgentHealthInput", () => {
         { monitor_alive: false },
       );
 
-      expect(input.stale_count).toBe(1);
+      expect(input.unread_count).toBe(1);
+      expect(input.stale_count).toBe(0);
+
+      const health = evaluateAgentHealth(makeAgent(), input, {
+        now: () => 10_000,
+      });
+      expect(health.status).toBe("degraded");
+      expect(health.issue_codes).toContain("unread_inbox_dispatches");
+      expect(health.issue_codes).not.toContain("stale_inbox_dispatches");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

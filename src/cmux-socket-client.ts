@@ -572,11 +572,15 @@ export class CmuxSocketClient {
     text: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    // V2 frames the full payload as one JSON string, so surface.send_text is
-    // already atomic for multiline input and does not need the CLI's global
-    // paste buffer. Keeping this on-socket also prevents concurrent clients
-    // from sharing mutable clipboard state.
-    return this.send(surface, text, opts);
+    const cliFallback = this.cliFallbackPinned();
+    if (cliFallback) {
+      return cliFallback.pasteText(surface, text, opts);
+    }
+
+    throw new CmuxSocketError(
+      "Atomic multiline paste requires the cmux CLI paste-buffer path; the socket protocol has no paste RPC, so pasteText is unavailable on a socket-only transport.",
+      "method_not_found",
+    );
   }
 
   async sendKey(
