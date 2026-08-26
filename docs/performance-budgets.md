@@ -2,7 +2,7 @@
 
 `bun run bench:daemon:check` builds cmuxlayer, runs the production-shaped 8-client x 12-round daemon replay, and compares it with `benchmarks/daemon-baseline.json`. CI runs this command on every pull request and every push to `main`. `bun run pre-pr` uses the same requests with three rounds and retains the local 250 ms `read_screen`, 2,000 ms first-send, and 4,000 ms CLI gates so regressions are visible before push.
 
-The committed baseline was measured by GitHub Actions on `ubuntu-latest` in workflow run `32923962535`. The checker derives every runner ceiling at check time from its committed measurement x `1.25`; the JSON has no separately editable `ceilings` block. First-send and CLI also have 10,000 ms far sanity caps. Actual time inside the first-send surface lock is compared separately from lock-acquisition wait.
+The committed baseline was measured by GitHub Actions on `ubuntu-latest` in workflow run `32927758842`. The checker derives every runner ceiling at check time from its committed measurement x `1.25`; the JSON has no separately editable `ceilings` block. First-send and CLI also have 10,000 ms far sanity caps. Actual time inside the first-send surface lock is compared separately from lock-acquisition wait.
 
 The replay records both request byte counts and SHA-256 identities of canonical `{name, arguments}` JSON. The checker rejects request drift even when the serialized length is unchanged. It also validates a refresh content hash over the baseline: editing measurements or replay data without a refresh makes the consistency assertion fail before the benchmark can pass.
 

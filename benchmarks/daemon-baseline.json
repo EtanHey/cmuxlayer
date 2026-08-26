@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "2771ad85ae16f258a33762c64ba2e5eecd7fb8ae",
-    "measured_at": "2026-08-26T02:46:18Z",
+    "git_sha": "1bccc364aeb06488709a8b4d8a726b991c35323b",
+    "measured_at": "2026-08-26T03:49:46.694Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 32923962535
+    "workflow_run_id": 32927758842
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -14,7 +14,11 @@
   "replay": {
     "clients": 8,
     "rounds": 12,
-    "operations": ["list_surfaces", "read_screen", "first_send_after_spawn"],
+    "operations": [
+      "list_surfaces",
+      "read_screen",
+      "first_send_after_spawn"
+    ],
     "bytes": {
       "list_surfaces": 142,
       "read_screen": 161,
@@ -28,22 +32,22 @@
   },
   "measurements": {
     "list_surfaces": {
-      "p50_ms": 678.58,
-      "p95_ms": 1050.37
+      "p50_ms": 631.33,
+      "p95_ms": 961.5
     },
     "read_screen": {
-      "p50_ms": 127.26,
-      "p95_ms": 288.65
+      "p50_ms": 159.79,
+      "p95_ms": 386.21
     },
     "first_send_after_spawn": {
-      "p50_ms": 1948.52,
-      "p95_ms": 1948.52,
-      "lock_hold_ms": 729
+      "p50_ms": 1624.53,
+      "p95_ms": 1624.53,
+      "lock_hold_ms": 640
     },
-    "cli_send_ms": 1066
+    "cli_send_ms": 1210.45
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "35283a45b36ef8a5671c0a617e3b9e9f187654ad9869f3ba92a1801da6399f64"
+    "content_sha256": "3efd279f17130f590f5f7ae43f47b063cb4f31f1befe3e9a3511908e7bfcd8c1"
   }
 }
