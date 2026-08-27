@@ -555,6 +555,118 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
+  it("drops a closed parent's watches but preserves its active child's report-path reservation", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = {
+      ...parentRecord(),
+      agent_id: "closed-parent-with-active-child",
+      surface_id: "surface:already-gone",
+      state: "done" as const,
+      user_killed: true,
+    };
+    const reportPath = join(inboxDir, "active-child-reservation", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "active-child-reservation",
+      surface_id: "surface:child",
+      state: "working",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "working\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    const closeResult = await server._registeredTools.close_surface.handler(
+      { scope: "agent", agent_id: parent.agent_id, force: true },
+      {} as never,
+    );
+
+    expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+    expect(closeResult.structuredContent).toMatchObject({
+      watch_cleanup: "completed",
+      watches_removed: 1,
+    });
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
+    expect(engine.stateMgr.readState(child.agent_id)).toMatchObject({
+      parent_agent_id: parent.agent_id,
+      report_path: reportPath,
+      state: "working",
+    });
+    appendFileSync(reportPath, "child can still write\n", "utf8");
+    expect(readFileSync(reportPath, "utf8")).toContain("child can still write");
+  });
+
+  it("reaps a pending owned watch without claiming it was delivered", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const owner = {
+      ...parentRecord(),
+      agent_id: "closed-pending-owner",
+      surface_id: "surface:already-gone",
+      state: "done" as const,
+      user_killed: true,
+    };
+    const target = join(inboxDir, "pending-owned-watch.md");
+    writeFileSync(target, "waiting\n", "utf8");
+    engine.stateMgr.writeState(owner);
+    engine.getRegistry().set(owner.agent_id, owner);
+    const watch = await engine.armWatch({
+      owner: owner.agent_id,
+      target,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const registry = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    registry.watches[0] = {
+      ...registry.watches[0],
+      state: "fired",
+      terminal_reason: "predicate_matched",
+      terminal_at_ms: 2_000,
+      notification_pending: true,
+      notification_attempts: 1,
+      notification_next_attempt_at_ms: 2_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(registry, null, 2)}\n`,
+      "utf8",
+    );
+
+    const closeResult = await server._registeredTools.close_surface.handler(
+      { scope: "agent", agent_id: owner.agent_id, force: true },
+      {} as never,
+    );
+
+    expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+    expect(closeResult.structuredContent).toMatchObject({
+      watch_cleanup: "completed",
+      watches_removed: 1,
+    });
+    expect(closeResult.structuredContent).not.toHaveProperty(
+      "notification_delivered_at_ms",
+    );
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
+    expect(watch).not.toHaveProperty("notification_delivered_at_ms");
+  });
+
   it.each(["stop_agent", "kill", "close_surface"] as const)(
     "drops a child-scoped report watch after %s terminates the child",
     async (toolName) => {
@@ -888,6 +1000,58 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         ({ owner }) => owner,
       ),
     ).toEqual([liveAliasOwner.seat_id, "unresolved-owner"]);
+  });
+
+  it("retains an active child when its parent owner is a resolved alias", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = {
+      ...parentRecord(),
+      agent_id: "canonical-dead-parent",
+      seat_id: "parent-seat-alias",
+      surface_id: "surface:dead-parent",
+      state: "done" as const,
+      user_killed: true,
+    };
+    const reportPath = join(inboxDir, "alias-owned-active-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "alias-owned-active-child",
+      surface_id: "surface:child",
+      state: "working",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "working\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.seat_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        owner: parent.seat_id,
+        subject_agent_id: child.agent_id,
+      }),
+    ]);
   });
 
   it("prunes at least 100 legacy rows whose agent directories exist but state files do not", async () => {
@@ -1266,7 +1430,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ...parentRecord(),
       agent_id: "bare-owner-child",
       surface_id: "surface:child",
-      parent_agent_id: "cmuxlayerClaude",
+      parent_agent_id: parent.agent_id,
       spawn_depth: 1,
       role: "worker",
       report_path: reportPath,
@@ -1433,7 +1597,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
       agent_id: "duplicate-owner-child",
       surface_id: "surface:child",
-      parent_agent_id: "cmuxlayerClaude",
+      parent_agent_id: liveOwner.agent_id,
       spawn_depth: 1,
       role: "worker",
       report_path: reportPath,
@@ -1649,7 +1813,18 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           screen_state: "ready",
         }),
         expectedDeliverable: true,
-        expectedRank: 3,
+        expectedRank: 2,
+      },
+      {
+        name: "registry-done without a live pane",
+        live: liveState({
+          state: "done",
+          source: "registry",
+          registry_state: "done",
+          screen_state: null,
+        }),
+        expectedDeliverable: false,
+        expectedRank: 7,
       },
       {
         name: "error-screened but registry-ready deliverable",
@@ -1875,7 +2050,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
-    expect(watch?.fingerprint).toBe(watch?.observed_value);
+    expect(watch?.fingerprint).not.toBe(watch?.observed_value);
   });
 
   it("re-arms after owner_not_live and wakes the resumed owner for the next revision", async () => {
@@ -1942,8 +2117,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
-    expect(afterOwnerLoss?.fingerprint).toBe(afterOwnerLoss?.observed_value);
-    expect(afterOwnerLoss?.fingerprint).not.toBe(initialFingerprint);
+    expect(afterOwnerLoss?.fingerprint).toBe(initialFingerprint);
+    expect(afterOwnerLoss?.fingerprint).not.toBe(
+      afterOwnerLoss?.observed_value,
+    );
 
     const resumedOwner = { ...parentRecord(parentUuid), agent_id: ownerId };
     engine.stateMgr.writeState(resumedOwner);
@@ -2087,7 +2264,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ...parentRecord(childUuid),
       agent_id: "external-fallback-child",
       surface_id: "surface:child",
-      parent_agent_id: "cmuxlayerClaude",
+      parent_agent_id: owner.agent_id,
       spawn_depth: 1,
       role: "worker",
     };
@@ -2203,6 +2380,84 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_pending: false,
       notification_attempts: 0,
     });
+  });
+
+  it("keeps local wake unconditional while absent notify makes zero external calls", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "local-only-parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    const externalNotify = vi.fn().mockResolvedValue(true);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchNotify: externalNotify,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    const reportPath = join(inboxDir, "local-only-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "local-only-child",
+      surface_id: "surface:child",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const initialFingerprint = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0]?.fingerprint;
+    const beforeWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    expect(externalNotify).not.toHaveBeenCalled();
+    const localWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      beforeWake,
+    );
+    expect(
+      localWakeCalls.filter(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toHaveLength(1);
+    const watch = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(watch).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_delivered_at_ms: expect.any(Number),
+    });
+    expect(watch?.fingerprint).toBe(watch?.observed_value);
+    expect(watch?.fingerprint).not.toBe(initialFingerprint);
   });
 
   it("keeps a first-delivery watch while its terminal child pane is live", async () => {
