@@ -1213,6 +1213,14 @@ function parseErrors(text: string): string[] {
       /^API Error:/i.test(rawLines[index] ?? "") ||
       /^Claude Code can't respond\b.*$/i.test(rawLines[index] ?? "")
     ) {
+      const precedingLine = [...lines.slice(0, index)]
+        .reverse()
+        .find((line) => line.length > 0);
+      const beginsHarnessOwnedBlock =
+        precedingLine === undefined ||
+        /^Claude Code(?:\s+v?\d.*)?$/i.test(precedingLine) ||
+        /^❯(?:\s|$)/.test(precedingLine);
+      if (!beginsHarnessOwnedBlock) continue;
       const composerIndex = lines.findIndex(
         (line, candidateIndex) =>
           candidateIndex > index && /^❯(?:\s|$)/.test(line),

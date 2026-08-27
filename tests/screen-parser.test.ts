@@ -128,6 +128,16 @@ API Error: 500 {"request_id":"req_quoted_example"}`);
     expect(parsed.status).not.toBe("frozen");
   });
 
+  it("does not treat a column-zero quoted API error as a harness-owned block", () => {
+    const parsed = parseScreen(`Claude Code v1.0.0
+⏺ Quoting the captured log below
+API Error: 500 {"request_id":"req_quoted_column_zero"}
+❯`);
+
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.status).not.toBe("frozen");
+  });
+
   it("parses Claude-style output with response block and done signal", () => {
     const parsed = parseScreen(`
 \u001b[32m⏺ Completed successfully\u001b[0m

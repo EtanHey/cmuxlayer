@@ -18052,6 +18052,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return okFormatted(formatOk("interact:resume", d), d);
             }
             case "skill": {
+              const submittedCommand = args.command!.trim();
+              const isSubmittedCommandEcho = (line: string): boolean =>
+                line.trim().replace(/^[>❯›]\s*/, "") === submittedCommand;
+              let commandEchoCountBefore: number | null = null;
+              try {
+                const beforeScreen = await engine.readAgentScreen(
+                  { agent_id: args.agent },
+                  { lines: 20 },
+                );
+                commandEchoCountBefore = beforeScreen.text
+                  .split("\n")
+                  .filter(isSubmittedCommandEcho).length;
+              } catch {
+                // Without a baseline, later output cannot be attributed to
+                // this invocation rather than an identical historical echo.
+              }
               const delivery = await deliverAgentInput({
                 agent_id: args.agent,
                 text: args.command!,
@@ -18065,10 +18081,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   { agent_id: args.agent },
                   { lines: 20 },
                 );
-                const submittedCommand = args.command!.trim();
                 const screenLines = screen.text
                   .split("\n")
                   .map((line) => line.trim());
+                const commandEchoCountAfter = screenLines.filter(
+                  isSubmittedCommandEcho,
+                ).length;
                 let commandLineIndex = -1;
                 for (let index = screenLines.length - 1; index >= 0; index -= 1) {
                   if (
@@ -18084,6 +18102,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     .slice(commandLineIndex + 1)
                     .filter(
                       (line) =>
+                        commandEchoCountBefore !== null &&
+                        commandEchoCountAfter > commandEchoCountBefore &&
                         commandLineIndex >= 0 &&
                         (!isComposerFooterOrChromeLine(line) ||
                           /^CLAUDE_COUNTER:/i.test(line)) &&
