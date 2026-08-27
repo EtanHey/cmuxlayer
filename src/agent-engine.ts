@@ -130,6 +130,15 @@ import {
   type WatchSpec,
 } from "./watch-spec.js";
 import {
+  canonicalAgentId,
+  canonicalAgentIdValue,
+  resolveWatchOwner,
+  watchOwnerIncludesCanonical,
+  watchRecordOwner,
+  type WatchOwnerCandidate,
+  type WatchOwnerResolution,
+} from "./watch-owner.js";
+import {
   classifyPromptDisposition,
   cleanScreenText,
   containsPromptApprovalChooser,
@@ -6578,25 +6587,6 @@ export class AgentEngine {
     const persistedWatchSnapshots = new Map(
       persistedWatches.map((watch) => [watch.watch_id, JSON.stringify(watch)]),
     );
-    const ownerAgentIdByWatch = new Map<string, string>();
-    const resolveOwnerCandidates = (owner: string): AgentRecord[] => {
-      const exact = agents.filter((agent) => agent.agent_id === owner);
-      if (exact.length > 0) return exact;
-      const seat = agents.filter((agent) => agent.seat_id?.trim() === owner);
-      if (seat.length > 0) return seat;
-      return agents.filter((agent) =>
-        agent.agent_id.startsWith(`${owner}-`),
-      );
-    };
-    for (const watch of persistedWatches) {
-      const candidates = resolveOwnerCandidates(watch.owner);
-      // Zero matches are unresolved, and multiple matches are ambiguous.
-      // Both retain fail-safe: only one exact delivery-style resolution can
-      // establish whose liveness is authoritative for destructive pruning.
-      if (candidates.length === 1) {
-        ownerAgentIdByWatch.set(watch.watch_id, candidates[0].agent_id);
-      }
-    }
     const subjectIdsByWatch = new Map<string, string[]>();
     const missingLegacyStateWatchIds = new Set<string>();
     const channelBaseDir = resolve(
@@ -6633,10 +6623,44 @@ export class AgentEngine {
         ...new Set(subjects.map((subject) => subject.agent_id)),
       ]);
     }
+    const knownSubjectParentIds = [
+      ...new Set(
+        [...subjectIdsByWatch.values()]
+          .flat()
+          .map(
+            (subjectId) =>
+              this.registry.get(subjectId) ?? this.stateMgr.readState(subjectId),
+          )
+          .map((subject) => subject?.parent_agent_id)
+          .filter((parentId): parentId is string => Boolean(parentId)),
+      ),
+    ];
+    const ownerCandidates: WatchOwnerCandidate[] = [
+      ...agents,
+      ...knownSubjectParentIds
+        .filter(
+          (parentId) => !agents.some((agent) => agent.agent_id === parentId),
+        )
+        .map((agent_id) => ({ agent_id })),
+    ];
+    const ownerResolutionByWatch = new Map<
+      string,
+      WatchOwnerResolution<WatchOwnerCandidate>
+    >();
+    for (const watch of persistedWatches) {
+      ownerResolutionByWatch.set(
+        watch.watch_id,
+        resolveWatchOwner(watchRecordOwner(watch), ownerCandidates),
+      );
+    }
     const liveAgentIds = new Set<string>();
     const candidateAgentIds = new Set([
       ...[...subjectIdsByWatch.values()].flat(),
-      ...ownerAgentIdByWatch.values(),
+      ...[...ownerResolutionByWatch.values()].flatMap((resolution) =>
+        resolution.canonical_id
+          ? [canonicalAgentIdValue(resolution.canonical_id)]
+          : [],
+      ),
     ]);
     await Promise.all(
       [...candidateAgentIds].map(async (agentId) => {
@@ -6670,6 +6694,17 @@ export class AgentEngine {
         if (watch.state === "failed" && !watch.notification_pending) {
           return (watch.waiter_expires_at_ms ?? 0) <= pruneObservedAt;
         }
+        if (watch.target_kind !== "file" || watch.change !== "content") {
+          return false;
+        }
+        if (!watch.subject_agent_id && watch.provenance === "public") {
+          return false;
+        }
+        const ownerResolution = ownerResolutionByWatch.get(watch.watch_id);
+        // Raw owner keys are not identities. Zero and multiple matches retain
+        // fail-safe; a subject can still prove that an ambiguous alias includes
+        // its canonical parent, but ambiguity cannot authorize deletion.
+        if (!ownerResolution) return false;
         const subjects = (subjectIdsByWatch.get(watch.watch_id) ?? [])
           .map(
             (subjectAgentId) =>
@@ -6683,10 +6718,17 @@ export class AgentEngine {
             !subject.deletion_intent &&
             (!TERMINAL_STATES.has(subject.state) ||
               liveAgentIds.has(subject.agent_id)) &&
-            subject.parent_agent_id ===
-              (ownerAgentIdByWatch.get(watch.watch_id) ?? watch.owner),
+            Boolean(
+              subject.parent_agent_id &&
+                watchOwnerIncludesCanonical(
+                  ownerResolution,
+                  canonicalAgentId(subject.parent_agent_id),
+                ),
+            ),
         );
-        const ownerAgentId = ownerAgentIdByWatch.get(watch.watch_id);
+        const ownerAgentId = ownerResolution.canonical_id
+          ? canonicalAgentIdValue(ownerResolution.canonical_id)
+          : null;
         // A live child still owns its report path even if its parent pane is
         // gone. Preserve that reservation; dead-owner pruning is destructive
         // only when no active subject ownership remains.
@@ -6697,12 +6739,6 @@ export class AgentEngine {
         ) {
           return true;
         }
-        if (watch.target_kind !== "file" || watch.change !== "content") {
-          return false;
-        }
-        if (!watch.subject_agent_id && watch.provenance === "public") {
-          return false;
-        }
         if (
           subjects.length === 0 &&
           missingLegacyStateWatchIds.has(watch.watch_id)
@@ -6710,6 +6746,7 @@ export class AgentEngine {
           return true;
         }
         if (subjects.length === 0) return Boolean(watch.subject_agent_id);
+        if (ownerResolution.kind !== "resolved") return false;
         return !hasActiveSubjectOwnership;
       },
       { registryPath: this.watchRegistryPath },
