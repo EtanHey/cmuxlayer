@@ -804,7 +804,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     await (
       engine as unknown as {
-        pruneClosedChildReportWatches: () => Promise<void>;
+        pruneClosedChildReportWatches: () => Promise<boolean>;
       }
     ).pruneClosedChildReportWatches();
 
@@ -854,12 +854,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "utf8",
     );
 
-    await (
-      engine as unknown as {
-        pruneClosedChildReportWatches: () => Promise<void>;
-      }
-    ).pruneClosedChildReportWatches();
+    const pruneTarget = engine as unknown as {
+      retryClosedChildReportWatchPrune: () => Promise<void>;
+      pruneClosedChildReportWatches: () => Promise<boolean>;
+    };
+    const pruneSpy = vi.spyOn(pruneTarget, "pruneClosedChildReportWatches");
+    engine.scheduleClosedChildReportWatchPrune();
+    await pruneTarget.retryClosedChildReportWatchPrune();
+    await pruneTarget.retryClosedChildReportWatchPrune();
 
+    expect(pruneSpy).toHaveBeenCalledTimes(2);
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toEqual([
@@ -1862,6 +1866,92 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
+  it("retries pruning after a watch mutates to pending during liveness probing", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "concurrent-pending", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+      agent_id: "concurrent-pending",
+      surface_id: "surface:closed-child",
+      state: "done",
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    let releaseLivenessProbe: (() => void) | undefined;
+    let markProbeStarted: (() => void) | undefined;
+    const probeStarted = new Promise<void>((resolve) => {
+      markProbeStarted = resolve;
+    });
+    const livenessGate = new Promise<void>((resolve) => {
+      releaseLivenessProbe = resolve;
+    });
+    vi.spyOn(engine.getRegistry(), "isSurfaceAlive").mockImplementation(
+      async () => {
+        markProbeStarted?.();
+        await livenessGate;
+        return false;
+      },
+    );
+    const pruneTarget = engine as unknown as {
+      retryClosedChildReportWatchPrune: () => Promise<void>;
+    };
+
+    engine.scheduleClosedChildReportWatchPrune();
+    const pruning = pruneTarget.retryClosedChildReportWatchPrune();
+    await probeStarted;
+    const pendingRegistry = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    pendingRegistry.watches[0] = {
+      ...pendingRegistry.watches[0],
+      state: "fired",
+      terminal_reason: "target_changed",
+      terminal_at_ms: 2_000,
+      observed_value: "sha256:pending",
+      notification_pending: true,
+      notification_attempts: 1,
+      notification_next_attempt_at_ms: 2_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(pendingRegistry, null, 2)}\n`,
+      "utf8",
+    );
+    releaseLivenessProbe?.();
+    await pruning;
+
+    const retryableRegistry = JSON.parse(
+      readFileSync(watchRegistryPath, "utf8"),
+    );
+    retryableRegistry.watches[0] = {
+      ...retryableRegistry.watches[0],
+      state: "armed",
+      notification_pending: false,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(retryableRegistry, null, 2)}\n`,
+      "utf8",
+    );
+    await pruneTarget.retryClosedChildReportWatchPrune();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
+  });
+
   it("keeps lifecycle initialization live and retries startup pruning after lock contention", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
@@ -2058,6 +2148,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         state: "armed",
       }),
     ]);
+
+    const pruneTarget = engine as unknown as {
+      retryClosedChildReportWatchPrune: () => Promise<void>;
+      pruneClosedChildReportWatches: () => Promise<boolean>;
+    };
+    const pruneSpy = vi.spyOn(pruneTarget, "pruneClosedChildReportWatches");
+    await pruneTarget.retryClosedChildReportWatchPrune();
+    expect(pruneSpy).not.toHaveBeenCalled();
   });
 
   it("retains a legacy shared-path watch when any matching direct child is live", async () => {
