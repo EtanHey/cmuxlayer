@@ -4742,6 +4742,14 @@ export class AgentEngine {
         halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
+    } else if (
+      haltType === "harness_api_error" &&
+      agent.halt_last_observable_action !== haltObservableAction
+    ) {
+      episode = this.stateMgr.updateRecord(agent.agent_id, {
+        halt_last_observable_action: haltObservableAction,
+      });
+      this.registry.set(agent.agent_id, episode);
     }
     if (episode.halt_notification_sent_at) return episode;
 

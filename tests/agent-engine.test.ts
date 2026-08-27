@@ -9682,6 +9682,66 @@ Session ID: ${sessionId}`,
       ]);
     });
 
+    it("refreshes the request id before retrying a harness API error notification", async () => {
+      const nowMs = Date.parse("2026-08-27T07:06:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "api-refresh-parent",
+        surface_id: "surface:api-refresh-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "api-refresh-child",
+        surface_id: "surface:api-refresh-child",
+        state: "working",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        halt_episode_type: "harness_api_error",
+        halt_episode_started_at: new Date(nowMs - 1_000).toISOString(),
+        halt_episode_observations: 1,
+        halt_last_observable_action:
+          "harness_api_error: stale request_id=req_stale",
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      await (engine as any).maybeEscalateLiveHalt(
+        child,
+        'Claude Code\nAPI Error: 500 {"request_id":"req_current"}\n❯',
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
+        "req_current",
+      );
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain(
+        "req_stale",
+      );
+    });
+
     it("persists prompt blockage even when escalation is opted out and clears it from healthy screen truth", async () => {
       const nowMs = Date.parse("2026-08-14T13:00:00.000Z");
       engine.dispose();
