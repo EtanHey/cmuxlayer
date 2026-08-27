@@ -4626,7 +4626,11 @@ export class AgentEngine {
     );
     agent = this.persistPausedState(agent, parsed.paused === true, nowIso);
     if (agent.halt_escalation === false) return agent;
+    const hasHarnessApiError = parsed.errors.some((error) =>
+      error.startsWith("harness_api_error:"),
+    );
     if (
+      !hasHarnessApiError &&
       parsed.paused !== true &&
       (parsed.control_state === "shell" ||
         parsed.control_state === "dead" ||
@@ -4661,7 +4665,7 @@ export class AgentEngine {
       this.blockingBackgroundWaitElapsedMs(screenText);
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
-    if (parsed.errors.some((error) => error.startsWith("harness_api_error:"))) {
+    if (hasHarnessApiError) {
       haltType = "harness_api_error";
     } else if (
       parsed.control_state === "permission_prompt" ||

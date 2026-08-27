@@ -124,7 +124,11 @@ export class CmuxClient {
 
   private async run(args: string[]): Promise<string> {
     for (let index = 0; index < args.length - 1; index += 1) {
-      if (args[index] === "--surface") {
+      if (
+        args[index] === "--surface" ||
+        args[index] === "--before" ||
+        args[index] === "--after"
+      ) {
         assertCanonicalSurfaceRef(args[index + 1]);
       }
     }

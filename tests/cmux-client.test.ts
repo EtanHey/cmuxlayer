@@ -38,6 +38,21 @@ describe("surface reference validation", () => {
     );
     expect(exec).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["before", () => ({ before: "45" })],
+    ["after", () => ({ after: "45" })],
+  ])("rejects a bare %s surface index before invoking the CLI", async (_name, placement) => {
+    const { client, exec } = mockClient({});
+    await expect(
+      client.moveSurface({
+        surface: "surface:9",
+        workspace: "workspace:2",
+        ...placement(),
+      }),
+    ).rejects.toThrow(/use surface:<index> ref or a surface UUID/);
+    expect(exec).not.toHaveBeenCalled();
+  });
 });
 
 describe("CmuxClient.listWorkspaces", () => {

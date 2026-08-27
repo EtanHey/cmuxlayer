@@ -10,6 +10,8 @@
 
 ---
 
+## Tasks
+
 ### Task 1: Harness API error truth
 
 **Files:** `src/screen-parser.ts`, `src/agent-engine.ts`, `tests/screen-parser.test.ts`, `tests/agent-engine.test.ts`

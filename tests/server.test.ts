@@ -9722,7 +9722,7 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent returns blocked_by_update_menu when the Codex update menu remains after acceptance", async () => {
+  it("spawn_agent returns truthful recovery when the Codex update menu remains", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked-state");
@@ -9854,7 +9854,9 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(false);
       expect(parsed.error_code).toBe("blocked_by_update_menu");
-      expect(parsed.recovery).toContain("Update now");
+      expect(parsed.recovery).toContain("resolve the update menu");
+      expect(parsed.recovery).toContain("surface:2");
+      expect(parsed.recovery).not.toContain("cmuxlayer accepted");
       expect(sentKeys).not.toContain("down");
       expect(sentKeys.filter((key) => key === "return")).toHaveLength(1);
     } finally {

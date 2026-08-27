@@ -9806,6 +9806,44 @@ Session ID: ${sessionId}`,
       expect(updated.halt_notification_sent_at).toEqual(expect.any(String));
     });
 
+    it("lets a live harness API error outrank recorded done evidence", async () => {
+      const parent = makeRecord({
+        agent_id: "api-stale-done-parent",
+        surface_id: "surface:api-stale-done-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "api-stale-done-child",
+        surface_id: "surface:api-stale-done-child",
+        state: "working",
+        role: "worker",
+        cli: "claude",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        task_done_detected_at: new Date().toISOString(),
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      await (engine as any).maybeEscalateLiveHalt(
+        child,
+        'Claude Code\nAPI Error: 500 {"request_id":"req_after_done"}\n❯',
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
+        "req_after_done",
+      );
+    });
+
     it("persists prompt blockage even when escalation is opted out and clears it from healthy screen truth", async () => {
       const nowMs = Date.parse("2026-08-14T13:00:00.000Z");
       engine.dispose();

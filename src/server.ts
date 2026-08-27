@@ -1375,15 +1375,18 @@ class BootPromptDeliveryError extends Error {
 
 class BootPromptUpdateMenuBlockedError extends Error {
   readonly error_code = "blocked_by_update_menu";
-  readonly recovery =
-    "Codex kept showing the interactive update menu after cmuxlayer accepted the default 'Update now' option. Rerun the spawn; the bounded updater guard prevents an infinite loop.";
+  readonly recovery: string;
 
   constructor(
     message: string,
     readonly last_10_lines: string[],
+    surface: string,
   ) {
     super(message);
     this.name = "BootPromptUpdateMenuBlockedError";
+    this.recovery =
+      `First resolve the update menu on ${surface}; cmuxlayer deliberately did not press Return. ` +
+      "Then deliver or resume the boot prompt on that same surface instead of rerunning the spawn.";
   }
 }
 
@@ -6480,6 +6483,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw new BootPromptUpdateMenuBlockedError(
             `Boot prompt delivery blocked by Codex update menu on ${target.surface}; cmuxlayer will not press Return before the prompt is typed`,
             tailLines(lastText, 10),
+            target.surface,
           );
         }
 
