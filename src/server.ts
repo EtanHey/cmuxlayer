@@ -18060,6 +18060,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 /^(?:[•✻✢✳✶✦]\s*(?:Thinking|Working)|[⏺⬡]\s*Running)(?:\b|…)/iu.test(
                   line,
                 );
+              const isComposerInputLine = (line: string): boolean =>
+                /^[>❯›]\s*\S/u.test(line);
               let commandEchoCountBefore: number | null = null;
               try {
                 const beforeScreen = await engine.readAgentScreen(
@@ -18111,6 +18113,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         commandEchoCountAfter > commandEchoCountBefore &&
                         commandLineIndex >= 0 &&
                         !isActiveSkillProgressLine(line) &&
+                        !isComposerInputLine(line) &&
                         (!isComposerFooterOrChromeLine(line) ||
                           /^CLAUDE_COUNTER:/i.test(line)) &&
                         !/^Claude Code(?:\s+v?\d|$)/i.test(line) &&

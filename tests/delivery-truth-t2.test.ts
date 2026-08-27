@@ -359,9 +359,14 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     context.dispose();
   });
 
-  it.each(["✻ Thinking…", "✻ Working…", "⏺ Running…"])(
-    "interact skill does not report active progress %s as a screen result",
-    async (activeProgressLine) => {
+  it.each([
+    "✻ Thinking…",
+    "✻ Working…",
+    "⏺ Running…",
+    "❯ investigate next issue",
+  ])(
+    "interact skill does not report non-result row %s as a screen result",
+    async (nonResultLine) => {
       const { createServer, createServerContext } = await loadServerModule();
       let screenText = "Claude Code\n❯ ";
       let submitted = false;
@@ -380,7 +385,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
             return {
               stdout: JSON.stringify({
                 surface: "surface:new",
-                text: `Claude Code\n❯ /review\n${activeProgressLine}\n`,
+                text: `Claude Code\n❯ /review\n${nonResultLine}\n`,
                 lines: 20,
                 scrollback_used: false,
               }),
