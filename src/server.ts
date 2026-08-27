@@ -379,7 +379,9 @@ export function rankDuplicateWatchOwnerCandidate(
         ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
         : DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
     case "done":
-      return DUPLICATE_WATCH_OWNER_RANK.TERMINAL;
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.OBSERVED_INTERACTIVE
+        : DUPLICATE_WATCH_OWNER_RANK.UNKNOWN;
     case "creating":
     case "booting":
       return deliverable
@@ -12576,23 +12578,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
-            const externalNotify =
-              event.notify === true ? opts?.watchNotify : undefined;
-            const subjectStillBelongsToOwner = (): boolean => {
+            const externalNotifyOptedIn =
+              event.notify === true && Boolean(opts?.watchNotify);
+            const deliverExternalNotification = async (): Promise<boolean> => {
+              if (!externalNotifyOptedIn || !opts?.watchNotify) return false;
+              try {
+                return (await opts.watchNotify(event)) !== false;
+              } catch {
+                return false;
+              }
+            };
+            const subjectStillBelongsToOwner = (
+              resolvedOwnerId?: string,
+            ): boolean => {
               if (!event.subject_agent_id) return true;
+              if (!resolvedOwnerId) return true;
               const subject =
                 registry.get(event.subject_agent_id) ??
                 stateMgr.readState(event.subject_agent_id);
               return Boolean(
                 subject &&
-                subject.parent_agent_id === event.owner &&
+                subject.parent_agent_id === resolvedOwnerId &&
                 subject.user_killed !== true &&
                 !subject.deletion_intent,
               );
             };
-            if (!subjectStillBelongsToOwner()) {
-              return true;
-            }
             const liveOwnerCandidates = [
               ...registry.list(),
               ...stateMgr.listStates(),
@@ -12634,27 +12644,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? prefixMatches[0]
                 : undefined;
             })();
-            let externalDelivered = true;
-            if (event.reason !== "predicate_matched" && externalNotify) {
-              try {
-                externalDelivered = (await externalNotify(event)) !== false;
-              } catch {
-                externalDelivered = false;
-              }
+            let externalDelivered = false;
+            if (event.reason !== "predicate_matched") {
+              externalDelivered = await deliverExternalNotification();
             }
-            if (!subjectStillBelongsToOwner()) {
+            if (!subjectStillBelongsToOwner(owner?.agent_id)) {
               return true;
             }
             if (!owner) {
-              if (event.reason === "predicate_matched" && externalNotify) {
-                try {
-                  externalDelivered =
-                    (await externalNotify(event)) !== false;
-                } catch {
-                  externalDelivered = false;
-                }
+              if (event.reason === "predicate_matched") {
+                externalDelivered = await deliverExternalNotification();
               }
-              if (externalNotify && externalDelivered) {
+              if (externalDelivered) {
                 return true;
               }
               return {
@@ -12665,18 +12666,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
             if (owner && lifecycleAgentInputDeliverer) {
               const externalFallbackAfterLocalFailure = async () => {
-                if (
-                  event.reason !== "predicate_matched" ||
-                  !externalNotify
-                ) {
-                  return false;
+                if (!subjectStillBelongsToOwner(owner.agent_id)) return true;
+                if (event.reason !== "predicate_matched") {
+                  return externalDelivered;
                 }
-                if (!subjectStillBelongsToOwner()) return true;
-                try {
-                  return (await externalNotify(event)) !== false;
-                } catch {
-                  return false;
-                }
+                return deliverExternalNotification();
               };
               const text = (() => {
                 if (
@@ -12717,11 +12711,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
             if (event.reason !== "predicate_matched") {
-              return externalNotify ? externalDelivered : false;
+              return externalDelivered;
             }
-            return externalNotify
-              ? (await externalNotify(event)) !== false
-              : false;
+            return deliverExternalNotification();
           },
           closeForensicsRunner: opts?.enableCloseForensics
             ? createDefaultCloseForensicsRunner({

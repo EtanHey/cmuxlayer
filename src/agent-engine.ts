@@ -6683,7 +6683,8 @@ export class AgentEngine {
             !subject.deletion_intent &&
             (!TERMINAL_STATES.has(subject.state) ||
               liveAgentIds.has(subject.agent_id)) &&
-            subject.parent_agent_id === watch.owner,
+            subject.parent_agent_id ===
+              (ownerAgentIdByWatch.get(watch.watch_id) ?? watch.owner),
         );
         const ownerAgentId = ownerAgentIdByWatch.get(watch.watch_id);
         // A live child still owns its report path even if its parent pane is
