@@ -1231,7 +1231,10 @@ function parseErrors(text: string): string[] {
   const harnessErrorLine = lines[harnessErrorIndex];
   const recoveredAfterHarnessError = lines
     .slice(harnessErrorIndex + 1)
-    .some((line) => ACTION_BLOCK_LINE_RE.test(line));
+    .some(
+      (line) =>
+        ACTION_BLOCK_LINE_RE.test(line) || CLAUDE_WORKING_LINE_RE.test(line),
+    );
   if (harnessErrorLine && !recoveredAfterHarnessError) {
     const summary = harnessErrorLine
       .replace(/^API Error:\s*/i, "")

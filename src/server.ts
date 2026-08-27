@@ -18066,17 +18066,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   { lines: 20 },
                 );
                 const submittedCommand = args.command!.trim();
+                const screenLines = screen.text
+                  .split("\n")
+                  .map((line) => line.trim());
+                let commandLineIndex = -1;
+                for (let index = screenLines.length - 1; index >= 0; index -= 1) {
+                  if (
+                    screenLines[index]?.replace(/^[>❯›]\s*/, "") ===
+                    submittedCommand
+                  ) {
+                    commandLineIndex = index;
+                    break;
+                  }
+                }
                 screenResultLine =
-                  screen.text
-                    .split("\n")
-                    .map((line) => line.trim())
+                  screenLines
+                    .slice(commandLineIndex + 1)
                     .filter(
                       (line) =>
+                        commandLineIndex >= 0 &&
                         (!isComposerFooterOrChromeLine(line) ||
                           /^CLAUDE_COUNTER:/i.test(line)) &&
                         !/^Claude Code(?:\s+v?\d|$)/i.test(line) &&
-                        !/^[>❯›]\s*$/.test(line) &&
-                        line.replace(/^[>❯›]\s*/, "") !== submittedCommand,
+                        !/^[>❯›]\s*$/.test(line),
                     )
                     .at(-1) ?? null;
                 screenResultAvailable = screenResultLine !== null;

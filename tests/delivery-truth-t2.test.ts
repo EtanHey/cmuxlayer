@@ -252,7 +252,27 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
   it("interact skill submits from an empty composer and receipts the screen result", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";
-    const mockExec = makeLifecycleExec(() => screenText);
+    const baseExec = makeLifecycleExec(() => screenText);
+    const mockExec: ExecFn = vi.fn().mockImplementation(
+      async (command: string, args: string[]) => {
+        if (
+          args.includes("read-screen") &&
+          args.includes("--lines") &&
+          args.includes("20")
+        ) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "Claude Code\n❯ /review\nCLAUDE_COUNTER:1\n",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(command, args);
+      },
+    );
     const context = createServerContext({
       exec: mockExec,
       stateDir: testDir,
@@ -291,7 +311,8 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: "Claude Code\n❯ /review\n⏵⏵ bypass permissions on · 2 monitors\n",
+              text:
+                "Claude Code\n⏺ Earlier unrelated answer\n❯ /review\n⏵⏵ bypass permissions on · 2 monitors\n",
               lines: 20,
               scrollback_used: false,
             }),

@@ -89,6 +89,17 @@ Request ID: req_stillfailed
     expect(parsed.control_state).not.toBe("ready");
   });
 
+  it("clears a stale harness error when a submitted retry is actively thinking", () => {
+    const parsed = parseScreen(`Claude Code v1.0.0
+API Error: overloaded
+Request ID: req_retry_active
+❯ retry
+✻ Thinking…`);
+
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.status).toBe("thinking");
+  });
+
   it("does not treat model-authored API Error text without a request id as a harness failure", () => {
     const parsed = parseScreen(`Claude Code v1.0.0
 ⏺ Completed the parser explanation
