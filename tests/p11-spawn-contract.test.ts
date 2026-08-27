@@ -843,6 +843,45 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
   });
 
+  it("never treats a provenance-absent subjectless public watch on an arbitrary path as legacy engine state", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const target = join(STATE_DIR, "caller-owned-arbitrary-watch.md");
+    writeFileSync(target, "caller data\n", "utf8");
+    const watch = {
+      watch_id: "unmarked-public-arbitrary-target",
+      owner: "lead-parent",
+      target,
+      change: "content" as const,
+      deadline: Number.MAX_SAFE_INTEGER,
+      target_kind: "file" as const,
+      armed_at_ms: 1_000,
+      last_heartbeat_at_ms: 1_000,
+      liveness_source: "process",
+      liveness: {
+        value: true,
+        source: "process" as const,
+        observed_at_ms: 1_000,
+      },
+      state: "armed" as const,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify({ version: 1, watches: [watch] }, null, 2)}\n`,
+      "utf8",
+    );
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<boolean>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([expect.objectContaining({ watch_id: watch.watch_id, target })]);
+  });
+
   it("never lets terminal-child pruning remove an undelivered notification", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
@@ -1234,6 +1273,76 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         { candidate: second, live: liveState() },
       ]),
     ).toBe(second);
+  });
+
+  it("prefers a working live-TUI owner over an earlier error-screened registry-ready duplicate", () => {
+    const staleReady = { agent_id: "first-stale-ready" };
+    const working = { agent_id: "second-working" };
+
+    expect(
+      selectDuplicateWatchOwnerCandidate([
+        {
+          candidate: staleReady,
+          live: liveState({
+            state: "error",
+            source: "screen",
+            registry_state: "ready",
+            screen_state: "error",
+            stale_registry_state: true,
+          }),
+        },
+        {
+          candidate: working,
+          live: liveState({
+            state: "working",
+            source: "screen",
+            registry_state: "working",
+            screen_state: "working",
+          }),
+        },
+      ]),
+    ).toBe(working);
+  });
+
+  it("keeps duplicate-owner selection ordered tier 1 before 2 before 3 before 4", () => {
+    const tier4 = { agent_id: "tier-4-fallback" };
+    const tier3 = { agent_id: "tier-3-error-deliverable" };
+    const tier2 = { agent_id: "tier-2-working-tui" };
+    const tier1 = { agent_id: "tier-1-live-deliverable" };
+    const candidates = [
+      { candidate: tier4, live: null },
+      {
+        candidate: tier3,
+        live: liveState({
+          state: "error",
+          source: "screen",
+          registry_state: "ready",
+          screen_state: "error",
+          stale_registry_state: true,
+        }),
+      },
+      {
+        candidate: tier2,
+        live: liveState({
+          state: "working",
+          source: "screen",
+          registry_state: "working",
+          screen_state: "working",
+        }),
+      },
+      { candidate: tier1, live: liveState() },
+    ];
+
+    expect(selectDuplicateWatchOwnerCandidate(candidates)).toBe(tier1);
+    expect(selectDuplicateWatchOwnerCandidate(candidates.slice(0, 3))).toBe(
+      tier2,
+    );
+    expect(selectDuplicateWatchOwnerCandidate(candidates.slice(0, 2))).toBe(
+      tier3,
+    );
+    expect(selectDuplicateWatchOwnerCandidate(candidates.slice(0, 1))).toBe(
+      tier4,
+    );
   });
 
   it("keeps the first duplicate owner selected for a wake attempt when every direct state is error-screened", () => {
