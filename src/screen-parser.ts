@@ -1206,12 +1206,25 @@ function parseErrors(text: string): string[] {
 
   const lines = text.split("\n").map((line) => line.trim());
   let harnessErrorIndex = -1;
+  let harnessErrorRequestId: string | null = null;
   for (let index = 0; index < lines.length; index += 1) {
     if (
       /^API Error:/i.test(lines[index]) ||
       /^Claude Code can't respond\b.*$/i.test(lines[index])
     ) {
+      const composerIndex = lines.findIndex(
+        (line, candidateIndex) =>
+          candidateIndex > index && /^❯(?:\s|$)/.test(line),
+      );
+      if (composerIndex < 0) continue;
+      const errorBlock = lines.slice(index, composerIndex).join("\n");
+      const requestId =
+        errorBlock.match(
+          /(?:"request_id"\s*:\s*"|request[ _]id\s*:\s*)(req_[A-Za-z0-9]+)/i,
+        )?.[1] ?? null;
+      if (!requestId) continue;
       harnessErrorIndex = index;
+      harnessErrorRequestId = requestId;
     }
   }
   const harnessErrorLine = lines[harnessErrorIndex];
@@ -1219,15 +1232,13 @@ function parseErrors(text: string): string[] {
     .slice(harnessErrorIndex + 1)
     .some((line) => ACTION_BLOCK_LINE_RE.test(line));
   if (harnessErrorLine && !recoveredAfterHarnessError) {
-    const errorTail = lines.slice(harnessErrorIndex).join("\n");
-    const requestId =
-      errorTail.match(/(?:"request_id"\s*:\s*"|request[ _]id\s*:\s*)(req_[A-Za-z0-9]+)/i)?.[1] ??
-      "unknown";
     const summary = harnessErrorLine
       .replace(/^API Error:\s*/i, "")
       .replace(/\s+/g, " ")
       .trim();
-    errors.push(`harness_api_error: ${summary} request_id=${requestId}`);
+    errors.push(
+      `harness_api_error: ${summary} request_id=${harnessErrorRequestId}`,
+    );
   }
 
   if (hasApprovalPromptBlock(text)) {

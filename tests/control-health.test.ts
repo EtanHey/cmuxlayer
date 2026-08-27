@@ -819,6 +819,7 @@ describe("control health", () => {
       { surfaceId: "11111111-2222-4333-8444-555555555555" },
       () => tool.handler({}, {} as any),
     );
+    const unscopedTerse = await tool.handler({}, {} as any);
     const full = await tool.handler({ detail: "full" }, {} as any);
     if (previousCallerSurface === undefined) delete process.env.CMUX_SURFACE_ID;
     else process.env.CMUX_SURFACE_ID = previousCallerSurface;
@@ -828,6 +829,10 @@ describe("control health", () => {
       watches: [
         { watch_id: "mine-live", target: "/reports/mine-live.md", state: "armed" },
       ],
+    });
+    expect(unscopedTerse.structuredContent.health.caller_live_watches).toEqual({
+      count: 0,
+      watches: [],
     });
     expect(terse.content[0].text.length).toBeLessThan(full.content[0].text.length);
     await server.close();

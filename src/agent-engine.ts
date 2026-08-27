@@ -4694,10 +4694,13 @@ export class AgentEngine {
       haltType = "idle_without_done";
     }
     if (!haltType) return this.clearHaltEpisode(agent);
+    const harnessApiError = parsed.errors.find((error) =>
+      error.startsWith("harness_api_error:"),
+    );
     const haltObservableAction =
-      parsed.current_action ??
-      parsed.errors.find((error) => error.startsWith("harness_api_error:")) ??
-      haltType;
+      haltType === "harness_api_error"
+        ? (harnessApiError ?? parsed.current_action ?? haltType)
+        : (parsed.current_action ?? harnessApiError ?? haltType);
 
     let episode = agent;
     if (!agent.halt_episode_type) {

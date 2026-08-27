@@ -89,6 +89,24 @@ Request ID: req_stillfailed
     expect(parsed.control_state).not.toBe("ready");
   });
 
+  it("does not treat model-authored API Error text without a request id as a harness failure", () => {
+    const parsed = parseScreen(`Claude Code v1.0.0
+⏺ Completed the parser explanation
+API Error: is the prefix used by the harness for transport failures.
+❯`);
+
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.status).not.toBe("frozen");
+  });
+
+  it("does not treat API Error text with a request id but no trailing composer as a harness failure", () => {
+    const parsed = parseScreen(`Claude Code v1.0.0
+⏺ Explaining a captured failure
+API Error: 500 {"request_id":"req_quoted_example"}`);
+
+    expect(parsed.errors).toEqual([]);
+  });
+
   it("parses Claude-style output with response block and done signal", () => {
     const parsed = parseScreen(`
 \u001b[32m⏺ Completed successfully\u001b[0m

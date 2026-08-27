@@ -9607,7 +9607,7 @@ Session ID: ${sessionId}`,
       });
 
       const apiError =
-        'Claude Code\nAPI Error: 500 {"request_id":"req_run9_api_error"}\n❯';
+        '⏺ Reading stale-work.ts\nClaude Code\nAPI Error: 500 {"request_id":"req_run9_api_error"}\n❯';
       await (engine as any).maybeEscalateLiveHalt(child, apiError);
 
       expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([
@@ -9618,6 +9618,9 @@ Session ID: ${sessionId}`,
       ]);
       expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
         "req_run9_api_error",
+      );
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain(
+        "Reading stale-work.ts",
       );
     });
 

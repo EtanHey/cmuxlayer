@@ -222,7 +222,6 @@ import type {
 import { isSubmitKey, normalizeKeyName } from "./key-names.js";
 import { assertCanonicalSurfaceRef } from "./surface-ref.js";
 import {
-  callerContextFromEnv,
   currentCallerContext,
   type CallerContext,
 } from "./caller-context.js";
@@ -8999,9 +8998,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             health: healthWithStale,
           });
         }
-        const callerSurface =
-          currentCallerContext()?.surfaceId?.trim() ??
-          callerContextFromEnv()?.surfaceId?.trim();
+        const callerSurface = currentCallerContext()?.surfaceId?.trim();
         const caller =
           resolveCurrentCallerAgent() ??
           (callerSurface
