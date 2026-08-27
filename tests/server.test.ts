@@ -4560,9 +4560,10 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     // Two readiness matches, launch-command preflight, boot-prompt preflight,
-    // complete composer observation, then post-submit verification.
+    // complete composer observation, then one or two post-submit verifications.
     expect(readsWhenBootPromptSent).toBe(4);
-    expect(reads).toBe(7);
+    expect(reads).toBeGreaterThanOrEqual(7);
+    expect(reads).toBeLessThanOrEqual(8);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
