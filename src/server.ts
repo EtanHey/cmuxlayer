@@ -109,6 +109,7 @@ import {
   isLiveDeliverable,
   isLiveTerminal,
   resolveLiveAgentState,
+  screenConfirmedAgentState,
   TERMINAL_AGENT_STATES,
   type LiveAgentState,
 } from "./live-agent-state.js";
@@ -3394,6 +3395,7 @@ export function reconcileAgentLiveState(
   registryState: AgentState,
   screen: ParsedScreenResult | null,
 ): AgentState {
+  if (screenConfirmedAgentState(screen) === "error") return "error";
   // Only a REAL agent screen can clear an error. parseScreen reports status:"idle" for a
   // plain shell prompt (agent_type:"unknown"), so a crashed agent fallen back to a shell must
   // keep its registry error instead of being masked as healthy idle.

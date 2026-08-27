@@ -14467,6 +14467,14 @@ codex>
       ).toBe("working");
     });
 
+    it("surfaces a live harness API error over a stale healthy registry state", () => {
+      const harnessError = liveScreen("frozen", 50_000);
+      harnessError.errors = [
+        "harness_api_error: request refused request_id=req_my_agents",
+      ];
+      expect(reconcileAgentLiveState("working", harnessError)).toBe("error");
+    });
+
     it("keeps registry error when there is no live screen to reconcile against", () => {
       expect(reconcileAgentLiveState("error", null)).toBe("error");
     });
