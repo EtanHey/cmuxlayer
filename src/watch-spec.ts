@@ -1332,7 +1332,7 @@ export async function sweepWatches(
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
               notification_pending: false,
-              notification_attempts: attempts,
+              notification_attempts: 0,
               notification_exhausted_at_ms: observedAt,
               notification_exhausted_reason: "retry_limit_exhausted",
             };

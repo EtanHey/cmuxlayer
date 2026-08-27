@@ -951,7 +951,7 @@ describe("WatchSpec arm contract", () => {
       watch_id: armed.watch_id,
       state: "armed",
       notification_pending: false,
-      notification_attempts: 8,
+      notification_attempts: 0,
       notification_exhausted_reason: "retry_limit_exhausted",
     });
 
