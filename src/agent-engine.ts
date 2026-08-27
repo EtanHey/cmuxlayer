@@ -6555,8 +6555,10 @@ export class AgentEngine {
   }
 
   /**
-   * A daemon restart must not re-arm report watches owned by children that are
-   * already closed or no longer belong to the recorded parent. New rows carry
+   * A daemon restart must not re-arm watches whose owner is confirmed dead, or
+   * report watches whose child is already closed or no longer belongs to the
+   * recorded parent. Owner aliases use delivery-style exact/seat/prefix
+   * resolution and retain on zero or multiple matches. New report rows carry
    * subject_agent_id; legacy rows are pruned only when their target exactly
    * matches a persisted child's engine-issued report_path.
    */
@@ -6576,6 +6578,25 @@ export class AgentEngine {
     const persistedWatchSnapshots = new Map(
       persistedWatches.map((watch) => [watch.watch_id, JSON.stringify(watch)]),
     );
+    const ownerAgentIdByWatch = new Map<string, string>();
+    const resolveOwnerCandidates = (owner: string): AgentRecord[] => {
+      const exact = agents.filter((agent) => agent.agent_id === owner);
+      if (exact.length > 0) return exact;
+      const seat = agents.filter((agent) => agent.seat_id?.trim() === owner);
+      if (seat.length > 0) return seat;
+      return agents.filter((agent) =>
+        agent.agent_id.startsWith(`${owner}-`),
+      );
+    };
+    for (const watch of persistedWatches) {
+      const candidates = resolveOwnerCandidates(watch.owner);
+      // Zero matches are unresolved, and multiple matches are ambiguous.
+      // Both retain fail-safe: only one exact delivery-style resolution can
+      // establish whose liveness is authoritative for destructive pruning.
+      if (candidates.length === 1) {
+        ownerAgentIdByWatch.set(watch.watch_id, candidates[0].agent_id);
+      }
+    }
     const subjectIdsByWatch = new Map<string, string[]>();
     const missingLegacyStateWatchIds = new Set<string>();
     const channelBaseDir = resolve(
@@ -6612,26 +6633,32 @@ export class AgentEngine {
         ...new Set(subjects.map((subject) => subject.agent_id)),
       ]);
     }
-    const liveSubjectIds = new Set<string>();
-    const candidateSubjectIds = new Set([...subjectIdsByWatch.values()].flat());
+    const liveAgentIds = new Set<string>();
+    const candidateAgentIds = new Set([
+      ...[...subjectIdsByWatch.values()].flat(),
+      ...ownerAgentIdByWatch.values(),
+    ]);
     await Promise.all(
-      [...candidateSubjectIds].map(async (subjectAgentId) => {
+      [...candidateAgentIds].map(async (agentId) => {
         const subject =
-          this.registry.get(subjectAgentId) ??
-          this.stateMgr.readState(subjectAgentId);
+          this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
         if (
           subject &&
           subject.user_killed !== true &&
           !subject.deletion_intent &&
           (await this.registry.isSurfaceAlive(subject))
         ) {
-          liveSubjectIds.add(subjectAgentId);
+          liveAgentIds.add(agentId);
         }
       }),
     );
     let retainedNeedsRecheck = false;
     await removeWatches(
       (watch) => {
+        if (watch.notification_pending) {
+          retainedNeedsRecheck = true;
+          return false;
+        }
         // The predicate runs under the watch-registry write lock. If a sweep
         // changed this row after our snapshot, retain it for the next prune.
         if (
@@ -6643,16 +6670,6 @@ export class AgentEngine {
         if (watch.state === "failed" && !watch.notification_pending) {
           return (watch.waiter_expires_at_ms ?? 0) <= pruneObservedAt;
         }
-        if (watch.target_kind !== "file" || watch.change !== "content") {
-          return false;
-        }
-        if (!watch.subject_agent_id && watch.provenance === "public") {
-          return false;
-        }
-        if (watch.notification_pending) {
-          retainedNeedsRecheck = true;
-          return false;
-        }
         const subjects = (subjectIdsByWatch.get(watch.watch_id) ?? [])
           .map(
             (subjectAgentId) =>
@@ -6660,6 +6677,31 @@ export class AgentEngine {
               this.stateMgr.readState(subjectAgentId),
           )
           .filter((subject): subject is AgentRecord => Boolean(subject));
+        const hasActiveSubjectOwnership = subjects.some(
+          (subject) =>
+            subject.user_killed !== true &&
+            !subject.deletion_intent &&
+            (!TERMINAL_STATES.has(subject.state) ||
+              liveAgentIds.has(subject.agent_id)) &&
+            subject.parent_agent_id === watch.owner,
+        );
+        const ownerAgentId = ownerAgentIdByWatch.get(watch.watch_id);
+        // A live child still owns its report path even if its parent pane is
+        // gone. Preserve that reservation; dead-owner pruning is destructive
+        // only when no active subject ownership remains.
+        if (
+          ownerAgentId &&
+          !liveAgentIds.has(ownerAgentId) &&
+          !hasActiveSubjectOwnership
+        ) {
+          return true;
+        }
+        if (watch.target_kind !== "file" || watch.change !== "content") {
+          return false;
+        }
+        if (!watch.subject_agent_id && watch.provenance === "public") {
+          return false;
+        }
         if (
           subjects.length === 0 &&
           missingLegacyStateWatchIds.has(watch.watch_id)
@@ -6667,14 +6709,7 @@ export class AgentEngine {
           return true;
         }
         if (subjects.length === 0) return Boolean(watch.subject_agent_id);
-        return !subjects.some(
-          (subject) =>
-            subject.user_killed !== true &&
-            !subject.deletion_intent &&
-            (!TERMINAL_STATES.has(subject.state) ||
-              liveSubjectIds.has(subject.agent_id)) &&
-            subject.parent_agent_id === watch.owner,
-        );
+        return !hasActiveSubjectOwnership;
       },
       { registryPath: this.watchRegistryPath },
     );

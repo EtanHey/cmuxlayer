@@ -516,6 +516,41 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
+  it("drops watches owned by a closed agent before close_surface returns", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const owner = {
+      ...parentRecord(),
+      agent_id: "closed-watch-owner",
+      surface_id: "surface:already-gone",
+      state: "done" as const,
+      user_killed: true,
+    };
+    const target = join(inboxDir, "owned-watch.md");
+    writeFileSync(target, "waiting\n", "utf8");
+    engine.stateMgr.writeState(owner);
+    engine.getRegistry().set(owner.agent_id, owner);
+    await engine.armWatch({
+      owner: owner.agent_id,
+      target,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    const closeResult = await server._registeredTools.close_surface.handler(
+      { scope: "agent", agent_id: owner.agent_id, force: true },
+      {} as never,
+    );
+
+    expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+    expect(closeResult.structuredContent).toMatchObject({
+      watch_cleanup: "completed",
+    });
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
+  });
+
   it.each(["stop_agent", "kill", "close_surface"] as const)(
     "drops a child-scoped report watch after %s terminates the child",
     async (toolName) => {
@@ -581,7 +616,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     },
   );
 
-  it("closes the pane and schedules watch cleanup when the registry lock is contended", async () => {
+  it("fails truthfully when synchronous close cleanup cannot acquire the registry lock", async () => {
     await server.close();
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     exec = makeExec(
@@ -638,16 +673,17 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       await vi.advanceTimersByTimeAsync(5_001);
       const closeResult = await closePromise;
 
-      expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+      expect(closeResult.isError, JSON.stringify(closeResult)).toBe(true);
       expect(closeResult.structuredContent).toMatchObject({
-        surface_closed: true,
-        watch_cleanup: "scheduled",
+        agent_stopped: true,
+        surface_closed: false,
+        watch_cleanup: "failed",
       });
       expect(
         (exec as ReturnType<typeof vi.fn>).mock.calls.some(
           ([, args]: [string, string[]]) => args.includes("close-surface"),
         ),
-      ).toBe(true);
+      ).toBe(false);
 
       rmSync(lockPath, { recursive: true, force: true });
       await vi.advanceTimersByTimeAsync(10);
@@ -661,7 +697,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     }
   });
 
-  it("keeps a report watch when the child resumes before deferred cleanup acquires the lock", async () => {
+  it("keeps a report watch when the child resumes after synchronous cleanup fails", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
     const reportPath = join(inboxDir, "resumed-during-cleanup", "report.md");
@@ -692,11 +728,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     vi.useFakeTimers({ now: 10_000 });
 
     try {
-      const closeResult = await server._registeredTools.close_surface.handler(
+      const closePromise = server._registeredTools.close_surface.handler(
         { scope: "agent", agent_id: child.agent_id, force: true },
         {} as never,
       );
-      expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+      await vi.advanceTimersByTimeAsync(5_001);
+      const closeResult = await closePromise;
+      expect(closeResult.isError, JSON.stringify(closeResult)).toBe(true);
+      expect(closeResult.structuredContent).toMatchObject({
+        watch_cleanup: "failed",
+      });
 
       const resumed = {
         ...child,
@@ -708,6 +749,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(resumed.agent_id, resumed);
       rmSync(lockPath, { recursive: true, force: true });
       await vi.advanceTimersByTimeAsync(20);
+      await engine.runSweep();
 
       expect(
         readWatchRegistry({ registryPath: watchRegistryPath }).watches,
@@ -773,6 +815,75 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toEqual([]);
+  });
+
+  it("prunes only owners confirmed dead at daemon start", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const liveAliasOwner = {
+      ...parentRecord(),
+      seat_id: "live-lead-alias",
+    };
+    const deadOwner = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "dead-owner-agent",
+      surface_id: "surface:dead-owner",
+      state: "done" as const,
+      user_killed: true,
+    };
+    engine.stateMgr.writeState(liveAliasOwner);
+    engine.stateMgr.writeState(deadOwner);
+    engine.getRegistry().set(liveAliasOwner.agent_id, liveAliasOwner);
+    engine.getRegistry().set(deadOwner.agent_id, deadOwner);
+
+    const targets = {
+      dead: join(inboxDir, "dead-owner-watch.md"),
+      alias: join(inboxDir, "live-alias-watch.md"),
+      unresolved: join(inboxDir, "unresolved-owner-watch.md"),
+    };
+    for (const target of Object.values(targets)) {
+      writeFileSync(target, "waiting\n", "utf8");
+    }
+    await engine.armWatch({
+      owner: deadOwner.agent_id,
+      target: targets.dead,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    await engine.armWatch({
+      owner: liveAliasOwner.seat_id,
+      target: targets.alias,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    await engine.armWatch({
+      owner: "unresolved-owner",
+      target: targets.unresolved,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    await server.close();
+
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    const listResult = await server._registeredTools.list_agents.handler(
+      {},
+      {} as never,
+    );
+
+    expect(listResult.isError, JSON.stringify(listResult)).not.toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches.map(
+        ({ owner }) => owner,
+      ),
+    ).toEqual([liveAliasOwner.seat_id, "unresolved-owner"]);
   });
 
   it("prunes at least 100 legacy rows whose agent directories exist but state files do not", async () => {

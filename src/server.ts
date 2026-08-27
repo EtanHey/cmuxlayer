@@ -4184,6 +4184,38 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   }) => Promise<void> = async () => {};
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
   let lifecycleScheduleChildReportWatchPrune: (() => void) | null = null;
+  const removeOwnedWatchesFor = async (agentId: string): Promise<number> => {
+    const candidates = [
+      ...(context.lifecycleRegistry?.list() ?? []),
+      ...stateMgr.listStates(),
+    ].filter(
+      (candidate, index, rows) =>
+        rows.findIndex((row) => row.agent_id === candidate.agent_id) === index,
+    );
+    const ownerResolvesToAgent = (owner: string): boolean => {
+      if (owner === agentId) return true;
+      const exact = candidates.filter(
+        (candidate) => candidate.agent_id === owner,
+      );
+      const directOrSeat =
+        exact.length > 0
+          ? exact
+          : candidates.filter(
+              (candidate) => candidate.seat_id?.trim() === owner,
+            );
+      const resolved =
+        directOrSeat.length > 0
+          ? directOrSeat
+          : candidates.filter((candidate) =>
+              candidate.agent_id.startsWith(`${owner}-`),
+            );
+      return resolved.length === 1 && resolved[0].agent_id === agentId;
+    };
+    return removeWatches((watch) => ownerResolvesToAgent(watch.owner), {
+      registryPath:
+        opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+    });
+  };
   const pruneChildReportWatchesFor = (agentId: string): void => {
     lifecycleScheduleChildReportWatchPrune?.();
     removeWatches(
@@ -11085,10 +11117,43 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             );
           }
+          let removedOwnedWatches: number;
+          try {
+            removedOwnedWatches = await removeOwnedWatchesFor(args.agent_id);
+          } catch (cleanupError) {
+            lifecycleScheduleChildReportWatchPrune?.();
+            const cleanupReason =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
+            let surfaceClosed = false;
+            if (boundSurface) {
+              try {
+                surfaceClosed =
+                  (await findSurfaceByRef(boundSurface, boundWorkspace)) ===
+                  null;
+              } catch {
+                surfaceClosed = false;
+              }
+            }
+            return err(
+              new Error(
+                `close_surface scope=agent stopped ${args.agent_id}, but synchronous owned-watch cleanup failed: ${cleanupReason}`,
+              ),
+              {
+                ...stopContent,
+                scope: "agent",
+                agent_stopped: true,
+                surface: boundSurface,
+                surface_closed: surfaceClosed,
+                watch_cleanup: "failed",
+                watch_cleanup_error: cleanupReason,
+              },
+            );
+          }
           const watchCleanup = {
-            watch_cleanup: lifecycleScheduleChildReportWatchPrune
-              ? ("scheduled" as const)
-              : ("best_effort" as const),
+            watch_cleanup: "completed" as const,
+            watches_removed: removedOwnedWatches,
           };
           if (!boundSurface) {
             const data = {
