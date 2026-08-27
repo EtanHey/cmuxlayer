@@ -8589,7 +8589,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       (overrides?.screen_status === undefined ||
         overrides?.screen_agent_type === undefined ||
         overrides?.screen_control_state === undefined ||
-        overrides?.screen_actions === undefined)
+        overrides?.screen_actions === undefined ||
+        overrides?.screen_errors === undefined)
     ) {
       parsedSurface = await readParsedSurface(
         binding.surfaceRef,
@@ -8627,6 +8628,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : binding
             ? (parsedSurface?.parsed.actions ?? null)
             : null,
+      screen_errors:
+        overrides?.screen_errors !== undefined
+          ? overrides.screen_errors
+          : binding
+            ? (parsedSurface?.parsed.errors ?? null)
+            : null,
       surface_write_liveness: binding
         ? surfaceWriteLiveness.observe(
             binding.surfaceRef,
@@ -8643,6 +8650,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         dispatchAckTimeoutMs: AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
         assessHarvestability: (target) =>
           lifecycleHealthEngine?.assessHarvestability(target),
+        readParsedSurface: async (target) => {
+          const targetBinding = resolveAuthorizedAgentSurfaceBinding(
+            target,
+            topology,
+          );
+          if (!targetBinding) return null;
+          const observation =
+            target.agent_id === agent.agent_id && parsedSurface
+              ? parsedSurface
+              : await readParsedSurface(
+                  targetBinding.surfaceRef,
+                  targetBinding.workspaceId ?? undefined,
+                  { agent: target },
+                );
+          return observation?.parsed ?? null;
+        },
         resolveCollapsedMonitors: (ownerSeats) => {
           if (!opts?.monitorRegistryPath) return [];
           const owners = new Set(ownerSeats);
@@ -18046,22 +18069,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 press_enter: true,
                 source_event: "interact",
               });
-              const route = await engine.resolveAgentIoRoute(args.agent);
-              const screen = await client.readScreen(route.surface_id, {
-                workspace: route.workspace_id ?? undefined,
-                lines: 20,
-              });
-              const screenResultLine = screen.text
-                .split("\n")
-                .map((line) => line.trim())
-                .filter(Boolean)
-                .at(-1) ?? null;
+              let screenResultLine: string | null = null;
+              let screenResultAvailable = false;
+              try {
+                const screen = await engine.readAgentScreen(
+                  { agent_id: args.agent },
+                  { lines: 20 },
+                );
+                screenResultLine =
+                  screen.text
+                    .split("\n")
+                    .map((line) => line.trim())
+                    .filter(Boolean)
+                    .at(-1) ?? null;
+                screenResultAvailable = true;
+              } catch {
+                // Submission already succeeded. Observation loss must not invite
+                // a retry that could execute the skill twice.
+              }
               const d = {
                 agent_id: args.agent,
                 action: "skill",
                 command: args.command,
                 retry_count: delivery.retry_count,
                 submit_verified: delivery.submit_verified,
+                screen_result_available: screenResultAvailable,
                 screen_result_line: screenResultLine,
               };
               return okFormatted(formatOk("interact:skill", d), d);

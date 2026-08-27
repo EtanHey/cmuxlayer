@@ -76,6 +76,19 @@ Request ID: req_old
     expect(recovered.status).not.toBe("frozen");
   });
 
+  it("keeps a harness error frozen when recovery text is only typed in the composer", () => {
+    const parsed = parseScreen(`Claude Code v1.0.0
+API Error: overloaded
+Request ID: req_stillfailed
+❯ retry`);
+
+    expect(parsed.errors).toEqual([
+      expect.stringMatching(/^harness_api_error: overloaded .*req_stillfailed$/),
+    ]);
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.control_state).not.toBe("ready");
+  });
+
   it("parses Claude-style output with response block and done signal", () => {
     const parsed = parseScreen(`
 \u001b[32m⏺ Completed successfully\u001b[0m

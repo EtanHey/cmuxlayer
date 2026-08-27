@@ -1217,7 +1217,7 @@ function parseErrors(text: string): string[] {
   const harnessErrorLine = lines[harnessErrorIndex];
   const recoveredAfterHarnessError = lines
     .slice(harnessErrorIndex + 1)
-    .some((line) => /^(?:❯|>)\s+\S/.test(line));
+    .some((line) => ACTION_BLOCK_LINE_RE.test(line));
   if (harnessErrorLine && !recoveredAfterHarnessError) {
     const errorTail = lines.slice(harnessErrorIndex).join("\n");
     const requestId =

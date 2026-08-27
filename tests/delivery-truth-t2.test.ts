@@ -277,6 +277,51 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     context.dispose();
   });
 
+  it("interact skill keeps the successful receipt when only its final observation fails", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n❯ ";
+    let failFinalObservation = false;
+    const baseExec = makeLifecycleExec(() => screenText);
+    const mockExec: ExecFn = vi.fn().mockImplementation(
+      async (command: string, args: string[]) => {
+        if (
+          failFinalObservation &&
+          args.includes("read-screen") &&
+          args.includes("--lines") &&
+          args.includes("20")
+        ) {
+          throw new Error("surface disappeared after submitted skill");
+        }
+        return baseExec(command, args);
+      },
+    );
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    screenText = "Claude Code\n> \nCLAUDE_COUNTER:1\n";
+    failFinalObservation = true;
+
+    const result = await (server as any)._registeredTools.interact.handler(
+      { agent: agentId, action: "skill", command: "/review" },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(parseToolResult(result)).toMatchObject({
+      ok: true,
+      submit_verified: true,
+      screen_result_available: false,
+      screen_result_line: null,
+    });
+    expect(mutatedPane(mockExec)).toBe(true);
+    context.dispose();
+  });
+
   it("send_to delivers through a rotating Codex placeholder", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText =

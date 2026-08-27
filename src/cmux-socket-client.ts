@@ -673,6 +673,7 @@ export class CmuxSocketClient {
     workspace?: string;
     surface?: string;
   }): Promise<void> {
+    if (opts?.surface) assertCanonicalSurfaceRef(opts.surface);
     const args: V1Arg[] = [];
     if (opts?.title) {
       args.push(this.rawV1Arg("--title"), opts.title);

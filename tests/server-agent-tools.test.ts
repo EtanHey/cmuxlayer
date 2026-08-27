@@ -7815,6 +7815,77 @@ describe("agent lifecycle tool handlers", () => {
     expect(live.health.issue_codes).toContain("registry_screen_disagreement");
   });
 
+  it("inbox_check preserves harness API errors through the general health evaluator", async () => {
+    const stableUuid = "71111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:api-error",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText(
+      'Claude Code\nAPI Error: 500 {"request_id":"req_inboxhealth"}\n❯',
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "api-error-health-agent",
+      surface_id: "surface:api-error",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "claude",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+
+    const parsed = parseToolResult(
+      await registeredTestTool(server, "inbox_check").handler(
+        { agent_id: record.agent_id },
+        {},
+      ),
+    );
+
+    expect(parsed.health).toMatchObject({
+      status: expect.not.stringMatching(/^healthy$/),
+      issue_codes: expect.arrayContaining(["harness_api_error"]),
+    });
+    expect(parsed.health.issues.join(" ")).toContain("req_inboxhealth");
+  });
+
+  it("interact skill observes the result through the stable UUID and bound workspace", async () => {
+    const stableUuid = "81111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:skill",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    (routeClient.client as any).supportsStableSurfaceReads = true;
+    routeClient.setScreenText("Claude Code\n❯ ");
+    const record = makeServerAgentRecord({
+      agent_id: "stable-skill-agent",
+      surface_id: "surface:skill",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      cli: "claude",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "interact").handler(
+        { agent: record.agent_id, action: "skill", command: "/review" },
+        {},
+      ),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(routeClient.client.readScreen).toHaveBeenLastCalledWith(stableUuid, {
+      workspace: "workspace:1",
+      lines: 20,
+    });
+  });
+
   it("list_agents reuses a bounded snapshot until live topology changes", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([

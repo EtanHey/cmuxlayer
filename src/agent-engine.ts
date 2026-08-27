@@ -3583,7 +3583,7 @@ export class AgentEngine {
     return updated;
   }
 
-  private async readAgentScreen(
+  async readAgentScreen(
     agent: Pick<AgentRecord, "agent_id">,
     opts: { lines?: number; scrollback?: boolean } = {},
   ): Promise<CmuxReadScreenResult> {
@@ -4730,7 +4730,8 @@ export class AgentEngine {
         halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
-      return episode;
+      if (haltType !== "harness_api_error") return episode;
+      agent = episode;
     }
     if (haltType === "wedged") {
       episode = this.stateMgr.updateRecord(agent.agent_id, {

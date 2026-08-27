@@ -1231,6 +1231,15 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     }
   });
 
+  it("rejects a bare numeric notify surface before V1 serialization", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await expect(
+      client.notify({ title: "Wrong target", surface: "45" }),
+    ).rejects.toThrow(/bare surface index/);
+    expect(lastV1Command).toBe("");
+  });
+
   it("renameTab sends V2 tab.action with rename params", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
