@@ -1166,6 +1166,26 @@ export async function sweepWatches(
             attempts: record.notification_attempts ?? 0,
             reason: terminalFailureReason,
           };
+          if (
+            record.change === "content" &&
+            typeof notification.observed_value === "string"
+          ) {
+            const {
+              terminal_reason: _terminalReason,
+              terminal_at_ms: _terminalAt,
+              notification_next_attempt_at_ms: _nextAttempt,
+              ...persistent
+            } = record;
+            return {
+              ...persistent,
+              state: "armed" as const,
+              fingerprint: notification.observed_value,
+              observed_value: notification.observed_value,
+              notification_pending: false,
+              notification_exhausted_at_ms: observedAt,
+              notification_exhausted_reason: terminalFailureReason,
+            };
+          }
           return {
             ...record,
             notification_pending: false,

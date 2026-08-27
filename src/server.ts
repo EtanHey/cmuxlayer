@@ -12424,6 +12424,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               };
             }
             if (owner && lifecycleAgentInputDeliverer) {
+              const externalFallbackAfterLocalFailure = async () => {
+                if (
+                  event.reason !== "predicate_matched" ||
+                  !opts?.watchNotify
+                ) {
+                  return false;
+                }
+                if (!subjectStillBelongsToOwner()) return true;
+                try {
+                  return (await opts.watchNotify(event)) !== false;
+                } catch {
+                  return false;
+                }
+              };
               const text = (() => {
                 if (
                   event.reason === "predicate_matched" ||
@@ -12455,11 +12469,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const ownerDelivered =
                   delivery.delivery === "submitted" ||
                   delivery.delivery === "queued";
-                return ownerDelivered;
+                return ownerDelivered
+                  ? true
+                  : externalFallbackAfterLocalFailure();
               } catch {
-                // Keep notification_pending=true. A later lifecycle sweep uses
-                // the parent's refreshed route after a session restart.
-                return false;
+                return externalFallbackAfterLocalFailure();
               }
             }
             if (event.reason !== "predicate_matched") {

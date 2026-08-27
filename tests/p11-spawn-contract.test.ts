@@ -939,7 +939,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
   });
 
-  it("fails a missing owner seat fast without incrementing delivery attempts", async () => {
+  it("fails a missing owner seat fast and re-arms the persistent content watch", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
     const reportPath = join(inboxDir, "missing-owner-child", "report.md");
@@ -967,14 +967,114 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     await engine.sweepWatchesBestEffort();
 
-    expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
-    ).toMatchObject({
-      state: "fired",
+    const watch = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(watch).toMatchObject({
+      state: "armed",
       notification_pending: false,
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
+    expect(watch?.fingerprint).toBe(watch?.observed_value);
+  });
+
+  it("re-arms after owner_not_live and wakes the resumed owner for the next revision", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "resumed-parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    let watchNow = 1_000;
+    const unavailableExternalNotify = vi.fn().mockResolvedValue(false);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchRegistryNow: () => watchNow,
+        watchNotify: unavailableExternalNotify,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const ownerId = "resumed-lead-seat";
+    const reportPath = join(inboxDir, "resumed-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "resumed-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: ownerId,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: ownerId,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const initialFingerprint = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0]?.fingerprint;
+
+    writeFileSync(reportPath, "first revision while owner is away\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+
+    const afterOwnerLoss = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(unavailableExternalNotify).toHaveBeenCalledOnce();
+    expect(afterOwnerLoss).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+      notification_exhausted_reason: "owner_not_live",
+    });
+    expect(afterOwnerLoss?.fingerprint).toBe(afterOwnerLoss?.observed_value);
+    expect(afterOwnerLoss?.fingerprint).not.toBe(initialFingerprint);
+
+    const resumedOwner = { ...parentRecord(parentUuid), agent_id: ownerId };
+    engine.stateMgr.writeState(resumedOwner);
+    engine.getRegistry().set(resumedOwner.agent_id, resumedOwner);
+    const beforeResumeWake = (exec as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    watchNow = 2_000;
+    writeFileSync(reportPath, "second revision after owner resumed\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+
+    const resumedWakeCalls = (
+      exec as ReturnType<typeof vi.fn>
+    ).mock.calls.slice(beforeResumeWake);
+    expect(
+      resumedWakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(unavailableExternalNotify).toHaveBeenCalledTimes(2);
+    const afterResume = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(afterResume).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+    expect(afterResume?.fingerprint).toBe(afterResume?.observed_value);
+    expect(afterResume?.fingerprint).not.toBe(afterOwnerLoss?.fingerprint);
   });
 
   it("accepts a successful external watch notification when the owner seat is absent", async () => {
@@ -1044,6 +1144,93 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         }),
       ]),
     );
+  });
+
+  it("falls back externally after an aliased owner's local wake is refused", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\n❯ preserve this human draft",
+      "aliased-parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "external-fallback-child",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    const externalNotify = vi.fn().mockResolvedValue(true);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchNotify: externalNotify,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const owner = {
+      ...parentRecord(parentUuid),
+      agent_id: "cmuxlayerClaude-live-seat",
+      seat_id: "cmuxlayerClaude",
+    };
+    const child: AgentRecord = {
+      ...parentRecord(childUuid),
+      agent_id: "external-fallback-child",
+      surface_id: "surface:child",
+      parent_agent_id: "cmuxlayerClaude",
+      spawn_depth: 1,
+      role: "worker",
+    };
+    for (const record of [owner, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: "cmuxlayerClaude",
+      subject_agent_id: child.agent_id,
+      target: child.agent_id,
+      predicate: "idle",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await engine.sweepWatchesBestEffort();
+
+    expect(externalNotify).toHaveBeenCalledOnce();
+    expect(externalNotify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "cmuxlayerClaude",
+        subject_agent_id: child.agent_id,
+        target: child.agent_id,
+        reason: "predicate_matched",
+      }),
+    );
+    const localMutationCalls = (
+      exec as ReturnType<typeof vi.fn>
+    ).mock.calls.slice(before);
+    expect(
+      localMutationCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[watch]") && arg.includes(child.agent_id),
+        ),
+      ),
+    ).toBe(false);
+    const afterFallback = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(afterFallback).toMatchObject({
+      state: "fired",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
   });
 
   it("delivers to a live owner whose persisted state is terminal", async () => {
