@@ -1,0 +1,7 @@
+Claude Code
+
+API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this message with Fable 5.
+Request ID: req_011CeRnwgFeHAsTb3hU4n9jt
+
+❯
+⏵⏵ bypass permissions on · 2 monitors

@@ -132,13 +132,18 @@ class DualCodexSurfaceClient {
 }
 
 function createPausedServer(client: DualCodexSurfaceClient) {
-  return createServer({
+  const server = createServer({
     client,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
+  const sendTo = (server as any)._registeredTools.send_to;
+  const sendToHandler = sendTo.handler.bind(sendTo);
+  sendTo.handler = (args: Record<string, unknown>, context: unknown) =>
+    sendToHandler({ mode: "agent", ...args }, context);
+  return server;
 }
 
 function makeAgent(

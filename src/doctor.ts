@@ -573,7 +573,10 @@ function probeDaemonMcp(
               jsonrpc: "2.0",
               id: 2,
               method: "tools/call",
-              params: { name: "control_health", arguments: {} },
+              params: {
+                name: "control_health",
+                arguments: { detail: "full" },
+              },
             });
           } else if (message.id === 2) {
             const result = isRecord(message.result) ? message.result : null;

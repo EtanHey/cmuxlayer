@@ -310,7 +310,7 @@ describe("send_to consolidated modes", () => {
       {
         mode: "command",
         target: "surface:1",
-        command: "pwd",
+        text: "pwd",
       },
       {},
     );
@@ -327,7 +327,7 @@ describe("send_to consolidated modes", () => {
     const server = createServer({ exec, controlHealthIntervalMs: 0 }) as any;
 
     const result = await server._registeredTools.send_to.handler(
-      { mode: "key", surface: "surface:1", key: "escape" },
+      { mode: "key", surface: "surface:1", text: "escape" },
       {},
     );
 
@@ -335,6 +335,41 @@ describe("send_to consolidated modes", () => {
     expect(exec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:1", "escape"]),
+    );
+  });
+
+  it("requires mode and accepts only text as the payload parameter", async () => {
+    const server = createServer({ exec: makeExec(), controlHealthIntervalMs: 0 }) as any;
+    const tool = server._registeredTools.send_to;
+
+    const missing = await tool.handler({ target: "surface:1", text: "pwd" }, {});
+    expect(parseResult(missing).error).toBe(
+      "mode required (agent|surface|command|key)",
+    );
+    for (const alias of ["message", "command", "key"] as const) {
+      const rejected = await tool.handler(
+        { mode: "command", target: "surface:1", [alias]: "pwd" },
+        {},
+      );
+      expect(parseResult(rejected).error).toMatch(/one payload parameter: text/);
+    }
+  });
+
+  it("rejects bare surface indexes at the public tool boundary", async () => {
+    const exec = makeExec();
+    const server = createServer({ exec, controlHealthIntervalMs: 0 }) as any;
+    const result = await server._registeredTools.send_to.handler(
+      { mode: "surface", surface: "3", text: "hello" },
+      {},
+    );
+    expect(parseResult(result).error).toMatch(/use surface:<index> ref or a surface UUID/);
+    expect(exec.mock.calls.some(([, args]) => args.includes("send"))).toBe(false);
+    const numeric = await server._registeredTools.send_to.handler(
+      { mode: "surface", surface: 3, text: "hello" },
+      {},
+    );
+    expect(parseResult(numeric).error).toMatch(
+      /use surface:<index> ref or a surface UUID/,
     );
   });
 });

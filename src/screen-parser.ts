@@ -1204,6 +1204,55 @@ export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
 
+  const rawLines = text.split("\n");
+  const lines = rawLines.map((line) => line.trim());
+  let harnessErrorIndex = -1;
+  let harnessErrorRequestId: string | null = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (
+      /^API Error:/i.test(rawLines[index] ?? "") ||
+      /^Claude Code can't respond\b.*$/i.test(rawLines[index] ?? "")
+    ) {
+      const precedingLine = [...lines.slice(0, index)]
+        .reverse()
+        .find((line) => line.length > 0);
+      const beginsHarnessOwnedBlock =
+        precedingLine === undefined ||
+        /^Claude Code(?:\s+v?\d.*)?$/i.test(precedingLine) ||
+        /^❯(?:\s|$)/.test(precedingLine);
+      if (!beginsHarnessOwnedBlock) continue;
+      const composerIndex = lines.findIndex(
+        (line, candidateIndex) =>
+          candidateIndex > index && /^❯(?:\s|$)/.test(line),
+      );
+      if (composerIndex < 0) continue;
+      const errorBlock = lines.slice(index, composerIndex).join("\n");
+      const requestId =
+        errorBlock.match(
+          /(?:"request_id"\s*:\s*"|request[ _]id\s*:\s*)(req_[A-Za-z0-9]+)/i,
+        )?.[1] ?? null;
+      if (!requestId) continue;
+      harnessErrorIndex = index;
+      harnessErrorRequestId = requestId;
+    }
+  }
+  const harnessErrorLine = lines[harnessErrorIndex];
+  const recoveredAfterHarnessError = lines
+    .slice(harnessErrorIndex + 1)
+    .some(
+      (line) =>
+        ACTION_BLOCK_LINE_RE.test(line) || CLAUDE_WORKING_LINE_RE.test(line),
+    );
+  if (harnessErrorLine && !recoveredAfterHarnessError) {
+    const summary = harnessErrorLine
+      .replace(/^API Error:\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    errors.push(
+      `harness_api_error: ${summary} request_id=${harnessErrorRequestId}`,
+    );
+  }
+
   if (hasApprovalPromptBlock(text)) {
     errors.push("permission_prompt");
   }

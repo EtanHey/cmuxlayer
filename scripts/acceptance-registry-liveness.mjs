@@ -688,7 +688,16 @@ async function main() {
     let sendOk = 0;
     for (const a of spawned) {
       try {
-        const sr = await mcp.call("send_to", { agent_id: a.agent_id, text: "§7 addressability ping", press_enter: false }, 60_000);
+        const sr = await mcp.call(
+          "send_to",
+          {
+            mode: "agent",
+            agent_id: a.agent_id,
+            text: "§7 addressability ping",
+            press_enter: false,
+          },
+          60_000,
+        );
         if (sr.delivered !== false && sr.ok !== false) sendOk += 1;
       } catch (e) {
         process.stdout.write(`  send_to ${a.agent_id} threw: ${e.message}\n`);

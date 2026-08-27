@@ -25,7 +25,11 @@ export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 // behind `resumable`, #482), as opposed to a remembered registry field.
 export type ObservationSource = "screen" | "registry" | "process" | "disk";
 export type AgentHaltType =
-  "awaiting_input" | "idle_without_done" | "wedged" | "paused";
+  | "awaiting_input"
+  | "idle_without_done"
+  | "wedged"
+  | "paused"
+  | "harness_api_error";
 
 export interface Observed<T> {
   value: T;

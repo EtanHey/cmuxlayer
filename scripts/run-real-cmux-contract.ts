@@ -1006,7 +1006,11 @@ async function runContractSteps(
     peer.sendNotification("notifications/initialized");
 
     setActiveStep("control_health baseline");
-    const healthResponse = await peer.callTool("control_health", {}, 15_000);
+    const healthResponse = await peer.callTool(
+      "control_health",
+      { detail: "full" },
+      15_000,
+    );
     const health = extractStructuredContent(healthResponse);
     assertLiveHealth(health, cmuxSocket);
     const initialDaemonPid = daemonPidFromHealth(health);
@@ -1047,7 +1051,11 @@ async function runContractSteps(
     assertOwnedDaemonSocket(root, daemonSocket);
     await terminateRecordedPid(initialDaemonPid, recordedPids);
 
-    const recoveredResponse = await peer.callTool("control_health", {}, 20_000);
+    const recoveredResponse = await peer.callTool(
+      "control_health",
+      { detail: "full" },
+      20_000,
+    );
     const recoveredHealth = extractStructuredContent(recoveredResponse);
     assertLiveHealth(recoveredHealth, cmuxSocket);
     const replacementDaemonPid = daemonPidFromHealth(recoveredHealth);

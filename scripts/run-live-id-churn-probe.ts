@@ -310,13 +310,13 @@ async function main(): Promise<void> {
       mode: "key",
       surface: child.surface_id,
       workspace: child.workspace_id,
-      key: "down",
+      text: "down",
     });
     await call(client, "send_to", {
       mode: "key",
       surface: child.surface_id,
       workspace: child.workspace_id,
-      key: "return",
+      text: "return",
     });
     const afterOverlaySend = await rawCall(client, "send_to", {
       mode: "agent",

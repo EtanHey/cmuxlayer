@@ -33,6 +33,7 @@ export type ScreenStateObservation = {
   status?: ParsedScreenStatus | string | null;
   agent_type?: string | null;
   control_state?: ParsedControlPlaneState | string | null;
+  errors?: string[] | null;
 };
 
 export type LiveAgentState = {
@@ -60,9 +61,16 @@ export function screenConfirmedAgentState(
   const status = screen.status ?? null;
   const agentType = screen.agent_type ?? null;
   const controlState = screen.control_state ?? null;
+  const hasHarnessApiError = (screen.errors ?? []).some((error) =>
+    error.startsWith("harness_api_error:"),
+  );
   // A tracked agent surface that has fallen back to a bare shell has no agent
   // process left; that is an error regardless of how idle the prompt looks.
   if (controlState === "shell" && agentType === "unknown") return "error";
+  // `frozen` is shared by recoverable permission prompts, interactive pickers,
+  // and transient SQLITE_BUSY contention. Only the terminal harness API error
+  // marker is strong enough to force agent state to `error`.
+  if (hasHarnessApiError) return "error";
   if (status === "working" || status === "thinking") return "working";
   if (
     controlState === "ready" &&

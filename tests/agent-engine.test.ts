@@ -9564,6 +9564,346 @@ Session ID: ${sessionId}`,
   });
 
   describe("halt escalation", () => {
+    it("wakes the parent immediately when a harness API error freezes a child", async () => {
+      const nowMs = Date.parse("2026-08-27T07:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "api-error-parent",
+        surface_id: "surface:api-error-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "api-error-child",
+        surface_id: "surface:api-error-child",
+        state: "working",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      const apiError =
+        '⏺ Reading stale-work.ts\nClaude Code\nAPI Error: 500 {"request_id":"req_run9_api_error"}\n❯';
+      await (engine as any).maybeEscalateLiveHalt(child, apiError);
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          tag: "agent_halt_harness_api_error",
+          task: expect.stringContaining("harness_api_error"),
+        }),
+      ]);
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
+        "req_run9_api_error",
+      );
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain(
+        "Reading stale-work.ts",
+      );
+    });
+
+    it("wakes the parent immediately when a child transitions into a harness API error", async () => {
+      const nowMs = Date.parse("2026-08-27T07:05:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "api-transition-parent",
+        surface_id: "surface:api-transition-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "api-transition-child",
+        surface_id: "surface:api-transition-child",
+        state: "working",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        halt_episode_type: "permission_prompt",
+        halt_episode_started_at: new Date(nowMs - 1_000).toISOString(),
+        halt_episode_observations: 1,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      await (engine as any).maybeEscalateLiveHalt(
+        child,
+        'Claude Code\nAPI Error: 500 {"request_id":"req_run9_transition"}\n❯',
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          tag: "agent_halt_harness_api_error",
+          task: expect.stringContaining("req_run9_transition"),
+        }),
+      ]);
+    });
+
+    it("refreshes the request id before retrying a harness API error notification", async () => {
+      const nowMs = Date.parse("2026-08-27T07:06:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "api-refresh-parent",
+        surface_id: "surface:api-refresh-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "api-refresh-child",
+        surface_id: "surface:api-refresh-child",
+        state: "working",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        halt_episode_type: "harness_api_error",
+        halt_episode_started_at: new Date(nowMs - 1_000).toISOString(),
+        halt_episode_observations: 1,
+        halt_last_observable_action:
+          "harness_api_error: stale request_id=req_stale",
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      await (engine as any).maybeEscalateLiveHalt(
+        child,
+        'Claude Code\nAPI Error: 500 {"request_id":"req_current"}\n❯',
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
+        "req_current",
+      );
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain(
+        "req_stale",
+      );
+    });
+
+    it("starts a new halt episode when the harness request id changes", async () => {
+      const nowMs = Date.parse("2026-08-27T07:07:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "api-new-request-parent",
+        surface_id: "surface:api-new-request-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const oldStartedAt = new Date(nowMs - 1_000).toISOString();
+      const child = makeRecord({
+        agent_id: "api-new-request-child",
+        surface_id: "surface:api-new-request-child",
+        state: "working",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        halt_episode_type: "harness_api_error",
+        halt_episode_started_at: oldStartedAt,
+        halt_episode_observations: 1,
+        halt_notification_sent_at: new Date(nowMs - 500).toISOString(),
+        halt_notified_ancestor_id: parent.agent_id,
+        halt_last_observable_action:
+          "harness_api_error: first request_id=req_first",
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      const updated = await (engine as any).maybeEscalateLiveHalt(
+        child,
+        'Claude Code\nAPI Error: 500 {"request_id":"req_second"}\n❯',
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
+        "req_second",
+      );
+      expect(updated.halt_episode_started_at).toBe(
+        new Date(nowMs).toISOString(),
+      );
+      expect(updated.halt_notification_sent_at).toEqual(expect.any(String));
+    });
+
+    it("does not restart a notified halt episode when the same request reflows", async () => {
+      const nowMs = Date.parse("2026-08-27T07:08:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "api-reflow-parent",
+        surface_id: "surface:api-reflow-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const oldStartedAt = new Date(nowMs - 1_000).toISOString();
+      const child = makeRecord({
+        agent_id: "api-reflow-child",
+        surface_id: "surface:api-reflow-child",
+        state: "working",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        halt_episode_type: "harness_api_error",
+        halt_episode_started_at: oldStartedAt,
+        halt_episode_observations: 1,
+        halt_notification_sent_at: new Date(nowMs - 500).toISOString(),
+        halt_notified_ancestor_id: parent.agent_id,
+        halt_last_observable_action:
+          "harness_api_error: narrow summary request_id=req_same",
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      const updated = await (engine as any).maybeEscalateLiveHalt(
+        child,
+        'Claude Code\nAPI Error: wider reflowed summary {"request_id":"req_same"}\n❯',
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([]);
+      expect(updated.halt_episode_started_at).toBe(oldStartedAt);
+      expect(updated.halt_last_observable_action).toContain("wider reflowed");
+    });
+
+    it("lets a live harness API error outrank recorded done evidence", async () => {
+      const parent = makeRecord({
+        agent_id: "api-stale-done-parent",
+        surface_id: "surface:api-stale-done-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "api-stale-done-child",
+        surface_id: "surface:api-stale-done-child",
+        state: "working",
+        role: "worker",
+        cli: "claude",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        task_done_detected_at: new Date().toISOString(),
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      await (engine as any).maybeEscalateLiveHalt(
+        child,
+        'Claude Code\nAPI Error: 500 {"request_id":"req_after_done"}\n❯',
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
+        "req_after_done",
+      );
+    });
+
     it("persists prompt blockage even when escalation is opted out and clears it from healthy screen truth", async () => {
       const nowMs = Date.parse("2026-08-14T13:00:00.000Z");
       engine.dispose();

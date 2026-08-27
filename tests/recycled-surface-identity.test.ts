@@ -22,7 +22,10 @@ async function callTool(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
-  return tool.handler(args, {} as any);
+  return tool.handler(
+    name === "send_to" ? { mode: "agent", ...args } : args,
+    {} as any,
+  );
 }
 
 /**

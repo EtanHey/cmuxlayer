@@ -293,7 +293,7 @@ function makeServer(
 
 async function sendKey(server: unknown, key: string): Promise<ToolCallResult> {
   return (await getTool(server, "send_to").handler(
-    { mode: "key", target: SURFACE, key },
+    { mode: "key", target: SURFACE, text: key },
     {},
   )) as ToolCallResult;
 }

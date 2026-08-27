@@ -3583,7 +3583,7 @@ export class AgentEngine {
     return updated;
   }
 
-  private async readAgentScreen(
+  async readAgentScreen(
     agent: Pick<AgentRecord, "agent_id">,
     opts: { lines?: number; scrollback?: boolean } = {},
   ): Promise<CmuxReadScreenResult> {
@@ -4110,6 +4110,8 @@ export class AgentEngine {
         return this.haltIdleWithoutDoneDwellMs;
       case "wedged":
         return this.haltWedgedDwellMs;
+      case "harness_api_error":
+        return 0;
     }
   }
 
@@ -4130,6 +4132,8 @@ export class AgentEngine {
           `the child is paused and cannot act — unpause the pane before send_to, ` +
           `or send_key(surface: "${agent.surface_id}", key: "return") if the screen says to resume`
         );
+      case "harness_api_error":
+        return `inspect the harness API error and request ID on surface ${agent.surface_id}, then retry or resume the harness turn`;
     }
   }
 
@@ -4622,7 +4626,11 @@ export class AgentEngine {
     );
     agent = this.persistPausedState(agent, parsed.paused === true, nowIso);
     if (agent.halt_escalation === false) return agent;
+    const hasHarnessApiError = parsed.errors.some((error) =>
+      error.startsWith("harness_api_error:"),
+    );
     if (
+      !hasHarnessApiError &&
       parsed.paused !== true &&
       (parsed.control_state === "shell" ||
         parsed.control_state === "dead" ||
@@ -4657,7 +4665,9 @@ export class AgentEngine {
       this.blockingBackgroundWaitElapsedMs(screenText);
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
-    if (
+    if (hasHarnessApiError) {
+      haltType = "harness_api_error";
+    } else if (
       parsed.control_state === "permission_prompt" ||
       parsed.control_state === "interactive_overlay"
     ) {
@@ -4688,6 +4698,15 @@ export class AgentEngine {
       haltType = "idle_without_done";
     }
     if (!haltType) return this.clearHaltEpisode(agent);
+    const harnessApiError = parsed.errors.find((error) =>
+      error.startsWith("harness_api_error:"),
+    );
+    const haltObservableAction =
+      haltType === "harness_api_error"
+        ? (harnessApiError ?? parsed.current_action ?? haltType)
+        : (parsed.current_action ?? harnessApiError ?? haltType);
+    const harnessRequestId = (value: string | null | undefined): string | null =>
+      value?.match(/\brequest_id=(req_[A-Za-z0-9]+)/i)?.[1] ?? null;
 
     let episode = agent;
     if (!agent.halt_episode_type) {
@@ -4702,10 +4721,11 @@ export class AgentEngine {
         halt_notified_ancestor_id: null,
         halt_fallback_sink_id: null,
         halt_last_delivery_error: null,
-        halt_last_observable_action: parsed.current_action ?? haltType,
+        halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
-      return episode;
+      if (haltType !== "harness_api_error") return episode;
+      agent = episode;
     }
     if (agent.halt_episode_type !== haltType) {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
@@ -4716,16 +4736,40 @@ export class AgentEngine {
         halt_notified_ancestor_id: null,
         halt_fallback_sink_id: null,
         halt_last_delivery_error: null,
-        halt_last_observable_action: parsed.current_action ?? haltType,
+        halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
-      return episode;
+      if (haltType !== "harness_api_error") return episode;
+      agent = episode;
     }
     if (haltType === "wedged") {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
         halt_episode_observations: (agent.halt_episode_observations ?? 0) + 1,
-        halt_last_observable_action: parsed.current_action ?? haltType,
+        halt_last_observable_action: haltObservableAction,
       });
+      this.registry.set(agent.agent_id, episode);
+    } else if (
+      haltType === "harness_api_error" &&
+      agent.halt_last_observable_action !== haltObservableAction
+    ) {
+      const sameRequestId =
+        harnessRequestId(agent.halt_last_observable_action) !== null &&
+        harnessRequestId(agent.halt_last_observable_action) ===
+          harnessRequestId(haltObservableAction);
+      episode = this.stateMgr.updateRecord(
+        agent.agent_id,
+        sameRequestId
+          ? { halt_last_observable_action: haltObservableAction }
+          : {
+              halt_episode_started_at: nowIso,
+              halt_episode_observations: 1,
+              halt_notification_sent_at: null,
+              halt_notified_ancestor_id: null,
+              halt_fallback_sink_id: null,
+              halt_last_delivery_error: null,
+              halt_last_observable_action: haltObservableAction,
+            },
+      );
       this.registry.set(agent.agent_id, episode);
     }
     if (episode.halt_notification_sent_at) return episode;
@@ -5709,6 +5753,7 @@ export class AgentEngine {
               return {
                 status: parsed.status,
                 actions: parsed.actions,
+                errors: parsed.errors,
               };
             } catch {
               return null;
@@ -8127,6 +8172,7 @@ export class AgentEngine {
         status: parsed.status,
         agent_type: parsed.agent_type,
         control_state: parsed.control_state,
+        errors: parsed.errors,
       });
       // Mid-boot or an unparseable frame: the screen has no authority over the
       // status here, and reading its default as an idle prompt would fire an

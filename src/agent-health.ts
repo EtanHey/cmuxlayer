@@ -28,6 +28,7 @@ export type AgentHealthIssueCode =
   | "agent_wedged"
   | "agent_shell_fallback"
   | "pane_pty_dead"
+  | "harness_api_error"
   | "registry_screen_disagreement"
   | "registry_surface_workspace_mismatch"
   | "closure_without_artifact"
@@ -53,6 +54,7 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   agent_wedged: "blocking",
   agent_shell_fallback: "blocking",
   pane_pty_dead: "blocking",
+  harness_api_error: "blocking",
   closure_without_artifact: "blocking",
   pr_loop_incomplete: "blocking",
   kept_open_contract_incomplete: "blocking",
@@ -97,6 +99,7 @@ export interface AgentHealthInput {
   closure_artifact_verified?: boolean | null;
   harvestability?: WorkerHarvestability | null;
   screen_actions?: string[] | null;
+  screen_errors?: string[] | null;
   topology?: AgentTopologyHealthInput | null;
   surface_write_liveness?: SurfaceWriteLivenessObservation | null;
   collapsed_monitors?: CollapsedMonitorHealthInput[];
@@ -452,6 +455,17 @@ export function evaluateAgentHealth(
 
   const screenActive =
     input.screen_status === "working" || input.screen_status === "thinking";
+  const harnessApiErrors = (input.screen_errors ?? []).filter((error) =>
+    error.startsWith("harness_api_error:"),
+  );
+  if (harnessApiErrors.length > 0) {
+    addIssue(
+      issueCodes,
+      issues,
+      "harness_api_error",
+      harnessApiErrors.join("; "),
+    );
+  }
   const panePtyDead =
     screenActive && input.surface_write_liveness?.pty_dead === true;
   if (panePtyDead) {
@@ -471,6 +485,7 @@ export function evaluateAgentHealth(
       status: input.screen_status,
       agent_type: input.screen_agent_type,
       control_state: input.screen_control_state,
+      errors: input.screen_errors,
     }) ?? undefined;
   const screenIsShell =
     input.screen_control_state === "shell" &&

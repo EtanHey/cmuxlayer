@@ -514,7 +514,7 @@ describe("createServer", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("includes a working send_to example in SDK-level invalid-mode errors", async () => {
+  it("returns the exact missing-mode error and a working SDK invalid-mode example", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-send-to-schema-error");
     rmSync(stateDir, { recursive: true, force: true });
     const server = createServer({
@@ -535,6 +535,22 @@ describe("createServer", () => {
       client.connect(clientTransport),
     ]);
     try {
+      const missingMode = await client.callTool({
+        name: "send_to",
+        arguments: {
+          agent_id: "cmuxlayerCodex-1234",
+          text: "hello",
+        },
+      });
+      expect(missingMode.isError).toBe(true);
+      const missingModeText = missingMode.content
+        .filter((item) => item.type === "text")
+        .map((item) => item.text)
+        .join("\n");
+      expect(JSON.parse(missingModeText).error).toBe(
+        "mode required (agent|surface|command|key)",
+      );
+
       const result = await client.callTool({
         name: "send_to",
         arguments: {
@@ -551,6 +567,19 @@ describe("createServer", () => {
         .replaceAll('\\"', '"');
       expect(validationText).toContain(
         'Example: send_to({ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" })',
+      );
+
+      const numericSurface = await client.callTool({
+        name: "send_to",
+        arguments: { mode: "surface", surface: 3, text: "hello" },
+      });
+      expect(numericSurface.isError).toBe(true);
+      const numericSurfaceText = numericSurface.content
+        .filter((item) => item.type === "text")
+        .map((item) => item.text)
+        .join("\n");
+      expect(numericSurfaceText).toContain(
+        "use surface:<index> ref or a surface UUID",
       );
     } finally {
       await client.close();
@@ -3637,7 +3666,7 @@ describe("tool handler integration", () => {
       {
         mode: "command",
         surface: "surface:receipt-parity",
-        command: "echo parity",
+        text: "echo parity",
       },
       {} as any,
     );
@@ -3645,7 +3674,7 @@ describe("tool handler integration", () => {
       {
         mode: "key",
         surface: "surface:receipt-parity",
-        key: "escape",
+        text: "escape",
       },
       {} as any,
     );
@@ -9278,7 +9307,7 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent accepts the default interactive Codex update and never selects Skip", async () => {
+  it("spawn_agent refuses the Codex update menu without pressing a pre-prompt Return", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-state");
@@ -9486,12 +9515,12 @@ describe("tool handler integration", () => {
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
-      expect(parsed.ok).toBe(true);
-      expect(parsed.boot_prompt_delivered).toBe(true);
-      expect(updateAccepted).toBe(true);
-      expect(updateMenuKeys).toEqual(["return"]);
-      expect(launcherSends).toBe(2);
-      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error_code).toBe("blocked_by_update_menu");
+      expect(updateAccepted).toBe(false);
+      expect(updateMenuKeys).toEqual([]);
+      expect(launcherSends).toBe(1);
+      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
     } finally {
       if (previousAllowModel === undefined) {
         delete process.env.REPOGOLEM_ALLOW_MODEL;
@@ -9503,7 +9532,7 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent keeps polling after the accepted Codex update menu repaints once", async () => {
+  it("spawn_agent does not drive a repainted Codex update menu", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-slow-state");
@@ -9676,14 +9705,12 @@ describe("tool handler integration", () => {
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
-      expect(parsed.ok).toBe(true);
-      expect(parsed.boot_prompt_delivered).toBe(true);
-      // Poll the repaint, confirm readiness, then perform the shared delivery
-      // preflight and verification for the combined caller + mailbox contract.
-      expect(postDismissMenuReads).toBe(3);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error_code).toBe("blocked_by_update_menu");
+      expect(postDismissMenuReads).toBe(0);
       expect(sentKeys).not.toContain("down");
-      expect(sentKeys).toContain("return");
-      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
+      expect(sentKeys.filter((key) => key === "return")).toHaveLength(1);
+      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
     } finally {
       if (previousAllowModel === undefined) {
         delete process.env.REPOGOLEM_ALLOW_MODEL;
@@ -9695,7 +9722,7 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent returns blocked_by_update_menu when the Codex update menu remains after acceptance", async () => {
+  it("spawn_agent returns truthful recovery when the Codex update menu remains", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked-state");
@@ -9827,9 +9854,11 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(false);
       expect(parsed.error_code).toBe("blocked_by_update_menu");
-      expect(parsed.recovery).toContain("Update now");
+      expect(parsed.recovery).toContain("resolve the update menu");
+      expect(parsed.recovery).toContain("surface:2");
+      expect(parsed.recovery).not.toContain("cmuxlayer accepted");
       expect(sentKeys).not.toContain("down");
-      expect(sentKeys).toContain("return");
+      expect(sentKeys.filter((key) => key === "return")).toHaveLength(1);
     } finally {
       if (previousAllowModel === undefined) {
         delete process.env.REPOGOLEM_ALLOW_MODEL;

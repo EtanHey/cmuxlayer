@@ -34,7 +34,10 @@ async function callTool(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
-  const resultPromise = tool.handler(args, {} as any);
+  const resultPromise = tool.handler(
+    name === "send_to" ? { mode: "agent", ...args } : args,
+    {} as any,
+  );
   for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
     await vi.advanceTimersByTimeAsync(100);
   }
@@ -482,6 +485,7 @@ describe("send_to v2 background verify", () => {
     registerAgent(server);
 
     const args = {
+      mode: "agent",
       agent_id: "agent-1",
       text: "race me once",
       press_enter: true,

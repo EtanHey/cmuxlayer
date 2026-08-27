@@ -109,6 +109,7 @@ import {
   isLiveDeliverable,
   isLiveTerminal,
   resolveLiveAgentState,
+  screenConfirmedAgentState,
   TERMINAL_AGENT_STATES,
   type LiveAgentState,
 } from "./live-agent-state.js";
@@ -220,7 +221,11 @@ import type {
   ParsedScreenResult,
 } from "./types.js";
 import { isSubmitKey, normalizeKeyName } from "./key-names.js";
-import { currentCallerContext, type CallerContext } from "./caller-context.js";
+import { assertCanonicalSurfaceRef } from "./surface-ref.js";
+import {
+  currentCallerContext,
+  type CallerContext,
+} from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
   CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE,
@@ -561,18 +566,19 @@ const SendToArgsSchema = z.object({
           SEND_TO_WORKING_EXAMPLE,
       }),
     })
-    .optional()
-    .default("agent"),
-  target: z.string().optional(),
+    .optional(),
+  target: z
+    .union([z.string(), z.number().transform((value) => String(value))])
+    .optional(),
   agent_id: z.string().optional(),
-  surface: z.string().optional(),
-  text: z.string().optional(),
-  command: z.string().optional(),
-  key: z
+  surface: z
+    .union([z.string(), z.number().transform((value) => String(value))])
+    .optional(),
+  text: z
     .string()
     .optional()
     .describe(
-      'Key name for mode="key". Submit aliases (return, enter, KPEnter, ctrl-m, a raw CR) are normalized to "return" and verified from observed prompt/composer transitions; unchanged composer contents alone are not treated as failure.',
+      'Text for every mode. In mode="key", this is the key name; submit aliases are normalized to "return".',
     ),
   workspace: z.string().optional(),
   chunk_size: z.number().int().min(1).optional().default(200),
@@ -996,6 +1002,7 @@ export interface PublicDeliveryReceipt {
   typed: boolean;
   submit_attempted: boolean;
   submit_verified: boolean | null;
+  submitted: boolean;
   submit_evidence?: SubmitEvidence | null;
   retry_count: number;
   delivery?: PublicDeliveryState;
@@ -1107,6 +1114,7 @@ export function buildPublicDeliveryReceipt(input: {
     typed: input.typed,
     submit_attempted: input.submit_attempted,
     submit_verified: input.submit_verified,
+    submitted: input.submit_verified === true,
     ...(input.submit_verified !== null
       ? { submit_evidence: input.submit_evidence ?? null }
       : {}),
@@ -1300,12 +1308,13 @@ class DeliverySafetyGateError extends Error {
       | "blocked_by_permission_prompt"
       | "blocked_by_foreign_draft",
     readonly screen: ParsedScreenResult,
+    readonly draftText?: string,
   ) {
     super(
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
         : error_code === "blocked_by_foreign_draft"
-          ? "target composer already holds text this delivery did not write; refused before typing"
+          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; refused before typing`
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -1367,15 +1376,18 @@ class BootPromptDeliveryError extends Error {
 
 class BootPromptUpdateMenuBlockedError extends Error {
   readonly error_code = "blocked_by_update_menu";
-  readonly recovery =
-    "Codex kept showing the interactive update menu after cmuxlayer accepted the default 'Update now' option. Rerun the spawn; the bounded updater guard prevents an infinite loop.";
+  readonly recovery: string;
 
   constructor(
     message: string,
     readonly last_10_lines: string[],
+    surface: string,
   ) {
     super(message);
     this.name = "BootPromptUpdateMenuBlockedError";
+    this.recovery =
+      `First resolve the update menu on ${surface}; cmuxlayer deliberately did not press Return. ` +
+      "Then deliver or resume the boot prompt on that same surface instead of rerunning the spawn.";
   }
 }
 
@@ -3383,6 +3395,7 @@ export function reconcileAgentLiveState(
   registryState: AgentState,
   screen: ParsedScreenResult | null,
 ): AgentState {
+  if (screenConfirmedAgentState(screen) === "error") return "error";
   // Only a REAL agent screen can clear an error. parseScreen reports status:"idle" for a
   // plain shell prompt (agent_type:"unknown"), so a crashed agent fallen back to a shell must
   // keep its registry error instead of being masked as healthy idle.
@@ -5468,6 +5481,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       throw new DeliverySafetyGateError(
         "blocked_by_foreign_draft",
         snapshot.parsed,
+        extractComposerInputRegion(snapshot.text)?.trim() || undefined,
       );
     }
 
@@ -6147,7 +6161,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "send_to_agent" ||
       opts.source_event === "send_input" ||
       opts.source_event === "dispatch_nudge" ||
-      opts.source_event === "report_to_parent";
+      opts.source_event === "report_to_parent" ||
+      opts.source_event === "interact";
     const draftGuardText = opts.chunks.join("");
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
@@ -6427,8 +6442,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateElapsedMs = 0;
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
-    let codexUpdateMenuAccepted = false;
-    let codexUpdateMenuAcceptedAt: number | null = null;
     type QueuedBootObservation = {
       metrics: RawSubmitEvidenceMetrics;
       route: { surface: string; workspace?: string };
@@ -6469,56 +6482,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         if (shouldHandleCodexUpdateMenu(opts.cli, screen.text)) {
-          if (codexUpdateMenuAccepted) {
-            const elapsedSinceAcceptMs =
-              codexUpdateMenuAcceptedAt === null
-                ? BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
-                : now - codexUpdateMenuAcceptedAt;
-            if (
-              elapsedSinceAcceptMs < BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
-            ) {
-              consecutiveMatches.clear();
-              await delay(BOOT_PROMPT_READY_POLL_MS);
-              continue;
-            }
-            throw new BootPromptUpdateMenuBlockedError(
-              `Boot prompt delivery blocked by Codex update menu on ${target.surface}`,
-              tailLines(lastText, 10),
-            );
-          }
-          updateWasSeen = true;
-          consecutiveMatches.clear();
-          await sendKeyWithRetry(
+          throw new BootPromptUpdateMenuBlockedError(
+            `Boot prompt delivery blocked by Codex update menu on ${target.surface}; cmuxlayer will not press Return before the prompt is typed`,
+            tailLines(lastText, 10),
             target.surface,
-            "return",
-            target.workspace,
-            opts.resolveRoute
-              ? async () => {
-                  const current = await opts.resolveRoute!();
-                  if (
-                    current.surface !== target.surface ||
-                    (current.workspace ?? null) !== (target.workspace ?? null)
-                  ) {
-                    throw new Error(
-                      `Boot prompt route changed before update-menu Return; ` +
-                        `refusing terminal mutation.`,
-                    );
-                  }
-                }
-              : undefined,
           );
-          codexUpdateMenuAccepted = true;
-          const acceptedAt = Date.now();
-          codexUpdateMenuAcceptedAt = acceptedAt;
-          deadline = Math.max(
-            deadline,
-            acceptedAt + postUpdateReadyBudgetMs(),
-            acceptedAt +
-              BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS +
-              BOOT_PROMPT_READY_POLL_MS,
-          );
-          await delay(BOOT_PROMPT_READY_POLL_MS);
-          continue;
         }
 
         if (updateState === "updating") {
@@ -6699,18 +6667,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // A NULL count stays inconclusive on purpose: several CLIs never
         // report one, and reading unknown as zero would break every boot.
         const consumptionRefuted = metrics.tokenCount === 0;
+        const composerInput = extractComposerInputRegion(snapshot.text);
+        const hasPendingInput = screenShowsPendingInput(
+          snapshot.text,
+          opts.text,
+        );
         if (
+          !hasPendingInput &&
           !consumptionRefuted &&
           isSubmitVerifiedStatus(snapshot.parsed.status)
         ) {
           return "status_only";
         }
 
-        const composerInput = extractComposerInputRegion(snapshot.text);
-        const hasPendingInput = screenShowsPendingInput(
-          snapshot.text,
-          opts.text,
-        );
         if (
           composerInput !== null &&
           !hasPendingInput &&
@@ -8588,6 +8557,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         screen_agent_type: parsed?.parsed.agent_type ?? null,
         screen_control_state: parsed?.parsed.control_state ?? null,
         screen_actions: parsed?.parsed.actions ?? null,
+        screen_errors: parsed?.parsed.errors ?? null,
       },
       live: resolveLiveAgentState(
         agent,
@@ -8596,6 +8566,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               status: parsed.parsed.status,
               agent_type: parsed.parsed.agent_type,
               control_state: parsed.parsed.control_state,
+              errors: parsed.parsed.errors,
             }
           : null,
       ),
@@ -8623,7 +8594,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       (overrides?.screen_status === undefined ||
         overrides?.screen_agent_type === undefined ||
         overrides?.screen_control_state === undefined ||
-        overrides?.screen_actions === undefined)
+        overrides?.screen_actions === undefined ||
+        overrides?.screen_errors === undefined)
     ) {
       parsedSurface = await readParsedSurface(
         binding.surfaceRef,
@@ -8661,6 +8633,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : binding
             ? (parsedSurface?.parsed.actions ?? null)
             : null,
+      screen_errors:
+        overrides?.screen_errors !== undefined
+          ? overrides.screen_errors
+          : binding
+            ? (parsedSurface?.parsed.errors ?? null)
+            : null,
       surface_write_liveness: binding
         ? surfaceWriteLiveness.observe(
             binding.surfaceRef,
@@ -8677,6 +8655,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         dispatchAckTimeoutMs: AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
         assessHarvestability: (target) =>
           lifecycleHealthEngine?.assessHarvestability(target),
+        readParsedSurface: async (target) => {
+          const targetBinding = resolveAuthorizedAgentSurfaceBinding(
+            target,
+            topology,
+          );
+          if (!targetBinding) return null;
+          const observation =
+            target.agent_id === agent.agent_id && parsedSurface
+              ? parsedSurface
+              : await readParsedSurface(
+                  targetBinding.surfaceRef,
+                  targetBinding.workspaceId ?? undefined,
+                  { agent: target },
+                );
+          return observation?.parsed ?? null;
+        },
         resolveCollapsedMonitors: (ownerSeats) => {
           if (!opts?.monitorRegistryPath) return [];
           const owners = new Set(ownerSeats);
@@ -8993,19 +8987,62 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   server.tool(
     "control_health",
-    "Report cmuxlayer control-path health: selected transport, prod/nightly socket markers, cmux binary resolution, process env, and job-control diagnostics.",
-    {},
+    "Report terse control-path health by default; pass detail=full for diagnostics.",
+    {
+      detail: z.enum(["terse", "full"]).optional().default("terse"),
+    },
     ANNOTATIONS.readOnly,
-    async () => {
+    async (args) => {
       try {
         const health = await appendControlHealthSnapshot();
         const staleWarning = staleBuildWarning();
         const healthWithStale = staleWarning
           ? { ...health, warnings: [...health.warnings, staleWarning] }
           : health;
-        return okFormatted(formatControlHealth(healthWithStale), {
-          health: healthWithStale,
-        });
+        if (args.detail === "full") {
+          return okFormatted(formatControlHealth(healthWithStale), {
+            health: healthWithStale,
+          });
+        }
+        const caller = resolveCurrentCallerAgent();
+        const callerOwners = new Set(
+          [caller?.agent_id, caller?.seat_id].filter(
+            (value): value is string => Boolean(value),
+          ),
+        );
+        const watches = caller
+          ? readWatchRegistry({
+              registryPath:
+                opts?.watchRegistryPath ??
+                join(context.stateDir, "watch-specs.json"),
+            }).watches
+              .filter(
+                (watch) =>
+                  callerOwners.has(watch.owner) &&
+                  (watch.state === "armed" || watch.state === "firing"),
+              )
+              .map(({ watch_id, target, state }) => ({
+                watch_id,
+                target,
+                state,
+              }))
+          : [];
+        const terse = {
+          transport: healthWithStale.selected_transport,
+          warnings: healthWithStale.warnings,
+          daemon_lifecycle: healthWithStale.daemon_lifecycle,
+          self_heal: {
+            pane_pty_dead:
+              healthWithStale.self_heal.pane_pty_dead.count,
+            collapsed_monitors:
+              healthWithStale.self_heal.monitor_registry.collapsed,
+          },
+          caller_live_watches: {
+            count: watches.length,
+            watches,
+          },
+        };
+        return okFormatted(JSON.stringify(terse), { health: terse });
       } catch (e) {
         return err(e);
       }
@@ -12014,6 +12051,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       parsed_status?: string | null;
       control_state?: string | null;
       cli?: string | null;
+      errors?: string[] | null;
       read_error?: unknown;
     };
     // Same binding rule list_agents uses: a UUID pair, or a surface_id match
@@ -12044,12 +12082,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       status: string | null;
       agent_type: string | null;
       control_state: string | null;
+      errors: string[] | null;
     } | null => {
       if (!row || row.read_error) return null;
       return {
         status: row.parsed_status ?? null,
         agent_type: row.cli === "kiro" ? "unknown" : (row.cli ?? null),
         control_state: row.control_state ?? null,
+        errors: row.errors ?? null,
       };
     };
     const screenObservationForRecord = (
@@ -12058,6 +12098,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       status: string | null;
       agent_type: string | null;
       control_state: string | null;
+      errors: string[] | null;
     } | null => {
       const cached = discovery.cachedScan();
       if (!cached) return null;
@@ -12940,6 +12981,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               agent_type:
                 freshOccupant.cli === "kiro" ? "unknown" : freshOccupant.cli,
               control_state: freshOccupant.control_state,
+              errors: freshOccupant.errors ?? null,
             }
           : null,
       );
@@ -16198,6 +16240,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             ? "unknown"
                             : trustedScreenObservation.cli,
                         control_state: trustedScreenObservation.control_state,
+                        errors: trustedScreenObservation.errors ?? null,
                       }
                     : null,
                 );
@@ -16219,6 +16262,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             trustedScreenObservation.control_state,
                           screen_actions:
                             trustedScreenObservation.actions ?? [],
+                          screen_errors:
+                            trustedScreenObservation.errors ?? [],
                         }
                       : {}),
                     // Without this the health block re-derived harvestability
@@ -16790,6 +16835,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (rawArgs) => {
         let failedReceiptPayload: Record<string, unknown> = {};
         try {
+          if (rawArgs.mode === undefined) {
+            throw new Error("mode required (agent|surface|command|key)");
+          }
+          if ("message" in rawArgs || "command" in rawArgs || "key" in rawArgs) {
+            throw new Error("send_to accepts one payload parameter: text");
+          }
+          for (const field of ["surface", "target"] as const) {
+            if (typeof rawArgs[field] === "number") {
+              throw new Error(
+                `bare surface index ${JSON.stringify(rawArgs[field])} is not allowed; use surface:<index> ref or a surface UUID`,
+              );
+            }
+          }
           const parsedArgs = SendToArgsSchema.safeParse(rawArgs);
           if (!parsedArgs.success) {
             return err(
@@ -16798,7 +16856,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           const args = parsedArgs.data;
-          const mode = args.mode ?? "agent";
+          const mode = args.mode;
+          if (!mode) {
+            throw new Error("mode required (agent|surface|command|key)");
+          }
           if (args.targeting && mode !== "agent") {
             throw new Error(
               "send_to.targeting is supported only in mode=agent",
@@ -16811,6 +16872,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 `send_to mode=${mode} requires target or surface`,
               );
             }
+            assertCanonicalSurfaceRef(surface);
             const legacyHandler = (name: string) => {
               const handler = toolHandlersByName.get(name);
               if (!handler) {
@@ -16845,11 +16907,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             if (mode === "command") {
-              const command = args.command ?? args.text;
+              const command = args.text;
               if (command === undefined) {
-                throw new Error(
-                  "send_to mode=command requires command or text",
-                );
+                throw new Error("send_to mode=command requires text");
               }
               return legacyHandler("send_command")(
                 {
@@ -16863,11 +16923,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 {},
               );
             }
-            if (!args.key) {
-              throw new Error("send_to mode=key requires key");
+            if (!args.text) {
+              throw new Error("send_to mode=key requires text");
             }
             return legacyHandler("send_key")(
-              { surface, workspace: args.workspace, key: args.key },
+              { surface, workspace: args.workspace, key: args.text },
               {},
             );
           }
@@ -17536,6 +17596,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         } catch (e) {
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
+              ...e.receipt,
               ...failedReceiptPayload,
               error_code: e.error_code,
               submit_verified: e.submit_verified,
@@ -17575,7 +17636,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (rawArgs) => {
         try {
-          const parsedArgs = SendToArgsSchema.safeParse(rawArgs);
+          const parsedArgs = SendToArgsSchema.safeParse({
+            ...rawArgs,
+            mode: "agent",
+          });
           if (!parsedArgs.success) {
             return err(
               new Error(
@@ -17991,18 +18055,86 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return okFormatted(formatOk("interact:resume", d), d);
             }
             case "skill": {
+              const submittedCommand = args.command!.trim();
+              const isSubmittedCommandEcho = (line: string): boolean =>
+                line.trim().replace(/^[>❯›]\s*/, "") === submittedCommand;
+              const isActiveSkillProgressLine = (line: string): boolean =>
+                /^(?:[•✻✢✳✶✦]\s*(?:Thinking|Working)|[⏺⬡]\s*Running)(?:\b|…)/iu.test(
+                  line,
+                );
+              const isComposerInputLine = (line: string): boolean =>
+                /^[>❯›]\s*\S/u.test(line);
+              let commandEchoCountBefore: number | null = null;
+              try {
+                const beforeScreen = await engine.readAgentScreen(
+                  { agent_id: args.agent },
+                  { lines: 20 },
+                );
+                commandEchoCountBefore = beforeScreen.text
+                  .split("\n")
+                  .filter(isSubmittedCommandEcho).length;
+              } catch {
+                // Without a baseline, later output cannot be attributed to
+                // this invocation rather than an identical historical echo.
+              }
               const delivery = await deliverAgentInput({
                 agent_id: args.agent,
                 text: args.command!,
                 press_enter: true,
                 source_event: "interact",
               });
+              let screenResultLine: string | null = null;
+              let screenResultAvailable = false;
+              try {
+                const screen = await engine.readAgentScreen(
+                  { agent_id: args.agent },
+                  { lines: 20 },
+                );
+                const screenLines = screen.text
+                  .split("\n")
+                  .map((line) => line.trim());
+                const commandEchoCountAfter = screenLines.filter(
+                  isSubmittedCommandEcho,
+                ).length;
+                let commandLineIndex = -1;
+                for (let index = screenLines.length - 1; index >= 0; index -= 1) {
+                  if (
+                    screenLines[index]?.replace(/^[>❯›]\s*/, "") ===
+                    submittedCommand
+                  ) {
+                    commandLineIndex = index;
+                    break;
+                  }
+                }
+                screenResultLine =
+                  screenLines
+                    .slice(commandLineIndex + 1)
+                    .filter(
+                      (line) =>
+                        commandEchoCountBefore !== null &&
+                        commandEchoCountAfter > commandEchoCountBefore &&
+                        commandLineIndex >= 0 &&
+                        !isActiveSkillProgressLine(line) &&
+                        !isComposerInputLine(line) &&
+                        (!isComposerFooterOrChromeLine(line) ||
+                          /^CLAUDE_COUNTER:/i.test(line)) &&
+                        !/^Claude Code(?:\s+v?\d|$)/i.test(line) &&
+                        !/^[>❯›]\s*$/.test(line),
+                    )
+                    .at(-1) ?? null;
+                screenResultAvailable = screenResultLine !== null;
+              } catch {
+                // Submission already succeeded. Observation loss must not invite
+                // a retry that could execute the skill twice.
+              }
               const d = {
                 agent_id: args.agent,
                 action: "skill",
                 command: args.command,
                 retry_count: delivery.retry_count,
                 submit_verified: delivery.submit_verified,
+                screen_result_available: screenResultAvailable,
+                screen_result_line: screenResultLine,
               };
               return okFormatted(formatOk("interact:skill", d), d);
             }

@@ -27,6 +27,7 @@ import { normalizeKeyName } from "./key-names.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
 import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
+import { assertCanonicalSurfaceRef } from "./surface-ref.js";
 
 const execFileAsync = promisify(execFile);
 /**
@@ -122,6 +123,25 @@ export class CmuxClient {
   }
 
   private async run(args: string[]): Promise<string> {
+    for (let index = 0; index < args.length - 1; index += 1) {
+      if (
+        args[index] === "--surface" ||
+        args[index] === "--before" ||
+        args[index] === "--after"
+      ) {
+        assertCanonicalSurfaceRef(args[index + 1]);
+      }
+    }
+    if (args[0] === "rpc" && args[2]) {
+      try {
+        const params = JSON.parse(args[2]) as { surface_id?: unknown };
+        if (typeof params.surface_id === "string") {
+          assertCanonicalSurfaceRef(params.surface_id);
+        }
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+      }
+    }
     try {
       // Pin every CLI-fallback exec to the instance env (CMUX_SOCKET_PATH) so
       // the `cmux` subprocess cannot inherit an ambient socket path pointing at
