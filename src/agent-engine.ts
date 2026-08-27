@@ -6591,6 +6591,9 @@ export class AgentEngine {
         : (byReportPath.get(resolve(watch.target)) ?? []);
       if (subjects.length === 0 && !watch.subject_agent_id) {
         const targetDir = resolve(dirname(watch.target));
+        // Provenance-absent rows are legacy engine watches only inside the
+        // exact <channelBaseDir>/<agentId>/report.md shape. Arbitrary public
+        // file watches from before provenance existed must never enter it.
         const targetLooksEngineIssued =
           basename(watch.target) === "report.md" &&
           resolve(dirname(targetDir)) === channelBaseDir;
@@ -9375,12 +9378,12 @@ export class AgentEngine {
     }
     const startedAt = Date.now();
     const armed = await armDeclaredWatch(
-      { ...spec, provenance: "engine" },
+      spec,
       {
-      registryPath: this.watchRegistryPath,
-      now: this.watchRegistryNow,
-      agentObservation: this.watchAgentObservation,
-      waiterExpiresAtMs: Date.now() + Math.max(0, timeoutMs) + 60_000,
+        registryPath: this.watchRegistryPath,
+        now: this.watchRegistryNow,
+        agentObservation: this.watchAgentObservation,
+        waiterExpiresAtMs: Date.now() + Math.max(0, timeoutMs) + 60_000,
       },
     );
     const releaseWaiterBestEffort = async (): Promise<void> => {

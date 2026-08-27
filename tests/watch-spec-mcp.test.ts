@@ -150,6 +150,7 @@ describe("WatchSpec MCP contract", () => {
         target,
         marker: "DONE_P1",
         deadline: Date.now() + 1_000,
+        provenance: "engine",
       },
       timeout_ms: 500,
     });
@@ -159,7 +160,7 @@ describe("WatchSpec MCP contract", () => {
       ok: true,
       matched: true,
       watch: {
-        provenance: "engine",
+        provenance: "public",
         state: "fired",
         watermark: 1,
         observed_value: 2,

@@ -305,6 +305,13 @@ export function selectDuplicateWatchOwnerCandidate<T>(
         live.screen_state !== "error" &&
         isLiveDeliverable(live),
     )?.candidate ??
+    probed.find(
+      ({ live }) =>
+        live !== null &&
+        live.source === "screen" &&
+        live.state !== "error" &&
+        live.screen_state !== "error",
+    )?.candidate ??
     probed.find(({ live }) => live !== null && isLiveDeliverable(live))
       ?.candidate ??
     probed[0]?.candidate
@@ -15692,8 +15699,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 "wait_for watch is mutually exclusive with agent_id, ids, mine, and delivery_id",
               );
             }
+            const publicSpec = { ...(args.watch as WatchSpec) };
+            delete (publicSpec as WatchSpec & { provenance?: unknown })
+              .provenance;
             const result = await engine.waitForWatch(
-              args.watch as WatchSpec,
+              { ...publicSpec, provenance: "public" },
               args.timeout_ms,
             );
             return okFormatted(
