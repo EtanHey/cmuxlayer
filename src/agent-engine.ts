@@ -8139,6 +8139,7 @@ export class AgentEngine {
         status: parsed.status,
         agent_type: parsed.agent_type,
         control_state: parsed.control_state,
+        errors: parsed.errors,
       });
       // Mid-boot or an unparseable frame: the screen has no authority over the
       // status here, and reading its default as an idle prompt would fire an

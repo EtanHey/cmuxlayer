@@ -39,14 +39,51 @@ function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 describe("screenConfirmedAgentState — the one screen->state rule", () => {
-  it("treats a frozen harness-error screen as an error rather than idle-ready", () => {
+  it("treats a harness API error marker as error independent of frozen status", () => {
+    expect(
+      screenConfirmedAgentState({
+        status: "idle",
+        agent_type: "claude",
+        control_state: "unknown",
+        errors: [
+          "harness_api_error: Fable 5 safeguards flagged this message request_id=req_011CeRnwgFeHAsTb3hU4n9jt",
+        ],
+      }),
+    ).toBe("error");
+  });
+
+  it("does not classify a recoverable permission prompt as error and keeps it deliverable", () => {
+    const resolved = resolveLiveAgentState(record({ state: "ready" }), {
+      status: "frozen",
+      agent_type: "claude",
+      control_state: "permission_prompt",
+      errors: ["permission_prompt"],
+    });
+
+    expect(resolved.state).not.toBe("error");
+    expect(isLiveDeliverable(resolved)).toBe(true);
+  });
+
+  it("does not classify a recoverable interactive picker as error", () => {
+    expect(
+      screenConfirmedAgentState({
+        status: "frozen",
+        agent_type: "claude",
+        control_state: "interactive_overlay",
+        errors: ["interactive_prompt"],
+      }),
+    ).not.toBe("error");
+  });
+
+  it("does not classify transient SQLITE_BUSY contention as error", () => {
     expect(
       screenConfirmedAgentState({
         status: "frozen",
         agent_type: "claude",
         control_state: "unknown",
+        errors: ["SQLITE_BUSY"],
       }),
-    ).toBe("error");
+    ).not.toBe("error");
   });
 
   it("reads an active screen as working", () => {

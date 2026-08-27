@@ -8552,6 +8552,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         screen_agent_type: parsed?.parsed.agent_type ?? null,
         screen_control_state: parsed?.parsed.control_state ?? null,
         screen_actions: parsed?.parsed.actions ?? null,
+        screen_errors: parsed?.parsed.errors ?? null,
       },
       live: resolveLiveAgentState(
         agent,
@@ -8560,6 +8561,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               status: parsed.parsed.status,
               agent_type: parsed.parsed.agent_type,
               control_state: parsed.parsed.control_state,
+              errors: parsed.parsed.errors,
             }
           : null,
       ),
@@ -12035,6 +12037,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       parsed_status?: string | null;
       control_state?: string | null;
       cli?: string | null;
+      errors?: string[] | null;
       read_error?: unknown;
     };
     // Same binding rule list_agents uses: a UUID pair, or a surface_id match
@@ -12065,12 +12068,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       status: string | null;
       agent_type: string | null;
       control_state: string | null;
+      errors: string[] | null;
     } | null => {
       if (!row || row.read_error) return null;
       return {
         status: row.parsed_status ?? null,
         agent_type: row.cli === "kiro" ? "unknown" : (row.cli ?? null),
         control_state: row.control_state ?? null,
+        errors: row.errors ?? null,
       };
     };
     const screenObservationForRecord = (
@@ -12079,6 +12084,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       status: string | null;
       agent_type: string | null;
       control_state: string | null;
+      errors: string[] | null;
     } | null => {
       const cached = discovery.cachedScan();
       if (!cached) return null;
@@ -12961,6 +12967,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               agent_type:
                 freshOccupant.cli === "kiro" ? "unknown" : freshOccupant.cli,
               control_state: freshOccupant.control_state,
+              errors: freshOccupant.errors ?? null,
             }
           : null,
       );
@@ -16219,6 +16226,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             ? "unknown"
                             : trustedScreenObservation.cli,
                         control_state: trustedScreenObservation.control_state,
+                        errors: trustedScreenObservation.errors ?? null,
                       }
                     : null,
                 );
@@ -16240,6 +16248,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             trustedScreenObservation.control_state,
                           screen_actions:
                             trustedScreenObservation.actions ?? [],
+                          screen_errors:
+                            trustedScreenObservation.errors ?? [],
                         }
                       : {}),
                     // Without this the health block re-derived harvestability

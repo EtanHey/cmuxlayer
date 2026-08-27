@@ -485,6 +485,7 @@ export function evaluateAgentHealth(
       status: input.screen_status,
       agent_type: input.screen_agent_type,
       control_state: input.screen_control_state,
+      errors: input.screen_errors,
     }) ?? undefined;
   const screenIsShell =
     input.screen_control_state === "shell" &&
