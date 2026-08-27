@@ -176,6 +176,7 @@ describe("WatchSpec MCP contract", () => {
         owner: "lead-a",
         target,
         marker: "DONE",
+        notify: true,
         deadline: Date.now() + 1_000,
       },
       timeout_ms: 500,

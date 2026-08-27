@@ -429,6 +429,10 @@ const WatchSpecArgsSchema = {
     .nonnegative()
     .optional()
     .describe("Prior marker count; defaults to count observed at arm time"),
+  notify: z
+    .boolean()
+    .optional()
+    .describe("Opt in to the configured external notification transport"),
   deadline: z
     .number()
     .int()
