@@ -107,6 +107,16 @@ API Error: 500 {"request_id":"req_quoted_example"}`);
     expect(parsed.errors).toEqual([]);
   });
 
+  it("does not treat an indented quoted API error as a harness failure", () => {
+    const parsed = parseScreen(`Claude Code v1.0.0
+⏺ Explaining a captured failure
+  API Error: 500 {"request_id":"req_quoted_with_composer"}
+❯`);
+
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.status).not.toBe("frozen");
+  });
+
   it("parses Claude-style output with response block and done signal", () => {
     const parsed = parseScreen(`
 \u001b[32m⏺ Completed successfully\u001b[0m

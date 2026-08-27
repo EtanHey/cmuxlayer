@@ -1204,13 +1204,14 @@ export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
 
-  const lines = text.split("\n").map((line) => line.trim());
+  const rawLines = text.split("\n");
+  const lines = rawLines.map((line) => line.trim());
   let harnessErrorIndex = -1;
   let harnessErrorRequestId: string | null = null;
   for (let index = 0; index < lines.length; index += 1) {
     if (
-      /^API Error:/i.test(lines[index]) ||
-      /^Claude Code can't respond\b.*$/i.test(lines[index])
+      /^API Error:/i.test(rawLines[index] ?? "") ||
+      /^Claude Code can't respond\b.*$/i.test(rawLines[index] ?? "")
     ) {
       const composerIndex = lines.findIndex(
         (line, candidateIndex) =>

@@ -277,6 +277,54 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     context.dispose();
   });
 
+  it("interact skill does not report terminal chrome as a screen result", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n❯ ";
+    const baseExec = makeLifecycleExec(() => screenText);
+    const mockExec: ExecFn = vi.fn().mockImplementation(
+      async (command: string, args: string[]) => {
+        if (
+          args.includes("read-screen") &&
+          args.includes("--lines") &&
+          args.includes("20")
+        ) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "Claude Code\n❯ /review\n⏵⏵ bypass permissions on · 2 monitors\n",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(command, args);
+      },
+    );
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    screenText = "Claude Code\n❯ \nCLAUDE_COUNTER:1\n";
+
+    const result = await (server as any)._registeredTools.interact.handler(
+      { agent: agentId, action: "skill", command: "/review" },
+      {} as any,
+    );
+
+    expect(parseToolResult(result)).toMatchObject({
+      ok: true,
+      submit_verified: true,
+      screen_result_available: false,
+      screen_result_line: null,
+    });
+    context.dispose();
+  });
+
   it("interact skill keeps the successful receipt when only its final observation fails", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";

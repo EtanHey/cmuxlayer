@@ -18073,13 +18073,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   { agent_id: args.agent },
                   { lines: 20 },
                 );
+                const submittedCommand = args.command!.trim();
                 screenResultLine =
                   screen.text
                     .split("\n")
                     .map((line) => line.trim())
-                    .filter(Boolean)
+                    .filter(
+                      (line) =>
+                        (!isComposerFooterOrChromeLine(line) ||
+                          /^CLAUDE_COUNTER:/i.test(line)) &&
+                        !/^Claude Code(?:\s+v?\d|$)/i.test(line) &&
+                        !/^[>❯›]\s*$/.test(line) &&
+                        line.replace(/^[>❯›]\s*/, "") !== submittedCommand,
+                    )
                     .at(-1) ?? null;
-                screenResultAvailable = true;
+                screenResultAvailable = screenResultLine !== null;
               } catch {
                 // Submission already succeeded. Observation loss must not invite
                 // a retry that could execute the skill twice.

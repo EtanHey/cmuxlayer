@@ -4747,6 +4747,12 @@ export class AgentEngine {
       agent.halt_last_observable_action !== haltObservableAction
     ) {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
+        halt_episode_started_at: nowIso,
+        halt_episode_observations: 1,
+        halt_notification_sent_at: null,
+        halt_notified_ancestor_id: null,
+        halt_fallback_sink_id: null,
+        halt_last_delivery_error: null,
         halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
