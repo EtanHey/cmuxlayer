@@ -4705,6 +4705,8 @@ export class AgentEngine {
       haltType === "harness_api_error"
         ? (harnessApiError ?? parsed.current_action ?? haltType)
         : (parsed.current_action ?? harnessApiError ?? haltType);
+    const harnessRequestId = (value: string | null | undefined): string | null =>
+      value?.match(/\brequest_id=(req_[A-Za-z0-9]+)/i)?.[1] ?? null;
 
     let episode = agent;
     if (!agent.halt_episode_type) {
@@ -4750,15 +4752,24 @@ export class AgentEngine {
       haltType === "harness_api_error" &&
       agent.halt_last_observable_action !== haltObservableAction
     ) {
-      episode = this.stateMgr.updateRecord(agent.agent_id, {
-        halt_episode_started_at: nowIso,
-        halt_episode_observations: 1,
-        halt_notification_sent_at: null,
-        halt_notified_ancestor_id: null,
-        halt_fallback_sink_id: null,
-        halt_last_delivery_error: null,
-        halt_last_observable_action: haltObservableAction,
-      });
+      const sameRequestId =
+        harnessRequestId(agent.halt_last_observable_action) !== null &&
+        harnessRequestId(agent.halt_last_observable_action) ===
+          harnessRequestId(haltObservableAction);
+      episode = this.stateMgr.updateRecord(
+        agent.agent_id,
+        sameRequestId
+          ? { halt_last_observable_action: haltObservableAction }
+          : {
+              halt_episode_started_at: nowIso,
+              halt_episode_observations: 1,
+              halt_notification_sent_at: null,
+              halt_notified_ancestor_id: null,
+              halt_fallback_sink_id: null,
+              halt_last_delivery_error: null,
+              halt_last_observable_action: haltObservableAction,
+            },
+      );
       this.registry.set(agent.agent_id, episode);
     }
     if (episode.halt_notification_sent_at) return episode;

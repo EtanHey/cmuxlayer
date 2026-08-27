@@ -776,6 +776,18 @@ describe("control health", () => {
       model: "codex",
       cli: "codex",
     } as any);
+    stateMgr.writeState({
+      agent_id: "stale-recycled-agent",
+      seat_id: "stale-recycled-seat",
+      surface_id: "surface:recycled",
+      surface_uuid: null,
+      surface_observer_id: null,
+      workspace_id: "workspace:1",
+      state: "done",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+    } as any);
     const watch = (watch_id: string, owner: string, state: string) => ({
       watch_id,
       owner,
@@ -797,6 +809,7 @@ describe("control health", () => {
           watch("mine-live", "caller-agent", "armed"),
           watch("mine-dropped", "caller-seat", "fired"),
           watch("foreign-live", "another-agent", "armed"),
+          watch("stale-live", "stale-recycled-agent", "armed"),
         ],
       }),
     );
@@ -820,6 +833,10 @@ describe("control health", () => {
       () => tool.handler({}, {} as any),
     );
     const unscopedTerse = await tool.handler({}, {} as any);
+    const recycledRefTerse = await runWithCallerContext(
+      { surfaceId: "surface:recycled" },
+      () => tool.handler({}, {} as any),
+    );
     const full = await tool.handler({ detail: "full" }, {} as any);
     if (previousCallerSurface === undefined) delete process.env.CMUX_SURFACE_ID;
     else process.env.CMUX_SURFACE_ID = previousCallerSurface;
@@ -834,6 +851,9 @@ describe("control health", () => {
       count: 0,
       watches: [],
     });
+    expect(
+      recycledRefTerse.structuredContent.health.caller_live_watches,
+    ).toEqual({ count: 0, watches: [] });
     expect(terse.content[0].text.length).toBeLessThan(full.content[0].text.length);
     await server.close();
   });

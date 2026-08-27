@@ -9002,19 +9002,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             health: healthWithStale,
           });
         }
-        const callerSurface = currentCallerContext()?.surfaceId?.trim();
-        const caller =
-          resolveCurrentCallerAgent() ??
-          (callerSurface
-            ? stateMgr
-                .listStates()
-                .find(
-                  (agent) =>
-                    agent.surface_id === callerSurface ||
-                    agent.surface_uuid?.toLowerCase() ===
-                      callerSurface.toLowerCase(),
-                ) ?? null
-            : null);
+        const caller = resolveCurrentCallerAgent();
         const callerOwners = new Set(
           [caller?.agent_id, caller?.seat_id].filter(
             (value): value is string => Boolean(value),
