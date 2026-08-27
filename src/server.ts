@@ -12451,11 +12451,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 !candidate.deletion_intent,
             );
             const owner = await (async () => {
-              const directOrSeatMatches = liveOwnerCandidates.filter(
-                (candidate) =>
-                  candidate.agent_id === event.owner ||
-                  candidate.seat_id?.trim() === event.owner,
+              const exactMatches = liveOwnerCandidates.filter(
+                (candidate) => candidate.agent_id === event.owner,
               );
+              const directOrSeatMatches =
+                exactMatches.length > 0
+                  ? exactMatches
+                  : liveOwnerCandidates.filter(
+                      (candidate) =>
+                        candidate.seat_id?.trim() === event.owner,
+                    );
               if (directOrSeatMatches.length === 1) {
                 return directOrSeatMatches[0];
               }

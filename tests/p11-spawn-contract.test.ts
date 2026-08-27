@@ -843,6 +843,34 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
   });
 
+  it("retains a subjectless legacy report watch when its state file exists but is malformed", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "malformed-legacy-state";
+    const reportPath = join(inboxDir, agentId, "report.md");
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "legacy report\n", "utf8");
+    const watch = await engine.armWatch({
+      owner: "lead-parent",
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const stateDir = join(STATE_DIR, agentId);
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "state.json"), "{malformed", "utf8");
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<boolean>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([expect.objectContaining({ watch_id: watch.watch_id })]);
+  });
+
   it("never treats a provenance-absent subjectless public watch on an arbitrary path as legacy engine state", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
@@ -1162,6 +1190,93 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_pending: false,
       notification_attempts: 0,
     });
+  });
+
+  it("prefers the exact owner agent id over a more-live seat collision", async () => {
+    await server.close();
+    const seatCollisionUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const exactOwnerUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "seat-collision-pane",
+      undefined,
+      [
+        {
+          id: exactOwnerUuid,
+          ref: "surface:exact-owner",
+          title: "exact-owner-pane",
+          text: "Claude Code\n✻ Working\n",
+        },
+      ],
+      seatCollisionUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const exactOwnerId = "cmuxlayerClaude-exact-owner";
+    const seatCollision: AgentRecord = {
+      ...parentRecord(seatCollisionUuid),
+      agent_id: "cmuxlayerClaude-seat-collision",
+      seat_id: exactOwnerId,
+    };
+    const exactOwner: AgentRecord = {
+      ...parentRecord(exactOwnerUuid),
+      agent_id: exactOwnerId,
+      seat_id: "cmuxlayerClaude",
+      surface_id: "surface:exact-owner",
+      state: "working",
+    };
+    const reportPath = join(inboxDir, "exact-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+      agent_id: "exact-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: exactOwnerId,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [seatCollision, exactOwner, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: exactOwnerId,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    const isReportWake = ([, args]: [string, string[]]) =>
+      args.some((arg) => arg.includes("[report]") && arg.includes(reportPath));
+    expect(
+      wakeCalls.some(
+        (call: [string, string[]]) =>
+          call[1].includes("surface:exact-owner") && isReportWake(call),
+      ),
+    ).toBe(true);
+    expect(
+      wakeCalls.some(
+        (call: [string, string[]]) =>
+          call[1].includes("surface:new") && isReportWake(call),
+      ),
+    ).toBe(false);
   });
 
   it("prefers a live duplicate seat owner over an earlier terminal record", async () => {

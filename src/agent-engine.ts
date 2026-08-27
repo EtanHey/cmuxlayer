@@ -6603,7 +6603,9 @@ export class AgentEngine {
             this.registry.get(inferredAgentId) ??
             this.stateMgr.readState(inferredAgentId);
           if (inferred) subjects = [inferred];
-          else missingLegacyStateWatchIds.add(watch.watch_id);
+          else if (!this.stateMgr.hasStateFile(inferredAgentId)) {
+            missingLegacyStateWatchIds.add(watch.watch_id);
+          }
         }
       }
       subjectIdsByWatch.set(watch.watch_id, [
