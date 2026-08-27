@@ -45,6 +45,7 @@ import {
   type LiveAgentState,
 } from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
+import { isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -3910,69 +3911,65 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     await siblingServer.close();
   });
 
-  it("keeps all 101 marker and public rows outside report-content startup pruning", async () => {
+  it("replays the 107-row incident: subject prune removes zero while dead-owner prune removes the seven firing markers", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
-    const target = join(inboxDir, "incident-shape-marker.md");
-    writeFileSync(target, "waiting\n", "utf8");
+    const incident = JSON.parse(
+      readFileSync(
+        new URL("./fixtures/watch-specs-incident-20260827.json", import.meta.url),
+        "utf8",
+      ),
+    ) as {
+      version: 1;
+      watches: Array<{
+        watch_id: string;
+        owner: string;
+        target_kind: "file" | "agent";
+        change?: "content" | null;
+      }>;
+    };
+    expect(incident.watches).toHaveLength(107);
+    expect(
+      incident.watches.filter(isSubjectSideReportWatchPruneEligible),
+    ).toHaveLength(0);
 
-    const deadExact = Array.from({ length: 80 }, (_, index) => ({
+    const deadIncidentOwner = {
       ...parentRecord(),
-      agent_id: `dead-exact-${index}`,
-      surface_id: `surface:dead-exact-${index}`,
+      agent_id: "cmuxlayerClaude-339a9e6a",
+      surface_id: "surface:closed-incident-lead",
       state: "done" as const,
-    }));
-    const deadAliases = Array.from({ length: 10 }, (_, index) => ({
-      ...parentRecord(),
-      agent_id: `dead-alias-agent-${index}`,
-      seat_id: `retired-seat-${index}`,
-      surface_id: `surface:dead-alias-${index}`,
-      state: "done" as const,
-    }));
+    };
     const liveAliases = [
-      "cmuxlayerClaude",
-      "golemsCodex",
-      "cmuxlayer-LEADClaude",
-      "lead-a",
+      ["orcClaude-live", "orcClaude"],
+      ["coachClaude-live", "coachClaude"],
+      ["cmuxlayerClaude-current", "cmuxlayerClaude"],
     ].map((seatId, index) => ({
       ...parentRecord(),
-      agent_id: `live-alias-agent-${index}`,
-      seat_id: seatId,
+      agent_id: seatId[0],
+      seat_id: seatId[1],
       surface_id: `surface:live-alias-${index}`,
     }));
-    const liveExact = Array.from({ length: 3 }, (_, index) => ({
-      ...parentRecord(),
-      agent_id: `live-exact-${index}`,
-      surface_id: `surface:live-exact-${index}`,
-    }));
-    for (const record of [
-      ...deadExact,
-      ...deadAliases,
-      ...liveAliases,
-      ...liveExact,
-    ]) {
+    for (const record of [deadIncidentOwner, ...liveAliases]) {
       engine.getRegistry().set(record.agent_id, record);
     }
     vi.spyOn(engine.getRegistry(), "isSurfaceAlive").mockImplementation(
-      async (record: AgentRecord) => record.agent_id.startsWith("live-"),
+      async (record: AgentRecord) =>
+        liveAliases.some((live) => live.agent_id === record.agent_id),
     );
 
-    const owners = [
-      ...deadExact.map((record) => record.agent_id),
-      ...deadAliases.map((record) => record.seat_id as string),
-      ...Array.from({ length: 4 }, (_, index) => `unresolvable-owner-${index}`),
-      ...liveAliases.map((record) => record.seat_id as string),
-      ...liveExact.map((record) => record.agent_id),
-    ];
-    expect(owners).toHaveLength(101);
-    for (const owner of owners) {
-      await engine.armWatch({
-        owner,
-        target,
-        marker: "DONE",
-        deadline: Number.MAX_SAFE_INTEGER,
-      });
-    }
+    writeFileSync(watchRegistryPath, JSON.stringify(incident), "utf8");
+    const countByOwner = (owners: string[]) =>
+      owners.reduce<Record<string, number>>((counts, owner) => {
+        counts[owner] = (counts[owner] ?? 0) + 1;
+        return counts;
+      }, {});
+    const beforeByOwner = countByOwner(
+      incident.watches.map((watch) => watch.owner),
+    );
+    expect(beforeByOwner["cmuxlayerClaude-339a9e6a"]).toBe(7);
+    expect(beforeByOwner.orcClaude).toBe(1);
+    expect(beforeByOwner.coachClaude).toBe(5);
+    expect(beforeByOwner.cmuxlayerClaude).toBe(4);
 
     await (
       engine as unknown as {
@@ -3980,9 +3977,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
     ).pruneClosedChildReportWatches();
 
-    expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
-    ).toHaveLength(101);
+    const retained = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches;
+    const afterByOwner = countByOwner(retained.map((watch) => watch.owner));
+    expect(retained).toHaveLength(100);
+    expect(afterByOwner["cmuxlayerClaude-339a9e6a"] ?? 0).toBe(0);
+    for (const [owner, before] of Object.entries(beforeByOwner)) {
+      if (owner === "cmuxlayerClaude-339a9e6a") continue;
+      expect(afterByOwner[owner]).toBe(before);
+    }
   });
 
   it("retains an active subject watch under an ambiguous live seat alias", async () => {

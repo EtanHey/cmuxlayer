@@ -148,6 +148,12 @@ import {
   parseScreen,
   type PromptDisposition,
 } from "./screen-parser.js";
+
+export function isSubjectSideReportWatchPruneEligible(
+  watch: Pick<WatchRecord, "target_kind" | "change">,
+): boolean {
+  return watch.target_kind === "file" && watch.change === "content";
+}
 import {
   canonicalRoleColumn,
   chooseAgentSpawnPlacement,
@@ -6694,12 +6700,6 @@ export class AgentEngine {
         if (watch.state === "failed" && !watch.notification_pending) {
           return (watch.waiter_expires_at_ms ?? 0) <= pruneObservedAt;
         }
-        if (watch.target_kind !== "file" || watch.change !== "content") {
-          return false;
-        }
-        if (!watch.subject_agent_id && watch.provenance === "public") {
-          return false;
-        }
         const ownerResolution = ownerResolutionByWatch.get(watch.watch_id);
         // Raw owner keys are not identities. Zero and multiple matches retain
         // fail-safe; a subject can still prove that an ambiguous alias includes
@@ -6729,15 +6729,28 @@ export class AgentEngine {
         const ownerAgentId = ownerResolution.canonical_id
           ? canonicalAgentIdValue(ownerResolution.canonical_id)
           : null;
+        const ownerRecord = ownerAgentId
+          ? (this.registry.get(ownerAgentId) ??
+            this.stateMgr.readState(ownerAgentId))
+          : null;
         // A live child still owns its report path even if its parent pane is
         // gone. Preserve that reservation; dead-owner pruning is destructive
         // only when no active subject ownership remains.
         if (
+          ownerRecord &&
           ownerAgentId &&
           !liveAgentIds.has(ownerAgentId) &&
           !hasActiveSubjectOwnership
         ) {
           return true;
+        }
+        // Owner death and subject death answer different questions. A
+        // confirmed-dead owner makes every watch kind undeliverable, including
+        // marker and agent watches. Subject-side lifecycle pruning is narrower
+        // and may only inspect report-content rows.
+        if (!isSubjectSideReportWatchPruneEligible(watch)) return false;
+        if (!watch.subject_agent_id && watch.provenance === "public") {
+          return false;
         }
         if (
           subjects.length === 0 &&
