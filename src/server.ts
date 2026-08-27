@@ -294,28 +294,117 @@ import {
 } from "./surface-write-liveness.js";
 import type { FleetSidebarPublisherLike } from "./fleet-sidebar.js";
 
+const DUPLICATE_WATCH_OWNER_RANK = {
+  INTERACTIVE: 0,
+  ACTIVE: 1,
+  OBSERVED_INTERACTIVE: 2,
+  TERMINAL: 3,
+  DEGRADED_DELIVERABLE: 4,
+  STARTING_OR_INDIRECT: 5,
+  ERROR: 6,
+  UNKNOWN: 7,
+} as const;
+
+const DUPLICATE_WATCH_OWNER_STATES = new Set([
+  "creating",
+  "booting",
+  "ready",
+  "working",
+  "idle",
+  "done",
+  "error",
+]);
+
+/**
+ * Total order for duplicate report-watch owners. Lower ranks win.
+ *
+ * 0 interactive and deliverable; 1 direct screen activity; 2 directly
+ * observed interactive but not ordinarily deliverable; 3 terminal but still
+ * attemptable; 4 degraded/error-screened but deliverable; 5 starting or only
+ * indirectly live; 6 known error; 7 missing or unenumerated evidence.
+ *
+ * Screen evidence is mapped positively: error is degraded, working is active,
+ * done is terminal, ready/idle is interactive, and creating/booting is
+ * starting. No unenumerated state can enter a preferred rank; it receives the
+ * explicit worst-attemptable rank instead.
+ */
+export function rankDuplicateWatchOwnerCandidate(
+  live: LiveAgentState | null,
+): number {
+  if (live === null) return DUPLICATE_WATCH_OWNER_RANK.UNKNOWN;
+  if (
+    !DUPLICATE_WATCH_OWNER_STATES.has(live.state) ||
+    (live.screen_state !== null &&
+      !DUPLICATE_WATCH_OWNER_STATES.has(live.screen_state)) ||
+    (live.source !== "screen" && live.source !== "registry")
+  ) {
+    return DUPLICATE_WATCH_OWNER_RANK.UNKNOWN;
+  }
+
+  const deliverable = isLiveDeliverable(live);
+  switch (live.screen_state) {
+    case "error":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.ERROR;
+    case "working":
+      if (live.source === "screen") {
+        return DUPLICATE_WATCH_OWNER_RANK.ACTIVE;
+      }
+      break;
+    case "done":
+      return DUPLICATE_WATCH_OWNER_RANK.TERMINAL;
+    case "creating":
+    case "booting":
+      return DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "ready":
+    case "idle":
+    case null:
+      break;
+  }
+
+  switch (live.state) {
+    case "ready":
+    case "idle":
+      if (deliverable) return DUPLICATE_WATCH_OWNER_RANK.INTERACTIVE;
+      if (
+        live.source === "screen" &&
+        (live.screen_state === "ready" || live.screen_state === "idle")
+      ) {
+        return DUPLICATE_WATCH_OWNER_RANK.OBSERVED_INTERACTIVE;
+      }
+      return DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "working":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "done":
+      return DUPLICATE_WATCH_OWNER_RANK.TERMINAL;
+    case "creating":
+    case "booting":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "error":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.ERROR;
+  }
+}
+
 export function selectDuplicateWatchOwnerCandidate<T>(
   probed: readonly { candidate: T; live: LiveAgentState | null }[],
 ): T | undefined {
-  return (
-    probed.find(
-      ({ live }) =>
-        live !== null &&
-        live.state !== "error" &&
-        live.screen_state !== "error" &&
-        isLiveDeliverable(live),
-    )?.candidate ??
-    probed.find(
-      ({ live }) =>
-        live !== null &&
-        live.source === "screen" &&
-        live.state !== "error" &&
-        live.screen_state !== "error",
-    )?.candidate ??
-    probed.find(({ live }) => live !== null && isLiveDeliverable(live))
-      ?.candidate ??
-    probed[0]?.candidate
-  );
+  let best = probed[0];
+  let bestRank = rankDuplicateWatchOwnerCandidate(best?.live ?? null);
+  for (const entry of probed.slice(1)) {
+    const rank = rankDuplicateWatchOwnerCandidate(entry.live);
+    if (rank < bestRank) {
+      best = entry;
+      bestRank = rank;
+    }
+  }
+  return best?.candidate;
 }
 
 type TextContent = { type: "text"; text: string };

@@ -25,6 +25,7 @@ import {
   createServerContext,
   selectDuplicateWatchOwnerCandidate,
 } from "../src/server.js";
+import * as serverModule from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { runWithCallerContext } from "../src/caller-context.js";
@@ -39,7 +40,10 @@ import {
 import { recommendedMonitorCommand } from "../src/inbox.js";
 import { armWatch, readWatchRegistry } from "../src/watch-spec.js";
 import type { AgentRecord } from "../src/agent-types.js";
-import type { LiveAgentState } from "../src/live-agent-state.js";
+import {
+  isLiveDeliverable,
+  type LiveAgentState,
+} from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
@@ -1528,6 +1532,252 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         },
       ]),
     ).toBe(working);
+  });
+
+  it("prefers a working owner over an earlier screen-confirmed done owner", () => {
+    const completed = { agent_id: "first-completed" };
+    const working = { agent_id: "second-working" };
+
+    expect(
+      selectDuplicateWatchOwnerCandidate([
+        {
+          candidate: completed,
+          live: liveState({
+            state: "done",
+            source: "screen",
+            registry_state: "done",
+            screen_state: "done",
+          }),
+        },
+        {
+          candidate: working,
+          live: liveState({
+            state: "working",
+            source: "screen",
+            registry_state: "working",
+            screen_state: "working",
+          }),
+        },
+      ]),
+    ).toBe(working);
+  });
+
+  it("assigns every duplicate-owner state tuple an explicit documented rank", () => {
+    const rank = (
+      serverModule as unknown as {
+        rankDuplicateWatchOwnerCandidate?: (
+          live: LiveAgentState | null,
+        ) => number;
+      }
+    ).rankDuplicateWatchOwnerCandidate;
+    expect(rank).toBeTypeOf("function");
+    if (!rank) return;
+
+    const cases: {
+      name: string;
+      live: LiveAgentState | null;
+      expectedDeliverable: boolean | null;
+      expectedRank: number;
+    }[] = [
+      {
+        name: "screen-ready deliverable",
+        live: liveState(),
+        expectedDeliverable: true,
+        expectedRank: 0,
+      },
+      {
+        name: "registry-idle deliverable without screen evidence",
+        live: liveState({
+          state: "idle",
+          source: "registry",
+          registry_state: "idle",
+          screen_state: null,
+        }),
+        expectedDeliverable: true,
+        expectedRank: 0,
+      },
+      {
+        name: "screen-working active",
+        live: liveState({
+          state: "working",
+          source: "screen",
+          registry_state: "working",
+          screen_state: "working",
+        }),
+        expectedDeliverable: false,
+        expectedRank: 1,
+      },
+      {
+        name: "screen-ready but registry-booting",
+        live: liveState({
+          state: "ready",
+          source: "screen",
+          registry_state: "booting",
+          screen_state: "ready",
+        }),
+        expectedDeliverable: false,
+        expectedRank: 2,
+      },
+      {
+        name: "screen-idle but not deliverable",
+        live: liveState({
+          state: "idle",
+          source: "screen",
+          registry_state: "booting",
+          screen_state: "idle",
+        }),
+        expectedDeliverable: false,
+        expectedRank: 2,
+      },
+      {
+        name: "screen-confirmed done",
+        live: liveState({
+          state: "done",
+          source: "screen",
+          registry_state: "done",
+          screen_state: "done",
+        }),
+        expectedDeliverable: false,
+        expectedRank: 3,
+      },
+      {
+        name: "registry-done at a live ready prompt",
+        live: liveState({
+          state: "done",
+          source: "registry",
+          registry_state: "done",
+          screen_state: "ready",
+        }),
+        expectedDeliverable: true,
+        expectedRank: 3,
+      },
+      {
+        name: "error-screened but registry-ready deliverable",
+        live: liveState({
+          state: "error",
+          source: "screen",
+          registry_state: "ready",
+          screen_state: "error",
+        }),
+        expectedDeliverable: true,
+        expectedRank: 4,
+      },
+      {
+        name: "creating without direct screen evidence",
+        live: liveState({
+          state: "creating",
+          source: "registry",
+          registry_state: "creating",
+          screen_state: null,
+        }),
+        expectedDeliverable: false,
+        expectedRank: 5,
+      },
+      {
+        name: "booting without direct screen evidence",
+        live: liveState({
+          state: "booting",
+          source: "registry",
+          registry_state: "booting",
+          screen_state: null,
+        }),
+        expectedDeliverable: false,
+        expectedRank: 5,
+      },
+      {
+        name: "screen-creating evidence stays in the starting rank",
+        live: liveState({
+          state: "creating",
+          source: "screen",
+          registry_state: "creating",
+          screen_state: "creating",
+        }),
+        expectedDeliverable: false,
+        expectedRank: 5,
+      },
+      {
+        name: "screen-booting evidence stays in the starting rank",
+        live: liveState({
+          state: "booting",
+          source: "screen",
+          registry_state: "booting",
+          screen_state: "booting",
+        }),
+        expectedDeliverable: false,
+        expectedRank: 5,
+      },
+      {
+        name: "registry-working without direct screen evidence",
+        live: liveState({
+          state: "working",
+          source: "registry",
+          registry_state: "working",
+          screen_state: null,
+        }),
+        expectedDeliverable: false,
+        expectedRank: 5,
+      },
+      {
+        name: "non-deliverable error",
+        live: liveState({
+          state: "error",
+          source: "screen",
+          registry_state: "error",
+          screen_state: "error",
+        }),
+        expectedDeliverable: false,
+        expectedRank: 6,
+      },
+      {
+        name: "missing probe",
+        live: null,
+        expectedDeliverable: null,
+        expectedRank: 7,
+      },
+      {
+        name: "bogus lifecycle state is worst even if marked deliverable",
+        live: liveState({
+          state: "bogus" as never,
+          source: "screen",
+          registry_state: "ready",
+          screen_state: "ready",
+        }),
+        expectedDeliverable: true,
+        expectedRank: 7,
+      },
+      {
+        name: "bogus screen state is worst even with a known lifecycle state",
+        live: liveState({
+          state: "ready",
+          source: "screen",
+          registry_state: "ready",
+          screen_state: "bogus" as never,
+        }),
+        expectedDeliverable: true,
+        expectedRank: 7,
+      },
+      {
+        name: "bogus evidence source is worst even when deliverable",
+        live: liveState({
+          state: "ready",
+          source: "bogus" as never,
+          registry_state: "ready",
+          screen_state: "ready",
+        }),
+        expectedDeliverable: true,
+        expectedRank: 7,
+      },
+    ];
+
+    for (const testCase of cases) {
+      if (testCase.live && testCase.expectedDeliverable !== null) {
+        expect(
+          isLiveDeliverable(testCase.live),
+          `${testCase.name} deliverability`,
+        ).toBe(testCase.expectedDeliverable);
+      }
+      expect(rank(testCase.live), testCase.name).toBe(testCase.expectedRank);
+    }
   });
 
   it("keeps duplicate-owner selection ordered tier 1 before 2 before 3 before 4", () => {
