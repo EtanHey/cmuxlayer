@@ -6560,8 +6560,8 @@ export class AgentEngine {
    * subject_agent_id; legacy rows are pruned only when their target exactly
    * matches a persisted child's engine-issued report_path.
    */
-  private async pruneClosedChildReportWatches(): Promise<void> {
-    if (!this.watchRegistryPath) return;
+  private async pruneClosedChildReportWatches(): Promise<boolean> {
+    if (!this.watchRegistryPath) return false;
     const agents = this.registry.list();
     const pruneObservedAt = Date.now();
     const byReportPath = new Map<string, AgentRecord[]>();
@@ -6577,7 +6577,7 @@ export class AgentEngine {
       persistedWatches.map((watch) => [watch.watch_id, JSON.stringify(watch)]),
     );
     const subjectIdsByWatch = new Map<string, string[]>();
-    const missingLegacyChannelWatchIds = new Set<string>();
+    const missingLegacyStateWatchIds = new Set<string>();
     const channelBaseDir = resolve(
       dirname(agentDir("__cmuxlayer_channel_probe__", this.inboxOpts)),
     );
@@ -6600,9 +6600,7 @@ export class AgentEngine {
             this.registry.get(inferredAgentId) ??
             this.stateMgr.readState(inferredAgentId);
           if (inferred) subjects = [inferred];
-          else if (!existsSync(targetDir)) {
-            missingLegacyChannelWatchIds.add(watch.watch_id);
-          }
+          else missingLegacyStateWatchIds.add(watch.watch_id);
         }
       }
       subjectIdsByWatch.set(watch.watch_id, [
@@ -6626,6 +6624,7 @@ export class AgentEngine {
         }
       }),
     );
+    let retainedRevisionChanged = false;
     await removeWatches(
       (watch) => {
         // The predicate runs under the watch-registry write lock. If a sweep
@@ -6633,6 +6632,7 @@ export class AgentEngine {
         if (
           persistedWatchSnapshots.get(watch.watch_id) !== JSON.stringify(watch)
         ) {
+          retainedRevisionChanged = true;
           return false;
         }
         if (watch.state === "failed" && !watch.notification_pending) {
@@ -6651,7 +6651,7 @@ export class AgentEngine {
           .filter((subject): subject is AgentRecord => Boolean(subject));
         if (
           subjects.length === 0 &&
-          missingLegacyChannelWatchIds.has(watch.watch_id)
+          missingLegacyStateWatchIds.has(watch.watch_id)
         ) {
           return true;
         }
@@ -6667,6 +6667,7 @@ export class AgentEngine {
       },
       { registryPath: this.watchRegistryPath },
     );
+    return retainedRevisionChanged;
   }
 
   scheduleClosedChildReportWatchPrune(): void {
@@ -6677,7 +6678,9 @@ export class AgentEngine {
     if (!this.childReportWatchPrunePending) return;
     this.childReportWatchPrunePending = false;
     try {
-      await this.pruneClosedChildReportWatches();
+      if (await this.pruneClosedChildReportWatches()) {
+        this.childReportWatchPrunePending = true;
+      }
     } catch (error) {
       this.childReportWatchPrunePending = true;
       this.sweepDebugLog(

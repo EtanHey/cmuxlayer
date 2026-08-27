@@ -769,7 +769,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
-  it("prunes at least 100 legacy rows whose agent channel directories are absent", async () => {
+  it("prunes at least 100 legacy rows whose agent directories exist but state files do not", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
     const watches = Array.from({ length: 120 }, (_, index) => ({
@@ -789,6 +789,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       },
       state: "armed" as const,
     }));
+    for (const watch of watches) {
+      mkdirSync(dirname(watch.target), { recursive: true });
+      writeFileSync(watch.target, "legacy report\n", "utf8");
+    }
     writeFileSync(
       watchRegistryPath,
       `${JSON.stringify({ version: 1, watches }, null, 2)}\n`,
@@ -1072,6 +1076,87 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
     expect(
       wakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      owner: "cmuxlayerClaude",
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+  });
+
+  it("prefers a live duplicate seat owner over an earlier terminal record", async () => {
+    await server.close();
+    const liveOwnerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "live-owner-pane",
+      undefined,
+      [],
+      liveOwnerUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const staleOwner: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "cmuxlayerClaude-stale-seat",
+      seat_id: "cmuxlayerClaude",
+      surface_id: "surface:stale",
+      state: "done",
+      cli_session_id: "recover-stale-owner",
+    };
+    const liveOwner: AgentRecord = {
+      ...parentRecord(liveOwnerUuid),
+      agent_id: "cmuxlayerClaude-live-seat",
+      seat_id: "cmuxlayerClaude",
+    };
+    const reportPath = join(inboxDir, "duplicate-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+      agent_id: "duplicate-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: "cmuxlayerClaude",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [staleOwner, liveOwner, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: "cmuxlayerClaude",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    expect(
+      wakeCalls.some(([, args]: [string, string[]]) =>
+        args.includes("surface:new") &&
         args.some(
           (arg) => arg.includes("[report]") && arg.includes(reportPath),
         ),
@@ -1683,7 +1768,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
   });
 
-  it("does not prune a watch revision that re-arms during liveness probing", async () => {
+  it("retries pruning after retaining a watch revision that re-arms during liveness probing", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
     const reportPath = join(inboxDir, "concurrent-rearm", "report.md");
@@ -1734,11 +1819,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       },
     );
 
+    engine.scheduleClosedChildReportWatchPrune();
     const pruning = (
       engine as unknown as {
-        pruneClosedChildReportWatches: () => Promise<void>;
+        retryClosedChildReportWatchPrune: () => Promise<void>;
       }
-    ).pruneClosedChildReportWatches();
+    ).retryClosedChildReportWatchPrune();
     await probeStarted;
     const rearmedRegistry = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
     rearmedRegistry.watches[0] = {
@@ -1764,6 +1850,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         notification_delivered_at_ms: 3_000,
       }),
     ]);
+
+    await (
+      engine as unknown as {
+        retryClosedChildReportWatchPrune: () => Promise<void>;
+      }
+    ).retryClosedChildReportWatchPrune();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
   });
 
   it("keeps lifecycle initialization live and retries startup pruning after lock contention", async () => {

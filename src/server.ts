@@ -12426,21 +12426,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 candidate.user_killed !== true &&
                 !candidate.deletion_intent,
             );
-            const owner =
-              liveOwnerCandidates.find(
-                (candidate) => candidate.agent_id === event.owner,
-              ) ??
-              liveOwnerCandidates.find(
-                (candidate) => candidate.seat_id?.trim() === event.owner,
-              ) ??
-              (() => {
-                const prefixMatches = liveOwnerCandidates.filter((candidate) =>
-                  candidate.agent_id.startsWith(`${event.owner}-`),
+            const owner = await (async () => {
+              const directOrSeatMatches = liveOwnerCandidates.filter(
+                (candidate) =>
+                  candidate.agent_id === event.owner ||
+                  candidate.seat_id?.trim() === event.owner,
+              );
+              if (directOrSeatMatches.length === 1) {
+                return directOrSeatMatches[0];
+              }
+              if (directOrSeatMatches.length > 1) {
+                const probed = await Promise.all(
+                  directOrSeatMatches.map(async (candidate) => ({
+                    candidate,
+                    live: await freshLiveAgentStateProbe(candidate),
+                  })),
                 );
-                return prefixMatches.length === 1
-                  ? prefixMatches[0]
-                  : undefined;
-              })();
+                return (
+                  probed.find(
+                    ({ live }) => live !== null && isLiveDeliverable(live),
+                  )?.candidate ?? directOrSeatMatches[0]
+                );
+              }
+              const prefixMatches = liveOwnerCandidates.filter((candidate) =>
+                candidate.agent_id.startsWith(`${event.owner}-`),
+              );
+              return prefixMatches.length === 1
+                ? prefixMatches[0]
+                : undefined;
+            })();
             let externalDelivered = true;
             if (event.reason !== "predicate_matched" && externalNotify) {
               try {
