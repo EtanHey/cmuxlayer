@@ -18,7 +18,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -769,6 +769,851 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
+  it("prunes at least 100 legacy rows whose agent channel directories are absent", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const watches = Array.from({ length: 120 }, (_, index) => ({
+      watch_id: `legacy-dead-${index}`,
+      owner: "lead-parent",
+      target: join(inboxDir, `legacy-dead-${index}`, "report.md"),
+      change: "content" as const,
+      deadline: Number.MAX_SAFE_INTEGER,
+      target_kind: "file" as const,
+      armed_at_ms: 1_000,
+      last_heartbeat_at_ms: 1_000,
+      liveness_source: "process",
+      liveness: {
+        value: true,
+        source: "process" as const,
+        observed_at_ms: 1_000,
+      },
+      state: "armed" as const,
+    }));
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify({ version: 1, watches }, null, 2)}\n`,
+      "utf8",
+    );
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(120);
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(0);
+  });
+
+  it("never lets terminal-child pruning remove an undelivered notification", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "pending-notification", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "pending-notification",
+      state: "done",
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "done\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    const watch = await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const registryFile = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    registryFile.watches[0] = {
+      ...registryFile.watches[0],
+      state: "fired",
+      terminal_reason: "target_changed",
+      terminal_at_ms: 2_000,
+      observed_value: "sha256:changed",
+      notification_pending: true,
+      notification_attempts: 8,
+      notification_next_attempt_at_ms: 2_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(registryFile, null, 2)}\n`,
+      "utf8",
+    );
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        watch_id: watch.watch_id,
+        notification_pending: true,
+        notification_attempts: 8,
+      }),
+    ]);
+  });
+
+  it("resolves a legacy bare owner seat to the live suffixed lead before delivery", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = {
+      ...parentRecord(),
+      agent_id: "cmuxlayerClaude-live-seat",
+      seat_id: "cmuxlayerClaude",
+    };
+    const reportPath = join(inboxDir, "bare-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "bare-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: "cmuxlayerClaude",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: "cmuxlayerClaude",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    expect(
+      wakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      owner: "cmuxlayerClaude",
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+  });
+
+  it("fails a missing owner seat fast and re-arms the persistent content watch", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "missing-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "missing-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: "retired-lead-seat",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: "retired-lead-seat",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const watch = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(watch).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+      notification_exhausted_reason: "owner_not_live",
+    });
+    expect(watch?.fingerprint).toBe(watch?.observed_value);
+  });
+
+  it("re-arms after owner_not_live and wakes the resumed owner for the next revision", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "resumed-parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    let watchNow = 1_000;
+    const unavailableExternalNotify = vi.fn().mockResolvedValue(false);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchRegistryNow: () => watchNow,
+        watchNotify: unavailableExternalNotify,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const ownerId = "resumed-lead-seat";
+    const reportPath = join(inboxDir, "resumed-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "resumed-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: ownerId,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({
+      owner: ownerId,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const initialFingerprint = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0]?.fingerprint;
+
+    writeFileSync(reportPath, "first revision while owner is away\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+
+    const afterOwnerLoss = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(unavailableExternalNotify).toHaveBeenCalledOnce();
+    expect(afterOwnerLoss).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+      notification_exhausted_reason: "owner_not_live",
+    });
+    expect(afterOwnerLoss?.fingerprint).toBe(afterOwnerLoss?.observed_value);
+    expect(afterOwnerLoss?.fingerprint).not.toBe(initialFingerprint);
+
+    const resumedOwner = { ...parentRecord(parentUuid), agent_id: ownerId };
+    engine.stateMgr.writeState(resumedOwner);
+    engine.getRegistry().set(resumedOwner.agent_id, resumedOwner);
+    const beforeResumeWake = (exec as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    watchNow = 2_000;
+    writeFileSync(reportPath, "second revision after owner resumed\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+
+    const resumedWakeCalls = (
+      exec as ReturnType<typeof vi.fn>
+    ).mock.calls.slice(beforeResumeWake);
+    expect(
+      resumedWakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(unavailableExternalNotify).toHaveBeenCalledTimes(2);
+    const afterResume = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(afterResume).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+    expect(afterResume?.fingerprint).toBe(afterResume?.observed_value);
+    expect(afterResume?.fingerprint).not.toBe(afterOwnerLoss?.fingerprint);
+  });
+
+  it("accepts a successful external watch notification when the owner seat is absent", async () => {
+    await server.close();
+    const externalNotify = vi.fn().mockResolvedValue(true);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchNotify: externalNotify,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "externally-notified-child",
+      surface_id: "surface:child",
+      parent_agent_id: "missing-owner-seat",
+      spawn_depth: 1,
+      role: "worker",
+    };
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    const contentPath = join(inboxDir, child.agent_id, "content-report.md");
+    const markerPath = join(inboxDir, child.agent_id, "marker-report.md");
+    mkdirSync(dirname(contentPath), { recursive: true });
+    writeFileSync(contentPath, "before\n", "utf8");
+    writeFileSync(markerPath, "before\n", "utf8");
+    await engine.armWatch({
+      owner: child.parent_agent_id as string,
+      subject_agent_id: child.agent_id,
+      target: contentPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    await engine.armWatch({
+      owner: child.parent_agent_id as string,
+      subject_agent_id: child.agent_id,
+      target: markerPath,
+      marker: "DONE_EXTERNAL",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    writeFileSync(contentPath, "after\n", "utf8");
+    appendFileSync(markerPath, "DONE_EXTERNAL\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    expect(externalNotify).toHaveBeenCalledTimes(2);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: contentPath,
+          state: "armed",
+          notification_pending: false,
+          notification_attempts: 0,
+        }),
+        expect.objectContaining({
+          target: markerPath,
+          state: "fired",
+          notification_pending: false,
+          notification_attempts: 0,
+        }),
+      ]),
+    );
+  });
+
+  it("falls back externally after an aliased owner's local wake is refused", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\n❯ preserve this human draft",
+      "aliased-parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "external-fallback-child",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    const externalNotify = vi.fn().mockResolvedValue(true);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchNotify: externalNotify,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    const owner = {
+      ...parentRecord(parentUuid),
+      agent_id: "cmuxlayerClaude-live-seat",
+      seat_id: "cmuxlayerClaude",
+    };
+    const child: AgentRecord = {
+      ...parentRecord(childUuid),
+      agent_id: "external-fallback-child",
+      surface_id: "surface:child",
+      parent_agent_id: "cmuxlayerClaude",
+      spawn_depth: 1,
+      role: "worker",
+    };
+    for (const record of [owner, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: "cmuxlayerClaude",
+      subject_agent_id: child.agent_id,
+      target: child.agent_id,
+      predicate: "idle",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await engine.sweepWatchesBestEffort();
+
+    expect(externalNotify).toHaveBeenCalledOnce();
+    expect(externalNotify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "cmuxlayerClaude",
+        subject_agent_id: child.agent_id,
+        target: child.agent_id,
+        reason: "predicate_matched",
+      }),
+    );
+    const localMutationCalls = (
+      exec as ReturnType<typeof vi.fn>
+    ).mock.calls.slice(before);
+    expect(
+      localMutationCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[watch]") && arg.includes(child.agent_id),
+        ),
+      ),
+    ).toBe(false);
+    const afterFallback = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(afterFallback).toMatchObject({
+      state: "fired",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+  });
+
+  it("delivers to a live owner whose persisted state is terminal", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(parentUuid), state: "done" as const };
+    const reportPath = join(inboxDir, "terminal-owner-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "terminal-owner-child",
+      surface_id: "surface:child",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      before,
+    );
+    expect(
+      wakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+    });
+  });
+
+  it("keeps a first-delivery watch while its terminal child pane is live", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    const reportPath = join(inboxDir, "live-first-delivery", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(childUuid),
+      agent_id: "live-first-delivery",
+      surface_id: "surface:child",
+      surface_uuid: childUuid,
+      state: "done",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        subject_agent_id: child.agent_id,
+        state: "armed",
+      }),
+    ]);
+  });
+
+  it("keeps a subjectless legacy watch while its terminal child pane is live", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    const reportPath = join(inboxDir, "legacy-live-terminal", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(childUuid),
+      agent_id: "legacy-live-terminal",
+      surface_id: "surface:child",
+      surface_uuid: childUuid,
+      state: "done",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        target: reportPath,
+        state: "armed",
+      }),
+    ]);
+  });
+
+  it("keeps a delivered content watch armed while a terminal record still has a live pane", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord();
+    const reportPath = join(inboxDir, "live-terminal-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord(),
+      agent_id: "live-terminal-child",
+      surface_id: "surface:child",
+      surface_uuid: childUuid,
+      state: "done",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: parent.agent_id,
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    writeFileSync(reportPath, "first distinct change\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+    const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+    writeFileSync(reportPath, "second distinct change\n", "utf8");
+    await engine.sweepWatchesBestEffort();
+
+    const secondWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      afterFirstWake,
+    );
+    expect(
+      secondWakeCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      notification_pending: false,
+      notification_delivered_at_ms: expect.any(Number),
+    });
+  });
+
+  it("does not prune a watch revision that re-arms during liveness probing", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const reportPath = join(inboxDir, "concurrent-rearm", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "concurrent-rearm",
+      surface_id: "surface:closed-child",
+      state: "done",
+      parent_agent_id: "lead-parent",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    const watch = await engine.armWatch({
+      owner: "lead-parent",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const initialRegistry = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    initialRegistry.watches[0] = {
+      ...initialRegistry.watches[0],
+      notification_delivered_at_ms: 2_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(initialRegistry, null, 2)}\n`,
+      "utf8",
+    );
+    let releaseLivenessProbe: (() => void) | undefined;
+    let markProbeStarted: (() => void) | undefined;
+    const probeStarted = new Promise<void>((resolve) => {
+      markProbeStarted = resolve;
+    });
+    const livenessGate = new Promise<void>((resolve) => {
+      releaseLivenessProbe = resolve;
+    });
+    vi.spyOn(engine.getRegistry(), "isSurfaceAlive").mockImplementation(
+      async () => {
+        markProbeStarted?.();
+        await livenessGate;
+        return false;
+      },
+    );
+
+    const pruning = (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+    await probeStarted;
+    const rearmedRegistry = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    rearmedRegistry.watches[0] = {
+      ...rearmedRegistry.watches[0],
+      fingerprint: "concurrent-revision",
+      observed_value: "concurrent-revision",
+      notification_delivered_at_ms: 3_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(rearmedRegistry, null, 2)}\n`,
+      "utf8",
+    );
+    releaseLivenessProbe?.();
+    await pruning;
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        watch_id: watch.watch_id,
+        fingerprint: "concurrent-revision",
+        notification_delivered_at_ms: 3_000,
+      }),
+    ]);
+  });
+
   it("keeps lifecycle initialization live and retries startup pruning after lock contention", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
@@ -891,8 +1736,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "report.md",
     );
     const child: AgentRecord = {
-      ...parentRecord(),
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
       agent_id: "terminal-child-without-stop-flag",
+      surface_id: "surface:closed-child",
       state: "done",
       user_killed: false,
       parent_agent_id: "lead-parent",

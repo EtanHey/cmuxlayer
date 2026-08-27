@@ -185,13 +185,15 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     );
 
     const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
     expect(parsed).toMatchObject({
       delivered: false,
-      terminal: false,
-      delivery_state: "queued",
+      terminal: true,
+      delivery_state: "failed",
+      error_code: "blocked_by_foreign_draft",
     });
-    expect(parsed.WARNING).toMatch(/not delivered yet/i);
-    expect(parsed.WARNING).toMatch(/composer already holds text/i);
+    expect(parsed.WARNING).toMatch(/terminal failure/i);
+    expect(parsed.error).toMatch(/composer already holds text/i);
     expect(mutatedPane(mockExec)).toBe(false);
     context.dispose();
   }, 20_000);
@@ -281,10 +283,12 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       {} as any,
     );
 
+    expect(result.isError).toBe(true);
     expect(parseToolResult(result)).toMatchObject({
       delivered: false,
-      terminal: false,
-      delivery_state: "queued",
+      terminal: true,
+      delivery_state: "failed",
+      error_code: "blocked_by_foreign_draft",
     });
     expect(mutatedPane(mockExec)).toBe(false);
     context.dispose();
@@ -379,7 +383,7 @@ describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () =>
   }, 20_000);
 });
 
-describe("T2 delivery truth — a blocked composer is not a terminal verdict (B1a)", () => {
+describe("T2 delivery truth — a blocked composer is a terminal refusal (B1a)", () => {
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-t2-delivery-truth-"));
   });
@@ -389,7 +393,7 @@ describe("T2 delivery truth — a blocked composer is not a terminal verdict (B1
     vi.resetModules();
   });
 
-  it("queues instead of terminally failing when the composer holds unflushed text", async () => {
+  it("refuses instead of accepting a send when the composer holds unflushed text", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n\u276f ";
     const mockExec = makeLifecycleExec(() => screenText);
@@ -402,10 +406,8 @@ describe("T2 delivery truth — a blocked composer is not a terminal verdict (B1
     const server = createServer({ context });
     const agentId = await spawnReadyAgent(server);
 
-    // This delivery's OWN prior message, still sitting unflushed in the
-    // composer (the queued_followup shape). The guard cannot tell it from a
-    // human draft -- and must not, because the right answer for both is
-    // "wait for the composer to flush", never a terminal failure.
+    // The guard cannot prove who owns this existing draft. It can prove that
+    // appending and pressing Return is unsafe, so this invocation must refuse.
     screenText = "Claude Code\n> an earlier message that has not flushed yet\n";
     mockExec.mockClear();
 
@@ -415,14 +417,14 @@ describe("T2 delivery truth — a blocked composer is not a terminal verdict (B1
     );
 
     const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
     expect(parsed).toMatchObject({
-      ok: true,
+      ok: false,
       delivered: false,
-      delivery_state: "queued",
-      terminal: false,
+      delivery_state: "failed",
+      terminal: true,
+      error_code: "blocked_by_foreign_draft",
     });
-    expect(parsed.WARNING).toMatch(/not delivered yet/i);
-    expect(parsed.WARNING).toMatch(/composer already holds text/i);
     // Still the property #442 exists for: nothing was typed.
     expect(mutatedPane(mockExec)).toBe(false);
     context.dispose();

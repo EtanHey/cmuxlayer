@@ -262,8 +262,9 @@ describe("send_to consolidated modes", () => {
     expect(parsed.terminal).toBe(true);
     expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
-    expect(result.content[0].text).toContain("typed into");
-    expect(result.content[0].text).toContain("not submitted");
+    expect(JSON.parse(result.content[0].text)).toEqual(
+      result.structuredContent,
+    );
   });
 
   it("returns terminal typed truth when raw surface Return was unverified", async () => {
@@ -295,8 +296,10 @@ describe("send_to consolidated modes", () => {
     expect(parsed.terminal).toBe(true);
     expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
-    expect(result.content[0].text).toContain("submission attempted");
-    expect(result.content[0].text).toContain("not verified");
+    expect(JSON.parse(result.content[0].text)).toEqual(
+      result.structuredContent,
+    );
+    expect(parsed.WARNING).toMatch(/not verified/i);
   });
 
   it("routes command mode through atomic raw-surface command delivery", async () => {

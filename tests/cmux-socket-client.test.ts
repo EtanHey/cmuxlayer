@@ -25,6 +25,10 @@ import { CmuxSocketClient } from "../src/cmux-socket-client.js";
 import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
 import { getTransportHealth } from "../src/cmux-transport-self-heal.js";
+import {
+  currentCliFallbackSources,
+  withTransportRetryTracking,
+} from "../src/transport-retry-context.js";
 
 // ── Mock V2 Socket Server ──────────────────────────────────────────────
 
@@ -36,6 +40,15 @@ const INTERLEAVED_STATUS_FRAME = readFileSync(
 ).trim();
 const MOCK_WORKSPACE_ID = "8481D6A0-CE17-4B7C-8695-7A722D30FEE2";
 const MOCK_SECOND_WORKSPACE_ID = "7335E54B-6E88-4B19-BE8C-71C39F4E9D10";
+
+it("names every CLI fallback call site instead of emitting unspecified provenance", () => {
+  const source = readFileSync(
+    new URL("../src/cmux-socket-client.ts", import.meta.url),
+    "utf8",
+  );
+
+  expect(source).not.toMatch(/cliFallbackPinned\(\)/);
+});
 
 interface MockV2Request {
   id: string;
@@ -1316,9 +1329,14 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
         cliFallback: createMockCli(),
       });
 
-      await expect(client.listWindows()).resolves.toEqual({
+      const result = await withTransportRetryTracking(async () => {
+        const windows = await client.listWindows();
+        return { windows, sources: currentCliFallbackSources() };
+      });
+      expect(result.windows).toEqual({
         windows: [{ id: "cli-window", workspace_count: 1 }],
       });
+      expect(result.sources).toEqual(["list_windows"]);
       expect(cliCalls).toEqual([{ method: "listWindows", args: [] }]);
     } finally {
       MOCK_RESPONSES["window.list"] = saved;
@@ -1345,6 +1363,23 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
         ],
       },
     ]);
+  });
+
+  it("labels the socket-missing new-surface path in transport provenance", async () => {
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback: createMockCli(),
+    });
+
+    const sources = await withTransportRetryTracking(async () => {
+      await client.newSurface({
+        pane: "pane:1",
+        workspace: "workspace:1",
+      });
+      return currentCliFallbackSources();
+    });
+
+    expect(sources).toEqual(["new_surface"]);
   });
 
   it("newSplit falls back to CLI when surface.split returns method_not_found", async () => {

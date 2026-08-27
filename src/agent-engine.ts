@@ -19,7 +19,7 @@ import {
   resolveClosureState,
   type ClosureState,
 } from "./coordination-paths.js";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
@@ -240,6 +240,7 @@ import {
 } from "./cmux-transport-self-heal.js";
 import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
+  agentDir,
   dispatchOnce,
   readInbox,
   reapOrphanedPendingChannelMarkers,
@@ -6522,23 +6523,96 @@ export class AgentEngine {
       const path = resolve(agent.report_path);
       byReportPath.set(path, [...(byReportPath.get(path) ?? []), agent]);
     }
+    const persistedWatches = readWatchRegistry({
+      registryPath: this.watchRegistryPath,
+    }).watches;
+    const persistedWatchSnapshots = new Map(
+      persistedWatches.map((watch) => [watch.watch_id, JSON.stringify(watch)]),
+    );
+    const subjectIdsByWatch = new Map<string, string[]>();
+    const missingLegacyChannelWatchIds = new Set<string>();
+    const channelBaseDir = resolve(
+      dirname(agentDir("__cmuxlayer_channel_probe__", this.inboxOpts)),
+    );
+    for (const watch of persistedWatches) {
+      if (watch.target_kind !== "file" || watch.change !== "content") continue;
+      let subjects = watch.subject_agent_id
+        ? [
+            this.registry.get(watch.subject_agent_id) ??
+              this.stateMgr.readState(watch.subject_agent_id),
+          ].filter((subject): subject is AgentRecord => Boolean(subject))
+        : (byReportPath.get(resolve(watch.target)) ?? []);
+      if (subjects.length === 0 && !watch.subject_agent_id) {
+        const targetDir = resolve(dirname(watch.target));
+        const targetLooksEngineIssued =
+          basename(watch.target) === "report.md" &&
+          resolve(dirname(targetDir)) === channelBaseDir;
+        if (targetLooksEngineIssued) {
+          const inferredAgentId = basename(targetDir);
+          const inferred =
+            this.registry.get(inferredAgentId) ??
+            this.stateMgr.readState(inferredAgentId);
+          if (inferred) subjects = [inferred];
+          else if (!existsSync(targetDir)) {
+            missingLegacyChannelWatchIds.add(watch.watch_id);
+          }
+        }
+      }
+      subjectIdsByWatch.set(watch.watch_id, [
+        ...new Set(subjects.map((subject) => subject.agent_id)),
+      ]);
+    }
+    const liveSubjectIds = new Set<string>();
+    const candidateSubjectIds = new Set([...subjectIdsByWatch.values()].flat());
+    await Promise.all(
+      [...candidateSubjectIds].map(async (subjectAgentId) => {
+        const subject =
+          this.registry.get(subjectAgentId) ??
+          this.stateMgr.readState(subjectAgentId);
+        if (
+          subject &&
+          subject.user_killed !== true &&
+          !subject.deletion_intent &&
+          (await this.registry.isSurfaceAlive(subject))
+        ) {
+          liveSubjectIds.add(subjectAgentId);
+        }
+      }),
+    );
     await removeWatches(
       (watch) => {
         if (watch.target_kind !== "file" || watch.change !== "content") {
           return false;
         }
-        const subjects = watch.subject_agent_id
-          ? [
-              this.registry.get(watch.subject_agent_id) ??
-                this.stateMgr.readState(watch.subject_agent_id),
-            ].filter((subject): subject is AgentRecord => Boolean(subject))
-          : (byReportPath.get(resolve(watch.target)) ?? []);
+        if (watch.notification_pending) return false;
+        // The predicate runs under the watch-registry write lock. If a sweep
+        // re-armed or otherwise changed this row after our liveness snapshot,
+        // retain it and let the next prune evaluate the fresh revision.
+        if (
+          persistedWatchSnapshots.get(watch.watch_id) !== JSON.stringify(watch)
+        ) {
+          return false;
+        }
+        const subjects = (subjectIdsByWatch.get(watch.watch_id) ?? [])
+          .map(
+            (subjectAgentId) =>
+              this.registry.get(subjectAgentId) ??
+              this.stateMgr.readState(subjectAgentId),
+          )
+          .filter((subject): subject is AgentRecord => Boolean(subject));
+        if (
+          subjects.length === 0 &&
+          missingLegacyChannelWatchIds.has(watch.watch_id)
+        ) {
+          return true;
+        }
         if (subjects.length === 0) return Boolean(watch.subject_agent_id);
         return !subjects.some(
           (subject) =>
             subject.user_killed !== true &&
             !subject.deletion_intent &&
-            !TERMINAL_STATES.has(subject.state) &&
+            (!TERMINAL_STATES.has(subject.state) ||
+              liveSubjectIds.has(subject.agent_id)) &&
             subject.parent_agent_id === watch.owner,
         );
       },
@@ -8080,6 +8154,11 @@ export class AgentEngine {
         now: this.watchRegistryNow,
         agentObservation: this.watchAgentObservation,
         notify: this.watchNotify,
+        onNotificationExhausted: ({ notification, attempts, reason }) => {
+          this.sweepDebugLog(
+            `[cmuxlayer] watch notification exhausted: watch=${notification.watch_id} owner=${notification.owner} attempts=${attempts} reason=${reason}`,
+          );
+        },
       });
     } catch {
       // Declared watches are retried on the next lifecycle sweep.
@@ -9236,6 +9315,11 @@ export class AgentEngine {
         now: this.watchRegistryNow,
         agentObservation: this.watchAgentObservation,
         notify: this.watchNotify,
+        onNotificationExhausted: ({ notification, attempts, reason }) => {
+          this.sweepDebugLog(
+            `[cmuxlayer] watch notification exhausted: watch=${notification.watch_id} owner=${notification.owner} attempts=${attempts} reason=${reason}`,
+          );
+        },
       });
       const current = readWatchRegistry({
         registryPath: this.watchRegistryPath,

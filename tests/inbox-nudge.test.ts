@@ -1267,8 +1267,9 @@ describe("report_to_parent hierarchy-bound escalation", () => {
     expect(sendCalls(exec).at(-1)?.join(" ")).toContain("surface:new");
   });
 
-  it("keeps a parent blocker durable without typing into a foreign draft", async () => {
+  it("keeps a parent blocker durable and escalates past a foreign draft", async () => {
     await server.close();
+    const grandparentUuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     exec = makeExec(
       "Claude Code\n❯ do not submit this existing draft",
       "parent-pane",
@@ -1280,15 +1281,27 @@ describe("report_to_parent hierarchy-bound escalation", () => {
           title: "child-pane",
           text: "Claude Code\nWhat can I help you with?\n❯ ",
         },
+        {
+          id: grandparentUuid,
+          ref: "surface:grandparent",
+          title: "grandparent-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
       ],
       parentUuid,
     );
     server = createInboxServer(exec, inboxDir);
+    const grandparent = hierarchyRecord({
+      agentId: "orc-grandparent",
+      surfaceId: "surface:grandparent",
+      surfaceUuid: grandparentUuid,
+      parentAgentId: null,
+    });
     const parent = hierarchyRecord({
       agentId: "lead-parent",
       surfaceId: "surface:new",
       surfaceUuid: parentUuid,
-      parentAgentId: null,
+      parentAgentId: grandparent.agent_id,
     });
     const child = hierarchyRecord({
       agentId: "worker-child",
@@ -1296,7 +1309,7 @@ describe("report_to_parent hierarchy-bound escalation", () => {
       surfaceUuid: childUuid,
       parentAgentId: parent.agent_id,
     });
-    register(parent, child);
+    register(grandparent, parent, child);
     const before = sendCalls(exec).length;
 
     const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
@@ -1310,14 +1323,21 @@ describe("report_to_parent hierarchy-bound escalation", () => {
 
     expect(parsed).toMatchObject({
       ok: true,
-      route: "direct",
-      delivery: "queued",
+      route: "fallback",
+      notified_agent_id: grandparent.agent_id,
+      delivery: "submitted",
       durable: true,
     });
-    expect(sendCalls(exec)).toHaveLength(before);
+    expect(sendCalls(exec)).toHaveLength(before + 1);
     expect(readInbox(parent.agent_id, { baseDir: inboxDir })[0]?.task).toBe(
       "Blocked while parent is composing",
     );
+    expect(
+      readInbox(grandparent.agent_id, { baseDir: inboxDir })[0],
+    ).toMatchObject({
+      tag: "parent_delivery_failed",
+      task: expect.stringContaining("Blocked while parent is composing"),
+    });
   });
 
   it("refuses a root caller with no registry parent", async () => {

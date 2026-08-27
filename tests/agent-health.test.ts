@@ -370,6 +370,8 @@ describe("agent lifecycle health", () => {
 
     expect(health.reconciled_state).toBe("ready");
     expect(health.issue_codes).toContain("registry_screen_disagreement");
+    expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
+    expect(health.status).toBe("healthy");
   });
 
   it("marks stale dispatches on a live monitor as wedged, not dead", () => {

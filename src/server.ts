@@ -705,7 +705,7 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       notified_agent_id: z.string().optional(),
       route: z.enum(["direct", "fallback"]).optional(),
       durable: z.boolean().optional(),
-      delivery: z.enum(["submitted", "queued"]).optional(),
+      delivery: z.enum(["submitted", "queued", "refused"]).optional(),
       delivery_id: z.string().optional(),
       error_code: z.string().optional(),
     })
@@ -1023,6 +1023,23 @@ function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
   return { route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0 };
 }
 
+function withSurfaceDeliveryTimings(
+  result: ToolReturn,
+  timings: DeliveryPhaseTimings,
+): ToolReturn {
+  const payload = result.structuredContent;
+  if (!payload) return result;
+  const structuredContent = {
+    ...payload,
+    timings_ms: payload.timings_ms ?? timings,
+  };
+  return {
+    ...result,
+    content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+    structuredContent,
+  };
+}
+
 function addDeliveryPhaseTiming(
   timings: DeliveryPhaseTimings | undefined,
   phase: DeliveryPhase,
@@ -1279,12 +1296,16 @@ class DeliverySafetyGateError extends Error {
 
   constructor(
     readonly error_code:
-      "blocked_by_interactive_prompt" | "blocked_by_permission_prompt",
+      | "blocked_by_interactive_prompt"
+      | "blocked_by_permission_prompt"
+      | "blocked_by_foreign_draft",
     readonly screen: ParsedScreenResult,
   ) {
     super(
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
+        : error_code === "blocked_by_foreign_draft"
+          ? "target composer already holds text this delivery did not write; refused before typing"
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -5436,21 +5457,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // the first keystroke -- a refused send is recoverable, a submitted draft
     // is not.
     //
-    // RETRYABLE, not terminal (T2 B1a): the same screen is produced by this
-    // delivery's OWN unflushed prior message (the queued_followup shape), and
-    // the guard cannot tell that from a human draft. For both, the right
-    // answer is "wait for the composer to flush", which the v2 queue already
-    // expresses -- and #467's bounded queue lifetime guarantees the caller
-    // still gets a terminal answer if it never does. A terminal `failed` here
-    // would be this PR's own disease: a verdict the engine did not observe.
+    // Refusal is terminal for this caller: the pre-type snapshot proves the
+    // requested bytes cannot be appended safely. Queuing that refusal reports
+    // `accepted:true` even though the guard deliberately performed no pane
+    // mutation, and can later submit text the caller never authorized.
     if (
       opts.draftGuardText !== undefined &&
       composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
     ) {
-      throw new RetryableDeliveryError(
-        "target composer already holds text this delivery did not write; " +
-          "refused to type (typing + Return would submit or mutate it). " +
-          "Delivery stays queued until the composer is clear.",
+      throw new DeliverySafetyGateError(
+        "blocked_by_foreign_draft",
+        snapshot.parsed,
       );
     }
 
@@ -12351,6 +12368,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (!subjectStillBelongsToOwner()) {
               return true;
             }
+            const liveOwnerCandidates = [
+              ...registry.list(),
+              ...stateMgr.listStates(),
+            ].filter(
+              (candidate, index, rows) =>
+                rows.findIndex(
+                  (row) => row.agent_id === candidate.agent_id,
+                ) === index &&
+                candidate.user_killed !== true &&
+                !candidate.deletion_intent,
+            );
+            const owner =
+              liveOwnerCandidates.find(
+                (candidate) => candidate.agent_id === event.owner,
+              ) ??
+              liveOwnerCandidates.find(
+                (candidate) => candidate.seat_id?.trim() === event.owner,
+              ) ??
+              (() => {
+                const prefixMatches = liveOwnerCandidates.filter((candidate) =>
+                  candidate.agent_id.startsWith(`${event.owner}-`),
+                );
+                return prefixMatches.length === 1
+                  ? prefixMatches[0]
+                  : undefined;
+              })();
             let externalDelivered = true;
             if (event.reason !== "predicate_matched" && opts?.watchNotify) {
               try {
@@ -12362,9 +12405,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (!subjectStillBelongsToOwner()) {
               return true;
             }
-            const owner =
-              registry.get(event.owner) ?? stateMgr.readState(event.owner);
+            if (!owner) {
+              if (event.reason === "predicate_matched" && opts?.watchNotify) {
+                try {
+                  externalDelivered =
+                    (await opts.watchNotify(event)) !== false;
+                } catch {
+                  externalDelivered = false;
+                }
+              }
+              if (opts?.watchNotify && externalDelivered) {
+                return true;
+              }
+              return {
+                delivered: false,
+                retryable: false,
+                reason: "owner_not_live",
+              };
+            }
             if (owner && lifecycleAgentInputDeliverer) {
+              const externalFallbackAfterLocalFailure = async () => {
+                if (
+                  event.reason !== "predicate_matched" ||
+                  !opts?.watchNotify
+                ) {
+                  return false;
+                }
+                if (!subjectStillBelongsToOwner()) return true;
+                try {
+                  return (await opts.watchNotify(event)) !== false;
+                } catch {
+                  return false;
+                }
+              };
               const text = (() => {
                 if (
                   event.reason === "predicate_matched" ||
@@ -12396,11 +12469,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const ownerDelivered =
                   delivery.delivery === "submitted" ||
                   delivery.delivery === "queued";
-                return ownerDelivered;
+                return ownerDelivered
+                  ? true
+                  : externalFallbackAfterLocalFailure();
               } catch {
-                // Keep notification_pending=true. A later lifecycle sweep uses
-                // the parent's refreshed route after a session restart.
-                return false;
+                return externalFallbackAfterLocalFailure();
               }
             }
             if (event.reason !== "predicate_matched") {
@@ -16751,21 +16824,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const deliveryId = randomUUID();
               const timings = createDeliveryPhaseTimings();
-              return legacyHandler("send_input")(
-                {
-                  surface,
-                  workspace: args.workspace,
-                  text: args.text,
-                  chunk_size: args.chunk_size,
-                  background: args.background,
-                  press_enter: args.press_enter,
-                  rename_to_task: args.rename_to_task,
-                  allow_long_inline: args.allow_long_inline,
-                  _cmuxlayer_source_event: "send_to",
-                  _cmuxlayer_delivery_id: deliveryId,
-                  _cmuxlayer_timings: timings,
-                },
-                {},
+              return withSurfaceDeliveryTimings(
+                await legacyHandler("send_input")(
+                  {
+                    surface,
+                    workspace: args.workspace,
+                    text: args.text,
+                    chunk_size: args.chunk_size,
+                    background: args.background,
+                    press_enter: args.press_enter,
+                    rename_to_task: args.rename_to_task,
+                    allow_long_inline: args.allow_long_inline,
+                    _cmuxlayer_source_event: "send_to",
+                    _cmuxlayer_delivery_id: deliveryId,
+                    _cmuxlayer_timings: timings,
+                  },
+                  {},
+                ),
+                timings,
               );
             }
             if (mode === "command") {
