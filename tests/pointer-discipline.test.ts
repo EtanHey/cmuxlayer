@@ -523,7 +523,7 @@ describe("pane input pointer discipline", () => {
     mockExec.mockClear();
 
     const result = await tool.handler(
-      { agent_id: agentId, text: "new fleet message", press_enter: false },
+      { mode: "agent", agent_id: agentId, text: "new fleet message", press_enter: false },
       {} as any,
     );
 
@@ -603,7 +603,7 @@ describe("pane input pointer discipline", () => {
     mockExec.mockClear();
 
     const result = await tool.handler(
-      { agent_id: agentId, text: "continue", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "continue", press_enter: true },
       {} as any,
     );
 
@@ -1010,6 +1010,7 @@ describe("pane input pointer discipline", () => {
 
     const result = await sendTo.handler(
       {
+        mode: "agent",
         agent_id: agentId,
         text: "x".repeat(601),
         press_enter: true,
@@ -1043,7 +1044,7 @@ describe("pane input pointer discipline", () => {
     mockExec.mockClear();
 
     const result = await sendTo.handler(
-      { agent_id: agentId, text: denseIncidentPayload, press_enter: true },
+      { mode: "agent", agent_id: agentId, text: denseIncidentPayload, press_enter: true },
       {} as any,
     );
 
@@ -1057,7 +1058,7 @@ describe("pane input pointer discipline", () => {
 
   it.each([
     ["surface", { text: denseIncidentPayload }],
-    ["command", { command: denseIncidentPayload }],
+    ["command", { text: denseIncidentPayload }],
   ] as const)(
     "send_to mode=%s refuses the dense incident below the general inline cap",
     async (mode, payload) => {
@@ -1113,6 +1114,7 @@ describe("pane input pointer discipline", () => {
 
     const result = await sendTo.handler(
       {
+        mode: "agent",
         agent_id: agentId,
         text: "x".repeat(2_000),
         press_enter: true,
@@ -1154,6 +1156,7 @@ describe("pane input pointer discipline", () => {
 
     const result = await sendTo.handler(
       {
+        mode: "agent",
         agent_id: agentId,
         text: "x".repeat(600),
         press_enter: true,
@@ -1188,6 +1191,7 @@ describe("pane input pointer discipline", () => {
 
     let result = await sendToAgent.handler(
       {
+        mode: "agent",
         agent_id: agentId,
         text: "x".repeat(601),
         press_enter: true,
@@ -1204,6 +1208,7 @@ describe("pane input pointer discipline", () => {
 
     result = await sendToAgent.handler(
       {
+        mode: "agent",
         agent_id: agentId,
         text: "x".repeat(2_000),
         press_enter: true,
@@ -1245,6 +1250,7 @@ describe("pane input pointer discipline", () => {
 
     const result = await sendTo.handler(
       {
+        mode: "agent",
         agent_id: agentId,
         text: "x".repeat(701),
         press_enter: true,

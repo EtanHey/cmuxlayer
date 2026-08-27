@@ -550,6 +550,10 @@ function createReliabilityServer(client: FakeClaudeSurfaceClient) {
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
+  const sendTo = (server as any)._registeredTools.send_to;
+  const sendToHandler = sendTo.handler.bind(sendTo);
+  sendTo.handler = (args: Record<string, unknown>, context: unknown) =>
+    sendToHandler({ mode: "agent", ...args }, context);
   // These tests exercise registry routing and submit verification, not the
   // periodic reconciliation loop. Stop its wall-clock sweep so it cannot race
   // the five-second submit deadline or add unrelated work under parallel load.

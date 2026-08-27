@@ -1204,6 +1204,32 @@ export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
 
+  const lines = text.split("\n").map((line) => line.trim());
+  let harnessErrorIndex = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (
+      /^API Error:/i.test(lines[index]) ||
+      /^Claude Code can't respond\b.*$/i.test(lines[index])
+    ) {
+      harnessErrorIndex = index;
+    }
+  }
+  const harnessErrorLine = lines[harnessErrorIndex];
+  const recoveredAfterHarnessError = lines
+    .slice(harnessErrorIndex + 1)
+    .some((line) => /^(?:❯|>)\s+\S/.test(line));
+  if (harnessErrorLine && !recoveredAfterHarnessError) {
+    const errorTail = lines.slice(harnessErrorIndex).join("\n");
+    const requestId =
+      errorTail.match(/(?:"request_id"\s*:\s*"|request[ _]id\s*:\s*)(req_[A-Za-z0-9]+)/i)?.[1] ??
+      "unknown";
+    const summary = harnessErrorLine
+      .replace(/^API Error:\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    errors.push(`harness_api_error: ${summary} request_id=${requestId}`);
+  }
+
   if (hasApprovalPromptBlock(text)) {
     errors.push("permission_prompt");
   }

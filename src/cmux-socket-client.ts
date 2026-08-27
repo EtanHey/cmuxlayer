@@ -31,6 +31,7 @@ import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
 import { recordCliFallback } from "./transport-retry-context.js";
 import { listAllWindowWorkspaces } from "./surface-topology.js";
+import { assertCanonicalSurfaceRef } from "./surface-ref.js";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -146,6 +147,9 @@ export class CmuxSocketClient {
     method: string,
     params: Record<string, unknown> = {},
   ): Promise<T> {
+    if (typeof params.surface_id === "string") {
+      assertCanonicalSurfaceRef(params.surface_id);
+    }
     return this.withConnectionRetry(
       async () => {
         await this.ensureAuthenticated();

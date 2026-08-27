@@ -33,6 +33,49 @@ const deadCodexShellFixture = JSON.parse(
 ) as { lines_12: string; lines_80: string };
 
 describe("parseScreen", () => {
+  it.each([
+    ["claude-api-error.txt", "req_011CeRnwUcf8wusrNawosx6c"],
+    ["claude-safeguard-refusal.txt", "req_011CeRnwgFeHAsTb3hU4n9jt"],
+    ["claude-cant-respond.txt", "req_011CeRpLVMKMCob477i3fnNb"],
+  ])(
+    "lifts harness API failure fixture %s into errors with its request id",
+    (fixture, requestId) => {
+      const parsed = parseScreen(readFixture(`live/${fixture}`));
+
+      expect(parsed.errors).toEqual([
+        expect.stringMatching(
+          new RegExp(`^harness_api_error:.*${requestId}$`, "i"),
+        ),
+      ]);
+      expect(parsed.status).toBe("frozen");
+      expect(parsed.control_state).not.toBe("ready");
+    },
+  );
+
+  it("keeps only the latest consecutive harness error and clears stale recovered errors", () => {
+    const consecutive = parseScreen(`
+API Error: first refusal
+Request ID: req_first
+❯ retry
+API Error: latest refusal
+Request ID: req_latest
+❯
+`);
+    expect(consecutive.errors).toEqual([
+      expect.stringMatching(/latest refusal.*req_latest$/),
+    ]);
+
+    const recovered = parseScreen(`
+API Error: old refusal
+Request ID: req_old
+❯ go
+⏺ Recovery completed successfully
+❯
+`);
+    expect(recovered.errors).toEqual([]);
+    expect(recovered.status).not.toBe("frozen");
+  });
+
   it("parses Claude-style output with response block and done signal", () => {
     const parsed = parseScreen(`
 \u001b[32m⏺ Completed successfully\u001b[0m

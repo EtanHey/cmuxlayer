@@ -28,21 +28,21 @@
       "list_surfaces": 142,
       "read_screen": 161,
       "send_to_surface_warm": 214,
-      "send_to_agent_warm": 217,
+      "send_to_agent_warm": 232,
       "list_agents": 112,
       "control_health": 97,
       "spawn_close_during_sweep": 161,
-      "first_send_after_spawn": 216
+      "first_send_after_spawn": 231
     },
     "request_sha256": {
       "list_surfaces": "29b9c66db4de170a41fdd8ad608f356201f747970e6f7fa74ae605f360f85a33",
       "read_screen": "0f6c57ad85b668c2ae73f651d9d44c41525b8f2fba3d2f7783e6acb592dc2137",
       "send_to_surface_warm": "d2b6d478fff8c5cf8568d2c2caaa48cbe98314a700477cccbc20657a0ba3058e",
-      "send_to_agent_warm": "2d59a5a9a94bfa7b2fa6a23a16e91eab26dee814b37a6b4285f382303907593c",
+      "send_to_agent_warm": "ec21fdf5817b3568ba66b0f44b2b5982319c2778cd60a7de637c1231428ee6e1",
       "list_agents": "4f4fb87e95a8f7cded25a4fd1bb35d11492182997e1f7d14c856683f53cc0416",
       "control_health": "56e5969d5764757c0775d59e7c65e83cbd91d6f4f4a3279f1cc910fe6854a10f",
       "spawn_close_during_sweep": "1c7dfd23479835bd9d42cc8e74444cbac74e47aa8f288d3eb3278e777c96acdf",
-      "first_send_after_spawn": "84b72f5cc76154d091394b15154b3dcc6aefd7e80d6027a2666c71c83a6194a6"
+      "first_send_after_spawn": "811745b320e17eddf09602072cea6a0f8274bd3e6ecb6438796646803efbcc75"
     },
     "transport": {
       "list_surfaces": "socket",
@@ -100,6 +100,6 @@
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "60864aaa599333a1ebcced00058d7c67f25ef412c36a09499aacf7f06c54362c"
+    "content_sha256": "5e082ba864d9aa64876bd2f8901ad301adab6286da3d18623c9ae4cc8682e601"
   }
 }

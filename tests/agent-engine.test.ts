@@ -9564,6 +9564,63 @@ Session ID: ${sessionId}`,
   });
 
   describe("halt escalation", () => {
+    it("wakes the parent immediately when a harness API error freezes a child", async () => {
+      const nowMs = Date.parse("2026-08-27T07:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "api-error-parent",
+        surface_id: "surface:api-error-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "api-error-child",
+        surface_id: "surface:api-error-child",
+        state: "working",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      const apiError =
+        'Claude Code\nAPI Error: 500 {"request_id":"req_run9_api_error"}\n❯';
+      await (engine as any).maybeEscalateLiveHalt(child, apiError);
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          tag: "agent_halt_harness_api_error",
+          task: expect.stringContaining("harness_api_error"),
+        }),
+      ]);
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain(
+        "req_run9_api_error",
+      );
+    });
+
     it("persists prompt blockage even when escalation is opted out and clears it from healthy screen truth", async () => {
       const nowMs = Date.parse("2026-08-14T13:00:00.000Z");
       engine.dispose();

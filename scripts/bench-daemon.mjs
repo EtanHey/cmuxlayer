@@ -820,6 +820,7 @@ async function measureFirstSendAfterSpawn(
   await waitForSweepHoldState(sweepHoldState, holdToken, "held");
   const first = await measureSend(
     {
+      mode: "agent",
       agent_id: spawnResult.agent_id,
       text: "Read and follow docs.local/scratch/run5r3/bench-first-send.md",
       press_enter: true,
@@ -833,6 +834,7 @@ async function measureFirstSendAfterSpawn(
   await waitForSweepHoldState(sweepHoldState, holdToken, "complete");
   const second = await measureSend(
     {
+      mode: "agent",
       agent_id: spawnResult.agent_id,
       text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
       press_enter: true,

@@ -26,6 +26,7 @@ export interface ParsedSurfaceHealthInput {
   agent_type?: ParsedScreenAgentType | null;
   control_state?: ParsedControlPlaneState | null;
   actions?: string[] | null;
+  errors?: string[] | null;
 }
 
 export interface AgentHealthInputOverrides {
@@ -37,6 +38,7 @@ export interface AgentHealthInputOverrides {
   screen_agent_type?: ParsedScreenAgentType | null;
   screen_control_state?: ParsedControlPlaneState | null;
   screen_actions?: string[] | null;
+  screen_errors?: string[] | null;
   surface_workspace_id?: string | null;
   surface_title?: string | null;
   topology?: AgentTopologyHealthInput | null;
@@ -115,8 +117,9 @@ export async function buildAgentHealthInput(
     overrides.screen_agent_type === undefined ||
     overrides.screen_control_state === undefined ||
     overrides.screen_actions === undefined;
+  const needsScreenErrors = overrides.screen_errors === undefined;
   let parsedScreen: ParsedSurfaceHealthInput | null | undefined = null;
-  if (needsScreen) {
+  if (needsScreen || needsScreenErrors) {
     try {
       parsedScreen = await deps.readParsedSurface?.(agent);
     } catch {
@@ -131,6 +134,10 @@ export async function buildAgentHealthInput(
     overrides.screen_actions !== undefined
       ? overrides.screen_actions
       : parsedScreen?.actions;
+  const screenErrors =
+    overrides.screen_errors !== undefined
+      ? overrides.screen_errors
+      : parsedScreen?.errors;
   const screenAgentType =
     overrides.screen_agent_type !== undefined
       ? overrides.screen_agent_type
@@ -165,6 +172,7 @@ export async function buildAgentHealthInput(
     screen_agent_type: screenAgentType,
     screen_control_state: screenControlState,
     screen_actions: screenActions,
+    screen_errors: screenErrors,
     surface_workspace_id: surfaceWorkspaceId,
     surface_title: overrides.surface_title,
     topology,

@@ -63,6 +63,7 @@ export function screenConfirmedAgentState(
   // A tracked agent surface that has fallen back to a bare shell has no agent
   // process left; that is an error regardless of how idle the prompt looks.
   if (controlState === "shell" && agentType === "unknown") return "error";
+  if (status === "frozen") return "error";
   if (status === "working" || status === "thinking") return "working";
   if (
     controlState === "ready" &&

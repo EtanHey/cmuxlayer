@@ -364,7 +364,7 @@ describe("live daemon-first restart topology", () => {
         jsonrpc: "2.0",
         id: 2,
         method: "tools/call",
-        params: { name: "control_health", arguments: {} },
+        params: { name: "control_health", arguments: { detail: "full" } },
       });
       const initialHealth = await peer.waitForResponse(2, 10_000);
       const initialDaemonPid = daemonPidFromHealth(initialHealth);
@@ -382,7 +382,7 @@ describe("live daemon-first restart topology", () => {
         jsonrpc: "2.0",
         id: 3,
         method: "tools/call",
-        params: { name: "control_health", arguments: {} },
+        params: { name: "control_health", arguments: { detail: "full" } },
       });
       const recoveredHealth = await peer.waitForResponse(3, 15_000);
       const replacementDaemonPid = daemonPidFromHealth(recoveredHealth, stderr);

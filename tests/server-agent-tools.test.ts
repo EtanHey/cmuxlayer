@@ -358,6 +358,12 @@ function createTrackedServer(
   const context = createServerContext(normalizedOpts);
   serverContexts.push(context);
   const server = createServer({ ...normalizedOpts, context });
+  const sendToTool = (server as any)._registeredTools?.send_to;
+  if (sendToTool?.handler) {
+    const sendToHandler = sendToTool.handler.bind(sendToTool);
+    sendToTool.handler = (args: Record<string, unknown>, toolContext: unknown) =>
+      sendToHandler({ mode: "agent", ...args }, toolContext);
+  }
   if (defaultCallerContext) {
     const registeredTools = (server as any)._registeredTools as Record<
       string,
@@ -2051,7 +2057,13 @@ function registeredTestTool(server: unknown, name: string): RegisteredTestTool {
       _registeredTools: Record<string, RegisteredTestTool>;
     }
   )._registeredTools;
-  return registry[name]!;
+  const tool = registry[name]!;
+  if (name !== "send_to") return tool;
+  return {
+    handler(args, context) {
+      return tool.handler({ mode: "agent", ...args }, context);
+    },
+  };
 }
 
 function testLifecycleEngine(server: unknown): TestLifecycleEngine {

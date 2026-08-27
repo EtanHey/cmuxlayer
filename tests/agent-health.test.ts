@@ -43,6 +43,23 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("agent lifecycle health", () => {
+  it("degrades a pane whose latest turn ended on a harness API error", () => {
+    const health = evaluateAgentHealth(makeRecord(), {
+      screen_status: "frozen",
+      screen_agent_type: "claude",
+      screen_control_state: "unknown",
+      screen_errors: [
+        "harness_api_error: Fable 5 safeguards flagged this message request_id=req_011CeRnwgFeHAsTb3hU4n9jt",
+      ],
+    });
+
+    expect(health.status).not.toBe("healthy");
+    expect(health.issue_codes).toContain("harness_api_error");
+    expect(health.issues.join(" ")).toContain(
+      "req_011CeRnwgFeHAsTb3hU4n9jt",
+    );
+  });
+
   it("marks an owner unhealthy when its registered monitor collapsed", () => {
     const health = evaluateAgentHealth(makeRecord(), {
       monitor_alive: true,

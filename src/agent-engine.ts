@@ -4110,6 +4110,8 @@ export class AgentEngine {
         return this.haltIdleWithoutDoneDwellMs;
       case "wedged":
         return this.haltWedgedDwellMs;
+      case "harness_api_error":
+        return 0;
     }
   }
 
@@ -4130,6 +4132,8 @@ export class AgentEngine {
           `the child is paused and cannot act — unpause the pane before send_to, ` +
           `or send_key(surface: "${agent.surface_id}", key: "return") if the screen says to resume`
         );
+      case "harness_api_error":
+        return `inspect the harness API error and request ID on surface ${agent.surface_id}, then retry or resume the harness turn`;
     }
   }
 
@@ -4657,7 +4661,9 @@ export class AgentEngine {
       this.blockingBackgroundWaitElapsedMs(screenText);
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
-    if (
+    if (parsed.errors.some((error) => error.startsWith("harness_api_error:"))) {
+      haltType = "harness_api_error";
+    } else if (
       parsed.control_state === "permission_prompt" ||
       parsed.control_state === "interactive_overlay"
     ) {
@@ -4688,6 +4694,10 @@ export class AgentEngine {
       haltType = "idle_without_done";
     }
     if (!haltType) return this.clearHaltEpisode(agent);
+    const haltObservableAction =
+      parsed.current_action ??
+      parsed.errors.find((error) => error.startsWith("harness_api_error:")) ??
+      haltType;
 
     let episode = agent;
     if (!agent.halt_episode_type) {
@@ -4702,10 +4712,11 @@ export class AgentEngine {
         halt_notified_ancestor_id: null,
         halt_fallback_sink_id: null,
         halt_last_delivery_error: null,
-        halt_last_observable_action: parsed.current_action ?? haltType,
+        halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
-      return episode;
+      if (haltType !== "harness_api_error") return episode;
+      agent = episode;
     }
     if (agent.halt_episode_type !== haltType) {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
@@ -4716,7 +4727,7 @@ export class AgentEngine {
         halt_notified_ancestor_id: null,
         halt_fallback_sink_id: null,
         halt_last_delivery_error: null,
-        halt_last_observable_action: parsed.current_action ?? haltType,
+        halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
       return episode;
@@ -4724,7 +4735,7 @@ export class AgentEngine {
     if (haltType === "wedged") {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
         halt_episode_observations: (agent.halt_episode_observations ?? 0) + 1,
-        halt_last_observable_action: parsed.current_action ?? haltType,
+        halt_last_observable_action: haltObservableAction,
       });
       this.registry.set(agent.agent_id, episode);
     }
@@ -5709,6 +5720,7 @@ export class AgentEngine {
               return {
                 status: parsed.status,
                 actions: parsed.actions,
+                errors: parsed.errors,
               };
             } catch {
               return null;

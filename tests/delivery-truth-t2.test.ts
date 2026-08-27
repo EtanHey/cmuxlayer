@@ -180,7 +180,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { agent_id: agentId, text: "fleet message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
       {} as any,
     );
 
@@ -215,11 +215,64 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { agent_id: agentId, text: "fleet message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
       {} as any,
     );
 
     expect(parseToolResult(result).ok).toBe(true);
+    expect(mutatedPane(mockExec)).toBe(true);
+    context.dispose();
+  });
+
+  it("interact skill refuses a non-empty composer and names its contents", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n❯ ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    screenText = "Claude Code\n❯ keep this human draft\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools.interact.handler(
+      { agent: agentId, action: "skill", command: "/review" },
+      {} as any,
+    );
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error).toContain("keep this human draft");
+    expect(mutatedPane(mockExec)).toBe(false);
+    context.dispose();
+  });
+
+  it("interact skill submits from an empty composer and receipts the screen result", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n❯ ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    screenText = "Claude Code\n❯ \nCLAUDE_COUNTER:1\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools.interact.handler(
+      { agent: agentId, action: "skill", command: "/review" },
+      {} as any,
+    );
+    expect(parseToolResult(result)).toMatchObject({
+      ok: true,
+      submit_verified: true,
+      screen_result_line: "CLAUDE_COUNTER:1",
+    });
     expect(mutatedPane(mockExec)).toBe(true);
     context.dispose();
   });
@@ -245,7 +298,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { agent_id: agentId, text: "fleet message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
       {} as any,
     );
 
@@ -279,7 +332,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { agent_id: agentId, text: "fleet message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
       {} as any,
     );
 
@@ -373,7 +426,7 @@ describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () =>
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { agent_id: agentId, text: "fleet message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
       {} as any,
     );
 
@@ -412,7 +465,7 @@ describe("T2 delivery truth — a blocked composer is a terminal refusal (B1a)",
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { agent_id: agentId, text: "second message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "second message", press_enter: true },
       {} as any,
     );
 

@@ -19,6 +19,7 @@ import { AgentEngine } from "../src/agent-engine.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-control-health-test");
 const ACCESS_CONTROL_DENIED_TEXT =
@@ -605,13 +606,13 @@ describe("control health", () => {
         { surface: "surface:untracked", key: "return" },
         {} as any,
       );
-      const first = await controlHealth.handler({}, {} as any);
+      const first = await controlHealth.handler({ detail: "full" }, {} as any);
       nowMs += 1_000;
       await sendKey.handler(
         { surface: "surface:untracked", key: "return" },
         {} as any,
       );
-      const second = await controlHealth.handler({}, {} as any);
+      const second = await controlHealth.handler({ detail: "full" }, {} as any);
       const firstHealth =
         first.structuredContent.health.self_heal.pane_pty_dead;
       const secondHealth =
@@ -635,7 +636,10 @@ describe("control health", () => {
         { surface: "surface:untracked", key: "return" },
         {} as any,
       );
-      const afterNonPtyFailure = await controlHealth.handler({}, {} as any);
+      const afterNonPtyFailure = await controlHealth.handler(
+        { detail: "full" },
+        {} as any,
+      );
       expect(
         afterNonPtyFailure.structuredContent.health.self_heal.pane_pty_dead,
       ).toMatchObject({
@@ -658,7 +662,10 @@ describe("control health", () => {
         { surface: "surface:untracked", key: "return" },
         {} as any,
       );
-      const nextEpisode = await controlHealth.handler({}, {} as any);
+      const nextEpisode = await controlHealth.handler(
+        { detail: "full" },
+        {} as any,
+      );
       expect(
         nextEpisode.structuredContent.health.self_heal.pane_pty_dead.surfaces[0]
           .since_at,
@@ -719,7 +726,7 @@ describe("control health", () => {
     });
     const tool = (server as any)._registeredTools["control_health"];
 
-    const result = await tool.handler({}, {} as any);
+    const result = await tool.handler({ detail: "full" }, {} as any);
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -745,6 +752,85 @@ describe("control health", () => {
     expect(lines[0].snapshot.cmux_instances.nightly.socket_path).toBe(
       nightlySocket,
     );
+  });
+
+  it("defaults to terse health and lists only the caller's live watches", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const watchRegistryPath = join(TEST_ROOT, "watch-specs.json");
+    const rawHealth = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "home-terse"),
+      tmpDir: join(TEST_ROOT, "tmp-terse"),
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+    });
+    const stateMgr = new StateManager(TEST_ROOT);
+    stateMgr.writeState({
+      agent_id: "caller-agent",
+      seat_id: "caller-seat",
+      surface_id: "surface:caller",
+      surface_uuid: "11111111-2222-4333-8444-555555555555",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+    } as any);
+    const watch = (watch_id: string, owner: string, state: string) => ({
+      watch_id,
+      owner,
+      target: `/reports/${watch_id}.md`,
+      target_kind: "file",
+      marker: "TASK_DONE",
+      deadline: Date.now() + 60_000,
+      armed_at_ms: Date.now(),
+      last_heartbeat_at_ms: Date.now(),
+      liveness_source: "test",
+      liveness: { value: true, source: "process", observed_at_ms: Date.now() },
+      state,
+    });
+    writeFileSync(
+      watchRegistryPath,
+      JSON.stringify({
+        version: 1,
+        watches: [
+          watch("mine-live", "caller-agent", "armed"),
+          watch("mine-dropped", "caller-seat", "fired"),
+          watch("foreign-live", "another-agent", "armed"),
+        ],
+      }),
+    );
+    const context = createServerContext({ stateDir: TEST_ROOT });
+    const server = createServer({
+      context,
+      watchRegistryPath,
+      skipAgentLifecycle: true,
+      controlHealthCollector: async () => rawHealth,
+    });
+    const tool = (server as any)._registeredTools.control_health;
+    expect(new StateManager(context.stateDir).listStates()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ agent_id: "caller-agent" }),
+      ]),
+    );
+    const previousCallerSurface = process.env.CMUX_SURFACE_ID;
+    process.env.CMUX_SURFACE_ID = "11111111-2222-4333-8444-555555555555";
+    const terse = await runWithCallerContext(
+      { surfaceId: "11111111-2222-4333-8444-555555555555" },
+      () => tool.handler({}, {} as any),
+    );
+    const full = await tool.handler({ detail: "full" }, {} as any);
+    if (previousCallerSurface === undefined) delete process.env.CMUX_SURFACE_ID;
+    else process.env.CMUX_SURFACE_ID = previousCallerSurface;
+
+    expect(terse.structuredContent.health.caller_live_watches).toEqual({
+      count: 1,
+      watches: [
+        { watch_id: "mine-live", target: "/reports/mine-live.md", state: "armed" },
+      ],
+    });
+    expect(terse.content[0].text.length).toBeLessThan(full.content[0].text.length);
+    await server.close();
   });
 
   it("control_health surfaces daemon fallback warnings", async () => {

@@ -39,6 +39,16 @@ function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 describe("screenConfirmedAgentState — the one screen->state rule", () => {
+  it("treats a frozen harness-error screen as an error rather than idle-ready", () => {
+    expect(
+      screenConfirmedAgentState({
+        status: "frozen",
+        agent_type: "claude",
+        control_state: "unknown",
+      }),
+    ).toBe("error");
+  });
+
   it("reads an active screen as working", () => {
     expect(
       screenConfirmedAgentState({
