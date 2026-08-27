@@ -20,7 +20,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer, createServerContext } from "../src/server.js";
+import {
+  createServer,
+  createServerContext,
+  selectDuplicateWatchOwnerCandidate,
+} from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { runWithCallerContext } from "../src/caller-context.js";
@@ -35,6 +39,7 @@ import {
 import { recommendedMonitorCommand } from "../src/inbox.js";
 import { armWatch, readWatchRegistry } from "../src/watch-spec.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import type { LiveAgentState } from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
@@ -1201,109 +1206,51 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
   });
 
-  async function exerciseReadyDuplicateAtBareShell(secondScreen: string) {
-    await server.close();
-    const secondOwnerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    const firstOwnerUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    exec = makeExec(
-      secondScreen,
-      "second-owner-pane",
-      undefined,
-      [
-        {
-          id: firstOwnerUuid,
-          ref: "surface:first-owner",
-          title: "first-owner-pane",
-          text: "etanheyman@mac ~/repo$",
-        },
-      ],
-      secondOwnerUuid,
-    );
-    server = createServer(
-      withTestSurfaceObserver({
-        exec,
-        stateDir: STATE_DIR,
-        disableSpawnPreflight: true,
-        inboxBaseDir: inboxDir,
-        watchRegistryPath,
-      }),
-    );
-    await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
-    const firstOwner: AgentRecord = {
-      ...parentRecord(firstOwnerUuid),
-      agent_id: "cmuxlayerClaude-first-ready-seat",
-      seat_id: "cmuxlayerClaude",
-      surface_id: "surface:first-owner",
-      state: "ready",
-    };
-    const secondOwner: AgentRecord = {
-      ...parentRecord(secondOwnerUuid),
-      agent_id: "cmuxlayerClaude-second-ready-seat",
-      seat_id: "cmuxlayerClaude",
-      state: "ready",
-    };
-    const reportPath = join(inboxDir, "ready-duplicate-child", "report.md");
-    const child: AgentRecord = {
-      ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
-      agent_id: "ready-duplicate-child",
-      surface_id: "surface:child",
-      parent_agent_id: "cmuxlayerClaude",
-      spawn_depth: 1,
-      role: "worker",
-      report_path: reportPath,
-    };
-    mkdirSync(dirname(reportPath), { recursive: true });
-    writeFileSync(reportPath, "before\n", "utf8");
-    for (const record of [firstOwner, secondOwner, child]) {
-      engine.stateMgr.writeState(record);
-      engine.getRegistry().set(record.agent_id, record);
-    }
-    await engine.armWatch({
-      owner: "cmuxlayerClaude",
-      subject_agent_id: child.agent_id,
-      target: reportPath,
-      change: "content",
-      deadline: Number.MAX_SAFE_INTEGER,
-    });
-    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
-    writeFileSync(reportPath, "after\n", "utf8");
-
-    await engine.sweepWatchesBestEffort();
-
-    return {
-      reportPath,
-      wakeCalls: (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before),
-    };
-  }
-
-  it("prefers a genuinely live duplicate over an earlier ready record at a bare shell", async () => {
-    const { reportPath, wakeCalls } = await exerciseReadyDuplicateAtBareShell(
-      "Claude Code\nWhat can I help you with?\n❯ ",
-    );
-
-    expect(
-      wakeCalls.some(([, args]: [string, string[]]) =>
-        args.includes("surface:new") &&
-        args.some(
-          (arg) => arg.includes("[report]") && arg.includes(reportPath),
-        ),
-      ),
-    ).toBe(true);
+  const liveState = (
+    overrides: Partial<LiveAgentState> = {},
+  ): LiveAgentState => ({
+    state: "ready",
+    source: "screen",
+    registry_state: "ready",
+    screen_state: "ready",
+    stale_registry_state: false,
+    ...overrides,
   });
 
-  it("still attempts the first duplicate owner when every candidate is error-screened", async () => {
-    const { wakeCalls } = await exerciseReadyDuplicateAtBareShell(
-      "etanheyman@mac ~/repo$",
-    );
+  it("prefers a genuinely live duplicate over an earlier ready record with a direct error state", () => {
+    const first = { agent_id: "first-error-screened" };
+    const second = { agent_id: "second-live" };
 
     expect(
-      wakeCalls.filter(
-        ([, args]: [string, string[]]) =>
-          args.includes("read-screen") &&
-          args.includes("surface:first-owner"),
-      ).length,
-    ).toBeGreaterThanOrEqual(2);
+      selectDuplicateWatchOwnerCandidate([
+        {
+          candidate: first,
+          live: liveState({
+            state: "error",
+            screen_state: "error",
+            stale_registry_state: true,
+          }),
+        },
+        { candidate: second, live: liveState() },
+      ]),
+    ).toBe(second);
+  });
+
+  it("keeps the first duplicate owner selected for a wake attempt when every direct state is error-screened", () => {
+    const first = { agent_id: "first-error-screened" };
+    const second = { agent_id: "second-error-screened" };
+    const errorScreened = liveState({
+      state: "error",
+      screen_state: "error",
+      stale_registry_state: true,
+    });
+
+    expect(
+      selectDuplicateWatchOwnerCandidate([
+        { candidate: first, live: errorScreened },
+        { candidate: second, live: errorScreened },
+      ]),
+    ).toBe(first);
   });
 
   it("fails a missing owner seat fast and re-arms the persistent content watch", async () => {
