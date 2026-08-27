@@ -294,6 +294,23 @@ import {
 } from "./surface-write-liveness.js";
 import type { FleetSidebarPublisherLike } from "./fleet-sidebar.js";
 
+export function selectDuplicateWatchOwnerCandidate<T>(
+  probed: readonly { candidate: T; live: LiveAgentState | null }[],
+): T | undefined {
+  return (
+    probed.find(
+      ({ live }) =>
+        live !== null &&
+        live.state !== "error" &&
+        live.screen_state !== "error" &&
+        isLiveDeliverable(live),
+    )?.candidate ??
+    probed.find(({ live }) => live !== null && isLiveDeliverable(live))
+      ?.candidate ??
+    probed[0]?.candidate
+  );
+}
+
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
   content: TextContent[];
@@ -12442,18 +12459,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     live: await freshLiveAgentStateProbe(candidate),
                   })),
                 );
-                return (
-                  probed.find(
-                    ({ live }) =>
-                      live !== null &&
-                      live.state !== "error" &&
-                      live.screen_state !== "error" &&
-                      isLiveDeliverable(live),
-                  )?.candidate ??
-                  probed.find(
-                    ({ live }) => live !== null && isLiveDeliverable(live),
-                  )?.candidate ?? directOrSeatMatches[0]
-                );
+                return selectDuplicateWatchOwnerCandidate(probed);
               }
               const prefixMatches = liveOwnerCandidates.filter((candidate) =>
                 candidate.agent_id.startsWith(`${event.owner}-`),
