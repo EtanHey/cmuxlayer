@@ -22,6 +22,7 @@ const distIndex = join(repoRoot, "dist", "index.js");
 const distDaemon = join(repoRoot, "dist", "daemon.js");
 const DEFAULT_CLIENTS = 8;
 const DEFAULT_ROUNDS = 12;
+const PARALLEL_STRESS_COUNT = 10;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
 const READ_SCREEN_P50_BUDGET_MS = 250;
@@ -768,7 +769,28 @@ async function waitForLifecycleWaiter(
   throw new Error("close_surface never queued behind the held lifecycle sweep");
 }
 
-async function measureFirstSendAfterSpawn(
+function summarizeTimedSamples(samples) {
+  const transports = samples.map((sample) => sample.transport);
+  return {
+    request_bytes: samples[0]?.request_bytes,
+    request_sha256: samples[0]?.request_sha256,
+    p50_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 50)),
+    p95_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 95)),
+    lock_hold_ms: Math.max(
+      ...samples.map((sample) => sample.lock_hold_ms ?? 0),
+    ),
+    transport: transports.every((value) => value === "socket")
+      ? "socket"
+      : "cli",
+    transport_fallbacks: [
+      ...new Set(samples.flatMap((sample) => sample.transport_fallbacks ?? [])),
+    ],
+    sample_count: samples.length,
+    sampling: "sampled",
+  };
+}
+
+async function measureSpawnLifecycleOnce(
   client,
   sweepHoldState,
 ) {
@@ -871,36 +893,6 @@ async function measureFirstSendAfterSpawn(
     };
   }
 
-  const measureWarmTool = async (name, args) => {
-    const samples = [];
-    const transports = [];
-    const fallbackSources = new Set();
-    for (let index = 0; index < rounds; index += 1) {
-      const startedAt = nowMs();
-      const receipt = toolData(await client.callTool(name, args, 30_000), name);
-      samples.push(nowMs() - startedAt);
-      transports.push(operationTransport(receipt, name));
-      for (const source of receipt.transport_fallbacks ?? []) {
-        fallbackSources.add(source);
-      }
-    }
-    return {
-      request_bytes: requestBytes(name, args),
-      request_sha256: requestSha256(name, args),
-      lock_hold_ms: 0,
-      p50_ms: round(percentile(samples, 50)),
-      p95_ms: round(percentile(samples, 95)),
-      transport: transports.every((value) => value === "socket")
-        ? "socket"
-        : "cli",
-      transport_fallbacks: [...fallbackSources],
-    };
-  };
-  const listAgents = await measureWarmTool("list_agents", {
-    detail: "summary",
-  });
-  const controlHealth = await measureWarmTool("control_health", {});
-
   const closeArgs = {
     scope: "agent",
     agent_id: spawnResult.agent_id,
@@ -942,10 +934,95 @@ async function measureFirstSendAfterSpawn(
     first,
     second,
     surface: { ...surface, wait_for: surfaceWaitFor },
-    list_agents: listAgents,
-    control_health: controlHealth,
     spawn_close_during_sweep: spawnCloseDuringSweep,
   };
+}
+
+async function measureWarmToolAcrossClients(clients, name, args) {
+  const samples = [];
+  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    await Promise.all(
+      clients.map(async (client) => {
+        const startedAt = nowMs();
+        const receipt = toolData(
+          await client.callTool(name, args, 30_000),
+          name,
+        );
+        samples.push({
+          elapsed_ms: nowMs() - startedAt,
+          request_bytes: requestBytes(name, args),
+          request_sha256: requestSha256(name, args),
+          lock_hold_ms: receipt.timings_ms?.lock_hold ?? 0,
+          transport: operationTransport(receipt, name),
+          transport_fallbacks: receipt.transport_fallbacks ?? [],
+        });
+      }),
+    );
+  }
+  return summarizeTimedSamples(samples);
+}
+
+async function measureSpawnLifecycleAcrossClients(clients, sweepHoldState) {
+  const samples = [];
+  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    for (const client of clients) {
+      samples.push(await measureSpawnLifecycleOnce(client, sweepHoldState));
+    }
+  }
+  return {
+    first: samples[0].first,
+    second: samples[0].second,
+    surface: samples[0].surface,
+    spawn_close_sample: samples[0].spawn_close_during_sweep,
+    sampled: summarizeTimedSamples(samples.map((sample) => sample.first)),
+    send_to_agent_warm: summarizeTimedSamples(
+      samples.map((sample) => sample.second),
+    ),
+    send_to_surface_warm: summarizeTimedSamples(
+      samples.map((sample) => sample.surface),
+    ),
+    spawn_close_during_sweep: summarizeTimedSamples(
+      samples.map((sample) => sample.spawn_close_during_sweep),
+    ),
+  };
+}
+
+async function measureParallelStress(client, name, args) {
+  const samples = [];
+  const request = {
+    parallel: PARALLEL_STRESS_COUNT,
+    name,
+    arguments: args,
+  };
+  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    const startedAt = nowMs();
+    const receipts = await Promise.all(
+      Array.from({ length: PARALLEL_STRESS_COUNT }, async () =>
+        toolData(await client.callTool(name, args, 30_000), name),
+      ),
+    );
+    samples.push({
+      elapsed_ms: nowMs() - startedAt,
+      request_bytes: requestBytes(name, args) * PARALLEL_STRESS_COUNT,
+      request_sha256: createHash("sha256")
+        .update(JSON.stringify(canonicalize(request)))
+        .digest("hex"),
+      lock_hold_ms: Math.max(
+        ...receipts.map((receipt) => receipt.timings_ms?.lock_hold ?? 0),
+      ),
+      transport: receipts.every(
+        (receipt) => operationTransport(receipt, name) === "socket",
+      )
+        ? "socket"
+        : "cli",
+      transport_fallbacks: [
+        ...new Set(
+          receipts.flatMap((receipt) => receipt.transport_fallbacks ?? []),
+        ),
+      ],
+    });
+  }
+  return { ...summarizeTimedSamples(samples), stress: true };
 }
 
 async function main() {
@@ -1056,9 +1133,39 @@ async function main() {
       );
     }
     const daemonLatency = await measureLatency(daemonClients);
-    const firstSendAfterSpawn = await measureFirstSendAfterSpawn(
-      daemonClients[0],
+    const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
+      daemonClients,
       sweepHoldState,
+    );
+    const listAgents = await measureWarmToolAcrossClients(
+      daemonClients,
+      "list_agents",
+      { detail: "summary" },
+    );
+    const controlHealth = await measureWarmToolAcrossClients(
+      daemonClients,
+      "control_health",
+      {},
+    );
+    const sendToSurface10Parallel = await measureParallelStress(
+      daemonClients[0],
+      "send_to",
+      {
+        mode: "surface",
+        surface: "surface:bench-0",
+        workspace: "workspace:bench",
+        text: "parallel surface benchmark",
+        press_enter: true,
+      },
+    );
+    const readScreen10Parallel = await measureParallelStress(
+      daemonClients[0],
+      "read_screen",
+      {
+        surface: "surface:bench-0",
+        workspace: "workspace:bench",
+        lines: 5,
+      },
     );
     const daemonRssMb = await totalRssMb(
       [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(
@@ -1092,9 +1199,9 @@ async function main() {
             local_read_screen_p50_within_250ms:
               daemonLatency.read_screen.p50_ms <= READ_SCREEN_P50_BUDGET_MS,
             local_first_send_after_spawn_within_2s:
-              firstSendAfterSpawn.first.elapsed_ms <= 2_000,
+              firstSendAfterSpawn.sampled.p50_ms <= 2_000,
             local_cli_send_within_4s:
-              firstSendAfterSpawn.surface.elapsed_ms <= 4_000,
+              firstSendAfterSpawn.send_to_surface_warm.p50_ms <= 4_000,
           }
         : {}),
       surface_receipt_is_waitable:
@@ -1108,9 +1215,11 @@ async function main() {
         firstSendAfterSpawn.first,
         firstSendAfterSpawn.second,
         firstSendAfterSpawn.surface,
-        firstSendAfterSpawn.list_agents,
-        firstSendAfterSpawn.control_health,
+        listAgents,
+        controlHealth,
         firstSendAfterSpawn.spawn_close_during_sweep,
+        sendToSurface10Parallel,
+        readScreen10Parallel,
       ].every((measurement) => measurement.transport === "socket"),
     };
     const green = Object.values(gates).every(Boolean);
@@ -1131,39 +1240,98 @@ async function main() {
           "control_health",
           "spawn_close_during_sweep",
           "first_send_after_spawn",
+          "send_to_surface_10_parallel",
+          "read_screen_10_parallel",
         ],
+        row_metadata: {
+          list_surfaces: {
+            sampling: "sampled",
+            samples_per_run: clientCount * rounds,
+          },
+          read_screen: {
+            sampling: "sampled",
+            samples_per_run: clientCount * rounds,
+          },
+          send_to_surface_warm: {
+            sampling: "sampled",
+            samples_per_run: firstSendAfterSpawn.send_to_surface_warm.sample_count,
+          },
+          send_to_agent_warm: {
+            sampling: "sampled",
+            samples_per_run: firstSendAfterSpawn.send_to_agent_warm.sample_count,
+          },
+          list_agents: {
+            sampling: "sampled",
+            samples_per_run: listAgents.sample_count,
+          },
+          control_health: {
+            sampling: "sampled",
+            samples_per_run: controlHealth.sample_count,
+          },
+          spawn_close_during_sweep: {
+            sampling: "sampled",
+            samples_per_run:
+              firstSendAfterSpawn.spawn_close_during_sweep.sample_count,
+          },
+          first_send_after_spawn: {
+            sampling: "sampled",
+            samples_per_run: firstSendAfterSpawn.sampled.sample_count,
+          },
+          send_to_surface_10_parallel: {
+            sampling: "sampled",
+            samples_per_run: sendToSurface10Parallel.sample_count,
+            stress: true,
+          },
+          read_screen_10_parallel: {
+            sampling: "sampled",
+            samples_per_run: readScreen10Parallel.sample_count,
+            stress: true,
+          },
+        },
         bytes: {
           list_surfaces: daemonLatency.list_surfaces.request_bytes,
           read_screen: daemonLatency.read_screen.request_bytes,
-          send_to_surface_warm: firstSendAfterSpawn.surface.request_bytes,
-          send_to_agent_warm: firstSendAfterSpawn.second.request_bytes,
-          list_agents: firstSendAfterSpawn.list_agents.request_bytes,
-          control_health: firstSendAfterSpawn.control_health.request_bytes,
+          send_to_surface_warm:
+            firstSendAfterSpawn.send_to_surface_warm.request_bytes,
+          send_to_agent_warm:
+            firstSendAfterSpawn.send_to_agent_warm.request_bytes,
+          list_agents: listAgents.request_bytes,
+          control_health: controlHealth.request_bytes,
           spawn_close_during_sweep:
             firstSendAfterSpawn.spawn_close_during_sweep.request_bytes,
-          first_send_after_spawn: firstSendAfterSpawn.first.request_bytes,
+          first_send_after_spawn: firstSendAfterSpawn.sampled.request_bytes,
+          send_to_surface_10_parallel: sendToSurface10Parallel.request_bytes,
+          read_screen_10_parallel: readScreen10Parallel.request_bytes,
         },
         request_sha256: {
           list_surfaces: daemonLatency.list_surfaces.request_sha256,
           read_screen: daemonLatency.read_screen.request_sha256,
-          send_to_surface_warm: firstSendAfterSpawn.surface.request_sha256,
-          send_to_agent_warm: firstSendAfterSpawn.second.request_sha256,
-          list_agents: firstSendAfterSpawn.list_agents.request_sha256,
-          control_health: firstSendAfterSpawn.control_health.request_sha256,
+          send_to_surface_warm:
+            firstSendAfterSpawn.send_to_surface_warm.request_sha256,
+          send_to_agent_warm:
+            firstSendAfterSpawn.send_to_agent_warm.request_sha256,
+          list_agents: listAgents.request_sha256,
+          control_health: controlHealth.request_sha256,
           spawn_close_during_sweep:
             firstSendAfterSpawn.spawn_close_during_sweep.request_sha256,
-          first_send_after_spawn: firstSendAfterSpawn.first.request_sha256,
+          first_send_after_spawn: firstSendAfterSpawn.sampled.request_sha256,
+          send_to_surface_10_parallel: sendToSurface10Parallel.request_sha256,
+          read_screen_10_parallel: readScreen10Parallel.request_sha256,
         },
         transport: {
           list_surfaces: daemonLatency.list_surfaces.transport,
           read_screen: daemonLatency.read_screen.transport,
-          send_to_surface_warm: firstSendAfterSpawn.surface.transport,
-          send_to_agent_warm: firstSendAfterSpawn.second.transport,
-          list_agents: firstSendAfterSpawn.list_agents.transport,
-          control_health: firstSendAfterSpawn.control_health.transport,
+          send_to_surface_warm:
+            firstSendAfterSpawn.send_to_surface_warm.transport,
+          send_to_agent_warm:
+            firstSendAfterSpawn.send_to_agent_warm.transport,
+          list_agents: listAgents.transport,
+          control_health: controlHealth.transport,
           spawn_close_during_sweep:
             firstSendAfterSpawn.spawn_close_during_sweep.transport,
-          first_send_after_spawn: firstSendAfterSpawn.first.transport,
+          first_send_after_spawn: firstSendAfterSpawn.sampled.transport,
+          send_to_surface_10_parallel: sendToSurface10Parallel.transport,
+          read_screen_10_parallel: readScreen10Parallel.transport,
         },
       },
       rss: {
@@ -1182,29 +1350,18 @@ async function main() {
         daemon_path: {
           list_surfaces: daemonLatency.list_surfaces,
           read_screen: daemonLatency.read_screen,
-          list_agents: firstSendAfterSpawn.list_agents,
-          control_health: firstSendAfterSpawn.control_health,
+          list_agents: listAgents,
+          control_health: controlHealth,
+          send_to_surface_10_parallel: sendToSurface10Parallel,
+          read_screen_10_parallel: readScreen10Parallel,
         },
         first_send_after_spawn: firstSendAfterSpawn,
-        send_to_surface_warm: {
-          p50_ms: firstSendAfterSpawn.surface.elapsed_ms,
-          p95_ms: firstSendAfterSpawn.surface.elapsed_ms,
-          lock_hold_ms: firstSendAfterSpawn.surface.lock_hold_ms ?? 0,
-          transport: firstSendAfterSpawn.surface.transport,
-        },
-        send_to_agent_warm: {
-          p50_ms: firstSendAfterSpawn.second.elapsed_ms,
-          p95_ms: firstSendAfterSpawn.second.elapsed_ms,
-          lock_hold_ms: firstSendAfterSpawn.second.lock_hold_ms ?? 0,
-          transport: firstSendAfterSpawn.second.transport,
-        },
-        spawn_close_during_sweep: {
-          p50_ms: firstSendAfterSpawn.spawn_close_during_sweep.elapsed_ms,
-          p95_ms: firstSendAfterSpawn.spawn_close_during_sweep.elapsed_ms,
-          lock_hold_ms:
-            firstSendAfterSpawn.spawn_close_during_sweep.lock_hold_ms,
-          transport: firstSendAfterSpawn.spawn_close_during_sweep.transport,
-        },
+        send_to_surface_warm: firstSendAfterSpawn.send_to_surface_warm,
+        send_to_agent_warm: firstSendAfterSpawn.send_to_agent_warm,
+        spawn_close_during_sweep:
+          firstSendAfterSpawn.spawn_close_during_sweep,
+        send_to_surface_10_parallel: sendToSurface10Parallel,
+        read_screen_10_parallel: readScreen10Parallel,
       },
       daemon_cpu_pct: round(daemonStats.cpuPct, 2),
       gates,

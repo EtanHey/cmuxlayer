@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import * as checkerModule from "../scripts/check-daemon-benchmark.mjs";
 import {
   baselineContentSha256,
   compareBenchmark,
@@ -49,7 +50,29 @@ const baseline = attest({
       "control_health",
       "spawn_close_during_sweep",
       "first_send_after_spawn",
+      "send_to_surface_10_parallel",
+      "read_screen_10_parallel",
     ],
+    row_metadata: {
+      list_surfaces: { sampling: "sampled", samples_per_run: 96 },
+      read_screen: { sampling: "sampled", samples_per_run: 96 },
+      send_to_surface_warm: { sampling: "sampled", samples_per_run: 96 },
+      send_to_agent_warm: { sampling: "sampled", samples_per_run: 96 },
+      list_agents: { sampling: "sampled", samples_per_run: 96 },
+      control_health: { sampling: "sampled", samples_per_run: 96 },
+      spawn_close_during_sweep: { sampling: "sampled", samples_per_run: 96 },
+      first_send_after_spawn: { sampling: "sampled", samples_per_run: 96 },
+      send_to_surface_10_parallel: {
+        sampling: "sampled",
+        samples_per_run: 12,
+        stress: true,
+      },
+      read_screen_10_parallel: {
+        sampling: "sampled",
+        samples_per_run: 12,
+        stress: true,
+      },
+    },
     bytes: {
       list_surfaces: 140,
       read_screen: 170,
@@ -59,6 +82,8 @@ const baseline = attest({
       control_health: 183,
       spawn_close_during_sweep: 184,
       first_send_after_spawn: 240,
+      send_to_surface_10_parallel: 2_000,
+      read_screen_10_parallel: 1_700,
     },
     request_sha256: {
       list_surfaces: "1".repeat(64),
@@ -69,6 +94,8 @@ const baseline = attest({
       control_health: "7".repeat(64),
       spawn_close_during_sweep: "8".repeat(64),
       first_send_after_spawn: "3".repeat(64),
+      send_to_surface_10_parallel: "a".repeat(64),
+      read_screen_10_parallel: "b".repeat(64),
     },
     transport: {
       list_surfaces: "socket",
@@ -79,6 +106,8 @@ const baseline = attest({
       control_health: "socket",
       spawn_close_during_sweep: "socket",
       first_send_after_spawn: "socket",
+      send_to_surface_10_parallel: "socket",
+      read_screen_10_parallel: "socket",
     },
   },
   measurements: {
@@ -93,6 +122,16 @@ const baseline = attest({
       p50_ms: 900,
       p95_ms: 900,
       lock_hold_ms: 20,
+    },
+    send_to_surface_10_parallel: {
+      p50_ms: 260,
+      p95_ms: 310,
+      lock_hold_ms: 120,
+    },
+    read_screen_10_parallel: {
+      p50_ms: 180,
+      p95_ms: 240,
+      lock_hold_ms: 0,
     },
     cli_send_ms: 700,
   },
@@ -126,6 +165,18 @@ const result = {
       control_health: {
         p50_ms: 95,
         p95_ms: 105,
+        lock_hold_ms: 0,
+        transport: "socket",
+      },
+      send_to_surface_10_parallel: {
+        p50_ms: 270,
+        p95_ms: 320,
+        lock_hold_ms: 125,
+        transport: "socket",
+      },
+      read_screen_10_parallel: {
+        p50_ms: 190,
+        p95_ms: 250,
         lock_hold_ms: 0,
         transport: "socket",
       },
@@ -213,6 +264,107 @@ describe("daemon performance budget", () => {
         replay: { ...baseline.replay, rounds: 3 },
       }),
     ).toThrow(/canonical 8x12 replay/);
+    expect(() =>
+      validateBaseline(
+        attest({
+          ...baseline,
+          replay: { ...baseline.replay, row_metadata: undefined },
+        }),
+      ),
+    ).toThrow(/row_metadata/);
+  });
+
+  it("uses measured spread and five-run p50 variance only for earned sampled rows", () => {
+    const history = [90, 95, 100, 105, 110].map((p50_ms, index) => ({
+      source: { git_sha: String(index).padStart(40, "0"), workflow_run_id: index + 1 },
+      measurements: {
+        list_surfaces: { p50_ms, p95_ms: p50_ms + 20, lock_hold_ms: 0 },
+      },
+    }));
+    const comparison = compareBenchmark(baseline, result, { history });
+    const row = comparison.rows.find(
+      (entry) => entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+    );
+    expect(row).toMatchObject({ sampling: "sampled", margin_ms: 40, ceiling: 140 });
+
+    const highVarianceHistory = [50, 75, 100, 125, 150].map((p50_ms, index) => ({
+      source: { git_sha: `f${String(index).padStart(39, "0")}`, workflow_run_id: 100 + index },
+      measurements: {
+        list_surfaces: { p50_ms, p95_ms: p50_ms + 20, lock_hold_ms: 0 },
+      },
+    }));
+    const highVariance = compareBenchmark(baseline, result, {
+      history: highVarianceHistory,
+    }).rows.find(
+      (entry) => entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+    );
+    expect(highVariance?.margin_ms).toBeCloseTo(106.07, 2);
+    expect(highVariance?.ceiling).toBeCloseTo(206.07, 2);
+  });
+
+  it("keeps a wide margin for honest single-shot and explicit stress rows", () => {
+    const singleShot = attest({
+      ...baseline,
+      replay: {
+        ...baseline.replay,
+        row_metadata: {
+          ...baseline.replay.row_metadata,
+          list_surfaces: { sampling: "single_shot", samples_per_run: 1 },
+        },
+      },
+    });
+    const singleRow = compareBenchmark(singleShot, result).rows.find(
+      (entry) => entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+    );
+    expect(singleRow).toMatchObject({
+      sampling: "single_shot",
+      margin_ms: 300,
+      ceiling: 400,
+    });
+    const stressRow = compareBenchmark(baseline, result).rows.find(
+      (entry) =>
+        entry.operation === "send_to_surface_10_parallel" &&
+        entry.metric === "p50_ms",
+    );
+    expect(stressRow).toMatchObject({ stress: true, margin_ms: 300, ceiling: 560 });
+  });
+
+  it("records only green main runs and bounds append-only history to 50 runs", () => {
+    expect(checkerModule).toHaveProperty("appendGreenMainHistory");
+    const appendGreenMainHistory = (
+      checkerModule as typeof checkerModule & {
+        appendGreenMainHistory: (
+          history: unknown[],
+          result: unknown,
+          context: Record<string, unknown>,
+        ) => unknown[];
+      }
+    ).appendGreenMainHistory;
+    const existing = Array.from({ length: 50 }, (_, index) => ({
+      source: {
+        git_sha: String(index).padStart(40, "0"),
+        workflow_run_id: index + 1,
+      },
+      measurements: { list_surfaces: { p50_ms: index } },
+    }));
+    const unchanged = appendGreenMainHistory(existing, result, {
+      event_name: "pull_request",
+      ref: "refs/pull/1/merge",
+      git_sha: "f".repeat(40),
+      workflow_run_id: 999,
+    });
+    expect(unchanged).toEqual(existing);
+    const appended = appendGreenMainHistory(existing, result, {
+      event_name: "push",
+      ref: "refs/heads/main",
+      git_sha: "f".repeat(40),
+      workflow_run_id: 999,
+    });
+    expect(appended).toHaveLength(50);
+    expect(appended[0]).toEqual(existing[1]);
+    expect(appended.at(-1)).toMatchObject({
+      source: { git_sha: "f".repeat(40), workflow_run_id: 999 },
+    });
   });
 
   it("fails the consistency assertion after a baseline-only hand edit", () => {
@@ -247,7 +399,7 @@ describe("daemon performance budget", () => {
 
     expect(comparison.passed).toBe(false);
     expect(comparison.failures).toContain(
-      "read_screen p50: 441ms exceeds 440ms",
+      "read_screen p50: 441ms exceeds 180ms",
     );
   });
 
@@ -332,6 +484,16 @@ describe("daemon performance budget", () => {
     expect(maximumBenchmarkMeasurements([result, slower])).toEqual({
       list_surfaces: { p50_ms: 110, p95_ms: 200, lock_hold_ms: 0 },
       read_screen: { p50_ms: 190, p95_ms: 170, lock_hold_ms: 0 },
+      send_to_surface_10_parallel: {
+        p50_ms: 270,
+        p95_ms: 320,
+        lock_hold_ms: 125,
+      },
+      read_screen_10_parallel: {
+        p50_ms: 190,
+        p95_ms: 250,
+        lock_hold_ms: 0,
+      },
       send_to_surface_warm: {
         p50_ms: 210,
         p95_ms: 230,
@@ -354,7 +516,7 @@ describe("daemon performance budget", () => {
         p95_ms: 1_100,
         lock_hold_ms: 21,
       },
-      cli_send_ms: 900,
+      cli_send_ms: 210,
     });
     expect(() =>
       maximumBenchmarkMeasurements([
@@ -410,6 +572,7 @@ describe("daemon performance budget", () => {
         list_surfaces: {
           ...baseline.measurements.list_surfaces,
           p50_ms: 1,
+          p95_ms: 2,
         },
       },
     });
@@ -421,7 +584,7 @@ describe("daemon performance budget", () => {
           ...result.latency.daemon_path,
           list_surfaces: {
             ...result.latency.daemon_path.list_surfaces,
-            p50_ms: 302,
+            p50_ms: 4,
           },
         },
       },
@@ -432,9 +595,9 @@ describe("daemon performance budget", () => {
         (entry) =>
           entry.operation === "list_surfaces" && entry.metric === "p50_ms",
       )?.ceiling,
-    ).toBe(301);
+    ).toBe(3);
     expect(comparison.failures).toContain(
-      "list_surfaces p50: 302ms exceeds 301ms",
+      "list_surfaces p50: 4ms exceeds 3ms",
     );
   });
 
@@ -443,9 +606,9 @@ describe("daemon performance budget", () => {
       ...result,
       latency: {
         ...result.latency,
-        first_send_after_spawn: {
-          ...result.latency.first_send_after_spawn,
-          surface: { elapsed_ms: 1_001 },
+        send_to_surface_warm: {
+          ...result.latency.send_to_surface_warm,
+          p50_ms: 1_001,
         },
       },
     });
@@ -541,11 +704,14 @@ describe("daemon performance budget", () => {
     );
 
     expect(markdown).toContain("<!-- cmuxlayer-perf-budget -->");
-    expect(markdown).toContain(
-      "| Operation | Transport | Metric | Baseline | Current | Ceiling | Status |",
-    );
+    expect(markdown).toContain("| Operation | Transport | Sampling | Metric |");
     expect(markdown).toContain("first_send_after_spawn");
     expect(markdown).toContain("Runner regression ratio: 1.25x");
+    expect(markdown).toContain("rows unchanged");
+    expect(markdown).toContain("<details>");
+    expect(markdown).toContain("<summary>Full table</summary>");
+    const defaultTable = markdown.split("<details>")[0];
+    expect(defaultTable).not.toContain("| list_surfaces | socket | sampled | request_bytes |");
   });
 
   it("commits a post-run-5 baseline with the full replay contract", () => {
@@ -568,6 +734,8 @@ describe("daemon performance budget", () => {
       "control_health",
       "spawn_close_during_sweep",
       "first_send_after_spawn",
+      "send_to_surface_10_parallel",
+      "read_screen_10_parallel",
     ]);
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
     expect(committed.source.workflow_run_id).toBe(32988968639);
@@ -585,6 +753,10 @@ describe("daemon performance budget", () => {
 
     expect(source).toContain("const DEFAULT_CLIENTS = 8");
     expect(source).toContain("const DEFAULT_ROUNDS = 12");
+    expect(source).toContain("const PARALLEL_STRESS_COUNT = 10");
+    expect(source).toContain('sampling: "sampled"');
+    expect(source).toContain("samples_per_run");
+    expect(source).toContain("for (const client of clients)");
     expect(source).toContain("p95_ms");
     expect(source).toContain("request_bytes");
     expect(source).toContain("lock_hold_ms");
@@ -639,6 +811,15 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("<!-- cmuxlayer-perf-budget -->");
     expect(workflow).toContain("updateComment");
     expect(workflow).toContain("createComment");
+    expect(workflow).toContain("actions/cache/restore");
+    expect(workflow).toContain("actions/cache/save");
+    expect(workflow).toContain("history.json");
+    expect(
+      readFileSync(
+        join(repoRoot, "scripts", "check-daemon-benchmark.mjs"),
+        "utf8",
+      ),
+    ).toContain("GITHUB_STEP_SUMMARY");
   });
 
   it("refuses to refresh a baseline from an over-budget lock hold", () => {

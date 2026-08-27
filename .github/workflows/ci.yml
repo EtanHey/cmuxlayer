@@ -38,8 +38,23 @@ jobs:
 
       - run: rm -f package-lock.json
       - run: bun install
+
+      - name: Restore bounded green-main benchmark history
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: docs.local/scratch/perf-budget/history.json
+          key: daemon-perf-history-main-${{ github.run_id }}
+          restore-keys: daemon-perf-history-main-
+
       - name: Run daemon performance budget
         run: bun run bench:daemon:check
+
+      - name: Save bounded green-main benchmark history
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: docs.local/scratch/perf-budget/history.json
+          key: daemon-perf-history-main-${{ github.run_id }}
 
       - name: Upload performance evidence
         if: always()

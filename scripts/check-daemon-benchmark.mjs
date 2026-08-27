@@ -29,7 +29,10 @@ export const CANONICAL_OPERATIONS = [
   "control_health",
   "spawn_close_during_sweep",
   "first_send_after_spawn",
+  "send_to_surface_10_parallel",
+  "read_screen_10_parallel",
 ];
+export const BENCHMARK_HISTORY_LIMIT = 50;
 const REQUIRED_REGRESSION_RATIO = 1.25;
 
 function finite(value, path) {
@@ -101,6 +104,31 @@ export function validateBaseline(baseline) {
     throw new Error("baseline must use the canonical 8x12 replay");
   }
   for (const operation of baseline.replay.operations) {
+    const metadata = baseline.replay?.row_metadata?.[operation];
+    if (!metadata || !["sampled", "single_shot"].includes(metadata.sampling)) {
+      throw new Error(
+        `baseline replay.row_metadata.${operation}.sampling must be sampled or single_shot`,
+      );
+    }
+    if (
+      !Number.isSafeInteger(metadata.samples_per_run) ||
+      metadata.samples_per_run <= 0
+    ) {
+      throw new Error(
+        `baseline replay.row_metadata.${operation}.samples_per_run must be a positive integer`,
+      );
+    }
+    if (metadata.sampling === "sampled" && metadata.samples_per_run < 12) {
+      throw new Error(
+        `baseline sampled row ${operation} must have at least 12 samples per run`,
+      );
+    }
+    if (
+      metadata.stress !== undefined &&
+      typeof metadata.stress !== "boolean"
+    ) {
+      throw new Error(`baseline replay.row_metadata.${operation}.stress must be boolean`);
+    }
     finite(baseline.replay?.bytes?.[operation], `replay.bytes.${operation}`);
     if (!/^[0-9a-f]{64}$/.test(baseline.replay?.request_sha256?.[operation])) {
       throw new Error(
@@ -138,12 +166,51 @@ export function validateBaseline(baseline) {
   return baseline;
 }
 
-export function performanceCeiling(baselineValue, ratio, sanityCap = 1_000) {
+export function performanceCeiling(
+  baselineValue,
+  ratio,
+  sanityCap = 1_000,
+  marginMs = 300,
+) {
   return Math.min(
-    Math.round(Math.max(baselineValue * ratio, baselineValue + 300) * 100) /
+    Math.round(
+      Math.max(baselineValue * ratio, baselineValue + marginMs) * 100,
+    ) /
       100,
     sanityCap,
   );
+}
+
+function rounded(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function standardDeviation(values) {
+  if (values.length === 0) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  return Math.sqrt(
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+      values.length,
+  );
+}
+
+function operationMargin(baseline, operation, history) {
+  const metadata = baseline.replay.row_metadata[operation];
+  if (
+    metadata.stress === true ||
+    metadata.sampling === "single_shot" ||
+    metadata.samples_per_run < 12
+  ) {
+    return 300;
+  }
+  const measurement = baseline.measurements[operation];
+  const spread = Math.max(0, 2 * (measurement.p95_ms - measurement.p50_ms));
+  const historicalP50 = history
+    .map((entry) => entry?.measurements?.[operation]?.p50_ms)
+    .filter(Number.isFinite);
+  const varianceMargin =
+    historicalP50.length >= 5 ? 3 * standardDeviation(historicalP50) : 0;
+  return rounded(Math.max(spread, varianceMargin));
 }
 
 export function requireBaselineIncreaseReason(measurementPairs, reason) {
@@ -160,6 +227,7 @@ export function requireBaselineIncreaseReason(measurementPairs, reason) {
 
 function currentMetrics(result) {
   const first = result?.latency?.first_send_after_spawn?.first;
+  const sampledFirst = result?.latency?.first_send_after_spawn?.sampled;
   return {
     list_surfaces: {
       ...result?.latency?.daemon_path?.list_surfaces,
@@ -176,18 +244,71 @@ function currentMetrics(result) {
     list_agents: result?.latency?.daemon_path?.list_agents,
     control_health: result?.latency?.daemon_path?.control_health,
     spawn_close_during_sweep: result?.latency?.spawn_close_during_sweep,
+    send_to_surface_10_parallel:
+      result?.latency?.send_to_surface_10_parallel ??
+      result?.latency?.daemon_path?.send_to_surface_10_parallel,
+    read_screen_10_parallel:
+      result?.latency?.read_screen_10_parallel ??
+      result?.latency?.daemon_path?.read_screen_10_parallel,
     first_send_after_spawn: {
-      p50_ms: first?.elapsed_ms,
-      p95_ms: first?.elapsed_ms,
+      p50_ms: sampledFirst?.p50_ms ?? first?.elapsed_ms,
+      p95_ms: sampledFirst?.p95_ms ?? first?.elapsed_ms,
       lock_hold_ms:
-        first?.lock_hold_ms ?? first?.receipt?.timings_ms?.lock_hold,
-      transport: first?.transport ?? first?.receipt?.transport,
+        sampledFirst?.lock_hold_ms ??
+        first?.lock_hold_ms ??
+        first?.receipt?.timings_ms?.lock_hold,
+      transport:
+        sampledFirst?.transport ?? first?.transport ?? first?.receipt?.transport,
     },
     cli_send_transport:
       result?.latency?.first_send_after_spawn?.surface?.transport ??
       result?.latency?.first_send_after_spawn?.surface?.receipt?.transport,
-    cli_send_ms: result?.latency?.first_send_after_spawn?.surface?.elapsed_ms,
+    cli_send_ms:
+      result?.latency?.send_to_surface_warm?.p50_ms ??
+      result?.latency?.first_send_after_spawn?.surface?.elapsed_ms,
   };
+}
+
+export function appendGreenMainHistory(history, result, context) {
+  const existing = Array.isArray(history) ? history : [];
+  if (
+    result?.verdict !== "GREEN" ||
+    context?.event_name !== "push" ||
+    context?.ref !== "refs/heads/main"
+  ) {
+    return existing;
+  }
+  if (
+    !/^[0-9a-f]{40}$/.test(context?.git_sha ?? "") ||
+    !Number.isSafeInteger(context?.workflow_run_id) ||
+    context.workflow_run_id <= 0
+  ) {
+    throw new Error("green main history requires an exact SHA and workflow run id");
+  }
+  if (
+    existing.some(
+      (entry) => entry?.source?.workflow_run_id === context.workflow_run_id,
+    )
+  ) {
+    return existing;
+  }
+  const measurements = currentMetrics(result);
+  const entry = {
+    source: {
+      git_sha: context.git_sha,
+      workflow_run_id: context.workflow_run_id,
+      measured_at: context.measured_at ?? new Date().toISOString(),
+    },
+    measurements: Object.fromEntries(
+      [...CANONICAL_OPERATIONS, "cli_send_ms"].map((operation) => [
+        operation,
+        operation === "cli_send_ms"
+          ? { p50_ms: measurements.cli_send_ms }
+          : measurements[operation],
+      ]),
+    ),
+  };
+  return [...existing, entry].slice(-BENCHMARK_HISTORY_LIMIT);
 }
 
 export function maximumBenchmarkMeasurements(results) {
@@ -225,6 +346,7 @@ function row(
   ceiling,
   unit = "ms",
   transport,
+  metadata = {},
 ) {
   const passed = Number.isFinite(current) && current <= ceiling;
   return {
@@ -235,11 +357,14 @@ function row(
     ceiling,
     unit,
     transport,
+    sampling: metadata.sampling,
+    stress: metadata.stress === true,
+    margin_ms: metadata.margin_ms,
     passed,
   };
 }
 
-function exactRow(operation, metric, committed, current, unit) {
+function exactRow(operation, metric, committed, current, unit, metadata = {}) {
   const passed = Number.isFinite(current) && current === committed;
   return {
     operation,
@@ -250,19 +375,23 @@ function exactRow(operation, metric, committed, current, unit) {
     unit,
     passed,
     exact: true,
+    sampling: metadata.sampling,
+    stress: metadata.stress === true,
   };
 }
 
 export function compareBenchmark(
   baseline,
   result,
-  { expectedRounds = baseline.replay.rounds } = {},
+  { expectedRounds = baseline.replay.rounds, history = [] } = {},
 ) {
   validateBaseline(baseline);
   const current = currentMetrics(result);
   const ratio = baseline.regression_ratio;
   const rows = [];
   for (const operation of baseline.replay.operations) {
+    const metadata = baseline.replay.row_metadata[operation];
+    const marginMs = operationMargin(baseline, operation, history);
     for (const metric of ["p50_ms", "p95_ms"]) {
       rows.push(
         row(
@@ -274,14 +403,18 @@ export function compareBenchmark(
             baseline.measurements[operation][metric],
             ratio,
             baseline.sanity_caps_ms.all_rows,
+            marginMs,
           ),
           "ms",
           current[operation]?.transport,
+          { ...metadata, margin_ms: marginMs },
         ),
       );
     }
   }
   for (const operation of baseline.replay.operations) {
+    const metadata = baseline.replay.row_metadata[operation];
+    const marginMs = operationMargin(baseline, operation, history);
     rows.push(
       row(
         operation,
@@ -292,9 +425,11 @@ export function compareBenchmark(
           baseline.measurements[operation].lock_hold_ms,
           ratio,
           baseline.sanity_caps_ms.all_rows,
+          marginMs,
         ),
         "ms",
         current[operation]?.transport,
+        { ...metadata, margin_ms: marginMs },
       ),
     );
   }
@@ -308,9 +443,18 @@ export function compareBenchmark(
         baseline.measurements.cli_send_ms,
         ratio,
         baseline.sanity_caps_ms.cli_send,
+        operationMargin(baseline, "send_to_surface_warm", history),
       ),
       "ms",
       current.cli_send_transport,
+      {
+        ...baseline.replay.row_metadata.send_to_surface_warm,
+        margin_ms: operationMargin(
+          baseline,
+          "send_to_surface_warm",
+          history,
+        ),
+      },
     ),
   );
   for (const operation of baseline.replay.operations) {
@@ -321,6 +465,7 @@ export function compareBenchmark(
         baseline.replay.bytes[operation],
         result?.replay?.bytes?.[operation],
         "bytes",
+        baseline.replay.row_metadata[operation],
       ),
     );
   }
@@ -380,20 +525,35 @@ function formatted(value, unit) {
 }
 
 export function renderMarkdownComparison(baseline, result, comparison) {
+  const tableHeader = [
+    "| Operation | Transport | Sampling | Metric | Baseline | Current | Ceiling | Status |",
+    "|---|:---:|:---:|---:|---:|---:|---:|:---:|",
+  ];
+  const tableRow = (entry) =>
+    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
+  const changed = comparison.rows.filter(
+    (entry) => !entry.passed || entry.current !== entry.baseline,
+  );
+  const unchangedCount = comparison.rows.length - changed.length;
   const lines = [
     "<!-- cmuxlayer-perf-budget -->",
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
-    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Every CI row uses max(baseline x ratio, baseline + 300 ms) with a 1,000 ms sanity cap.`,
+    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot and stress rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
     "",
-    "| Operation | Transport | Metric | Baseline | Current | Ceiling | Status |",
-    "|---|:---:|---:|---:|---:|---:|:---:|",
+    ...tableHeader,
+    ...changed.map(tableRow),
+    "",
+    `${unchangedCount} rows unchanged.`,
+    "",
+    "<details>",
+    "<summary>Full table</summary>",
+    "",
+    ...tableHeader,
+    ...comparison.rows.map(tableRow),
+    "",
+    "</details>",
   ];
-  for (const entry of comparison.rows) {
-    lines.push(
-      `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`,
-    );
-  }
   if (comparison.failures.length) {
     lines.push(
       "",
@@ -457,8 +617,19 @@ async function main() {
   const expectedRounds = Number(
     process.env.CMUXLAYER_BENCH_ROUNDS ?? baseline.replay.rounds,
   );
+  const historyPath =
+    process.env.CMUXLAYER_BENCH_HISTORY_PATH ??
+    join(runResult.artifactDir, "history.json");
+  let history = [];
+  try {
+    const parsed = JSON.parse(await readFile(historyPath, "utf8"));
+    history = Array.isArray(parsed?.runs) ? parsed.runs : [];
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   const comparison = compareBenchmark(baseline, runResult.result, {
     expectedRounds,
+    history,
   });
   const markdown = renderMarkdownComparison(
     baseline,
@@ -467,6 +638,24 @@ async function main() {
   );
   const reportPath = join(runResult.artifactDir, "comment.md");
   await writeFile(reportPath, markdown);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    await writeFile(process.env.GITHUB_STEP_SUMMARY, markdown, { flag: "a" });
+  }
+  if (runResult.code === 0 && comparison.passed) {
+    const nextHistory = appendGreenMainHistory(history, runResult.result, {
+      event_name: process.env.GITHUB_EVENT_NAME,
+      ref: process.env.GITHUB_REF,
+      git_sha: process.env.GITHUB_SHA,
+      workflow_run_id: Number(process.env.GITHUB_RUN_ID),
+    });
+    if (nextHistory !== history) {
+      await mkdir(dirname(historyPath), { recursive: true });
+      await writeFile(
+        historyPath,
+        `${JSON.stringify({ schema_version: 1, limit: BENCHMARK_HISTORY_LIMIT, runs: nextHistory }, null, 2)}\n`,
+      );
+    }
+  }
   process.stdout.write(markdown);
   if (runResult.code !== 0 || !comparison.passed) process.exitCode = 1;
 }
