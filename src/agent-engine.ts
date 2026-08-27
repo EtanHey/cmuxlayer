@@ -6660,6 +6660,9 @@ export class AgentEngine {
         if (watch.target_kind !== "file" || watch.change !== "content") {
           return false;
         }
+        if (!watch.subject_agent_id && watch.provenance === "public") {
+          return false;
+        }
         if (watch.notification_pending) {
           retainedNeedsRecheck = true;
           return false;
@@ -9454,12 +9457,15 @@ export class AgentEngine {
       throw new Error("WatchSpec registry is not configured");
     }
     const startedAt = Date.now();
-    const armed = await armDeclaredWatch(spec, {
+    const armed = await armDeclaredWatch(
+      { ...spec, provenance: "engine" },
+      {
       registryPath: this.watchRegistryPath,
       now: this.watchRegistryNow,
       agentObservation: this.watchAgentObservation,
       waiterExpiresAtMs: Date.now() + Math.max(0, timeoutMs) + 60_000,
-    });
+      },
+    );
     const releaseWaiterBestEffort = async (): Promise<void> => {
       try {
         const released = await releaseWatchWaiter(armed.watch_id, {

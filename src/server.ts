@@ -12741,6 +12741,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 );
                 return (
                   probed.find(
+                    ({ live }) =>
+                      live !== null &&
+                      live.state !== "error" &&
+                      live.screen_state !== "error" &&
+                      isLiveDeliverable(live),
+                  )?.candidate ??
+                  probed.find(
                     ({ live }) => live !== null && isLiveDeliverable(live),
                   )?.candidate ?? directOrSeatMatches[0]
                 );
@@ -12933,7 +12940,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await awaitLifecycleStart();
-          const watch = await engine.armWatch(args as WatchSpec);
+          const publicSpec = { ...(args as WatchSpec) };
+          delete (publicSpec as WatchSpec & { provenance?: unknown })
+            .provenance;
+          const watch = await engine.armWatch({
+            ...publicSpec,
+            provenance: "public",
+          });
           return ok({ watch });
         } catch (error) {
           if (error instanceof WatchArmError) {
@@ -13637,6 +13650,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           owner: parentAgentId,
           subject_agent_id: childAgentId,
           target: reportPath,
+          provenance: "engine",
           change: "content",
           deadline: Number.MAX_SAFE_INTEGER,
         });
