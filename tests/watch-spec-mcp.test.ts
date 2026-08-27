@@ -53,6 +53,7 @@ describe("WatchSpec MCP contract", () => {
       target,
       marker: "DONE",
       deadline: Date.now() + 5_000,
+      provenance: "engine",
     });
 
     expect(raw.isError).toBe(true);
@@ -80,6 +81,7 @@ describe("WatchSpec MCP contract", () => {
       watch: {
         owner: "lead-a",
         target,
+        provenance: "public",
         state: "armed",
         liveness_source: target,
         liveness: { value: true, source: "process" },
@@ -157,6 +159,7 @@ describe("WatchSpec MCP contract", () => {
       ok: true,
       matched: true,
       watch: {
+        provenance: "engine",
         state: "fired",
         watermark: 1,
         observed_value: 2,

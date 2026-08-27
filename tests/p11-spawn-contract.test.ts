@@ -385,6 +385,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         owner: parent.agent_id,
         subject_agent_id: child.agent_id,
         target: child.report_path,
+        provenance: "engine",
         change: "content",
         state: "armed",
       }),
@@ -772,7 +773,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   it("prunes at least 100 legacy rows whose agent directories exist but state files do not", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
-    const watches = Array.from({ length: 120 }, (_, index) => ({
+    const legacyWatches = Array.from({ length: 120 }, (_, index) => ({
       watch_id: `legacy-dead-${index}`,
       owner: "lead-parent",
       target: join(inboxDir, `legacy-dead-${index}`, "report.md"),
@@ -789,6 +790,25 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       },
       state: "armed" as const,
     }));
+    const watches = [
+      ...legacyWatches,
+      {
+        ...legacyWatches[0],
+        watch_id: "explicit-engine-dead",
+        target: join(inboxDir, "explicit-engine-dead", "report.md"),
+        provenance: "engine" as const,
+      },
+      {
+        ...legacyWatches[0],
+        watch_id: "public-watch-with-engine-shaped-target",
+        target: join(
+          inboxDir,
+          "public-watch-with-engine-shaped-target",
+          "report.md",
+        ),
+        provenance: "public" as const,
+      },
+    ];
     for (const watch of watches) {
       mkdirSync(dirname(watch.target), { recursive: true });
       writeFileSync(watch.target, "legacy report\n", "utf8");
@@ -800,7 +820,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
-    ).toHaveLength(120);
+    ).toHaveLength(122);
 
     await (
       engine as unknown as {
@@ -810,7 +830,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
-    ).toHaveLength(0);
+    ).toEqual([
+      expect.objectContaining({
+        watch_id: "public-watch-with-engine-shaped-target",
+        provenance: "public",
+      }),
+    ]);
   });
 
   it("never lets terminal-child pruning remove an undelivered notification", async () => {
@@ -1174,6 +1199,111 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_pending: false,
       notification_attempts: 0,
     });
+  });
+
+  async function exerciseReadyDuplicateAtBareShell(secondScreen: string) {
+    await server.close();
+    const secondOwnerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const firstOwnerUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      secondScreen,
+      "second-owner-pane",
+      undefined,
+      [
+        {
+          id: firstOwnerUuid,
+          ref: "surface:first-owner",
+          title: "first-owner-pane",
+          text: "etanheyman@mac ~/repo$",
+        },
+      ],
+      secondOwnerUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const firstOwner: AgentRecord = {
+      ...parentRecord(firstOwnerUuid),
+      agent_id: "cmuxlayerClaude-first-ready-seat",
+      seat_id: "cmuxlayerClaude",
+      surface_id: "surface:first-owner",
+      state: "ready",
+    };
+    const secondOwner: AgentRecord = {
+      ...parentRecord(secondOwnerUuid),
+      agent_id: "cmuxlayerClaude-second-ready-seat",
+      seat_id: "cmuxlayerClaude",
+      state: "ready",
+    };
+    const reportPath = join(inboxDir, "ready-duplicate-child", "report.md");
+    const child: AgentRecord = {
+      ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+      agent_id: "ready-duplicate-child",
+      surface_id: "surface:child",
+      parent_agent_id: "cmuxlayerClaude",
+      spawn_depth: 1,
+      role: "worker",
+      report_path: reportPath,
+    };
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "before\n", "utf8");
+    for (const record of [firstOwner, secondOwner, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    await engine.armWatch({
+      owner: "cmuxlayerClaude",
+      subject_agent_id: child.agent_id,
+      target: reportPath,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    return {
+      reportPath,
+      wakeCalls: (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before),
+    };
+  }
+
+  it("prefers a genuinely live duplicate over an earlier ready record at a bare shell", async () => {
+    const { reportPath, wakeCalls } = await exerciseReadyDuplicateAtBareShell(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+    );
+
+    expect(
+      wakeCalls.some(([, args]: [string, string[]]) =>
+        args.includes("surface:new") &&
+        args.some(
+          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("still attempts the first duplicate owner when every candidate is error-screened", async () => {
+    const { wakeCalls } = await exerciseReadyDuplicateAtBareShell(
+      "etanheyman@mac ~/repo$",
+    );
+
+    expect(
+      wakeCalls.filter(
+        ([, args]: [string, string[]]) =>
+          args.includes("read-screen") &&
+          args.includes("surface:first-owner"),
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("fails a missing owner seat fast and re-arms the persistent content watch", async () => {
