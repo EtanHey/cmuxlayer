@@ -17594,6 +17594,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         } catch (e) {
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
+              ...e.receipt,
               ...failedReceiptPayload,
               error_code: e.error_code,
               submit_verified: e.submit_verified,
@@ -18055,6 +18056,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const submittedCommand = args.command!.trim();
               const isSubmittedCommandEcho = (line: string): boolean =>
                 line.trim().replace(/^[>❯›]\s*/, "") === submittedCommand;
+              const isActiveSkillProgressLine = (line: string): boolean =>
+                /^(?:[•✻✢✳✶✦]\s*(?:Thinking|Working)|[⏺⬡]\s*Running)(?:\b|…)/iu.test(
+                  line,
+                );
               let commandEchoCountBefore: number | null = null;
               try {
                 const beforeScreen = await engine.readAgentScreen(
@@ -18105,6 +18110,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         commandEchoCountBefore !== null &&
                         commandEchoCountAfter > commandEchoCountBefore &&
                         commandLineIndex >= 0 &&
+                        !isActiveSkillProgressLine(line) &&
                         (!isComposerFooterOrChromeLine(line) ||
                           /^CLAUDE_COUNTER:/i.test(line)) &&
                         !/^Claude Code(?:\s+v?\d|$)/i.test(line) &&

@@ -190,6 +190,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       delivered: false,
       terminal: true,
       delivery_state: "failed",
+      submitted: false,
       error_code: "blocked_by_foreign_draft",
     });
     expect(parsed.WARNING).toMatch(/terminal failure/i);
@@ -357,6 +358,62 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     });
     context.dispose();
   });
+
+  it.each(["✻ Thinking…", "✻ Working…", "⏺ Running…"])(
+    "interact skill does not report active progress %s as a screen result",
+    async (activeProgressLine) => {
+      const { createServer, createServerContext } = await loadServerModule();
+      let screenText = "Claude Code\n❯ ";
+      let submitted = false;
+      const baseExec = makeLifecycleExec(() => screenText);
+      const mockExec: ExecFn = vi.fn().mockImplementation(
+        async (command: string, args: string[]) => {
+          if (args.includes("send-key") && args.includes("return")) {
+            submitted = true;
+          }
+          if (
+            submitted &&
+            args.includes("read-screen") &&
+            args.includes("--lines") &&
+            args.includes("20")
+          ) {
+            return {
+              stdout: JSON.stringify({
+                surface: "surface:new",
+                text: `Claude Code\n❯ /review\n${activeProgressLine}\n`,
+                lines: 20,
+                scrollback_used: false,
+              }),
+              stderr: "",
+            };
+          }
+          return baseExec(command, args);
+        },
+      );
+      const context = createServerContext({
+        exec: mockExec,
+        stateDir: testDir,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      });
+      const server = createServer({ context });
+      const agentId = await spawnReadyAgent(server);
+      submitted = false;
+
+      const result = await (server as any)._registeredTools.interact.handler(
+        { agent: agentId, action: "skill", command: "/review" },
+        {} as any,
+      );
+
+      expect(parseToolResult(result)).toMatchObject({
+        ok: true,
+        submit_verified: true,
+        screen_result_available: false,
+        screen_result_line: null,
+      });
+      context.dispose();
+    },
+  );
 
   it("interact skill does not reuse a historical identical command echo", async () => {
     const { createServer, createServerContext } = await loadServerModule();

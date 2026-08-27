@@ -539,6 +539,7 @@ describe("pane input pointer discipline", () => {
       submit_attempted: false,
       error_code: "blocked_by_interactive_prompt",
       submit_verified: false,
+      submitted: false,
       error:
         "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     });
@@ -612,6 +613,7 @@ describe("pane input pointer discipline", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.error_code).toBe("blocked_by_permission_prompt");
     expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submitted).toBe(false);
     expect(parsed.screen).toMatchObject({
       control_state: "permission_prompt",
       errors: expect.arrayContaining(["permission_prompt"]),
