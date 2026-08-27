@@ -6643,7 +6643,7 @@ export class AgentEngine {
         }
       }),
     );
-    let retainedRevisionChanged = false;
+    let retainedNeedsRecheck = false;
     await removeWatches(
       (watch) => {
         // The predicate runs under the watch-registry write lock. If a sweep
@@ -6651,7 +6651,7 @@ export class AgentEngine {
         if (
           persistedWatchSnapshots.get(watch.watch_id) !== JSON.stringify(watch)
         ) {
-          retainedRevisionChanged = true;
+          retainedNeedsRecheck = true;
           return false;
         }
         if (watch.state === "failed" && !watch.notification_pending) {
@@ -6660,7 +6660,10 @@ export class AgentEngine {
         if (watch.target_kind !== "file" || watch.change !== "content") {
           return false;
         }
-        if (watch.notification_pending) return false;
+        if (watch.notification_pending) {
+          retainedNeedsRecheck = true;
+          return false;
+        }
         const subjects = (subjectIdsByWatch.get(watch.watch_id) ?? [])
           .map(
             (subjectAgentId) =>
@@ -6686,7 +6689,7 @@ export class AgentEngine {
       },
       { registryPath: this.watchRegistryPath },
     );
-    return retainedRevisionChanged;
+    return retainedNeedsRecheck;
   }
 
   scheduleClosedChildReportWatchPrune(): void {
