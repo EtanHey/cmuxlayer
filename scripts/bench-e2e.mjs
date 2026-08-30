@@ -52,8 +52,11 @@ export const FAIRNESS_CONTRACTS = Object.freeze({
   }),
   read_screen: fairnessContract(
     "read_screen",
-    ["read-screen", "topology:all-windows:sequential"],
-    "MCP reads the screen and then collects all-window topology; direct CLI performs the same external primitives in the same order.",
+    [
+      "read-screen:raw-surface",
+      "topology:all-windows:sequential-best-effort",
+    ],
+    "MCP reads a raw surface without a workspace qualifier and then collects all-window topology best-effort; direct CLI uses the same request identity, external primitives, ordering, and churn semantics.",
   ),
   list_surfaces: fairnessContract(
     "list_surfaces",
@@ -491,12 +494,13 @@ export async function terminateChild(child, graceMs = 5_000) {
 }
 
 export function beginObservedTermination(child, terminate = terminateChild) {
-  let promise;
-  try {
-    promise = terminate(child);
-  } catch (error) {
-    promise = Promise.reject(error);
-  }
+  const promise = (() => {
+    try {
+      return terminate(child);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  })();
   promise.catch(() => undefined);
   return promise;
 }
@@ -662,6 +666,10 @@ export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
   const cleanBaseEnv = { ...baseEnv };
   delete cleanBaseEnv.CMUXLAYER_FORCE_INPROCESS;
   delete cleanBaseEnv.CMUXLAYER_DEFAULT_PALETTE;
+  delete cleanBaseEnv.CMUXLAYER_DAEMON_FD;
+  delete cleanBaseEnv.LISTEN_FDS;
+  delete cleanBaseEnv.LISTEN_PID;
+  delete cleanBaseEnv.LISTEN_FDNAMES;
   const root = reservation.ownerDirectory;
   const isolatedHome = join(root, "home");
   return stringEnv({
@@ -942,8 +950,6 @@ export function cliArgs(row, config, worker, sample) {
   if (row.operation === "read_screen") {
     return [
       "read-screen",
-      "--workspace",
-      config.workspace,
       "--surface",
       config.surface,
       "--lines",
@@ -1061,26 +1067,40 @@ async function runCliTopology(
   config,
   workspaces,
   exec = execCapture,
-  { parallelWorkspaces = false, parallelPanes = false } = {},
+  {
+    parallelWorkspaces = false,
+    parallelPanes = false,
+    bestEffort = false,
+  } = {},
 ) {
   const runWorkspace = async (workspace) => {
-    const panesOut = await exec(config.cmuxBin, listPanesCliArgs(workspace), {
-      env: config.env,
-    });
-    const panes = paneRefsFromListPanesStdout(panesOut.stdout);
+    let panes;
+    try {
+      const panesOut = await exec(config.cmuxBin, listPanesCliArgs(workspace), {
+        env: config.env,
+      });
+      panes = paneRefsFromListPanesStdout(panesOut.stdout);
+    } catch (error) {
+      if (bestEffort) return;
+      throw error;
+    }
     if (parallelPanes) {
-      await Promise.all(
-        panes.map((pane) =>
-          exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
-            env: config.env,
-          }),
-        ),
+      const work = panes.map((pane) =>
+        exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
+          env: config.env,
+        }),
       );
+      if (bestEffort) await Promise.allSettled(work);
+      else await Promise.all(work);
     } else {
       for (const pane of panes) {
-        await exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
-          env: config.env,
-        });
+        try {
+          await exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
+            env: config.env,
+          });
+        } catch (error) {
+          if (!bestEffort) throw error;
+        }
       }
     }
   };
@@ -1116,10 +1136,18 @@ export async function runCliReadScreen(
     cliArgs({ operation: "read_screen" }, config, worker, sample),
     { env: config.env },
   );
-  observedWork.push("read-screen");
-  const workspaces = await enumerateCliWorkspaces(config, exec);
-  await runCliTopology(config, workspaceRefs(workspaces), exec);
-  observedWork.push("topology:all-windows:sequential");
+  observedWork.push("read-screen:raw-surface");
+  let workspaces = [];
+  try {
+    workspaces = await enumerateCliWorkspaces(config, exec);
+  } catch {
+    // MCP collectSurfaceTopology returns null when all-window enumeration
+    // races with topology churn; the successful screen read still succeeds.
+  }
+  await runCliTopology(config, workspaceRefs(workspaces), exec, {
+    bestEffort: true,
+  });
+  observedWork.push("topology:all-windows:sequential-best-effort");
   assertCliFairnessTrace("read_screen", observedWork);
 }
 

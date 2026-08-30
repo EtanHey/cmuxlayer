@@ -552,8 +552,6 @@ describe("bench-e2e measurement harness", () => {
     expect(calls).toEqual([
       [
         "read-screen",
-        "--workspace",
-        "workspace:7",
         "--surface",
         "surface:21",
         "--lines",
@@ -566,6 +564,73 @@ describe("bench-e2e measurement harness", () => {
       listPanesCliArgs("workspace:8"),
       listPaneSurfacesCliArgs("workspace:8", "pane:2"),
     ]);
+  });
+
+  it("keeps direct CLI read_screen request identity equal to the raw-surface MCP request", () => {
+    expect(
+      cliArgs(
+        { operation: "read_screen" },
+        { workspace: "workspace:7", surface: "surface:21" },
+        0,
+        0,
+      ),
+    ).toEqual(["read-screen", "--surface", "surface:21", "--lines", "20"]);
+  });
+
+  it("treats read_screen topology churn as best effort like MCP", async () => {
+    let call = 0;
+    await expect(
+      runCliReadScreen(
+        {
+          workspace: "workspace:7",
+          surface: "surface:21",
+          cmuxBin: "/opt/cmux",
+          env: {},
+        },
+        0,
+        0,
+        () => {
+          call += 1;
+          if (call === 1) return { stdout: "screen contents", stderr: "" };
+          throw new Error("workspace closed during topology collection");
+        },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("keeps read_screen successful when a topology pane or surface disappears", async () => {
+    for (const failingVerb of ["list-panes", "list-pane-surfaces"]) {
+      const outputs = [
+        "screen contents",
+        JSON.stringify({
+          windows: [{ ref: "window:1", workspace_count: 1 }],
+        }),
+        JSON.stringify({ workspaces: [{ ref: "workspace:7" }] }),
+        JSON.stringify({
+          workspace_ref: "workspace:7",
+          panes: [{ ref: "pane:1" }],
+        }),
+        JSON.stringify({ surfaces: [] }),
+      ];
+      await expect(
+        runCliReadScreen(
+          {
+            workspace: "workspace:7",
+            surface: "surface:21",
+            cmuxBin: "/opt/cmux",
+            env: {},
+          },
+          0,
+          0,
+          (_command, args) => {
+            if (args.includes(failingVerb)) {
+              throw new Error(`${failingVerb} raced with topology churn`);
+            }
+            return { stdout: outputs.shift() ?? "", stderr: "" };
+          },
+        ),
+      ).resolves.toBeUndefined();
+    }
   });
 
   it("retries an incomplete all-window CLI enumeration once", async () => {
@@ -882,6 +947,8 @@ describe("bench-e2e measurement harness", () => {
         PATH: "/usr/bin",
         CMUXLAYER_FORCE_INPROCESS: "1",
         CMUXLAYER_DEFAULT_PALETTE: "list_surfaces",
+        CMUXLAYER_DAEMON_FD: "7",
+        LISTEN_FDS: "1",
       },
       {
         ownerDirectory: "/tmp/run10.sock.owner-abc",
@@ -893,6 +960,8 @@ describe("bench-e2e measurement harness", () => {
     expect(env.CMUXLAYER_DAEMON_SOCKET).toContain("/tmp/run10.sock.owner-abc/");
     expect(env).not.toHaveProperty("CMUXLAYER_FORCE_INPROCESS");
     expect(env).not.toHaveProperty("CMUXLAYER_DEFAULT_PALETTE");
+    expect(env).not.toHaveProperty("CMUXLAYER_DAEMON_FD");
+    expect(env).not.toHaveProperty("LISTEN_FDS");
   });
 
   it("validates rows before reserving daemon resources", async () => {
