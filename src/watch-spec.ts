@@ -946,7 +946,6 @@ function notificationFor(
   };
 }
 
-// skipcq: JS-R1005 -- Keep observation, atomic registry transition, and notification settlement in one compatibility-critical sweep.
 export async function sweepWatches(
   opts: WatchSweepOptions = {},
 ): Promise<WatchSweepResult> {
@@ -990,6 +989,7 @@ export async function sweepWatches(
     );
   }
 
+  // skipcq: JS-R1005 -- Keep every registry transition in one atomic write-lock callback.
   await withWriteLock(path, () => {
     const registry = readRegistryState(path);
     const watches = registry.rows.map((row) => {
