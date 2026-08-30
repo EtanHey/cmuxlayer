@@ -629,7 +629,7 @@ export async function createSocketReservation(requestedPath) {
   };
 }
 
-export async function createOutputReservation(outputPath) {
+export async function createOutputReservation(outputPath, onFailure) {
   const absoluteOutput = resolve(outputPath);
   await mkdir(dirname(absoluteOutput), { recursive: true });
   const canonicalOutput = existsSync(absoluteOutput)
@@ -639,10 +639,13 @@ export async function createOutputReservation(outputPath) {
   const reservation = await createPidLock(
     lockPath,
     `benchmark output ${canonicalOutput}`,
+    onFailure,
   );
   return Object.freeze({
     outputPath: canonicalOutput,
     lockPath,
+    lockHolderPid: reservation.lockHolderPid,
+    assertHealthy: reservation.assertHealthy,
     release: reservation.release,
   });
 }
@@ -683,26 +686,26 @@ async function waitForLockHolder(child, invocation, label, lockPath) {
   await new Promise((resolveReady, reject) => {
     let stdout = "";
     let stderr = "";
-    const cleanup = () => {
+    function cleanup() {
       child.stdout.off("data", onStdout);
       child.stderr.off("data", onStderr);
       child.off("error", onError);
       child.off("exit", onExit);
-    };
-    const onStdout = (chunk) => {
+    }
+    function onStdout(chunk) {
       stdout += chunk.toString();
       if (!stdout.includes("LOCKED\n")) return;
       cleanup();
       resolveReady();
-    };
-    const onStderr = (chunk) => {
+    }
+    function onStderr(chunk) {
       stderr += chunk.toString();
-    };
-    const onError = (error) => {
+    }
+    function onError(error) {
       cleanup();
       reject(error);
-    };
-    const onExit = (code, signal) => {
+    }
+    function onExit(code, signal) {
       cleanup();
       if (code === invocation.contendedStatus) {
         reject(new Error(`${label} is already reserved by another live process`));
@@ -714,7 +717,7 @@ async function waitForLockHolder(child, invocation, label, lockPath) {
           `${label} could not acquire kernel lock ${lockPath} (exit ${code ?? signal ?? "unknown"})${detail ? `: ${detail}` : ""}`,
         ),
       );
-    };
+    }
     child.stdout.on("data", onStdout);
     child.stderr.on("data", onStderr);
     child.once("error", onError);
@@ -753,7 +756,7 @@ async function discardLockHolder(child) {
   await closed;
 }
 
-async function createPidLock(lockPath, label) {
+async function createPidLock(lockPath, label, onFailure) {
   await mkdir(dirname(lockPath), { recursive: true });
   const lockHandle = await open(
     lockPath,
@@ -774,8 +777,21 @@ async function createPidLock(lockPath, label) {
   const holder = spawn(invocation.command, invocation.args, {
     stdio: ["pipe", "pipe", "pipe", lockHandle.fd],
   });
+  let releasing = false;
+  let holderFailure = null;
+  const onUnexpectedExit = (code, signal) => {
+    if (releasing || holderFailure) return;
+    holderFailure = new Error(
+      `${label} lock holder exited unexpectedly (exit ${code ?? signal ?? "unknown"})`,
+    );
+    onFailure?.(holderFailure);
+  };
   try {
     await waitForLockHolder(holder, invocation, label, lockPath);
+    holder.once("exit", onUnexpectedExit);
+    if (holder.exitCode !== null || holder.signalCode !== null) {
+      onUnexpectedExit(holder.exitCode, holder.signalCode);
+    }
     await lockHandle.truncate(0);
     await lockHandle.writeFile(
       `${JSON.stringify({ pid: process.pid, claim_id: randomUUID() })}\n`,
@@ -783,7 +799,10 @@ async function createPidLock(lockPath, label) {
     );
     await lockHandle.sync();
     await lockHandle.close();
+    if (holderFailure) throw holderFailure;
   } catch (error) {
+    releasing = true;
+    holder.off("exit", onUnexpectedExit);
     await discardLockHolder(holder);
     await lockHandle.close().catch(() => undefined);
     throw error;
@@ -791,8 +810,14 @@ async function createPidLock(lockPath, label) {
   let released = false;
   return {
     lockPath,
+    lockHolderPid: holder.pid,
+    assertHealthy() {
+      if (holderFailure) throw holderFailure;
+    },
     async release() {
       if (released) return;
+      releasing = true;
+      holder.off("exit", onUnexpectedExit);
       await closeLockHolder(holder, label);
       released = true;
     },
@@ -803,6 +828,7 @@ export function createWorkspaceReservation(
   cmuxSocketPath,
   workspace,
   lockRoot = "/tmp",
+  onFailure,
 ) {
   const key = createHash("sha256")
     .update(resolve(cmuxSocketPath))
@@ -812,6 +838,7 @@ export function createWorkspaceReservation(
   return createPidLock(
     lockPath,
     `Nightly socket ${cmuxSocketPath} (requested workspace ${workspace})`,
+    onFailure,
   );
 }
 
@@ -1880,6 +1907,9 @@ async function main() {
     );
   }
   const abortController = new AbortController();
+  const abortForLockFailure = (error) => {
+    if (!abortController.signal.aborted) abortController.abort(error);
+  };
   const removeSignalHandlers = installGracefulSignalAbort(abortController);
   try {
     const stableWorkspaceId = await resolveStableWorkspaceId(config.workspace, {
@@ -1890,6 +1920,8 @@ async function main() {
     const workspaceReservation = await createWorkspaceReservation(
       isolation.cmuxSocketPath,
       stableWorkspaceId,
+      "/tmp",
+      abortForLockFailure,
     );
     let outputReservation = null;
     const releaseTopLevel = () =>
@@ -1898,7 +1930,10 @@ async function main() {
       );
     try {
       abortController.signal.throwIfAborted();
-      const prepared = await prepareProvenanceThenReserveOutput(config);
+      const prepared = await prepareProvenanceThenReserveOutput(config, {
+        reserve: (outputPath) =>
+          createOutputReservation(outputPath, abortForLockFailure),
+      });
       outputReservation = prepared.outputReservation;
       abortController.signal.throwIfAborted();
       await executeBenchmark(

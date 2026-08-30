@@ -1137,6 +1137,25 @@ describe("bench-e2e measurement harness", () => {
     }
   });
 
+  it("reports an unexpected lock-holder exit immediately", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    let holderFailure;
+    const reservation = await createOutputReservation(output, (error) => {
+      holderFailure = error;
+    });
+
+    process.kill(reservation.lockHolderPid, "SIGKILL");
+    for (let attempt = 0; attempt < 50 && !holderFailure; attempt += 1) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    }
+
+    expect(holderFailure).toBeInstanceOf(Error);
+    expect(holderFailure.message).toMatch(/lock holder exited unexpectedly/);
+    await expect(reservation.release()).rejects.toThrow(/exited before release/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("uses one output lock through real and symbolic-link parent paths", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const realDirectory = join(directory, "real");
