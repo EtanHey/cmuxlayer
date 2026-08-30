@@ -1101,7 +1101,6 @@ async function measureParallelStress(clients, name, args, validateReceipt) {
         validateReceipt?.(receipt, requestArgs, index);
         return receipt;
       }),
-      ),
     );
     samples.push({
       elapsed_ms: nowMs() - startedAt,

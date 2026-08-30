@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import * as checkerModule from "../scripts/check-daemon-benchmark.mjs";
 import {
@@ -961,6 +962,15 @@ describe("daemon performance budget", () => {
     expect(source).not.toContain("firstSendAfterSpawn.first,\n");
     expect(source).not.toContain("firstSendAfterSpawn.second,\n");
     expect(source).not.toContain("firstSendAfterSpawn.surface,\n");
+  });
+
+  it("keeps the executable benchmark parseable by Node", () => {
+    const benchmarkPath = join(repoRoot, "scripts", "bench-daemon.mjs");
+    const checked = spawnSync("node", ["--check", benchmarkPath], {
+      encoding: "utf8",
+    });
+
+    expect(checked.status, checked.stderr).toBe(0);
   });
 
   it("wires a required PR/main job and edits a single comment even on RED", () => {
