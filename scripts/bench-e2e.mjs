@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
-  open,
   readFile,
   readdir,
   realpath,
@@ -657,50 +656,117 @@ function processIsLive(pid, signalPid = process.kill) {
   }
 }
 
-export function advisoryLockInvocation(platform, fd = 3) {
+const LOCK_HOLDER_SCRIPT =
+  'process.stdout.write("LOCKED\\n"); process.stdin.resume();';
+
+export function advisoryLockInvocation(platform, lockPath) {
+  const holderArgs = [process.execPath, "-e", LOCK_HOLDER_SCRIPT];
   if (platform === "darwin") {
     return {
       command: "/usr/bin/lockf",
-      args: ["-s", "-t", "0", String(fd)],
+      args: ["-s", "-k", "-t", "0", lockPath, ...holderArgs],
       contendedStatus: 75,
     };
   }
   if (platform === "linux") {
     return {
       command: "/usr/bin/flock",
-      args: ["-n", String(fd)],
+      args: ["-n", lockPath, ...holderArgs],
       contendedStatus: 1,
     };
   }
   throw new Error(`unsupported advisory-lock platform: ${platform}`);
 }
 
+async function waitForLockHolder(child, invocation, label, lockPath) {
+  await new Promise((resolveReady, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const cleanup = () => {
+      child.stdout.off("data", onStdout);
+      child.stderr.off("data", onStderr);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    const onStdout = (chunk) => {
+      stdout += chunk.toString();
+      if (!stdout.includes("LOCKED\n")) return;
+      cleanup();
+      resolveReady();
+    };
+    const onStderr = (chunk) => {
+      stderr += chunk.toString();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code, signal) => {
+      cleanup();
+      if (code === invocation.contendedStatus) {
+        reject(new Error(`${label} is already reserved by another live process`));
+        return;
+      }
+      const detail = stderr.trim();
+      reject(
+        new Error(
+          `${label} could not acquire kernel lock ${lockPath} (exit ${code ?? signal ?? "unknown"})${detail ? `: ${detail}` : ""}`,
+        ),
+      );
+    };
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+async function closeLockHolder(child, label) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`${label} lock holder exited before release`);
+  }
+  const closed = new Promise((resolveClosed, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolveClosed();
+      else {
+        reject(
+          new Error(
+            `${label} lock holder failed during release (exit ${code ?? signal ?? "unknown"})`,
+          ),
+        );
+      }
+    });
+  });
+  child.stdin.end();
+  await closed;
+}
+
+async function discardLockHolder(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise((resolveClosed) => {
+    child.once("close", resolveClosed);
+    child.once("error", resolveClosed);
+  });
+  child.stdin.end();
+  await closed;
+}
+
 async function createPidLock(lockPath, label) {
   await mkdir(dirname(lockPath), { recursive: true });
-  const lockHandle = await open(lockPath, "a+", 0o600);
+  const invocation = advisoryLockInvocation(process.platform, lockPath);
+  const holder = spawn(invocation.command, invocation.args, {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   try {
-    const invocation = advisoryLockInvocation(process.platform);
-    const result = spawnSync(invocation.command, invocation.args, {
-      stdio: ["ignore", "ignore", "pipe", lockHandle.fd],
-    });
-    if (result.error) throw result.error;
-    if (result.status === invocation.contendedStatus) {
-      throw new Error(`${label} is already reserved by another live process`);
-    }
-    if (result.status !== 0) {
-      const detail = result.stderr?.toString().trim();
-      throw new Error(
-        `${label} could not acquire kernel lock ${lockPath}${detail ? `: ${detail}` : ""}`,
-      );
-    }
-    await lockHandle.truncate(0);
-    await lockHandle.writeFile(
+    await waitForLockHolder(holder, invocation, label, lockPath);
+    await writeFile(
+      lockPath,
       `${JSON.stringify({ pid: process.pid, claim_id: randomUUID() })}\n`,
-      "utf8",
+      { encoding: "utf8", mode: 0o600 },
     );
-    await lockHandle.sync();
   } catch (error) {
-    await lockHandle.close().catch(() => undefined);
+    await discardLockHolder(holder);
     throw error;
   }
   let released = false;
@@ -708,7 +774,7 @@ async function createPidLock(lockPath, label) {
     lockPath,
     async release() {
       if (released) return;
-      await lockHandle.close();
+      await closeLockHolder(holder, label);
       released = true;
     },
   };

@@ -6,7 +6,7 @@ Close the eight unanswered PR #575 findings without changing the benchmark matri
 
 ## Decision
 
-Reservation authority is a kernel advisory lock acquired through macOS `/usr/bin/lockf` or Linux `/usr/bin/flock` on a file descriptor retained by the benchmark process. Process exit closes the descriptor and releases the kernel lock, so abandoned lock bytes and legacy `.reclaim` markers have no authority and need no racy cleanup. The lock file retains PID and claim metadata for diagnosis only.
+Reservation authority is a kernel advisory lock acquired through macOS `/usr/bin/lockf` or Linux `/usr/bin/flock` in file-and-command form. A child holds the lock while its parent-owned stdin pipe remains open. Normal release closes the pipe and awaits the child; parent exit also closes the pipe and releases the kernel lock, so abandoned lock bytes and legacy `.reclaim` markers have no authority and need no racy cleanup. The lock file retains PID and claim metadata for diagnosis only.
 
 The output and workspace leases get separate lifetimes. Workspace pressure may be released after benchmark execution and provenance revalidation, but the output lease remains held until the receipt write finishes. The outer cleanup remains idempotent so every failure path still attempts both releases.
 

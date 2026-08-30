@@ -4,7 +4,7 @@
 
 **Goal:** Repair all eight unanswered PR #575 findings while preserving the Run 10 benchmark contract and measurements.
 
-**Architecture:** Replace the racy hard-link reclaim protocol with a BSD advisory lock held on the benchmark process's file descriptor. Separate workspace cleanup from output publication so the output lock protects the authoritative write, and harden the remaining row, environment, provenance, and abort semantics in their existing helpers.
+**Architecture:** Replace the racy hard-link reclaim protocol with a kernel advisory lock held by a child for the benchmark reservation's lifetime. Separate workspace cleanup from output publication so the output lock protects the authoritative write, and harden the remaining row, environment, provenance, and abort semantics in their existing helpers.
 
 **Tech Stack:** Bun, JavaScript ESM, Vitest, Node filesystem/process APIs, GitHub GraphQL review threads.
 
@@ -20,7 +20,7 @@
 
 1. Add a test that creates `<output>.lock.reclaim` with a dead PID and verifies it cannot block `createOutputReservation(output)`.
 2. Run only that test and observe `could not reclaim atomic lock`.
-3. Acquire a non-blocking kernel lock through `/usr/bin/lockf` on macOS or `/usr/bin/flock` on Linux using a retained file descriptor. Keep owner bytes diagnostic-only and release by closing the descriptor, including on process exit.
+3. Acquire a non-blocking kernel lock through `/usr/bin/lockf` on macOS or `/usr/bin/flock` on Linux in file-and-command form. Keep the lock-holder child alive through the reservation pipe; closing that pipe, including on parent exit, releases the lock. Keep owner bytes diagnostic-only.
 4. Run the focused test, the live-contender exclusion test, the legacy-marker test, and the simultaneous-stale-contender test.
 
 ## Task 2: Close row and abort correctness findings

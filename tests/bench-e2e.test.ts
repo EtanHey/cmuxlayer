@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   advisoryLockInvocation,
   assertNightlyIsolation,
@@ -64,14 +64,29 @@ import {
 
 describe("bench-e2e measurement harness", () => {
   it("uses the native advisory-lock command on Darwin and Linux", () => {
-    expect(advisoryLockInvocation("darwin")).toEqual({
+    expect(advisoryLockInvocation("darwin", "/tmp/bench.lock")).toMatchObject({
       command: "/usr/bin/lockf",
-      args: ["-s", "-t", "0", "3"],
+      args: [
+        "-s",
+        "-k",
+        "-t",
+        "0",
+        "/tmp/bench.lock",
+        process.execPath,
+        "-e",
+        expect.stringContaining('process.stdout.write("LOCKED\\n")'),
+      ],
       contendedStatus: 75,
     });
-    expect(advisoryLockInvocation("linux")).toEqual({
+    expect(advisoryLockInvocation("linux", "/tmp/bench.lock")).toMatchObject({
       command: "/usr/bin/flock",
-      args: ["-n", "3"],
+      args: [
+        "-n",
+        "/tmp/bench.lock",
+        process.execPath,
+        "-e",
+        expect.stringContaining('process.stdout.write("LOCKED\\n")'),
+      ],
       contendedStatus: 1,
     });
   });
@@ -1054,6 +1069,59 @@ describe("bench-e2e measurement harness", () => {
     const afterRelease = await createOutputReservation(output);
     await afterRelease.release();
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("releases the kernel lock when the reserving process crashes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const moduleUrl = new URL("../scripts/bench-e2e.mjs", import.meta.url).href;
+    const crashed = spawn(
+      process.execPath,
+      [
+        "-e",
+        `import(${JSON.stringify(moduleUrl)}).then(async ({ createOutputReservation }) => { await createOutputReservation(${JSON.stringify(output)}); process.stdout.write("RESERVED\\n"); process.stdin.resume(); });`,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    try {
+      await new Promise<void>((resolveReady, reject) => {
+        let stdout = "";
+        let stderr = "";
+        crashed.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+          if (stdout.includes("RESERVED\n")) resolveReady();
+        });
+        crashed.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        crashed.once("error", reject);
+        crashed.once("exit", (code, signal) => {
+          reject(
+            new Error(
+              `reservation owner exited before readiness (${code ?? signal}): ${stderr}`,
+            ),
+          );
+        });
+      });
+      crashed.kill("SIGKILL");
+      await new Promise<void>((resolveClosed) => crashed.once("close", resolveClosed));
+
+      let reservation;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        try {
+          reservation = await createOutputReservation(output);
+          break;
+        } catch (error) {
+          if (!String(error).includes("already reserved") || attempt === 49) throw error;
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+        }
+      }
+      expect(reservation).toBeDefined();
+      await reservation.release();
+    } finally {
+      if (crashed.exitCode === null && crashed.signalCode === null) crashed.kill("SIGKILL");
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("uses one output lock through real and symbolic-link parent paths", async () => {
