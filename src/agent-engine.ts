@@ -6626,6 +6626,9 @@ export class AgentEngine {
     );
     await removeWatches(
       (watch) => {
+        if (watch.state === "failed" && !watch.notification_pending) {
+          return true;
+        }
         if (watch.target_kind !== "file" || watch.change !== "content") {
           return false;
         }
