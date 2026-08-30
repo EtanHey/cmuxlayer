@@ -936,9 +936,15 @@ describe("daemon performance budget", () => {
     );
     expect(source).not.toContain("const transportReceipts = await Promise.all");
     expect(source).toMatch(
-      /const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients\([\s\S]*?\n    \);\n    daemonRssMb = await totalRssMb/,
+      /const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients\([\s\S]*?\n {4}\);\n {4}const daemonRssMb = await totalRssMb/,
     );
     expect(source).not.toContain("onFirstSample");
+    expect(source).toContain("firstSendAfterSpawn.sampled");
+    expect(source).toContain("firstSendAfterSpawn.send_to_agent_warm");
+    expect(source).toContain("firstSendAfterSpawn.send_to_surface_warm");
+    expect(source).not.toContain("firstSendAfterSpawn.first,\n");
+    expect(source).not.toContain("firstSendAfterSpawn.second,\n");
+    expect(source).not.toContain("firstSendAfterSpawn.surface,\n");
   });
 
   it("wires a required PR/main job and edits a single comment even on RED", () => {

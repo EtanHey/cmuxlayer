@@ -1158,16 +1158,14 @@ async function main() {
       );
     }
     const daemonLatency = await measureLatency(daemonClients);
-    let daemonRssMb;
-    let daemonStats;
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
     );
-    daemonRssMb = await totalRssMb(
+    const daemonRssMb = await totalRssMb(
       [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
     );
-    daemonStats = await processStats(daemon.pid);
+    const daemonStats = await processStats(daemon.pid);
     const listAgents = await measureWarmToolAcrossClients(
       daemonClients,
       "list_agents",
@@ -1244,9 +1242,9 @@ async function main() {
       socket_transport_only: [
         daemonLatency.list_surfaces,
         daemonLatency.read_screen,
-        firstSendAfterSpawn.first,
-        firstSendAfterSpawn.second,
-        firstSendAfterSpawn.surface,
+        firstSendAfterSpawn.sampled,
+        firstSendAfterSpawn.send_to_agent_warm,
+        firstSendAfterSpawn.send_to_surface_warm,
         listAgents,
         controlHealth,
         firstSendAfterSpawn.spawn_close_during_sweep,
