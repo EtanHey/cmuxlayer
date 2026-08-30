@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "9960960f8a75f1c4947d3f5a6fe1f16b0e647f1f",
-    "measured_at": "2026-08-30T15:35:23.831Z",
+    "git_sha": "3f4303b49d8165f7756538d17fd19c3b2c9862d3",
+    "measured_at": "2026-08-30T17:23:34.781Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 33319637454,
-    "increase_reason": "incorporate second canonical runner sample after measured-ratchet RED"
+    "workflow_run_id": 33324494030,
+    "increase_reason": "canonical stress requests now use per-surface sentinels and raw read identity verification"
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -80,8 +80,8 @@
       "control_health": 97,
       "spawn_close_during_sweep": 161,
       "first_send_after_spawn": 231,
-      "send_to_surface_10_parallel": 2400,
-      "read_screen_10_parallel": 1820
+      "send_to_surface_10_parallel": 2420,
+      "read_screen_10_parallel": 1930
     },
     "request_sha256": {
       "list_surfaces": "29b9c66db4de170a41fdd8ad608f356201f747970e6f7fa74ae605f360f85a33",
@@ -92,8 +92,8 @@
       "control_health": "56e5969d5764757c0775d59e7c65e83cbd91d6f4f4a3279f1cc910fe6854a10f",
       "spawn_close_during_sweep": "1c7dfd23479835bd9d42cc8e74444cbac74e47aa8f288d3eb3278e777c96acdf",
       "first_send_after_spawn": "811745b320e17eddf09602072cea6a0f8274bd3e6ecb6438796646803efbcc75",
-      "send_to_surface_10_parallel": "69f3a964953c8a8b27d2cd7e1bd28e0dbc383c31e161a33f6a698f84ab7a0172",
-      "read_screen_10_parallel": "d93e1443889427dddaec043831bd3cd453725252f8f63d28a75c6565fc20f19e"
+      "send_to_surface_10_parallel": "987a52afdc7845b58174464c4b69b3c04b53dbe36c7ef95e31b7e04589de7aac",
+      "read_screen_10_parallel": "366278b96955bd7c665f9793a8fa22ace224a74074e4d3af2b423afc7f806b2c"
     },
     "transport": {
       "list_surfaces": "socket",
@@ -115,8 +115,8 @@
       "lock_hold_ms": 0
     },
     "read_screen": {
-      "p50_ms": 13.47,
-      "p95_ms": 21,
+      "p50_ms": 13.55,
+      "p95_ms": 23.75,
       "lock_hold_ms": 0
     },
     "send_to_surface_warm": {
@@ -135,8 +135,8 @@
       "lock_hold_ms": 0
     },
     "control_health": {
-      "p50_ms": 127.17,
-      "p95_ms": 149.07,
+      "p50_ms": 132.77,
+      "p95_ms": 155.41,
       "lock_hold_ms": 0
     },
     "spawn_close_during_sweep": {
@@ -150,19 +150,19 @@
       "lock_hold_ms": 120
     },
     "send_to_surface_10_parallel": {
-      "p50_ms": 116.48,
+      "p50_ms": 121.35,
       "p95_ms": 368.97,
       "lock_hold_ms": 353
     },
     "read_screen_10_parallel": {
-      "p50_ms": 30.27,
-      "p95_ms": 41.14,
+      "p50_ms": 31.4,
+      "p95_ms": 49.89,
       "lock_hold_ms": 0
     },
     "cli_send_ms": 64.52
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "f792518e5f3ab80dd4193817e458292156f857468f1c7b3e82040e42a1e7d6d7"
+    "content_sha256": "a076427666a2995fdfd6400206bf4168d13db7abfdf6dac837a9990f09c964ca"
   }
 }
