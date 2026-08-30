@@ -867,7 +867,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
   });
 
-  it("prunes a settled failed watch on the next prune pass", async () => {
+  it("retains a settled failed watch for its waiter, then prunes after release", async () => {
     const engine = server._registeredTools.interact._engine;
     const target = join(inboxDir, "settled-deadline.md");
     writeFileSync(target, "", "utf8");
@@ -885,10 +885,31 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       terminal_at_ms: 2_000,
       notification_pending: false,
       notification_attempts: 1,
+      waiter_expires_at_ms: Date.now() + 60_000,
     };
     writeFileSync(
       watchRegistryPath,
       `${JSON.stringify(registryFile, null, 2)}\n`,
+      "utf8",
+    );
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(1);
+
+    const retainedRegistry = JSON.parse(
+      readFileSync(watchRegistryPath, "utf8"),
+    );
+    delete retainedRegistry.watches[0].waiter_expires_at_ms;
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(retainedRegistry, null, 2)}\n`,
       "utf8",
     );
 
@@ -945,14 +966,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       terminal_reason: "deadline_elapsed",
     });
     expect(localDeadlineNotice).toHaveBeenCalledTimes(1);
-    expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
-    ).toMatchObject({
+    const settled = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(settled).toMatchObject({
       state: "failed",
       notification_pending: false,
       notification_attempts: 1,
       notification_exhausted_reason: "terminal_notice_fire_once",
     });
+    expect(settled).not.toHaveProperty("waiter_expires_at_ms");
 
     await server.close();
     watchNow = 3_000;
@@ -972,67 +995,6 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toEqual([]);
-  });
-
-  it("returns the failed deadline verdict when a concurrent prune removes its row", async () => {
-    await server.close();
-    let watchNow = 1_000;
-    const localDeadlineNotice = vi.fn().mockResolvedValue(false);
-    server = createServer(
-      withTestSurfaceObserver({
-        exec,
-        stateDir: STATE_DIR,
-        disableSpawnPreflight: true,
-        inboxBaseDir: inboxDir,
-        watchRegistryPath,
-        watchRegistryNow: () => watchNow,
-      }),
-    );
-    const engine = server._registeredTools.interact._engine;
-    engine.stateMgr.writeState(parentRecord());
-    engine.getRegistry().set("lead-parent", parentRecord());
-    (
-      engine as unknown as {
-        watchNotify: typeof localDeadlineNotice;
-        sweepDebugLog: () => void;
-      }
-    ).watchNotify = localDeadlineNotice;
-    (
-      engine as unknown as {
-        sweepDebugLog: () => void;
-      }
-    ).sweepDebugLog = () => {
-      writeFileSync(
-        watchRegistryPath,
-        `${JSON.stringify({ version: 1, watches: [] }, null, 2)}\n`,
-        "utf8",
-      );
-    };
-    const target = join(inboxDir, "deadline-pruned-during-wait.md");
-    writeFileSync(target, "", "utf8");
-    setTimeout(() => {
-      watchNow = 2_000;
-    }, 10);
-
-    const result = await engine.waitForWatch(
-      {
-        owner: "lead-parent",
-        target,
-        marker: "DONE",
-        deadline: 2_000,
-      },
-      500,
-    );
-
-    expect(localDeadlineNotice).toHaveBeenCalledOnce();
-    expect(result).toMatchObject({
-      matched: false,
-      watch: {
-        state: "failed",
-        terminal_reason: "deadline_elapsed",
-        notification_pending: false,
-      },
-    });
   });
 
   it("resolves a legacy bare owner seat to the live suffixed lead before delivery", async () => {

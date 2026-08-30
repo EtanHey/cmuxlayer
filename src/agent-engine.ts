@@ -121,6 +121,7 @@ import type { CloseForensicsSweepResult } from "./close-forensics.js";
 import {
   armWatch as armDeclaredWatch,
   readWatchRegistry,
+  releaseWatchWaiter,
   removeWatches,
   sweepWatches,
   type WatchAgentObservation,
@@ -6562,6 +6563,7 @@ export class AgentEngine {
   private async pruneClosedChildReportWatches(): Promise<void> {
     if (!this.watchRegistryPath) return;
     const agents = this.registry.list();
+    const pruneObservedAt = Date.now();
     const byReportPath = new Map<string, AgentRecord[]>();
     for (const agent of agents) {
       if (!agent.report_path) continue;
@@ -6634,6 +6636,7 @@ export class AgentEngine {
           return false;
         }
         if (watch.state === "failed" && !watch.notification_pending) {
+          if ((watch.waiter_expires_at_ms ?? 0) > pruneObservedAt) return false;
           return true;
         }
         if (watch.target_kind !== "file" || watch.change !== "content") {
@@ -9356,7 +9359,12 @@ export class AgentEngine {
       throw new Error("WatchSpec registry is not configured");
     }
     const startedAt = Date.now();
-    const armed = await this.armWatch(spec);
+    const armed = await armDeclaredWatch(spec, {
+      registryPath: this.watchRegistryPath,
+      now: this.watchRegistryNow,
+      agentObservation: this.watchAgentObservation,
+      waiterExpiresAtMs: Date.now() + Math.max(0, timeoutMs) + 60_000,
+    });
     while (true) {
       const swept = await sweepWatches({
         registryPath: this.watchRegistryPath,
@@ -9371,21 +9379,27 @@ export class AgentEngine {
       });
       const current = readWatchRegistry({
         registryPath: this.watchRegistryPath,
-      }).watches.find((watch) => watch.watch_id === armed.watch_id) ??
-        swept.newly_failed_records.find(
-          (watch) => watch.watch_id === armed.watch_id,
-        );
+      }).watches.find((watch) => watch.watch_id === armed.watch_id);
       if (!current) {
         throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
       }
       const elapsed = Date.now() - startedAt;
       if (current.state === "fired" || swept.fired.includes(armed.watch_id)) {
+        await releaseWatchWaiter(armed.watch_id, {
+          registryPath: this.watchRegistryPath,
+        });
         return { matched: true, elapsed, watch: current };
       }
       if (current.state === "failed") {
+        await releaseWatchWaiter(armed.watch_id, {
+          registryPath: this.watchRegistryPath,
+        });
         return { matched: false, elapsed, watch: current };
       }
       if (elapsed >= timeoutMs) {
+        await releaseWatchWaiter(armed.watch_id, {
+          registryPath: this.watchRegistryPath,
+        });
         return { matched: false, elapsed, watch: current };
       }
       await new Promise<void>((resolveSleep) => {
