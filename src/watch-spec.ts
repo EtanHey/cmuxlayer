@@ -989,8 +989,7 @@ export async function sweepWatches(
     );
   }
 
-  // skipcq: JS-R1005 -- Keep every registry transition in one atomic write-lock callback.
-  await withWriteLock(path, () => {
+  await withWriteLock(path, () => { // skipcq: JS-R1005
     const registry = readRegistryState(path);
     const watches = registry.rows.map((row) => {
       if (!isWatchRecord(row)) return row;
