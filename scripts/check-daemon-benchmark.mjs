@@ -272,7 +272,7 @@ function operationMarginRule(
   const measuredRuns = history.filter((entry) =>
     Number.isFinite(entry?.measurements?.[operation]?.p50_ms),
   ).length;
-  const runCount = Math.max(1, measuredRuns);
+  const runCount = measuredRuns >= 5 ? measuredRuns : 1;
   return `measured (${runCount} ${runCount === 1 ? "run" : "runs"})`;
 }
 
@@ -636,9 +636,11 @@ export function compareBenchmark(
   for (const operation of baseline.replay.operations) {
     const expected = baseline.replay.row_metadata[operation];
     const candidate = result?.replay?.row_metadata?.[operation];
+    const expectedSamples =
+      (expected.samples_per_run * expectedRounds) / baseline.replay.rounds;
     if (
       candidate?.sampling !== expected.sampling ||
-      candidate?.samples_per_run !== expected.samples_per_run ||
+      candidate?.samples_per_run !== expectedSamples ||
       (candidate?.stress === true) !== (expected.stress === true)
     ) {
       failures.push(

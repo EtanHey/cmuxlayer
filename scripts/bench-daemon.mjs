@@ -996,7 +996,9 @@ async function measureSpawnLifecycleAcrossClients(
         typeof sample.surface.receipt.delivery_id === "string" &&
         sample.surface.wait_for.delivery_id ===
           sample.surface.receipt.delivery_id &&
-        sample.surface.wait_for.terminal === true,
+        sample.surface.wait_for.terminal === true &&
+        sample.surface.wait_for.delivery_state === "submitted" &&
+        sample.surface.wait_for.submit_verified === true,
     ),
   };
 }

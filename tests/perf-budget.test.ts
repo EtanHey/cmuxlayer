@@ -305,6 +305,12 @@ describe("daemon performance budget", () => {
     );
     expect(highVariance?.margin_ms).toBeCloseTo(106.07, 2);
     expect(highVariance?.ceiling).toBeCloseTo(206.07, 2);
+    expect(
+      compareBenchmark(baseline, result, { history: history.slice(0, 3) }).rows.find(
+        (entry) =>
+          entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+      )?.margin_rule,
+    ).toBe("measured (1 run)");
   });
 
   it("keeps a wide margin only for honest single-shot rows", () => {
@@ -807,10 +813,23 @@ describe("daemon performance budget", () => {
   });
 
   it("allows the explicit fast-round override but no implicit round drift", () => {
+    const fastRowMetadata = Object.fromEntries(
+      Object.entries(result.replay.row_metadata).map(([operation, metadata]) => [
+        operation,
+        {
+          ...metadata,
+          samples_per_run: metadata.samples_per_run / 4,
+        },
+      ]),
+    );
     const fast = {
       ...result,
       rounds: 3,
-      replay: { ...result.replay, rounds: 3 },
+      replay: {
+        ...result.replay,
+        rounds: 3,
+        row_metadata: fastRowMetadata,
+      },
     };
     expect(compareBenchmark(baseline, fast).failures).toContain(
       "replay rounds: 3 does not match expected 12",
@@ -840,7 +859,7 @@ describe("daemon performance budget", () => {
     expect(defaultTable).not.toContain("| list_surfaces | socket | sampled | request_bytes |");
   });
 
-  it("commits only the canonical CI-attested sampled baseline", () => {
+  it("recognizes the attested legacy baseline only for fail-closed CI evidence migration", () => {
     const committed = JSON.parse(
       readFileSync(
         join(repoRoot, "benchmarks", "daemon-baseline.json"),
@@ -848,7 +867,7 @@ describe("daemon performance budget", () => {
       ),
     );
 
-    expect(() => validateBaseline(committed)).not.toThrow();
+    expect(() => validateBaseline(committed)).toThrow(/canonical 8x12 replay/);
     expect(checkerModule).toHaveProperty("isAttestedLegacyBaseline");
     expect(
       (
@@ -856,13 +875,21 @@ describe("daemon performance budget", () => {
           isAttestedLegacyBaseline: (candidate: unknown) => boolean;
         }
       ).isAttestedLegacyBaseline(committed),
-    ).toBe(false);
+    ).toBe(true);
     expect(committed.source.git_sha).toMatch(/^[0-9a-f]{40}$/);
     expect(committed.replay).toMatchObject({ clients: 8, rounds: 12 });
-    expect(committed.replay.operations).toEqual(baseline.replay.operations);
-    expect(committed.replay.row_metadata).toEqual(baseline.replay.row_metadata);
+    expect(committed.replay.operations).toEqual([
+      "list_surfaces",
+      "read_screen",
+      "send_to_surface_warm",
+      "send_to_agent_warm",
+      "list_agents",
+      "control_health",
+      "spawn_close_during_sweep",
+      "first_send_after_spawn",
+    ]);
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
-    expect(committed.source.workflow_run_id).toBe(33317747972);
+    expect(committed.source.workflow_run_id).toBe(32988968639);
     expect(committed).not.toHaveProperty("ceilings");
     expect(committed.refresh_attestation.content_sha256).toMatch(
       /^[0-9a-f]{64}$/,
@@ -882,6 +909,8 @@ describe("daemon performance budget", () => {
     expect(source).toContain("samples_per_run");
     expect(source).toContain("for (const client of clients)");
     expect(source).toContain("surface_receipts_waitable: samples.every");
+    expect(source).toContain('sample.surface.wait_for.delivery_state === "submitted"');
+    expect(source).toContain("sample.surface.wait_for.submit_verified === true");
     expect(source).toContain(
       "surface_receipt_is_waitable:\n        firstSendAfterSpawn.surface_receipts_waitable",
     );
@@ -963,6 +992,7 @@ describe("daemon performance budget", () => {
     expect(source).toContain("GITHUB_RUN_ID");
     expect(source).toContain('GITHUB_ACTIONS !== "true"');
     expect(source).toContain("compareBenchmark(existing, sample)");
+    expect(source).toContain("migratingLegacyBaseline\n            ? measured");
     expect(source).toContain("replay?.bytes?.[operation]");
     expect(source).toContain(
       "refusing to raise a committed performance baseline",
