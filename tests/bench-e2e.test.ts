@@ -46,6 +46,7 @@ import {
   readGitHead,
   prepareBuiltEntries,
   prepareProvenanceThenReserveOutput,
+  provenanceStatusArgs,
   publishBenchmarkReceipt,
   renderMarkdownTable,
   releaseReservations,
@@ -1339,10 +1340,10 @@ describe("bench-e2e measurement harness", () => {
     );
 
     expect(calls).toEqual([
-      "status --porcelain",
+      "status --porcelain --untracked-files=all",
       "rev-parse HEAD",
       "run build",
-      "status --porcelain",
+      "status --porcelain --untracked-files=all",
       "rev-parse HEAD",
     ]);
     expect(result).toEqual({
@@ -1378,6 +1379,26 @@ describe("bench-e2e measurement harness", () => {
         sha256: "sha256:/opt/cmux/bin/cmux",
       },
     });
+  });
+
+  it("forces untracked provenance while excluding only the selected receipt artifacts", () => {
+    expect(
+      provenanceStatusArgs("/repo", "/repo/results/bench.json"),
+    ).toEqual([
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      "--",
+      ".",
+      ":(exclude,literal)results/bench.json",
+      ":(exclude,glob)results/bench.json.lock*",
+      ":(exclude,glob)results/bench.json.daemon-*.log",
+    ]);
+    expect(provenanceStatusArgs("/repo", "/tmp/bench.json")).toEqual([
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]);
   });
 
   it("attests provenance before creating the output reservation", async () => {

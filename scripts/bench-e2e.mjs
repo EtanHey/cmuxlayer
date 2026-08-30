@@ -15,7 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import net from "node:net";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -1590,6 +1590,28 @@ export async function assertArtifactProvenance(
   }
 }
 
+export function provenanceStatusArgs(root, outputPath) {
+  const args = ["status", "--porcelain", "--untracked-files=all"];
+  if (!outputPath) return args;
+  const outputRelative = relative(resolve(root), resolve(outputPath));
+  if (
+    outputRelative === "" ||
+    outputRelative === ".." ||
+    outputRelative.startsWith(`..${sep}`)
+  ) {
+    return args;
+  }
+  const pathspec = outputRelative.split(sep).join("/");
+  return [
+    ...args,
+    "--",
+    ".",
+    `:(exclude,literal)${pathspec}`,
+    `:(exclude,glob)${pathspec}.lock*`,
+    `:(exclude,glob)${pathspec}.daemon-*.log`,
+  ];
+}
+
 export async function prepareBuiltEntries(config, deps = {}) {
   const root = deps.repoRoot ?? repoRoot;
   const exec = deps.exec ?? execCapture;
@@ -1607,13 +1629,13 @@ export async function prepareBuiltEntries(config, deps = {}) {
       "custom built entries have unverifiable source provenance; use the repository dist/index.js and dist/daemon.js",
     );
   }
-  const readTrackedStatus = () =>
-    exec("git", ["status", "--porcelain"], {
+  const readWorktreeStatus = () =>
+    exec("git", provenanceStatusArgs(root, config.out), {
       env: config.env,
     });
   const readHead = () =>
     exec("git", ["rev-parse", "HEAD"], { env: config.env });
-  const status = await readTrackedStatus();
+  const status = await readWorktreeStatus();
   if (status.stdout.trim()) {
     throw new Error(
       "refusing to benchmark built artifacts from a dirty worktree",
@@ -1621,7 +1643,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
   }
   const head = await readHead();
   await exec("bun", ["run", "build"], { env: config.env });
-  const finalStatus = await readTrackedStatus();
+  const finalStatus = await readWorktreeStatus();
   if (finalStatus.stdout.trim()) {
     throw new Error("worktree changed during artifact build");
   }
