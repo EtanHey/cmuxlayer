@@ -374,9 +374,9 @@ function mcpReceipt(result) {
 function execCapture(
   command,
   args,
-  { env, timeoutMs = 30_000, signal = null } = {},
+  { env, timeoutMs = 30_000, signal: abortSignal = null } = {},
 ) {
-  if (signal?.aborted) return Promise.reject(signal.reason);
+  if (abortSignal?.aborted) return Promise.reject(abortSignal.reason);
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: repoRoot,
@@ -392,10 +392,10 @@ function execCapture(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
+      abortSignal?.removeEventListener("abort", onAbort);
       fn(value);
     };
-    const cancel = (reason) => {
+    function cancel(reason) {
       timedOut = true;
       terminateChild(child).then(
         () => settle(reject, reason),
@@ -408,9 +408,11 @@ function execCapture(
             ),
           ),
       );
-    };
-    const onAbort = () => cancel(signal.reason);
-    signal?.addEventListener("abort", onAbort, { once: true });
+    }
+    function onAbort() {
+      cancel(abortSignal.reason);
+    }
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(() => {
       const timeoutError = new Error(
         `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
@@ -426,13 +428,13 @@ function execCapture(
     child.once("error", (error) => {
       settle(reject, error);
     });
-    child.once("close", (code, signal) => {
+    child.once("close", (code, exitSignal) => {
       if (timedOut) return;
       if (code !== 0) {
         settle(
           reject,
           new Error(
-            `${command} ${args.join(" ")} exited code=${code} signal=${signal}: ${stderr.trim()}`,
+            `${command} ${args.join(" ")} exited code=${code} signal=${exitSignal}: ${stderr.trim()}`,
           ),
         );
         return;
