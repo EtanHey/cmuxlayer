@@ -6,7 +6,7 @@ Close the eight unanswered PR #575 findings without changing the benchmark matri
 
 ## Decision
 
-The reclaim marker remains an atomic hard link, but it is treated as an owned lease rather than an immortal sentinel. A contender reads the marker's existing PID/start-time identity, preserves it while that owner is live, and unlinks it when the owner is dead or the PID has been reused. It then retries the ordinary atomic claim. This follows the ruling directly and avoids both unsafe age-based guessing and a wider lock-protocol replacement.
+Reservation authority is a kernel advisory lock acquired through macOS `/usr/bin/lockf` or Linux `/usr/bin/flock` on a file descriptor retained by the benchmark process. Process exit closes the descriptor and releases the kernel lock, so abandoned lock bytes and legacy `.reclaim` markers have no authority and need no racy cleanup. The lock file retains PID and claim metadata for diagnosis only.
 
 The output and workspace leases get separate lifetimes. Workspace pressure may be released after benchmark execution and provenance revalidation, but the output lease remains held until the receipt write finishes. The outer cleanup remains idempotent so every failure path still attempts both releases.
 
@@ -14,8 +14,9 @@ The remaining findings are accepted as instrument-validity defects: all workers 
 
 ## Alternatives rejected
 
-- Reclaim markers based only on age or retry count can delete a slow live owner's marker.
-- Replacing hard-link locks with a new directory-lock protocol widens a corrective PR and discards already-tested contention behavior.
+- Reclaim markers based on age, PID checks, or content comparison still require a conditional unlink operation the filesystem API does not provide. Review demonstrated that a replacement can land between inspection and cleanup.
+- Quarantining a marker with `rename` is insufficient when restoration finds a third claim at the shared path; discarding the quarantined inode loses ownership authority.
+- Directory locks have the same stale-owner removal race. A kernel advisory lock makes liveness physical and releases automatically on process death.
 - Merely documenting inherited environment values leaves the benchmark dependent on an open-ended set of launcher/runtime controls; clearing the behavior-changing class is smaller and reproducible.
 
 ## Verification

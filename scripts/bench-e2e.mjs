@@ -1,19 +1,17 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
 import {
-  link,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
-  rename,
   rm,
   stat,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import net from "node:net";
@@ -659,173 +657,58 @@ function processIsLive(pid, signalPid = process.kill) {
   }
 }
 
-async function readProcessStartIdentity(pid) {
-  const result = await execCapture(
-    "/bin/ps",
-    ["-p", String(pid), "-o", "lstart="],
-    { env: { ...process.env, LC_ALL: "C", LANG: "C" } },
-  ).catch(() => null);
-  return nonEmptyString(result?.stdout.trim());
-}
-
-function parseLockOwner(text) {
-  let parsed = null;
-  try {
-    parsed = JSON.parse(text);
-    if (
-      isRecord(parsed) &&
-      Number.isSafeInteger(parsed.pid) &&
-      parsed.pid > 0
-    ) {
-      return {
-        pid: parsed.pid,
-        process_start: nonEmptyString(parsed.process_start),
-      };
-    }
-  } catch {
-    // Fall through to the legacy numeric format below.
+export function advisoryLockInvocation(platform, fd = 3) {
+  if (platform === "darwin") {
+    return {
+      command: "/usr/bin/lockf",
+      args: ["-s", "-t", "0", String(fd)],
+      contendedStatus: 75,
+    };
   }
-  const legacyPid = Number.parseInt(text.trim(), 10);
-  if (Number.isSafeInteger(legacyPid) && legacyPid > 0) {
-    return { pid: legacyPid, process_start: null };
+  if (platform === "linux") {
+    return {
+      command: "/usr/bin/flock",
+      args: ["-n", String(fd)],
+      contendedStatus: 1,
+    };
   }
-  return null;
-}
-
-async function lockOwnerIsLive(owner) {
-  if (!owner || !processIsLive(owner.pid)) return false;
-  const observedStart = await readProcessStartIdentity(owner.pid);
-  return (
-    !owner.process_start ||
-    observedStart === null ||
-    observedStart === owner.process_start
-  );
-}
-
-export async function retireStaleReclaimMarker(
-  reclaimPath,
-  observedText,
-  deps = {},
-) {
-  const renameFile = deps.rename ?? rename;
-  const readMarker = deps.readFile ?? readFile;
-  const restoreMarker = deps.link ?? link;
-  const removeMarker = deps.unlink ?? unlink;
-  const ownerIsLive = deps.ownerIsLive ?? lockOwnerIsLive;
-  const quarantinePath =
-    deps.quarantinePath ??
-    `${reclaimPath}.retired-${process.pid}-${randomUUID()}`;
-  try {
-    await renameFile(reclaimPath, quarantinePath);
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
-
-  let retire = false;
-  try {
-    const quarantinedText = await readMarker(quarantinePath, "utf8");
-    retire =
-      quarantinedText === observedText &&
-      !(await ownerIsLive(parseLockOwner(quarantinedText)));
-    if (!retire) {
-      await restoreMarker(quarantinePath, reclaimPath).catch((error) => {
-        if (error?.code !== "EEXIST") throw error;
-      });
-    }
-    return retire;
-  } finally {
-    await removeMarker(quarantinePath).catch((error) => {
-      if (error?.code !== "ENOENT") throw error;
-    });
-  }
+  throw new Error(`unsupported advisory-lock platform: ${platform}`);
 }
 
 async function createPidLock(lockPath, label) {
   await mkdir(dirname(lockPath), { recursive: true });
-  const processStart = await readProcessStartIdentity(process.pid);
-  if (!processStart) {
-    throw new Error(`${label} could not attest process start identity`);
-  }
-  const ownerText = `${JSON.stringify({
-    pid: process.pid,
-    process_start: processStart,
-    claim_id: randomUUID(),
-  })}\n`;
-  const candidatePath = `${lockPath}.claim-${process.pid}-${randomUUID()}`;
-  const reclaimPath = `${lockPath}.reclaim`;
-  await writeFile(candidatePath, ownerText, { flag: "wx", mode: 0o600 });
-  let acquired = false;
+  const lockHandle = await open(lockPath, "a+", 0o600);
   try {
-    for (let attempt = 0; attempt < 20 && !acquired; attempt += 1) {
-      const reclaimText = await readFile(reclaimPath, "utf8").catch((error) => {
-        if (error?.code === "ENOENT") return null;
-        throw error;
-      });
-      if (reclaimText !== null) {
-        if (await lockOwnerIsLive(parseLockOwner(reclaimText))) {
-          await new Promise((resolvePause) => setTimeout(resolvePause, 10));
-          continue;
-        }
-        if (!(await retireStaleReclaimMarker(reclaimPath, reclaimText))) {
-          continue;
-        }
-      }
-      try {
-        await link(candidatePath, lockPath);
-        acquired = true;
-        break;
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
-      }
-      const observedText = await readFile(lockPath, "utf8").catch((error) => {
-        if (error?.code === "ENOENT") return null;
-        throw error;
-      });
-      if (observedText === null) continue;
-      const owner = parseLockOwner(observedText);
-      if (await lockOwnerIsLive(owner)) {
-        throw new Error(`${label} is already reserved by pid ${owner.pid}`);
-      }
-      let ownsReclaim = false;
-      try {
-        await link(candidatePath, reclaimPath);
-        ownsReclaim = true;
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
-      }
-      if (!ownsReclaim) {
-        await new Promise((resolvePause) => setTimeout(resolvePause, 10));
-        continue;
-      }
-      try {
-        const currentText = await readFile(lockPath, "utf8").catch(() => null);
-        if (currentText !== observedText) continue;
-        await unlink(lockPath).catch((error) => {
-          if (error?.code !== "ENOENT") throw error;
-        });
-        await link(candidatePath, lockPath);
-        acquired = true;
-      } finally {
-        await unlink(reclaimPath).catch(() => undefined);
-      }
+    const invocation = advisoryLockInvocation(process.platform);
+    const result = spawnSync(invocation.command, invocation.args, {
+      stdio: ["ignore", "ignore", "pipe", lockHandle.fd],
+    });
+    if (result.error) throw result.error;
+    if (result.status === invocation.contendedStatus) {
+      throw new Error(`${label} is already reserved by another live process`);
     }
-  } finally {
-    await unlink(candidatePath).catch(() => undefined);
-  }
-  if (!acquired) {
-    throw new Error(`${label} could not reclaim atomic lock ${lockPath}`);
+    if (result.status !== 0) {
+      const detail = result.stderr?.toString().trim();
+      throw new Error(
+        `${label} could not acquire kernel lock ${lockPath}${detail ? `: ${detail}` : ""}`,
+      );
+    }
+    await lockHandle.truncate(0);
+    await lockHandle.writeFile(
+      `${JSON.stringify({ pid: process.pid, claim_id: randomUUID() })}\n`,
+      "utf8",
+    );
+    await lockHandle.sync();
+  } catch (error) {
+    await lockHandle.close().catch(() => undefined);
+    throw error;
   }
   let released = false;
   return {
     lockPath,
     async release() {
       if (released) return;
-      const currentText = await readFile(lockPath, "utf8");
-      if (currentText !== ownerText) {
-        throw new Error(`${label} ownership changed before release`);
-      }
-      await rm(lockPath, { force: false });
+      await lockHandle.close();
       released = true;
     },
   };

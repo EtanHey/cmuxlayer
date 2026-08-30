@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import {
+  advisoryLockInvocation,
   assertNightlyIsolation,
   assertArtifactProvenance,
   assertCliFairnessTrace,
@@ -46,7 +47,6 @@ import {
   prepareBuiltEntries,
   prepareProvenanceThenReserveOutput,
   publishBenchmarkReceipt,
-  retireStaleReclaimMarker,
   renderMarkdownTable,
   releaseReservations,
   resolveStableWorkspaceId,
@@ -62,6 +62,19 @@ import {
 } from "../scripts/bench-e2e.mjs";
 
 describe("bench-e2e measurement harness", () => {
+  it("uses the native advisory-lock command on Darwin and Linux", () => {
+    expect(advisoryLockInvocation("darwin")).toEqual({
+      command: "/usr/bin/lockf",
+      args: ["-s", "-t", "0", "3"],
+      contendedStatus: 75,
+    });
+    expect(advisoryLockInvocation("linux")).toEqual({
+      command: "/usr/bin/flock",
+      args: ["-n", "3"],
+      contendedStatus: 1,
+    });
+  });
+
   it("uses nearest-rank percentiles instead of copying p50 into p95", () => {
     const samples = Array.from({ length: 20 }, (_, index) => index + 1);
 
@@ -1077,7 +1090,7 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("recovers a reclaim marker whose recorded owner is gone", async () => {
+  it("ignores an abandoned legacy reclaim marker", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
     const exitedChild = spawnSync(process.execPath, ["-e", ""]);
@@ -1091,45 +1104,8 @@ describe("bench-e2e measurement harness", () => {
     const reservation = await createOutputReservation(output);
 
     await reservation.release();
-    await expect(stat(`${output}.lock.reclaim`)).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expect(stat(`${output}.lock.reclaim`)).resolves.toBeDefined();
     await rm(directory, { recursive: true, force: true });
-  });
-
-  it("atomically quarantines only the stale reclaim marker it inspected", async () => {
-    const operations: string[] = [];
-    const staleOwner = '{"pid":41,"claim_id":"stale"}\n';
-    const replacementOwner = '{"pid":42,"claim_id":"live"}\n';
-
-    const retired = await retireStaleReclaimMarker(
-      "/tmp/output.lock.reclaim",
-      staleOwner,
-      {
-        rename: (_source, destination) => {
-          operations.push(`rename:${destination}`);
-        },
-        readFile: () => replacementOwner,
-        link: (source, destination) => {
-          operations.push(`restore:${source}:${destination}`);
-          return Promise.resolve();
-        },
-        unlink: (path) => {
-          operations.push(`unlink:${path}`);
-          return Promise.resolve();
-        },
-        ownerIsLive: () => true,
-        quarantinePath: "/tmp/output.lock.reclaim.retired-test",
-      },
-    );
-
-    expect(retired).toBe(false);
-    expect(operations).toEqual([
-      "rename:/tmp/output.lock.reclaim.retired-test",
-      "restore:/tmp/output.lock.reclaim.retired-test:/tmp/output.lock.reclaim",
-      "unlink:/tmp/output.lock.reclaim.retired-test",
-    ]);
-    expect(operations).not.toContain("unlink:/tmp/output.lock.reclaim");
   });
 
   it("recovers a lock whose live PID belongs to a different process start", async () => {
@@ -1145,13 +1121,12 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("preserves a legacy numeric lock while its PID is live", async () => {
+  it("does not treat legacy PID bytes as a live kernel lock", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
     await writeFile(`${output}.lock`, `${process.pid}\n`, "utf8");
-    await expect(createOutputReservation(output)).rejects.toThrow(
-      /already reserved/,
-    );
+    const reservation = await createOutputReservation(output);
+    await reservation.release();
     await rm(directory, { recursive: true, force: true });
   });
 
