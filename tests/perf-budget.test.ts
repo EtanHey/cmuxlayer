@@ -947,6 +947,10 @@ describe("daemon performance budget", () => {
     expect(source).toContain(
       "daemon_survived_replay:\n        daemon.exitCode === null &&\n        daemon.signalCode === null &&\n        daemonStats.rssKb > 0",
     );
+    expect(source).toContain("get alive() {");
+    expect(source).toContain(
+      "benchmark_clients_survived_replay:\n        stressClientsSurvivedReplay &&\n        daemonClients.every((client) => client.alive)",
+    );
     expect(source).toContain("firstSendAfterSpawn.sampled");
     expect(source).toContain("firstSendAfterSpawn.send_to_agent_warm");
     expect(source).toContain("firstSendAfterSpawn.send_to_surface_warm");

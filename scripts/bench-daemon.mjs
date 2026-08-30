@@ -212,6 +212,10 @@ class McpProcess {
     return this.child.pid;
   }
 
+  get alive() {
+    return this.child.exitCode === null && this.child.signalCode === null;
+  }
+
   handleMessage(message) {
     if (!message || typeof message !== "object" || !("id" in message)) {
       return;
@@ -1271,6 +1275,9 @@ async function main() {
         lines: 5,
       }),
     );
+    const stressClientsSurvivedReplay = stressClients.every(
+      (client) => client.alive,
+    );
     await Promise.all(stressClients.map((client) => client.close()));
     stressClients = [];
     const daemonRssMb = await totalRssMb(
@@ -1289,6 +1296,9 @@ async function main() {
         daemon.exitCode === null &&
         daemon.signalCode === null &&
         daemonStats.rssKb > 0,
+      benchmark_clients_survived_replay:
+        stressClientsSurvivedReplay &&
+        daemonClients.every((client) => client.alive),
       truthful_state: truthfulState,
       list_surfaces_p50_no_regression: latencyGate(
         baselineLatency,
