@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   assertNightlyIsolation,
   buildBenchmarkRows,
+  cliOperationArgs,
   createScratchTargets,
   markSurfaceTransportUntrusted,
   nearestRankPercentile,
@@ -59,13 +60,13 @@ describe("bench-e2e measurement harness", () => {
       },
       {
         nowMs: () => clock,
-        runOperation: async ({ worker, sample }) => {
+        runOperation: ({ worker, sample }) => {
           clock += worker + sample + 1;
-          return {
+          return Promise.resolve({
             ok: true,
             transport: "socket",
             transport_fallbacks: [],
-          };
+          });
         },
       },
     );
@@ -125,9 +126,9 @@ describe("bench-e2e measurement harness", () => {
     const fixture = await createScratchTargets(3, {
       workspace: "workspace:7",
       controllerSurface: "surface:20",
-      execCmux: async (args: string[]) => {
+      execCmux: (args: string[]) => {
         calls.push(args);
-        return { stdout: outputs.shift() ?? "OK\n", stderr: "" };
+        return Promise.resolve({ stdout: outputs.shift() ?? "OK\n", stderr: "" });
       },
     });
 
@@ -180,6 +181,29 @@ describe("bench-e2e measurement harness", () => {
     ).toEqual({ workspace: "43557C0A-1F0D-4947-98A6-440ACBC0BEF8", verbose: false });
   });
 
+  it("uses the real cmux CLI verbs and a newline submit, not a literal slash-n", () => {
+    const sendArgs = cliOperationArgs(
+      { operation: "send_to", payload_chars: 250 },
+      "surface:4",
+      "workspace:7",
+      0,
+      0,
+    );
+    expect(sendArgs[0]).toBe("send");
+    expect(sendArgs.at(-1)?.endsWith("\n")).toBe(true);
+    expect(sendArgs.at(-1)?.endsWith("\\n")).toBe(false);
+    expect(sendArgs.at(-1)).toHaveLength(251);
+    expect(
+      cliOperationArgs(
+        { operation: "list_surfaces", payload_chars: null },
+        "surface:4",
+        "workspace:7",
+        0,
+        0,
+      ),
+    ).toEqual(["list-workspaces"]);
+  });
+
   it("marks raw-surface send_to provenance UNTRUSTED under D180", () => {
     const row = markSurfaceTransportUntrusted({
       operation: "send_to",
@@ -220,12 +244,10 @@ describe("bench-e2e measurement harness", () => {
 
   it("keeps a benchmark receipt writable when git head lookup fails", async () => {
     await expect(
-      readGitHead(async () => {
-        throw new Error("git unavailable");
-      }),
+      readGitHead(() => Promise.reject(new Error("git unavailable"))),
     ).resolves.toBeNull();
     await expect(
-      readGitHead(async () => ({ stdout: "abc123\n", stderr: "" })),
+      readGitHead(() => Promise.resolve({ stdout: "abc123\n", stderr: "" })),
     ).resolves.toBe("abc123");
   });
 

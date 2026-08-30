@@ -269,9 +269,17 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(
+      settle(
+        reject,
         new Error(
           `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
         ),
@@ -284,42 +292,50 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
       stderr += chunk.toString("utf8");
     });
     child.once("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
+      settle(reject, error);
     });
     child.once("close", (code, signal) => {
-      clearTimeout(timer);
       if (code !== 0) {
-        reject(
+        settle(
+          reject,
           new Error(
             `${command} ${args.join(" ")} exited code=${code} signal=${signal}: ${stderr.trim()}`,
           ),
         );
         return;
       }
-      resolvePromise({ stdout, stderr });
+      settle(resolvePromise, { stdout, stderr });
     });
   });
 }
 
 function waitForSocket(path, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
-  return new Promise((resolvePromise, reject) => {
+  let cancelled = false;
+  let retryTimer = null;
+  const promise = new Promise((resolvePromise, reject) => {
     const attempt = () => {
+      if (cancelled) return;
       const socket = net.createConnection({ path });
       let settled = false;
       const finish = (connected) => {
-        if (settled) return;
+        if (settled || cancelled) {
+          socket.removeAllListeners();
+          // Swallow destroy-time errors from a cancelled or already-finished probe.
+          socket.on("error", ignoreFollowOnError);
+          socket.destroy();
+          return;
+        }
         settled = true;
         socket.removeAllListeners();
-        socket.on("error", () => {});
+        socket.on("error", ignoreFollowOnError);
         socket.destroy();
         if (connected) {
           resolvePromise();
         } else if (Date.now() >= deadline) {
           reject(new Error(`timed out waiting for socket ${path}`));
         } else {
-          setTimeout(attempt, 50);
+          retryTimer = setTimeout(attempt, 50);
         }
       };
       socket.setTimeout(250, () => finish(false));
@@ -328,19 +344,31 @@ function waitForSocket(path, timeoutMs = 15_000) {
     };
     attempt();
   });
+  return {
+    promise,
+    cancel() {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    },
+  };
+}
+
+function ignoreFollowOnError() {
+  // Used for destroy-time socket errors and best-effort scratch teardown after
+  // a create failure so the original error remains the thrown cause.
 }
 
 export function openExclusiveWriteStream(path) {
   return new Promise((resolvePromise, reject) => {
     const stream = createWriteStream(path, { flags: "wx" });
-    const onOpen = () => {
+    function onOpen() {
       stream.off("error", onError);
       resolvePromise(stream);
-    };
-    const onError = (error) => {
+    }
+    function onError(error) {
       stream.off("open", onOpen);
       reject(error);
-    };
+    }
     stream.once("open", onOpen);
     stream.once("error", onError);
   });
@@ -361,7 +389,7 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
   child.stdout.pipe(log, { end: false });
   child.stderr.pipe(log, { end: false });
   let earlyExit = null;
-  let rejectSpawnFailure;
+  let rejectSpawnFailure = ignoreFollowOnError;
   const spawnFailure = new Promise((_, reject) => {
     rejectSpawnFailure = reject;
   });
@@ -370,8 +398,9 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
   child.once("exit", (code, signal) => {
     earlyExit = { code, signal };
   });
+  const socketWait = waitForSocket(daemonSocketPath);
   try {
-    await Promise.race([waitForSocket(daemonSocketPath), spawnFailure]);
+    await Promise.race([socketWait.promise, spawnFailure]);
     child.off("error", onSpawnError);
     if (earlyExit) {
       throw new Error(
@@ -379,6 +408,7 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
       );
     }
   } catch (error) {
+    socketWait.cancel();
     child.off("error", onSpawnError);
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
@@ -487,7 +517,7 @@ export async function createScratchTargets(count, deps) {
       anchor = surface;
     }
   } catch (error) {
-    await closeRecorded().catch(() => {});
+    await closeRecorded().catch(ignoreFollowOnError);
     throw error;
   }
   return { targets: Object.freeze([...targets]), close: closeRecorded };
@@ -509,30 +539,39 @@ export function operationArgs(row, surface, workspace, worker, sample) {
   return { workspace, verbose: false };
 }
 
-async function runCliOperation(row, config, worker, sample) {
-  let args;
+export function cliOperationArgs(row, surface, workspace, worker, sample) {
   if (row.operation === "send_to") {
-    args = [
+    return [
       "send",
       "--workspace",
-      config.workspace,
+      workspace,
       "--surface",
-      config.surface,
-      `${payloadText(row.payload_chars, worker, sample)}\\n`,
+      surface,
+      `${payloadText(row.payload_chars, worker, sample)}\n`,
     ];
-  } else if (row.operation === "read_screen") {
-    args = [
+  }
+  if (row.operation === "read_screen") {
+    return [
       "read-screen",
       "--workspace",
-      config.workspace,
+      workspace,
       "--surface",
-      config.surface,
+      surface,
       "--lines",
       "20",
     ];
-  } else {
-    args = ["tree", "--workspace", config.workspace];
   }
+  return ["list-workspaces"];
+}
+
+async function runCliOperation(row, config, worker, sample) {
+  const args = cliOperationArgs(
+    row,
+    config.surface,
+    config.workspace,
+    worker,
+    sample,
+  );
   await execCapture(config.cmuxBin, args, { env: config.env });
   return { ok: true, transport: "cli", transport_fallbacks: [] };
 }
