@@ -10,6 +10,7 @@ import {
   compareBenchmark,
   maximumBenchmarkMeasurements,
   performanceCeiling,
+  requireCanonicalRequestChangeReason,
   requireBaselineIncreaseReason,
   runBenchmark,
   validateBaseline,
@@ -123,18 +124,27 @@ for (const sample of samples) {
     throw new Error("refusing to refresh without the canonical 8x12 replay");
   }
   for (const operation of CANONICAL_OPERATIONS) {
+    const canonicalRequestChanged =
+      !migratingLegacyBaseline &&
+      (sample.replay?.bytes?.[operation] !==
+        existing.replay.bytes[operation] ||
+        sample.replay?.request_sha256?.[operation] !==
+          existing.replay.request_sha256[operation]);
     if (
       !Number.isFinite(sample.replay?.bytes?.[operation]) ||
       !/^[0-9a-f]{64}$/.test(
         sample.replay?.request_sha256?.[operation] ?? "",
       ) ||
-      (!migratingLegacyBaseline &&
-        (sample.replay.bytes[operation] !== existing.replay.bytes[operation] ||
-          sample.replay.request_sha256[operation] !==
-            existing.replay.request_sha256[operation]))
+      (canonicalRequestChanged && !runnerRebase)
     ) {
       throw new Error(
         `refusing to refresh changed canonical request ${operation}`,
+      );
+    }
+    if (runnerRebase) {
+      requireCanonicalRequestChangeReason(
+        canonicalRequestChanged,
+        increaseReason,
       );
     }
   }

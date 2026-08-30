@@ -288,6 +288,15 @@ export function requireBaselineIncreaseReason(measurementPairs, reason) {
   return raisesCommittedBaseline;
 }
 
+export function requireCanonicalRequestChangeReason(changed, reason) {
+  if (changed && !reason?.trim()) {
+    throw new Error(
+      'refusing imported canonical request change without --reason "<text>"',
+    );
+  }
+  return changed;
+}
+
 function currentMetrics(result) {
   const first = result?.latency?.first_send_after_spawn?.first;
   const sampledFirst = result?.latency?.first_send_after_spawn?.sampled;

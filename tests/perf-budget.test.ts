@@ -9,6 +9,7 @@ import {
   compareBenchmark,
   maximumBenchmarkMeasurements,
   performanceCeiling,
+  requireCanonicalRequestChangeReason,
   requireBaselineIncreaseReason,
   renderMarkdownComparison,
   runBenchmark,
@@ -225,6 +226,16 @@ describe("daemon performance budget", () => {
       true,
     );
     expect(requireBaselineIncreaseReason([[99, 100]], "")).toBe(false);
+  });
+
+  it("requires an explicit reason for an imported canonical-request change", () => {
+    expect(() => requireCanonicalRequestChangeReason(true, "")).toThrow(
+      /canonical request change without --reason/,
+    );
+    expect(
+      requireCanonicalRequestChangeReason(true, "verify parallel read identity"),
+    ).toBe(true);
+    expect(requireCanonicalRequestChangeReason(false, "")).toBe(false);
   });
 
   it("requires a CI-runner source, canonical requests, and the 1.25 ratio", () => {
