@@ -150,9 +150,13 @@ import {
 } from "./screen-parser.js";
 
 export function isSubjectSideReportWatchPruneEligible(
-  watch: Pick<WatchRecord, "target_kind" | "change">,
+  watch: Pick<WatchRecord, "target_kind" | "change" | "provenance">,
 ): boolean {
-  return watch.target_kind === "file" && watch.change === "content";
+  return (
+    watch.provenance !== "public" &&
+    watch.target_kind === "file" &&
+    watch.change === "content"
+  );
 }
 import {
   canonicalRoleColumn,
@@ -6749,9 +6753,6 @@ export class AgentEngine {
         // marker and agent watches. Subject-side lifecycle pruning is narrower
         // and may only inspect report-content rows.
         if (!isSubjectSideReportWatchPruneEligible(watch)) return false;
-        if (!watch.subject_agent_id && watch.provenance === "public") {
-          return false;
-        }
         if (
           subjects.length === 0 &&
           missingLegacyStateWatchIds.has(watch.watch_id)

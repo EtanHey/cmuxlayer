@@ -3742,6 +3742,57 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.report_path).toBe(override);
   });
 
+  it("never repurposes or lifecycle-deletes a public aliased watch when a child adopts its report path", async () => {
+    const parent = {
+      ...parentRecord(),
+      seat_id: "lead-seat",
+      surface_uuid: null,
+    };
+    new StateManager(STATE_DIR).writeState(parent);
+    const reportPath = join(inboxDir, "collab", "public-report.md");
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, "public data\n", "utf8");
+
+    const publicWatch = await armWatch(
+      {
+        owner: parent.seat_id,
+        provenance: "public",
+        target: reportPath,
+        change: "content",
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: watchRegistryPath },
+    );
+    const publicWatchId = publicWatch.watch_id;
+
+    const child = await spawn({
+      parent_agent_id: parent.agent_id,
+      report_path: reportPath,
+    });
+    expect(child.ok, JSON.stringify(child)).toBe(true);
+    const watchesAfterSpawn = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches;
+    expect(watchesAfterSpawn).toHaveLength(2);
+    const retainedPublic = watchesAfterSpawn.find(
+      (watch) => watch.watch_id === publicWatchId,
+    );
+    expect(retainedPublic).toMatchObject({
+      owner: parent.seat_id,
+      provenance: "public",
+    });
+    expect(retainedPublic).not.toHaveProperty("subject_agent_id");
+    expect(watchesAfterSpawn).toContainEqual(
+      expect.objectContaining({
+        owner: parent.agent_id,
+        provenance: "engine",
+        subject_agent_id: child.agent_id,
+        target: reportPath,
+      }),
+    );
+    expect(isSubjectSideReportWatchPruneEligible(retainedPublic!)).toBe(false);
+  });
+
   it("rejects a shared explicit report_path before launching a second child", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -4039,7 +4090,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toHaveLength(1);
   });
 
-  it("binds duplicate-seat delivery to the subject parent without acknowledging a mismatch", async () => {
+  it("consumes an ambiguously owned revision after one delivered wake instead of storming across five sweeps", async () => {
     await server.close();
     const unrelatedUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const actualParentUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -4109,7 +4160,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const beforeWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     writeFileSync(reportPath, "after\n", "utf8");
 
-    await engine.sweepWatchesBestEffort();
+    for (let sweep = 0; sweep < 5; sweep += 1) {
+      await engine.sweepWatchesBestEffort();
+    }
 
     const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls
       .slice(beforeWake)
@@ -4120,7 +4173,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       registryPath: watchRegistryPath,
     }).watches[0];
     expect(wakeCalls).toHaveLength(1);
-    expect(watch?.fingerprint).toBe(initialFingerprint);
+    expect(watch?.fingerprint).not.toBe(initialFingerprint);
   });
 
   it("removes a terminal owner's aliased watch after stop eviction", async () => {

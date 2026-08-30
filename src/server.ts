@@ -9162,11 +9162,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         }
         const caller = resolveCurrentCallerAgent();
-        const callerOwners = new Set(
-          [caller?.agent_id, caller?.seat_id].filter(
-            (value): value is string => Boolean(value),
-          ),
-        );
+        const callerCanonicalId = caller
+          ? canonicalAgentId(caller.agent_id)
+          : null;
         const watches = caller
           ? readWatchRegistry({
               registryPath:
@@ -9174,9 +9172,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 join(context.stateDir, "watch-specs.json"),
             }).watches
               .filter(
-                (watch) =>
-                  callerOwners.has(watch.owner) &&
-                  (watch.state === "armed" || watch.state === "firing"),
+                (watch) => {
+                  const ownerResolution = resolveWatchOwner(
+                    watchRecordOwner(watch),
+                    [caller],
+                  );
+                  return (
+                    callerCanonicalId !== null &&
+                    watchOwnerIncludesCanonical(
+                      ownerResolution,
+                      callerCanonicalId,
+                    ) &&
+                    (watch.state === "armed" || watch.state === "firing")
+                  );
+                },
               )
               .map(({ watch_id, target, state }) => ({
                 watch_id,
@@ -12740,17 +12749,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const ownerDelivered =
                   delivery.delivery === "submitted" ||
                   delivery.delivery === "queued";
-                if (
-                  ownerDelivered &&
-                  ownerResolution.kind === "ambiguous" &&
-                  !externalDelivered
-                ) {
-                  return {
-                    delivered: false,
-                    retryable: false,
-                    reason: "owner_ambiguous",
-                  };
-                }
                 return ownerDelivered
                   ? true
                   : externalFallbackAfterLocalFailure();
@@ -13523,17 +13521,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return `Report watch was not armed: ${childAgentId} is not a direct child of ${parentAgentId}`;
         }
         const reportPath = resolve(coordination.report_path);
+        const legacyEngineReportPath = resolve(
+          issueSpawnCoordination(childAgentId).report_path,
+        );
         const canonicalParent = canonicalAgentId(parentAgentId);
         const ownerCandidates = snapshotWatchOwnerCandidates();
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
         }).watches.find(
           (watch) => {
+            // Lifecycle may only adopt rows it owns. Provenance-absent rows are
+            // legacy engine rows only at the engine-derived child report path;
+            // an arbitrary/public row must remain independent even when its
+            // owner alias, target, and change happen to match this contract.
+            const lifecycleOwned =
+              watch.provenance === "engine" ||
+              (watch.provenance === undefined &&
+                resolve(watch.target) === legacyEngineReportPath);
             const ownerResolution = resolveWatchOwner(
               watchRecordOwner(watch),
               ownerCandidates,
             );
             return (
+              lifecycleOwned &&
               watchOwnerIncludesCanonical(ownerResolution, canonicalParent) &&
               (!watch.subject_agent_id ||
                 watch.subject_agent_id === childAgentId) &&
