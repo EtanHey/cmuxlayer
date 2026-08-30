@@ -6626,6 +6626,13 @@ export class AgentEngine {
     );
     await removeWatches(
       (watch) => {
+        // The predicate runs under the watch-registry write lock. If a sweep
+        // changed this row after our snapshot, retain it for the next prune.
+        if (
+          persistedWatchSnapshots.get(watch.watch_id) !== JSON.stringify(watch)
+        ) {
+          return false;
+        }
         if (watch.state === "failed" && !watch.notification_pending) {
           return true;
         }
@@ -6633,14 +6640,6 @@ export class AgentEngine {
           return false;
         }
         if (watch.notification_pending) return false;
-        // The predicate runs under the watch-registry write lock. If a sweep
-        // re-armed or otherwise changed this row after our liveness snapshot,
-        // retain it and let the next prune evaluate the fresh revision.
-        if (
-          persistedWatchSnapshots.get(watch.watch_id) !== JSON.stringify(watch)
-        ) {
-          return false;
-        }
         const subjects = (subjectIdsByWatch.get(watch.watch_id) ?? [])
           .map(
             (subjectAgentId) =>

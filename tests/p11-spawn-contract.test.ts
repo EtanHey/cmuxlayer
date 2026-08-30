@@ -945,6 +945,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       terminal_reason: "deadline_elapsed",
     });
     expect(localDeadlineNotice).toHaveBeenCalledTimes(1);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "failed",
+      notification_pending: false,
+      notification_attempts: 1,
+      notification_exhausted_reason: "terminal_notice_fire_once",
+    });
 
     await server.close();
     watchNow = 3_000;

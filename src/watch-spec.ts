@@ -1177,9 +1177,7 @@ export async function sweepWatches(
               notification_delivered_at_ms: observedAt,
             };
           }
-          const attempts =
-            (record.notification_attempts ?? 0) +
-            (terminalFailureReason ? 0 : 1);
+          const attempts = (record.notification_attempts ?? 0) + 1;
           const reason =
             terminalFailureReason ?? "terminal_notice_fire_once";
           exhausted = { notification, attempts, reason };
