@@ -946,23 +946,7 @@ function notificationFor(
   };
 }
 
-async function collectAgentObservations(
-  records: WatchRecord[],
-  observer: WatchSweepOptions["agentObservation"],
-): Promise<Map<string, WatchAgentObservation>> {
-  const observations = new Map<string, WatchAgentObservation>();
-  for (const record of records) {
-    if (record.state !== "armed" || record.target_kind !== "agent") continue;
-    if (!observer) {
-      throw new Error(
-        "Agent WatchSpec sweep requires an independent observation provider",
-      );
-    }
-    observations.set(record.target, await observer(record.target));
-  }
-  return observations;
-}
-
+// skipcq: JS-R1005 -- Keep observation, atomic registry transition, and notification settlement in one compatibility-critical sweep.
 export async function sweepWatches(
   opts: WatchSweepOptions = {},
 ): Promise<WatchSweepResult> {
@@ -992,10 +976,19 @@ export async function sweepWatches(
   };
 
   const snapshot = readRegistryState(path);
-  const agentObservations = await collectAgentObservations(
-    snapshot.watches,
-    opts.agentObservation,
-  );
+  const agentObservations = new Map<string, WatchAgentObservation>();
+  for (const record of snapshot.watches) {
+    if (record.state !== "armed" || record.target_kind !== "agent") continue;
+    if (!opts.agentObservation) {
+      throw new Error(
+        "Agent WatchSpec sweep requires an independent observation provider",
+      );
+    }
+    agentObservations.set(
+      record.target,
+      await opts.agentObservation(record.target),
+    );
+  }
 
   await withWriteLock(path, () => {
     const registry = readRegistryState(path);
