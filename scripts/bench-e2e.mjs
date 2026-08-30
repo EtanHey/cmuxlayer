@@ -6,8 +6,10 @@ import { constants, createWriteStream, existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
+  lstat,
   open,
   readFile,
+  readlink,
   readdir,
   realpath,
   rm,
@@ -629,11 +631,24 @@ export async function createSocketReservation(requestedPath) {
   };
 }
 
-export async function canonicalOutputPath(outputPath) {
+export async function canonicalOutputPath(outputPath, seen = new Set()) {
   const absoluteOutput = resolve(outputPath);
-  return existsSync(absoluteOutput)
-    ? await realpath(absoluteOutput)
-    : join(await realpath(dirname(absoluteOutput)), basename(absoluteOutput));
+  if (seen.has(absoluteOutput)) {
+    throw new Error(`output path contains a symbolic-link cycle: ${absoluteOutput}`);
+  }
+  seen.add(absoluteOutput);
+  const outputStat = await lstat(absoluteOutput).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (outputStat?.isSymbolicLink()) {
+    const target = await readlink(absoluteOutput);
+    return canonicalOutputPath(resolve(dirname(absoluteOutput), target), seen);
+  }
+  if (outputStat) return realpath(absoluteOutput);
+  const parent = dirname(absoluteOutput);
+  if (parent === absoluteOutput) return absoluteOutput;
+  return join(await canonicalOutputPath(parent, seen), basename(absoluteOutput));
 }
 
 export async function createOutputReservation(outputPath, onFailure) {
@@ -1737,6 +1752,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const hashFile = deps.hashFile ?? sha256File;
   const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
   const resolveCliExecutable = deps.resolveExecutable ?? resolveExecutable;
+  const execOptions = { env: config.env, signal: config.signal };
   const expectedMcpEntry = join(root, "dist", "index.js");
   const expectedDaemonEntry = join(root, "dist", "daemon.js");
   if (
@@ -1748,11 +1764,9 @@ export async function prepareBuiltEntries(config, deps = {}) {
     );
   }
   const readWorktreeStatus = () =>
-    exec("git", provenanceStatusArgs(root, config.out), {
-      env: config.env,
-    });
+    exec("git", provenanceStatusArgs(root, config.out), execOptions);
   const readHead = () =>
-    exec("git", ["rev-parse", "HEAD"], { env: config.env });
+    exec("git", ["rev-parse", "HEAD"], execOptions);
   const outputRelative = config.out
     ? relative(resolve(root), resolve(config.out))
     : null;
@@ -1772,7 +1786,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
         "--",
         `:(literal)${outputRelative.split(sep).join("/")}`,
       ],
-      { env: config.env },
+      execOptions,
     );
     if (trackedOutput.stdout.trim()) {
       throw new Error(
@@ -1788,7 +1802,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
     );
   }
   const head = await readHead();
-  await exec("bun", ["run", "build"], { env: config.env });
+  await exec("bun", ["run", "build"], execOptions);
   await assertOutputUntracked();
   const finalStatus = await readWorktreeStatus();
   if (finalStatus.stdout.trim()) {
@@ -1885,24 +1899,41 @@ export async function publishBenchmarkReceipt(
   receipt,
   outputReservation,
   writeReceipt = writeFile,
+  abortSignal = null,
 ) {
+  abortSignal?.throwIfAborted();
+  outputReservation.assertHealthy?.();
   await writeReceipt(path, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  abortSignal?.throwIfAborted();
+  outputReservation.assertHealthy?.();
   await outputReservation.release();
 }
 
 export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
+  const signal = deps.signal ?? null;
   const canonicalize = deps.canonicalize ?? canonicalOutputPath;
   const prepare = deps.prepare ?? prepareBuiltEntries;
   const validate = deps.validate ?? assertArtifactProvenance;
   const reserve = deps.reserve ?? createOutputReservation;
+  signal?.throwIfAborted();
   config.out = await canonicalize(config.out);
+  signal?.throwIfAborted();
   const artifactProvenance = await prepare({
     ...config,
     env: process.env,
+    signal,
   });
+  signal?.throwIfAborted();
   config.cmuxBin = artifactProvenance.cli_executable.path;
   await validate(artifactProvenance);
+  signal?.throwIfAborted();
   const outputReservation = await reserve(config.out);
+  try {
+    signal?.throwIfAborted();
+  } catch (error) {
+    await outputReservation.release();
+    throw error;
+  }
   return { artifactProvenance, outputReservation };
 }
 
@@ -1943,6 +1974,7 @@ async function main() {
     try {
       abortController.signal.throwIfAborted();
       const prepared = await prepareProvenanceThenReserveOutput(config, {
+        signal: abortController.signal,
         reserve: (outputPath) =>
           createOutputReservation(outputPath, abortForLockFailure),
       });
@@ -2195,7 +2227,13 @@ async function executeBenchmark(
     rows: results,
     fatal_error: fatalError,
   };
-  await publishBenchmarkReceipt(config.out, receipt, outputReservation);
+  await publishBenchmarkReceipt(
+    config.out,
+    receipt,
+    outputReservation,
+    writeFile,
+    abortSignal,
+  );
   process.stdout.write(`${renderMarkdownTable(results)}\n`);
   process.stdout.write(`[bench-e2e] receipt ${config.out}\n`);
   if (fatalError || results.some((row) => row.error_count > 0)) {

@@ -1177,6 +1177,31 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("canonicalizes a dangling output symlink to its future target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const target = join(directory, "future.json");
+    const output = join(directory, "receipt-link.json");
+    await symlink(target, output);
+
+    await expect(canonicalOutputPath(output)).resolves.toBe(
+      join(await realpath(directory), "future.json"),
+    );
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("canonicalizes beneath a missing parent without creating it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "missing", "nested", "receipt.json");
+
+    await expect(canonicalOutputPath(output)).resolves.toBe(
+      join(await realpath(directory), "missing", "nested", "receipt.json"),
+    );
+    await expect(stat(join(directory, "missing"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("uses one output lock through real and symbolic-link parent paths", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const realDirectory = join(directory, "real");
@@ -1623,6 +1648,34 @@ describe("bench-e2e measurement harness", () => {
     expect(config.out).toBe("/repo/package.json");
   });
 
+  it("stops after preparation when reservation authority aborts", async () => {
+    const controller = new AbortController();
+    const events: string[] = [];
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: "/repo/bench.json", cmuxBin: "cmux" },
+        {
+          signal: controller.signal,
+          canonicalize: (path) => path,
+          prepare: (preparedConfig) => {
+            events.push(
+              preparedConfig.signal === controller.signal
+                ? "prepare"
+                : "bad-signal",
+            );
+            controller.abort(
+              new Error("workspace lock holder exited unexpectedly"),
+            );
+            return { cli_executable: { path: "/opt/cmux/bin/cmux" } };
+          },
+          validate: () => events.push("validate"),
+          reserve: () => events.push("reserve"),
+        },
+      ),
+    ).rejects.toThrow(/workspace lock holder exited unexpectedly/);
+    expect(events).toEqual(["prepare"]);
+  });
+
   it("rejects mutable built entries whose hashes change after attestation", async () => {
     await expect(
       assertArtifactProvenance(
@@ -1885,6 +1938,24 @@ describe("bench-e2e measurement harness", () => {
     finishWrite();
     await pending;
     expect(events).toEqual(["write-start", "write-finish", "output-release"]);
+  });
+
+  it("refuses publication after output reservation authority is lost", async () => {
+    const events = [];
+    await expect(
+      publishBenchmarkReceipt(
+        "/tmp/receipt.json",
+        { rows: [] },
+        {
+          assertHealthy() {
+            throw new Error("output lock holder exited unexpectedly");
+          },
+          release: () => events.push("release"),
+        },
+        () => events.push("write"),
+      ),
+    ).rejects.toThrow(/output lock holder exited unexpectedly/);
+    expect(events).toEqual([]);
   });
 
   it("cancels a pending socket retry without waiting for its deadline", async () => {
