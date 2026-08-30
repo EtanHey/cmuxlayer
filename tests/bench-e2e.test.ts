@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
+import { spawnSync } from "node:child_process";
 import {
   assertNightlyIsolation,
   assertArtifactProvenance,
@@ -43,6 +44,7 @@ import {
   payloadText,
   readGitHead,
   prepareBuiltEntries,
+  publishBenchmarkReceipt,
   renderMarkdownTable,
   releaseReservations,
   resolveStableWorkspaceId,
@@ -210,6 +212,45 @@ describe("bench-e2e measurement harness", () => {
     controller.abort(new Error("stop now"));
     await expect(pending).rejects.toThrow("stop now");
     expect(starts).toBe(1);
+  });
+
+  it("drains every worker before propagating an abort", async () => {
+    const controller = new AbortController();
+    let releaseFirst;
+    let releaseSecond;
+    const firstGate = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise((resolve) => {
+      releaseSecond = resolve;
+    });
+    const started = [];
+    let settled = false;
+    let rejection = null;
+    const observed = runBenchmarkRow(
+      { concurrency: 2, samples_per_worker: 1 },
+      {
+        signal: controller.signal,
+        runOperation: async ({ worker }) => {
+          started.push(worker);
+          await (worker === 0 ? firstGate : secondGate);
+          return { ok: true, transport: "socket", transport_fallbacks: [] };
+        },
+      },
+    ).catch((error) => {
+      settled = true;
+      rejection = error;
+    });
+
+    expect(started).toEqual([0, 1]);
+    controller.abort(new Error("stop all workers"));
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    releaseSecond();
+    await observed;
+    expect(rejection).toMatchObject({ message: "stop all workers" });
   });
 
   it("counts transport and every fallback from the raw samples", () => {
@@ -483,6 +524,7 @@ describe("bench-e2e measurement harness", () => {
       comparison_status: "NOT_COMPARABLE",
     });
     expect(buildAbsentComparisonRow(cliRow)).toMatchObject({
+      concurrency_profile: "c5",
       attempt_count: 0,
       success_count: 0,
       failure_rate_pct: null,
@@ -1020,10 +1062,36 @@ describe("bench-e2e measurement harness", () => {
   it("recovers an output lock whose recorded owner is gone", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
-    await writeFile(`${output}.lock`, "99999\n", "utf8");
+    const exitedChild = spawnSync(process.execPath, ["-e", ""]);
+    expect(exitedChild.status).toBe(0);
+    await writeFile(
+      `${output}.lock`,
+      `${JSON.stringify({ pid: exitedChild.pid, process_start: "exited-child" })}\n`,
+      "utf8",
+    );
     await utimes(`${output}.lock`, new Date(0), new Date(0));
     const reservation = await createOutputReservation(output);
     await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("recovers a reclaim marker whose recorded owner is gone", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const exitedChild = spawnSync(process.execPath, ["-e", ""]);
+    expect(exitedChild.status).toBe(0);
+    await writeFile(
+      `${output}.lock.reclaim`,
+      `${JSON.stringify({ pid: exitedChild.pid, process_start: "exited-child" })}\n`,
+      "utf8",
+    );
+
+    const reservation = await createOutputReservation(output);
+
+    await reservation.release();
+    await expect(stat(`${output}.lock.reclaim`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1184,6 +1252,10 @@ describe("bench-e2e measurement harness", () => {
         CMUXLAYER_FORCE_INPROCESS: "1",
         CMUXLAYER_DEFAULT_PALETTE: "list_surfaces",
         CMUXLAYER_DAEMON_FD: "7",
+        CMUXLAYER_HEAP_GUARD_BYTES: "1",
+        CMUXLAYER_UNKNOWN_RUNTIME_TOGGLE: "enabled",
+        NODE_OPTIONS: "--require /tmp/untrusted-node-hook.cjs",
+        BUN_OPTIONS: "--preload /tmp/untrusted-bun-hook.ts",
         LISTEN_FDS: "1",
       },
       {
@@ -1197,6 +1269,10 @@ describe("bench-e2e measurement harness", () => {
     expect(env).not.toHaveProperty("CMUXLAYER_FORCE_INPROCESS");
     expect(env).not.toHaveProperty("CMUXLAYER_DEFAULT_PALETTE");
     expect(env).not.toHaveProperty("CMUXLAYER_DAEMON_FD");
+    expect(env).not.toHaveProperty("CMUXLAYER_HEAP_GUARD_BYTES");
+    expect(env).not.toHaveProperty("CMUXLAYER_UNKNOWN_RUNTIME_TOGGLE");
+    expect(env).not.toHaveProperty("NODE_OPTIONS");
+    expect(env).not.toHaveProperty("BUN_OPTIONS");
     expect(env).not.toHaveProperty("LISTEN_FDS");
   });
 
@@ -1251,10 +1327,10 @@ describe("bench-e2e measurement harness", () => {
     );
 
     expect(calls).toEqual([
-      "status --porcelain --untracked-files=no",
+      "status --porcelain",
       "rev-parse HEAD",
       "run build",
-      "status --porcelain --untracked-files=no",
+      "status --porcelain",
       "rev-parse HEAD",
     ]);
     expect(result).toEqual({
@@ -1526,6 +1602,34 @@ describe("bench-e2e measurement harness", () => {
       ],
     });
     expect(calls).toEqual(["output", "workspace"]);
+  });
+
+  it("holds the output reservation until receipt publication finishes", async () => {
+    const events = [];
+    let finishWrite;
+    const writeGate = new Promise((resolve) => {
+      finishWrite = resolve;
+    });
+    const pending = publishBenchmarkReceipt(
+      "/tmp/receipt.json",
+      { schema_version: 1 },
+      {
+        release: () => {
+          events.push("output-release");
+        },
+      },
+      async () => {
+        events.push("write-start");
+        await writeGate;
+        events.push("write-finish");
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(["write-start"]);
+    finishWrite();
+    await pending;
+    expect(events).toEqual(["write-start", "write-finish", "output-release"]);
   });
 
   it("cancels a pending socket retry without waiting for its deadline", async () => {

@@ -287,7 +287,12 @@ export async function runBenchmarkRow(row, deps) {
       return samples;
     })(),
   );
-  const samples = (await Promise.all(workerRuns)).flat();
+  const settledWorkers = await Promise.allSettled(workerRuns);
+  const rejectedWorker = settledWorkers.find(
+    (result) => result.status === "rejected",
+  );
+  if (rejectedWorker) throw rejectedWorker.reason;
+  const samples = settledWorkers.flatMap((result) => result.value);
   const latencies = samples
     .filter((sample) => sample.ok)
     .map((sample) => sample.latency_ms);
@@ -315,6 +320,7 @@ export async function runBenchmarkRow(row, deps) {
 export function buildAbsentComparisonRow(row) {
   return {
     ...row,
+    concurrency_profile: `c${row.concurrency}`,
     comparison_status: "NOT_COMPARABLE",
     attempt_count: 0,
     success_count: 0,
@@ -685,22 +691,52 @@ function parseLockOwner(text) {
   return null;
 }
 
+async function lockOwnerIsLive(owner) {
+  if (!owner || !processIsLive(owner.pid)) return false;
+  const observedStart = await readProcessStartIdentity(owner.pid);
+  return (
+    !owner.process_start ||
+    observedStart === null ||
+    observedStart === owner.process_start
+  );
+}
+
 async function createPidLock(lockPath, label) {
   await mkdir(dirname(lockPath), { recursive: true });
   const processStart = await readProcessStartIdentity(process.pid);
   if (!processStart) {
     throw new Error(`${label} could not attest process start identity`);
   }
-  const ownerText = `${JSON.stringify({ pid: process.pid, process_start: processStart })}\n`;
+  const ownerText = `${JSON.stringify({
+    pid: process.pid,
+    process_start: processStart,
+    claim_id: randomUUID(),
+  })}\n`;
   const candidatePath = `${lockPath}.claim-${process.pid}-${randomUUID()}`;
   const reclaimPath = `${lockPath}.reclaim`;
   await writeFile(candidatePath, ownerText, { flag: "wx", mode: 0o600 });
   let acquired = false;
   try {
     for (let attempt = 0; attempt < 20 && !acquired; attempt += 1) {
-      if (existsSync(reclaimPath)) {
-        await new Promise((resolvePause) => setTimeout(resolvePause, 10));
-        continue;
+      const reclaimText = await readFile(reclaimPath, "utf8").catch((error) => {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      });
+      if (reclaimText !== null) {
+        if (await lockOwnerIsLive(parseLockOwner(reclaimText))) {
+          await new Promise((resolvePause) => setTimeout(resolvePause, 10));
+          continue;
+        }
+        const currentReclaimText = await readFile(reclaimPath, "utf8").catch(
+          (error) => {
+            if (error?.code === "ENOENT") return null;
+            throw error;
+          },
+        );
+        if (currentReclaimText !== reclaimText) continue;
+        await unlink(reclaimPath).catch((error) => {
+          if (error?.code !== "ENOENT") throw error;
+        });
       }
       try {
         await link(candidatePath, lockPath);
@@ -715,15 +751,8 @@ async function createPidLock(lockPath, label) {
       });
       if (observedText === null) continue;
       const owner = parseLockOwner(observedText);
-      if (owner && processIsLive(owner.pid)) {
-        const observedStart = await readProcessStartIdentity(owner.pid);
-        if (
-          !owner.process_start ||
-          observedStart === null ||
-          observedStart === owner.process_start
-        ) {
-          throw new Error(`${label} is already reserved by pid ${owner.pid}`);
-        }
+      if (await lockOwnerIsLive(owner)) {
+        throw new Error(`${label} is already reserved by pid ${owner.pid}`);
       }
       let ownsReclaim = false;
       try {
@@ -844,13 +873,19 @@ export function daemonLogPath(
 }
 
 export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
-  const cleanBaseEnv = { ...baseEnv };
-  delete cleanBaseEnv.CMUXLAYER_FORCE_INPROCESS;
-  delete cleanBaseEnv.CMUXLAYER_DEFAULT_PALETTE;
-  delete cleanBaseEnv.CMUXLAYER_DAEMON_FD;
-  delete cleanBaseEnv.LISTEN_FDS;
-  delete cleanBaseEnv.LISTEN_PID;
-  delete cleanBaseEnv.LISTEN_FDNAMES;
+  const blockedNames = new Set([
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "BUN_OPTIONS",
+    "LISTEN_FDS",
+    "LISTEN_PID",
+    "LISTEN_FDNAMES",
+  ]);
+  const cleanBaseEnv = Object.fromEntries(
+    Object.entries(baseEnv).filter(
+      ([name]) => !name.startsWith("CMUXLAYER_") && !blockedNames.has(name),
+    ),
+  );
   const root = reservation.ownerDirectory;
   const isolatedHome = join(root, "home");
   return stringEnv({
@@ -1657,7 +1692,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
     );
   }
   const readTrackedStatus = () =>
-    exec("git", ["status", "--porcelain", "--untracked-files=no"], {
+    exec("git", ["status", "--porcelain"], {
       env: config.env,
     });
   const readHead = () =>
@@ -1665,14 +1700,14 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const status = await readTrackedStatus();
   if (status.stdout.trim()) {
     throw new Error(
-      "refusing to benchmark built artifacts from a dirty tracked worktree",
+      "refusing to benchmark built artifacts from a dirty worktree",
     );
   }
   const head = await readHead();
   await exec("bun", ["run", "build"], { env: config.env });
   const finalStatus = await readTrackedStatus();
   if (finalStatus.stdout.trim()) {
-    throw new Error("tracked worktree changed during artifact build");
+    throw new Error("worktree changed during artifact build");
   }
   const finalHead = await readHead();
   if (finalHead.stdout.trim() !== head.stdout.trim()) {
@@ -1760,6 +1795,16 @@ export async function releaseReservations(reservations) {
   }
 }
 
+export async function publishBenchmarkReceipt(
+  path,
+  receipt,
+  outputReservation,
+  writeReceipt = writeFile,
+) {
+  await writeReceipt(path, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  await outputReservation.release();
+}
+
 async function main() {
   const config = parseConfig(process.argv.slice(2), process.env);
   if (config.help) {
@@ -1797,7 +1842,8 @@ async function main() {
         config,
         isolation,
         abortController.signal,
-        releaseTopLevel,
+        () => workspaceReservation.release(),
+        outputReservation,
       );
     } finally {
       await releaseTopLevel();
@@ -1811,7 +1857,8 @@ async function executeBenchmark(
   config,
   isolation,
   abortSignal,
-  releaseTopLevel,
+  releaseWorkspaceReservation,
+  outputReservation,
 ) {
   const artifactProvenance = await prepareBuiltEntries({
     ...config,
@@ -1972,9 +2019,9 @@ async function executeBenchmark(
     fatalError = appendFatalError(fatalError, error, "artifact revalidation");
   }
   try {
-    await releaseTopLevel();
+    await releaseWorkspaceReservation();
   } catch (error) {
-    fatalError = appendFatalError(fatalError, error, "top-level release");
+    fatalError = appendFatalError(fatalError, error, "workspace release");
   }
 
   const receipt = {
@@ -2042,7 +2089,7 @@ async function executeBenchmark(
     rows: results,
     fatal_error: fatalError,
   };
-  await writeFile(config.out, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  await publishBenchmarkReceipt(config.out, receipt, outputReservation);
   process.stdout.write(`${renderMarkdownTable(results)}\n`);
   process.stdout.write(`[bench-e2e] receipt ${config.out}\n`);
   if (fatalError || results.some((row) => row.error_count > 0)) {
