@@ -1009,7 +1009,7 @@ export async function sweepWatches(
         ) {
           const notification = notificationFor(
             migrated,
-            migrated.terminal_reason!,
+            record.terminal_reason,
             migrated.terminal_at_ms ?? observedAt,
             migrated.observed_value,
           );
