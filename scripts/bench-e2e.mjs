@@ -1271,6 +1271,32 @@ async function enumerateCliWorkspaces(config, exec = execCapture) {
   throw new Error("incomplete all-window workspace enumeration after retry");
 }
 
+export async function resolveStableWorkspaceId(
+  requestedWorkspace,
+  config,
+  exec = execCapture,
+) {
+  const workspaces = await enumerateCliWorkspaces(config, exec);
+  const matches = workspaces.filter(
+    (workspace) =>
+      isRecord(workspace) &&
+      (nonEmptyString(workspace.ref) === requestedWorkspace ||
+        nonEmptyString(workspace.id) === requestedWorkspace),
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `workspace ${requestedWorkspace} resolved to ${matches.length} all-window entries; refusing an ambiguous reservation`,
+    );
+  }
+  const stableId = nonEmptyString(matches[0].id);
+  if (!stableId) {
+    throw new Error(
+      `workspace ${requestedWorkspace} has no stable id; refusing a ref-only reservation`,
+    );
+  }
+  return stableId;
+}
+
 function workspaceRefs(workspaces) {
   return workspaces
     .map((workspace) =>
@@ -1582,9 +1608,14 @@ async function main() {
   const abortController = new AbortController();
   const removeSignalHandlers = installGracefulSignalAbort(abortController);
   try {
+    const stableWorkspaceId = await resolveStableWorkspaceId(config.workspace, {
+      cmuxBin: config.cmuxBin,
+      env: process.env,
+      signal: abortController.signal,
+    });
     const workspaceReservation = await createWorkspaceReservation(
       isolation.cmuxSocketPath,
-      config.workspace,
+      stableWorkspaceId,
     );
     try {
       abortController.signal.throwIfAborted();

@@ -35,6 +35,7 @@ import {
   readGitHead,
   prepareBuiltEntries,
   renderMarkdownTable,
+  resolveStableWorkspaceId,
   runCliReadScreen,
   installGracefulSignalAbort,
   assertNoUnexpectedDaemons,
@@ -1011,6 +1012,49 @@ describe("bench-e2e measurement harness", () => {
         directory,
       );
       await otherWorkspace.release();
+    } finally {
+      await first.release();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("canonicalizes workspace refs and ids to one reservation key", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const exec = async (_command, args) => {
+      if (args.includes("list-windows")) {
+        return {
+          stdout: JSON.stringify([
+            { ref: "window:1", id: "WINDOW-UUID", workspace_count: 1 },
+          ]),
+          stderr: "",
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          workspaces: [{ ref: "workspace:7", id: "WORKSPACE-UUID" }],
+        }),
+        stderr: "",
+      };
+    };
+    const config = { cmuxBin: "/opt/cmux", env: {} };
+    const byRef = await resolveStableWorkspaceId("workspace:7", config, exec);
+    const byId = await resolveStableWorkspaceId("WORKSPACE-UUID", config, exec);
+    expect(byRef).toBe("WORKSPACE-UUID");
+    expect(byId).toBe("WORKSPACE-UUID");
+
+    const first = await createWorkspaceReservation(
+      "/tmp/cmux-nightly.sock",
+      byRef,
+      directory,
+    );
+    try {
+      await expect(
+        createWorkspaceReservation(
+          "/tmp/cmux-nightly.sock",
+          byId,
+          directory,
+        ),
+      ).rejects.toThrow(/already reserved/);
     } finally {
       await first.release();
       await rm(directory, { recursive: true, force: true });
