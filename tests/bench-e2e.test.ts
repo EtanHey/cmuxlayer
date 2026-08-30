@@ -20,6 +20,7 @@ import {
   FAIRNESS_CONTRACTS,
   appendFatalError,
   appendSettledFailures,
+  assertOwnedDaemonHealthy,
   listPanesCliArgs,
   listPaneSurfacesCliArgs,
   listWindowsCliArgs,
@@ -1088,6 +1089,30 @@ describe("bench-e2e measurement harness", () => {
     expect(fatal).toContain("benchmark: row failed");
     expect(fatal).toContain("scratch teardown: close failed");
     expect(fatal).toContain("daemon stop: stop failed");
+  });
+
+  it("preserves nested aggregate cleanup evidence in fatal_error", () => {
+    const cleanup = new AggregateError(
+      [new Error("SIGKILL failed"), new Error("reservation release failed")],
+      "isolated daemon cleanup failed",
+    );
+    const stop = new AggregateError([cleanup], "isolated daemon stop failed");
+
+    const fatal = appendFatalError(null, stop, "daemon stop");
+
+    expect(fatal).toContain("isolated daemon stop failed");
+    expect(fatal).toContain("isolated daemon cleanup failed");
+    expect(fatal).toContain("SIGKILL failed");
+    expect(fatal).toContain("reservation release failed");
+  });
+
+  it("fails health checks when the owned daemon exits after readiness", () => {
+    const child = { exitCode: null, signalCode: null, pid: 4242 };
+    expect(() => assertOwnedDaemonHealthy(child, null)).not.toThrow();
+    child.exitCode = 17;
+    expect(() => assertOwnedDaemonHealthy(child, null)).toThrow(
+      /owned isolated daemon.*4242.*exitCode.*17/,
+    );
   });
 
   it("preserves every rejected MCP client shutdown", () => {

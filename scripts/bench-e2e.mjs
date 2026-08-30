@@ -722,9 +722,32 @@ export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
 }
 
 export function appendFatalError(current, error, phase) {
-  const detail = error instanceof Error ? error.message : String(error);
+  const details = [];
+  const seen = new Set();
+  const visit = (value) => {
+    if (value && typeof value === "object") {
+      if (seen.has(value)) return;
+      seen.add(value);
+    }
+    const message = value instanceof Error ? value.message : String(value);
+    if (message && !details.includes(message)) details.push(message);
+    if (Array.isArray(value?.errors)) {
+      for (const nested of value.errors) visit(nested);
+    }
+  };
+  visit(error);
+  const detail = details.join(" -> ");
   const entry = `${phase}: ${detail}`;
   return current ? `${current}; ${entry}` : entry;
+}
+
+export function assertOwnedDaemonHealthy(child, logError = null) {
+  if (logError) throw logError;
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(
+      `owned isolated daemon pid ${child.pid ?? "unknown"} exited after readiness: ${JSON.stringify({ exitCode: child.exitCode, signalCode: child.signalCode })}`,
+    );
+  }
 }
 
 export function appendSettledFailures(current, results, phase) {
@@ -824,7 +847,7 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
   return {
     pid: child.pid,
     assertHealthy() {
-      if (logError) throw logError;
+      assertOwnedDaemonHealthy(child, logError);
     },
     async stop() {
       let cleanupError = null;
@@ -1427,8 +1450,11 @@ async function executeBenchmark(config, isolation) {
         .map((row) => row.concurrency),
     );
     for (let index = 0; index < maxMcpConcurrency; index += 1) {
+      daemon.assertHealthy();
       mcpClients.push(await connectMcpClient(config.mcpEntry, env, index));
+      daemon.assertHealthy();
     }
+    daemon.assertHealthy();
     await Promise.all(
       mcpClients.map((client) =>
         client.callTool(
@@ -1438,7 +1464,9 @@ async function executeBenchmark(config, isolation) {
         ),
       ),
     );
+    daemon.assertHealthy();
     for (const [index, row] of rows.entries()) {
+      daemon.assertHealthy();
       if (row.comparison_status === "NOT_COMPARABLE") {
         process.stderr.write(
           `[bench-e2e] row ${index + 1}/${rows.length} ${row.operation} c${row.concurrency} payload=${row.payload_chars ?? "-"} ${row.client} NOT_COMPARABLE\n`,
