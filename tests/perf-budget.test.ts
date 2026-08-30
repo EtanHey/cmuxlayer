@@ -935,6 +935,10 @@ describe("daemon performance budget", () => {
       'receipt.transport || name === "control_health"',
     );
     expect(source).not.toContain("const transportReceipts = await Promise.all");
+    expect(source).toMatch(
+      /const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients\([\s\S]*?\n    \);\n    daemonRssMb = await totalRssMb/,
+    );
+    expect(source).not.toContain("onFirstSample");
   });
 
   it("wires a required PR/main job and edits a single comment even on RED", () => {

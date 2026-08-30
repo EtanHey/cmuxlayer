@@ -967,13 +967,11 @@ async function measureWarmToolAcrossClients(clients, name, args) {
 async function measureSpawnLifecycleAcrossClients(
   clients,
   sweepHoldState,
-  onFirstSample,
 ) {
   const samples = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     for (const client of clients) {
       samples.push(await measureSpawnLifecycleOnce(client, sweepHoldState));
-      if (samples.length === 1) await onFirstSample?.();
     }
   }
   return {
@@ -1165,15 +1163,11 @@ async function main() {
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
-      async () => {
-        daemonRssMb = await totalRssMb(
-          [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(
-            Boolean,
-          ),
-        );
-        daemonStats = await processStats(daemon.pid);
-      },
     );
+    daemonRssMb = await totalRssMb(
+      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
+    );
+    daemonStats = await processStats(daemon.pid);
     const listAgents = await measureWarmToolAcrossClients(
       daemonClients,
       "list_agents",
