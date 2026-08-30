@@ -951,6 +951,10 @@ describe("daemon performance budget", () => {
     expect(source).toContain(
       "benchmark_clients_survived_replay:\n        stressClientsSurvivedReplay &&\n        daemonClients.every((client) => client.alive)",
     );
+    expect(source).toContain("function parallelStressSentinel(index)");
+    expect(source).toContain("validateReceipt?.(receipt, requestArgs, index)");
+    expect(source).toContain("parallel read returned the wrong surface");
+    expect(source).toContain("parallel read omitted its unique sentinel");
     expect(source).toContain("firstSendAfterSpawn.sampled");
     expect(source).toContain("firstSendAfterSpawn.send_to_agent_warm");
     expect(source).toContain("firstSendAfterSpawn.send_to_surface_warm");

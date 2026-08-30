@@ -1076,7 +1076,11 @@ async function measureSpawnLifecycleAcrossClients(
   };
 }
 
-async function measureParallelStress(clients, name, args) {
+function parallelStressSentinel(index) {
+  return `parallel surface benchmark ${index}`;
+}
+
+async function measureParallelStress(clients, name, args, validateReceipt) {
   const samples = [];
   const requests = Array.from({ length: PARALLEL_STRESS_COUNT }, (_, index) =>
     typeof args === "function" ? args(index) : args,
@@ -1089,11 +1093,14 @@ async function measureParallelStress(clients, name, args) {
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     const startedAt = nowMs();
     const receipts = await Promise.all(
-      requests.map(async (requestArgs, index) =>
-        toolData(
+      requests.map(async (requestArgs, index) => {
+        const receipt = toolData(
           await clients[index].callTool(name, requestArgs, 30_000),
           name,
-        ),
+        );
+        validateReceipt?.(receipt, requestArgs, index);
+        return receipt;
+      }),
       ),
     );
     samples.push({
@@ -1262,7 +1269,7 @@ async function main() {
         mode: "surface",
         surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
         workspace: "workspace:bench",
-        text: "parallel surface benchmark",
+        text: parallelStressSentinel(index),
         press_enter: true,
       }),
     );
@@ -1273,7 +1280,20 @@ async function main() {
         surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
         workspace: "workspace:bench",
         lines: 5,
+        raw: true,
       }),
+      (receipt, requestArgs, index) => {
+        const expectedRef = `surface:bench-${index}`;
+        if (
+          receipt.surface !== requestArgs.surface &&
+          receipt.surface !== expectedRef
+        ) {
+          throw new Error("parallel read returned the wrong surface");
+        }
+        if (!receipt.content?.includes(parallelStressSentinel(index))) {
+          throw new Error("parallel read omitted its unique sentinel");
+        }
+      },
     );
     const stressClientsSurvivedReplay = stressClients.every(
       (client) => client.alive,
