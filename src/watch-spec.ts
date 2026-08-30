@@ -1004,7 +1004,9 @@ export async function sweepWatches(
           notification_next_attempt_at_ms:
             record.notification_next_attempt_at_ms ?? observedAt,
         };
-        if (migrated.notification_next_attempt_at_ms! <= observedAt) {
+        if (
+          (migrated.notification_next_attempt_at_ms ?? observedAt) <= observedAt
+        ) {
           const notification = notificationFor(
             migrated,
             migrated.terminal_reason!,
