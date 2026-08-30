@@ -6636,8 +6636,7 @@ export class AgentEngine {
           return false;
         }
         if (watch.state === "failed" && !watch.notification_pending) {
-          if ((watch.waiter_expires_at_ms ?? 0) > pruneObservedAt) return false;
-          return true;
+          return (watch.waiter_expires_at_ms ?? 0) <= pruneObservedAt;
         }
         if (watch.target_kind !== "file" || watch.change !== "content") {
           return false;
@@ -9365,6 +9364,17 @@ export class AgentEngine {
       agentObservation: this.watchAgentObservation,
       waiterExpiresAtMs: Date.now() + Math.max(0, timeoutMs) + 60_000,
     });
+    const releaseWaiterBestEffort = async (): Promise<void> => {
+      try {
+        await releaseWatchWaiter(armed.watch_id, {
+          registryPath: this.watchRegistryPath,
+        });
+      } catch (error) {
+        this.sweepDebugLog(
+          `[cmuxlayer] watch waiter release deferred: watch=${armed.watch_id} error=${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
     while (true) {
       const swept = await sweepWatches({
         registryPath: this.watchRegistryPath,
@@ -9385,21 +9395,15 @@ export class AgentEngine {
       }
       const elapsed = Date.now() - startedAt;
       if (current.state === "fired" || swept.fired.includes(armed.watch_id)) {
-        await releaseWatchWaiter(armed.watch_id, {
-          registryPath: this.watchRegistryPath,
-        });
+        await releaseWaiterBestEffort();
         return { matched: true, elapsed, watch: current };
       }
       if (current.state === "failed") {
-        await releaseWatchWaiter(armed.watch_id, {
-          registryPath: this.watchRegistryPath,
-        });
+        await releaseWaiterBestEffort();
         return { matched: false, elapsed, watch: current };
       }
       if (elapsed >= timeoutMs) {
-        await releaseWatchWaiter(armed.watch_id, {
-          registryPath: this.watchRegistryPath,
-        });
+        await releaseWaiterBestEffort();
         return { matched: false, elapsed, watch: current };
       }
       await new Promise<void>((resolveSleep) => {

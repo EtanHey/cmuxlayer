@@ -1199,15 +1199,16 @@ export async function sweepWatches(
           return record;
         }
         if (record.state === "failed") {
+          const attempts = (record.notification_attempts ?? 0) + 1;
           if (delivered) {
             return {
               ...record,
               notification_pending: false,
+              notification_attempts: attempts,
               notification_next_attempt_at_ms: undefined,
               notification_delivered_at_ms: observedAt,
             };
           }
-          const attempts = (record.notification_attempts ?? 0) + 1;
           const reason =
             terminalFailureReason ?? "terminal_notice_fire_once";
           exhausted = { notification, attempts, reason };

@@ -1004,7 +1004,13 @@ describe("WatchSpec arm contract", () => {
     );
     expect(
       readWatchRegistry({ registryPath: registryPath() }).watches[0],
-    ).toMatchObject({ state: "failed", terminal_reason: "deadline_elapsed" });
+    ).toMatchObject({
+      state: "failed",
+      terminal_reason: "deadline_elapsed",
+      notification_pending: false,
+      notification_attempts: 1,
+      notification_delivered_at_ms: 2_000,
+    });
   });
 
   it("fires a marker watch on count increase only", async () => {
