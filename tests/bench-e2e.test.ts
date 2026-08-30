@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import {
   assertNightlyIsolation,
   buildBenchmarkRows,
+  cliArgs,
   createScratchTargets,
   markSurfaceTransportUntrusted,
   nearestRankPercentile,
@@ -14,6 +16,8 @@ import {
   readGitHead,
   runBenchmarkRow,
   summarizeTransport,
+  terminateChild,
+  waitForSocket,
 } from "../scripts/bench-e2e.mjs";
 
 describe("bench-e2e measurement harness", () => {
@@ -59,7 +63,7 @@ describe("bench-e2e measurement harness", () => {
       },
       {
         nowMs: () => clock,
-        runOperation: async ({ worker, sample }) => {
+        runOperation: ({ worker, sample }) => {
           clock += worker + sample + 1;
           return {
             ok: true,
@@ -125,7 +129,7 @@ describe("bench-e2e measurement harness", () => {
     const fixture = await createScratchTargets(3, {
       workspace: "workspace:7",
       controllerSurface: "surface:20",
-      execCmux: async (args: string[]) => {
+      execCmux: (args: string[]) => {
         calls.push(args);
         return { stdout: outputs.shift() ?? "OK\n", stderr: "" };
       },
@@ -151,6 +155,19 @@ describe("bench-e2e measurement harness", () => {
 
     expect(payload).toHaveLength(520);
     expect(payload.startsWith(": run10-e2e w4s11 ")).toBe(true);
+  });
+
+  it("submits direct CLI send rows with an actual newline", () => {
+    const args = cliArgs(
+      { operation: "send_to", payload_chars: 520 },
+      { workspace: "workspace:7", surface: "surface:21" },
+      0,
+      0,
+    );
+
+    expect(args.at(-1)).toHaveLength(521);
+    expect(args.at(-1)?.endsWith("\n")).toBe(true);
+    expect(args.at(-1)?.endsWith("\\n")).toBe(false);
   });
 
   it("does not mix an environment workspace UUID into raw-surface calls", () => {
@@ -218,15 +235,89 @@ describe("bench-e2e measurement harness", () => {
     }
   });
 
+  it("captures daemon log errors that occur after the stream opens", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const logPath = join(directory, "daemon.log");
+    let runtimeError = null;
+    try {
+      const stream = await openExclusiveWriteStream(logPath, (error) => {
+        runtimeError = error;
+      });
+      const expected = new Error("disk full");
+      stream.emit("error", expected);
+      expect(runtimeError).toBe(expected);
+      stream.end();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps a benchmark receipt writable when git head lookup fails", async () => {
     await expect(
-      readGitHead(async () => {
+      readGitHead(() => {
         throw new Error("git unavailable");
       }),
     ).resolves.toBeNull();
     await expect(
-      readGitHead(async () => ({ stdout: "abc123\n", stderr: "" })),
+      readGitHead(() => ({ stdout: "abc123\n", stderr: "" })),
     ).resolves.toBe("abc123");
+  });
+
+  it("reports both scratch creation and cleanup failures", async () => {
+    let call = 0;
+    await expect(
+      createScratchTargets(2, {
+        workspace: "workspace:7",
+        controllerSurface: "surface:20",
+        execCmux: () => {
+          call += 1;
+          if (call === 1) return { stdout: "OK surface:21\n", stderr: "" };
+          if (call === 2) throw new Error("create failed");
+          throw new Error("close failed");
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "AggregateError",
+      message: "scratch target creation and teardown failed",
+      errors: [
+        expect.objectContaining({ message: "create failed" }),
+        expect.objectContaining({ message: expect.stringContaining("close failed") }),
+      ],
+    });
+  });
+
+  it("escalates an unresponsive child from TERM to KILL", async () => {
+    class FakeChild extends EventEmitter {
+      exitCode = null;
+      signalCode = null;
+      signals: string[] = [];
+
+      kill(signal: string) {
+        this.signals.push(signal);
+        if (signal === "SIGKILL") {
+          this.signalCode = signal;
+          queueMicrotask(() => this.emit("exit", null, signal));
+        }
+        return true;
+      }
+    }
+    const child = new FakeChild();
+
+    await terminateChild(child, 0);
+
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("cancels a pending socket retry without waiting for its deadline", async () => {
+    const wait = waitForSocket(
+      join(tmpdir(), `cmuxlayer-missing-${process.pid}-${Date.now()}.sock`),
+      30_000,
+    );
+    const reason = new Error("startup failed elsewhere");
+
+    wait.cancel(reason);
+
+    await expect(wait.promise).rejects.toBe(reason);
   });
 
 });

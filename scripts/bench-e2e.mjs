@@ -269,13 +269,16 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(
-        new Error(
-          `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
-        ),
-      );
+      timedOut = true;
+      void terminateChild(child).finally(() => {
+        reject(
+          new Error(
+            `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
+          ),
+        );
+      });
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
@@ -289,6 +292,7 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
     });
     child.once("close", (code, signal) => {
       clearTimeout(timer);
+      if (timedOut) return;
       if (code !== 0) {
         reject(
           new Error(
@@ -302,47 +306,111 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
   });
 }
 
-function waitForSocket(path, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  return new Promise((resolvePromise, reject) => {
-    const attempt = () => {
-      const socket = net.createConnection({ path });
-      let settled = false;
-      const finish = (connected) => {
-        if (settled) return;
-        settled = true;
-        socket.removeAllListeners();
-        socket.on("error", () => {});
-        socket.destroy();
-        if (connected) {
-          resolvePromise();
-        } else if (Date.now() >= deadline) {
-          reject(new Error(`timed out waiting for socket ${path}`));
-        } else {
-          setTimeout(attempt, 50);
-        }
-      };
-      socket.setTimeout(250, () => finish(false));
-      socket.once("connect", () => finish(true));
-      socket.once("error", () => finish(false));
+export async function terminateChild(child, graceMs = 5_000) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exitPromise = new Promise((resolveExit) => {
+    const onExit = () => {
+      child.off("exit", onExit);
+      child.off("close", onExit);
+      resolveExit();
     };
-    attempt();
+    child.once("exit", onExit);
+    child.once("close", onExit);
   });
+  child.kill("SIGTERM");
+  let timer;
+  const exitedGracefully = await Promise.race([
+    exitPromise.then(() => true),
+    new Promise((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout(false), graceMs);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (
+    !exitedGracefully &&
+    child.exitCode === null &&
+    child.signalCode === null
+  ) {
+    child.kill("SIGKILL");
+    await exitPromise;
+  }
 }
 
-export function openExclusiveWriteStream(path) {
+export function waitForSocket(path, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let activeSocket = null;
+  let retryTimer = null;
+  let settled = false;
+  let resolveWait;
+  let rejectWait;
+  const promise = new Promise((resolvePromise, reject) => {
+    resolveWait = resolvePromise;
+    rejectWait = reject;
+  });
+  const settle = (error = null) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(retryTimer);
+    if (activeSocket) {
+      activeSocket.removeAllListeners();
+      activeSocket.on("error", () => undefined);
+      activeSocket.destroy();
+      activeSocket = null;
+    }
+    if (error) rejectWait(error);
+    else resolveWait();
+  };
+  const attempt = () => {
+    if (settled) return;
+    const socket = net.createConnection({ path });
+    activeSocket = socket;
+    let attemptSettled = false;
+    const finish = (connected) => {
+      if (attemptSettled) return;
+      attemptSettled = true;
+      socket.removeAllListeners();
+      socket.on("error", () => undefined);
+      socket.destroy();
+      if (activeSocket === socket) activeSocket = null;
+      if (connected) {
+        settle();
+      } else if (Date.now() >= deadline) {
+        settle(new Error(`timed out waiting for socket ${path}`));
+      } else {
+        retryTimer = setTimeout(attempt, 50);
+      }
+    };
+    socket.setTimeout(250, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  };
+  attempt();
+  return {
+    promise,
+    cancel(reason = new Error(`cancelled socket wait for ${path}`)) {
+      settle(reason);
+    },
+  };
+}
+
+export function openExclusiveWriteStream(path, onRuntimeError = null) {
   return new Promise((resolvePromise, reject) => {
     const stream = createWriteStream(path, { flags: "wx" });
+    let opened = false;
     const onOpen = () => {
-      stream.off("error", onError);
+      opened = true;
       resolvePromise(stream);
     };
     const onError = (error) => {
-      stream.off("open", onOpen);
-      reject(error);
+      if (!opened) {
+        stream.off("open", onOpen);
+        reject(error);
+      } else if (onRuntimeError) {
+        onRuntimeError(error);
+      }
     };
     stream.once("open", onOpen);
-    stream.once("error", onError);
+    stream.on("error", onError);
   });
 }
 
@@ -352,8 +420,21 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
       `isolated daemon socket already exists; refusing to reap an unowned path: ${daemonSocketPath}`,
     );
   }
-  const log = await openExclusiveWriteStream(logPath);
-  const child = spawn(process.execPath, [entry], {
+  let child = null;
+  let logError = null;
+  let terminationPromise = null;
+  let rejectLogFailure;
+  const logFailure = new Promise((_, reject) => {
+    rejectLogFailure = reject;
+  });
+  const log = await openExclusiveWriteStream(logPath, (error) => {
+    logError ??= error;
+    rejectLogFailure(error);
+    if (child) {
+      terminationPromise ??= terminateChild(child);
+    }
+  });
+  child = spawn(process.execPath, [entry], {
     cwd: repoRoot,
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -370,35 +451,37 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
   child.once("exit", (code, signal) => {
     earlyExit = { code, signal };
   });
+  const socketWait = waitForSocket(daemonSocketPath);
   try {
-    await Promise.race([waitForSocket(daemonSocketPath), spawnFailure]);
+    await Promise.race([socketWait.promise, spawnFailure, logFailure]);
+    socketWait.cancel();
     child.off("error", onSpawnError);
+    if (logError) throw logError;
     if (earlyExit) {
       throw new Error(
         `isolated daemon exited before readiness: ${JSON.stringify(earlyExit)}`,
       );
     }
   } catch (error) {
+    socketWait.cancel();
     child.off("error", onSpawnError);
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-    }
+    terminationPromise ??= terminateChild(child);
+    await terminationPromise;
     log.end();
     await rm(daemonSocketPath, { force: true });
     throw error;
   }
   return {
     pid: child.pid,
+    assertHealthy() {
+      if (logError) throw logError;
+    },
     async stop() {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGTERM");
-        await Promise.race([
-          new Promise((resolveExit) => child.once("exit", resolveExit)),
-          new Promise((resolveTimeout) => setTimeout(resolveTimeout, 5_000)),
-        ]);
-      }
+      terminationPromise ??= terminateChild(child);
+      await terminationPromise;
       log.end();
       await rm(daemonSocketPath, { force: true });
+      if (logError) throw logError;
     },
   };
 }
@@ -487,7 +570,14 @@ export async function createScratchTargets(count, deps) {
       anchor = surface;
     }
   } catch (error) {
-    await closeRecorded().catch(() => {});
+    try {
+      await closeRecorded();
+    } catch (teardownError) {
+      throw new AggregateError(
+        [error, teardownError],
+        "scratch target creation and teardown failed",
+      );
+    }
     throw error;
   }
   return { targets: Object.freeze([...targets]), close: closeRecorded };
@@ -509,19 +599,19 @@ export function operationArgs(row, surface, workspace, worker, sample) {
   return { workspace, verbose: false };
 }
 
-async function runCliOperation(row, config, worker, sample) {
-  let args;
+export function cliArgs(row, config, worker, sample) {
   if (row.operation === "send_to") {
-    args = [
+    return [
       "send",
       "--workspace",
       config.workspace,
       "--surface",
       config.surface,
-      `${payloadText(row.payload_chars, worker, sample)}\\n`,
+      `${payloadText(row.payload_chars, worker, sample)}\n`,
     ];
-  } else if (row.operation === "read_screen") {
-    args = [
+  }
+  if (row.operation === "read_screen") {
+    return [
       "read-screen",
       "--workspace",
       config.workspace,
@@ -530,9 +620,12 @@ async function runCliOperation(row, config, worker, sample) {
       "--lines",
       "20",
     ];
-  } else {
-    args = ["tree", "--workspace", config.workspace];
   }
+  return ["tree", "--workspace", config.workspace];
+}
+
+async function runCliOperation(row, config, worker, sample) {
+  const args = cliArgs(row, config, worker, sample);
   await execCapture(config.cmuxBin, args, { env: config.env });
   return { ok: true, transport: "cli", transport_fallbacks: [] };
 }
@@ -711,6 +804,7 @@ async function main() {
       });
       const result = markSurfaceTransportUntrusted(measured);
       results.push(result);
+      daemon.assertHealthy();
     }
   } catch (error) {
     fatalError = error instanceof Error ? error.message : String(error);
@@ -723,7 +817,11 @@ async function main() {
         fatalError ??= error instanceof Error ? error.message : String(error);
       }
     }
-    await daemon.stop();
+    try {
+      await daemon.stop();
+    } catch (error) {
+      fatalError ??= error instanceof Error ? error.message : String(error);
+    }
   }
 
   const receipt = {
