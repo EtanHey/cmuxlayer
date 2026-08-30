@@ -5,14 +5,18 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import {
   assertNightlyIsolation,
+  assertCliFairnessTrace,
   buildBenchmarkRows,
+  buildAbsentComparisonRow,
   buildRowsAndReserve,
   buildIsolatedRuntimeEnv,
+  beginObservedTermination,
   cliArgs,
   cleanupDaemonResources,
   createScratchTargets,
   createSocketReservation,
   daemonLogPath,
+  FAIRNESS_CONTRACTS,
   appendFatalError,
   appendSettledFailures,
   listPanesCliArgs,
@@ -27,6 +31,7 @@ import {
   payloadText,
   readGitHead,
   prepareBuiltEntries,
+  renderMarkdownTable,
   runCliReadScreen,
   runCliListSurfaces,
   runBenchmarkRow,
@@ -127,6 +132,9 @@ describe("bench-e2e measurement harness", () => {
     );
 
     expect(result.error_count).toBe(6);
+    expect(result.attempt_count).toBe(12);
+    expect(result.success_count).toBe(6);
+    expect(result.failure_rate_pct).toBe(50);
     expect(result.p50_ms).toBe(100);
     expect(result.p95_ms).toBe(100);
   });
@@ -155,6 +163,9 @@ describe("bench-e2e measurement harness", () => {
     );
 
     expect(result.error_count).toBe(12);
+    expect(result.attempt_count).toBe(12);
+    expect(result.success_count).toBe(0);
+    expect(result.failure_rate_pct).toBe(100);
     expect(result.p50_ms).toBeNull();
     expect(result.p95_ms).toBeNull();
   });
@@ -170,6 +181,27 @@ describe("bench-e2e measurement harness", () => {
       transport_counts: { socket: 1, cli: 2 },
       transport_fallback_counts: { paste_text: 2, send: 1 },
     });
+  });
+
+  it("renders attempts, successes, and failure rate beside percentiles", () => {
+    const table = renderMarkdownTable([
+      {
+        operation: "send_to",
+        concurrency_profile: "c5",
+        payload_chars: 520,
+        client: "mcp",
+        attempt_count: 60,
+        success_count: 47,
+        failure_rate_pct: 21.67,
+        p50_ms: 100,
+        p95_ms: 200,
+        transport_counts: { UNTRUSTED: 60 },
+        transport_fallback_counts: { UNTRUSTED_D180: 60 },
+      },
+    ]);
+
+    expect(table).toContain("| attempts | successes | failure % | p50 ms |");
+    expect(table).toContain("| 60 | 47 | 21.67 | 100 | 200 |");
   });
 
   it("refuses production or ambiguous socket configuration", () => {
@@ -279,7 +311,7 @@ describe("bench-e2e measurement harness", () => {
     expect(payload.startsWith(": run10-e2e w4s11 ")).toBe(true);
   });
 
-  it("submits direct CLI send rows with an actual newline", () => {
+  it("keeps the legacy direct CLI send shape available but not comparable", () => {
     const args = cliArgs(
       { operation: "send_to", payload_chars: 520 },
       { workspace: "workspace:7", surface: "surface:21" },
@@ -289,7 +321,6 @@ describe("bench-e2e measurement harness", () => {
 
     expect(args.at(-1)).toHaveLength(521);
     expect(args.at(-1)?.endsWith("\n")).toBe(true);
-    expect(args.at(-1)?.endsWith("\\n")).toBe(false);
   });
 
   it("walks the same all-window topology verbs as MCP list_surfaces", async () => {
@@ -362,6 +393,115 @@ describe("bench-e2e measurement harness", () => {
       listPanesCliArgs("workspace:7"),
       listPaneSurfacesCliArgs("workspace:7", "pane:1"),
     ]);
+  });
+
+  it("defines and enforces one fairness contract for every operation", () => {
+    expect(Object.keys(FAIRNESS_CONTRACTS)).toEqual([
+      "send_to",
+      "read_screen",
+      "list_surfaces",
+    ]);
+    expect(FAIRNESS_CONTRACTS.send_to).toMatchObject({
+      comparable: false,
+      cli_work: null,
+    });
+    expect(FAIRNESS_CONTRACTS.send_to.reason).toMatch(
+      /dynamic.*cannot be mirrored/i,
+    );
+    expect(() => assertCliFairnessTrace("send_to", [])).toThrow(
+      /not comparable/,
+    );
+    for (const contract of [
+      FAIRNESS_CONTRACTS.read_screen,
+      FAIRNESS_CONTRACTS.list_surfaces,
+    ]) {
+      expect(contract.comparable).toBe(true);
+      expect(contract.cli_work).toEqual(contract.mcp_work);
+      expect(() =>
+        assertCliFairnessTrace(contract.operation, contract.cli_work),
+      ).not.toThrow();
+      expect(() =>
+        assertCliFairnessTrace(contract.operation, ["drifted-work"]),
+      ).toThrow(/fairness contract drift/);
+    }
+  });
+
+  it("emits an explicit absent row instead of an unfair send_to comparison", () => {
+    const [mcpRow, cliRow] = buildBenchmarkRows({
+      concurrency: [5],
+      payloadSizes: [520],
+      samplesPerWorker: 12,
+      operations: ["send_to"],
+      clients: ["mcp", "cli"],
+    });
+
+    expect(mcpRow.comparison_status).toBe("MEASURED");
+    expect(cliRow).toMatchObject({
+      client: "cli",
+      comparison_status: "NOT_COMPARABLE",
+    });
+    expect(buildAbsentComparisonRow(cliRow)).toMatchObject({
+      attempt_count: 0,
+      success_count: 0,
+      failure_rate_pct: null,
+      p50_ms: null,
+      p95_ms: null,
+      comparison_status: "NOT_COMPARABLE",
+    });
+  });
+
+  it("fans out multi-pane list_surfaces work concurrently like MCP", async () => {
+    const calls: string[][] = [];
+    const releases: Array<() => void> = [];
+    const pending = runCliListSurfaces(
+      {
+        workspace: "workspace:7",
+        surface: "surface:21",
+        cmuxBin: "/opt/cmux",
+        env: {},
+      },
+      (_command, args) => {
+        calls.push(args);
+        if (args.includes("list-windows")) {
+          return {
+            stdout: JSON.stringify({
+              windows: [{ ref: "window:1", workspace_count: 1 }],
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-workspaces")) {
+          return {
+            stdout: JSON.stringify({ workspaces: [{ ref: "workspace:7" }] }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-panes")) {
+          return {
+            stdout: JSON.stringify({
+              workspace_ref: "workspace:7",
+              panes: [{ ref: "pane:1" }, { ref: "pane:2" }],
+            }),
+            stderr: "",
+          };
+        }
+        return new Promise((resolve) => {
+          releases.push(() =>
+            resolve({
+              stdout: JSON.stringify({ surfaces: [] }),
+              stderr: "",
+            }),
+          );
+        });
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      calls.filter((args) => args.includes("list-pane-surfaces")),
+    ).toHaveLength(2);
+    for (const release of releases) release();
+    await pending;
   });
 
   it("adds the MCP topology workload to direct CLI read_screen samples", async () => {
@@ -539,6 +679,23 @@ describe("bench-e2e measurement harness", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("observes a log-triggered termination rejection immediately", async () => {
+    const expected = new Error("termination failed");
+    const rejection = Promise.reject(expected);
+    const originalCatch = rejection.catch.bind(rejection);
+    let catchCalls = 0;
+    rejection.catch = (...args) => {
+      catchCalls += 1;
+      return originalCatch(...args);
+    };
+
+    const observed = beginObservedTermination({}, () => rejection);
+
+    expect(observed).toBe(rejection);
+    expect(catchCalls).toBe(1);
+    await expect(observed).rejects.toBe(expected);
   });
 
   it("keeps a benchmark receipt writable when git head lookup fails", async () => {
@@ -751,7 +908,7 @@ describe("bench-e2e measurement harness", () => {
           clients: ["mcp"],
         },
         "/tmp/cmuxlayer-run10-nightly.sock",
-        async () => {
+        () => {
           reservationCalls += 1;
           throw new Error("must not reserve");
         },

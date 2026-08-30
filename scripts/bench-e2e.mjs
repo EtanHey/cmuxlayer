@@ -24,6 +24,63 @@ const DEFAULT_PAYLOAD_SIZES = Object.freeze([250, 450, 520, 900]);
 const DEFAULT_SAMPLES_PER_WORKER = 12;
 const REQUIRED_NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 
+function fairnessContract(operation, work, note) {
+  const frozenWork = Object.freeze([...work]);
+  return Object.freeze({
+    operation,
+    comparable: true,
+    mcp_work: frozenWork,
+    cli_work: Object.freeze([...work]),
+    note,
+  });
+}
+
+export const FAIRNESS_CONTRACTS = Object.freeze({
+  send_to: Object.freeze({
+    operation: "send_to",
+    comparable: false,
+    mcp_work: Object.freeze([
+      "topology:all-windows:sequential",
+      "dynamic-route-and-control-validation",
+      "read-screen:safety",
+      "payload-dependent-send-or-paste-with-retries",
+      "send-key:return-with-retries",
+    ]),
+    cli_work: null,
+    reason:
+      "MCP send_to performs dynamic route, control, safety, retry, and payload-dependent paste work that cannot be mirrored by direct cmux send without reimplementing the server; the CLI comparison row is explicitly absent.",
+  }),
+  read_screen: fairnessContract(
+    "read_screen",
+    ["read-screen", "topology:all-windows:sequential"],
+    "MCP reads the screen and then collects all-window topology; direct CLI performs the same external primitives in the same order.",
+  ),
+  list_surfaces: fairnessContract(
+    "list_surfaces",
+    [
+      "enumerate:all-window-workspaces",
+      "topology:target-workspace:parallel-panes",
+      "terminal-metadata:socket-empty-noop",
+    ],
+    "MCP enumerates all-window workspaces, fans target-workspace pane surface reads concurrently, then calls the socket client's in-process empty terminal-metadata method; direct CLI mirrors those external primitives and records the same no-op.",
+  ),
+});
+
+export function assertCliFairnessTrace(operation, observedWork) {
+  const contract = FAIRNESS_CONTRACTS[operation];
+  if (!contract) throw new Error(`missing fairness contract for ${operation}`);
+  if (!contract.comparable || !contract.cli_work) {
+    throw new Error(
+      `${operation} is not comparable: ${contract.reason ?? "no equivalent direct CLI arm"}`,
+    );
+  }
+  if (JSON.stringify(observedWork) !== JSON.stringify(contract.cli_work)) {
+    throw new Error(
+      `fairness contract drift for ${operation}: expected ${JSON.stringify(contract.cli_work)}, observed ${JSON.stringify(observedWork)}`,
+    );
+  }
+}
+
 function round(value, digits = 2) {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
@@ -117,6 +174,13 @@ export function buildBenchmarkRows({
             concurrency: workerCount,
             payload_chars: payloadChars,
             samples_per_worker: samplesPerWorker,
+            comparison_status:
+              operation === "send_to" && client === "cli"
+                ? "NOT_COMPARABLE"
+                : "MEASURED",
+            ...(operation === "send_to" && client === "cli"
+              ? { comparison_note: FAIRNESS_CONTRACTS.send_to.reason }
+              : {}),
           });
         }
       }
@@ -217,17 +281,41 @@ export async function runBenchmarkRow(row, deps) {
   const latencies = samples
     .filter((sample) => sample.ok)
     .map((sample) => sample.latency_ms);
+  const attemptCount = samples.length;
+  const successCount = latencies.length;
+  const failureCount = attemptCount - successCount;
   return {
     ...row,
     concurrency_profile: `c${row.concurrency}`,
     sample_count: samples.length,
+    attempt_count: attemptCount,
+    success_count: successCount,
+    failure_rate_pct:
+      attemptCount > 0 ? round((failureCount / attemptCount) * 100) : 0,
     p50_ms:
       latencies.length > 0 ? round(nearestRankPercentile(latencies, 50)) : null,
     p95_ms:
       latencies.length > 0 ? round(nearestRankPercentile(latencies, 95)) : null,
-    error_count: samples.filter((sample) => !sample.ok).length,
+    error_count: failureCount,
     ...summarizeTransport(samples),
     samples,
+  };
+}
+
+export function buildAbsentComparisonRow(row) {
+  return {
+    ...row,
+    comparison_status: "NOT_COMPARABLE",
+    attempt_count: 0,
+    success_count: 0,
+    failure_rate_pct: null,
+    sample_count: 0,
+    p50_ms: null,
+    p95_ms: null,
+    error_count: 0,
+    transport_counts: {},
+    transport_fallback_counts: {},
+    samples: [],
   };
 }
 
@@ -400,6 +488,17 @@ export async function terminateChild(child, graceMs = 5_000) {
     child.off("error", onError);
     child.off("close", onClose);
   }
+}
+
+export function beginObservedTermination(child, terminate = terminateChild) {
+  let promise;
+  try {
+    promise = terminate(child);
+  } catch (error) {
+    promise = Promise.reject(error);
+  }
+  promise.catch(() => undefined);
+  return promise;
 }
 
 export function waitForSocket(path, timeoutMs = 15_000) {
@@ -610,7 +709,7 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
     logError ??= error;
     rejectLogFailure(error);
     if (child) {
-      terminationPromise ??= terminateChild(child);
+      terminationPromise ??= beginObservedTermination(child);
     }
   });
   child = spawn(process.execPath, [entry], {
@@ -958,22 +1057,51 @@ function workspaceRefs(workspaces) {
     .filter((ref) => ref !== null);
 }
 
-async function runCliTopology(config, workspaces, exec = execCapture) {
-  for (const workspace of workspaces) {
+async function runCliTopology(
+  config,
+  workspaces,
+  exec = execCapture,
+  { parallelWorkspaces = false, parallelPanes = false } = {},
+) {
+  const runWorkspace = async (workspace) => {
     const panesOut = await exec(config.cmuxBin, listPanesCliArgs(workspace), {
       env: config.env,
     });
-    for (const pane of paneRefsFromListPanesStdout(panesOut.stdout)) {
-      await exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
-        env: config.env,
-      });
+    const panes = paneRefsFromListPanesStdout(panesOut.stdout);
+    if (parallelPanes) {
+      await Promise.all(
+        panes.map((pane) =>
+          exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
+            env: config.env,
+          }),
+        ),
+      );
+    } else {
+      for (const pane of panes) {
+        await exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
+          env: config.env,
+        });
+      }
     }
+  };
+  if (parallelWorkspaces) {
+    await Promise.all(workspaces.map(runWorkspace));
+  } else {
+    for (const workspace of workspaces) await runWorkspace(workspace);
   }
 }
 
 export async function runCliListSurfaces(config, exec = execCapture) {
+  const observedWork = [];
   await enumerateCliWorkspaces(config, exec);
-  await runCliTopology(config, [config.workspace], exec);
+  observedWork.push("enumerate:all-window-workspaces");
+  await runCliTopology(config, [config.workspace], exec, {
+    parallelWorkspaces: true,
+    parallelPanes: true,
+  });
+  observedWork.push("topology:target-workspace:parallel-panes");
+  observedWork.push("terminal-metadata:socket-empty-noop");
+  assertCliFairnessTrace("list_surfaces", observedWork);
 }
 
 export async function runCliReadScreen(
@@ -982,13 +1110,17 @@ export async function runCliReadScreen(
   sample,
   exec = execCapture,
 ) {
+  const observedWork = [];
   await exec(
     config.cmuxBin,
     cliArgs({ operation: "read_screen" }, config, worker, sample),
     { env: config.env },
   );
+  observedWork.push("read-screen");
   const workspaces = await enumerateCliWorkspaces(config, exec);
   await runCliTopology(config, workspaceRefs(workspaces), exec);
+  observedWork.push("topology:all-windows:sequential");
+  assertCliFairnessTrace("read_screen", observedWork);
 }
 
 async function runCliOperation(row, config, worker, sample) {
@@ -999,6 +1131,9 @@ async function runCliOperation(row, config, worker, sample) {
   if (row.operation === "read_screen") {
     await runCliReadScreen(config, worker, sample);
     return { ok: true, transport: "cli", transport_fallbacks: [] };
+  }
+  if (row.operation === "send_to") {
+    throw new Error(FAIRNESS_CONTRACTS.send_to.reason);
   }
   const args = cliArgs(row, config, worker, sample);
   await execCapture(config.cmuxBin, args, { env: config.env });
@@ -1014,12 +1149,12 @@ function compactCounts(counts) {
 
 export function renderMarkdownTable(rows) {
   const lines = [
-    "| operation | profile | payload | client | n | p50 ms | p95 ms | errors | transport | fallbacks |",
-    "|---|---:|---:|---|---:|---:|---:|---:|---|---|",
+    "| operation | profile | payload | client | status | attempts | successes | failure % | p50 ms | p95 ms | transport | fallbacks |",
+    "|---|---:|---:|---|---|---:|---:|---:|---:|---:|---|---|",
   ];
   for (const row of rows) {
     lines.push(
-      `| ${row.operation} | ${row.concurrency_profile} | ${row.payload_chars ?? "-"} | ${row.client} | ${row.sample_count} | ${row.p50_ms} | ${row.p95_ms} | ${row.error_count} | ${compactCounts(row.transport_counts)} | ${compactCounts(row.transport_fallback_counts)} |`,
+      `| ${row.operation} | ${row.concurrency_profile} | ${row.payload_chars ?? "-"} | ${row.client} | ${row.comparison_status ?? "MEASURED"} | ${row.attempt_count} | ${row.success_count} | ${row.failure_rate_pct ?? "-"} | ${row.p50_ms ?? "-"} | ${row.p95_ms ?? "-"} | ${compactCounts(row.transport_counts)} | ${compactCounts(row.transport_fallback_counts)} |`,
     );
   }
   return lines.join("\n");
@@ -1230,6 +1365,13 @@ async function main() {
       ),
     );
     for (const [index, row] of rows.entries()) {
+      if (row.comparison_status === "NOT_COMPARABLE") {
+        process.stderr.write(
+          `[bench-e2e] row ${index + 1}/${rows.length} ${row.operation} c${row.concurrency} payload=${row.payload_chars ?? "-"} ${row.client} NOT_COMPARABLE\n`,
+        );
+        results.push(buildAbsentComparisonRow(row));
+        continue;
+      }
       process.stderr.write(
         `[bench-e2e] row ${index + 1}/${rows.length} ${row.operation} c${row.concurrency} payload=${row.payload_chars ?? "-"} ${row.client}\n`,
       );
@@ -1333,9 +1475,18 @@ async function main() {
       load_model: "none (synthetic MCP/CLI clients; no LLM seats launched)",
       estimated_model_cost_usd: 0,
     },
+    fairness_contracts: FAIRNESS_CONTRACTS,
     row_schema: {
       identity: ["operation", "client", "concurrency_profile", "payload_chars"],
-      aggregate: ["sample_count", "p50_ms", "p95_ms", "error_count"],
+      comparison: ["comparison_status", "comparison_note?"],
+      aggregate: [
+        "attempt_count",
+        "success_count",
+        "failure_rate_pct",
+        "p50_ms",
+        "p95_ms",
+        "error_count",
+      ],
       transport: ["transport_counts", "transport_fallback_counts"],
       raw_sample: [
         "worker",
