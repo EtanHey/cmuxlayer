@@ -429,6 +429,10 @@ const WatchSpecArgsSchema = {
     .nonnegative()
     .optional()
     .describe("Prior marker count; defaults to count observed at arm time"),
+  notify: z
+    .boolean()
+    .optional()
+    .describe("Opt in to the configured external notification transport"),
   deadline: z
     .number()
     .int()
@@ -12394,6 +12398,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
+            const externalNotify =
+              event.notify === true ? opts?.watchNotify : undefined;
             const subjectStillBelongsToOwner = (): boolean => {
               if (!event.subject_agent_id) return true;
               const subject =
@@ -12436,9 +12442,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   : undefined;
               })();
             let externalDelivered = true;
-            if (event.reason !== "predicate_matched" && opts?.watchNotify) {
+            if (event.reason !== "predicate_matched" && externalNotify) {
               try {
-                externalDelivered = (await opts.watchNotify(event)) !== false;
+                externalDelivered = (await externalNotify(event)) !== false;
               } catch {
                 externalDelivered = false;
               }
@@ -12447,15 +12453,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return true;
             }
             if (!owner) {
-              if (event.reason === "predicate_matched" && opts?.watchNotify) {
+              if (event.reason === "predicate_matched" && externalNotify) {
                 try {
                   externalDelivered =
-                    (await opts.watchNotify(event)) !== false;
+                    (await externalNotify(event)) !== false;
                 } catch {
                   externalDelivered = false;
                 }
               }
-              if (opts?.watchNotify && externalDelivered) {
+              if (externalNotify && externalDelivered) {
                 return true;
               }
               return {
@@ -12468,13 +12474,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const externalFallbackAfterLocalFailure = async () => {
                 if (
                   event.reason !== "predicate_matched" ||
-                  !opts?.watchNotify
+                  !externalNotify
                 ) {
                   return false;
                 }
                 if (!subjectStillBelongsToOwner()) return true;
                 try {
-                  return (await opts.watchNotify(event)) !== false;
+                  return (await externalNotify(event)) !== false;
                 } catch {
                   return false;
                 }
@@ -12518,10 +12524,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
             if (event.reason !== "predicate_matched") {
-              return opts?.watchNotify ? externalDelivered : false;
+              return externalNotify ? externalDelivered : false;
             }
-            return opts?.watchNotify
-              ? (await opts.watchNotify(event)) !== false
+            return externalNotify
+              ? (await externalNotify(event)) !== false
               : false;
           },
           closeForensicsRunner: opts?.enableCloseForensics

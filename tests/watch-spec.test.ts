@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import {
   WatchArmError,
   armWatch,
+  httpNotifyWatch,
   readWatchRegistry,
   reserveWatchReportPath,
   releaseWatchReportPathReservation,
@@ -33,6 +34,50 @@ describe("WatchSpec arm contract", () => {
 
   afterEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("notifies the transport only when the declared watch opts in", async () => {
+    const silentTarget = join(TEST_DIR, "silent.md");
+    const notifyingTarget = join(TEST_DIR, "notifying.md");
+    writeFileSync(silentTarget, "", "utf8");
+    writeFileSync(notifyingTarget, "", "utf8");
+    const transport = vi.fn().mockResolvedValue(true);
+
+    await armWatch(
+      {
+        owner: "lead-a",
+        target: silentTarget,
+        marker: "DONE",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    await armWatch(
+      {
+        owner: "lead-a",
+        target: notifyingTarget,
+        marker: "DONE",
+        deadline: 60_000,
+        notify: true,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    appendFileSync(silentTarget, "DONE\n", "utf8");
+    appendFileSync(notifyingTarget, "DONE\n", "utf8");
+
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify: (event) =>
+        httpNotifyWatch(event, "http://notify.invalid", transport),
+    });
+
+    expect(transport).toHaveBeenCalledOnce();
+    expect(transport.mock.calls[0]?.[0]).toMatchObject({
+      title: "Declared watch changed",
+      body: expect.stringContaining(`target=${notifyingTarget}`),
+    });
+    expect(transport.mock.calls[0]?.[1]).toBe("http://notify.invalid");
   });
 
   it("rejects a nonexistent file target immediately with a structured arm error", async () => {
@@ -80,6 +125,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target,
         change: "content",
+        notify: true,
         deadline: 60_000,
       },
       {
@@ -298,6 +344,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target: "worker-a",
         predicate: "done",
+        notify: true,
         deadline: 60_000,
       },
       {
@@ -349,6 +396,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target: "worker-a",
         predicate: "done",
+        notify: true,
         deadline: 60_000,
       },
       {
@@ -777,6 +825,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target,
         marker: "DONE",
+        notify: true,
         deadline: 60_000,
       },
       { registryPath: registryPath(), now: () => now },
@@ -831,6 +880,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target,
         marker: "DONE",
+        notify: true,
         deadline: Number.MAX_SAFE_INTEGER,
       },
       { registryPath: registryPath(), now: () => now },
@@ -878,6 +928,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target,
         change: "content",
+        notify: true,
         deadline: Number.MAX_SAFE_INTEGER,
       },
       { registryPath: registryPath(), now: () => now },
@@ -935,6 +986,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target,
         marker: "DONE",
+        notify: true,
         deadline: 2_000,
       },
       { registryPath: registryPath(), now: () => 1_000 },
@@ -964,6 +1016,7 @@ describe("WatchSpec arm contract", () => {
         owner: "lead-a",
         target,
         marker: "DONE_P1",
+        notify: true,
         deadline: 60_000,
       },
       { registryPath: registryPath(), now: () => 1_000 },

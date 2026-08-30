@@ -35,6 +35,8 @@ export interface WatchSpec {
   owner: string;
   /** Managed child whose lifecycle owns this watch. */
   subject_agent_id?: string;
+  /** Opt in to the configured external notification transport. */
+  notify?: boolean;
   target: string;
   predicate?: WatchAgentPredicate;
   marker?: string;
@@ -101,6 +103,7 @@ export interface WatchNotification {
   watch_id: string;
   owner: string;
   subject_agent_id?: string;
+  notify?: boolean;
   target: string;
   target_kind: "file" | "agent";
   reason: WatchNotificationReason;
@@ -322,6 +325,9 @@ function isWatchRecord(value: unknown): value is WatchRecord {
     value.subject_agent_id !== undefined &&
     typeof value.subject_agent_id !== "string"
   ) {
+    return false;
+  }
+  if (value.notify !== undefined && typeof value.notify !== "boolean") {
     return false;
   }
   if (
@@ -829,6 +835,7 @@ export async function armWatch(
     watch_id: randomUUID(),
     owner: checked.owner,
     ...(subjectAgentId ? { subject_agent_id: subjectAgentId } : {}),
+    ...(spec.notify === true ? { notify: true } : {}),
     target,
     ...(checked.predicate ? { predicate: checked.predicate } : {}),
     ...(checked.marker ? { marker: checked.marker } : {}),
@@ -903,6 +910,7 @@ function notificationFor(
     ...(record.subject_agent_id
       ? { subject_agent_id: record.subject_agent_id }
       : {}),
+    ...(record.notify === true ? { notify: true } : {}),
     target: record.target,
     target_kind: record.target_kind,
     reason,
@@ -1285,8 +1293,10 @@ export async function sweepWatches(
 export async function httpNotifyWatch(
   event: WatchNotification,
   notifyUrl = DEFAULT_NOTIFY_URL,
+  deliver: typeof httpDeliver = httpDeliver,
 ): Promise<boolean> {
-  return httpDeliver(
+  if (event.notify !== true) return true;
+  return deliver(
     {
       title: "Declared watch changed",
       body: `Watch ${event.watch_id} for ${event.owner}: ${event.reason}; target=${event.target}`,

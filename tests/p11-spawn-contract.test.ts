@@ -1023,6 +1023,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       subject_agent_id: child.agent_id,
       target: reportPath,
       change: "content",
+      notify: true,
       deadline: Number.MAX_SAFE_INTEGER,
     });
     const initialFingerprint = readWatchRegistry({
@@ -1111,6 +1112,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       subject_agent_id: child.agent_id,
       target: contentPath,
       change: "content",
+      notify: true,
       deadline: Number.MAX_SAFE_INTEGER,
     });
     await engine.armWatch({
@@ -1118,6 +1120,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       subject_agent_id: child.agent_id,
       target: markerPath,
       marker: "DONE_EXTERNAL",
+      notify: true,
       deadline: Number.MAX_SAFE_INTEGER,
     });
     writeFileSync(contentPath, "after\n", "utf8");
@@ -1198,6 +1201,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       subject_agent_id: child.agent_id,
       target: child.agent_id,
       predicate: "idle",
+      notify: true,
       deadline: Number.MAX_SAFE_INTEGER,
     });
     const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
@@ -1999,6 +2003,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       subject_agent_id: child.agent_id,
       target: reportPath,
       change: "content",
+      notify: true,
       deadline: Number.MAX_SAFE_INTEGER,
     });
     const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
@@ -2051,6 +2056,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       owner: parent.agent_id,
       target: reportPath,
       marker: "DONE_REAPED_CHILD",
+      notify: true,
       deadline: Number.MAX_SAFE_INTEGER,
     });
 
