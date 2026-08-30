@@ -4,12 +4,14 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
 import {
+  link,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import net from "node:net";
@@ -649,33 +651,78 @@ function processIsLive(pid, signalPid = process.kill) {
   }
 }
 
+async function readProcessStartIdentity(pid) {
+  const result = await execCapture(
+    "/bin/ps",
+    ["-p", String(pid), "-o", "lstart="],
+    { env: process.env },
+  ).catch(() => null);
+  return nonEmptyString(result?.stdout.trim());
+}
+
+function parseLockOwner(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (
+      isRecord(parsed) &&
+      Number.isSafeInteger(parsed.pid) &&
+      parsed.pid > 0
+    ) {
+      return {
+        pid: parsed.pid,
+        process_start: nonEmptyString(parsed.process_start),
+      };
+    }
+  } catch {
+    const legacyPid = Number.parseInt(text.trim(), 10);
+    if (Number.isSafeInteger(legacyPid) && legacyPid > 0) {
+      return { pid: legacyPid, process_start: null };
+    }
+  }
+  return null;
+}
+
 async function createPidLock(lockPath, label) {
   await mkdir(dirname(lockPath), { recursive: true });
+  const processStart = await readProcessStartIdentity(process.pid);
+  if (!processStart) {
+    throw new Error(`${label} could not attest process start identity`);
+  }
+  const ownerText = `${JSON.stringify({ pid: process.pid, process_start: processStart })}\n`;
+  const candidatePath = `${lockPath}.claim-${process.pid}-${randomUUID()}`;
+  await writeFile(candidatePath, ownerText, { flag: "wx", mode: 0o600 });
   let acquired = false;
-  for (let attempt = 0; attempt < 2 && !acquired; attempt += 1) {
-    acquired = await execCapture(
-      "/usr/bin/shlock",
-      ["-p", String(process.pid), "-f", lockPath],
-      { env: process.env },
-    ).then(
-      () => true,
-      () => false,
-    );
-    if (acquired) break;
-    const ownerText = await readFile(lockPath, "utf8").catch(() => "");
-    const ownerPid = Number.parseInt(ownerText.trim(), 10);
-    if (
-      Number.isSafeInteger(ownerPid) &&
-      ownerPid > 0 &&
-      processIsLive(ownerPid)
-    ) {
-      throw new Error(`${label} is already reserved by pid ${ownerPid}`);
+  try {
+    for (let attempt = 0; attempt < 3 && !acquired; attempt += 1) {
+      try {
+        await link(candidatePath, lockPath);
+        acquired = true;
+        break;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      const observedText = await readFile(lockPath, "utf8").catch((error) => {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      });
+      if (observedText === null) continue;
+      const owner = parseLockOwner(observedText);
+      if (owner && processIsLive(owner.pid)) {
+        const observedStart = await readProcessStartIdentity(owner.pid);
+        if (!owner.process_start || observedStart === owner.process_start) {
+          throw new Error(`${label} is already reserved by pid ${owner.pid}`);
+        }
+      }
+      // Re-read before unlinking so a contender that replaced the stale owner
+      // is never removed based on an earlier observation.
+      const currentText = await readFile(lockPath, "utf8").catch(() => null);
+      if (currentText !== observedText) continue;
+      await unlink(lockPath).catch((error) => {
+        if (error?.code !== "ENOENT") throw error;
+      });
     }
-    if (attempt === 0) {
-      // shlock deliberately refuses to reap a lock whose timestamp changed in
-      // the current second. Retry after that atomic-safety window expires.
-      await new Promise((resolvePause) => setTimeout(resolvePause, 1_100));
-    }
+  } finally {
+    await unlink(candidatePath).catch(() => undefined);
   }
   if (!acquired) {
     throw new Error(`${label} could not reclaim atomic lock ${lockPath}`);
@@ -685,8 +732,8 @@ async function createPidLock(lockPath, label) {
     lockPath,
     async release() {
       if (released) return;
-      const ownerText = await readFile(lockPath, "utf8");
-      if (Number.parseInt(ownerText.trim(), 10) !== process.pid) {
+      const currentText = await readFile(lockPath, "utf8");
+      if (currentText !== ownerText) {
         throw new Error(`${label} ownership changed before release`);
       }
       released = true;

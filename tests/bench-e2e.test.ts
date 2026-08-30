@@ -1025,6 +1025,19 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("recovers a lock whose live PID belongs to a different process start", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    await writeFile(
+      `${output}.lock`,
+      `${JSON.stringify({ pid: process.pid, process_start: "reused-pid-start" })}\n`,
+      "utf8",
+    );
+    const reservation = await createOutputReservation(output);
+    await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("allows only one winner when contenders reclaim the same stale lock", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
