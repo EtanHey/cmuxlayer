@@ -103,6 +103,7 @@ import {
 import {
   canonicalAgentId,
   resolveWatchOwner,
+  resolveWatchOwnerFromSources,
   watchNotificationOwner,
   watchOwnerIncludesCanonical,
   watchRecordOwner,
@@ -12921,20 +12922,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 !subject.deletion_intent,
               );
             };
-            const liveOwnerCandidates = [
-              ...registry.list(),
-              ...stateMgr.listStates(),
-            ].filter(
-              (candidate, index, rows) =>
-                rows.findIndex(
-                  (row) => row.agent_id === candidate.agent_id,
-                ) === index &&
-                candidate.user_killed !== true &&
-                !candidate.deletion_intent,
-            );
-            const ownerResolution = resolveWatchOwner(
+            const ownerResolution = resolveWatchOwnerFromSources(
               watchNotificationOwner(event),
-              liveOwnerCandidates,
+              registry.list(),
+              stateMgr.listStates(),
             );
             const subjectBoundOwner = (() => {
               if (!event.subject_agent_id) return null;

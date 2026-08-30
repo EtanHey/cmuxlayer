@@ -2062,7 +2062,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
-    expect(watch?.fingerprint).not.toBe(watch?.observed_value);
+    expect(watch?.fingerprint).toBe(watch?.observed_value);
   });
 
   it("re-arms after owner_not_live and wakes the resumed owner for the next revision", async () => {
@@ -2129,10 +2129,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
-    expect(afterOwnerLoss?.fingerprint).toBe(initialFingerprint);
-    expect(afterOwnerLoss?.fingerprint).not.toBe(
-      afterOwnerLoss?.observed_value,
-    );
+    expect(afterOwnerLoss?.fingerprint).toBe(afterOwnerLoss?.observed_value);
+    expect(afterOwnerLoss?.fingerprint).not.toBe(initialFingerprint);
 
     const resumedOwner = { ...parentRecord(parentUuid), agent_id: ownerId };
     engine.stateMgr.writeState(resumedOwner);
@@ -2704,6 +2702,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   it("retries pruning after retaining a watch revision that re-arms during liveness probing", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const reportPath = join(inboxDir, "concurrent-rearm", "report.md");
     const child: AgentRecord = {
       ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
@@ -2717,8 +2716,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     };
     mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
     writeFileSync(reportPath, "before\n", "utf8");
-    engine.stateMgr.writeState(child);
-    engine.getRegistry().set(child.agent_id, child);
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
     const watch = await engine.armWatch({
       owner: "lead-parent",
       subject_agent_id: child.agent_id,
@@ -2798,6 +2799,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   it("retries pruning after a watch mutates to pending during liveness probing", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const reportPath = join(inboxDir, "concurrent-pending", "report.md");
     const child: AgentRecord = {
       ...parentRecord("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
@@ -2811,8 +2813,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     };
     mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
     writeFileSync(reportPath, "before\n", "utf8");
-    engine.stateMgr.writeState(child);
-    engine.getRegistry().set(child.agent_id, child);
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
     await engine.armWatch({
       owner: "lead-parent",
       subject_agent_id: child.agent_id,
@@ -2997,6 +3001,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   it("prunes a terminal child's report watch when stop left user_killed unset", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const target = join(
       inboxDir,
       "terminal-child-without-stop-flag",
@@ -3015,8 +3020,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     };
     mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
     writeFileSync(target, "done\n", "utf8");
-    engine.stateMgr.writeState(child);
-    engine.getRegistry().set(child.agent_id, child);
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
     await engine.armWatch({
       owner: "lead-parent",
       subject_agent_id: child.agent_id,
@@ -3036,6 +3043,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   it("leaves non-report subject watches alone when pruning a closed child", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const child: AgentRecord = {
       ...parentRecord(),
       agent_id: "closed-child-with-marker-watch",
@@ -3048,8 +3056,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const target = join(inboxDir, child.agent_id, "marker.md");
     mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
     writeFileSync(target, "working\n", "utf8");
-    engine.stateMgr.writeState(child);
-    engine.getRegistry().set(child.agent_id, child);
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
     await engine.armWatch({
       owner: "lead-parent",
       subject_agent_id: child.agent_id,
@@ -3977,12 +3987,25 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         owner: string;
         target_kind: "file" | "agent";
         change?: "content" | null;
+        state: "armed" | "fired" | "failed";
+        notification_pending?: boolean;
+        waiter_expires_at_ms?: number;
       }>;
     };
     expect(incident.watches).toHaveLength(107);
     expect(
       incident.watches.filter(isSubjectSideReportWatchPruneEligible),
     ).toHaveLength(0);
+    // This replay isolates owner-vs-subject authority. Main's waiter lifecycle
+    // separately prunes settled failed rows once no waiter lease remains, so
+    // keep those rows leased while proving only the dead owner authorizes the
+    // seven destructive removals from the original 107-row incident shape.
+    const waiterLeaseExpiresAt = Date.now() + 60_000;
+    for (const watch of incident.watches) {
+      if (watch.state === "failed" && watch.notification_pending !== true) {
+        watch.waiter_expires_at_ms = waiterLeaseExpiresAt;
+      }
+    }
 
     const deadIncidentOwner = {
       ...parentRecord(),
@@ -4085,6 +4108,87 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
     ).pruneClosedChildReportWatches();
 
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(1);
+  });
+
+  it("retains a watch when a state-backed live owner also matches its dead registry alias", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const deadRegistryOwner = {
+      ...parentRecord(),
+      agent_id: "lead-dead-registry",
+      seat_id: "lead-seat",
+      surface_id: "surface:dead-owner",
+      state: "done" as const,
+      user_killed: true,
+    };
+    const liveStateOwner = {
+      ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+      agent_id: "lead-live-state",
+      seat_id: "lead-seat",
+      surface_id: "surface:live-state-owner",
+    };
+    engine.getRegistry().set(deadRegistryOwner.agent_id, deadRegistryOwner);
+    engine.stateMgr.writeState(liveStateOwner);
+    vi.spyOn(engine.getRegistry(), "isSurfaceAlive").mockImplementation(
+      async (record: AgentRecord) => record.agent_id === liveStateOwner.agent_id,
+    );
+    const target = join(inboxDir, "state-backed-owner-watch.md");
+    writeFileSync(target, "waiting\n", "utf8");
+    await engine.armWatch({
+      owner: "lead-seat",
+      target,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<boolean>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(1);
+  });
+
+  it("rechecks owner liveness under the watch lock before destructive pruning", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const owner = {
+      ...parentRecord(),
+      agent_id: "lead-resumed-under-lock",
+      surface_id: "surface:resumed-owner",
+      state: "done" as const,
+    };
+    engine.getRegistry().set(owner.agent_id, owner);
+    engine.stateMgr.writeState(owner);
+    const target = join(inboxDir, "resumed-owner-watch.md");
+    writeFileSync(target, "waiting\n", "utf8");
+    await engine.armWatch({
+      owner: owner.agent_id,
+      target,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const isSurfaceAlive = vi
+      .spyOn(engine.getRegistry(), "isSurfaceAlive")
+      .mockResolvedValueOnce(false)
+      .mockImplementation(async () => {
+        expect(existsSync(`${watchRegistryPath}.lock`)).toBe(true);
+        return true;
+      });
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<boolean>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(isSurfaceAlive).toHaveBeenCalledTimes(2);
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toHaveLength(1);
@@ -4217,6 +4321,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     for (const sourcePath of ["src/server.ts", "src/agent-engine.ts"]) {
       const source = readFileSync(join(process.cwd(), sourcePath), "utf8");
       expect(source, sourcePath).not.toMatch(/\b(?:watch|event)\.owner\b/);
+      expect(source, sourcePath).toContain("resolveWatchOwnerFromSources(");
     }
   });
 });

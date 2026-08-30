@@ -524,7 +524,10 @@ function currentProcessStartedAtMs(opts: WatchRegistryOptions): number | null {
   return (opts.reservationProcessStartedAtMs ?? processStartedAtMs)(process.pid);
 }
 
-async function withWriteLock<T>(path: string, operation: () => T): Promise<T> {
+async function withWriteLock<T>(
+  path: string,
+  operation: () => T | Promise<T>,
+): Promise<T> {
   const lockPath = `${path}.lock`;
   const lockOwnerPath = join(
     lockPath,
@@ -560,7 +563,7 @@ async function withWriteLock<T>(path: string, operation: () => T): Promise<T> {
     }
   }
   try {
-    return operation();
+    return await operation();
   } finally {
     let ownsLock = true;
     try {
@@ -881,18 +884,21 @@ export async function armWatch(
 }
 
 export function removeWatches(
-  predicate: (watch: WatchRecord) => boolean,
+  predicate: (watch: WatchRecord) => boolean | Promise<boolean>,
   opts: WatchRegistryOptions = {},
 ): Promise<number> {
   const path = registryPathFor(opts);
-  return withWriteLock(path, () => {
+  return withWriteLock(path, async () => {
     const registry = readRegistryState(path);
     let removed = 0;
-    const rows = registry.rows.filter((row) => {
-      if (!isWatchRecord(row) || !predicate(row)) return true;
+    const rows: unknown[] = [];
+    for (const row of registry.rows) {
+      if (!isWatchRecord(row) || !(await predicate(row))) {
+        rows.push(row);
+        continue;
+      }
       removed += 1;
-      return false;
-    });
+    }
     if (removed > 0) writeRegistry(path, registry.version, rows);
     return removed;
   });
@@ -957,6 +963,36 @@ function notificationFor(
     observed_at_ms: observedAt,
     ...(record.watermark !== undefined ? { watermark: record.watermark } : {}),
     ...(observedValue !== undefined ? { observed_value: observedValue } : {}),
+  };
+}
+
+function rearmContentWatchAfterNotificationFailure(
+  record: WatchRecord,
+  notification: WatchNotification,
+  observedAt: number,
+  reason: string,
+): WatchRecord | null {
+  if (
+    record.change !== "content" ||
+    typeof notification.observed_value !== "string"
+  ) {
+    return null;
+  }
+  const {
+    terminal_reason: _terminalReason,
+    terminal_at_ms: _terminalAt,
+    notification_next_attempt_at_ms: _nextAttempt,
+    ...persistent
+  } = record;
+  return {
+    ...persistent,
+    state: "armed",
+    fingerprint: notification.observed_value,
+    observed_value: notification.observed_value,
+    notification_pending: false,
+    notification_attempts: 0,
+    notification_exhausted_at_ms: observedAt,
+    notification_exhausted_reason: reason,
   };
 }
 
@@ -1267,25 +1303,13 @@ export async function sweepWatches(
             attempts: record.notification_attempts ?? 0,
             reason: terminalFailureReason,
           };
-          if (
-            record.change === "content" &&
-            typeof notification.observed_value === "string"
-          ) {
-            const {
-              terminal_reason: _terminalReason,
-              terminal_at_ms: _terminalAt,
-              notification_next_attempt_at_ms: _nextAttempt,
-              ...persistent
-            } = record;
-            return {
-              ...persistent,
-              state: "armed" as const,
-              observed_value: notification.observed_value,
-              notification_pending: false,
-              notification_exhausted_at_ms: observedAt,
-              notification_exhausted_reason: terminalFailureReason,
-            };
-          }
+          const rearmed = rearmContentWatchAfterNotificationFailure(
+            record,
+            notification,
+            observedAt,
+            terminalFailureReason,
+          );
+          if (rearmed) return rearmed;
           return {
             ...record,
             notification_pending: false,
@@ -1329,26 +1353,13 @@ export async function sweepWatches(
             attempts,
             reason: "retry_limit_exhausted",
           };
-          if (
-            record.change === "content" &&
-            typeof notification.observed_value === "string"
-          ) {
-            const {
-              terminal_reason: _terminalReason,
-              terminal_at_ms: _terminalAt,
-              notification_next_attempt_at_ms: _nextAttempt,
-              ...persistent
-            } = record;
-            return {
-              ...persistent,
-              state: "armed" as const,
-              observed_value: notification.observed_value,
-              notification_pending: false,
-              notification_attempts: 0,
-              notification_exhausted_at_ms: observedAt,
-              notification_exhausted_reason: "retry_limit_exhausted",
-            };
-          }
+          const rearmed = rearmContentWatchAfterNotificationFailure(
+            record,
+            notification,
+            observedAt,
+            "retry_limit_exhausted",
+          );
+          if (rearmed) return rearmed;
           return {
             ...record,
             notification_pending: false,
