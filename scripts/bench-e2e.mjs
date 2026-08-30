@@ -629,12 +629,17 @@ export async function createSocketReservation(requestedPath) {
   };
 }
 
+export async function canonicalOutputPath(outputPath) {
+  const absoluteOutput = resolve(outputPath);
+  return existsSync(absoluteOutput)
+    ? await realpath(absoluteOutput)
+    : join(await realpath(dirname(absoluteOutput)), basename(absoluteOutput));
+}
+
 export async function createOutputReservation(outputPath, onFailure) {
   const absoluteOutput = resolve(outputPath);
   await mkdir(dirname(absoluteOutput), { recursive: true });
-  const canonicalOutput = existsSync(absoluteOutput)
-    ? await realpath(absoluteOutput)
-    : join(await realpath(dirname(absoluteOutput)), basename(absoluteOutput));
+  const canonicalOutput = await canonicalOutputPath(absoluteOutput);
   const lockPath = `${canonicalOutput}.lock`;
   const reservation = await createPidLock(
     lockPath,
@@ -828,7 +833,7 @@ export function createWorkspaceReservation(
   cmuxSocketPath,
   workspace,
   lockRoot = "/tmp",
-  onFailure,
+  onFailure = undefined,
 ) {
   const key = createHash("sha256")
     .update(resolve(cmuxSocketPath))
@@ -1761,7 +1766,12 @@ export async function prepareBuiltEntries(config, deps = {}) {
     }
     const trackedOutput = await exec(
       "git",
-      ["ls-files", "--cached", "--", outputRelative.split(sep).join("/")],
+      [
+        "ls-files",
+        "--cached",
+        "--",
+        `:(literal)${outputRelative.split(sep).join("/")}`,
+      ],
       { env: config.env },
     );
     if (trackedOutput.stdout.trim()) {
@@ -1881,9 +1891,11 @@ export async function publishBenchmarkReceipt(
 }
 
 export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
+  const canonicalize = deps.canonicalize ?? canonicalOutputPath;
   const prepare = deps.prepare ?? prepareBuiltEntries;
   const validate = deps.validate ?? assertArtifactProvenance;
   const reserve = deps.reserve ?? createOutputReservation;
+  config.out = await canonicalize(config.out);
   const artifactProvenance = await prepare({
     ...config,
     env: process.env,

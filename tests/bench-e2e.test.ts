@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -23,6 +24,7 @@ import {
   buildRowsAndReserve,
   buildIsolatedRuntimeEnv,
   beginObservedTermination,
+  canonicalOutputPath,
   cliArgs,
   cleanupDaemonResources,
   createScratchTargets,
@@ -1140,19 +1142,38 @@ describe("bench-e2e measurement harness", () => {
   it("reports an unexpected lock-holder exit immediately", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
-    let holderFailure;
+    let resolveHolderFailure;
+    const holderFailurePromise = new Promise((resolveFailure) => {
+      resolveHolderFailure = resolveFailure;
+    });
     const reservation = await createOutputReservation(output, (error) => {
-      holderFailure = error;
+      resolveHolderFailure(error);
     });
 
     process.kill(reservation.lockHolderPid, "SIGKILL");
-    for (let attempt = 0; attempt < 50 && !holderFailure; attempt += 1) {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-    }
+    const holderFailure = await Promise.race([
+      holderFailurePromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("lock holder exit was not reported")), 500),
+      ),
+    ]);
 
     expect(holderFailure).toBeInstanceOf(Error);
     expect(holderFailure.message).toMatch(/lock holder exited unexpectedly/);
     await expect(reservation.release()).rejects.toThrow(/exited before release/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("canonicalizes a symlinked output to its real target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const target = join(directory, "tracked.json");
+    const output = join(directory, "receipt.json");
+    await writeFile(target, "{}\n", "utf8");
+    await symlink(target, output);
+
+    await expect(canonicalOutputPath(output)).resolves.toBe(
+      await realpath(target),
+    );
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1507,24 +1528,27 @@ describe("bench-e2e measurement harness", () => {
   });
 
   it("refuses to exclude a tracked output receipt from provenance", async () => {
+    let trackedPathspec;
     await expect(
       prepareBuiltEntries(
         {
           mcpEntry: "/repo/dist/index.js",
           daemonEntry: "/repo/dist/daemon.js",
-          out: "/repo/results/bench.json",
+          out: "/repo/:(literal)receipt.json",
         },
         {
           repoRoot: "/repo",
           exec: (_command, args) => {
             if (args[0] === "ls-files") {
-              return { stdout: "results/bench.json\n", stderr: "" };
+              trackedPathspec = args.at(-1);
+              return { stdout: ":(literal)receipt.json\n", stderr: "" };
             }
             throw new Error(`unexpected command: ${args.join(" ")}`);
           },
         },
       ),
     ).rejects.toThrow(/tracked output receipt/);
+    expect(trackedPathspec).toBe(":(literal):(literal)receipt.json");
   });
 
   it("rechecks that the output receipt remains untracked after the build", async () => {
@@ -1567,6 +1591,7 @@ describe("bench-e2e measurement harness", () => {
     };
 
     const result = await prepareProvenanceThenReserveOutput(config, {
+      canonicalize: (path) => path,
       prepare: () => {
         events.push("provenance");
         return provenance;
@@ -1583,6 +1608,19 @@ describe("bench-e2e measurement harness", () => {
     expect(events).toEqual(["provenance", "validate", "reserve-output"]);
     expect(config.cmuxBin).toBe("/opt/cmux/bin/cmux");
     expect(result.artifactProvenance).toBe(provenance);
+  });
+
+  it("canonicalizes the output target before provenance validation", async () => {
+    const config = { out: "/repo/receipt-link.json", cmuxBin: "cmux" };
+    await expect(
+      prepareProvenanceThenReserveOutput(config, {
+        canonicalize: () => "/repo/package.json",
+        prepare: (preparedConfig) => {
+          throw new Error(`tracked output receipt: ${preparedConfig.out}`);
+        },
+      }),
+    ).rejects.toThrow(/tracked output receipt: \/repo\/package\.json/);
+    expect(config.out).toBe("/repo/package.json");
   });
 
   it("rejects mutable built entries whose hashes change after attestation", async () => {
