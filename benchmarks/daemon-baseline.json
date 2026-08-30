@@ -1,10 +1,11 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "7e1bb96f9fc82d6f7676043b75dcaf1ed1c31837",
-    "measured_at": "2026-08-26T16:33:17.727Z",
+    "git_sha": "06499d9485fec00ef8e5f5bdd50fd5b224257e23",
+    "measured_at": "2026-08-30T14:53:59.623Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 32988968639
+    "workflow_run_id": 33317747972,
+    "increase_reason": "migrate legacy single-shot rows to canonical sampled 10-row runner evidence"
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -22,8 +23,54 @@
       "list_agents",
       "control_health",
       "spawn_close_during_sweep",
-      "first_send_after_spawn"
+      "first_send_after_spawn",
+      "send_to_surface_10_parallel",
+      "read_screen_10_parallel"
     ],
+    "row_metadata": {
+      "list_surfaces": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "read_screen": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "send_to_surface_warm": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "send_to_agent_warm": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "list_agents": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "control_health": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "spawn_close_during_sweep": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "first_send_after_spawn": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "send_to_surface_10_parallel": {
+        "sampling": "sampled",
+        "samples_per_run": 12,
+        "stress": true
+      },
+      "read_screen_10_parallel": {
+        "sampling": "sampled",
+        "samples_per_run": 12,
+        "stress": true
+      }
+    },
     "bytes": {
       "list_surfaces": 142,
       "read_screen": 161,
@@ -32,7 +79,9 @@
       "list_agents": 112,
       "control_health": 97,
       "spawn_close_during_sweep": 161,
-      "first_send_after_spawn": 231
+      "first_send_after_spawn": 231,
+      "send_to_surface_10_parallel": 2400,
+      "read_screen_10_parallel": 1820
     },
     "request_sha256": {
       "list_surfaces": "29b9c66db4de170a41fdd8ad608f356201f747970e6f7fa74ae605f360f85a33",
@@ -42,7 +91,9 @@
       "list_agents": "4f4fb87e95a8f7cded25a4fd1bb35d11492182997e1f7d14c856683f53cc0416",
       "control_health": "56e5969d5764757c0775d59e7c65e83cbd91d6f4f4a3279f1cc910fe6854a10f",
       "spawn_close_during_sweep": "1c7dfd23479835bd9d42cc8e74444cbac74e47aa8f288d3eb3278e777c96acdf",
-      "first_send_after_spawn": "811745b320e17eddf09602072cea6a0f8274bd3e6ecb6438796646803efbcc75"
+      "first_send_after_spawn": "811745b320e17eddf09602072cea6a0f8274bd3e6ecb6438796646803efbcc75",
+      "send_to_surface_10_parallel": "69f3a964953c8a8b27d2cd7e1bd28e0dbc383c31e161a33f6a698f84ab7a0172",
+      "read_screen_10_parallel": "d93e1443889427dddaec043831bd3cd453725252f8f63d28a75c6565fc20f19e"
     },
     "transport": {
       "list_surfaces": "socket",
@@ -52,43 +103,45 @@
       "list_agents": "socket",
       "control_health": "socket",
       "spawn_close_during_sweep": "socket",
-      "first_send_after_spawn": "socket"
+      "first_send_after_spawn": "socket",
+      "send_to_surface_10_parallel": "socket",
+      "read_screen_10_parallel": "socket"
     }
   },
   "measurements": {
     "list_surfaces": {
       "p50_ms": 9.41,
-      "p95_ms": 34.2,
+      "p95_ms": 40.37,
       "lock_hold_ms": 0
     },
     "read_screen": {
-      "p50_ms": 12.71,
+      "p50_ms": 12.98,
       "p95_ms": 28.58,
       "lock_hold_ms": 0
     },
     "send_to_surface_warm": {
       "p50_ms": 69.58,
       "p95_ms": 69.58,
-      "lock_hold_ms": 63
+      "lock_hold_ms": 65
     },
     "send_to_agent_warm": {
       "p50_ms": 104.01,
-      "p95_ms": 104.01,
+      "p95_ms": 108.73,
       "lock_hold_ms": 66
     },
     "list_agents": {
-      "p50_ms": 15.76,
-      "p95_ms": 63.22,
+      "p50_ms": 62.97,
+      "p95_ms": 106.55,
       "lock_hold_ms": 0
     },
     "control_health": {
-      "p50_ms": 23.13,
-      "p95_ms": 32.24,
+      "p50_ms": 126.27,
+      "p95_ms": 150.35,
       "lock_hold_ms": 0
     },
     "spawn_close_during_sweep": {
       "p50_ms": 48.76,
-      "p95_ms": 48.76,
+      "p95_ms": 57.26,
       "lock_hold_ms": 0
     },
     "first_send_after_spawn": {
@@ -96,10 +149,20 @@
       "p95_ms": 134.91,
       "lock_hold_ms": 75
     },
+    "send_to_surface_10_parallel": {
+      "p50_ms": 117.49,
+      "p95_ms": 143.73,
+      "lock_hold_ms": 115
+    },
+    "read_screen_10_parallel": {
+      "p50_ms": 28.83,
+      "p95_ms": 43.46,
+      "lock_hold_ms": 0
+    },
     "cli_send_ms": 69.58
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "5e082ba864d9aa64876bd2f8901ad301adab6286da3d18623c9ae4cc8682e601"
+    "content_sha256": "1f31847a7960349a62a7cd12e6fe5b19b601b6b8bda070e9fa7d00d13d124927"
   }
 }

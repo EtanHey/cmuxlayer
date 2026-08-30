@@ -833,7 +833,7 @@ describe("daemon performance budget", () => {
     expect(defaultTable).not.toContain("| list_surfaces | socket | sampled | request_bytes |");
   });
 
-  it("recognizes the attested legacy baseline only for fail-closed CI evidence migration", () => {
+  it("commits only the canonical CI-attested sampled baseline", () => {
     const committed = JSON.parse(
       readFileSync(
         join(repoRoot, "benchmarks", "daemon-baseline.json"),
@@ -841,7 +841,7 @@ describe("daemon performance budget", () => {
       ),
     );
 
-    expect(() => validateBaseline(committed)).toThrow(/canonical 8x12 replay/);
+    expect(() => validateBaseline(committed)).not.toThrow();
     expect(checkerModule).toHaveProperty("isAttestedLegacyBaseline");
     expect(
       (
@@ -849,21 +849,13 @@ describe("daemon performance budget", () => {
           isAttestedLegacyBaseline: (candidate: unknown) => boolean;
         }
       ).isAttestedLegacyBaseline(committed),
-    ).toBe(true);
+    ).toBe(false);
     expect(committed.source.git_sha).toMatch(/^[0-9a-f]{40}$/);
     expect(committed.replay).toMatchObject({ clients: 8, rounds: 12 });
-    expect(committed.replay.operations).toEqual([
-      "list_surfaces",
-      "read_screen",
-      "send_to_surface_warm",
-      "send_to_agent_warm",
-      "list_agents",
-      "control_health",
-      "spawn_close_during_sweep",
-      "first_send_after_spawn",
-    ]);
+    expect(committed.replay.operations).toEqual(baseline.replay.operations);
+    expect(committed.replay.row_metadata).toEqual(baseline.replay.row_metadata);
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
-    expect(committed.source.workflow_run_id).toBe(32988968639);
+    expect(committed.source.workflow_run_id).toBe(33317747972);
     expect(committed).not.toHaveProperty("ceilings");
     expect(committed.refresh_attestation.content_sha256).toMatch(
       /^[0-9a-f]{64}$/,
