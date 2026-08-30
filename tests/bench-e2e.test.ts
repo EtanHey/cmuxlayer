@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -174,6 +174,31 @@ describe("bench-e2e measurement harness", () => {
     expect(result.failure_rate_pct).toBe(100);
     expect(result.p50_ms).toBeNull();
     expect(result.p95_ms).toBeNull();
+  });
+
+  it("stops a row after an in-flight operation receives the abort signal", async () => {
+    const controller = new AbortController();
+    let starts = 0;
+    const pending = runBenchmarkRow(
+      { concurrency: 1, samples_per_worker: 12 },
+      {
+        signal: controller.signal,
+        runOperation: () => {
+          starts += 1;
+          return new Promise((_, reject) => {
+            controller.signal.addEventListener(
+              "abort",
+              () => reject(controller.signal.reason),
+              { once: true },
+            );
+          });
+        },
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error("stop now"));
+    await expect(pending).rejects.toThrow("stop now");
+    expect(starts).toBe(1);
   });
 
   it("counts transport and every fallback from the raw samples", () => {
@@ -942,9 +967,26 @@ describe("bench-e2e measurement harness", () => {
   it("recovers an output lock whose recorded owner is gone", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
-    await writeFile(`${output}.lock`, "2147483647\n", "utf8");
+    await writeFile(`${output}.lock`, "99999\n", "utf8");
+    await utimes(`${output}.lock`, new Date(0), new Date(0));
     const reservation = await createOutputReservation(output);
     await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("allows only one winner when contenders reclaim the same stale lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    await writeFile(`${output}.lock`, "99999\n", "utf8");
+    await utimes(`${output}.lock`, new Date(0), new Date(0));
+    const contenders = await Promise.allSettled([
+      createOutputReservation(output),
+      createOutputReservation(output),
+    ]);
+    expect(contenders.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(contenders.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const winner = contenders.find((result) => result.status === "fulfilled");
+    await winner.value.release();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1188,8 +1230,51 @@ describe("bench-e2e measurement harness", () => {
       }
       if (signal === "SIGTERM") live = false;
     };
-    await terminateUnexpectedDaemons(receipt, 4242, signalPid, async () => {});
+    await terminateUnexpectedDaemons(receipt, 4242, "owner-token", {
+      signalPid,
+      pause: () => Promise.resolve(),
+      verifyPid: () => Promise.resolve(true),
+    });
     expect(signals).toContainEqual([4343, "SIGTERM"]);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("refuses to signal a recorded PID whose ownership token does not match", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const receipt = join(directory, "daemon-pids.txt");
+    await writeFile(receipt, "4343\n", "utf8");
+    const signals = [];
+    await expect(
+      terminateUnexpectedDaemons(receipt, 4242, "owner-token", {
+        signalPid: (_pid, signal) => signals.push(signal),
+        verifyPid: () => Promise.resolve(false),
+      }),
+    ).rejects.toThrow(/unowned daemon cleanup failed/);
+    expect(signals).toEqual([0]);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("waits after SIGKILL before declaring an unexpected daemon alive", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const receipt = join(directory, "daemon-pids.txt");
+    await writeFile(receipt, "4343\n", "utf8");
+    let killProbes = 0;
+    let killed = false;
+    const signalPid = (_pid, signal) => {
+      if (signal === "SIGKILL") killed = true;
+      if (signal === 0 && killed) {
+        killProbes += 1;
+        if (killProbes >= 3) {
+          throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        }
+      }
+    };
+    await terminateUnexpectedDaemons(receipt, 4242, "owner-token", {
+      signalPid,
+      pause: () => Promise.resolve(),
+      verifyPid: () => Promise.resolve(true),
+    });
+    expect(killProbes).toBe(4);
     await rm(directory, { recursive: true, force: true });
   });
 

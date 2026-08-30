@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
-  open,
   readFile,
   rm,
   stat,
@@ -252,9 +251,11 @@ export async function runBenchmarkRow(row, deps) {
     (async () => {
       const samples = [];
       for (let sample = 0; sample < row.samples_per_worker; sample += 1) {
+        deps.signal?.throwIfAborted();
         const started = nowMs();
         try {
           const receipt = await deps.runOperation({ row, worker, sample });
+          deps.signal?.throwIfAborted();
           samples.push({
             worker,
             sample,
@@ -267,6 +268,7 @@ export async function runBenchmarkRow(row, deps) {
             ...(receipt.error ? { error: String(receipt.error) } : {}),
           });
         } catch (error) {
+          if (deps.signal?.aborted) throw deps.signal.reason;
           samples.push({
             worker,
             sample,
@@ -369,7 +371,12 @@ function mcpReceipt(result) {
   };
 }
 
-function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
+function execCapture(
+  command,
+  args,
+  { env, timeoutMs = 30_000, signal = null } = {},
+) {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: repoRoot,
@@ -385,24 +392,30 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       fn(value);
     };
-    timer = setTimeout(() => {
+    const cancel = (reason) => {
       timedOut = true;
-      const timeoutError = new Error(
-        `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
-      );
       terminateChild(child).then(
-        () => settle(reject, timeoutError),
+        () => settle(reject, reason),
         (terminationError) =>
           settle(
             reject,
             new AggregateError(
-              [timeoutError, terminationError],
-              "command timed out and child termination failed",
+              [reason, terminationError],
+              "command cancellation and child termination failed",
             ),
           ),
       );
+    };
+    const onAbort = () => cancel(signal.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      const timeoutError = new Error(
+        `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
+      );
+      cancel(timeoutError);
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
@@ -629,50 +642,53 @@ function processIsLive(pid, signalPid = process.kill) {
   }
 }
 
-async function createPidLock(lockPath, label, signalPid = process.kill) {
+async function createPidLock(lockPath, label) {
   await mkdir(dirname(lockPath), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const opened = await open(lockPath, "wx", 0o600).then(
-      (handle) => ({ handle, error: null }),
-      (error) => ({ handle: null, error }),
+  let acquired = false;
+  for (let attempt = 0; attempt < 2 && !acquired; attempt += 1) {
+    acquired = await execCapture(
+      "/usr/bin/shlock",
+      ["-p", String(process.pid), "-f", lockPath],
+      { env: process.env },
+    ).then(
+      () => true,
+      () => false,
     );
-    if (opened.error) {
-      const error = opened.error;
-      if (error?.code !== "EEXIST") throw error;
-      const ownerText = await readFile(lockPath, "utf8").catch(() => "");
-      const ownerPid = Number.parseInt(ownerText.trim(), 10);
-      if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
-        throw new Error(`${label} has an unreadable owner lock: ${lockPath}`);
-      }
-      if (processIsLive(ownerPid, signalPid)) {
-        throw new Error(`${label} is already reserved by pid ${ownerPid}`);
-      }
-      await rm(lockPath, { force: true });
-      continue;
+    if (acquired) break;
+    const ownerText = await readFile(lockPath, "utf8").catch(() => "");
+    const ownerPid = Number.parseInt(ownerText.trim(), 10);
+    if (
+      Number.isSafeInteger(ownerPid) &&
+      ownerPid > 0 &&
+      processIsLive(ownerPid)
+    ) {
+      throw new Error(`${label} is already reserved by pid ${ownerPid}`);
     }
-    const handle = opened.handle;
-    try {
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      await rm(lockPath, { force: true }).catch(() => undefined);
-      throw error;
+    if (attempt === 0) {
+      // shlock deliberately refuses to reap a lock whose timestamp changed in
+      // the current second. Retry after that atomic-safety window expires.
+      await new Promise((resolvePause) => setTimeout(resolvePause, 1_100));
     }
-    let released = false;
-    return {
-      lockPath,
-      async release() {
-        if (released) return;
-        released = true;
-        await handle.close();
-        await rm(lockPath, { force: false });
-      },
-    };
   }
-  throw new Error(`${label} lock reclamation raced with another run`);
+  if (!acquired) {
+    throw new Error(`${label} could not reclaim atomic lock ${lockPath}`);
+  }
+  let released = false;
+  return {
+    lockPath,
+    async release() {
+      if (released) return;
+      const ownerText = await readFile(lockPath, "utf8");
+      if (Number.parseInt(ownerText.trim(), 10) !== process.pid) {
+        throw new Error(`${label} ownership changed before release`);
+      }
+      released = true;
+      await rm(lockPath, { force: false });
+    },
+  };
 }
 
-export async function createWorkspaceReservation(
+export function createWorkspaceReservation(
   cmuxSocketPath,
   workspace,
   lockRoot = "/tmp",
@@ -767,6 +783,7 @@ export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
     CMUXLAYER_SEAT_REGISTRY_PATH: join(root, "seat-registry.json"),
     CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(root, "launcher-registry.json"),
     CMUXLAYER_DAEMON_PID_RECEIPT: join(root, "unexpected-daemon-pids.txt"),
+    CMUXLAYER_BENCH_OWNER_TOKEN: randomUUID(),
     CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH: join(root, "fleet-sidebar.swift"),
     CMUXLAYER_HARNESS_HOME: join(root, "harness"),
     CMUXLAYER_DEV: "1",
@@ -826,8 +843,22 @@ export async function assertNoUnexpectedDaemons(path, ownedPid) {
 export async function terminateUnexpectedDaemons(
   path,
   ownedPid,
-  signalPid = process.kill,
-  pause = (ms) => new Promise((resolvePause) => setTimeout(resolvePause, ms)),
+  ownerToken,
+  {
+    signalPid = process.kill,
+    pause = (ms) =>
+      new Promise((resolvePause) => setTimeout(resolvePause, ms)),
+    verifyPid = async (pid, token) => {
+      const result = await execCapture(
+        "/bin/ps",
+        ["eww", "-p", String(pid), "-o", "command="],
+        { env: process.env },
+      ).catch(() => null);
+      return result?.stdout.includes(
+        `CMUXLAYER_BENCH_OWNER_TOKEN=${token}`,
+      );
+    },
+  } = {},
 ) {
   const unexpected = (await readRecordedDaemonPids(path)).filter(
     (pid) => pid !== ownedPid,
@@ -836,12 +867,23 @@ export async function terminateUnexpectedDaemons(
   for (const pid of unexpected) {
     try {
       if (!processIsLive(pid, signalPid)) continue;
+      if (!(await verifyPid(pid, ownerToken))) {
+        throw new Error(
+          `refusing to signal unowned or PID-reused process ${pid}`,
+        );
+      }
       signalPid(pid, "SIGTERM");
       for (let attempt = 0; attempt < 20; attempt += 1) {
         if (!processIsLive(pid, signalPid)) break;
         await pause(25);
       }
-      if (processIsLive(pid, signalPid)) signalPid(pid, "SIGKILL");
+      if (processIsLive(pid, signalPid)) {
+        signalPid(pid, "SIGKILL");
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (!processIsLive(pid, signalPid)) break;
+          await pause(25);
+        }
+      }
       if (processIsLive(pid, signalPid)) {
         throw new Error(`unowned daemon pid ${pid} survived SIGKILL`);
       }
@@ -867,6 +909,7 @@ export function appendSettledFailures(current, results, phase) {
 async function startIsolatedDaemon(entry, env, reservation, logPath) {
   const daemonSocketPath = reservation.socketPath;
   const daemonPidReceipt = env.CMUXLAYER_DAEMON_PID_RECEIPT;
+  const daemonOwnerToken = env.CMUXLAYER_BENCH_OWNER_TOKEN;
   let child = null;
   let logError = null;
   let terminationPromise = null;
@@ -959,7 +1002,11 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
       let cleanupError = null;
       let unexpectedDaemonError = null;
       try {
-        await terminateUnexpectedDaemons(daemonPidReceipt, child.pid);
+        await terminateUnexpectedDaemons(
+          daemonPidReceipt,
+          child.pid,
+          daemonOwnerToken,
+        );
       } catch (error) {
         unexpectedDaemonError = error;
       }
@@ -1173,6 +1220,7 @@ async function enumerateCliWorkspaces(config, exec = execCapture) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const windowsOut = await exec(config.cmuxBin, listWindowsCliArgs(), {
       env: config.env,
+      signal: config.signal,
     });
     const parsedWindows = parseCliJson(windowsOut.stdout, "list-windows");
     const windows = Array.isArray(parsedWindows)
@@ -1194,7 +1242,7 @@ async function enumerateCliWorkspaces(config, exec = execCapture) {
         const output = await exec(
           config.cmuxBin,
           listWorkspacesCliArgs(target),
-          { env: config.env },
+          { env: config.env, signal: config.signal },
         );
         const parsed = parseCliJson(output.stdout, "list-workspaces");
         if (!isRecord(parsed) || !Array.isArray(parsed.workspaces)) {
@@ -1247,7 +1295,7 @@ async function runCliTopology(
         const panesOut = await exec(
           config.cmuxBin,
           listPanesCliArgs(workspace),
-          { env: config.env },
+          { env: config.env, signal: config.signal },
         );
         return paneRefsFromListPanesStdout(panesOut.stdout);
       } catch (error) {
@@ -1260,6 +1308,7 @@ async function runCliTopology(
       const work = panes.map((pane) =>
         exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
           env: config.env,
+          signal: config.signal,
         }),
       );
       if (bestEffort) await Promise.allSettled(work);
@@ -1269,6 +1318,7 @@ async function runCliTopology(
         try {
           await exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
             env: config.env,
+            signal: config.signal,
           });
         } catch (error) {
           if (!bestEffort) throw error;
@@ -1306,7 +1356,7 @@ export async function runCliReadScreen(
   await exec(
     config.cmuxBin,
     cliArgs({ operation: "read_screen" }, config, worker, sample),
-    { env: config.env },
+    { env: config.env, signal: config.signal },
   );
   observedWork.push("read-screen:raw-surface");
   let workspaces = [];
@@ -1336,7 +1386,10 @@ async function runCliOperation(row, config, worker, sample) {
     throw new Error(FAIRNESS_CONTRACTS.send_to.reason);
   }
   const args = cliArgs(row, config, worker, sample);
-  await execCapture(config.cmuxBin, args, { env: config.env });
+  await execCapture(config.cmuxBin, args, {
+    env: config.env,
+    signal: config.signal,
+  });
   return { ok: true, transport: "cli", transport_fallbacks: [] };
 }
 
@@ -1613,7 +1666,7 @@ async function executeBenchmark(config, isolation, abortSignal) {
         client.callTool(
           { name: "list_surfaces", arguments: { workspace: config.workspace } },
           undefined,
-          { timeout: 30_000 },
+          { timeout: 30_000, signal: abortSignal },
         ),
       ),
     );
@@ -1633,6 +1686,7 @@ async function executeBenchmark(config, isolation, abortSignal) {
         `[bench-e2e] row ${index + 1}/${rows.length} ${row.operation} c${row.concurrency} payload=${row.payload_chars ?? "-"} ${row.client}\n`,
       );
       const measured = await runBenchmarkRow(row, {
+        signal: abortSignal,
         runOperation: async ({ worker, sample }) => {
           if (row.client === "cli") {
             return runCliOperation(
@@ -1640,6 +1694,7 @@ async function executeBenchmark(config, isolation, abortSignal) {
               {
                 cmuxBin: config.cmuxBin,
                 env,
+                signal: abortSignal,
                 surface: fixture.targets[worker],
                 workspace: config.workspace,
               },
@@ -1659,7 +1714,7 @@ async function executeBenchmark(config, isolation, abortSignal) {
               ),
             },
             undefined,
-            { timeout: 30_000 },
+            { timeout: 30_000, signal: abortSignal },
           );
           return mcpReceipt(toolResult);
         },
