@@ -174,6 +174,8 @@ export interface WatchSweepOptions extends WatchRegistryOptions {
 export interface WatchSweepResult {
   fired: string[];
   failed: string[];
+  /** Final post-notification snapshots for watches that failed in this sweep. */
+  newly_failed_records: WatchRecord[];
   armed: string[];
 }
 
@@ -926,7 +928,13 @@ export async function sweepWatches(
   const path = registryPathFor(opts);
   const observedAt = nowMs(opts);
   const notifications: WatchNotification[] = [];
-  const result: WatchSweepResult = { fired: [], failed: [], armed: [] };
+  const result: WatchSweepResult = {
+    fired: [],
+    failed: [],
+    newly_failed_records: [],
+    armed: [],
+  };
+  const failedRecords = new Map<string, WatchRecord>();
 
   const snapshot = readRegistryState(path);
   const agentObservations = new Map<string, WatchAgentObservation>();
@@ -1027,7 +1035,7 @@ export async function sweepWatches(
         const notification = notificationFor(record, reason, observedAt);
         notifications.push(notification);
         result.failed.push(record.watch_id);
-        return {
+        const failedRecord: WatchRecord = {
           ...record,
           ...heartbeat,
           state: "failed" as const,
@@ -1037,6 +1045,8 @@ export async function sweepWatches(
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
         };
+        failedRecords.set(record.watch_id, failedRecord);
+        return failedRecord;
       }
 
       if (observedAt >= record.deadline) {
@@ -1047,7 +1057,7 @@ export async function sweepWatches(
         );
         notifications.push(notification);
         result.failed.push(record.watch_id);
-        return {
+        const failedRecord: WatchRecord = {
           ...record,
           ...heartbeat,
           state: "failed" as const,
@@ -1057,6 +1067,8 @@ export async function sweepWatches(
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
         };
+        failedRecords.set(record.watch_id, failedRecord);
+        return failedRecord;
       }
 
       const observedValue =
@@ -1109,7 +1121,7 @@ export async function sweepWatches(
         );
         notifications.push(notification);
         result.failed.push(record.watch_id);
-        return {
+        const failedRecord: WatchRecord = {
           ...record,
           ...heartbeat,
           state: "failed" as const,
@@ -1120,6 +1132,8 @@ export async function sweepWatches(
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
         };
+        failedRecords.set(record.watch_id, failedRecord);
+        return failedRecord;
       }
 
       result.armed.push(record.watch_id);
@@ -1170,18 +1184,20 @@ export async function sweepWatches(
         }
         if (record.state === "failed") {
           if (delivered) {
-            return {
+            const settledRecord: WatchRecord = {
               ...record,
               notification_pending: false,
               notification_next_attempt_at_ms: undefined,
               notification_delivered_at_ms: observedAt,
             };
+            failedRecords.set(record.watch_id, settledRecord);
+            return settledRecord;
           }
           const attempts = (record.notification_attempts ?? 0) + 1;
           const reason =
             terminalFailureReason ?? "terminal_notice_fire_once";
           exhausted = { notification, attempts, reason };
-          return {
+          const settledRecord: WatchRecord = {
             ...record,
             notification_pending: false,
             notification_attempts: attempts,
@@ -1189,6 +1205,8 @@ export async function sweepWatches(
             notification_exhausted_at_ms: observedAt,
             notification_exhausted_reason: reason,
           };
+          failedRecords.set(record.watch_id, settledRecord);
+          return settledRecord;
         }
         if (terminalFailureReason) {
           exhausted = {
@@ -1309,6 +1327,7 @@ export async function sweepWatches(
       }
     }
   }
+  result.newly_failed_records = [...failedRecords.values()];
   return result;
 }
 

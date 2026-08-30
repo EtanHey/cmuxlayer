@@ -974,6 +974,67 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toEqual([]);
   });
 
+  it("returns the failed deadline verdict when a concurrent prune removes its row", async () => {
+    await server.close();
+    let watchNow = 1_000;
+    const localDeadlineNotice = vi.fn().mockResolvedValue(false);
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+        watchRegistryNow: () => watchNow,
+      }),
+    );
+    const engine = server._registeredTools.interact._engine;
+    engine.stateMgr.writeState(parentRecord());
+    engine.getRegistry().set("lead-parent", parentRecord());
+    (
+      engine as unknown as {
+        watchNotify: typeof localDeadlineNotice;
+        sweepDebugLog: () => void;
+      }
+    ).watchNotify = localDeadlineNotice;
+    (
+      engine as unknown as {
+        sweepDebugLog: () => void;
+      }
+    ).sweepDebugLog = () => {
+      writeFileSync(
+        watchRegistryPath,
+        `${JSON.stringify({ version: 1, watches: [] }, null, 2)}\n`,
+        "utf8",
+      );
+    };
+    const target = join(inboxDir, "deadline-pruned-during-wait.md");
+    writeFileSync(target, "", "utf8");
+    setTimeout(() => {
+      watchNow = 2_000;
+    }, 10);
+
+    const result = await engine.waitForWatch(
+      {
+        owner: "lead-parent",
+        target,
+        marker: "DONE",
+        deadline: 2_000,
+      },
+      500,
+    );
+
+    expect(localDeadlineNotice).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      matched: false,
+      watch: {
+        state: "failed",
+        terminal_reason: "deadline_elapsed",
+        notification_pending: false,
+      },
+    });
+  });
+
   it("resolves a legacy bare owner seat to the live suffixed lead before delivery", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

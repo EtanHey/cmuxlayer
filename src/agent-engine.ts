@@ -9371,7 +9371,10 @@ export class AgentEngine {
       });
       const current = readWatchRegistry({
         registryPath: this.watchRegistryPath,
-      }).watches.find((watch) => watch.watch_id === armed.watch_id);
+      }).watches.find((watch) => watch.watch_id === armed.watch_id) ??
+        swept.newly_failed_records.find(
+          (watch) => watch.watch_id === armed.watch_id,
+        );
       if (!current) {
         throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
       }
