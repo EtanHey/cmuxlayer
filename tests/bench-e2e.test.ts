@@ -1166,6 +1166,41 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("publishes the completed receipt from the process holding the kernel lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const temp = `${output}.tmp-test`;
+    const reservation = await createOutputReservation(output);
+    await writeFile(temp, "published\n", "utf8");
+
+    await reservation.publishTemp(temp, output);
+
+    await expect(readFile(output, "utf8")).resolves.toBe("published\n");
+    await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" });
+    reservation.assertHealthy();
+    await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("cleans abandoned receipt temps only after winning the output lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const first = await createOutputReservation(output);
+    const temp = `${output}.tmp-abandoned`;
+    await writeFile(temp, "partial\n", "utf8");
+
+    await expect(createOutputReservation(output)).rejects.toThrow(
+      /already reserved/,
+    );
+    await expect(readFile(temp, "utf8")).resolves.toBe("partial\n");
+
+    await first.release();
+    const next = await createOutputReservation(output);
+    await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" });
+    await next.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("canonicalizes a symlinked output to its real target", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const target = join(directory, "tracked.json");
@@ -1569,6 +1604,7 @@ describe("bench-e2e measurement harness", () => {
       ":(exclude,literal)results/bench.json",
       ":(exclude,glob)results/bench.json.lock*",
       ":(exclude,glob)results/bench.json.daemon-*.log",
+      ":(exclude,glob)results/bench.json.tmp-*",
     ]);
     expect(provenanceStatusArgs("/repo", "/tmp/bench.json")).toEqual([
       "status",
@@ -1669,6 +1705,9 @@ describe("bench-e2e measurement harness", () => {
     ).rejects.toThrow(/tracked output artifact.*bench\.json\.lock/);
     expect(trackedProbeArgs).toContain(
       ":(glob)results/bench.json.daemon-*.log",
+    );
+    expect(trackedProbeArgs).toContain(
+      ":(glob)results/bench.json.tmp-*",
     );
   });
 
@@ -2033,7 +2072,9 @@ describe("bench-e2e measurement harness", () => {
       "/tmp/receipt.json",
       { rows: [] },
       {
-        assertHealthy() {},
+        assertHealthy() {
+          return undefined;
+        },
         release: () => events.push("release"),
       },
       async (_path, _contents, signal) => {
@@ -2080,7 +2121,7 @@ describe("bench-e2e measurement harness", () => {
         publishTemp() {
           events.push(["publish"]);
         },
-        async removeTemp() {
+        removeTemp() {
           events.push(["cleanup"]);
         },
       },

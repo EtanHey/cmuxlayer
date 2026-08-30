@@ -667,13 +667,34 @@ export async function createOutputReservation(outputPath, onFailure) {
     `benchmark output ${canonicalOutput}`,
     onFailure,
   );
+  try {
+    await cleanupAbandonedReceiptTemps(canonicalOutput);
+  } catch (error) {
+    await reservation.release();
+    throw error;
+  }
   return Object.freeze({
     outputPath: canonicalOutput,
     lockPath,
     lockHolderPid: reservation.lockHolderPid,
     assertHealthy: reservation.assertHealthy,
+    publishTemp: reservation.publishTemp,
     release: reservation.release,
   });
+}
+
+async function cleanupAbandonedReceiptTemps(outputPath) {
+  const directory = dirname(outputPath);
+  const prefix = `${basename(outputPath)}.tmp-`;
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.name.startsWith(prefix)) continue;
+    const candidate = join(directory, entry.name);
+    if (!entry.isFile() && !entry.isSymbolicLink()) {
+      throw new Error(`refusing unexpected receipt temp artifact: ${candidate}`);
+    }
+    await rm(candidate, { force: true });
+  }
 }
 
 function processIsLive(pid, signalPid = process.kill) {
@@ -686,8 +707,32 @@ function processIsLive(pid, signalPid = process.kill) {
   }
 }
 
-const LOCK_HOLDER_SCRIPT =
-  'process.stdout.write("LOCKED\\n"); process.stdin.resume();';
+const LOCK_HOLDER_SCRIPT = String.raw`
+const { renameSync } = require("node:fs");
+let buffered = "";
+process.stdout.write("LOCKED\n");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffered += chunk;
+  for (;;) {
+    const newline = buffered.indexOf("\n");
+    if (newline < 0) break;
+    const line = buffered.slice(0, newline);
+    buffered = buffered.slice(newline + 1);
+    if (!line) continue;
+    try {
+      const command = JSON.parse(line);
+      if (command.operation !== "publish") throw new Error("unsupported command");
+      renameSync(command.from, command.to);
+      process.stdout.write("PUBLISHED " + command.id + "\n");
+    } catch (error) {
+      process.stderr.write("lock holder command failed: " + error.message + "\n");
+      process.exit(70);
+    }
+  }
+});
+process.stdin.resume();
+`;
 
 export function advisoryLockInvocation(platform, lockPath) {
   const holderArgs = [process.execPath, "-e", LOCK_HOLDER_SCRIPT];
@@ -772,6 +817,50 @@ async function closeLockHolder(child, label) {
   await closed;
 }
 
+async function publishWithLockHolder(child, from, to, label) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`${label} lock holder exited before publication`);
+  }
+  const commandId = randomUUID();
+  await new Promise((resolvePublished, reject) => {
+    let stdout = "";
+    function cleanup() {
+      child.stdout.off("data", onStdout);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    }
+    function fail(error) {
+      cleanup();
+      reject(error);
+    }
+    function onStdout(chunk) {
+      stdout += chunk.toString();
+      if (!stdout.includes(`PUBLISHED ${commandId}\n`)) return;
+      cleanup();
+      resolvePublished();
+    }
+    function onError(error) {
+      fail(error);
+    }
+    function onExit(code, signal) {
+      fail(
+        new Error(
+          `${label} lock holder exited during publication (exit ${code ?? signal ?? "unknown"})`,
+        ),
+      );
+    }
+    child.stdout.on("data", onStdout);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.stdin.write(
+      `${JSON.stringify({ operation: "publish", id: commandId, from, to })}\n`,
+      (error) => {
+        if (error) fail(error);
+      },
+    );
+  });
+}
+
 async function discardLockHolder(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const closed = new Promise((resolveClosed) => {
@@ -837,6 +926,10 @@ async function createPidLock(lockPath, label, onFailure) {
     lockHolderPid: holder.pid,
     assertHealthy() {
       if (holderFailure) throw holderFailure;
+    },
+    publishTemp(from, to) {
+      if (holderFailure) throw holderFailure;
+      return publishWithLockHolder(holder, from, to, label);
     },
     async release() {
       if (released) return;
@@ -1746,6 +1839,7 @@ export function provenanceStatusArgs(root, outputPath) {
     `:(exclude,literal)${pathspec}`,
     `:(exclude,glob)${globPathspec}.lock*`,
     `:(exclude,glob)${globPathspec}.daemon-*.log`,
+    `:(exclude,glob)${globPathspec}.tmp-*`,
   ];
 }
 
@@ -1797,6 +1891,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
         `:(literal)${pathspec}`,
         `:(glob)${globPathspec}.lock*`,
         `:(glob)${globPathspec}.daemon-*.log`,
+        `:(glob)${globPathspec}.tmp-*`,
       ],
       execOptions,
     );
@@ -1921,7 +2016,9 @@ export async function publishBenchmarkReceipt(
 ) {
   abortSignal?.throwIfAborted();
   outputReservation.assertHealthy?.();
-  await writeReceipt(path, `${JSON.stringify(receipt, null, 2)}\n`, abortSignal);
+  await writeReceipt(path, `${JSON.stringify(receipt, null, 2)}\n`, abortSignal, {
+    publishTemp: outputReservation.publishTemp,
+  });
   abortSignal?.throwIfAborted();
   outputReservation.assertHealthy?.();
   await outputReservation.release();
@@ -1947,7 +2044,9 @@ export async function writeReceiptAtomically(
     abortSignal?.throwIfAborted();
     await publishTemp(tempPath, path);
   } finally {
-    await removeTemp(tempPath, { force: true }).catch(() => undefined);
+    await Promise.resolve(removeTemp(tempPath, { force: true })).catch(
+      () => undefined,
+    );
   }
 }
 
