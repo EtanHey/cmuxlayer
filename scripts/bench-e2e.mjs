@@ -10,6 +10,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   unlink,
@@ -701,6 +702,45 @@ async function lockOwnerIsLive(owner) {
   );
 }
 
+export async function retireStaleReclaimMarker(
+  reclaimPath,
+  observedText,
+  deps = {},
+) {
+  const renameFile = deps.rename ?? rename;
+  const readMarker = deps.readFile ?? readFile;
+  const restoreMarker = deps.link ?? link;
+  const removeMarker = deps.unlink ?? unlink;
+  const ownerIsLive = deps.ownerIsLive ?? lockOwnerIsLive;
+  const quarantinePath =
+    deps.quarantinePath ??
+    `${reclaimPath}.retired-${process.pid}-${randomUUID()}`;
+  try {
+    await renameFile(reclaimPath, quarantinePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+
+  let retire = false;
+  try {
+    const quarantinedText = await readMarker(quarantinePath, "utf8");
+    retire =
+      quarantinedText === observedText &&
+      !(await ownerIsLive(parseLockOwner(quarantinedText)));
+    if (!retire) {
+      await restoreMarker(quarantinePath, reclaimPath).catch((error) => {
+        if (error?.code !== "EEXIST") throw error;
+      });
+    }
+    return retire;
+  } finally {
+    await removeMarker(quarantinePath).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  }
+}
+
 async function createPidLock(lockPath, label) {
   await mkdir(dirname(lockPath), { recursive: true });
   const processStart = await readProcessStartIdentity(process.pid);
@@ -727,16 +767,9 @@ async function createPidLock(lockPath, label) {
           await new Promise((resolvePause) => setTimeout(resolvePause, 10));
           continue;
         }
-        const currentReclaimText = await readFile(reclaimPath, "utf8").catch(
-          (error) => {
-            if (error?.code === "ENOENT") return null;
-            throw error;
-          },
-        );
-        if (currentReclaimText !== reclaimText) continue;
-        await unlink(reclaimPath).catch((error) => {
-          if (error?.code !== "ENOENT") throw error;
-        });
+        if (!(await retireStaleReclaimMarker(reclaimPath, reclaimText))) {
+          continue;
+        }
       }
       try {
         await link(candidatePath, lockPath);
@@ -1805,6 +1838,20 @@ export async function publishBenchmarkReceipt(
   await outputReservation.release();
 }
 
+export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
+  const prepare = deps.prepare ?? prepareBuiltEntries;
+  const validate = deps.validate ?? assertArtifactProvenance;
+  const reserve = deps.reserve ?? createOutputReservation;
+  const artifactProvenance = await prepare({
+    ...config,
+    env: process.env,
+  });
+  config.cmuxBin = artifactProvenance.cli_executable.path;
+  await validate(artifactProvenance);
+  const outputReservation = await reserve(config.out);
+  return { artifactProvenance, outputReservation };
+}
+
 async function main() {
   const config = parseConfig(process.argv.slice(2), process.env);
   if (config.help) {
@@ -1836,7 +1883,8 @@ async function main() {
       );
     try {
       abortController.signal.throwIfAborted();
-      outputReservation = await createOutputReservation(config.out);
+      const prepared = await prepareProvenanceThenReserveOutput(config);
+      outputReservation = prepared.outputReservation;
       abortController.signal.throwIfAborted();
       await executeBenchmark(
         config,
@@ -1844,6 +1892,7 @@ async function main() {
         abortController.signal,
         () => workspaceReservation.release(),
         outputReservation,
+        prepared.artifactProvenance,
       );
     } finally {
       await releaseTopLevel();
@@ -1859,13 +1908,8 @@ async function executeBenchmark(
   abortSignal,
   releaseWorkspaceReservation,
   outputReservation,
+  artifactProvenance,
 ) {
-  const artifactProvenance = await prepareBuiltEntries({
-    ...config,
-    env: process.env,
-  });
-  config.cmuxBin = artifactProvenance.cli_executable.path;
-  await assertArtifactProvenance(artifactProvenance);
   abortSignal.throwIfAborted();
   const nightlySocket = await stat(isolation.cmuxSocketPath).catch(() => null);
   if (!nightlySocket?.isSocket()) {

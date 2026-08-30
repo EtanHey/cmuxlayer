@@ -44,7 +44,9 @@ import {
   payloadText,
   readGitHead,
   prepareBuiltEntries,
+  prepareProvenanceThenReserveOutput,
   publishBenchmarkReceipt,
+  retireStaleReclaimMarker,
   renderMarkdownTable,
   releaseReservations,
   resolveStableWorkspaceId,
@@ -1095,6 +1097,39 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("atomically quarantines only the stale reclaim marker it inspected", async () => {
+    const operations: string[] = [];
+    const staleOwner = '{"pid":41,"claim_id":"stale"}\n';
+    const replacementOwner = '{"pid":42,"claim_id":"live"}\n';
+
+    const retired = await retireStaleReclaimMarker(
+      "/tmp/output.lock.reclaim",
+      staleOwner,
+      {
+        rename: async (_source, destination) => {
+          operations.push(`rename:${destination}`);
+        },
+        readFile: async () => replacementOwner,
+        link: async (source, destination) => {
+          operations.push(`restore:${source}:${destination}`);
+        },
+        unlink: async (path) => {
+          operations.push(`unlink:${path}`);
+        },
+        ownerIsLive: async () => true,
+        quarantinePath: "/tmp/output.lock.reclaim.retired-test",
+      },
+    );
+
+    expect(retired).toBe(false);
+    expect(operations).toEqual([
+      "rename:/tmp/output.lock.reclaim.retired-test",
+      "restore:/tmp/output.lock.reclaim.retired-test:/tmp/output.lock.reclaim",
+      "unlink:/tmp/output.lock.reclaim.retired-test",
+    ]);
+    expect(operations).not.toContain("unlink:/tmp/output.lock.reclaim");
+  });
+
   it("recovers a lock whose live PID belongs to a different process start", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
@@ -1366,6 +1401,32 @@ describe("bench-e2e measurement harness", () => {
         sha256: "sha256:/opt/cmux/bin/cmux",
       },
     });
+  });
+
+  it("attests provenance before creating the output reservation", async () => {
+    const events: string[] = [];
+    const config = { out: "/repo/bench.json", cmuxBin: "cmux" };
+    const provenance = {
+      cli_executable: { path: "/opt/cmux/bin/cmux" },
+    };
+
+    const result = await prepareProvenanceThenReserveOutput(config, {
+      prepare: async () => {
+        events.push("provenance");
+        return provenance;
+      },
+      validate: async () => {
+        events.push("validate");
+      },
+      reserve: async () => {
+        events.push("reserve-output");
+        return { release: async () => undefined };
+      },
+    });
+
+    expect(events).toEqual(["provenance", "validate", "reserve-output"]);
+    expect(config.cmuxBin).toBe("/opt/cmux/bin/cmux");
+    expect(result.artifactProvenance).toBe(provenance);
   });
 
   it("rejects mutable built entries whose hashes change after attestation", async () => {
