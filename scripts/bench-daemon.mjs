@@ -432,14 +432,14 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
-        void handleFakeCmuxSocketLine(
+        handleFakeCmuxSocketLine(
           socket,
           line,
           statePath,
           surfaceCount,
           surfaceStates,
           surfaceMutationQueues,
-        );
+        ).catch((error) => socket.destroy(error));
       }
     });
   });
@@ -450,7 +450,15 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
   return server;
 }
 
-async function mutateFakeSurfaceState(
+function fakeSurfaceStateKey(surfaceIdentifier, surfaces) {
+  const surface = surfaces.find(
+    (candidate) =>
+      candidate.ref === surfaceIdentifier || candidate.id === surfaceIdentifier,
+  );
+  return surface?.ref ?? surfaceIdentifier;
+}
+
+function mutateFakeSurfaceState(
   surfaceId,
   surfaceStates,
   surfaceMutationQueues,
@@ -466,7 +474,13 @@ async function mutateFakeSurfaceState(
     surfaceStates.set(surfaceId, updated);
     return updated;
   });
-  surfaceMutationQueues.set(surfaceId, currentMutation.catch(() => {}));
+  surfaceMutationQueues.set(
+    surfaceId,
+    currentMutation.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
   return currentMutation;
 }
 
@@ -575,7 +589,8 @@ async function handleFakeCmuxSocketLine(
       result = { ...layout, surfaces };
       break;
     case "surface.read_text": {
-      const surfaceState = surfaceStates.get(params.surface_id) ?? {
+      const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
+      const surfaceState = surfaceStates.get(surfaceKey) ?? {
         composer: "",
         transcript: "",
       };
@@ -584,9 +599,7 @@ async function handleFakeCmuxSocketLine(
         : "";
       result = {
         surface_ref: params.surface_id,
-        text:
-          `╭ OpenAI Codex ╮\nmodel: gpt-5.6-sol\n${transcript}\n› ` +
-          surfaceState.composer,
+        text: `╭ OpenAI Codex ╮\nmodel: gpt-5.6-sol\n${transcript}\n› ${surfaceState.composer}`,
         lines: 8,
       };
       break;
@@ -601,9 +614,10 @@ async function handleFakeCmuxSocketLine(
         type: "terminal",
       };
       break;
-    case "surface.send_text":
+    case "surface.send_text": {
+      const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
       await mutateFakeSurfaceState(
-        params.surface_id,
+        surfaceKey,
         surfaceStates,
         surfaceMutationQueues,
         (surfaceState) => ({
@@ -613,9 +627,11 @@ async function handleFakeCmuxSocketLine(
       );
       result = { ok: true };
       break;
-    case "surface.send_key":
+    }
+    case "surface.send_key": {
+      const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
       await mutateFakeSurfaceState(
-        params.surface_id,
+        surfaceKey,
         surfaceStates,
         surfaceMutationQueues,
         (surfaceState) =>
@@ -629,6 +645,7 @@ async function handleFakeCmuxSocketLine(
       );
       result = { ok: true };
       break;
+    }
     case "surface.close":
       await writeFakeState(statePath, { ...state, closed: true });
       result = { ok: true };
@@ -1268,6 +1285,10 @@ async function main() {
 
     const gates = {
       rss_improved: daemonRssMb < baselineRssMb,
+      daemon_survived_replay:
+        daemon.exitCode === null &&
+        daemon.signalCode === null &&
+        daemonStats.rssKb > 0,
       truthful_state: truthfulState,
       list_surfaces_p50_no_regression: latencyGate(
         baselineLatency,

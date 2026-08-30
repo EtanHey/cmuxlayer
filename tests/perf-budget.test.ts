@@ -941,7 +941,12 @@ describe("daemon performance budget", () => {
     expect(source).not.toContain("onFirstSample");
     expect(source).toContain("const surfaceStates = new Map()");
     expect(source).toContain("const surfaceMutationQueues = new Map()");
+    expect(source).toContain("function fakeSurfaceStateKey(");
+    expect(source).toContain("fakeSurfaceStateKey(params.surface_id, surfaces)");
     expect(source).toContain("await mutateFakeSurfaceState(");
+    expect(source).toContain(
+      "daemon_survived_replay:\n        daemon.exitCode === null &&\n        daemon.signalCode === null &&\n        daemonStats.rssKb > 0",
+    );
     expect(source).toContain("firstSendAfterSpawn.sampled");
     expect(source).toContain("firstSendAfterSpawn.send_to_agent_warm");
     expect(source).toContain("firstSendAfterSpawn.send_to_surface_warm");
