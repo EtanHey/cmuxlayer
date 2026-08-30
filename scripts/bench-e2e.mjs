@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   stat,
@@ -692,10 +693,15 @@ async function createPidLock(lockPath, label) {
   }
   const ownerText = `${JSON.stringify({ pid: process.pid, process_start: processStart })}\n`;
   const candidatePath = `${lockPath}.claim-${process.pid}-${randomUUID()}`;
+  const reclaimPath = `${lockPath}.reclaim`;
   await writeFile(candidatePath, ownerText, { flag: "wx", mode: 0o600 });
   let acquired = false;
   try {
-    for (let attempt = 0; attempt < 3 && !acquired; attempt += 1) {
+    for (let attempt = 0; attempt < 20 && !acquired; attempt += 1) {
+      if (existsSync(reclaimPath)) {
+        await new Promise((resolvePause) => setTimeout(resolvePause, 10));
+        continue;
+      }
       try {
         await link(candidatePath, lockPath);
         acquired = true;
@@ -719,13 +725,28 @@ async function createPidLock(lockPath, label) {
           throw new Error(`${label} is already reserved by pid ${owner.pid}`);
         }
       }
-      // Re-read before unlinking so a contender that replaced the stale owner
-      // is never removed based on an earlier observation.
-      const currentText = await readFile(lockPath, "utf8").catch(() => null);
-      if (currentText !== observedText) continue;
-      await unlink(lockPath).catch((error) => {
-        if (error?.code !== "ENOENT") throw error;
-      });
+      let ownsReclaim = false;
+      try {
+        await link(candidatePath, reclaimPath);
+        ownsReclaim = true;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      if (!ownsReclaim) {
+        await new Promise((resolvePause) => setTimeout(resolvePause, 10));
+        continue;
+      }
+      try {
+        const currentText = await readFile(lockPath, "utf8").catch(() => null);
+        if (currentText !== observedText) continue;
+        await unlink(lockPath).catch((error) => {
+          if (error?.code !== "ENOENT") throw error;
+        });
+        await link(candidatePath, lockPath);
+        acquired = true;
+      } finally {
+        await unlink(reclaimPath).catch(() => undefined);
+      }
     }
   } finally {
     await unlink(candidatePath).catch(() => undefined);
@@ -1564,11 +1585,38 @@ async function sha256File(path) {
     .digest("hex");
 }
 
+async function listRuntimeFiles(root) {
+  const files = [];
+  async function visit(directory) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) files.push(path);
+    }
+  }
+  await visit(root);
+  return files;
+}
+
 export async function assertArtifactProvenance(
   provenance,
   hashFile = sha256File,
 ) {
-  for (const entry of Object.values(provenance.entries)) {
+  const attested = [
+    ...Object.values(provenance.entries),
+    ...(provenance.runtime_files ?? []),
+  ];
+  if (provenance.runtime_root && provenance.runtime_files) {
+    const expectedPaths = provenance.runtime_files.map((entry) => entry.path);
+    const observedPaths = await listRuntimeFiles(provenance.runtime_root);
+    if (JSON.stringify(observedPaths) !== JSON.stringify(expectedPaths)) {
+      throw new Error("runtime artifact file set changed after attestation");
+    }
+  }
+  for (const entry of attested) {
     const observed = await hashFile(entry.path);
     if (observed !== entry.sha256) {
       throw new Error(
@@ -1583,6 +1631,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const exec = deps.exec ?? execCapture;
   const exists = deps.exists ?? existsSync;
   const hashFile = deps.hashFile ?? sha256File;
+  const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
   const expectedMcpEntry = join(root, "dist", "index.js");
   const expectedDaemonEntry = join(root, "dist", "daemon.js");
   if (
@@ -1618,6 +1667,8 @@ export async function prepareBuiltEntries(config, deps = {}) {
   for (const path of [config.mcpEntry, config.daemonEntry]) {
     if (!exists(path)) throw new Error(`built entry does not exist: ${path}`);
   }
+  const runtimeRoot = join(root, "dist");
+  const runtimeFiles = await enumerateRuntimeFiles(runtimeRoot);
   return {
     git_head: head.stdout.trim(),
     entries: {
@@ -1630,6 +1681,10 @@ export async function prepareBuiltEntries(config, deps = {}) {
         sha256: await hashFile(config.daemonEntry),
       },
     },
+    runtime_root: runtimeRoot,
+    runtime_files: await Promise.all(
+      runtimeFiles.map(async (path) => ({ path, sha256: await hashFile(path) })),
+    ),
   };
 }
 

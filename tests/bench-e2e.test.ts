@@ -1240,6 +1240,11 @@ describe("bench-e2e measurement harness", () => {
         },
         exists: () => true,
         hashFile: (path) => `sha256:${path}`,
+        listRuntimeFiles: () => [
+          "/repo/dist/daemon.js",
+          "/repo/dist/index.js",
+          "/repo/dist/server.js",
+        ],
       },
     );
 
@@ -1262,6 +1267,21 @@ describe("bench-e2e measurement harness", () => {
           sha256: "sha256:/repo/dist/daemon.js",
         },
       },
+      runtime_root: "/repo/dist",
+      runtime_files: [
+        {
+          path: "/repo/dist/daemon.js",
+          sha256: "sha256:/repo/dist/daemon.js",
+        },
+        {
+          path: "/repo/dist/index.js",
+          sha256: "sha256:/repo/dist/index.js",
+        },
+        {
+          path: "/repo/dist/server.js",
+          sha256: "sha256:/repo/dist/server.js",
+        },
+      ],
     });
   });
 
@@ -1278,6 +1298,35 @@ describe("bench-e2e measurement harness", () => {
           path.endsWith("index.js") ? "mcp-after" : "daemon-before",
       ),
     ).rejects.toThrow(/artifact changed after attestation.*index\.js/);
+  });
+
+  it("rejects drift in an imported runtime sibling", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const runtimeRoot = join(directory, "dist");
+    const indexPath = join(runtimeRoot, "index.js");
+    const serverPath = join(runtimeRoot, "server.js");
+    await mkdir(runtimeRoot);
+    await writeFile(indexPath, "index", "utf8");
+    await writeFile(serverPath, "server", "utf8");
+    let serverHash = "server-before";
+    const provenance = {
+      entries: {},
+      runtime_root: runtimeRoot,
+      runtime_files: [
+        { path: indexPath, sha256: "index-before" },
+        { path: serverPath, sha256: "server-before" },
+      ],
+    };
+    const hashFile = (path) =>
+      path === serverPath ? serverHash : "index-before";
+    await expect(assertArtifactProvenance(provenance, hashFile)).resolves.toBe(
+      undefined,
+    );
+    serverHash = "server-after";
+    await expect(assertArtifactProvenance(provenance, hashFile)).rejects.toThrow(
+      /artifact changed after attestation.*server\.js/,
+    );
+    await rm(directory, { recursive: true, force: true });
   });
 
   it("rejects built entry provenance when HEAD changes during the build", async () => {
@@ -1304,6 +1353,7 @@ describe("bench-e2e measurement harness", () => {
           },
           exists: () => true,
           hashFile: () => "unused",
+          listRuntimeFiles: () => [],
         },
       ),
     ).rejects.toThrow(/revision changed during build/);
