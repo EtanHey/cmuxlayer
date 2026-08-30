@@ -417,6 +417,8 @@ if (command === "list-workspaces") {
 }
 
 async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
+  const surfaceStates = new Map();
+  const surfaceMutationQueues = new Map();
   const server = net.createServer((socket) => {
     // Benchmark clients may disappear while the fake server is replying.
     // Treat that expected teardown reset as connection-local evidence, not an
@@ -430,7 +432,14 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
-        void handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount);
+        void handleFakeCmuxSocketLine(
+          socket,
+          line,
+          statePath,
+          surfaceCount,
+          surfaceStates,
+          surfaceMutationQueues,
+        );
       }
     });
   });
@@ -441,7 +450,34 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
   return server;
 }
 
-async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
+async function mutateFakeSurfaceState(
+  surfaceId,
+  surfaceStates,
+  surfaceMutationQueues,
+  mutate,
+) {
+  const previous = surfaceMutationQueues.get(surfaceId) ?? Promise.resolve();
+  const currentMutation = previous.then(() => {
+    const current = surfaceStates.get(surfaceId) ?? {
+      composer: "",
+      transcript: "",
+    };
+    const updated = mutate(current);
+    surfaceStates.set(surfaceId, updated);
+    return updated;
+  });
+  surfaceMutationQueues.set(surfaceId, currentMutation.catch(() => {}));
+  return currentMutation;
+}
+
+async function handleFakeCmuxSocketLine(
+  socket,
+  line,
+  statePath,
+  surfaceCount,
+  surfaceStates,
+  surfaceMutationQueues,
+) {
   if (!line.startsWith("{")) {
     socket.write(`${line.startsWith("list_status") ? "[]" : "OK"}\n`);
     return;
@@ -539,12 +575,18 @@ async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
       result = { ...layout, surfaces };
       break;
     case "surface.read_text": {
-      const transcript = state.transcript ? `\n› ${state.transcript}\n` : "";
+      const surfaceState = surfaceStates.get(params.surface_id) ?? {
+        composer: "",
+        transcript: "",
+      };
+      const transcript = surfaceState.transcript
+        ? `\n› ${surfaceState.transcript}\n`
+        : "";
       result = {
         surface_ref: params.surface_id,
         text:
           `╭ OpenAI Codex ╮\nmodel: gpt-5.6-sol\n${transcript}\n› ` +
-          (state.composer ?? ""),
+          surfaceState.composer,
         lines: 8,
       };
       break;
@@ -560,18 +602,30 @@ async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
       };
       break;
     case "surface.send_text":
-      await writeFakeState(statePath, {
-        ...state,
-        composer: `${state.composer ?? ""}${params.text ?? ""}`,
-      });
+      await mutateFakeSurfaceState(
+        params.surface_id,
+        surfaceStates,
+        surfaceMutationQueues,
+        (surfaceState) => ({
+          ...surfaceState,
+          composer: `${surfaceState.composer}${params.text ?? ""}`,
+        }),
+      );
       result = { ok: true };
       break;
     case "surface.send_key":
-      await writeFakeState(
-        statePath,
-        String(params.key).toLowerCase() === "return"
-          ? { ...state, transcript: state.composer ?? "", composer: "" }
-          : state,
+      await mutateFakeSurfaceState(
+        params.surface_id,
+        surfaceStates,
+        surfaceMutationQueues,
+        (surfaceState) =>
+          String(params.key).toLowerCase() === "return"
+            ? {
+                ...surfaceState,
+                transcript: surfaceState.composer,
+                composer: "",
+              }
+            : surfaceState,
       );
       result = { ok: true };
       break;
@@ -1162,10 +1216,6 @@ async function main() {
       daemonClients,
       sweepHoldState,
     );
-    const daemonRssMb = await totalRssMb(
-      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
-    );
-    const daemonStats = await processStats(daemon.pid);
     const listAgents = await measureWarmToolAcrossClients(
       daemonClients,
       "list_agents",
@@ -1206,6 +1256,10 @@ async function main() {
     );
     await Promise.all(stressClients.map((client) => client.close()));
     stressClients = [];
+    const daemonRssMb = await totalRssMb(
+      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
+    );
+    const daemonStats = await processStats(daemon.pid);
     const truthfulState =
       compact(baselineLatency.firstResults.listResult?.structuredContent) ===
         compact(daemonLatency.firstResults.listResult?.structuredContent) &&
