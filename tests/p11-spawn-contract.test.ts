@@ -867,6 +867,154 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
   });
 
+  it("retains a settled failed watch for its waiter, then prunes after release", async () => {
+    const engine = server._registeredTools.interact._engine;
+    const target = join(inboxDir, "settled-deadline.md");
+    writeFileSync(target, "", "utf8");
+    await engine.armWatch({
+      owner: "lead-parent",
+      target,
+      marker: "DONE",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const registryFile = JSON.parse(readFileSync(watchRegistryPath, "utf8"));
+    registryFile.watches[0] = {
+      ...registryFile.watches[0],
+      state: "failed",
+      terminal_reason: "deadline_elapsed",
+      terminal_at_ms: 2_000,
+      notification_pending: false,
+      notification_attempts: 1,
+      waiter_expires_at_ms: Date.now() + 60_000,
+    };
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(registryFile, null, 2)}\n`,
+      "utf8",
+    );
+
+    await (
+      engine as unknown as {
+        pruneClosedChildReportWatches: () => Promise<void>;
+      }
+    ).pruneClosedChildReportWatches();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toHaveLength(1);
+
+    (
+      engine as unknown as {
+        childReportWatchPrunePending: boolean;
+      }
+    ).childReportWatchPrunePending = false;
+    await (
+      engine as unknown as {
+        sweepWatchesBestEffort: () => Promise<void>;
+      }
+    ).sweepWatchesBestEffort();
+    expect(
+      (
+        engine as unknown as {
+          childReportWatchPrunePending: boolean;
+        }
+      ).childReportWatchPrunePending,
+    ).toBe(true);
+
+    const retainedRegistry = JSON.parse(
+      readFileSync(watchRegistryPath, "utf8"),
+    );
+    delete retainedRegistry.watches[0].waiter_expires_at_ms;
+    writeFileSync(
+      watchRegistryPath,
+      `${JSON.stringify(retainedRegistry, null, 2)}\n`,
+      "utf8",
+    );
+
+    await (
+      engine as unknown as {
+        retryClosedChildReportWatchPrune: () => Promise<void>;
+      }
+    ).retryClosedChildReportWatchPrune();
+
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
+  });
+
+  it("fires a deadline-elapsed wait notice once and never again after restart", async () => {
+    await server.close();
+    let watchNow = 1_000;
+    const localDeadlineNotice = vi.fn().mockResolvedValue(false);
+    const serverOptions = withTestSurfaceObserver({
+      exec,
+      stateDir: STATE_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir,
+      watchRegistryPath,
+      watchRegistryNow: () => watchNow,
+    });
+    server = createServer(serverOptions);
+    let engine = server._registeredTools.interact._engine;
+    engine.stateMgr.writeState(parentRecord());
+    engine.getRegistry().set("lead-parent", parentRecord());
+    (
+      engine as unknown as {
+        watchNotify: typeof localDeadlineNotice;
+      }
+    ).watchNotify = localDeadlineNotice;
+    const target = join(inboxDir, "deadline-fire-once.md");
+    writeFileSync(target, "", "utf8");
+    setTimeout(() => {
+      watchNow = 2_000;
+    }, 10);
+
+    const first = await engine.waitForWatch(
+      {
+        owner: "lead-parent",
+        target,
+        marker: "DONE",
+        deadline: 2_000,
+      },
+      500,
+    );
+
+    expect(first.watch).toMatchObject({
+      state: "failed",
+      terminal_reason: "deadline_elapsed",
+    });
+    expect(localDeadlineNotice).toHaveBeenCalledTimes(1);
+    const settled = readWatchRegistry({
+      registryPath: watchRegistryPath,
+    }).watches[0];
+    expect(settled).toMatchObject({
+      state: "failed",
+      notification_pending: false,
+      notification_attempts: 1,
+      notification_exhausted_reason: "terminal_notice_fire_once",
+    });
+    expect(settled).not.toHaveProperty("waiter_expires_at_ms");
+
+    await server.close();
+    watchNow = 3_000;
+    server = createServer(serverOptions);
+    engine = server._registeredTools.interact._engine;
+    engine.stateMgr.writeState(parentRecord());
+    engine.getRegistry().set("lead-parent", parentRecord());
+    (
+      engine as unknown as {
+        watchNotify: typeof localDeadlineNotice;
+      }
+    ).watchNotify = localDeadlineNotice;
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    await engine.sweepWatchesBestEffort();
+
+    expect(localDeadlineNotice).toHaveBeenCalledTimes(1);
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([]);
+  });
+
   it("resolves a legacy bare owner seat to the live suffixed lead before delivery", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
