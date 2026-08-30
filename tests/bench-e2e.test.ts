@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   stat,
   symlink,
@@ -1071,6 +1072,18 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("refuses a symbolic-link lock without modifying its target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const target = join(directory, "do-not-touch.txt");
+    await writeFile(target, "preserve me\n", "utf8");
+    await symlink(target, `${output}.lock`);
+
+    await expect(createOutputReservation(output)).rejects.toThrow();
+    await expect(readFile(target, "utf8")).resolves.toBe("preserve me\n");
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("releases the kernel lock when the reserving process crashes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
@@ -1467,6 +1480,64 @@ describe("bench-e2e measurement harness", () => {
       "--porcelain",
       "--untracked-files=all",
     ]);
+    expect(
+      provenanceStatusArgs("/repo", "/repo/results/bench[1]*?.json"),
+    ).toContain(
+      ":(exclude,glob)results/bench\\[1\\]\\*\\?.json.daemon-*.log",
+    );
+  });
+
+  it("refuses to exclude a tracked output receipt from provenance", async () => {
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              return { stdout: "results/bench.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+  });
+
+  it("rechecks that the output receipt remains untracked after the build", async () => {
+    let trackedChecks = 0;
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedChecks += 1;
+              return {
+                stdout: trackedChecks === 1 ? "" : "results/bench.json\n",
+                stderr: "",
+              };
+            }
+            if (args[0] === "status") return { stdout: "", stderr: "" };
+            if (args[0] === "rev-parse") {
+              return { stdout: "abc123\n", stderr: "" };
+            }
+            if (args[0] === "run") return { stdout: "built\n", stderr: "" };
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+    expect(trackedChecks).toBe(2);
   });
 
   it("attests provenance before creating the output reservation", async () => {

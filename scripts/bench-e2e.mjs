@@ -2,10 +2,11 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream, existsSync } from "node:fs";
+import { constants, createWriteStream, existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -754,19 +755,37 @@ async function discardLockHolder(child) {
 
 async function createPidLock(lockPath, label) {
   await mkdir(dirname(lockPath), { recursive: true });
-  const invocation = advisoryLockInvocation(process.platform, lockPath);
+  const lockHandle = await open(
+    lockPath,
+    constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600,
+  );
+  const lockStat = await lockHandle.stat();
+  if (!lockStat.isFile()) {
+    await lockHandle.close();
+    throw new Error(`${label} lock path is not a regular file: ${lockPath}`);
+  }
+  const inheritedLockPath =
+    process.platform === "linux" ? "/proc/self/fd/3" : "/dev/fd/3";
+  const invocation = advisoryLockInvocation(
+    process.platform,
+    inheritedLockPath,
+  );
   const holder = spawn(invocation.command, invocation.args, {
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe", lockHandle.fd],
   });
   try {
     await waitForLockHolder(holder, invocation, label, lockPath);
-    await writeFile(
-      lockPath,
+    await lockHandle.truncate(0);
+    await lockHandle.writeFile(
       `${JSON.stringify({ pid: process.pid, claim_id: randomUUID() })}\n`,
-      { encoding: "utf8", mode: 0o600 },
+      "utf8",
     );
+    await lockHandle.sync();
+    await lockHandle.close();
   } catch (error) {
     await discardLockHolder(holder);
+    await lockHandle.close().catch(() => undefined);
     throw error;
   }
   let released = false;
@@ -1668,13 +1687,14 @@ export function provenanceStatusArgs(root, outputPath) {
     return args;
   }
   const pathspec = outputRelative.split(sep).join("/");
+  const globPathspec = pathspec.replace(/[?*[\]\\]/g, "\\$&");
   return [
     ...args,
     "--",
     ".",
     `:(exclude,literal)${pathspec}`,
-    `:(exclude,glob)${pathspec}.lock*`,
-    `:(exclude,glob)${pathspec}.daemon-*.log`,
+    `:(exclude,glob)${globPathspec}.lock*`,
+    `:(exclude,glob)${globPathspec}.daemon-*.log`,
   ];
 }
 
@@ -1701,6 +1721,29 @@ export async function prepareBuiltEntries(config, deps = {}) {
     });
   const readHead = () =>
     exec("git", ["rev-parse", "HEAD"], { env: config.env });
+  const outputRelative = config.out
+    ? relative(resolve(root), resolve(config.out))
+    : null;
+  const assertOutputUntracked = async () => {
+    if (
+      !outputRelative ||
+      outputRelative === ".." ||
+      outputRelative.startsWith(`..${sep}`)
+    ) {
+      return;
+    }
+    const trackedOutput = await exec(
+      "git",
+      ["ls-files", "--cached", "--", outputRelative.split(sep).join("/")],
+      { env: config.env },
+    );
+    if (trackedOutput.stdout.trim()) {
+      throw new Error(
+        `refusing to use a tracked output receipt: ${config.out}`,
+      );
+    }
+  };
+  await assertOutputUntracked();
   const status = await readWorktreeStatus();
   if (status.stdout.trim()) {
     throw new Error(
@@ -1709,6 +1752,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
   }
   const head = await readHead();
   await exec("bun", ["run", "build"], { env: config.env });
+  await assertOutputUntracked();
   const finalStatus = await readWorktreeStatus();
   if (finalStatus.stdout.trim()) {
     throw new Error("worktree changed during artifact build");
