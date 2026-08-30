@@ -989,9 +989,9 @@ export async function sweepWatches(
     );
   }
 
-  // skipcq: JS-R1005
   await withWriteLock(path, () => {
     const registry = readRegistryState(path);
+    // skipcq: JS-R1005
     const watches = registry.rows.map((row) => {
       if (!isWatchRecord(row)) return row;
       const record = row;
