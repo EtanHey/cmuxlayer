@@ -13,10 +13,13 @@ import {
   daemonLogPath,
   appendFatalError,
   appendSettledFailures,
+  listPanesCliArgs,
+  listPaneSurfacesCliArgs,
   markSurfaceTransportUntrusted,
   nearestRankPercentile,
   operationArgs,
   openExclusiveWriteStream,
+  paneRefsFromListPanesStdout,
   payloadText,
   readGitHead,
   runBenchmarkRow,
@@ -173,6 +176,43 @@ describe("bench-e2e measurement harness", () => {
     expect(args.at(-1)).toHaveLength(521);
     expect(args.at(-1)?.endsWith("\n")).toBe(true);
     expect(args.at(-1)?.endsWith("\\n")).toBe(false);
+  });
+
+  it("walks the real cmux topology verbs for CLI list_surfaces, not tree", () => {
+    const config = { workspace: "workspace:7", surface: "surface:21" };
+
+    expect(cliArgs({ operation: "list_surfaces" }, config, 0, 0)).toEqual([
+      "--json",
+      "--id-format",
+      "both",
+      "list-workspaces",
+    ]);
+    expect(listPanesCliArgs("workspace:7")).toEqual([
+      "--json",
+      "--id-format",
+      "both",
+      "list-panes",
+      "--workspace",
+      "workspace:7",
+    ]);
+    expect(listPaneSurfacesCliArgs("workspace:7", "pane:3")).toEqual([
+      "--json",
+      "--id-format",
+      "both",
+      "list-pane-surfaces",
+      "--workspace",
+      "workspace:7",
+      "--pane",
+      "pane:3",
+    ]);
+    expect(
+      paneRefsFromListPanesStdout(
+        JSON.stringify({
+          workspace_ref: "workspace:7",
+          panes: [{ ref: "pane:1" }, { ref: "pane:2" }],
+        }),
+      ),
+    ).toEqual(["pane:1", "pane:2"]);
   });
 
   it("does not mix an environment workspace UUID into raw-surface calls", () => {

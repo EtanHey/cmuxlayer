@@ -270,16 +270,24 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let settled = false;
     let timer = null;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
     timer = setTimeout(() => {
       timedOut = true;
       const timeoutError = new Error(
         `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
       );
       terminateChild(child).then(
-        () => reject(timeoutError),
+        () => settle(reject, timeoutError),
         (terminationError) =>
-          reject(
+          settle(
+            reject,
             new AggregateError(
               [timeoutError, terminationError],
               "command timed out and child termination failed",
@@ -294,21 +302,20 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
       stderr += chunk.toString("utf8");
     });
     child.once("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
+      settle(reject, error);
     });
     child.once("close", (code, signal) => {
-      clearTimeout(timer);
       if (timedOut) return;
       if (code !== 0) {
-        reject(
+        settle(
+          reject,
           new Error(
             `${command} ${args.join(" ")} exited code=${code} signal=${signal}: ${stderr.trim()}`,
           ),
         );
         return;
       }
-      resolvePromise({ stdout, stderr });
+      settle(resolvePromise, { stdout, stderr });
     });
   });
 }
@@ -529,20 +536,24 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
     rejectSpawnFailure = reject;
   });
   const onSpawnError = (error) => rejectSpawnFailure(error);
-  child.once("error", onSpawnError);
-  child.once("exit", (code, signal) => {
+  const onEarlyExit = (code, signal) => {
     earlyExit = { code, signal };
     rejectSpawnFailure(
       new Error(
         `isolated daemon exited before readiness: ${JSON.stringify(earlyExit)}`,
       ),
     );
-  });
+  };
+  child.once("error", onSpawnError);
+  child.once("exit", onEarlyExit);
   const socketWait = waitForSocket(daemonSocketPath);
   try {
     await Promise.race([socketWait.promise, spawnFailure, logFailure]);
     socketWait.cancel();
     child.off("error", onSpawnError);
+    child.off("exit", onEarlyExit);
+    spawnFailure.catch(() => undefined);
+    logFailure.catch(() => undefined);
     if (logError) throw logError;
     if (earlyExit) {
       throw new Error(
@@ -552,6 +563,9 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
   } catch (error) {
     socketWait.cancel();
     child.off("error", onSpawnError);
+    child.off("exit", onEarlyExit);
+    spawnFailure.catch(() => undefined);
+    logFailure.catch(() => undefined);
     terminationPromise ??= terminateChild(child);
     await terminationPromise;
     log.end();
@@ -686,6 +700,8 @@ export function operationArgs(row, surface, workspace, worker, sample) {
   return { workspace, verbose: false };
 }
 
+const CMUX_JSON_PREFIX = Object.freeze(["--json", "--id-format", "both"]);
+
 export function cliArgs(row, config, worker, sample) {
   if (row.operation === "send_to") {
     return [
@@ -708,10 +724,62 @@ export function cliArgs(row, config, worker, sample) {
       "20",
     ];
   }
-  return ["tree", "--workspace", config.workspace];
+  return [...CMUX_JSON_PREFIX, "list-workspaces"];
+}
+
+export function listPanesCliArgs(workspace) {
+  return [...CMUX_JSON_PREFIX, "list-panes", "--workspace", workspace];
+}
+
+export function listPaneSurfacesCliArgs(workspace, pane) {
+  return [
+    ...CMUX_JSON_PREFIX,
+    "list-pane-surfaces",
+    "--workspace",
+    workspace,
+    "--pane",
+    pane,
+  ];
+}
+
+export function paneRefsFromListPanesStdout(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(
+      `cmux list-panes returned non-JSON: ${JSON.stringify(stdout.trim())}`,
+    );
+  }
+  const panes = isRecord(parsed) && Array.isArray(parsed.panes) ? parsed.panes : [];
+  return panes
+    .map((pane) => (isRecord(pane) ? nonEmptyString(pane.ref) : null))
+    .filter((ref) => ref !== null);
+}
+
+async function runCliListSurfaces(config) {
+  await execCapture(config.cmuxBin, cliArgs({ operation: "list_surfaces" }, config), {
+    env: config.env,
+  });
+  const panesOut = await execCapture(
+    config.cmuxBin,
+    listPanesCliArgs(config.workspace),
+    { env: config.env },
+  );
+  for (const pane of paneRefsFromListPanesStdout(panesOut.stdout)) {
+    await execCapture(
+      config.cmuxBin,
+      listPaneSurfacesCliArgs(config.workspace, pane),
+      { env: config.env },
+    );
+  }
 }
 
 async function runCliOperation(row, config, worker, sample) {
+  if (row.operation === "list_surfaces") {
+    await runCliListSurfaces(config);
+    return { ok: true, transport: "cli", transport_fallbacks: [] };
+  }
   const args = cliArgs(row, config, worker, sample);
   await execCapture(config.cmuxBin, args, { env: config.env });
   return { ok: true, transport: "cli", transport_fallbacks: [] };
