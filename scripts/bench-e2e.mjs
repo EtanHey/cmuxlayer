@@ -492,18 +492,18 @@ export async function createSocketReservation(requestedPath) {
 async function endWritable(log) {
   if (log.writableFinished || log.closed || log.destroyed) return;
   await new Promise((resolvePromise, reject) => {
-    const cleanup = () => {
+    function cleanup() {
       log.off("finish", onFinish);
       log.off("error", onError);
-    };
-    const onFinish = () => {
+    }
+    function onFinish() {
       cleanup();
       resolvePromise();
-    };
-    const onError = (error) => {
+    }
+    function onError(error) {
       cleanup();
       reject(error);
-    };
+    }
     log.once("finish", onFinish);
     log.once("error", onError);
     log.end();
@@ -1071,7 +1071,7 @@ async function main() {
     clients: config.clients,
   });
   const startedAt = new Date().toISOString();
-  let daemon;
+  let daemon = null;
   try {
     daemon = await startIsolatedDaemon(
       config.daemonEntry,

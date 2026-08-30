@@ -292,7 +292,7 @@ describe("bench-e2e measurement harness", () => {
     ];
     await runCliListSurfaces(
       { ...config, cmuxBin: "/opt/cmux", env: {} },
-      async (_command, args) => {
+      (_command, args) => {
         calls.push(args);
         return { stdout: JSON.stringify(outputs.shift()), stderr: "" };
       },
@@ -322,7 +322,7 @@ describe("bench-e2e measurement harness", () => {
         cmuxBin: "/opt/cmux",
         env: {},
       },
-      async (_command, args) => {
+      (_command, args) => {
         calls.push(args);
         return { stdout: JSON.stringify(outputs.shift()), stderr: "" };
       },
@@ -484,9 +484,7 @@ describe("bench-e2e measurement harness", () => {
       exitCode = null;
       signalCode = null;
 
-      kill() {
-        return true;
-      }
+      kill = () => true;
     }
 
     await expect(terminateChild(new ImmortalChild(), 0)).rejects.toThrow(
@@ -499,9 +497,7 @@ describe("bench-e2e measurement harness", () => {
       exitCode = null;
       signalCode = null;
 
-      kill() {
-        return false;
-      }
+      kill = () => false;
     }
 
     await expect(terminateChild(new UnsignallableChild(), 0)).rejects.toThrow(
@@ -549,7 +545,7 @@ describe("bench-e2e measurement harness", () => {
       },
     });
     const reservation = {
-      async release() {
+      release() {
         events.push("release");
       },
     };
@@ -559,7 +555,7 @@ describe("bench-e2e measurement harness", () => {
         child,
         log,
         reservation,
-        terminate: async () => {
+        terminate: () => {
           throw new Error("terminate failed");
         },
       }),
