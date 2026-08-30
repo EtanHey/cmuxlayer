@@ -8210,6 +8210,13 @@ export class AgentEngine {
           );
         },
       });
+      if (
+        readWatchRegistry({ registryPath: this.watchRegistryPath }).watches.some(
+          (watch) => watch.state === "failed" && !watch.notification_pending,
+        )
+      ) {
+        this.scheduleClosedChildReportWatchPrune();
+      }
     } catch {
       // Declared watches are retried on the next lifecycle sweep.
     } finally {
@@ -9366,9 +9373,10 @@ export class AgentEngine {
     });
     const releaseWaiterBestEffort = async (): Promise<void> => {
       try {
-        await releaseWatchWaiter(armed.watch_id, {
+        const released = await releaseWatchWaiter(armed.watch_id, {
           registryPath: this.watchRegistryPath,
         });
+        if (released) this.scheduleClosedChildReportWatchPrune();
       } catch (error) {
         this.sweepDebugLog(
           `[cmuxlayer] watch waiter release deferred: watch=${armed.watch_id} error=${error instanceof Error ? error.message : String(error)}`,

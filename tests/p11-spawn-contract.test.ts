@@ -903,6 +903,24 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toHaveLength(1);
 
+    (
+      engine as unknown as {
+        childReportWatchPrunePending: boolean;
+      }
+    ).childReportWatchPrunePending = false;
+    await (
+      engine as unknown as {
+        sweepWatchesBestEffort: () => Promise<void>;
+      }
+    ).sweepWatchesBestEffort();
+    expect(
+      (
+        engine as unknown as {
+          childReportWatchPrunePending: boolean;
+        }
+      ).childReportWatchPrunePending,
+    ).toBe(true);
+
     const retainedRegistry = JSON.parse(
       readFileSync(watchRegistryPath, "utf8"),
     );
@@ -915,9 +933,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     await (
       engine as unknown as {
-        pruneClosedChildReportWatches: () => Promise<void>;
+        retryClosedChildReportWatchPrune: () => Promise<void>;
       }
-    ).pruneClosedChildReportWatches();
+    ).retryClosedChildReportWatchPrune();
 
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
