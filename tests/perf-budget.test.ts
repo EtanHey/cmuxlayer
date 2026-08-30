@@ -367,6 +367,55 @@ describe("daemon performance budget", () => {
     });
   });
 
+  it("renders corrupted history RED with visibly degraded wide-margin rows", async () => {
+    expect(checkerModule).toHaveProperty("readBenchmarkHistory");
+    const readBenchmarkHistory = (
+      checkerModule as typeof checkerModule & {
+        readBenchmarkHistory: (path: string) => Promise<{
+          runs: unknown[];
+          degraded: boolean;
+          reason?: string;
+        }>;
+      }
+    ).readBenchmarkHistory;
+    const artifactDir = mkdtempSync(join(tmpdir(), "cmuxlayer-bad-history-"));
+    const historyPath = join(artifactDir, "history.json");
+    writeFileSync(historyPath, "{not-json");
+    try {
+      const corrupted = await readBenchmarkHistory(historyPath);
+      expect(corrupted).toMatchObject({
+        runs: [],
+        degraded: true,
+        reason: expect.stringContaining("history.json"),
+      });
+      const comparison = compareBenchmark(baseline, result, {
+        history: corrupted.runs,
+        historyDegraded: corrupted.degraded,
+        historyDegradedReason: corrupted.reason,
+      });
+      expect(comparison.passed).toBe(false);
+      expect(comparison.failures).toContainEqual(
+        expect.stringContaining("benchmark history degraded"),
+      );
+      expect(
+        comparison.rows.find(
+          (entry) =>
+            entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+        ),
+      ).toMatchObject({ history_degraded: true, margin_ms: 300 });
+      expect(renderMarkdownComparison(baseline, result, comparison)).toContain(
+        "history-degraded · wide-margin",
+      );
+      writeFileSync(historyPath, JSON.stringify({ runs: [{ source: { workflow_run_id: 1 } }] }));
+      await expect(readBenchmarkHistory(historyPath)).resolves.toMatchObject({
+        runs: [{ source: { workflow_run_id: 1 } }],
+        degraded: false,
+      });
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+    }
+  });
+
   it("fails the consistency assertion after a baseline-only hand edit", () => {
     expect(() =>
       validateBaseline({
@@ -443,17 +492,14 @@ describe("daemon performance budget", () => {
     ).toContain("| read_screen | cli |");
   });
 
-  it("fails the benchmark when the intrinsic CLI-send sample used fallback", () => {
+  it("fails the benchmark when the sampled CLI-send distribution used fallback", () => {
     const fallback = compareBenchmark(baseline, {
       ...result,
       latency: {
         ...result.latency,
-        first_send_after_spawn: {
-          ...result.latency.first_send_after_spawn,
-          surface: {
-            ...result.latency.first_send_after_spawn.surface,
-            transport: "cli",
-          },
+        send_to_surface_warm: {
+          ...result.latency.send_to_surface_warm,
+          transport: "cli",
         },
       },
     });
@@ -613,7 +659,7 @@ describe("daemon performance budget", () => {
       },
     });
     expect(cli.failures).toContain(
-      "first_send_after_spawn cli_send: 1001ms exceeds 1000ms",
+      "send_to_surface_warm cli_send: 1001ms exceeds 875ms",
     );
 
     const replay = compareBenchmark(baseline, {
@@ -714,7 +760,7 @@ describe("daemon performance budget", () => {
     expect(defaultTable).not.toContain("| list_surfaces | socket | sampled | request_bytes |");
   });
 
-  it("commits a post-run-5 baseline with the full replay contract", () => {
+  it("recognizes the attested legacy baseline only for fail-closed CI evidence migration", () => {
     const committed = JSON.parse(
       readFileSync(
         join(repoRoot, "benchmarks", "daemon-baseline.json"),
@@ -722,7 +768,15 @@ describe("daemon performance budget", () => {
       ),
     );
 
-    expect(() => validateBaseline(committed)).not.toThrow();
+    expect(() => validateBaseline(committed)).toThrow(/canonical 8x12 replay/);
+    expect(checkerModule).toHaveProperty("isAttestedLegacyBaseline");
+    expect(
+      (
+        checkerModule as typeof checkerModule & {
+          isAttestedLegacyBaseline: (candidate: unknown) => boolean;
+        }
+      ).isAttestedLegacyBaseline(committed),
+    ).toBe(true);
     expect(committed.source.git_sha).toMatch(/^[0-9a-f]{40}$/);
     expect(committed.replay).toMatchObject({ clients: 8, rounds: 12 });
     expect(committed.replay.operations).toEqual([
@@ -734,8 +788,6 @@ describe("daemon performance budget", () => {
       "control_health",
       "spawn_close_during_sweep",
       "first_send_after_spawn",
-      "send_to_surface_10_parallel",
-      "read_screen_10_parallel",
     ]);
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
     expect(committed.source.workflow_run_id).toBe(32988968639);

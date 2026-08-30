@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -13,7 +14,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import net from "node:net";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 
@@ -549,7 +550,7 @@ async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
       break;
     }
     case "surface.split":
-      await writeFile(statePath, JSON.stringify({ ...state, closed: false }));
+      await writeFakeState(statePath, { ...state, closed: false });
       result = {
         ...layout,
         surface_ref: spawned.ref,
@@ -559,35 +560,30 @@ async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
       };
       break;
     case "surface.send_text":
-      await writeFile(
-        statePath,
-        JSON.stringify({
-          ...state,
-          composer: `${state.composer ?? ""}${params.text ?? ""}`,
-        }),
-      );
+      await writeFakeState(statePath, {
+        ...state,
+        composer: `${state.composer ?? ""}${params.text ?? ""}`,
+      });
       result = { ok: true };
       break;
     case "surface.send_key":
-      await writeFile(
+      await writeFakeState(
         statePath,
-        JSON.stringify(
-          String(params.key).toLowerCase() === "return"
-            ? { ...state, transcript: state.composer ?? "", composer: "" }
-            : state,
-        ),
+        String(params.key).toLowerCase() === "return"
+          ? { ...state, transcript: state.composer ?? "", composer: "" }
+          : state,
       );
       result = { ok: true };
       break;
     case "surface.close":
-      await writeFile(statePath, JSON.stringify({ ...state, closed: true }));
+      await writeFakeState(statePath, { ...state, closed: true });
       result = { ok: true };
       break;
     case "tab.action":
-      await writeFile(
-        statePath,
-        JSON.stringify({ ...state, title: params.title ?? state.title }),
-      );
+      await writeFakeState(statePath, {
+        ...state,
+        title: params.title ?? state.title,
+      });
       result = { ok: true };
       break;
     case "workspace.select":
@@ -721,6 +717,12 @@ async function readFakeState(statePath) {
   } catch {
     return {};
   }
+}
+
+async function writeFakeState(statePath, state) {
+  const temporaryPath = `${statePath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(state));
+  await rename(temporaryPath, statePath);
 }
 
 async function armSweepHold(statePath, holdToken) {
@@ -962,11 +964,16 @@ async function measureWarmToolAcrossClients(clients, name, args) {
   return summarizeTimedSamples(samples);
 }
 
-async function measureSpawnLifecycleAcrossClients(clients, sweepHoldState) {
+async function measureSpawnLifecycleAcrossClients(
+  clients,
+  sweepHoldState,
+  onFirstSample,
+) {
   const samples = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     for (const client of clients) {
       samples.push(await measureSpawnLifecycleOnce(client, sweepHoldState));
+      if (samples.length === 1) await onFirstSample?.();
     }
   }
   return {
@@ -987,23 +994,32 @@ async function measureSpawnLifecycleAcrossClients(clients, sweepHoldState) {
   };
 }
 
-async function measureParallelStress(client, name, args) {
+async function measureParallelStress(clients, name, args) {
   const samples = [];
+  const requests = Array.from({ length: PARALLEL_STRESS_COUNT }, (_, index) =>
+    typeof args === "function" ? args(index) : args,
+  );
   const request = {
     parallel: PARALLEL_STRESS_COUNT,
     name,
-    arguments: args,
+    arguments: requests,
   };
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     const startedAt = nowMs();
     const receipts = await Promise.all(
-      Array.from({ length: PARALLEL_STRESS_COUNT }, async () =>
-        toolData(await client.callTool(name, args, 30_000), name),
+      requests.map(async (requestArgs, index) =>
+        toolData(
+          await clients[index].callTool(name, requestArgs, 30_000),
+          name,
+        ),
       ),
     );
     samples.push({
       elapsed_ms: nowMs() - startedAt,
-      request_bytes: requestBytes(name, args) * PARALLEL_STRESS_COUNT,
+      request_bytes: requests.reduce(
+        (total, requestArgs) => total + requestBytes(name, requestArgs),
+        0,
+      ),
       request_sha256: createHash("sha256")
         .update(JSON.stringify(canonicalize(request)))
         .digest("hex"),
@@ -1054,13 +1070,14 @@ async function main() {
   const daemonSocket = join(socketRoot, "d.sock");
   const missingCmuxSocket = join(socketRoot, "m.sock");
   const fakeCmuxState = join(tempRoot, "fake-cmux-state.json");
+  const surfaceCount = Math.max(clientCount, PARALLEL_STRESS_COUNT);
   const fakeCmuxSocketServer =
     process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1"
       ? net.createServer((socket) => socket.destroy())
       : await startFakeCmuxSocket(
           missingCmuxSocket,
           fakeCmuxState,
-          clientCount,
+          surfaceCount,
         );
   if (process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1") {
     await new Promise((resolvePromise, reject) => {
@@ -1077,7 +1094,7 @@ async function main() {
     CMUX_TAB_ID: "",
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     CMUX_SOCKET_PATH: missingCmuxSocket,
-    CMUXLAYER_BENCH_SURFACES: String(clientCount),
+    CMUXLAYER_BENCH_SURFACES: String(surfaceCount),
     CMUXLAYER_BENCH_STATE: fakeCmuxState,
     CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
     CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
@@ -1088,6 +1105,7 @@ async function main() {
 
   let baselineClients = [];
   let daemonClients = [];
+  let stressClients = [];
   let daemon = null;
   try {
     baselineClients = await startClients("baseline", clientCount, {
@@ -1133,9 +1151,19 @@ async function main() {
       );
     }
     const daemonLatency = await measureLatency(daemonClients);
+    let daemonRssMb;
+    let daemonStats;
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
+      async () => {
+        daemonRssMb = await totalRssMb(
+          [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(
+            Boolean,
+          ),
+        );
+        daemonStats = await processStats(daemon.pid);
+      },
     );
     const listAgents = await measureWarmToolAcrossClients(
       daemonClients,
@@ -1147,32 +1175,36 @@ async function main() {
       "control_health",
       {},
     );
-    const sendToSurface10Parallel = await measureParallelStress(
-      daemonClients[0],
-      "send_to",
+    stressClients = await startClients(
+      "daemon-stress",
+      PARALLEL_STRESS_COUNT,
       {
+        ...baseEnv,
+        CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+      },
+    );
+    const sendToSurface10Parallel = await measureParallelStress(
+      stressClients,
+      "send_to",
+      (index) => ({
         mode: "surface",
-        surface: "surface:bench-0",
+        surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
         workspace: "workspace:bench",
         text: "parallel surface benchmark",
         press_enter: true,
-      },
+      }),
     );
     const readScreen10Parallel = await measureParallelStress(
-      daemonClients[0],
+      stressClients,
       "read_screen",
-      {
-        surface: "surface:bench-0",
+      (index) => ({
+        surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
         workspace: "workspace:bench",
         lines: 5,
-      },
+      }),
     );
-    const daemonRssMb = await totalRssMb(
-      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(
-        Boolean,
-      ),
-    );
-    const daemonStats = await processStats(daemon.pid);
+    await Promise.all(stressClients.map((client) => client.close()));
+    stressClients = [];
     const truthfulState =
       compact(baselineLatency.firstResults.listResult?.structuredContent) ===
         compact(daemonLatency.firstResults.listResult?.structuredContent) &&
@@ -1394,7 +1426,9 @@ async function main() {
     }
   } finally {
     await Promise.all(
-      [...baselineClients, ...daemonClients].map((client) => client.close()),
+      [...baselineClients, ...daemonClients, ...stressClients].map((client) =>
+        client.close(),
+      ),
     );
     await stopChild(daemon);
     await new Promise((resolvePromise) =>

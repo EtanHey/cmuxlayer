@@ -56,6 +56,18 @@ export function baselineContentSha256(baseline) {
   return createHash("sha256").update(canonicalJson(content)).digest("hex");
 }
 
+export function isAttestedLegacyBaseline(baseline) {
+  return (
+    baseline?.schema_version === 2 &&
+    baseline?.refresh_attestation?.algorithm === "sha256" &&
+    baseline.refresh_attestation.content_sha256 ===
+      baselineContentSha256(baseline) &&
+    JSON.stringify(baseline?.replay?.operations) ===
+      JSON.stringify(CANONICAL_OPERATIONS.slice(0, 8)) &&
+    baseline?.replay?.row_metadata === undefined
+  );
+}
+
 export function validateBaseline(baseline) {
   if (baseline?.schema_version !== 2)
     throw new Error("baseline schema_version must be 2");
@@ -194,9 +206,15 @@ function standardDeviation(values) {
   );
 }
 
-function operationMargin(baseline, operation, history) {
+function operationMargin(
+  baseline,
+  operation,
+  history,
+  historyDegraded = false,
+) {
   const metadata = baseline.replay.row_metadata[operation];
   if (
+    historyDegraded ||
     metadata.stress === true ||
     metadata.sampling === "single_shot" ||
     metadata.samples_per_run < 12
@@ -260,9 +278,7 @@ function currentMetrics(result) {
       transport:
         sampledFirst?.transport ?? first?.transport ?? first?.receipt?.transport,
     },
-    cli_send_transport:
-      result?.latency?.first_send_after_spawn?.surface?.transport ??
-      result?.latency?.first_send_after_spawn?.surface?.receipt?.transport,
+    cli_send_transport: result?.latency?.send_to_surface_warm?.transport,
     cli_send_ms:
       result?.latency?.send_to_surface_warm?.p50_ms ??
       result?.latency?.first_send_after_spawn?.surface?.elapsed_ms,
@@ -309,6 +325,27 @@ export function appendGreenMainHistory(history, result, context) {
     ),
   };
   return [...existing, entry].slice(-BENCHMARK_HISTORY_LIMIT);
+}
+
+export async function readBenchmarkHistory(historyPath) {
+  try {
+    const parsed = JSON.parse(await readFile(historyPath, "utf8"));
+    if (!Array.isArray(parsed?.runs)) {
+      return {
+        runs: [],
+        degraded: true,
+        reason: `${historyPath} does not contain a runs array`,
+      };
+    }
+    return { runs: parsed.runs, degraded: false };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { runs: [], degraded: false };
+    return {
+      runs: [],
+      degraded: true,
+      reason: `${historyPath} is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 export function maximumBenchmarkMeasurements(results) {
@@ -359,6 +396,7 @@ function row(
     transport,
     sampling: metadata.sampling,
     stress: metadata.stress === true,
+    history_degraded: metadata.history_degraded === true,
     margin_ms: metadata.margin_ms,
     passed,
   };
@@ -377,13 +415,19 @@ function exactRow(operation, metric, committed, current, unit, metadata = {}) {
     exact: true,
     sampling: metadata.sampling,
     stress: metadata.stress === true,
+    history_degraded: metadata.history_degraded === true,
   };
 }
 
 export function compareBenchmark(
   baseline,
   result,
-  { expectedRounds = baseline.replay.rounds, history = [] } = {},
+  {
+    expectedRounds = baseline.replay.rounds,
+    history = [],
+    historyDegraded = false,
+    historyDegradedReason,
+  } = {},
 ) {
   validateBaseline(baseline);
   const current = currentMetrics(result);
@@ -391,7 +435,12 @@ export function compareBenchmark(
   const rows = [];
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay.row_metadata[operation];
-    const marginMs = operationMargin(baseline, operation, history);
+    const marginMs = operationMargin(
+      baseline,
+      operation,
+      history,
+      historyDegraded,
+    );
     for (const metric of ["p50_ms", "p95_ms"]) {
       rows.push(
         row(
@@ -407,14 +456,23 @@ export function compareBenchmark(
           ),
           "ms",
           current[operation]?.transport,
-          { ...metadata, margin_ms: marginMs },
+          {
+            ...metadata,
+            margin_ms: marginMs,
+            history_degraded: historyDegraded,
+          },
         ),
       );
     }
   }
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay.row_metadata[operation];
-    const marginMs = operationMargin(baseline, operation, history);
+    const marginMs = operationMargin(
+      baseline,
+      operation,
+      history,
+      historyDegraded,
+    );
     rows.push(
       row(
         operation,
@@ -429,13 +487,17 @@ export function compareBenchmark(
         ),
         "ms",
         current[operation]?.transport,
-        { ...metadata, margin_ms: marginMs },
+        {
+          ...metadata,
+          margin_ms: marginMs,
+          history_degraded: historyDegraded,
+        },
       ),
     );
   }
   rows.push(
     row(
-      "first_send_after_spawn",
+      "send_to_surface_warm",
       "cli_send_ms",
       baseline.measurements.cli_send_ms,
       current.cli_send_ms,
@@ -443,7 +505,12 @@ export function compareBenchmark(
         baseline.measurements.cli_send_ms,
         ratio,
         baseline.sanity_caps_ms.cli_send,
-        operationMargin(baseline, "send_to_surface_warm", history),
+        operationMargin(
+          baseline,
+          "send_to_surface_warm",
+          history,
+          historyDegraded,
+        ),
       ),
       "ms",
       current.cli_send_transport,
@@ -453,7 +520,9 @@ export function compareBenchmark(
           baseline,
           "send_to_surface_warm",
           history,
+          historyDegraded,
         ),
+        history_degraded: historyDegraded,
       },
     ),
   );
@@ -465,7 +534,10 @@ export function compareBenchmark(
         baseline.replay.bytes[operation],
         result?.replay?.bytes?.[operation],
         "bytes",
-        baseline.replay.row_metadata[operation],
+        {
+          ...baseline.replay.row_metadata[operation],
+          history_degraded: historyDegraded,
+        },
       ),
     );
   }
@@ -477,6 +549,11 @@ export function compareBenchmark(
         ? `${entry.operation} ${metric}: ${entry.current} ${entry.unit} does not match committed ${entry.baseline} ${entry.unit}`
         : `${entry.operation} ${metric}: ${entry.current}${entry.unit} exceeds ${entry.ceiling}${entry.unit}`;
     });
+  if (historyDegraded) {
+    failures.push(
+      `benchmark history degraded: ${historyDegradedReason ?? "untrusted cache"}; conservative +300ms margins active`,
+    );
+  }
   for (const operation of baseline.replay.operations) {
     if (current[operation]?.transport !== "socket") {
       failures.push(
@@ -530,7 +607,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "|---|:---:|:---:|---:|---:|---:|---:|:---:|",
   ];
   const tableRow = (entry) =>
-    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
+    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
   const changed = comparison.rows.filter(
     (entry) => !entry.passed || entry.current !== entry.baseline,
   );
@@ -608,28 +685,50 @@ export async function runBenchmark({
 }
 
 async function main() {
-  const baseline = validateBaseline(
-    JSON.parse(await readFile(baselinePath, "utf8")),
-  );
+  const rawBaseline = JSON.parse(await readFile(baselinePath, "utf8"));
+  let baseline;
+  let legacyBaseline = false;
+  try {
+    baseline = validateBaseline(rawBaseline);
+  } catch (error) {
+    if (!isAttestedLegacyBaseline(rawBaseline)) throw error;
+    baseline = rawBaseline;
+    legacyBaseline = true;
+  }
   const runResult = await runBenchmark({
     artifactDir: process.env.CMUXLAYER_PERF_ARTIFACT_DIR,
   });
+  if (legacyBaseline) {
+    const markdown = [
+      "<!-- cmuxlayer-perf-budget -->",
+      "## Daemon performance budget: RED",
+      "",
+      "The committed baseline is an attested legacy 8-row snapshot. This run produced canonical 10-row evidence, but enforcement remains fail-closed until the CI-runner artifact is imported into the committed baseline.",
+      "",
+      `Evidence invocation nonce: ${runResult.result?.invocation_nonce ?? "missing"}`,
+      "",
+    ].join("\n");
+    const reportPath = join(runResult.artifactDir, "comment.md");
+    await writeFile(reportPath, markdown);
+    if (process.env.GITHUB_STEP_SUMMARY) {
+      await writeFile(process.env.GITHUB_STEP_SUMMARY, markdown, { flag: "a" });
+    }
+    process.stdout.write(markdown);
+    process.exitCode = 1;
+    return;
+  }
   const expectedRounds = Number(
     process.env.CMUXLAYER_BENCH_ROUNDS ?? baseline.replay.rounds,
   );
   const historyPath =
     process.env.CMUXLAYER_BENCH_HISTORY_PATH ??
     join(runResult.artifactDir, "history.json");
-  let history = [];
-  try {
-    const parsed = JSON.parse(await readFile(historyPath, "utf8"));
-    history = Array.isArray(parsed?.runs) ? parsed.runs : [];
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
+  const historyState = await readBenchmarkHistory(historyPath);
   const comparison = compareBenchmark(baseline, runResult.result, {
     expectedRounds,
-    history,
+    history: historyState.runs,
+    historyDegraded: historyState.degraded,
+    historyDegradedReason: historyState.reason,
   });
   const markdown = renderMarkdownComparison(
     baseline,
@@ -642,13 +741,17 @@ async function main() {
     await writeFile(process.env.GITHUB_STEP_SUMMARY, markdown, { flag: "a" });
   }
   if (runResult.code === 0 && comparison.passed) {
-    const nextHistory = appendGreenMainHistory(history, runResult.result, {
+    const nextHistory = appendGreenMainHistory(
+      historyState.runs,
+      runResult.result,
+      {
       event_name: process.env.GITHUB_EVENT_NAME,
       ref: process.env.GITHUB_REF,
       git_sha: process.env.GITHUB_SHA,
       workflow_run_id: Number(process.env.GITHUB_RUN_ID),
-    });
-    if (nextHistory !== history) {
+      },
+    );
+    if (nextHistory !== historyState.runs) {
       await mkdir(dirname(historyPath), { recursive: true });
       await writeFile(
         historyPath,
