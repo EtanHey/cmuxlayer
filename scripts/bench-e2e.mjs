@@ -80,7 +80,11 @@ export function buildBenchmarkRows({
       `samplesPerWorker must be at least 12, got ${samplesPerWorker}`,
     );
   }
-  const allowedOperations = new Set(["send_to", "read_screen", "list_surfaces"]);
+  const allowedOperations = new Set([
+    "send_to",
+    "read_screen",
+    "list_surfaces",
+  ]);
   const allowedClients = new Set(["mcp", "cli"]);
   for (const operation of operations) {
     if (!allowedOperations.has(operation)) {
@@ -166,7 +170,8 @@ export function markSurfaceTransportUntrusted(row) {
 }
 
 export async function runBenchmarkRow(row, deps) {
-  const nowMs = deps.nowMs ?? (() => Number(process.hrtime.bigint()) / 1_000_000);
+  const nowMs =
+    deps.nowMs ?? (() => Number(process.hrtime.bigint()) / 1_000_000);
   const workerRuns = Array.from({ length: row.concurrency }, (_, worker) =>
     (async () => {
       const samples = [];
@@ -321,25 +326,27 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
 }
 
 export async function terminateChild(child, graceMs = 5_000) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
   const isLive = () => child.exitCode === null && child.signalCode === null;
+  const streamsClosed = () =>
+    [child.stdout, child.stderr]
+      .filter(Boolean)
+      .every((stream) => stream.closed || stream.destroyed);
   let resolveFailure = () => undefined;
   const failurePromise = new Promise((resolveFailurePromise) => {
     resolveFailure = resolveFailurePromise;
   });
   const onError = (error) => resolveFailure({ kind: "error", error });
   child.on("error", onError);
-  let resolveExit = () => undefined;
-  const exitPromise = new Promise((resolveExitPromise) => {
-    resolveExit = resolveExitPromise;
+  let resolveClose = () => undefined;
+  const closePromise = new Promise((resolveClosePromise) => {
+    resolveClose = resolveClosePromise;
   });
-  const onExit = () => resolveExit({ kind: "exit" });
-  child.once("exit", onExit);
-  child.once("close", onExit);
+  const onClose = () => resolveClose({ kind: "close" });
+  child.once("close", onClose);
   const waitBounded = async () => {
     let timer = null;
     const outcome = await Promise.race([
-      exitPromise,
+      closePromise,
       failurePromise,
       new Promise((resolveTimeout) => {
         timer = setTimeout(() => resolveTimeout({ kind: "timeout" }), graceMs);
@@ -347,7 +354,7 @@ export async function terminateChild(child, graceMs = 5_000) {
     ]);
     clearTimeout(timer);
     if (outcome.kind === "error") throw outcome.error;
-    return outcome.kind === "exit";
+    return outcome.kind === "close";
   };
   const deliver = (signal) => {
     const delivered = child.kill(signal);
@@ -356,17 +363,30 @@ export async function terminateChild(child, graceMs = 5_000) {
     }
   };
   try {
+    if (!isLive()) {
+      if (streamsClosed() || (await waitBounded())) return;
+      throw new Error(
+        "child exited but stdio did not close within the bounded wait",
+      );
+    }
     deliver("SIGTERM");
     if (await waitBounded()) return;
-    if (!isLive()) return;
+    if (!isLive()) {
+      throw new Error(
+        "child exited but stdio did not close within the bounded wait",
+      );
+    }
     deliver("SIGKILL");
-    if (!(await waitBounded()) && isLive()) {
-      throw new Error("child did not exit after SIGKILL within the bounded wait");
+    if (!(await waitBounded())) {
+      throw new Error(
+        isLive()
+          ? "child did not exit after SIGKILL within the bounded wait"
+          : "child exited after SIGKILL but stdio did not close within the bounded wait",
+      );
     }
   } finally {
     child.off("error", onError);
-    child.off("exit", onExit);
-    child.off("close", onExit);
+    child.off("close", onClose);
   }
 }
 
@@ -454,6 +474,7 @@ export async function createSocketReservation(requestedPath) {
       `isolated daemon socket already exists; refusing to reuse an unowned path: ${requestedPath}`,
     );
   }
+  await mkdir(dirname(requestedPath), { recursive: true });
   const ownerDirectory = await mkdtemp(`${requestedPath}.owner-`);
   const socketPath = join(ownerDirectory, "daemon.sock");
   let released = false;
@@ -468,7 +489,61 @@ export async function createSocketReservation(requestedPath) {
   };
 }
 
-export function daemonLogPath(receiptPath, pid = process.pid, now = Date.now()) {
+async function endWritable(log) {
+  if (log.writableFinished || log.closed || log.destroyed) return;
+  await new Promise((resolvePromise, reject) => {
+    const cleanup = () => {
+      log.off("finish", onFinish);
+      log.off("error", onError);
+    };
+    const onFinish = () => {
+      cleanup();
+      resolvePromise();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    log.once("finish", onFinish);
+    log.once("error", onError);
+    log.end();
+  });
+}
+
+export async function cleanupDaemonResources({
+  child,
+  log,
+  reservation,
+  terminate = terminateChild,
+}) {
+  const errors = [];
+  try {
+    await terminate(child);
+  } catch (error) {
+    errors.push(error);
+  }
+  child.stdout?.unpipe?.(log);
+  child.stderr?.unpipe?.(log);
+  try {
+    await endWritable(log);
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await reservation.release();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "isolated daemon cleanup failed");
+  }
+}
+
+export function daemonLogPath(
+  receiptPath,
+  pid = process.pid,
+  now = Date.now(),
+) {
   return `${receiptPath}.daemon-${pid}-${now}.log`;
 }
 
@@ -566,11 +641,30 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
     child.off("exit", onEarlyExit);
     spawnFailure.catch(() => undefined);
     logFailure.catch(() => undefined);
-    terminationPromise ??= terminateChild(child);
-    await terminationPromise;
-    log.end();
-    await reservation.release();
-    throw error;
+    let cleanupError = null;
+    try {
+      await cleanupDaemonResources({
+        child,
+        log,
+        reservation,
+        terminate: () => {
+          terminationPromise ??= terminateChild(child);
+          return terminationPromise;
+        },
+      });
+    } catch (caught) {
+      cleanupError = caught;
+    }
+    const failures = [error, cleanupError, logError].filter(
+      (failure, index, all) => failure && all.indexOf(failure) === index,
+    );
+    if (failures.length > 1) {
+      throw new AggregateError(
+        failures,
+        "isolated daemon startup and cleanup failed",
+      );
+    }
+    throw failures[0];
   }
   return {
     pid: child.pid,
@@ -578,11 +672,26 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
       if (logError) throw logError;
     },
     async stop() {
-      terminationPromise ??= terminateChild(child);
-      await terminationPromise;
-      log.end();
-      await reservation.release();
-      if (logError) throw logError;
+      let cleanupError = null;
+      try {
+        await cleanupDaemonResources({
+          child,
+          log,
+          reservation,
+          terminate: () => {
+            terminationPromise ??= terminateChild(child);
+            return terminationPromise;
+          },
+        });
+      } catch (error) {
+        cleanupError = error;
+      }
+      const failures = [cleanupError, logError].filter(
+        (failure, index, all) => failure && all.indexOf(failure) === index,
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "isolated daemon stop failed");
+      }
     },
   };
 }
@@ -606,7 +715,10 @@ async function connectMcpClient(entry, env, label) {
     env: stringEnv(env),
     stderr: "inherit",
   });
-  const client = new Client({ name: `cmuxlayer-bench-e2e-${label}`, version: "1" });
+  const client = new Client({
+    name: `cmuxlayer-bench-e2e-${label}`,
+    version: "1",
+  });
   await client.connect(transport);
   return client;
 }
@@ -724,7 +836,15 @@ export function cliArgs(row, config, worker, sample) {
       "20",
     ];
   }
-  return [...CMUX_JSON_PREFIX, "list-workspaces"];
+  return listWindowsCliArgs();
+}
+
+export function listWindowsCliArgs() {
+  return [...CMUX_JSON_PREFIX, "list-windows"];
+}
+
+export function listWorkspacesCliArgs(window) {
+  return [...CMUX_JSON_PREFIX, "list-workspaces", "--window", window];
 }
 
 export function listPanesCliArgs(workspace) {
@@ -743,31 +863,85 @@ export function listPaneSurfacesCliArgs(workspace, pane) {
 }
 
 export function paneRefsFromListPanesStdout(stdout) {
-  let parsed;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    throw new Error(
-      `cmux list-panes returned non-JSON: ${JSON.stringify(stdout.trim())}`,
-    );
-  }
-  const panes = isRecord(parsed) && Array.isArray(parsed.panes) ? parsed.panes : [];
+  const parsed = parseCliJson(stdout, "list-panes");
+  const panes =
+    isRecord(parsed) && Array.isArray(parsed.panes) ? parsed.panes : [];
   return panes
     .map((pane) => (isRecord(pane) ? nonEmptyString(pane.ref) : null))
     .filter((ref) => ref !== null);
 }
 
-async function runCliListSurfaces(config) {
-  await execCapture(config.cmuxBin, cliArgs({ operation: "list_surfaces" }, config), {
-    env: config.env,
-  });
-  const panesOut = await execCapture(
+function parseCliJson(stdout, operation) {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    throw new Error(
+      `cmux ${operation} returned non-JSON: ${JSON.stringify(stdout.trim())}`,
+    );
+  }
+}
+
+async function enumerateCliWorkspaces(config, exec = execCapture) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const windowsOut = await exec(config.cmuxBin, listWindowsCliArgs(), {
+      env: config.env,
+    });
+    const parsedWindows = parseCliJson(windowsOut.stdout, "list-windows");
+    const windows = Array.isArray(parsedWindows)
+      ? parsedWindows
+      : isRecord(parsedWindows) && Array.isArray(parsedWindows.windows)
+        ? parsedWindows.windows
+        : null;
+    if (!windows) throw new Error("cmux list-windows returned malformed JSON");
+    let complete = windows.length > 0;
+    const workspaceLists = await Promise.all(
+      windows.map(async (window) => {
+        const target = isRecord(window)
+          ? (nonEmptyString(window.ref) ?? nonEmptyString(window.id))
+          : null;
+        if (!target) {
+          complete = false;
+          return [];
+        }
+        const output = await exec(
+          config.cmuxBin,
+          listWorkspacesCliArgs(target),
+          { env: config.env },
+        );
+        const parsed = parseCliJson(output.stdout, "list-workspaces");
+        if (!isRecord(parsed) || !Array.isArray(parsed.workspaces)) {
+          throw new Error(
+            `cmux list-workspaces returned malformed JSON for ${target}`,
+          );
+        }
+        const expected =
+          typeof window.workspace_count === "number"
+            ? window.workspace_count
+            : null;
+        if (
+          expected === null
+            ? parsed.workspaces.length === 0
+            : parsed.workspaces.length !== expected
+        ) {
+          complete = false;
+        }
+        return parsed.workspaces;
+      }),
+    );
+    if (complete) return workspaceLists.flat();
+  }
+  throw new Error("incomplete all-window workspace enumeration after retry");
+}
+
+export async function runCliListSurfaces(config, exec = execCapture) {
+  await enumerateCliWorkspaces(config, exec);
+  const panesOut = await exec(
     config.cmuxBin,
     listPanesCliArgs(config.workspace),
     { env: config.env },
   );
   for (const pane of paneRefsFromListPanesStdout(panesOut.stdout)) {
-    await execCapture(
+    await exec(
       config.cmuxBin,
       listPaneSurfacesCliArgs(config.workspace, pane),
       { env: config.env },
@@ -822,14 +996,20 @@ function parseConfig(argv, env) {
     help: false,
     samplesPerWorker,
     concurrency: listArg(namedArg(argv, "--concurrency"), DEFAULT_CONCURRENCY),
-    payloadSizes: listArg(namedArg(argv, "--payload-sizes"), DEFAULT_PAYLOAD_SIZES),
+    payloadSizes: listArg(
+      namedArg(argv, "--payload-sizes"),
+      DEFAULT_PAYLOAD_SIZES,
+    ),
     operations,
     clients,
     out,
     surface: namedArg(argv, "--surface") ?? nonEmptyString(env.CMUX_SURFACE_ID),
-    workspace: namedArg(argv, "--workspace") ?? nonEmptyString(env.CMUX_WORKSPACE_ID),
+    workspace:
+      namedArg(argv, "--workspace") ?? nonEmptyString(env.CMUX_WORKSPACE_ID),
     cmuxBin: namedArg(argv, "--cmux-bin") ?? "cmux",
-    mcpEntry: resolve(namedArg(argv, "--mcp-entry") ?? join(repoRoot, "dist", "index.js")),
+    mcpEntry: resolve(
+      namedArg(argv, "--mcp-entry") ?? join(repoRoot, "dist", "index.js"),
+    ),
     daemonEntry: resolve(
       namedArg(argv, "--daemon-entry") ?? join(repoRoot, "dist", "daemon.js"),
     ),
@@ -866,7 +1046,8 @@ async function main() {
     );
   }
   for (const path of [config.mcpEntry, config.daemonEntry]) {
-    if (!existsSync(path)) throw new Error(`built entry does not exist: ${path}`);
+    if (!existsSync(path))
+      throw new Error(`built entry does not exist: ${path}`);
   }
   const nightlySocket = await stat(isolation.cmuxSocketPath).catch(() => null);
   if (!nightlySocket?.isSocket()) {
@@ -915,7 +1096,9 @@ async function main() {
     });
     const maxMcpConcurrency = Math.max(
       0,
-      ...rows.filter((row) => row.client === "mcp").map((row) => row.concurrency),
+      ...rows
+        .filter((row) => row.client === "mcp")
+        .map((row) => row.concurrency),
     );
     for (let index = 0; index < maxMcpConcurrency; index += 1) {
       mcpClients.push(await connectMcpClient(config.mcpEntry, env, index));
@@ -1062,7 +1245,7 @@ async function main() {
 if (resolve(process.argv[1] ?? "") === scriptPath) {
   main().catch((error) => {
     process.stderr.write(
-      `[bench-e2e] fatal ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
+      `[bench-e2e] fatal ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
     );
     process.exitCode = 1;
   });

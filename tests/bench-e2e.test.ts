@@ -8,6 +8,7 @@ import {
   buildBenchmarkRows,
   buildIsolatedRuntimeEnv,
   cliArgs,
+  cleanupDaemonResources,
   createScratchTargets,
   createSocketReservation,
   daemonLogPath,
@@ -15,6 +16,8 @@ import {
   appendSettledFailures,
   listPanesCliArgs,
   listPaneSurfacesCliArgs,
+  listWindowsCliArgs,
+  listWorkspacesCliArgs,
   markSurfaceTransportUntrusted,
   nearestRankPercentile,
   operationArgs,
@@ -22,6 +25,7 @@ import {
   paneRefsFromListPanesStdout,
   payloadText,
   readGitHead,
+  runCliListSurfaces,
   runBenchmarkRow,
   summarizeTransport,
   terminateChild,
@@ -55,8 +59,12 @@ describe("bench-e2e measurement harness", () => {
       });
     }
     expect(rows.filter((row) => row.operation === "send_to")).toHaveLength(24);
-    expect(rows.filter((row) => row.operation === "read_screen")).toHaveLength(6);
-    expect(rows.filter((row) => row.operation === "list_surfaces")).toHaveLength(6);
+    expect(rows.filter((row) => row.operation === "read_screen")).toHaveLength(
+      6,
+    );
+    expect(
+      rows.filter((row) => row.operation === "list_surfaces"),
+    ).toHaveLength(6);
   });
 
   it("collects at least twelve samples from every concurrent worker", async () => {
@@ -84,7 +92,9 @@ describe("bench-e2e measurement harness", () => {
 
     expect(result.samples).toHaveLength(60);
     for (let worker = 0; worker < 5; worker += 1) {
-      expect(result.samples.filter((sample) => sample.worker === worker)).toHaveLength(12);
+      expect(
+        result.samples.filter((sample) => sample.worker === worker),
+      ).toHaveLength(12);
     }
     expect(result.sample_count).toBe(60);
     expect(result.p95_ms).toBeGreaterThan(result.p50_ms);
@@ -145,16 +155,61 @@ describe("bench-e2e measurement harness", () => {
 
     expect(fixture.targets).toEqual(["surface:21", "surface:22", "surface:23"]);
     expect(calls.slice(0, 3)).toEqual([
-      ["new-split", "right", "--workspace", "workspace:7", "--surface", "surface:20", "--focus", "false"],
-      ["new-split", "right", "--workspace", "workspace:7", "--surface", "surface:21", "--focus", "false"],
-      ["new-split", "right", "--workspace", "workspace:7", "--surface", "surface:22", "--focus", "false"],
+      [
+        "new-split",
+        "right",
+        "--workspace",
+        "workspace:7",
+        "--surface",
+        "surface:20",
+        "--focus",
+        "false",
+      ],
+      [
+        "new-split",
+        "right",
+        "--workspace",
+        "workspace:7",
+        "--surface",
+        "surface:21",
+        "--focus",
+        "false",
+      ],
+      [
+        "new-split",
+        "right",
+        "--workspace",
+        "workspace:7",
+        "--surface",
+        "surface:22",
+        "--focus",
+        "false",
+      ],
     ]);
 
     await fixture.close();
     expect(calls.slice(3)).toEqual([
-      ["close-surface", "--workspace", "workspace:7", "--surface", "surface:23"],
-      ["close-surface", "--workspace", "workspace:7", "--surface", "surface:22"],
-      ["close-surface", "--workspace", "workspace:7", "--surface", "surface:21"],
+      [
+        "close-surface",
+        "--workspace",
+        "workspace:7",
+        "--surface",
+        "surface:23",
+      ],
+      [
+        "close-surface",
+        "--workspace",
+        "workspace:7",
+        "--surface",
+        "surface:22",
+      ],
+      [
+        "close-surface",
+        "--workspace",
+        "workspace:7",
+        "--surface",
+        "surface:21",
+      ],
     ]);
   });
 
@@ -178,14 +233,28 @@ describe("bench-e2e measurement harness", () => {
     expect(args.at(-1)?.endsWith("\\n")).toBe(false);
   });
 
-  it("walks the real cmux topology verbs for CLI list_surfaces, not tree", () => {
+  it("walks the same all-window topology verbs as MCP list_surfaces", async () => {
     const config = { workspace: "workspace:7", surface: "surface:21" };
 
     expect(cliArgs({ operation: "list_surfaces" }, config, 0, 0)).toEqual([
       "--json",
       "--id-format",
       "both",
+      "list-windows",
+    ]);
+    expect(listWindowsCliArgs()).toEqual([
+      "--json",
+      "--id-format",
+      "both",
+      "list-windows",
+    ]);
+    expect(listWorkspacesCliArgs("window:1")).toEqual([
+      "--json",
+      "--id-format",
+      "both",
       "list-workspaces",
+      "--window",
+      "window:1",
     ]);
     expect(listPanesCliArgs("workspace:7")).toEqual([
       "--json",
@@ -213,6 +282,55 @@ describe("bench-e2e measurement harness", () => {
         }),
       ),
     ).toEqual(["pane:1", "pane:2"]);
+
+    const calls: string[][] = [];
+    const outputs = [
+      { windows: [{ ref: "window:1", workspace_count: 1 }] },
+      { workspaces: [{ ref: "workspace:7" }] },
+      { workspace_ref: "workspace:7", panes: [{ ref: "pane:1" }] },
+      { workspace_ref: "workspace:7", pane_ref: "pane:1", surfaces: [] },
+    ];
+    await runCliListSurfaces(
+      { ...config, cmuxBin: "/opt/cmux", env: {} },
+      async (_command, args) => {
+        calls.push(args);
+        return { stdout: JSON.stringify(outputs.shift()), stderr: "" };
+      },
+    );
+    expect(calls).toEqual([
+      listWindowsCliArgs(),
+      listWorkspacesCliArgs("window:1"),
+      listPanesCliArgs("workspace:7"),
+      listPaneSurfacesCliArgs("workspace:7", "pane:1"),
+    ]);
+  });
+
+  it("retries an incomplete all-window CLI enumeration once", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      { windows: [{ ref: "window:1", workspace_count: 2 }] },
+      { workspaces: [{ ref: "workspace:7" }] },
+      { windows: [{ ref: "window:1", workspace_count: 1 }] },
+      { workspaces: [{ ref: "workspace:7" }] },
+      { workspace_ref: "workspace:7", panes: [] },
+    ];
+
+    await runCliListSurfaces(
+      {
+        workspace: "workspace:7",
+        surface: "surface:21",
+        cmuxBin: "/opt/cmux",
+        env: {},
+      },
+      async (_command, args) => {
+        calls.push(args);
+        return { stdout: JSON.stringify(outputs.shift()), stderr: "" };
+      },
+    );
+
+    expect(calls.filter((args) => args.at(-1) === "list-windows")).toHaveLength(
+      2,
+    );
   });
 
   it("does not mix an environment workspace UUID into raw-surface calls", () => {
@@ -239,7 +357,10 @@ describe("bench-e2e measurement harness", () => {
         0,
         0,
       ),
-    ).toEqual({ workspace: "43557C0A-1F0D-4947-98A6-440ACBC0BEF8", verbose: false });
+    ).toEqual({
+      workspace: "43557C0A-1F0D-4947-98A6-440ACBC0BEF8",
+      verbose: false,
+    });
   });
 
   it("marks raw-surface send_to provenance UNTRUSTED under D180", () => {
@@ -326,7 +447,9 @@ describe("bench-e2e measurement harness", () => {
       message: "scratch target creation and teardown failed",
       errors: [
         expect.objectContaining({ message: "create failed" }),
-        expect.objectContaining({ message: expect.stringContaining("close failed") }),
+        expect.objectContaining({
+          message: expect.stringContaining("close failed"),
+        }),
       ],
     });
   });
@@ -341,7 +464,10 @@ describe("bench-e2e measurement harness", () => {
         this.signals.push(signal);
         if (signal === "SIGKILL") {
           this.signalCode = signal;
-          queueMicrotask(() => this.emit("exit", null, signal));
+          queueMicrotask(() => {
+            this.emit("exit", null, signal);
+            this.emit("close", null, signal);
+          });
         }
         return true;
       }
@@ -383,6 +509,69 @@ describe("bench-e2e measurement harness", () => {
     );
   });
 
+  it("waits for stdio close after child exit", async () => {
+    class ClosingChild extends EventEmitter {
+      exitCode = null;
+      signalCode = null;
+
+      kill() {
+        queueMicrotask(() => {
+          this.exitCode = 0;
+          this.emit("exit", 0, null);
+        });
+        return true;
+      }
+    }
+    const child = new ClosingChild();
+    let settled = false;
+    const pending = terminateChild(child, 100).then(() => {
+      settled = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    child.emit("close", 0, null);
+    await pending;
+  });
+
+  it("releases the reservation even when child termination fails", async () => {
+    const events: string[] = [];
+    const child = {
+      stdout: { unpipe: () => events.push("stdout-unpipe") },
+      stderr: { unpipe: () => events.push("stderr-unpipe") },
+    };
+    const log = Object.assign(new EventEmitter(), {
+      writableFinished: false,
+      end() {
+        events.push("log-end");
+        this.writableFinished = true;
+        queueMicrotask(() => this.emit("finish"));
+      },
+    });
+    const reservation = {
+      async release() {
+        events.push("release");
+      },
+    };
+
+    await expect(
+      cleanupDaemonResources({
+        child,
+        log,
+        reservation,
+        terminate: async () => {
+          throw new Error("terminate failed");
+        },
+      }),
+    ).rejects.toMatchObject({ name: "AggregateError" });
+    expect(events).toEqual([
+      "stdout-unpipe",
+      "stderr-unpipe",
+      "log-end",
+      "release",
+    ]);
+  });
+
   it("uses a unique daemon log beside the requested receipt", () => {
     expect(daemonLogPath("/tmp/bench.json", 42, 1234)).toBe(
       "/tmp/bench.json.daemon-42-1234.log",
@@ -413,7 +602,11 @@ describe("bench-e2e measurement harness", () => {
 
   it("preserves primary, scratch, and daemon cleanup failures", () => {
     let fatal = appendFatalError(null, new Error("row failed"), "benchmark");
-    fatal = appendFatalError(fatal, new Error("close failed"), "scratch teardown");
+    fatal = appendFatalError(
+      fatal,
+      new Error("close failed"),
+      "scratch teardown",
+    );
     fatal = appendFatalError(fatal, new Error("stop failed"), "daemon stop");
 
     expect(fatal).toContain("benchmark: row failed");
@@ -455,15 +648,29 @@ describe("bench-e2e measurement harness", () => {
       const reservation = await createSocketReservation(requestedPath);
 
       expect(reservation.socketPath).not.toBe(requestedPath);
-      expect(
-        reservation.socketPath.startsWith(`${requestedPath}.owner-`),
-      ).toBe(true);
+      expect(reservation.socketPath.startsWith(`${requestedPath}.owner-`)).toBe(
+        true,
+      );
       expect(reservation.socketPath.endsWith("/daemon.sock")).toBe(true);
 
       await reservation.release();
       await expect(stat(reservation.ownerDirectory)).rejects.toMatchObject({
         code: "ENOENT",
       });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a missing parent for a nested isolated socket request", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const requestedPath = join(directory, "nested", "run10-nightly.sock");
+    try {
+      const reservation = await createSocketReservation(requestedPath);
+      expect(reservation.socketPath).toContain(
+        "/nested/run10-nightly.sock.owner-",
+      );
+      await reservation.release();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
