@@ -240,7 +240,6 @@ function operationMargin(
   const metadata = baseline.replay.row_metadata[operation];
   if (
     historyDegraded ||
-    metadata.stress === true ||
     metadata.sampling === "single_shot" ||
     metadata.samples_per_run < 12
   ) {
@@ -265,7 +264,6 @@ function operationMarginRule(
   const metadata = baseline.replay.row_metadata[operation];
   if (
     historyDegraded ||
-    metadata.stress === true ||
     metadata.sampling === "single_shot" ||
     metadata.samples_per_run < 12
   ) {
@@ -715,7 +713,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "<!-- cmuxlayer-perf-budget -->",
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
-    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot and stress rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
+    `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot or untrusted-history rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
     "",
     ...tableHeader,
     ...changed.map(tableRow),

@@ -307,7 +307,7 @@ describe("daemon performance budget", () => {
     expect(highVariance?.ceiling).toBeCloseTo(206.07, 2);
   });
 
-  it("keeps a wide margin for honest single-shot and explicit stress rows", () => {
+  it("keeps a wide margin only for honest single-shot rows", () => {
     const singleShot = attest({
       ...baseline,
       replay: {
@@ -334,9 +334,9 @@ describe("daemon performance budget", () => {
     );
     expect(stressRow).toMatchObject({
       stress: true,
-      margin_ms: 300,
-      margin_rule: "constant +300ms (single-shot)",
-      ceiling: 560,
+      margin_ms: 100,
+      margin_rule: "measured (1 run)",
+      ceiling: 360,
     });
     const markdown = renderMarkdownComparison(
       baseline,
@@ -351,7 +351,14 @@ describe("daemon performance budget", () => {
     );
     expect(markdown).toContain("| Margin rule |");
     expect(markdown).toContain("measured (5 runs)");
-    expect(markdown).toContain("constant +300ms (single-shot)");
+    expect(markdown).not.toContain("constant +300ms (single-shot)");
+    expect(
+      renderMarkdownComparison(
+        singleShot,
+        result,
+        compareBenchmark(singleShot, result),
+      ),
+    ).toContain("constant +300ms (single-shot)");
   });
 
   it("records only green main runs and bounds append-only history to 50 runs", () => {
