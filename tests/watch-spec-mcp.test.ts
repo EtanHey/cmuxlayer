@@ -197,6 +197,36 @@ describe("WatchSpec MCP contract", () => {
     expect(notify).toHaveBeenCalledOnce();
   });
 
+  it("does not invoke an injected external notifier without explicit opt-in", async () => {
+    const notify = vi.fn().mockResolvedValue(true);
+    const server = createWatchServer(notify);
+    const target = join(TEST_DIR, "local-only.md");
+    writeFileSync(target, "", "utf8");
+    setTimeout(() => appendFileSync(target, "DONE\n", "utf8"), 30);
+
+    const { raw, parsed } = await callTool(server, "wait_for", {
+      watch: {
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: Date.now() + 1_000,
+      },
+      timeout_ms: 500,
+    });
+
+    expect(raw.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      matched: true,
+      watch: {
+        state: "fired",
+        terminal_reason: "predicate_matched",
+        notification_pending: false,
+      },
+    });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("D14 emits MCP progress before a long wait hits the harness silence cutoff", async () => {
     vi.useFakeTimers();
     try {
