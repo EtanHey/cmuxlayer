@@ -686,9 +686,16 @@ export async function createOutputReservation(outputPath, onFailure) {
 async function cleanupAbandonedReceiptTemps(outputPath) {
   const directory = dirname(outputPath);
   const prefix = `${basename(outputPath)}.tmp-`;
+  const ownedSuffix =
+    /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const entries = await readdir(directory, { withFileTypes: true });
   for (const entry of entries) {
-    if (!entry.name.startsWith(prefix)) continue;
+    if (
+      !entry.name.startsWith(prefix) ||
+      !ownedSuffix.test(entry.name.slice(prefix.length))
+    ) {
+      continue;
+    }
     const candidate = join(directory, entry.name);
     if (!entry.isFile() && !entry.isSymbolicLink()) {
       throw new Error(`refusing unexpected receipt temp artifact: ${candidate}`);
@@ -1832,6 +1839,7 @@ export function provenanceStatusArgs(root, outputPath) {
   }
   const pathspec = outputRelative.split(sep).join("/");
   const globPathspec = escapeGitGlobPath(pathspec);
+  const tempGlobPathspec = receiptTempGlobPathspec(globPathspec);
   return [
     ...args,
     "--",
@@ -1839,12 +1847,20 @@ export function provenanceStatusArgs(root, outputPath) {
     `:(exclude,literal)${pathspec}`,
     `:(exclude,glob)${globPathspec}.lock*`,
     `:(exclude,glob)${globPathspec}.daemon-*.log`,
-    `:(exclude,glob)${globPathspec}.tmp-*`,
+    `:(exclude,glob)${tempGlobPathspec}`,
   ];
 }
 
 function escapeGitGlobPath(pathspec) {
   return pathspec.replace(/[?*[\]\\]/g, "\\$&");
+}
+
+function receiptTempGlobPathspec(outputGlobPathspec) {
+  const hex = "[0-9a-f]";
+  const uuid = [8, 4, 4, 4, 12]
+    .map((length) => hex.repeat(length))
+    .join("-");
+  return `${outputGlobPathspec}.tmp-[0-9]*-${uuid}`;
 }
 
 export async function prepareBuiltEntries(config, deps = {}) {
@@ -1882,6 +1898,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
     }
     const pathspec = outputRelative.split(sep).join("/");
     const globPathspec = escapeGitGlobPath(pathspec);
+    const tempGlobPathspec = receiptTempGlobPathspec(globPathspec);
     const trackedOutput = await exec(
       "git",
       [
@@ -1891,7 +1908,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
         `:(literal)${pathspec}`,
         `:(glob)${globPathspec}.lock*`,
         `:(glob)${globPathspec}.daemon-*.log`,
-        `:(glob)${globPathspec}.tmp-*`,
+        `:(glob)${tempGlobPathspec}`,
       ],
       execOptions,
     );

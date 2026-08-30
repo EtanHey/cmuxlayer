@@ -1186,8 +1186,10 @@ describe("bench-e2e measurement harness", () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
     const first = await createOutputReservation(output);
-    const temp = `${output}.tmp-abandoned`;
+    const temp = `${output}.tmp-1234-12345678-1234-1234-1234-123456789abc`;
+    const unrelated = `${output}.tmp-before-edit`;
     await writeFile(temp, "partial\n", "utf8");
+    await writeFile(unrelated, "user data\n", "utf8");
 
     await expect(createOutputReservation(output)).rejects.toThrow(
       /already reserved/,
@@ -1197,6 +1199,7 @@ describe("bench-e2e measurement harness", () => {
     await first.release();
     const next = await createOutputReservation(output);
     await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(unrelated, "utf8")).resolves.toBe("user data\n");
     await next.release();
     await rm(directory, { recursive: true, force: true });
   });
@@ -1593,6 +1596,10 @@ describe("bench-e2e measurement harness", () => {
   });
 
   it("forces untracked provenance while excluding only the selected receipt artifacts", () => {
+    const hex = "[0-9a-f]";
+    const uuidGlob = [8, 4, 4, 4, 12]
+      .map((length) => hex.repeat(length))
+      .join("-");
     expect(
       provenanceStatusArgs("/repo", "/repo/results/bench.json"),
     ).toEqual([
@@ -1604,7 +1611,7 @@ describe("bench-e2e measurement harness", () => {
       ":(exclude,literal)results/bench.json",
       ":(exclude,glob)results/bench.json.lock*",
       ":(exclude,glob)results/bench.json.daemon-*.log",
-      ":(exclude,glob)results/bench.json.tmp-*",
+      `:(exclude,glob)results/bench.json.tmp-[0-9]*-${uuidGlob}`,
     ]);
     expect(provenanceStatusArgs("/repo", "/tmp/bench.json")).toEqual([
       "status",
@@ -1706,8 +1713,10 @@ describe("bench-e2e measurement harness", () => {
     expect(trackedProbeArgs).toContain(
       ":(glob)results/bench.json.daemon-*.log",
     );
-    expect(trackedProbeArgs).toContain(
-      ":(glob)results/bench.json.tmp-*",
+    expect(trackedProbeArgs).toContainEqual(
+      expect.stringMatching(
+        /^:\(glob\)results\/bench\.json\.tmp-\[0-9\]\*-/,
+      ),
     );
   });
 
