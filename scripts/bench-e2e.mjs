@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -206,13 +214,17 @@ export async function runBenchmarkRow(row, deps) {
     })(),
   );
   const samples = (await Promise.all(workerRuns)).flat();
-  const latencies = samples.map((sample) => sample.latency_ms);
+  const latencies = samples
+    .filter((sample) => sample.ok)
+    .map((sample) => sample.latency_ms);
   return {
     ...row,
     concurrency_profile: `c${row.concurrency}`,
     sample_count: samples.length,
-    p50_ms: round(nearestRankPercentile(latencies, 50)),
-    p95_ms: round(nearestRankPercentile(latencies, 95)),
+    p50_ms:
+      latencies.length > 0 ? round(nearestRankPercentile(latencies, 50)) : null,
+    p95_ms:
+      latencies.length > 0 ? round(nearestRankPercentile(latencies, 95)) : null,
     error_count: samples.filter((sample) => !sample.ok).length,
     ...summarizeTransport(samples),
     samples,
@@ -548,10 +560,13 @@ export function daemonLogPath(
 }
 
 export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
+  const cleanBaseEnv = { ...baseEnv };
+  delete cleanBaseEnv.CMUXLAYER_FORCE_INPROCESS;
+  delete cleanBaseEnv.CMUXLAYER_DEFAULT_PALETTE;
   const root = reservation.ownerDirectory;
   const isolatedHome = join(root, "home");
   return stringEnv({
-    ...baseEnv,
+    ...cleanBaseEnv,
     HOME: isolatedHome,
     CMUX_SOCKET_PATH: cmuxSocketPath,
     CMUXLAYER_DAEMON_SOCKET: reservation.socketPath,
@@ -933,25 +948,56 @@ async function enumerateCliWorkspaces(config, exec = execCapture) {
   throw new Error("incomplete all-window workspace enumeration after retry");
 }
 
+function workspaceRefs(workspaces) {
+  return workspaces
+    .map((workspace) =>
+      isRecord(workspace)
+        ? (nonEmptyString(workspace.ref) ?? nonEmptyString(workspace.id))
+        : null,
+    )
+    .filter((ref) => ref !== null);
+}
+
+async function runCliTopology(config, workspaces, exec = execCapture) {
+  for (const workspace of workspaces) {
+    const panesOut = await exec(config.cmuxBin, listPanesCliArgs(workspace), {
+      env: config.env,
+    });
+    for (const pane of paneRefsFromListPanesStdout(panesOut.stdout)) {
+      await exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
+        env: config.env,
+      });
+    }
+  }
+}
+
 export async function runCliListSurfaces(config, exec = execCapture) {
   await enumerateCliWorkspaces(config, exec);
-  const panesOut = await exec(
+  await runCliTopology(config, [config.workspace], exec);
+}
+
+export async function runCliReadScreen(
+  config,
+  worker,
+  sample,
+  exec = execCapture,
+) {
+  await exec(
     config.cmuxBin,
-    listPanesCliArgs(config.workspace),
+    cliArgs({ operation: "read_screen" }, config, worker, sample),
     { env: config.env },
   );
-  for (const pane of paneRefsFromListPanesStdout(panesOut.stdout)) {
-    await exec(
-      config.cmuxBin,
-      listPaneSurfacesCliArgs(config.workspace, pane),
-      { env: config.env },
-    );
-  }
+  const workspaces = await enumerateCliWorkspaces(config, exec);
+  await runCliTopology(config, workspaceRefs(workspaces), exec);
 }
 
 async function runCliOperation(row, config, worker, sample) {
   if (row.operation === "list_surfaces") {
     await runCliListSurfaces(config);
+    return { ok: true, transport: "cli", transport_fallbacks: [] };
+  }
+  if (row.operation === "read_screen") {
+    await runCliReadScreen(config, worker, sample);
     return { ok: true, transport: "cli", transport_fallbacks: [] };
   }
   const args = cliArgs(row, config, worker, sample);
@@ -1016,6 +1062,83 @@ function parseConfig(argv, env) {
   };
 }
 
+export async function buildRowsAndReserve(
+  config,
+  requestedSocketPath,
+  reserve = createSocketReservation,
+) {
+  const rows = buildBenchmarkRows({
+    concurrency: config.concurrency,
+    payloadSizes: config.payloadSizes,
+    samplesPerWorker: config.samplesPerWorker,
+    operations: config.operations,
+    clients: config.clients,
+  });
+  const socketReservation = await reserve(requestedSocketPath);
+  return { rows, socketReservation };
+}
+
+async function sha256File(path) {
+  return createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
+}
+
+export async function prepareBuiltEntries(config, deps = {}) {
+  const root = deps.repoRoot ?? repoRoot;
+  const exec = deps.exec ?? execCapture;
+  const exists = deps.exists ?? existsSync;
+  const hashFile = deps.hashFile ?? sha256File;
+  const expectedMcpEntry = join(root, "dist", "index.js");
+  const expectedDaemonEntry = join(root, "dist", "daemon.js");
+  if (
+    config.mcpEntry !== expectedMcpEntry ||
+    config.daemonEntry !== expectedDaemonEntry
+  ) {
+    throw new Error(
+      "custom built entries have unverifiable source provenance; use the repository dist/index.js and dist/daemon.js",
+    );
+  }
+  const readTrackedStatus = () =>
+    exec("git", ["status", "--porcelain", "--untracked-files=no"], {
+      env: config.env,
+    });
+  const readHead = () =>
+    exec("git", ["rev-parse", "HEAD"], { env: config.env });
+  const status = await readTrackedStatus();
+  if (status.stdout.trim()) {
+    throw new Error(
+      "refusing to benchmark built artifacts from a dirty tracked worktree",
+    );
+  }
+  const head = await readHead();
+  await exec("bun", ["run", "build"], { env: config.env });
+  const finalStatus = await readTrackedStatus();
+  if (finalStatus.stdout.trim()) {
+    throw new Error("tracked worktree changed during artifact build");
+  }
+  const finalHead = await readHead();
+  if (finalHead.stdout.trim() !== head.stdout.trim()) {
+    throw new Error("repository revision changed during build");
+  }
+  for (const path of [config.mcpEntry, config.daemonEntry]) {
+    if (!exists(path)) throw new Error(`built entry does not exist: ${path}`);
+  }
+  return {
+    git_head: head.stdout.trim(),
+    entries: {
+      mcp: {
+        path: config.mcpEntry,
+        sha256: await hashFile(config.mcpEntry),
+      },
+      daemon: {
+        path: config.daemonEntry,
+        sha256: await hashFile(config.daemonEntry),
+      },
+    },
+  };
+}
+
 const HELP = `bench-e2e.mjs — isolated agent-side MCP vs direct cmux CLI benchmark
 
 Required environment:
@@ -1045,17 +1168,18 @@ async function main() {
       "surface and workspace are required; run inside the Nightly terminal or pass --surface/--workspace",
     );
   }
-  for (const path of [config.mcpEntry, config.daemonEntry]) {
-    if (!existsSync(path))
-      throw new Error(`built entry does not exist: ${path}`);
-  }
+  const artifactProvenance = await prepareBuiltEntries({
+    ...config,
+    env: process.env,
+  });
   const nightlySocket = await stat(isolation.cmuxSocketPath).catch(() => null);
   if (!nightlySocket?.isSocket()) {
     throw new Error(`nightly socket is not live: ${isolation.cmuxSocketPath}`);
   }
   await mkdir(dirname(config.out), { recursive: true });
   const logPath = daemonLogPath(config.out);
-  const socketReservation = await createSocketReservation(
+  const { rows, socketReservation } = await buildRowsAndReserve(
+    config,
     isolation.daemonSocketPath,
   );
   const env = buildIsolatedRuntimeEnv(
@@ -1063,13 +1187,6 @@ async function main() {
     socketReservation,
     isolation.cmuxSocketPath,
   );
-  const rows = buildBenchmarkRows({
-    concurrency: config.concurrency,
-    payloadSizes: config.payloadSizes,
-    samplesPerWorker: config.samplesPerWorker,
-    operations: config.operations,
-    clients: config.clients,
-  });
   const startedAt = new Date().toISOString();
   let daemon = null;
   try {
@@ -1182,9 +1299,8 @@ async function main() {
     kind: "cmuxlayer-agent-side-e2e-benchmark",
     started_at: startedAt,
     finished_at: new Date().toISOString(),
-    git_head: await readGitHead(() =>
-      execCapture("git", ["rev-parse", "HEAD"], { env }),
-    ),
+    git_head: artifactProvenance.git_head,
+    artifact_provenance: artifactProvenance,
     environment: {
       cmux_socket_path: isolation.cmuxSocketPath,
       requested_daemon_socket_path: isolation.daemonSocketPath,

@@ -6,6 +6,7 @@ import { EventEmitter } from "node:events";
 import {
   assertNightlyIsolation,
   buildBenchmarkRows,
+  buildRowsAndReserve,
   buildIsolatedRuntimeEnv,
   cliArgs,
   cleanupDaemonResources,
@@ -25,6 +26,8 @@ import {
   paneRefsFromListPanesStdout,
   payloadText,
   readGitHead,
+  prepareBuiltEntries,
+  runCliReadScreen,
   runCliListSurfaces,
   runBenchmarkRow,
   summarizeTransport,
@@ -98,6 +101,62 @@ describe("bench-e2e measurement harness", () => {
     }
     expect(result.sample_count).toBe(60);
     expect(result.p95_ms).toBeGreaterThan(result.p50_ms);
+  });
+
+  it("computes latency percentiles from successful operations only", async () => {
+    let clock = 0;
+    const result = await runBenchmarkRow(
+      {
+        operation: "send_to",
+        client: "mcp",
+        concurrency: 1,
+        payload_chars: 520,
+        samples_per_worker: 12,
+      },
+      {
+        nowMs: () => clock,
+        runOperation: ({ sample }) => {
+          clock += sample < 6 ? 1 : 100;
+          return {
+            ok: sample >= 6,
+            transport: "socket",
+            transport_fallbacks: [],
+          };
+        },
+      },
+    );
+
+    expect(result.error_count).toBe(6);
+    expect(result.p50_ms).toBe(100);
+    expect(result.p95_ms).toBe(100);
+  });
+
+  it("uses null percentiles when a row has no successful operations", async () => {
+    let clock = 0;
+    const result = await runBenchmarkRow(
+      {
+        operation: "send_to",
+        client: "mcp",
+        concurrency: 1,
+        payload_chars: 900,
+        samples_per_worker: 12,
+      },
+      {
+        nowMs: () => clock,
+        runOperation: () => {
+          clock += 3;
+          return {
+            ok: false,
+            transport: "cli",
+            transport_fallbacks: ["paste_text"],
+          };
+        },
+      },
+    );
+
+    expect(result.error_count).toBe(12);
+    expect(result.p50_ms).toBeNull();
+    expect(result.p95_ms).toBeNull();
   });
 
   it("counts transport and every fallback from the raw samples", () => {
@@ -305,6 +364,70 @@ describe("bench-e2e measurement harness", () => {
     ]);
   });
 
+  it("adds the MCP topology workload to direct CLI read_screen samples", async () => {
+    const calls: string[][] = [];
+    const outputs = [
+      "screen contents",
+      JSON.stringify({
+        windows: [{ ref: "window:1", workspace_count: 2 }],
+      }),
+      JSON.stringify({
+        workspaces: [{ ref: "workspace:7" }, { ref: "workspace:8" }],
+      }),
+      JSON.stringify({
+        workspace_ref: "workspace:7",
+        panes: [{ ref: "pane:1" }],
+      }),
+      JSON.stringify({
+        workspace_ref: "workspace:7",
+        pane_ref: "pane:1",
+        surfaces: [],
+      }),
+      JSON.stringify({
+        workspace_ref: "workspace:8",
+        panes: [{ ref: "pane:2" }],
+      }),
+      JSON.stringify({
+        workspace_ref: "workspace:8",
+        pane_ref: "pane:2",
+        surfaces: [],
+      }),
+    ];
+
+    await runCliReadScreen(
+      {
+        workspace: "workspace:7",
+        surface: "surface:21",
+        cmuxBin: "/opt/cmux",
+        env: {},
+      },
+      0,
+      0,
+      (_command, args) => {
+        calls.push(args);
+        return { stdout: outputs.shift() ?? "", stderr: "" };
+      },
+    );
+
+    expect(calls).toEqual([
+      [
+        "read-screen",
+        "--workspace",
+        "workspace:7",
+        "--surface",
+        "surface:21",
+        "--lines",
+        "20",
+      ],
+      listWindowsCliArgs(),
+      listWorkspacesCliArgs("window:1"),
+      listPanesCliArgs("workspace:7"),
+      listPaneSurfacesCliArgs("workspace:7", "pane:1"),
+      listPanesCliArgs("workspace:8"),
+      listPaneSurfacesCliArgs("workspace:8", "pane:2"),
+    ]);
+  });
+
   it("retries an incomplete all-window CLI enumeration once", async () => {
     const calls: string[][] = [];
     const outputs = [
@@ -480,27 +603,25 @@ describe("bench-e2e measurement harness", () => {
   });
 
   it("rejects when an unresponsive child survives the bounded KILL wait", async () => {
-    class ImmortalChild extends EventEmitter {
-      exitCode = null;
-      signalCode = null;
+    const child = Object.assign(new EventEmitter(), {
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    });
 
-      kill = () => true;
-    }
-
-    await expect(terminateChild(new ImmortalChild(), 0)).rejects.toThrow(
+    await expect(terminateChild(child, 0)).rejects.toThrow(
       /did not exit after SIGKILL/,
     );
   });
 
   it("rejects when child signal delivery fails", async () => {
-    class UnsignallableChild extends EventEmitter {
-      exitCode = null;
-      signalCode = null;
+    const child = Object.assign(new EventEmitter(), {
+      exitCode: null,
+      signalCode: null,
+      kill: () => false,
+    });
 
-      kill = () => false;
-    }
-
-    await expect(terminateChild(new UnsignallableChild(), 0)).rejects.toThrow(
+    await expect(terminateChild(child, 0)).rejects.toThrow(
       /failed to deliver SIGTERM/,
     );
   });
@@ -594,6 +715,122 @@ describe("bench-e2e measurement harness", () => {
       "/tmp/run10.sock.owner-abc/",
     );
     expect(env.HOME).not.toBe("/opt/example-home");
+    expect(env).not.toHaveProperty("CMUXLAYER_FORCE_INPROCESS");
+    expect(env).not.toHaveProperty("CMUXLAYER_DEFAULT_PALETTE");
+  });
+
+  it("clears inherited MCP routing overrides from the isolated runtime", () => {
+    const env = buildIsolatedRuntimeEnv(
+      {
+        PATH: "/usr/bin",
+        CMUXLAYER_FORCE_INPROCESS: "1",
+        CMUXLAYER_DEFAULT_PALETTE: "list_surfaces",
+      },
+      {
+        ownerDirectory: "/tmp/run10.sock.owner-abc",
+        socketPath: "/tmp/run10.sock.owner-abc/daemon.sock",
+      },
+      "/tmp/cmux-nightly.sock",
+    );
+
+    expect(env.CMUXLAYER_DAEMON_SOCKET).toContain("/tmp/run10.sock.owner-abc/");
+    expect(env).not.toHaveProperty("CMUXLAYER_FORCE_INPROCESS");
+    expect(env).not.toHaveProperty("CMUXLAYER_DEFAULT_PALETTE");
+  });
+
+  it("validates rows before reserving daemon resources", async () => {
+    let reservationCalls = 0;
+
+    await expect(
+      buildRowsAndReserve(
+        {
+          concurrency: [1],
+          payloadSizes: [520],
+          samplesPerWorker: 1,
+          operations: ["send_to"],
+          clients: ["mcp"],
+        },
+        "/tmp/cmuxlayer-run10-nightly.sock",
+        async () => {
+          reservationCalls += 1;
+          throw new Error("must not reserve");
+        },
+      ),
+    ).rejects.toThrow(/at least 12/);
+    expect(reservationCalls).toBe(0);
+  });
+
+  it("builds default entries from a clean recorded revision", async () => {
+    const calls: string[] = [];
+    const result = await prepareBuiltEntries(
+      {
+        mcpEntry: "/repo/dist/index.js",
+        daemonEntry: "/repo/dist/daemon.js",
+      },
+      {
+        repoRoot: "/repo",
+        exec: (_command, args) => {
+          calls.push(args.join(" "));
+          if (args[0] === "status") return { stdout: "", stderr: "" };
+          if (args[0] === "rev-parse") {
+            return { stdout: "abc123\n", stderr: "" };
+          }
+          return { stdout: "built\n", stderr: "" };
+        },
+        exists: () => true,
+        hashFile: (path) => `sha256:${path}`,
+      },
+    );
+
+    expect(calls).toEqual([
+      "status --porcelain --untracked-files=no",
+      "rev-parse HEAD",
+      "run build",
+      "status --porcelain --untracked-files=no",
+      "rev-parse HEAD",
+    ]);
+    expect(result).toEqual({
+      git_head: "abc123",
+      entries: {
+        mcp: {
+          path: "/repo/dist/index.js",
+          sha256: "sha256:/repo/dist/index.js",
+        },
+        daemon: {
+          path: "/repo/dist/daemon.js",
+          sha256: "sha256:/repo/dist/daemon.js",
+        },
+      },
+    });
+  });
+
+  it("rejects built entry provenance when HEAD changes during the build", async () => {
+    let headReads = 0;
+
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "status") return { stdout: "", stderr: "" };
+            if (args[0] === "rev-parse") {
+              headReads += 1;
+              return {
+                stdout: headReads === 1 ? "abc123\n" : "def456\n",
+                stderr: "",
+              };
+            }
+            return { stdout: "built\n", stderr: "" };
+          },
+          exists: () => true,
+          hashFile: () => "unused",
+        },
+      ),
+    ).rejects.toThrow(/revision changed during build/);
   });
 
   it("preserves primary, scratch, and daemon cleanup failures", () => {
