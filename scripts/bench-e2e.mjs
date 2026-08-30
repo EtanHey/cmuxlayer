@@ -661,8 +661,9 @@ async function readProcessStartIdentity(pid) {
 }
 
 function parseLockOwner(text) {
+  let parsed = null;
   try {
-    const parsed = JSON.parse(text);
+    parsed = JSON.parse(text);
     if (
       isRecord(parsed) &&
       Number.isSafeInteger(parsed.pid) &&
@@ -674,10 +675,11 @@ function parseLockOwner(text) {
       };
     }
   } catch {
-    const legacyPid = Number.parseInt(text.trim(), 10);
-    if (Number.isSafeInteger(legacyPid) && legacyPid > 0) {
-      return { pid: legacyPid, process_start: null };
-    }
+    // Fall through to the legacy numeric format below.
+  }
+  const legacyPid = Number.parseInt(text.trim(), 10);
+  if (Number.isSafeInteger(legacyPid) && legacyPid > 0) {
+    return { pid: legacyPid, process_start: null };
   }
   return null;
 }
@@ -709,7 +711,11 @@ async function createPidLock(lockPath, label) {
       const owner = parseLockOwner(observedText);
       if (owner && processIsLive(owner.pid)) {
         const observedStart = await readProcessStartIdentity(owner.pid);
-        if (!owner.process_start || observedStart === owner.process_start) {
+        if (
+          !owner.process_start ||
+          observedStart === null ||
+          observedStart === owner.process_start
+        ) {
           throw new Error(`${label} is already reserved by pid ${owner.pid}`);
         }
       }
@@ -736,8 +742,8 @@ async function createPidLock(lockPath, label) {
       if (currentText !== ownerText) {
         throw new Error(`${label} ownership changed before release`);
       }
-      released = true;
       await rm(lockPath, { force: false });
+      released = true;
     },
   };
 }
@@ -1144,7 +1150,7 @@ export async function createScratchTargets(count, deps) {
     const failures = [];
     for (const surface of [...targets].reverse()) {
       try {
-        await deps.execCmux([
+        await (deps.closeCmux ?? deps.execCmux)([
           "close-surface",
           "--workspace",
           deps.workspace,
@@ -1665,6 +1671,20 @@ export function installGracefulSignalAbort(
   };
 }
 
+export async function releaseReservations(reservations) {
+  const settled = await Promise.allSettled(
+    reservations.map((reservation) =>
+      Promise.resolve().then(() => reservation.release()),
+    ),
+  );
+  const failures = settled
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "top-level reservation release failed");
+  }
+}
+
 async function main() {
   const config = parseConfig(process.argv.slice(2), process.env);
   if (config.help) {
@@ -1689,24 +1709,35 @@ async function main() {
       isolation.cmuxSocketPath,
       stableWorkspaceId,
     );
+    let outputReservation = null;
+    const releaseTopLevel = () =>
+      releaseReservations(
+        [outputReservation, workspaceReservation].filter(Boolean),
+      );
     try {
       abortController.signal.throwIfAborted();
-      const outputReservation = await createOutputReservation(config.out);
-      try {
-        abortController.signal.throwIfAborted();
-        await executeBenchmark(config, isolation, abortController.signal);
-      } finally {
-        await outputReservation.release();
-      }
+      outputReservation = await createOutputReservation(config.out);
+      abortController.signal.throwIfAborted();
+      await executeBenchmark(
+        config,
+        isolation,
+        abortController.signal,
+        releaseTopLevel,
+      );
     } finally {
-      await workspaceReservation.release();
+      await releaseTopLevel();
     }
   } finally {
     removeSignalHandlers();
   }
 }
 
-async function executeBenchmark(config, isolation, abortSignal) {
+async function executeBenchmark(
+  config,
+  isolation,
+  abortSignal,
+  releaseTopLevel,
+) {
   const artifactProvenance = await prepareBuiltEntries({
     ...config,
     env: process.env,
@@ -1755,6 +1786,7 @@ async function executeBenchmark(config, isolation, abortSignal) {
       signal: abortSignal,
       execCmux: (args) =>
         execCapture(config.cmuxBin, args, { env, signal: abortSignal }),
+      closeCmux: (args) => execCapture(config.cmuxBin, args, { env }),
     });
     const maxMcpConcurrency = Math.max(
       0,
@@ -1862,6 +1894,11 @@ async function executeBenchmark(config, isolation, abortSignal) {
     await assertArtifactProvenance(artifactProvenance);
   } catch (error) {
     fatalError = appendFatalError(fatalError, error, "artifact revalidation");
+  }
+  try {
+    await releaseTopLevel();
+  } catch (error) {
+    fatalError = appendFatalError(fatalError, error, "top-level release");
   }
 
   const receipt = {

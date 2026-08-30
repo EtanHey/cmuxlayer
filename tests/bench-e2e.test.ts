@@ -44,6 +44,7 @@ import {
   readGitHead,
   prepareBuiltEntries,
   renderMarkdownTable,
+  releaseReservations,
   resolveStableWorkspaceId,
   runCliReadScreen,
   installGracefulSignalAbort,
@@ -850,10 +851,11 @@ describe("bench-e2e measurement harness", () => {
         signal: controller.signal,
         execCmux: (args: string[]) => {
           calls.push(args);
-          if (args[0] === "new-split") {
-            controller.abort(new Error("stop creating"));
-            return { stdout: "OK surface:21\n", stderr: "" };
-          }
+          controller.abort(new Error("stop creating"));
+          return { stdout: "OK surface:21\n", stderr: "" };
+        },
+        closeCmux: (args: string[]) => {
+          calls.push(args);
           return { stdout: "OK\n", stderr: "" };
         },
       }),
@@ -1035,6 +1037,16 @@ describe("bench-e2e measurement harness", () => {
     );
     const reservation = await createOutputReservation(output);
     await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("preserves a legacy numeric lock while its PID is live", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    await writeFile(`${output}.lock`, `${process.pid}\n`, "utf8");
+    await expect(createOutputReservation(output)).rejects.toThrow(
+      /already reserved/,
+    );
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1429,6 +1441,33 @@ describe("bench-e2e measurement harness", () => {
 
     expect(fatal).toContain("MCP client stop: client 1 failed");
     expect(fatal).toContain("MCP client stop: client 2 failed");
+  });
+
+  it("aggregates every top-level reservation release failure", async () => {
+    const calls = [];
+    await expect(
+      releaseReservations([
+        {
+          release: () => {
+            calls.push("output");
+            throw new Error("output release failed");
+          },
+        },
+        {
+          release: () => {
+            calls.push("workspace");
+            throw new Error("workspace release failed");
+          },
+        },
+      ]),
+    ).rejects.toMatchObject({
+      name: "AggregateError",
+      errors: [
+        expect.objectContaining({ message: "output release failed" }),
+        expect.objectContaining({ message: "workspace release failed" }),
+      ],
+    });
+    expect(calls).toEqual(["output", "workspace"]);
   });
 
   it("cancels a pending socket retry without waiting for its deadline", async () => {
