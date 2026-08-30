@@ -69,6 +69,29 @@ export function resolveWatchOwner<T extends WatchOwnerCandidate>(
   };
 }
 
+/**
+ * Resolve an owner against the complete lifecycle identity universe.
+ *
+ * Registry rows take precedence over duplicate persisted rows with the same
+ * canonical id, but persisted-only rows remain candidates. Delivery and prune
+ * must both call this boundary so aliases cannot mean different things on the
+ * two sides of the watch lifecycle.
+ */
+export function resolveWatchOwnerFromSources<T extends WatchOwnerCandidate>(
+  ownerRaw: RawWatchOwner,
+  ...sources: ReadonlyArray<readonly T[]>
+): WatchOwnerResolution<T> {
+  const candidatesById = new Map<string, T>();
+  for (const source of sources) {
+    for (const candidate of source) {
+      if (!candidatesById.has(candidate.agent_id)) {
+        candidatesById.set(candidate.agent_id, candidate);
+      }
+    }
+  }
+  return resolveWatchOwner(ownerRaw, [...candidatesById.values()]);
+}
+
 export function watchOwnerIncludesCanonical(
   resolution: WatchOwnerResolution<WatchOwnerCandidate>,
   canonicalId: CanonicalAgentId,

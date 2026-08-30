@@ -3915,6 +3915,14 @@ describe("AgentEngine", () => {
         await engine.runSweep();
         stateMgr.writeState(
           makeRecord({
+            agent_id: "lead-parent",
+            state: "done",
+            surface_id: "surface:closed-parent",
+            user_killed: true,
+          }),
+        );
+        stateMgr.writeState(
+          makeRecord({
             agent_id: "agent-user-closed",
             state: "working",
             surface_id: "surface:user-closed",

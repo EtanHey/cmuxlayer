@@ -132,10 +132,9 @@ import {
 import {
   canonicalAgentId,
   canonicalAgentIdValue,
-  resolveWatchOwner,
+  resolveWatchOwnerFromSources,
   watchOwnerIncludesCanonical,
   watchRecordOwner,
-  type WatchOwnerCandidate,
   type WatchOwnerResolution,
 } from "./watch-owner.js";
 import {
@@ -6581,10 +6580,22 @@ export class AgentEngine {
    * subject_agent_id; legacy rows are pruned only when their target exactly
    * matches a persisted child's engine-issued report_path.
    */
+  private async isWatchPruneCandidateLive(
+    record: AgentRecord | null,
+  ): Promise<boolean> {
+    return Boolean(
+      record &&
+        record.user_killed !== true &&
+        !record.deletion_intent &&
+        (await this.registry.isSurfaceAlive(record)),
+    );
+  }
+
   private async pruneClosedChildReportWatches(): Promise<boolean> {
     if (!this.watchRegistryPath) return false;
     const agents = this.registry.list();
     const pruneObservedAt = Date.now();
+    const persistedAgents = this.stateMgr.listStates();
     const byReportPath = new Map<string, AgentRecord[]>();
     for (const agent of agents) {
       if (!agent.report_path) continue;
@@ -6633,34 +6644,18 @@ export class AgentEngine {
         ...new Set(subjects.map((subject) => subject.agent_id)),
       ]);
     }
-    const knownSubjectParentIds = [
-      ...new Set(
-        [...subjectIdsByWatch.values()]
-          .flat()
-          .map(
-            (subjectId) =>
-              this.registry.get(subjectId) ?? this.stateMgr.readState(subjectId),
-          )
-          .map((subject) => subject?.parent_agent_id)
-          .filter((parentId): parentId is string => Boolean(parentId)),
-      ),
-    ];
-    const ownerCandidates: WatchOwnerCandidate[] = [
-      ...agents,
-      ...knownSubjectParentIds
-        .filter(
-          (parentId) => !agents.some((agent) => agent.agent_id === parentId),
-        )
-        .map((agent_id) => ({ agent_id })),
-    ];
     const ownerResolutionByWatch = new Map<
       string,
-      WatchOwnerResolution<WatchOwnerCandidate>
+      WatchOwnerResolution<AgentRecord>
     >();
     for (const watch of persistedWatches) {
       ownerResolutionByWatch.set(
         watch.watch_id,
-        resolveWatchOwner(watchRecordOwner(watch), ownerCandidates),
+        resolveWatchOwnerFromSources(
+          watchRecordOwner(watch),
+          agents,
+          persistedAgents,
+        ),
       );
     }
     const liveAgentIds = new Set<string>();
@@ -6676,19 +6671,14 @@ export class AgentEngine {
       [...candidateAgentIds].map(async (agentId) => {
         const subject =
           this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
-        if (
-          subject &&
-          subject.user_killed !== true &&
-          !subject.deletion_intent &&
-          (await this.registry.isSurfaceAlive(subject))
-        ) {
+        if (await this.isWatchPruneCandidateLive(subject)) {
           liveAgentIds.add(agentId);
         }
       }),
     );
     let retainedNeedsRecheck = false;
     await removeWatches(
-      (watch) => {
+      async (watch) => {
         if (watch.notification_pending) {
           retainedNeedsRecheck = true;
           return false;
@@ -6704,7 +6694,11 @@ export class AgentEngine {
         if (watch.state === "failed" && !watch.notification_pending) {
           return (watch.waiter_expires_at_ms ?? 0) <= pruneObservedAt;
         }
-        const ownerResolution = ownerResolutionByWatch.get(watch.watch_id);
+        const ownerResolution = resolveWatchOwnerFromSources(
+          watchRecordOwner(watch),
+          this.registry.list(),
+          this.stateMgr.listStates(),
+        );
         // Raw owner keys are not identities. Zero and multiple matches retain
         // fail-safe; a subject can still prove that an ambiguous alias includes
         // its canonical parent, but ambiguity cannot authorize deletion.
@@ -6737,13 +6731,15 @@ export class AgentEngine {
           ? (this.registry.get(ownerAgentId) ??
             this.stateMgr.readState(ownerAgentId))
           : null;
+        const ownerIsLiveUnderLock =
+          await this.isWatchPruneCandidateLive(ownerRecord);
         // A live child still owns its report path even if its parent pane is
         // gone. Preserve that reservation; dead-owner pruning is destructive
         // only when no active subject ownership remains.
         if (
           ownerRecord &&
           ownerAgentId &&
-          !liveAgentIds.has(ownerAgentId) &&
+          !ownerIsLiveUnderLock &&
           !hasActiveSubjectOwnership
         ) {
           return true;

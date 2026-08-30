@@ -955,6 +955,18 @@ describe("WatchSpec arm contract", () => {
       notification_exhausted_reason: "retry_limit_exhausted",
     });
 
+    for (let unchangedSweep = 0; unchangedSweep < 5; unchangedSweep += 1) {
+      now += 60_000;
+      await sweepWatches({
+        registryPath: registryPath(),
+        now: () => now,
+        notify,
+        onNotificationExhausted,
+      });
+    }
+    expect(notify).toHaveBeenCalledTimes(8);
+    expect(onNotificationExhausted).toHaveBeenCalledOnce();
+
     writeFileSync(target, "second revision\n", "utf8");
     now += 60_000;
     const secondRevision = await sweepWatches({
@@ -974,6 +986,51 @@ describe("WatchSpec arm contract", () => {
       notification_pending: false,
       notification_attempts: 0,
       notification_delivered_at_ms: now,
+    });
+  });
+
+  it("consumes a persistent content revision after one non-retryable failure", async () => {
+    const target = join(TEST_DIR, "persistent-terminal-notify.md");
+    writeFileSync(target, "before\n", "utf8");
+    const notify = vi.fn().mockResolvedValue({
+      delivered: false,
+      retryable: false,
+      reason: "owner_not_live",
+    });
+    const onNotificationExhausted = vi.fn();
+    let now = 1_000;
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        change: "content",
+        notify: true,
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: registryPath(), now: () => now },
+    );
+    writeFileSync(target, "one revision\n", "utf8");
+
+    for (let unchangedSweep = 0; unchangedSweep < 5; unchangedSweep += 1) {
+      now += 60_000;
+      await sweepWatches({
+        registryPath: registryPath(),
+        now: () => now,
+        notify,
+        onNotificationExhausted,
+      });
+    }
+
+    expect(notify).toHaveBeenCalledOnce();
+    expect(onNotificationExhausted).toHaveBeenCalledOnce();
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      watch_id: armed.watch_id,
+      state: "armed",
+      notification_pending: false,
+      notification_attempts: 0,
+      notification_exhausted_reason: "owner_not_live",
     });
   });
 
