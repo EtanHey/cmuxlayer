@@ -645,6 +645,11 @@ export async function canonicalOutputPath(outputPath, seen = new Set()) {
     const target = await readlink(absoluteOutput);
     return canonicalOutputPath(resolve(dirname(absoluteOutput), target), seen);
   }
+  if (outputStat?.isFile() && outputStat.nlink > 1) {
+    throw new Error(
+      `refusing output path with multiple hard links: ${absoluteOutput}`,
+    );
+  }
   if (outputStat) return realpath(absoluteOutput);
   const parent = dirname(absoluteOutput);
   if (parent === absoluteOutput) return absoluteOutput;

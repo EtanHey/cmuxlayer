@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   mkdir,
+  link,
   mkdtemp,
   readFile,
   realpath,
@@ -1174,6 +1175,20 @@ describe("bench-e2e measurement harness", () => {
     await expect(canonicalOutputPath(output)).resolves.toBe(
       await realpath(target),
     );
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects an existing output with another hard link", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const target = join(directory, "tracked.json");
+    const output = join(directory, "receipt.json");
+    await writeFile(target, "{}\n", "utf8");
+    await link(target, output);
+
+    await expect(canonicalOutputPath(output)).rejects.toThrow(
+      /multiple hard links/,
+    );
+    await expect(readFile(target, "utf8")).resolves.toBe("{}\n");
     await rm(directory, { recursive: true, force: true });
   });
 
