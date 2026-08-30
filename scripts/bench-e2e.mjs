@@ -1074,16 +1074,20 @@ async function runCliTopology(
   } = {},
 ) {
   const runWorkspace = async (workspace) => {
-    let panes;
-    try {
-      const panesOut = await exec(config.cmuxBin, listPanesCliArgs(workspace), {
-        env: config.env,
-      });
-      panes = paneRefsFromListPanesStdout(panesOut.stdout);
-    } catch (error) {
-      if (bestEffort) return;
-      throw error;
-    }
+    const panes = await (async () => {
+      try {
+        const panesOut = await exec(
+          config.cmuxBin,
+          listPanesCliArgs(workspace),
+          { env: config.env },
+        );
+        return paneRefsFromListPanesStdout(panesOut.stdout);
+      } catch (error) {
+        if (bestEffort) return null;
+        throw error;
+      }
+    })();
+    if (panes === null) return;
     if (parallelPanes) {
       const work = panes.map((pane) =>
         exec(config.cmuxBin, listPaneSurfacesCliArgs(workspace, pane), {
