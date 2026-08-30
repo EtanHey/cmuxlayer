@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -8,6 +8,7 @@ import {
   buildBenchmarkRows,
   cliArgs,
   createScratchTargets,
+  createSocketReservation,
   markSurfaceTransportUntrusted,
   nearestRankPercentile,
   operationArgs,
@@ -320,4 +321,24 @@ describe("bench-e2e measurement harness", () => {
     await expect(wait.promise).rejects.toBe(reason);
   });
 
+  it("reserves an owner-only directory for the isolated daemon socket", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const requestedPath = join(directory, "run10-nightly.sock");
+    try {
+      const reservation = await createSocketReservation(requestedPath);
+
+      expect(reservation.socketPath).not.toBe(requestedPath);
+      expect(
+        reservation.socketPath.startsWith(`${requestedPath}.owner-`),
+      ).toBe(true);
+      expect(reservation.socketPath.endsWith("/daemon.sock")).toBe(true);
+
+      await reservation.release();
+      await expect(stat(reservation.ownerDirectory)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

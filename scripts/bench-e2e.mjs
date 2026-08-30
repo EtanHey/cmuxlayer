@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -270,15 +270,22 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    const timer = setTimeout(() => {
+    let timer = null;
+    timer = setTimeout(() => {
       timedOut = true;
-      void terminateChild(child).finally(() => {
-        reject(
-          new Error(
-            `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
+      const timeoutError = new Error(
+        `${command} ${args.join(" ")} timed out after ${timeoutMs}ms`,
+      );
+      terminateChild(child).then(
+        () => reject(timeoutError),
+        (terminationError) =>
+          reject(
+            new AggregateError(
+              [timeoutError, terminationError],
+              "command timed out and child termination failed",
+            ),
           ),
-        );
-      });
+      );
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
@@ -318,7 +325,7 @@ export async function terminateChild(child, graceMs = 5_000) {
     child.once("close", onExit);
   });
   child.kill("SIGTERM");
-  let timer;
+  let timer = null;
   const exitedGracefully = await Promise.race([
     exitPromise.then(() => true),
     new Promise((resolveTimeout) => {
@@ -341,8 +348,8 @@ export function waitForSocket(path, timeoutMs = 15_000) {
   let activeSocket = null;
   let retryTimer = null;
   let settled = false;
-  let resolveWait;
-  let rejectWait;
+  let resolveWait = () => undefined;
+  let rejectWait = () => undefined;
   const promise = new Promise((resolvePromise, reject) => {
     resolveWait = resolvePromise;
     rejectWait = reject;
@@ -414,16 +421,32 @@ export function openExclusiveWriteStream(path, onRuntimeError = null) {
   });
 }
 
-async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
-  if (existsSync(daemonSocketPath)) {
+export async function createSocketReservation(requestedPath) {
+  if (existsSync(requestedPath)) {
     throw new Error(
-      `isolated daemon socket already exists; refusing to reap an unowned path: ${daemonSocketPath}`,
+      `isolated daemon socket already exists; refusing to reuse an unowned path: ${requestedPath}`,
     );
   }
+  const ownerDirectory = await mkdtemp(`${requestedPath}.owner-`);
+  const socketPath = join(ownerDirectory, "daemon.sock");
+  let released = false;
+  return {
+    ownerDirectory,
+    socketPath,
+    async release() {
+      if (released) return;
+      released = true;
+      await rm(ownerDirectory, { recursive: true, force: true });
+    },
+  };
+}
+
+async function startIsolatedDaemon(entry, env, reservation, logPath) {
+  const daemonSocketPath = reservation.socketPath;
   let child = null;
   let logError = null;
   let terminationPromise = null;
-  let rejectLogFailure;
+  let rejectLogFailure = () => undefined;
   const logFailure = new Promise((_, reject) => {
     rejectLogFailure = reject;
   });
@@ -442,7 +465,7 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
   child.stdout.pipe(log, { end: false });
   child.stderr.pipe(log, { end: false });
   let earlyExit = null;
-  let rejectSpawnFailure;
+  let rejectSpawnFailure = () => undefined;
   const spawnFailure = new Promise((_, reject) => {
     rejectSpawnFailure = reject;
   });
@@ -450,6 +473,11 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
   child.once("error", onSpawnError);
   child.once("exit", (code, signal) => {
     earlyExit = { code, signal };
+    rejectSpawnFailure(
+      new Error(
+        `isolated daemon exited before readiness: ${JSON.stringify(earlyExit)}`,
+      ),
+    );
   });
   const socketWait = waitForSocket(daemonSocketPath);
   try {
@@ -468,7 +496,7 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
     terminationPromise ??= terminateChild(child);
     await terminationPromise;
     log.end();
-    await rm(daemonSocketPath, { force: true });
+    await reservation.release();
     throw error;
   }
   return {
@@ -480,7 +508,7 @@ async function startIsolatedDaemon(entry, env, daemonSocketPath, logPath) {
       terminationPromise ??= terminateChild(child);
       await terminationPromise;
       log.end();
-      await rm(daemonSocketPath, { force: true });
+      await reservation.release();
       if (logError) throw logError;
     },
   };
@@ -719,10 +747,13 @@ async function main() {
   }
   await mkdir(dirname(config.out), { recursive: true });
   const logPath = `${config.out}.daemon.log`;
+  const socketReservation = await createSocketReservation(
+    isolation.daemonSocketPath,
+  );
   const env = stringEnv({
     ...process.env,
     CMUX_SOCKET_PATH: isolation.cmuxSocketPath,
-    CMUXLAYER_DAEMON_SOCKET: isolation.daemonSocketPath,
+    CMUXLAYER_DAEMON_SOCKET: socketReservation.socketPath,
     CMUXLAYER_DEV: "1",
   });
   const rows = buildBenchmarkRows({
@@ -733,12 +764,18 @@ async function main() {
     clients: config.clients,
   });
   const startedAt = new Date().toISOString();
-  const daemon = await startIsolatedDaemon(
-    config.daemonEntry,
-    env,
-    isolation.daemonSocketPath,
-    logPath,
-  );
+  let daemon;
+  try {
+    daemon = await startIsolatedDaemon(
+      config.daemonEntry,
+      env,
+      socketReservation,
+      logPath,
+    );
+  } catch (error) {
+    await socketReservation.release();
+    throw error;
+  }
   const mcpClients = [];
   const results = [];
   let fixture = null;
@@ -834,7 +871,8 @@ async function main() {
     ),
     environment: {
       cmux_socket_path: isolation.cmuxSocketPath,
-      daemon_socket_path: isolation.daemonSocketPath,
+      requested_daemon_socket_path: isolation.daemonSocketPath,
+      daemon_socket_path: socketReservation.socketPath,
       isolated_daemon_pid: daemon.pid,
       daemon_log: logPath,
       controller_surface: config.surface,
