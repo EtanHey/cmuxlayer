@@ -775,13 +775,13 @@ export function createWorkspaceReservation(
   lockRoot = "/tmp",
 ) {
   const key = createHash("sha256")
-    .update(`${resolve(cmuxSocketPath)}\0${workspace}`)
+    .update(resolve(cmuxSocketPath))
     .digest("hex")
     .slice(0, 24);
   const lockPath = join(lockRoot, `cmuxlayer-bench-workspace-${key}.lock`);
   return createPidLock(
     lockPath,
-    `Nightly workspace ${workspace} on ${cmuxSocketPath}`,
+    `Nightly socket ${cmuxSocketPath} (requested workspace ${workspace})`,
   );
 }
 
@@ -1601,6 +1601,18 @@ async function listRuntimeFiles(root) {
   return files;
 }
 
+async function resolveExecutable(command, env) {
+  const candidate = command.includes("/")
+    ? resolve(command)
+    : nonEmptyString(
+        (
+          await execCapture("/usr/bin/which", [command], { env })
+        ).stdout.trim(),
+      );
+  if (!candidate) throw new Error(`could not resolve executable ${command}`);
+  return realpath(candidate);
+}
+
 export async function assertArtifactProvenance(
   provenance,
   hashFile = sha256File,
@@ -1608,6 +1620,7 @@ export async function assertArtifactProvenance(
   const attested = [
     ...Object.values(provenance.entries),
     ...(provenance.runtime_files ?? []),
+    ...(provenance.cli_executable ? [provenance.cli_executable] : []),
   ];
   if (provenance.runtime_root && provenance.runtime_files) {
     const expectedPaths = provenance.runtime_files.map((entry) => entry.path);
@@ -1632,6 +1645,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const exists = deps.exists ?? existsSync;
   const hashFile = deps.hashFile ?? sha256File;
   const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
+  const resolveCliExecutable = deps.resolveExecutable ?? resolveExecutable;
   const expectedMcpEntry = join(root, "dist", "index.js");
   const expectedDaemonEntry = join(root, "dist", "daemon.js");
   if (
@@ -1669,6 +1683,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
   }
   const runtimeRoot = join(root, "dist");
   const runtimeFiles = await enumerateRuntimeFiles(runtimeRoot);
+  const cliPath = await resolveCliExecutable(config.cmuxBin ?? "cmux", config.env);
   return {
     git_head: head.stdout.trim(),
     entries: {
@@ -1685,6 +1700,11 @@ export async function prepareBuiltEntries(config, deps = {}) {
     runtime_files: await Promise.all(
       runtimeFiles.map(async (path) => ({ path, sha256: await hashFile(path) })),
     ),
+    cli_executable: {
+      requested: config.cmuxBin ?? "cmux",
+      path: cliPath,
+      sha256: await hashFile(cliPath),
+    },
   };
 }
 
@@ -1797,6 +1817,7 @@ async function executeBenchmark(
     ...config,
     env: process.env,
   });
+  config.cmuxBin = artifactProvenance.cli_executable.path;
   await assertArtifactProvenance(artifactProvenance);
   abortSignal.throwIfAborted();
   const nightlySocket = await stat(isolation.cmuxSocketPath).catch(() => null);

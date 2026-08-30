@@ -1081,12 +1081,13 @@ describe("bench-e2e measurement harness", () => {
           directory,
         ),
       ).rejects.toThrow(/already reserved/);
-      const otherWorkspace = await createWorkspaceReservation(
-        "/tmp/cmux-nightly.sock",
-        "workspace:8",
-        directory,
-      );
-      await otherWorkspace.release();
+      await expect(
+        createWorkspaceReservation(
+          "/tmp/cmux-nightly.sock",
+          "workspace:8",
+          directory,
+        ),
+      ).rejects.toThrow(/already reserved/);
     } finally {
       await first.release();
       await rm(directory, { recursive: true, force: true });
@@ -1245,6 +1246,7 @@ describe("bench-e2e measurement harness", () => {
           "/repo/dist/index.js",
           "/repo/dist/server.js",
         ],
+        resolveExecutable: () => "/opt/cmux/bin/cmux",
       },
     );
 
@@ -1282,6 +1284,11 @@ describe("bench-e2e measurement harness", () => {
           sha256: "sha256:/repo/dist/server.js",
         },
       ],
+      cli_executable: {
+        requested: "cmux",
+        path: "/opt/cmux/bin/cmux",
+        sha256: "sha256:/opt/cmux/bin/cmux",
+      },
     });
   });
 
@@ -1319,9 +1326,9 @@ describe("bench-e2e measurement harness", () => {
     };
     const hashFile = (path) =>
       path === serverPath ? serverHash : "index-before";
-    await expect(assertArtifactProvenance(provenance, hashFile)).resolves.toBe(
-      undefined,
-    );
+    await expect(
+      assertArtifactProvenance(provenance, hashFile),
+    ).resolves.toBeUndefined();
     serverHash = "server-after";
     await expect(assertArtifactProvenance(provenance, hashFile)).rejects.toThrow(
       /artifact changed after attestation.*server\.js/,
@@ -1354,6 +1361,7 @@ describe("bench-e2e measurement harness", () => {
           exists: () => true,
           hashFile: () => "unused",
           listRuntimeFiles: () => [],
+          resolveExecutable: () => "/opt/cmux/bin/cmux",
         },
       ),
     ).rejects.toThrow(/revision changed during build/);
