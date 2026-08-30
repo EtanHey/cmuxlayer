@@ -6,10 +6,13 @@ import { EventEmitter } from "node:events";
 import {
   assertNightlyIsolation,
   buildBenchmarkRows,
+  buildIsolatedRuntimeEnv,
   cliArgs,
   createScratchTargets,
   createSocketReservation,
   daemonLogPath,
+  appendFatalError,
+  appendSettledFailures,
   markSurfaceTransportUntrusted,
   nearestRankPercentile,
   operationArgs,
@@ -344,6 +347,53 @@ describe("bench-e2e measurement harness", () => {
     expect(daemonLogPath("/tmp/bench.json", 42, 1234)).toBe(
       "/tmp/bench.json.daemon-42-1234.log",
     );
+  });
+
+  it("moves daemon socket, monitor, watch, and state paths under the owned run directory", () => {
+    const env = buildIsolatedRuntimeEnv(
+      { PATH: "/usr/bin", HOME: "/opt/example-home" },
+      {
+        ownerDirectory: "/tmp/run10.sock.owner-abc",
+        socketPath: "/tmp/run10.sock.owner-abc/daemon.sock",
+      },
+      "/tmp/cmux-nightly.sock",
+    );
+
+    expect(env).toMatchObject({
+      CMUX_SOCKET_PATH: "/tmp/cmux-nightly.sock",
+      CMUXLAYER_DAEMON_SOCKET: "/tmp/run10.sock.owner-abc/daemon.sock",
+      HOME: "/tmp/run10.sock.owner-abc/home",
+      CMUXLAYER_STATE_DIR: "/tmp/run10.sock.owner-abc/state",
+    });
+    expect(env.CMUXLAYER_SESSION_REGISTRY).toContain(
+      "/tmp/run10.sock.owner-abc/",
+    );
+    expect(env.HOME).not.toBe("/opt/example-home");
+  });
+
+  it("preserves primary, scratch, and daemon cleanup failures", () => {
+    let fatal = appendFatalError(null, new Error("row failed"), "benchmark");
+    fatal = appendFatalError(fatal, new Error("close failed"), "scratch teardown");
+    fatal = appendFatalError(fatal, new Error("stop failed"), "daemon stop");
+
+    expect(fatal).toContain("benchmark: row failed");
+    expect(fatal).toContain("scratch teardown: close failed");
+    expect(fatal).toContain("daemon stop: stop failed");
+  });
+
+  it("preserves every rejected MCP client shutdown", () => {
+    const fatal = appendSettledFailures(
+      null,
+      [
+        { status: "fulfilled", value: undefined },
+        { status: "rejected", reason: new Error("client 1 failed") },
+        { status: "rejected", reason: new Error("client 2 failed") },
+      ],
+      "MCP client stop",
+    );
+
+    expect(fatal).toContain("MCP client stop: client 1 failed");
+    expect(fatal).toContain("MCP client stop: client 2 failed");
   });
 
   it("cancels a pending socket retry without waiting for its deadline", async () => {

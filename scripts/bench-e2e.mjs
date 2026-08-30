@@ -465,6 +465,41 @@ export function daemonLogPath(receiptPath, pid = process.pid, now = Date.now()) 
   return `${receiptPath}.daemon-${pid}-${now}.log`;
 }
 
+export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
+  const root = reservation.ownerDirectory;
+  const isolatedHome = join(root, "home");
+  return stringEnv({
+    ...baseEnv,
+    HOME: isolatedHome,
+    CMUX_SOCKET_PATH: cmuxSocketPath,
+    CMUXLAYER_DAEMON_SOCKET: reservation.socketPath,
+    CMUXLAYER_STATE_DIR: join(root, "state"),
+    CMUXLAYER_INBOX_BASE_DIR: join(root, "inbox"),
+    CMUXLAYER_SESSION_REGISTRY: join(root, "session-registry.jsonl"),
+    CMUXLAYER_SEAT_REGISTRY_PATH: join(root, "seat-registry.json"),
+    CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(root, "launcher-registry.json"),
+    CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH: join(root, "fleet-sidebar.swift"),
+    CMUXLAYER_HARNESS_HOME: join(root, "harness"),
+    CMUXLAYER_DEV: "1",
+  });
+}
+
+export function appendFatalError(current, error, phase) {
+  const detail = error instanceof Error ? error.message : String(error);
+  const entry = `${phase}: ${detail}`;
+  return current ? `${current}; ${entry}` : entry;
+}
+
+export function appendSettledFailures(current, results, phase) {
+  let combined = current;
+  for (const result of results) {
+    if (result.status === "rejected") {
+      combined = appendFatalError(combined, result.reason, phase);
+    }
+  }
+  return combined;
+}
+
 async function startIsolatedDaemon(entry, env, reservation, logPath) {
   const daemonSocketPath = reservation.socketPath;
   let child = null;
@@ -774,12 +809,11 @@ async function main() {
   const socketReservation = await createSocketReservation(
     isolation.daemonSocketPath,
   );
-  const env = stringEnv({
-    ...process.env,
-    CMUX_SOCKET_PATH: isolation.cmuxSocketPath,
-    CMUXLAYER_DAEMON_SOCKET: socketReservation.socketPath,
-    CMUXLAYER_DEV: "1",
-  });
+  const env = buildIsolatedRuntimeEnv(
+    process.env,
+    socketReservation,
+    isolation.cmuxSocketPath,
+  );
   const rows = buildBenchmarkRows({
     concurrency: config.concurrency,
     payloadSizes: config.payloadSizes,
@@ -868,20 +902,27 @@ async function main() {
       daemon.assertHealthy();
     }
   } catch (error) {
-    fatalError = error instanceof Error ? error.message : String(error);
+    fatalError = appendFatalError(fatalError, error, "benchmark");
   } finally {
-    await Promise.allSettled(mcpClients.map((client) => client.close()));
+    const clientStops = await Promise.allSettled(
+      mcpClients.map((client) => client.close()),
+    );
+    fatalError = appendSettledFailures(
+      fatalError,
+      clientStops,
+      "MCP client stop",
+    );
     if (fixture) {
       try {
         await fixture.close();
       } catch (error) {
-        fatalError ??= error instanceof Error ? error.message : String(error);
+        fatalError = appendFatalError(fatalError, error, "scratch teardown");
       }
     }
     try {
       await daemon.stop();
     } catch (error) {
-      fatalError ??= error instanceof Error ? error.message : String(error);
+      fatalError = appendFatalError(fatalError, error, "daemon stop");
     }
   }
 
@@ -897,6 +938,26 @@ async function main() {
       cmux_socket_path: isolation.cmuxSocketPath,
       requested_daemon_socket_path: isolation.daemonSocketPath,
       daemon_socket_path: socketReservation.socketPath,
+      configured_state_path: join(socketReservation.ownerDirectory, "state"),
+      daemon_state_path: join(
+        socketReservation.ownerDirectory,
+        "home",
+        ".local",
+        "state",
+        "cmux-agents",
+      ),
+      monitor_registry_path: join(
+        socketReservation.ownerDirectory,
+        "home",
+        ".golems-zikaron",
+        "monitor-registry.json",
+      ),
+      watch_registry_path: join(
+        socketReservation.ownerDirectory,
+        "home",
+        ".golems-zikaron",
+        "watch-specs.json",
+      ),
       isolated_daemon_pid: daemon.pid,
       daemon_log: logPath,
       controller_surface: config.surface,
