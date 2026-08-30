@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "c210a9a320556faf112eddf7a073967c2b2c95fa",
-    "measured_at": "2026-08-30T15:21:42.118Z",
+    "git_sha": "9960960f8a75f1c4947d3f5a6fe1f16b0e647f1f",
+    "measured_at": "2026-08-30T15:35:23.831Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 33319012094,
-    "increase_reason": "migrate legacy single-shot rows to canonical sampled 10-row runner evidence"
+    "workflow_run_id": 33319637454,
+    "increase_reason": "incorporate second canonical runner sample after measured-ratchet RED"
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -122,12 +122,12 @@
     "send_to_surface_warm": {
       "p50_ms": 64.52,
       "p95_ms": 71.2,
-      "lock_hold_ms": 104
+      "lock_hold_ms": 178
     },
     "send_to_agent_warm": {
       "p50_ms": 92.77,
-      "p95_ms": 110.39,
-      "lock_hold_ms": 75
+      "p95_ms": 122.59,
+      "lock_hold_ms": 200
     },
     "list_agents": {
       "p50_ms": 67.66,
@@ -141,18 +141,18 @@
     },
     "spawn_close_during_sweep": {
       "p50_ms": 45.91,
-      "p95_ms": 59.61,
+      "p95_ms": 143.28,
       "lock_hold_ms": 0
     },
     "first_send_after_spawn": {
       "p50_ms": 74.06,
       "p95_ms": 86.29,
-      "lock_hold_ms": 66
+      "lock_hold_ms": 120
     },
     "send_to_surface_10_parallel": {
       "p50_ms": 116.48,
-      "p95_ms": 151.43,
-      "lock_hold_ms": 125
+      "p95_ms": 368.97,
+      "lock_hold_ms": 353
     },
     "read_screen_10_parallel": {
       "p50_ms": 30.27,
@@ -163,6 +163,6 @@
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "69c66175d79104a9bd2937ba834d719276f40251f3c98c6021f81a3e44def9a2"
+    "content_sha256": "f792518e5f3ab80dd4193817e458292156f857468f1c7b3e82040e42a1e7d6d7"
   }
 }
