@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import {
   assertNightlyIsolation,
+  assertArtifactProvenance,
   assertCliFairnessTrace,
   buildBenchmarkRows,
   buildAbsentComparisonRow,
@@ -831,6 +840,28 @@ describe("bench-e2e measurement harness", () => {
     });
   });
 
+  it("stops scratch creation promptly after abort and still tears down", async () => {
+    const controller = new AbortController();
+    const calls: string[][] = [];
+    await expect(
+      createScratchTargets(3, {
+        workspace: "workspace:7",
+        controllerSurface: "surface:20",
+        signal: controller.signal,
+        execCmux: (args: string[]) => {
+          calls.push(args);
+          if (args[0] === "new-split") {
+            controller.abort(new Error("stop creating"));
+            return { stdout: "OK surface:21\n", stderr: "" };
+          }
+          return { stdout: "OK\n", stderr: "" };
+        },
+      }),
+    ).rejects.toThrow(/stop creating/);
+    expect(calls.filter((args) => args[0] === "new-split")).toHaveLength(1);
+    expect(calls.filter((args) => args[0] === "close-surface")).toHaveLength(1);
+  });
+
   it("escalates an unresponsive child from TERM to KILL", async () => {
     class FakeChild extends EventEmitter {
       exitCode = null;
@@ -965,6 +996,25 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("uses one output lock through real and symbolic-link parent paths", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const realDirectory = join(directory, "real");
+    const linkedDirectory = join(directory, "linked");
+    await mkdir(realDirectory);
+    await symlink(realDirectory, linkedDirectory, "dir");
+    const first = await createOutputReservation(
+      join(realDirectory, "receipt.json"),
+    );
+    try {
+      await expect(
+        createOutputReservation(join(linkedDirectory, "receipt.json")),
+      ).rejects.toThrow(/already reserved/);
+    } finally {
+      await first.release();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("recovers an output lock whose recorded owner is gone", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
@@ -1020,7 +1070,7 @@ describe("bench-e2e measurement harness", () => {
 
   it("canonicalizes workspace refs and ids to one reservation key", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
-    const exec = async (_command, args) => {
+    const exec = (_command, args) => {
       if (args.includes("list-windows")) {
         return {
           stdout: JSON.stringify([
@@ -1190,6 +1240,21 @@ describe("bench-e2e measurement harness", () => {
     });
   });
 
+  it("rejects mutable built entries whose hashes change after attestation", async () => {
+    await expect(
+      assertArtifactProvenance(
+        {
+          entries: {
+            mcp: { path: "/repo/dist/index.js", sha256: "mcp-before" },
+            daemon: { path: "/repo/dist/daemon.js", sha256: "daemon-before" },
+          },
+        },
+        (path) =>
+          path.endsWith("index.js") ? "mcp-after" : "daemon-before",
+      ),
+    ).rejects.toThrow(/artifact changed after attestation.*index\.js/);
+  });
+
   it("rejects built entry provenance when HEAD changes during the build", async () => {
     let headReads = 0;
 
@@ -1319,6 +1384,22 @@ describe("bench-e2e measurement harness", () => {
       verifyPid: () => Promise.resolve(true),
     });
     expect(killProbes).toBe(4);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not SIGKILL a PID that loses ownership after TERM", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const receipt = join(directory, "daemon-pids.txt");
+    await writeFile(receipt, "4343\n", "utf8");
+    const signals = [];
+    let verifications = 0;
+    await terminateUnexpectedDaemons(receipt, 4242, "owner-token", {
+      signalPid: (_pid, signal) => signals.push(signal),
+      pause: () => Promise.resolve(),
+      verifyPid: () => Promise.resolve(++verifications === 1),
+    });
+    expect(signals).toContain("SIGTERM");
+    expect(signals).not.toContain("SIGKILL");
     await rm(directory, { recursive: true, force: true });
   });
 

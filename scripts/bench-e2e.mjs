@@ -7,12 +7,13 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import net from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -621,7 +622,11 @@ export async function createSocketReservation(requestedPath) {
 }
 
 export async function createOutputReservation(outputPath) {
-  const canonicalOutput = resolve(outputPath);
+  const absoluteOutput = resolve(outputPath);
+  await mkdir(dirname(absoluteOutput), { recursive: true });
+  const canonicalOutput = existsSync(absoluteOutput)
+    ? await realpath(absoluteOutput)
+    : join(await realpath(dirname(absoluteOutput)), basename(absoluteOutput));
   const lockPath = `${canonicalOutput}.lock`;
   const reservation = await createPidLock(
     lockPath,
@@ -880,6 +885,10 @@ export async function terminateUnexpectedDaemons(
         await pause(25);
       }
       if (processIsLive(pid, signalPid)) {
+        if (!(await verifyPid(pid, ownerToken))) {
+          // The owned daemon exited after TERM and the PID was reused.
+          continue;
+        }
         signalPid(pid, "SIGKILL");
         for (let attempt = 0; attempt < 20; attempt += 1) {
           if (!processIsLive(pid, signalPid)) break;
@@ -1107,6 +1116,7 @@ export async function createScratchTargets(count, deps) {
   };
   try {
     for (let index = 0; index < count; index += 1) {
+      deps.signal?.throwIfAborted();
       const { stdout } = await deps.execCmux([
         "new-split",
         "right",
@@ -1120,6 +1130,7 @@ export async function createScratchTargets(count, deps) {
       const surface = createdSurfaceFromOutput(stdout);
       targets.push(surface);
       anchor = surface;
+      deps.signal?.throwIfAborted();
     }
   } catch (error) {
     try {
@@ -1500,6 +1511,20 @@ async function sha256File(path) {
     .digest("hex");
 }
 
+export async function assertArtifactProvenance(
+  provenance,
+  hashFile = sha256File,
+) {
+  for (const entry of Object.values(provenance.entries)) {
+    const observed = await hashFile(entry.path);
+    if (observed !== entry.sha256) {
+      throw new Error(
+        `artifact changed after attestation: ${entry.path} expected ${entry.sha256}, observed ${observed}`,
+      );
+    }
+  }
+}
+
 export async function prepareBuiltEntries(config, deps = {}) {
   const root = deps.repoRoot ?? repoRoot;
   const exec = deps.exec ?? execCapture;
@@ -1639,6 +1664,7 @@ async function executeBenchmark(config, isolation, abortSignal) {
     ...config,
     env: process.env,
   });
+  await assertArtifactProvenance(artifactProvenance);
   abortSignal.throwIfAborted();
   const nightlySocket = await stat(isolation.cmuxSocketPath).catch(() => null);
   if (!nightlySocket?.isSocket()) {
@@ -1673,12 +1699,15 @@ async function executeBenchmark(config, isolation, abortSignal) {
   let fixture = null;
   let fatalError = null;
   try {
+    await assertArtifactProvenance(artifactProvenance);
     abortSignal.throwIfAborted();
     const maxConcurrency = Math.max(1, ...rows.map((row) => row.concurrency));
     fixture = await createScratchTargets(maxConcurrency, {
       workspace: config.workspace,
       controllerSurface: config.surface,
-      execCmux: (args) => execCapture(config.cmuxBin, args, { env }),
+      signal: abortSignal,
+      execCmux: (args) =>
+        execCapture(config.cmuxBin, args, { env, signal: abortSignal }),
     });
     const maxMcpConcurrency = Math.max(
       0,
@@ -1690,6 +1719,7 @@ async function executeBenchmark(config, isolation, abortSignal) {
       abortSignal.throwIfAborted();
       await daemon.assertHealthy();
       mcpClients.push(await connectMcpClient(config.mcpEntry, env, index));
+      await assertArtifactProvenance(artifactProvenance);
       await daemon.assertHealthy();
       abortSignal.throwIfAborted();
     }
@@ -1780,6 +1810,11 @@ async function executeBenchmark(config, isolation, abortSignal) {
     } catch (error) {
       fatalError = appendFatalError(fatalError, error, "daemon stop");
     }
+  }
+  try {
+    await assertArtifactProvenance(artifactProvenance);
+  } catch (error) {
+    fatalError = appendFatalError(fatalError, error, "artifact revalidation");
   }
 
   const receipt = {
