@@ -16,6 +16,7 @@ import {
   createScratchTargets,
   createOutputReservation,
   createSocketReservation,
+  createWorkspaceReservation,
   daemonLogPath,
   FAIRNESS_CONTRACTS,
   appendFatalError,
@@ -35,6 +36,9 @@ import {
   prepareBuiltEntries,
   renderMarkdownTable,
   runCliReadScreen,
+  installGracefulSignalAbort,
+  assertNoUnexpectedDaemons,
+  terminateUnexpectedDaemons,
   runCliListSurfaces,
   runBenchmarkRow,
   summarizeTransport,
@@ -925,7 +929,7 @@ describe("bench-e2e measurement harness", () => {
     const first = await createOutputReservation(output);
     try {
       await expect(createOutputReservation(output)).rejects.toThrow(
-        /output is already reserved/,
+        /output .* is already reserved/,
       );
     } finally {
       await first.release();
@@ -933,6 +937,55 @@ describe("bench-e2e measurement harness", () => {
     const afterRelease = await createOutputReservation(output);
     await afterRelease.release();
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("recovers an output lock whose recorded owner is gone", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    await writeFile(`${output}.lock`, "2147483647\n", "utf8");
+    const reservation = await createOutputReservation(output);
+    await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("serializes every run sharing one Nightly workspace", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const first = await createWorkspaceReservation(
+      "/tmp/cmux-nightly.sock",
+      "workspace:7",
+      directory,
+    );
+    try {
+      await expect(
+        createWorkspaceReservation(
+          "/tmp/cmux-nightly.sock",
+          "workspace:7",
+          directory,
+        ),
+      ).rejects.toThrow(/already reserved/);
+      const otherWorkspace = await createWorkspaceReservation(
+        "/tmp/cmux-nightly.sock",
+        "workspace:8",
+        directory,
+      );
+      await otherWorkspace.release();
+    } finally {
+      await first.release();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("turns TERM into an awaited graceful-abort signal", () => {
+    const processLike = new EventEmitter();
+    const controller = new AbortController();
+    const remove = installGracefulSignalAbort(controller, processLike);
+
+    processLike.emit("SIGTERM");
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason.message).toContain("SIGTERM");
+    remove();
+    expect(processLike.listenerCount("SIGTERM")).toBe(0);
+    expect(processLike.listenerCount("SIGINT")).toBe(0);
   });
 
   it("moves daemon socket, monitor, watch, and state paths under the owned run directory", () => {
@@ -955,6 +1008,9 @@ describe("bench-e2e measurement harness", () => {
       "/tmp/run10.sock.owner-abc/",
     );
     expect(env.HOME).not.toBe("/opt/example-home");
+    expect(env.CMUXLAYER_DAEMON_PID_RECEIPT).toContain(
+      "/tmp/run10.sock.owner-abc/",
+    );
     expect(env).not.toHaveProperty("CMUXLAYER_FORCE_INPROCESS");
     expect(env).not.toHaveProperty("CMUXLAYER_DEFAULT_PALETTE");
   });
@@ -1113,6 +1169,28 @@ describe("bench-e2e measurement harness", () => {
     expect(() => assertOwnedDaemonHealthy(child, null)).toThrow(
       /owned isolated daemon.*4242.*exitCode.*17/,
     );
+  });
+
+  it("detects and terminates any daemon autostarted by an MCP client", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const receipt = join(directory, "daemon-pids.txt");
+    await writeFile(receipt, "4242\n4343\n", "utf8");
+    await expect(assertNoUnexpectedDaemons(receipt, 4242)).rejects.toThrow(
+      /4343/,
+    );
+    let live = true;
+    const signals = [];
+    const signalPid = (pid, signal) => {
+      signals.push([pid, signal]);
+      if (signal === 0) {
+        if (!live) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        return;
+      }
+      if (signal === "SIGTERM") live = false;
+    };
+    await terminateUnexpectedDaemons(receipt, 4242, signalPid, async () => {});
+    expect(signals).toContainEqual([4343, "SIGTERM"]);
+    await rm(directory, { recursive: true, force: true });
   });
 
   it("preserves every rejected MCP client shutdown", () => {

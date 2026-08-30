@@ -608,33 +608,84 @@ export async function createSocketReservation(requestedPath) {
 export async function createOutputReservation(outputPath) {
   const canonicalOutput = resolve(outputPath);
   const lockPath = `${canonicalOutput}.lock`;
-  await mkdir(dirname(canonicalOutput), { recursive: true });
-  const handle = await open(lockPath, "wx", 0o600).catch((error) => {
-    if (error?.code === "EEXIST") {
-      throw new Error(
-        `benchmark output is already reserved by another run: ${canonicalOutput}`,
-      );
-    }
-    throw error;
-  });
-  try {
-    await handle.writeFile(`${process.pid}\n`, "utf8");
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    await rm(lockPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
-  let released = false;
-  return {
+  const reservation = await createPidLock(
+    lockPath,
+    `benchmark output ${canonicalOutput}`,
+  );
+  return Object.freeze({
     outputPath: canonicalOutput,
     lockPath,
-    async release() {
-      if (released) return;
-      released = true;
-      await handle.close();
-      await rm(lockPath, { force: false });
-    },
-  };
+    release: reservation.release,
+  });
+}
+
+function processIsLive(pid, signalPid = process.kill) {
+  try {
+    signalPid(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function createPidLock(lockPath, label, signalPid = process.kill) {
+  await mkdir(dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const opened = await open(lockPath, "wx", 0o600).then(
+      (handle) => ({ handle, error: null }),
+      (error) => ({ handle: null, error }),
+    );
+    if (opened.error) {
+      const error = opened.error;
+      if (error?.code !== "EEXIST") throw error;
+      const ownerText = await readFile(lockPath, "utf8").catch(() => "");
+      const ownerPid = Number.parseInt(ownerText.trim(), 10);
+      if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
+        throw new Error(`${label} has an unreadable owner lock: ${lockPath}`);
+      }
+      if (processIsLive(ownerPid, signalPid)) {
+        throw new Error(`${label} is already reserved by pid ${ownerPid}`);
+      }
+      await rm(lockPath, { force: true });
+      continue;
+    }
+    const handle = opened.handle;
+    try {
+      await handle.writeFile(`${process.pid}\n`, "utf8");
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await rm(lockPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+    let released = false;
+    return {
+      lockPath,
+      async release() {
+        if (released) return;
+        released = true;
+        await handle.close();
+        await rm(lockPath, { force: false });
+      },
+    };
+  }
+  throw new Error(`${label} lock reclamation raced with another run`);
+}
+
+export async function createWorkspaceReservation(
+  cmuxSocketPath,
+  workspace,
+  lockRoot = "/tmp",
+) {
+  const key = createHash("sha256")
+    .update(`${resolve(cmuxSocketPath)}\0${workspace}`)
+    .digest("hex")
+    .slice(0, 24);
+  const lockPath = join(lockRoot, `cmuxlayer-bench-workspace-${key}.lock`);
+  return createPidLock(
+    lockPath,
+    `Nightly workspace ${workspace} on ${cmuxSocketPath}`,
+  );
 }
 
 async function endWritable(log) {
@@ -715,6 +766,7 @@ export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
     CMUXLAYER_SESSION_REGISTRY: join(root, "session-registry.jsonl"),
     CMUXLAYER_SEAT_REGISTRY_PATH: join(root, "seat-registry.json"),
     CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(root, "launcher-registry.json"),
+    CMUXLAYER_DAEMON_PID_RECEIPT: join(root, "unexpected-daemon-pids.txt"),
     CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH: join(root, "fleet-sidebar.swift"),
     CMUXLAYER_HARNESS_HOME: join(root, "harness"),
     CMUXLAYER_DEV: "1",
@@ -750,6 +802,58 @@ export function assertOwnedDaemonHealthy(child, logError = null) {
   }
 }
 
+async function readRecordedDaemonPids(path) {
+  const text = await readFile(path, "utf8").catch((error) => {
+    if (error?.code === "ENOENT") return "";
+    throw error;
+  });
+  return [...new Set(text.split(/\s+/).filter(Boolean).map(Number))].filter(
+    (pid) => Number.isSafeInteger(pid) && pid > 0,
+  );
+}
+
+export async function assertNoUnexpectedDaemons(path, ownedPid) {
+  const unexpected = (await readRecordedDaemonPids(path)).filter(
+    (pid) => pid !== ownedPid,
+  );
+  if (unexpected.length > 0) {
+    throw new Error(
+      `MCP client autostarted unowned daemon pid(s): ${unexpected.join(",")}`,
+    );
+  }
+}
+
+export async function terminateUnexpectedDaemons(
+  path,
+  ownedPid,
+  signalPid = process.kill,
+  pause = (ms) => new Promise((resolvePause) => setTimeout(resolvePause, ms)),
+) {
+  const unexpected = (await readRecordedDaemonPids(path)).filter(
+    (pid) => pid !== ownedPid,
+  );
+  const failures = [];
+  for (const pid of unexpected) {
+    try {
+      if (!processIsLive(pid, signalPid)) continue;
+      signalPid(pid, "SIGTERM");
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (!processIsLive(pid, signalPid)) break;
+        await pause(25);
+      }
+      if (processIsLive(pid, signalPid)) signalPid(pid, "SIGKILL");
+      if (processIsLive(pid, signalPid)) {
+        throw new Error(`unowned daemon pid ${pid} survived SIGKILL`);
+      }
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "unowned daemon cleanup failed");
+  }
+}
+
 export function appendSettledFailures(current, results, phase) {
   let combined = current;
   for (const result of results) {
@@ -762,6 +866,7 @@ export function appendSettledFailures(current, results, phase) {
 
 async function startIsolatedDaemon(entry, env, reservation, logPath) {
   const daemonSocketPath = reservation.socketPath;
+  const daemonPidReceipt = env.CMUXLAYER_DAEMON_PID_RECEIPT;
   let child = null;
   let logError = null;
   let terminationPromise = null;
@@ -846,11 +951,18 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
   }
   return {
     pid: child.pid,
-    assertHealthy() {
+    async assertHealthy() {
       assertOwnedDaemonHealthy(child, logError);
+      await assertNoUnexpectedDaemons(daemonPidReceipt, child.pid);
     },
     async stop() {
       let cleanupError = null;
+      let unexpectedDaemonError = null;
+      try {
+        await terminateUnexpectedDaemons(daemonPidReceipt, child.pid);
+      } catch (error) {
+        unexpectedDaemonError = error;
+      }
       try {
         await cleanupDaemonResources({
           child,
@@ -864,7 +976,7 @@ async function startIsolatedDaemon(entry, env, reservation, logPath) {
       } catch (error) {
         cleanupError = error;
       }
-      const failures = [cleanupError, logError].filter(
+      const failures = [unexpectedDaemonError, cleanupError, logError].filter(
         (failure, index, all) => failure && all.indexOf(failure) === index,
       );
       if (failures.length > 0) {
@@ -1379,6 +1491,27 @@ Options:
   --out <path>                   JSON receipt path
 `;
 
+export function installGracefulSignalAbort(
+  controller,
+  processLike = process,
+) {
+  const handlers = new Map();
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const handler = () => {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error(`benchmark interrupted by ${signal}`));
+      }
+    };
+    handlers.set(signal, handler);
+    processLike.on(signal, handler);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) {
+      processLike.off(signal, handler);
+    }
+  };
+}
+
 async function main() {
   const config = parseConfig(process.argv.slice(2), process.env);
   if (config.help) {
@@ -1391,19 +1524,36 @@ async function main() {
       "surface and workspace are required; run inside the Nightly terminal or pass --surface/--workspace",
     );
   }
-  const outputReservation = await createOutputReservation(config.out);
+  const abortController = new AbortController();
+  const removeSignalHandlers = installGracefulSignalAbort(abortController);
   try {
-    await executeBenchmark(config, isolation);
+    const workspaceReservation = await createWorkspaceReservation(
+      isolation.cmuxSocketPath,
+      config.workspace,
+    );
+    try {
+      abortController.signal.throwIfAborted();
+      const outputReservation = await createOutputReservation(config.out);
+      try {
+        abortController.signal.throwIfAborted();
+        await executeBenchmark(config, isolation, abortController.signal);
+      } finally {
+        await outputReservation.release();
+      }
+    } finally {
+      await workspaceReservation.release();
+    }
   } finally {
-    await outputReservation.release();
+    removeSignalHandlers();
   }
 }
 
-async function executeBenchmark(config, isolation) {
+async function executeBenchmark(config, isolation, abortSignal) {
   const artifactProvenance = await prepareBuiltEntries({
     ...config,
     env: process.env,
   });
+  abortSignal.throwIfAborted();
   const nightlySocket = await stat(isolation.cmuxSocketPath).catch(() => null);
   if (!nightlySocket?.isSocket()) {
     throw new Error(`nightly socket is not live: ${isolation.cmuxSocketPath}`);
@@ -1437,6 +1587,7 @@ async function executeBenchmark(config, isolation) {
   let fixture = null;
   let fatalError = null;
   try {
+    abortSignal.throwIfAborted();
     const maxConcurrency = Math.max(1, ...rows.map((row) => row.concurrency));
     fixture = await createScratchTargets(maxConcurrency, {
       workspace: config.workspace,
@@ -1450,11 +1601,13 @@ async function executeBenchmark(config, isolation) {
         .map((row) => row.concurrency),
     );
     for (let index = 0; index < maxMcpConcurrency; index += 1) {
-      daemon.assertHealthy();
+      abortSignal.throwIfAborted();
+      await daemon.assertHealthy();
       mcpClients.push(await connectMcpClient(config.mcpEntry, env, index));
-      daemon.assertHealthy();
+      await daemon.assertHealthy();
+      abortSignal.throwIfAborted();
     }
-    daemon.assertHealthy();
+    await daemon.assertHealthy();
     await Promise.all(
       mcpClients.map((client) =>
         client.callTool(
@@ -1464,9 +1617,11 @@ async function executeBenchmark(config, isolation) {
         ),
       ),
     );
-    daemon.assertHealthy();
+    await daemon.assertHealthy();
+    abortSignal.throwIfAborted();
     for (const [index, row] of rows.entries()) {
-      daemon.assertHealthy();
+      abortSignal.throwIfAborted();
+      await daemon.assertHealthy();
       if (row.comparison_status === "NOT_COMPARABLE") {
         process.stderr.write(
           `[bench-e2e] row ${index + 1}/${rows.length} ${row.operation} c${row.concurrency} payload=${row.payload_chars ?? "-"} ${row.client} NOT_COMPARABLE\n`,
@@ -1511,7 +1666,8 @@ async function executeBenchmark(config, isolation) {
       });
       const result = markSurfaceTransportUntrusted(measured);
       results.push(result);
-      daemon.assertHealthy();
+      await daemon.assertHealthy();
+      abortSignal.throwIfAborted();
     }
   } catch (error) {
     fatalError = appendFatalError(fatalError, error, "benchmark");
