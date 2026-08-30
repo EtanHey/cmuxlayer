@@ -1734,7 +1734,7 @@ export function provenanceStatusArgs(root, outputPath) {
     return args;
   }
   const pathspec = outputRelative.split(sep).join("/");
-  const globPathspec = pathspec.replace(/[?*[\]\\]/g, "\\$&");
+  const globPathspec = escapeGitGlobPath(pathspec);
   return [
     ...args,
     "--",
@@ -1743,6 +1743,10 @@ export function provenanceStatusArgs(root, outputPath) {
     `:(exclude,glob)${globPathspec}.lock*`,
     `:(exclude,glob)${globPathspec}.daemon-*.log`,
   ];
+}
+
+function escapeGitGlobPath(pathspec) {
+  return pathspec.replace(/[?*[\]\\]/g, "\\$&");
 }
 
 export async function prepareBuiltEntries(config, deps = {}) {
@@ -1778,19 +1782,29 @@ export async function prepareBuiltEntries(config, deps = {}) {
     ) {
       return;
     }
+    const pathspec = outputRelative.split(sep).join("/");
+    const globPathspec = escapeGitGlobPath(pathspec);
     const trackedOutput = await exec(
       "git",
       [
         "ls-files",
         "--cached",
         "--",
-        `:(literal)${outputRelative.split(sep).join("/")}`,
+        `:(literal)${pathspec}`,
+        `:(glob)${globPathspec}.lock*`,
+        `:(glob)${globPathspec}.daemon-*.log`,
       ],
       execOptions,
     );
-    if (trackedOutput.stdout.trim()) {
+    const trackedPath = trackedOutput.stdout.trim().split("\n")[0];
+    if (trackedPath) {
+      if (trackedPath === pathspec) {
+        throw new Error(
+          `refusing to use a tracked output receipt: ${config.out}`,
+        );
+      }
       throw new Error(
-        `refusing to use a tracked output receipt: ${config.out}`,
+        `refusing to overwrite tracked output artifact: ${trackedPath}`,
       );
     }
   };

@@ -1565,7 +1565,9 @@ describe("bench-e2e measurement harness", () => {
           repoRoot: "/repo",
           exec: (_command, args) => {
             if (args[0] === "ls-files") {
-              trackedPathspec = args.at(-1);
+              trackedPathspec = args.find((arg) =>
+                arg.startsWith(":(literal)"),
+              );
               return { stdout: ":(literal)receipt.json\n", stderr: "" };
             }
             throw new Error(`unexpected command: ${args.join(" ")}`);
@@ -1606,6 +1608,38 @@ describe("bench-e2e measurement harness", () => {
       ),
     ).rejects.toThrow(/tracked output receipt/);
     expect(trackedChecks).toBe(2);
+  });
+
+  it("refuses to exclude a tracked receipt sidecar from provenance", async () => {
+    let trackedProbeArgs = [];
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedProbeArgs = args;
+              const probesLock = args.includes(
+                ":(glob)results/bench.json.lock*",
+              );
+              return {
+                stdout: probesLock ? "results/bench.json.lock\n" : "",
+                stderr: "",
+              };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output artifact.*bench\.json\.lock/);
+    expect(trackedProbeArgs).toContain(
+      ":(glob)results/bench.json.daemon-*.log",
+    );
   });
 
   it("attests provenance before creating the output reservation", async () => {
