@@ -6,6 +6,7 @@ import { createWriteStream, existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   stat,
@@ -600,6 +601,38 @@ export async function createSocketReservation(requestedPath) {
       if (released) return;
       released = true;
       await rm(ownerDirectory, { recursive: true, force: true });
+    },
+  };
+}
+
+export async function createOutputReservation(outputPath) {
+  const canonicalOutput = resolve(outputPath);
+  const lockPath = `${canonicalOutput}.lock`;
+  await mkdir(dirname(canonicalOutput), { recursive: true });
+  const handle = await open(lockPath, "wx", 0o600).catch((error) => {
+    if (error?.code === "EEXIST") {
+      throw new Error(
+        `benchmark output is already reserved by another run: ${canonicalOutput}`,
+      );
+    }
+    throw error;
+  });
+  try {
+    await handle.writeFile(`${process.pid}\n`, "utf8");
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(lockPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  let released = false;
+  return {
+    outputPath: canonicalOutput,
+    lockPath,
+    async release() {
+      if (released) return;
+      released = true;
+      await handle.close();
+      await rm(lockPath, { force: false });
     },
   };
 }
@@ -1335,6 +1368,15 @@ async function main() {
       "surface and workspace are required; run inside the Nightly terminal or pass --surface/--workspace",
     );
   }
+  const outputReservation = await createOutputReservation(config.out);
+  try {
+    await executeBenchmark(config, isolation);
+  } finally {
+    await outputReservation.release();
+  }
+}
+
+async function executeBenchmark(config, isolation) {
   const artifactProvenance = await prepareBuiltEntries({
     ...config,
     env: process.env,

@@ -14,6 +14,7 @@ import {
   cliArgs,
   cleanupDaemonResources,
   createScratchTargets,
+  createOutputReservation,
   createSocketReservation,
   daemonLogPath,
   FAIRNESS_CONTRACTS,
@@ -915,6 +916,22 @@ describe("bench-e2e measurement harness", () => {
     expect(daemonLogPath("/tmp/bench.json", 42, 1234)).toBe(
       "/tmp/bench.json.daemon-42-1234.log",
     );
+  });
+
+  it("atomically excludes overlapping runs that share an output receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const first = await createOutputReservation(output);
+    try {
+      await expect(createOutputReservation(output)).rejects.toThrow(
+        /output is already reserved/,
+      );
+    } finally {
+      await first.release();
+    }
+    const afterRelease = await createOutputReservation(output);
+    await afterRelease.release();
+    await rm(directory, { recursive: true, force: true });
   });
 
   it("moves daemon socket, monitor, watch, and state paths under the owned run directory", () => {
