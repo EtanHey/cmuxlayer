@@ -9383,40 +9383,41 @@ export class AgentEngine {
         );
       }
     };
-    while (true) {
-      const swept = await sweepWatches({
-        registryPath: this.watchRegistryPath,
-        now: this.watchRegistryNow,
-        agentObservation: this.watchAgentObservation,
-        notify: this.watchNotify,
-        onNotificationExhausted: ({ notification, attempts, reason }) => {
-          this.sweepDebugLog(
-            `[cmuxlayer] watch notification exhausted: watch=${notification.watch_id} owner=${notification.owner} attempts=${attempts} reason=${reason}`,
-          );
-        },
-      });
-      const current = readWatchRegistry({
-        registryPath: this.watchRegistryPath,
-      }).watches.find((watch) => watch.watch_id === armed.watch_id);
-      if (!current) {
-        throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
+    try {
+      while (true) {
+        const swept = await sweepWatches({
+          registryPath: this.watchRegistryPath,
+          now: this.watchRegistryNow,
+          agentObservation: this.watchAgentObservation,
+          notify: this.watchNotify,
+          onNotificationExhausted: ({ notification, attempts, reason }) => {
+            this.sweepDebugLog(
+              `[cmuxlayer] watch notification exhausted: watch=${notification.watch_id} owner=${notification.owner} attempts=${attempts} reason=${reason}`,
+            );
+          },
+        });
+        const current = readWatchRegistry({
+          registryPath: this.watchRegistryPath,
+        }).watches.find((watch) => watch.watch_id === armed.watch_id);
+        if (!current) {
+          throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
+        }
+        const elapsed = Date.now() - startedAt;
+        if (current.state === "fired" || swept.fired.includes(armed.watch_id)) {
+          return { matched: true, elapsed, watch: current };
+        }
+        if (current.state === "failed") {
+          return { matched: false, elapsed, watch: current };
+        }
+        if (elapsed >= timeoutMs) {
+          return { matched: false, elapsed, watch: current };
+        }
+        await new Promise<void>((resolveSleep) => {
+          setTimeout(resolveSleep, Math.min(50, timeoutMs - elapsed));
+        });
       }
-      const elapsed = Date.now() - startedAt;
-      if (current.state === "fired" || swept.fired.includes(armed.watch_id)) {
-        await releaseWaiterBestEffort();
-        return { matched: true, elapsed, watch: current };
-      }
-      if (current.state === "failed") {
-        await releaseWaiterBestEffort();
-        return { matched: false, elapsed, watch: current };
-      }
-      if (elapsed >= timeoutMs) {
-        await releaseWaiterBestEffort();
-        return { matched: false, elapsed, watch: current };
-      }
-      await new Promise<void>((resolveSleep) => {
-        setTimeout(resolveSleep, Math.min(50, timeoutMs - elapsed));
-      });
+    } finally {
+      await releaseWaiterBestEffort();
     }
   }
 

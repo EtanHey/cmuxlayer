@@ -952,6 +952,22 @@ export async function sweepWatches(
   const path = registryPathFor(opts);
   const observedAt = nowMs(opts);
   const notifications: WatchNotification[] = [];
+  const claimedFailedWatchIds = new Set<string>();
+  const claimFailedNotification = (
+    record: WatchRecord,
+    notification: WatchNotification,
+  ): WatchRecord => {
+    notifications.push(notification);
+    claimedFailedWatchIds.add(record.watch_id);
+    return {
+      ...record,
+      notification_pending: false,
+      notification_attempts: (record.notification_attempts ?? 0) + 1,
+      notification_next_attempt_at_ms: undefined,
+      notification_exhausted_at_ms: observedAt,
+      notification_exhausted_reason: "terminal_notice_fire_once",
+    };
+  };
   const result: WatchSweepResult = {
     fired: [],
     failed: [],
@@ -989,14 +1005,16 @@ export async function sweepWatches(
             record.notification_next_attempt_at_ms ?? observedAt,
         };
         if (migrated.notification_next_attempt_at_ms! <= observedAt) {
-          notifications.push(
-            notificationFor(
-              migrated,
-              migrated.terminal_reason!,
-              migrated.terminal_at_ms ?? observedAt,
-              migrated.observed_value,
-            ),
+          const notification = notificationFor(
+            migrated,
+            migrated.terminal_reason!,
+            migrated.terminal_at_ms ?? observedAt,
+            migrated.observed_value,
           );
+          if (migrated.state === "failed") {
+            return claimFailedNotification(migrated, notification);
+          }
+          notifications.push(notification);
         }
         return migrated;
       }
@@ -1006,14 +1024,16 @@ export async function sweepWatches(
           record.terminal_reason &&
           (record.notification_next_attempt_at_ms ?? 0) <= observedAt
         ) {
-          notifications.push(
-            notificationFor(
-              record,
-              record.terminal_reason,
-              record.terminal_at_ms ?? observedAt,
-              record.observed_value,
-            ),
+          const notification = notificationFor(
+            record,
+            record.terminal_reason,
+            record.terminal_at_ms ?? observedAt,
+            record.observed_value,
           );
+          if (record.state === "failed") {
+            return claimFailedNotification(record, notification);
+          }
+          notifications.push(notification);
         }
         return record;
       }
@@ -1055,9 +1075,8 @@ export async function sweepWatches(
         const reason: WatchNotificationReason =
           record.target_kind === "agent" ? "consumer_died" : "target_missing";
         const notification = notificationFor(record, reason, observedAt);
-        notifications.push(notification);
         result.failed.push(record.watch_id);
-        return {
+        return claimFailedNotification({
           ...record,
           ...heartbeat,
           state: "failed" as const,
@@ -1066,7 +1085,7 @@ export async function sweepWatches(
           notification_pending: true,
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
-        };
+        }, notification);
       }
 
       if (observedAt >= record.deadline) {
@@ -1075,9 +1094,8 @@ export async function sweepWatches(
           "deadline_elapsed",
           observedAt,
         );
-        notifications.push(notification);
         result.failed.push(record.watch_id);
-        return {
+        return claimFailedNotification({
           ...record,
           ...heartbeat,
           state: "failed" as const,
@@ -1086,7 +1104,7 @@ export async function sweepWatches(
           notification_pending: true,
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
-        };
+        }, notification);
       }
 
       const observedValue =
@@ -1137,9 +1155,8 @@ export async function sweepWatches(
           observedAt,
           observedValue,
         );
-        notifications.push(notification);
         result.failed.push(record.watch_id);
-        return {
+        return claimFailedNotification({
           ...record,
           ...heartbeat,
           state: "failed" as const,
@@ -1149,7 +1166,7 @@ export async function sweepWatches(
           notification_pending: true,
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
-        };
+        }, notification);
       }
 
       result.armed.push(record.watch_id);
@@ -1192,17 +1209,22 @@ export async function sweepWatches(
       const watches = registry.rows.map((row) => {
         if (!isWatchRecord(row)) return row;
         const record = row;
-        if (
-          record.watch_id !== notification.watch_id ||
-          !record.notification_pending
-        ) {
+        if (record.watch_id !== notification.watch_id) {
           return record;
         }
-        if (record.state === "failed") {
-          const attempts = (record.notification_attempts ?? 0) + 1;
+        if (
+          record.state === "failed" &&
+          claimedFailedWatchIds.has(record.watch_id)
+        ) {
+          const attempts = record.notification_attempts ?? 1;
           if (delivered) {
+            const {
+              notification_exhausted_at_ms: _exhaustedAt,
+              notification_exhausted_reason: _exhaustedReason,
+              ...claimed
+            } = record;
             return {
-              ...record,
+              ...claimed,
               notification_pending: false,
               notification_attempts: attempts,
               notification_next_attempt_at_ms: undefined,
@@ -1221,6 +1243,7 @@ export async function sweepWatches(
             notification_exhausted_reason: reason,
           };
         }
+        if (!record.notification_pending) return record;
         if (terminalFailureReason) {
           exhausted = {
             notification,

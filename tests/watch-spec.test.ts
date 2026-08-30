@@ -1013,6 +1013,52 @@ describe("WatchSpec arm contract", () => {
     });
   });
 
+  it("claims a failed notice before dispatch so concurrent sweepers fire once", async () => {
+    const target = join(TEST_DIR, "concurrent-deadline.md");
+    writeFileSync(target, "", "utf8");
+    await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: 2_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    let finishDelivery!: (delivered: boolean) => void;
+    const notify = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishDelivery = resolve;
+        }),
+    );
+
+    const firstSweep = sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+    const secondSweep = sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+    await secondSweep;
+
+    expect(notify).toHaveBeenCalledOnce();
+    finishDelivery(true);
+    await firstSweep;
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      state: "failed",
+      notification_pending: false,
+      notification_attempts: 1,
+      notification_delivered_at_ms: 2_000,
+    });
+  });
+
   it("fires a marker watch on count increase only", async () => {
     const target = join(TEST_DIR, "findings.md");
     writeFileSync(target, "DONE_P1\n", "utf8");
