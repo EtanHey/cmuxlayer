@@ -64,6 +64,7 @@ import {
   summarizeTransport,
   terminateChild,
   waitForSocket,
+  writeReceiptAtomically,
 } from "../scripts/bench-e2e.mjs";
 
 describe("bench-e2e measurement harness", () => {
@@ -1192,6 +1193,20 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("rejects a hard-linked lock file without modifying its shared inode", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const target = join(directory, "do-not-touch.txt");
+    await writeFile(target, "preserve me\n", "utf8");
+    await link(target, `${output}.lock`);
+
+    await expect(createOutputReservation(output)).rejects.toThrow(
+      /lock path has multiple hard links/,
+    );
+    await expect(readFile(target, "utf8")).resolves.toBe("preserve me\n");
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("canonicalizes a dangling output symlink to its future target", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const target = join(directory, "future.json");
@@ -2005,6 +2020,80 @@ describe("bench-e2e measurement harness", () => {
       ),
     ).rejects.toThrow(/output lock holder exited unexpectedly/);
     expect(events).toEqual([]);
+  });
+
+  it("cancels an in-flight atomic receipt write when lock authority is lost", async () => {
+    const controller = new AbortController();
+    let rejectWrite;
+    const pendingWrite = new Promise((_, reject) => {
+      rejectWrite = reject;
+    });
+    const events = [];
+    const publication = publishBenchmarkReceipt(
+      "/tmp/receipt.json",
+      { rows: [] },
+      {
+        assertHealthy() {},
+        release: () => events.push("release"),
+      },
+      async (_path, _contents, signal) => {
+        events.push("write-start");
+        signal.addEventListener(
+          "abort",
+          () => rejectWrite(signal.reason),
+          { once: true },
+        );
+        await pendingWrite;
+        events.push("write-finish");
+      },
+      controller.signal,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error("output lock holder exited unexpectedly"));
+
+    await expect(publication).rejects.toThrow(/lock holder exited unexpectedly/);
+    expect(events).toEqual(["write-start"]);
+  });
+
+  it("does not publish an aborted atomic receipt temp file", async () => {
+    const controller = new AbortController();
+    const events = [];
+    let rejectWrite;
+    const pendingWrite = new Promise((_, reject) => {
+      rejectWrite = reject;
+    });
+    const publication = writeReceiptAtomically(
+      "/tmp/receipt.json",
+      "{}\n",
+      controller.signal,
+      {
+        async writeTemp(_path, _contents, options) {
+          events.push(["write", options.flag, options.mode]);
+          options.signal.addEventListener(
+            "abort",
+            () => rejectWrite(options.signal.reason),
+            { once: true },
+          );
+          await pendingWrite;
+        },
+        publishTemp() {
+          events.push(["publish"]);
+        },
+        async removeTemp() {
+          events.push(["cleanup"]);
+        },
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error("lock authority lost"));
+
+    await expect(publication).rejects.toThrow(/lock authority lost/);
+    expect(events).toEqual([
+      ["write", "wx", 0o600],
+      ["cleanup"],
+    ]);
   });
 
   it("cancels a pending socket retry without waiting for its deadline", async () => {

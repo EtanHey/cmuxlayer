@@ -12,6 +12,7 @@ import {
   readlink,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   writeFile,
@@ -793,6 +794,10 @@ async function createPidLock(lockPath, label, onFailure) {
     await lockHandle.close();
     throw new Error(`${label} lock path is not a regular file: ${lockPath}`);
   }
+  if (lockStat.nlink > 1) {
+    await lockHandle.close();
+    throw new Error(`${label} lock path has multiple hard links: ${lockPath}`);
+  }
   const inheritedLockPath =
     process.platform === "linux" ? "/proc/self/fd/3" : "/dev/fd/3";
   const invocation = advisoryLockInvocation(
@@ -817,12 +822,6 @@ async function createPidLock(lockPath, label, onFailure) {
     if (holder.exitCode !== null || holder.signalCode !== null) {
       onUnexpectedExit(holder.exitCode, holder.signalCode);
     }
-    await lockHandle.truncate(0);
-    await lockHandle.writeFile(
-      `${JSON.stringify({ pid: process.pid, claim_id: randomUUID() })}\n`,
-      "utf8",
-    );
-    await lockHandle.sync();
     await lockHandle.close();
     if (holderFailure) throw holderFailure;
   } catch (error) {
@@ -1917,15 +1916,39 @@ export async function publishBenchmarkReceipt(
   path,
   receipt,
   outputReservation,
-  writeReceipt = writeFile,
+  writeReceipt = writeReceiptAtomically,
   abortSignal = null,
 ) {
   abortSignal?.throwIfAborted();
   outputReservation.assertHealthy?.();
-  await writeReceipt(path, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  await writeReceipt(path, `${JSON.stringify(receipt, null, 2)}\n`, abortSignal);
   abortSignal?.throwIfAborted();
   outputReservation.assertHealthy?.();
   await outputReservation.release();
+}
+
+export async function writeReceiptAtomically(
+  path,
+  contents,
+  abortSignal = null,
+  deps = {},
+) {
+  const writeTemp = deps.writeTemp ?? writeFile;
+  const publishTemp = deps.publishTemp ?? rename;
+  const removeTemp = deps.removeTemp ?? rm;
+  const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeTemp(tempPath, contents, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+      signal: abortSignal ?? undefined,
+    });
+    abortSignal?.throwIfAborted();
+    await publishTemp(tempPath, path);
+  } finally {
+    await removeTemp(tempPath, { force: true }).catch(() => undefined);
+  }
 }
 
 export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
@@ -2250,7 +2273,7 @@ async function executeBenchmark(
     config.out,
     receipt,
     outputReservation,
-    writeFile,
+    undefined,
     abortSignal,
   );
   process.stdout.write(`${renderMarkdownTable(results)}\n`);
