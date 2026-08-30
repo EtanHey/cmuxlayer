@@ -1106,17 +1106,19 @@ describe("bench-e2e measurement harness", () => {
       "/tmp/output.lock.reclaim",
       staleOwner,
       {
-        rename: async (_source, destination) => {
+        rename: (_source, destination) => {
           operations.push(`rename:${destination}`);
         },
-        readFile: async () => replacementOwner,
-        link: async (source, destination) => {
+        readFile: () => replacementOwner,
+        link: (source, destination) => {
           operations.push(`restore:${source}:${destination}`);
+          return Promise.resolve();
         },
-        unlink: async (path) => {
+        unlink: (path) => {
           operations.push(`unlink:${path}`);
+          return Promise.resolve();
         },
-        ownerIsLive: async () => true,
+        ownerIsLive: () => true,
         quarantinePath: "/tmp/output.lock.reclaim.retired-test",
       },
     );
@@ -1411,16 +1413,16 @@ describe("bench-e2e measurement harness", () => {
     };
 
     const result = await prepareProvenanceThenReserveOutput(config, {
-      prepare: async () => {
+      prepare: () => {
         events.push("provenance");
         return provenance;
       },
-      validate: async () => {
+      validate: () => {
         events.push("validate");
       },
-      reserve: async () => {
+      reserve: () => {
         events.push("reserve-output");
-        return { release: async () => undefined };
+        return { release: () => undefined };
       },
     });
 
