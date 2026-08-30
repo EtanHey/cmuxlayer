@@ -656,7 +656,7 @@ async function readProcessStartIdentity(pid) {
   const result = await execCapture(
     "/bin/ps",
     ["-p", String(pid), "-o", "lstart="],
-    { env: process.env },
+    { env: { ...process.env, LC_ALL: "C", LANG: "C" } },
   ).catch(() => null);
   return nonEmptyString(result?.stdout.trim());
 }
