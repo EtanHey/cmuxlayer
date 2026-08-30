@@ -9,6 +9,7 @@ import {
   cliArgs,
   createScratchTargets,
   createSocketReservation,
+  daemonLogPath,
   markSurfaceTransportUntrusted,
   nearestRankPercentile,
   operationArgs,
@@ -307,6 +308,42 @@ describe("bench-e2e measurement harness", () => {
     await terminateChild(child, 0);
 
     expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("rejects when an unresponsive child survives the bounded KILL wait", async () => {
+    class ImmortalChild extends EventEmitter {
+      exitCode = null;
+      signalCode = null;
+
+      kill() {
+        return true;
+      }
+    }
+
+    await expect(terminateChild(new ImmortalChild(), 0)).rejects.toThrow(
+      /did not exit after SIGKILL/,
+    );
+  });
+
+  it("rejects when child signal delivery fails", async () => {
+    class UnsignallableChild extends EventEmitter {
+      exitCode = null;
+      signalCode = null;
+
+      kill() {
+        return false;
+      }
+    }
+
+    await expect(terminateChild(new UnsignallableChild(), 0)).rejects.toThrow(
+      /failed to deliver SIGTERM/,
+    );
+  });
+
+  it("uses a unique daemon log beside the requested receipt", () => {
+    expect(daemonLogPath("/tmp/bench.json", 42, 1234)).toBe(
+      "/tmp/bench.json.daemon-42-1234.log",
+    );
   });
 
   it("cancels a pending socket retry without waiting for its deadline", async () => {

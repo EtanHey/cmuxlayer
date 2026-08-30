@@ -315,31 +315,51 @@ function execCapture(command, args, { env, timeoutMs = 30_000 } = {}) {
 
 export async function terminateChild(child, graceMs = 5_000) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  const exitPromise = new Promise((resolveExit) => {
-    const onExit = () => {
-      child.off("exit", onExit);
-      child.off("close", onExit);
-      resolveExit();
-    };
-    child.once("exit", onExit);
-    child.once("close", onExit);
+  const isLive = () => child.exitCode === null && child.signalCode === null;
+  let resolveFailure = () => undefined;
+  const failurePromise = new Promise((resolveFailurePromise) => {
+    resolveFailure = resolveFailurePromise;
   });
-  child.kill("SIGTERM");
-  let timer = null;
-  const exitedGracefully = await Promise.race([
-    exitPromise.then(() => true),
-    new Promise((resolveTimeout) => {
-      timer = setTimeout(() => resolveTimeout(false), graceMs);
-    }),
-  ]);
-  clearTimeout(timer);
-  if (
-    !exitedGracefully &&
-    child.exitCode === null &&
-    child.signalCode === null
-  ) {
-    child.kill("SIGKILL");
-    await exitPromise;
+  const onError = (error) => resolveFailure({ kind: "error", error });
+  child.on("error", onError);
+  let resolveExit = () => undefined;
+  const exitPromise = new Promise((resolveExitPromise) => {
+    resolveExit = resolveExitPromise;
+  });
+  const onExit = () => resolveExit({ kind: "exit" });
+  child.once("exit", onExit);
+  child.once("close", onExit);
+  const waitBounded = async () => {
+    let timer = null;
+    const outcome = await Promise.race([
+      exitPromise,
+      failurePromise,
+      new Promise((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout({ kind: "timeout" }), graceMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (outcome.kind === "error") throw outcome.error;
+    return outcome.kind === "exit";
+  };
+  const deliver = (signal) => {
+    const delivered = child.kill(signal);
+    if (!delivered && isLive()) {
+      throw new Error(`failed to deliver ${signal} to child`);
+    }
+  };
+  try {
+    deliver("SIGTERM");
+    if (await waitBounded()) return;
+    if (!isLive()) return;
+    deliver("SIGKILL");
+    if (!(await waitBounded()) && isLive()) {
+      throw new Error("child did not exit after SIGKILL within the bounded wait");
+    }
+  } finally {
+    child.off("error", onError);
+    child.off("exit", onExit);
+    child.off("close", onExit);
   }
 }
 
@@ -439,6 +459,10 @@ export async function createSocketReservation(requestedPath) {
       await rm(ownerDirectory, { recursive: true, force: true });
     },
   };
+}
+
+export function daemonLogPath(receiptPath, pid = process.pid, now = Date.now()) {
+  return `${receiptPath}.daemon-${pid}-${now}.log`;
 }
 
 async function startIsolatedDaemon(entry, env, reservation, logPath) {
@@ -746,7 +770,7 @@ async function main() {
     throw new Error(`nightly socket is not live: ${isolation.cmuxSocketPath}`);
   }
   await mkdir(dirname(config.out), { recursive: true });
-  const logPath = `${config.out}.daemon.log`;
+  const logPath = daemonLogPath(config.out);
   const socketReservation = await createSocketReservation(
     isolation.daemonSocketPath,
   );
