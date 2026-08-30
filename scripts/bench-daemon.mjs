@@ -991,6 +991,13 @@ async function measureSpawnLifecycleAcrossClients(
     spawn_close_during_sweep: summarizeTimedSamples(
       samples.map((sample) => sample.spawn_close_during_sweep),
     ),
+    surface_receipts_waitable: samples.every(
+      (sample) =>
+        typeof sample.surface.receipt.delivery_id === "string" &&
+        sample.surface.wait_for.delivery_id ===
+          sample.surface.receipt.delivery_id &&
+        sample.surface.wait_for.terminal === true,
+    ),
   };
 }
 
@@ -1237,10 +1244,7 @@ async function main() {
           }
         : {}),
       surface_receipt_is_waitable:
-        typeof firstSendAfterSpawn.surface.receipt.delivery_id === "string" &&
-        firstSendAfterSpawn.surface.wait_for.delivery_id ===
-          firstSendAfterSpawn.surface.receipt.delivery_id &&
-        firstSendAfterSpawn.surface.wait_for.terminal === true,
+        firstSendAfterSpawn.surface_receipts_waitable,
       socket_transport_only: [
         daemonLatency.list_surfaces,
         daemonLatency.read_screen,

@@ -56,6 +56,31 @@ export function baselineContentSha256(baseline) {
   return createHash("sha256").update(canonicalJson(content)).digest("hex");
 }
 
+function historyEntryContentSha256(entry) {
+  const { content_sha256: _attestation, ...content } = entry;
+  return createHash("sha256").update(canonicalJson(content)).digest("hex");
+}
+
+function validHistoryEntry(entry) {
+  if (!/^[0-9a-f]{40}$/.test(entry?.source?.git_sha ?? "")) return false;
+  if (
+    !Number.isSafeInteger(entry?.source?.workflow_run_id) ||
+    entry.source.workflow_run_id <= 0 ||
+    entry?.content_sha256 !== historyEntryContentSha256(entry)
+  ) {
+    return false;
+  }
+  return [...CANONICAL_OPERATIONS, "cli_send_ms"].every((operation) => {
+    const measurement = entry?.measurements?.[operation];
+    if (!Number.isFinite(measurement?.p50_ms)) return false;
+    if (operation === "cli_send_ms") return true;
+    return (
+      Number.isFinite(measurement.p95_ms) &&
+      Number.isFinite(measurement.lock_hold_ms)
+    );
+  });
+}
+
 export function isAttestedLegacyBaseline(baseline) {
   return (
     baseline?.schema_version === 2 &&
@@ -231,6 +256,28 @@ function operationMargin(
   return rounded(Math.max(spread, varianceMargin));
 }
 
+function operationMarginRule(
+  baseline,
+  operation,
+  history,
+  historyDegraded = false,
+) {
+  const metadata = baseline.replay.row_metadata[operation];
+  if (
+    historyDegraded ||
+    metadata.stress === true ||
+    metadata.sampling === "single_shot" ||
+    metadata.samples_per_run < 12
+  ) {
+    return "constant +300ms (single-shot)";
+  }
+  const measuredRuns = history.filter((entry) =>
+    Number.isFinite(entry?.measurements?.[operation]?.p50_ms),
+  ).length;
+  const runCount = Math.max(1, measuredRuns);
+  return `measured (${runCount} ${runCount === 1 ? "run" : "runs"})`;
+}
+
 export function requireBaselineIncreaseReason(measurementPairs, reason) {
   const raisesCommittedBaseline = measurementPairs.some(
     ([proposed, committed]) => proposed > committed,
@@ -324,7 +371,11 @@ export function appendGreenMainHistory(history, result, context) {
       ]),
     ),
   };
-  return [...existing, entry].slice(-BENCHMARK_HISTORY_LIMIT);
+  const attestedEntry = {
+    ...entry,
+    content_sha256: historyEntryContentSha256(entry),
+  };
+  return [...existing, attestedEntry].slice(-BENCHMARK_HISTORY_LIMIT);
 }
 
 export async function readBenchmarkHistory(historyPath) {
@@ -335,6 +386,13 @@ export async function readBenchmarkHistory(historyPath) {
         runs: [],
         degraded: true,
         reason: `${historyPath} does not contain a runs array`,
+      };
+    }
+    if (!parsed.runs.every(validHistoryEntry)) {
+      return {
+        runs: [],
+        degraded: true,
+        reason: `${historyPath} contains a malformed entry`,
       };
     }
     return { runs: parsed.runs, degraded: false };
@@ -398,6 +456,7 @@ function row(
     stress: metadata.stress === true,
     history_degraded: metadata.history_degraded === true,
     margin_ms: metadata.margin_ms,
+    margin_rule: metadata.margin_rule,
     passed,
   };
 }
@@ -416,6 +475,7 @@ function exactRow(operation, metric, committed, current, unit, metadata = {}) {
     sampling: metadata.sampling,
     stress: metadata.stress === true,
     history_degraded: metadata.history_degraded === true,
+    margin_rule: metadata.margin_rule,
   };
 }
 
@@ -441,6 +501,12 @@ export function compareBenchmark(
       history,
       historyDegraded,
     );
+    const marginRule = operationMarginRule(
+      baseline,
+      operation,
+      history,
+      historyDegraded,
+    );
     for (const metric of ["p50_ms", "p95_ms"]) {
       rows.push(
         row(
@@ -459,6 +525,7 @@ export function compareBenchmark(
           {
             ...metadata,
             margin_ms: marginMs,
+            margin_rule: marginRule,
             history_degraded: historyDegraded,
           },
         ),
@@ -468,6 +535,12 @@ export function compareBenchmark(
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay.row_metadata[operation];
     const marginMs = operationMargin(
+      baseline,
+      operation,
+      history,
+      historyDegraded,
+    );
+    const marginRule = operationMarginRule(
       baseline,
       operation,
       history,
@@ -490,6 +563,7 @@ export function compareBenchmark(
         {
           ...metadata,
           margin_ms: marginMs,
+          margin_rule: marginRule,
           history_degraded: historyDegraded,
         },
       ),
@@ -522,6 +596,12 @@ export function compareBenchmark(
           history,
           historyDegraded,
         ),
+        margin_rule: operationMarginRule(
+          baseline,
+          "send_to_surface_warm",
+          history,
+          historyDegraded,
+        ),
         history_degraded: historyDegraded,
       },
     ),
@@ -536,6 +616,12 @@ export function compareBenchmark(
         "bytes",
         {
           ...baseline.replay.row_metadata[operation],
+          margin_rule: operationMarginRule(
+            baseline,
+            operation,
+            history,
+            historyDegraded,
+          ),
           history_degraded: historyDegraded,
         },
       ),
@@ -549,6 +635,19 @@ export function compareBenchmark(
         ? `${entry.operation} ${metric}: ${entry.current} ${entry.unit} does not match committed ${entry.baseline} ${entry.unit}`
         : `${entry.operation} ${metric}: ${entry.current}${entry.unit} exceeds ${entry.ceiling}${entry.unit}`;
     });
+  for (const operation of baseline.replay.operations) {
+    const expected = baseline.replay.row_metadata[operation];
+    const candidate = result?.replay?.row_metadata?.[operation];
+    if (
+      candidate?.sampling !== expected.sampling ||
+      candidate?.samples_per_run !== expected.samples_per_run ||
+      (candidate?.stress === true) !== (expected.stress === true)
+    ) {
+      failures.push(
+        `candidate row_metadata.${operation} does not match the committed sampling workload`,
+      );
+    }
+  }
   if (historyDegraded) {
     failures.push(
       `benchmark history degraded: ${historyDegradedReason ?? "untrusted cache"}; conservative +300ms margins active`,
@@ -603,11 +702,11 @@ function formatted(value, unit) {
 
 export function renderMarkdownComparison(baseline, result, comparison) {
   const tableHeader = [
-    "| Operation | Transport | Sampling | Metric | Baseline | Current | Ceiling | Status |",
-    "|---|:---:|:---:|---:|---:|---:|---:|:---:|",
+    "| Operation | Transport | Sampling | Margin rule | Metric | Baseline | Current | Ceiling | Status |",
+    "|---|:---:|:---:|:---:|---:|---:|---:|---:|:---:|",
   ];
   const tableRow = (entry) =>
-    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
+    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
   const changed = comparison.rows.filter(
     (entry) => !entry.passed || entry.current !== entry.baseline,
   );

@@ -285,7 +285,12 @@ describe("daemon performance budget", () => {
     const row = comparison.rows.find(
       (entry) => entry.operation === "list_surfaces" && entry.metric === "p50_ms",
     );
-    expect(row).toMatchObject({ sampling: "sampled", margin_ms: 40, ceiling: 140 });
+    expect(row).toMatchObject({
+      sampling: "sampled",
+      margin_ms: 40,
+      margin_rule: "measured (5 runs)",
+      ceiling: 140,
+    });
 
     const highVarianceHistory = [50, 75, 100, 125, 150].map((p50_ms, index) => ({
       source: { git_sha: `f${String(index).padStart(39, "0")}`, workflow_run_id: 100 + index },
@@ -319,6 +324,7 @@ describe("daemon performance budget", () => {
     expect(singleRow).toMatchObject({
       sampling: "single_shot",
       margin_ms: 300,
+      margin_rule: "constant +300ms (single-shot)",
       ceiling: 400,
     });
     const stressRow = compareBenchmark(baseline, result).rows.find(
@@ -326,7 +332,26 @@ describe("daemon performance budget", () => {
         entry.operation === "send_to_surface_10_parallel" &&
         entry.metric === "p50_ms",
     );
-    expect(stressRow).toMatchObject({ stress: true, margin_ms: 300, ceiling: 560 });
+    expect(stressRow).toMatchObject({
+      stress: true,
+      margin_ms: 300,
+      margin_rule: "constant +300ms (single-shot)",
+      ceiling: 560,
+    });
+    const markdown = renderMarkdownComparison(
+      baseline,
+      result,
+      compareBenchmark(baseline, result, {
+        history: Array.from({ length: 5 }, (_, index) => ({
+          measurements: {
+            list_surfaces: { p50_ms: 100 + index },
+          },
+        })),
+      }),
+    );
+    expect(markdown).toContain("| Margin rule |");
+    expect(markdown).toContain("measured (5 runs)");
+    expect(markdown).toContain("constant +300ms (single-shot)");
   });
 
   it("records only green main runs and bounds append-only history to 50 runs", () => {
@@ -408,7 +433,27 @@ describe("daemon performance budget", () => {
       );
       writeFileSync(historyPath, JSON.stringify({ runs: [{ source: { workflow_run_id: 1 } }] }));
       await expect(readBenchmarkHistory(historyPath)).resolves.toMatchObject({
-        runs: [{ source: { workflow_run_id: 1 } }],
+        runs: [],
+        degraded: true,
+        reason: expect.stringContaining("malformed entry"),
+      });
+      const validRun = (
+        checkerModule as typeof checkerModule & {
+          appendGreenMainHistory: (
+            history: unknown[],
+            result: unknown,
+            context: Record<string, unknown>,
+          ) => unknown[];
+        }
+      ).appendGreenMainHistory([], result, {
+        event_name: "push",
+        ref: "refs/heads/main",
+        git_sha: "a".repeat(40),
+        workflow_run_id: 99,
+      })[0];
+      writeFileSync(historyPath, JSON.stringify({ runs: [validRun] }));
+      await expect(readBenchmarkHistory(historyPath)).resolves.toMatchObject({
+        runs: [validRun],
         degraded: false,
       });
     } finally {
@@ -697,6 +742,32 @@ describe("daemon performance budget", () => {
     );
   });
 
+  it("fails closed when candidate sampling metadata is missing or incompatible", () => {
+    const missing = compareBenchmark(baseline, {
+      ...result,
+      replay: { ...result.replay, row_metadata: undefined },
+    });
+    expect(missing.passed).toBe(false);
+    expect(missing.failures).toContainEqual(
+      expect.stringContaining("candidate row_metadata.list_surfaces"),
+    );
+
+    const incompatible = compareBenchmark(baseline, {
+      ...result,
+      replay: {
+        ...result.replay,
+        row_metadata: {
+          ...result.replay.row_metadata,
+          list_surfaces: { sampling: "single_shot", samples_per_run: 1 },
+        },
+      },
+    });
+    expect(incompatible.passed).toBe(false);
+    expect(incompatible.failures).toContainEqual(
+      expect.stringContaining("candidate row_metadata.list_surfaces"),
+    );
+  });
+
   it("cannot reuse a stale result when the benchmark process fails", async () => {
     const artifactDir = mkdtempSync(join(tmpdir(), "cmuxlayer-stale-bench-"));
     writeFileSync(join(artifactDir, "result.json"), JSON.stringify(result));
@@ -750,7 +821,9 @@ describe("daemon performance budget", () => {
     );
 
     expect(markdown).toContain("<!-- cmuxlayer-perf-budget -->");
-    expect(markdown).toContain("| Operation | Transport | Sampling | Metric |");
+    expect(markdown).toContain(
+      "| Operation | Transport | Sampling | Margin rule | Metric |",
+    );
     expect(markdown).toContain("first_send_after_spawn");
     expect(markdown).toContain("Runner regression ratio: 1.25x");
     expect(markdown).toContain("rows unchanged");
@@ -809,6 +882,10 @@ describe("daemon performance budget", () => {
     expect(source).toContain('sampling: "sampled"');
     expect(source).toContain("samples_per_run");
     expect(source).toContain("for (const client of clients)");
+    expect(source).toContain("surface_receipts_waitable: samples.every");
+    expect(source).toContain(
+      "surface_receipt_is_waitable:\n        firstSendAfterSpawn.surface_receipts_waitable",
+    );
     expect(source).toContain("p95_ms");
     expect(source).toContain("request_bytes");
     expect(source).toContain("lock_hold_ms");
