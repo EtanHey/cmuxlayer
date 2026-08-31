@@ -1076,6 +1076,10 @@ async function measureSpawnLifecycleOnce(
     requireSubmitted: false,
     canonicalText: surfaceSampleSentinel("NNN"),
     validateReceipt: async (receipt) => {
+      requireTerminalSubmission(
+        receipt,
+        "sampled surface send initial receipt",
+      );
       try {
         const terminal = await requireSubmittedDelivery(
           client,
@@ -1528,14 +1532,16 @@ async function main() {
         text: parallelStressSentinel(index, roundIndex),
         press_enter: true,
       }),
-      (receipt, requestArgs, index) =>
-        requireSurfaceDeliveryProof(
+      (receipt, requestArgs, index) => {
+        requireTerminalSubmission(receipt, "parallel send initial receipt");
+        return requireSurfaceDeliveryProof(
           stressClients[index],
           receipt,
           requestArgs,
           `surface:bench-${index}`,
           "parallel send",
-        ),
+        );
+      },
     );
     const readScreen10Parallel = await measureParallelStress(
       stressClients,

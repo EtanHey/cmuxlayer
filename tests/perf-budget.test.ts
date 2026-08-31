@@ -1045,6 +1045,10 @@ describe("daemon performance budget", () => {
     expect(source).toMatch(
       /await Promise\.all\([\s\S]*?validateReceipt\?\.[\s\S]*?\);\n {4}const elapsedMs = nowMs\(\) - startedAt;/,
     );
+    expect(source).toContain('"sampled surface send initial receipt"');
+    expect(source).toContain(
+      'requireTerminalSubmission(receipt, "parallel send initial receipt")',
+    );
     expect(source).toContain("beforeRound?.(roundIndex)");
     expect(source).toContain("parallelStressSentinel(index, roundIndex)");
     expect(source).toContain("args(index, roundIndex)");
