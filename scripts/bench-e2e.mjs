@@ -1957,7 +1957,7 @@ export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
 async function isBareGitRepositoryRoot(root) {
   try {
     const [head, objects, refs, config] = await Promise.all([
-      lstat(join(root, "HEAD")),
+      stat(join(root, "HEAD")),
       lstat(join(root, "objects")),
       lstat(join(root, "refs")),
       lstat(join(root, "config")),

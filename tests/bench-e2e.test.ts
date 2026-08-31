@@ -1776,6 +1776,13 @@ describe("bench-e2e measurement harness", () => {
     await expect(
       assertOutputOutsideGitMetadata(output, directory),
     ).rejects.toThrow(/inside Git metadata/);
+    await mkdir(join(bareGit, "refs", "heads"), { recursive: true });
+    await writeFile(join(bareGit, "refs", "heads", "main"), "commit\n", "utf8");
+    await rm(output);
+    await symlink("refs/heads/main", output);
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
     await rm(directory, { recursive: true, force: true });
   });
 
