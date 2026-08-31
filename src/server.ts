@@ -7525,6 +7525,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               submit_verified: true,
               submit_evidence: submitEvidence,
               retry_count: error.retry_count,
+              rpc_methods: error.receipt.rpc_methods,
             }),
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
             prompt_text: rawPrompt,
@@ -17286,6 +17287,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_verified: delivery.submit_verified,
                     submit_evidence: delivery.submit_evidence,
                     retry_count: delivery.retry_count,
+                    rpc_methods: delivery.rpc_methods,
                     queued_behind_turn: delivery.queued_behind_turn,
                   }),
                   accepted: true,
@@ -17355,6 +17357,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         : false,
                     submit_verified: failed.submit_verified,
                     retry_count: failed.retry_count,
+                    rpc_methods:
+                      error instanceof SubmitVerificationError
+                        ? error.receipt.rpc_methods
+                        : [],
                   }),
                   accepted: false,
                   error: failed.error,
@@ -17562,6 +17568,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : false,
                 submit_verified: failedReceipt.submit_verified,
                 retry_count: failedReceipt.retry_count,
+                rpc_methods:
+                  error instanceof SubmitVerificationError
+                    ? error.receipt.rpc_methods
+                    : [],
                 timings_ms: timings,
               }),
             };
@@ -17638,6 +17648,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             submit_verified: delivery.submit_verified,
             submit_evidence: delivery.submit_evidence,
             retry_count: delivery.retry_count,
+            rpc_methods: delivery.rpc_methods,
             queued_behind_turn: delivery.queued_behind_turn,
             timings_ms: timings,
           });

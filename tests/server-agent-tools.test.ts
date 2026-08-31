@@ -1893,6 +1893,11 @@ function makeBroadcastClient(
   };
 
   const client = {
+    getTransportHealth: () => ({
+      mode: "socket" as const,
+      degraded: false,
+      current_socket_path: "/tmp/cmuxlayer-test.sock",
+    }),
     listWorkspaces: vi.fn().mockImplementation(async () =>
       opts.malformedEnumeration
         ? { workspaces: null }
@@ -8835,6 +8840,31 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("send_to preserves socket RPC provenance in a rebuilt agent receipt", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-rpc-receipt",
+      surface_id: "surface:worker-rpc-receipt",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server } = await createBroadcastServer([record]);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "Inspect receipt provenance",
+        press_enter: false,
+      },
+      {},
+    );
+
+    expect(parseToolResult(result)).toMatchObject({
+      ok: true,
+      rpc_methods: ["surface.send_text"],
+    });
+  });
+
   it("send_to resolves structured targeting by job function, workspace, ids, and exclude", async () => {
     const records = [
       makeServerAgentRecord({
@@ -8908,6 +8938,7 @@ describe("agent lifecycle tool handlers", () => {
           terminal: true,
           submit_verified: true,
           submit_evidence: "status_only",
+          rpc_methods: ["surface.send_text", "surface.send_key"],
         }),
         expect.objectContaining({
           requested_agent_id: "reviewer-excluded",

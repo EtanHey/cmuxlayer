@@ -144,11 +144,13 @@ function registeredTestTool(
   server: ReturnType<typeof createServerImpl>,
   name: string,
 ): RegisteredTestTool {
-  return (
+  const tool = (
     server as unknown as {
       _registeredTools: Record<string, RegisteredTestTool>;
     }
-  )._registeredTools[name]!;
+  )._registeredTools[name];
+  if (!tool) throw new Error(`Missing registered test tool: ${name}`);
+  return tool;
 }
 
 function createServerWithoutCallerContext(
@@ -3151,7 +3153,7 @@ describe("tool handler integration", () => {
     );
 
     const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0]!.text);
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
     expect(parsed.rpc_methods).toEqual([]);
   });
 
@@ -3178,7 +3180,7 @@ describe("tool handler integration", () => {
     );
 
     const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0]!.text);
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
     expect(parsed.rpc_methods).toEqual(["surface.send_key"]);
   });
 
@@ -3205,7 +3207,7 @@ describe("tool handler integration", () => {
     );
 
     const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0]!.text);
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
     expect(mockClient.send).toHaveBeenCalledWith(
       "surface:1",
       "",
