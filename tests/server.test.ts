@@ -129,6 +129,27 @@ function createServer(
   return server;
 }
 
+type RegisteredTestTool = {
+  handler: (
+    args: Record<string, unknown>,
+    extra: Record<string, never>,
+  ) => Promise<{
+    structuredContent?: Record<string, unknown>;
+    content: Array<{ text: string }>;
+  }>;
+};
+
+function registeredTestTool(
+  server: ReturnType<typeof createServerImpl>,
+  name: string,
+): RegisteredTestTool {
+  return (
+    server as unknown as {
+      _registeredTools: Record<string, RegisteredTestTool>;
+    }
+  )._registeredTools[name]!;
+}
+
 function createServerWithoutCallerContext(
   ...args: Parameters<typeof createServerImpl>
 ): ReturnType<typeof createServerImpl> {
@@ -3012,32 +3033,34 @@ describe("tool handler integration", () => {
 
   it("send_input pastes short multiline text and presses return once", async () => {
     const events: Array<{ type: "paste" | "key"; value: string }> = [];
+    let transportMode: "socket" | "cli" = "socket";
     const mockClient = {
       getTransportHealth: () => ({
-        mode: "socket" as const,
-        degraded: false,
+        mode: transportMode,
+        degraded: transportMode === "cli",
         current_socket_path: "/tmp/cmux-test.sock",
       }),
-      send: vi.fn().mockResolvedValue(undefined),
-      pasteText: vi.fn().mockImplementation((_surface, text) => {
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockImplementation((_surface: string, text: string) => {
         events.push({ type: "paste", value: text });
         return Promise.resolve();
       }),
-      sendKey: vi.fn().mockImplementation((_surface, key) => {
+      sendKey: vi.fn().mockImplementation((_surface: string, key: string) => {
         events.push({ type: "key", value: key });
+        transportMode = "cli";
         return Promise.resolve();
       }),
     };
     const server = createServer({
-      client: mockClient as any,
+      client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = registeredTestTool(server, "send_input");
     const text = "Objective\n\nConstraints\n\nAcceptance criteria";
 
     const result = await tool.handler(
       { surface: "surface:1", text, press_enter: true },
-      {} as any,
+      {},
     );
 
     const parsed =
@@ -3056,10 +3079,7 @@ describe("tool handler integration", () => {
       "return",
       expect.any(Object),
     );
-    expect(parsed.rpc_methods).toEqual([
-      "surface.send_text",
-      "surface.send_key",
-    ]);
+    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
     expect(events).toEqual([
       { type: "paste", value: text },
       { type: "key", value: "return" },
@@ -3069,7 +3089,7 @@ describe("tool handler integration", () => {
   it("send_input retries a paste when its buffer disappears before paste-buffer", async () => {
     const pastedTexts: string[] = [];
     const mockClient = {
-      send: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn().mockResolvedValue(),
       pasteText: vi
         .fn()
         .mockRejectedValueOnce(new Error("Buffer not found: cmuxlayer-surface-1"))
@@ -3077,18 +3097,18 @@ describe("tool handler integration", () => {
           pastedTexts.push(text);
           return Promise.resolve();
         }),
-      sendKey: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(),
     };
     const server = createServer({
-      client: mockClient as any,
+      client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = registeredTestTool(server, "send_input");
     const text = "line one\nline two";
 
     const result = await tool.handler(
       { surface: "surface:1", text, press_enter: false },
-      {} as any,
+      {},
     );
 
     const parsed =
@@ -3098,6 +3118,65 @@ describe("tool handler integration", () => {
     expect(pastedTexts).toEqual([text]);
     expect(mockClient.send).not.toHaveBeenCalled();
     expect(mockClient.sendKey).not.toHaveBeenCalled();
+  });
+
+  it("send_key receipts include socket RPC provenance for non-submit keys", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockResolvedValue(),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_key");
+
+    const result = await tool.handler(
+      { surface: "surface:1", key: "escape" },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]!.text);
+    expect(parsed.rpc_methods).toEqual(["surface.send_key"]);
+  });
+
+  it("send_input receipts include socket RPC provenance for empty text", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockResolvedValue(),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_input");
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: "", press_enter: false },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]!.text);
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:1",
+      "",
+      expect.any(Object),
+    );
+    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
   });
 
   it("send_input refuses multi-paragraph inline text for a tracked Codex unless explicitly allowed", async () => {

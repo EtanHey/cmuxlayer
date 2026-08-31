@@ -1028,6 +1028,8 @@ export interface PublicDeliveryReceipt {
   WARNING?: string;
 }
 
+type DeliveryRpcMethod = PublicDeliveryReceipt["rpc_methods"][number];
+
 type DeliveryPhase =
   "route" | "lock" | "lock_hold" | "enumerate" | "type" | "verify";
 type DeliveryPhaseTimings = Record<DeliveryPhase, number>;
@@ -4604,16 +4606,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : {}),
     };
   };
-  const directDeliveryRpcMethods = (
-    typed: boolean,
-    submitAttempted: boolean,
-  ): Array<"surface.send_text" | "surface.send_key"> => {
-    if (transportProvenance().transport !== "socket") return [];
-    return [
-      ...(typed ? (["surface.send_text"] as const) : []),
-      ...(submitAttempted ? (["surface.send_key"] as const) : []),
-    ];
-  };
+  const successfulDispatchRpcMethod = (
+    method: DeliveryRpcMethod,
+  ): DeliveryRpcMethod | null =>
+    getTransportHealth(client)?.mode === "socket" ? method : null;
   const attachTransportProvenance = (
     result: unknown,
     toolName: string,
@@ -5167,13 +5163,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     shouldPaste: boolean,
     avoidDuplicateOnAmbiguousRetry: boolean,
     beforeMutation?: () => Promise<void>,
-  ) => {
+  ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
     let lastError: unknown;
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
+      let attemptedRpcMethod: DeliveryRpcMethod | null = null;
       try {
         await beforeMutation?.();
+        attemptedRpcMethod =
+          getTransportHealth(client)?.mode === "socket"
+            ? "surface.send_text"
+            : null;
         if (shouldPaste) {
           if (typeof client.pasteText !== "function") {
             throw pasteRequiredError("client does not support pasteText");
@@ -5192,7 +5193,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await client.send(surface, chunk, opts);
         }
         invalidateSurfaceTopologyCallScope(client as object);
-        return;
+        return successfulDispatchRpcMethod("surface.send_text");
       } catch (error) {
         lastError = error;
         attempt += 1;
@@ -5227,7 +5228,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 (screenShowsPendingInput(snapshot.text, chunk) ||
                   screenShowsPendingShellInput(snapshot.text, chunk))
               ) {
-                return;
+                return attemptedRpcMethod;
               }
             } catch (observeError) {
               if (observeError instanceof SurfaceGoneError) {
@@ -5270,16 +5271,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     key: string,
     workspace?: string,
     beforeMutation?: () => Promise<void>,
-  ) => {
+  ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
+    let lastError: unknown;
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
         await beforeMutation?.();
         await client.sendKey(surface, key, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
-        return;
+        return successfulDispatchRpcMethod("surface.send_key");
       } catch (error) {
+        lastError = error;
         attempt += 1;
         if (
           !isRetryableDeliveryError(error) ||
@@ -5290,6 +5293,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await delay(SEND_INPUT_RETRY_DELAY_MS);
       }
     }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Failed to send key ${key} to ${surface}`);
   };
 
   const appendDeliveryEvent = (event: Omit<DeliveryTelemetryEvent, "ts">) => {
@@ -5589,6 +5596,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     pre_return_screen?: string | null;
     pre_return_metrics?: RawSubmitEvidenceMetrics | null;
     beforeMutation?: () => Promise<void>;
+    rpcMethods: Set<DeliveryRpcMethod>;
   }): Promise<{
     submit_verified: boolean | null;
     submit_evidence: SubmitEvidence | null;
@@ -5884,12 +5892,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         Date.now() - retryEligiblePendingSince >= retryObserveMs
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
-        await sendKeyWithRetry(
+        const recoveryRpcMethod = await sendKeyWithRetry(
           opts.surface,
           "return",
           opts.workspace,
           opts.beforeMutation,
         );
+        if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
         retryCount += 1;
         appendDeliveryEvent({
           event_type: "press_enter",
@@ -6113,6 +6122,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
+      const rpcMethods = new Set<DeliveryRpcMethod>();
       const submitAttempted = isSubmitKey(key);
       const submitBaseline =
         submitAttempted && opts.verify_submit
@@ -6120,7 +6130,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
-      await timeDeliveryPhase(opts.timings, "type", () =>
+      const keyRpcMethod = await timeDeliveryPhase(opts.timings, "type", () =>
         sendKeyWithRetry(
           opts.surface,
           key,
@@ -6128,6 +6138,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts.beforeMutation,
         ),
       );
+      if (keyRpcMethod) rpcMethods.add(keyRpcMethod);
       const verification =
         submitAttempted && opts.verify_submit
           ? await timeDeliveryPhase(opts.timings, "verify", () =>
@@ -6143,7 +6154,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_attempted: submitAttempted,
         submit_verified: verification.submit_verified,
         retry_count: 0,
-        rpc_methods: directDeliveryRpcMethods(false, submitAttempted),
+        rpc_methods: [...rpcMethods],
         timings_ms: opts.timings,
         ...(submitAttempted && verification.submit_verified === null
           ? {
@@ -6205,9 +6216,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.chunks,
       deliveryBatches.length,
     );
+    const rpcMethods = new Set<DeliveryRpcMethod>();
     await timeDeliveryPhase(opts.timings, "type", async () => {
       for (const [index, batch] of deliveryBatches.entries()) {
-        await sendChunkWithRetry(
+        const chunkRpcMethod = await sendChunkWithRetry(
           opts.surface,
           batch.text,
           {
@@ -6219,6 +6231,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts.source_event === "spawn_agent",
           opts.beforeMutation,
         );
+        if (chunkRpcMethod) rpcMethods.add(chunkRpcMethod);
         for (const sentChunks of batch.deliveredChunkCounts) {
           opts.onChunkDelivered?.(sentChunks);
         }
@@ -6293,12 +6306,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         await timeDeliveryPhase(opts.timings, "type", async () => {
           await delay(computeEnterDelayMs(bytes, opts.chunks.length));
-          await sendKeyWithRetry(
+          const submitRpcMethod = await sendKeyWithRetry(
             opts.surface,
             "return",
             opts.workspace,
             opts.beforeMutation,
           );
+          if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
         });
         appendDeliveryEvent({
           event_type: "press_enter",
@@ -6332,6 +6346,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 requireObservedPayloadBeforeEnter,
               require_working_status: opts.source_event === "boot_prompt",
               beforeMutation: opts.beforeMutation,
+              rpcMethods,
             }),
         );
         submit_verified = verification.submit_verified;
@@ -6410,7 +6425,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verified,
       submit_evidence,
       retry_count,
-      rpc_methods: directDeliveryRpcMethods(bytes > 0, Boolean(opts.press_enter)),
+      rpc_methods: [...rpcMethods],
       timings_ms: opts.timings,
       WARNING:
         opts.press_enter &&
