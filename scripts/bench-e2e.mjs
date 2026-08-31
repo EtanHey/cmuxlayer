@@ -1987,7 +1987,7 @@ async function resolveGitMetadataPathsAtRoot(root) {
   ];
 }
 
-export async function resolveGitMetadataPaths(root, outputPath = null) {
+export async function resolveGitRepositoryRoots(root, outputPath = null) {
   const absoluteRoot = await realpath(resolve(root)).catch((error) => {
     if (error?.code === "ENOENT") return resolve(root);
     throw error;
@@ -2008,6 +2008,11 @@ export async function resolveGitMetadataPaths(root, outputPath = null) {
       if (dirname(candidate) === candidate) break;
     }
   }
+  return [...new Set(candidateRoots)];
+}
+
+export async function resolveGitMetadataPaths(root, outputPath = null) {
+  const candidateRoots = await resolveGitRepositoryRoots(root, outputPath);
   return [
     ...new Set(
       (await Promise.all(candidateRoots.map(resolveGitMetadataPathsAtRoot))).flat(),
@@ -2089,6 +2094,12 @@ export async function prepareBuiltEntries(config, deps = {}) {
     root,
     deps.resolveGitMetadataPaths,
   );
+  const canonicalOutput = config.out
+    ? await canonicalOutputPath(config.out)
+    : null;
+  const outputRepositoryRoots = config.out
+    ? await resolveGitRepositoryRoots(root, canonicalOutput)
+    : [resolve(root)];
   const ownedSidecarPaths = async () =>
     config.out
       ? (await enumerateOwnedSidecars(config.out)).map((sidecar) =>
@@ -2103,54 +2114,60 @@ export async function prepareBuiltEntries(config, deps = {}) {
     );
   const readHead = () =>
     exec("git", ["rev-parse", "HEAD"], execOptions);
-  const outputRelative = config.out
-    ? relative(resolve(root), resolve(config.out))
-    : null;
   const assertOutputUntracked = async () => {
-    if (
-      !outputRelative ||
-      outputRelative === ".." ||
-      outputRelative.startsWith(`..${sep}`)
-    ) {
-      return;
-    }
-    const pathspec = outputRelative.split(sep).join("/");
-    const sidecarPathspecs = (await ownedSidecarPaths())
-      .filter((sidecarPath) =>
-        ownedReceiptSidecarKind(config.out, sidecarPath),
-      )
-      .map((sidecarPath) => relative(resolve(root), resolve(sidecarPath)))
-      .filter(
-        (tempRelative) =>
-          tempRelative !== "" &&
-          tempRelative !== ".." &&
-          !tempRelative.startsWith(`..${sep}`),
-      )
-      .map((tempRelative) =>
-        `:(literal)${tempRelative.split(sep).join("/")}`,
+    for (const [index, repositoryRoot] of outputRepositoryRoots.entries()) {
+      const outputRelative = config.out
+        ? relative(resolve(repositoryRoot), canonicalOutput)
+        : null;
+      if (
+        !outputRelative ||
+        outputRelative === ".." ||
+        outputRelative.startsWith(`..${sep}`)
+      ) {
+        continue;
+      }
+      const pathspec = outputRelative.split(sep).join("/");
+      const sidecarPathspecs = (await ownedSidecarPaths())
+        .filter((sidecarPath) =>
+          ownedReceiptSidecarKind(config.out, sidecarPath),
+        )
+        .map((sidecarPath) =>
+          relative(resolve(repositoryRoot), resolve(sidecarPath)),
+        )
+        .filter(
+          (tempRelative) =>
+            tempRelative !== "" &&
+            tempRelative !== ".." &&
+            !tempRelative.startsWith(`..${sep}`),
+        )
+        .map((tempRelative) =>
+          `:(literal)${tempRelative.split(sep).join("/")}`,
+        );
+      const gitPrefix = index === 0 ? [] : ["-C", repositoryRoot];
+      const trackedOutput = await exec(
+        "git",
+        [
+          ...gitPrefix,
+          "ls-files",
+          "--cached",
+          "--with-tree=HEAD",
+          "--",
+          `:(literal)${pathspec}`,
+          ...sidecarPathspecs,
+        ],
+        execOptions,
       );
-    const trackedOutput = await exec(
-      "git",
-      [
-        "ls-files",
-        "--cached",
-        "--with-tree=HEAD",
-        "--",
-        `:(literal)${pathspec}`,
-        ...sidecarPathspecs,
-      ],
-      execOptions,
-    );
-    const trackedPath = trackedOutput.stdout.trim().split("\n")[0];
-    if (trackedPath) {
-      if (trackedPath === pathspec) {
+      const trackedPath = trackedOutput.stdout.trim().split("\n")[0];
+      if (trackedPath) {
+        if (trackedPath === pathspec) {
+          throw new Error(
+            `refusing to use a tracked output receipt: ${config.out}`,
+          );
+        }
         throw new Error(
-          `refusing to use a tracked output receipt: ${config.out}`,
+          `refusing to overwrite tracked output artifact: ${trackedPath}`,
         );
       }
-      throw new Error(
-        `refusing to overwrite tracked output artifact: ${trackedPath}`,
-      );
     }
   };
   await assertOutputUntracked();

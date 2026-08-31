@@ -1741,6 +1741,36 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("rejects a receipt tracked by a nested checkout", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const nested = join(directory, "nested-checkout");
+    const output = join(nested, "receipt.json");
+    await mkdir(join(nested, ".git"), { recursive: true });
+    await writeFile(output, "tracked contents\n", "utf8");
+
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: join(directory, "dist", "index.js"),
+          daemonEntry: join(directory, "dist", "daemon.js"),
+          out: output,
+        },
+        {
+          repoRoot: directory,
+          exec: async (_command, args) => {
+            if (args[0] === "ls-files") return { stdout: "", stderr: "" };
+            if (args[0] === "-C" && args[1] === (await realpath(nested))) {
+              expect(args[2]).toBe("ls-files");
+              return { stdout: "receipt.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("rejects redirected Git metadata before provenance checks", async () => {
     await expect(
       prepareBuiltEntries(
