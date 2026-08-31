@@ -927,8 +927,8 @@ async function requireSurfaceDeliveryProof(
     typeof receipt.delivery_id === "string"
   ) {
     await requireSubmittedDelivery(client, receipt, label);
-  } else if (receipt.typed !== true || receipt.submit_attempted !== true) {
-    throw new Error(`${label} was neither waitable nor typed`);
+  } else {
+    throw new Error(`${label} was not verified as submitted`);
   }
   const read = toolData(
     await client.callTool(

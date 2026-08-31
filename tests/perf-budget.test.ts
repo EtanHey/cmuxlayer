@@ -1017,6 +1017,8 @@ describe("daemon performance budget", () => {
     expect(source).toContain("writeSurfaceState(surface, surfaceState)");
     expect(source).toContain("await requireSubmittedDelivery(client, receipt, label)");
     expect(source).not.toContain("return requireSubmittedDelivery(client, receipt, label)");
+    expect(source).not.toContain("receipt.typed !== true || receipt.submit_attempted !== true");
+    expect(source).toContain("throw new Error(`${label} was not verified as submitted`)");
     expect(source).toContain("text: surfaceSampleSentinel(sampleIndex)");
     expect(source).toContain('"surface:bench-spawn"');
     expect(source).toContain("read_back_verified: true");
