@@ -1753,6 +1753,16 @@ describe("bench-e2e measurement harness", () => {
     await expect(
       assertOutputOutsideGitMetadata(output, directory),
     ).rejects.toThrow(/inside Git metadata/);
+    for (const bareSetting of ["bare = yes", "bare = on", "bare = 1", "bare"]) {
+      await writeFile(
+        join(bareGit, "config"),
+        `[core]\n\t${bareSetting}\n`,
+        "utf8",
+      );
+      await expect(
+        assertOutputOutsideGitMetadata(output, directory),
+      ).rejects.toThrow(/inside Git metadata/);
+    }
     await rm(directory, { recursive: true, force: true });
   });
 

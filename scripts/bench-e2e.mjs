@@ -1966,7 +1966,7 @@ async function isBareGitRepositoryRoot(root) {
       head.isFile() &&
       objects.isDirectory() &&
       refs.isDirectory() &&
-      /^\s*bare\s*=\s*true\s*$/im.test(config)
+      /^\s*bare(?:\s*=\s*(?:true|yes|on|1))?\s*$/im.test(config)
     );
   } catch (error) {
     if (error?.code === "ENOENT") return false;
