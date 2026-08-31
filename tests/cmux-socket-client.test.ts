@@ -1496,45 +1496,24 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(result.surface).toBe("surface:cli-tab");
   });
 
-  it("pasteText inserts multiline text before an explicit surface.send_key return", async () => {
+  it("pasteText fails closed without a CLI fallback and never sends multiline text", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,
       timeoutMs: 1000,
     });
 
-    await client.pasteText("surface:1", "line one\nline two", {
-      workspace: "workspace:1",
-    });
-
-    expect(lastV2Request).toEqual({
-      method: "surface.send_text",
-      params: {
-        surface_id: "surface:1",
-        text: "line one\nline two",
-        workspace_id: "workspace:1",
-      },
-    });
-    expect(
-      mockEvents
-        .filter((event) => event.type === "v2")
-        .map((event) => event.method),
-    ).toEqual(["surface.send_text"]);
-
-    await client.sendKey("surface:1", "return", {
-      workspace: "workspace:1",
-    });
+    await expect(
+      client.pasteText("surface:1", "line one\nline two", {
+        workspace: "workspace:1",
+      }),
+    ).rejects.toMatchObject({ code: "method_not_found" });
 
     expect(
-      mockEvents
-        .filter((event) => event.type === "v2")
-        .map((event) => event.method),
-    ).toEqual([
-      "surface.send_text",
-      "surface.send_key",
-    ]);
+      mockEvents.map((event) => event.type === "v2" && event.method),
+    ).not.toContain("surface.send_text");
   });
 
-  it("pasteText keeps multiline delivery on surface.send_text when CLI fallback is available", async () => {
+  it("pasteText uses the pinned CLI paste-buffer path when available", async () => {
     const execCalls: Array<{
       cmd: string;
       args: string[];
@@ -1555,8 +1534,13 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       workspace: "workspace:1",
     });
 
-    expect(execCalls).toEqual([]);
-    expect(lastV2Request?.method).toBe("surface.send_text");
+    expect(execCalls.map((call) => call.args[3])).toEqual([
+      "set-buffer",
+      "paste-buffer",
+    ]);
+    expect(
+      mockEvents.map((event) => event.type === "v2" && event.method),
+    ).not.toContain("surface.send_text");
   });
 
   it("moveSurface uses CLI fallback", async () => {

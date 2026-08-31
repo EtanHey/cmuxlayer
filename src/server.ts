@@ -34,6 +34,7 @@ import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { agentProcessMayBeAlive } from "./process-liveness.js";
 import {
+  currentCliFallbackCount,
   currentCliFallbackSources,
   currentCliFallbackUsed,
   currentTransportRetryCount,
@@ -4608,8 +4609,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
   const successfulDispatchRpcMethod = (
     method: DeliveryRpcMethod,
+    cliFallbackCountBeforeDispatch: number,
   ): DeliveryRpcMethod | null =>
-    getTransportHealth(client)?.mode === "socket" ? method : null;
+    currentCliFallbackCount() === cliFallbackCountBeforeDispatch &&
+    getTransportHealth(client)?.mode === "socket"
+      ? method
+      : null;
   const attachTransportProvenance = (
     result: unknown,
     toolName: string,
@@ -5169,8 +5174,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       let attemptedRpcMethod: DeliveryRpcMethod | null = null;
+      let cliFallbackCountBeforeDispatch = currentCliFallbackCount();
       try {
         await beforeMutation?.();
+        cliFallbackCountBeforeDispatch = currentCliFallbackCount();
         attemptedRpcMethod =
           getTransportHealth(client)?.mode === "socket"
             ? "surface.send_text"
@@ -5193,8 +5200,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await client.send(surface, chunk, opts);
         }
         invalidateSurfaceTopologyCallScope(client as object);
-        return successfulDispatchRpcMethod("surface.send_text");
+        return successfulDispatchRpcMethod(
+          "surface.send_text",
+          cliFallbackCountBeforeDispatch,
+        );
       } catch (error) {
+        if (currentCliFallbackCount() !== cliFallbackCountBeforeDispatch) {
+          attemptedRpcMethod = null;
+        }
         lastError = error;
         attempt += 1;
         if (
@@ -5278,9 +5291,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
         await beforeMutation?.();
+        const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
         await client.sendKey(surface, key, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
-        return successfulDispatchRpcMethod("surface.send_key");
+        return successfulDispatchRpcMethod(
+          "surface.send_key",
+          cliFallbackCountBeforeDispatch,
+        );
       } catch (error) {
         lastError = error;
         attempt += 1;

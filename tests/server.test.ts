@@ -21,6 +21,7 @@ import {
   currentCallerContext,
   runWithCallerContext,
 } from "../src/caller-context.js";
+import { recordCliFallback } from "../src/transport-retry-context.js";
 
 type InputDeliveryTestModule = typeof import("../src/server.js") & {
   SEND_INPUT_PASTE_BATCH_MAX_BYTES: number;
@@ -3118,6 +3119,40 @@ describe("tool handler integration", () => {
     expect(pastedTexts).toEqual([text]);
     expect(mockClient.send).not.toHaveBeenCalled();
     expect(mockClient.sendKey).not.toHaveBeenCalled();
+  });
+
+  it("send_input receipts omit RPC methods for an internal CLI paste fallback", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockImplementation(() => {
+        recordCliFallback("paste_text");
+        return Promise.resolve();
+      }),
+      sendKey: vi.fn().mockResolvedValue(),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_input");
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: "line one\nline two",
+        press_enter: false,
+      },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]!.text);
+    expect(parsed.rpc_methods).toEqual([]);
   });
 
   it("send_key receipts include socket RPC provenance for non-submit keys", async () => {
