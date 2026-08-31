@@ -51,6 +51,7 @@ import {
   prepareBuiltEntries,
   prepareProvenanceThenReserveOutput,
   provenanceStatusArgs,
+  publishWithLockHolder,
   publishBenchmarkReceipt,
   renderMarkdownTable,
   releaseReservations,
@@ -1166,6 +1167,31 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("turns lock-holder stdin EPIPE into a controlled publication failure", async () => {
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.stdout = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.write = () => {
+      queueMicrotask(() => {
+        const error = new Error("broken pipe");
+        error.code = "EPIPE";
+        child.stdin.emit("error", error);
+      });
+      return true;
+    };
+
+    await expect(
+      publishWithLockHolder(
+        child,
+        "/tmp/receipt.tmp",
+        "/tmp/receipt.json",
+        "benchmark output",
+      ),
+    ).rejects.toThrow(/command pipe failed/);
+  });
+
   it("publishes the completed receipt from the process holding the kernel lock", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
@@ -1596,12 +1622,10 @@ describe("bench-e2e measurement harness", () => {
   });
 
   it("forces untracked provenance while excluding only the selected receipt artifacts", () => {
-    const hex = "[0-9a-f]";
-    const uuidGlob = [8, 4, 4, 4, 12]
-      .map((length) => hex.repeat(length))
-      .join("-");
+    const ownedTemp =
+      "/repo/results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc";
     expect(
-      provenanceStatusArgs("/repo", "/repo/results/bench.json"),
+      provenanceStatusArgs("/repo", "/repo/results/bench.json", [ownedTemp]),
     ).toEqual([
       "status",
       "--porcelain",
@@ -1611,7 +1635,7 @@ describe("bench-e2e measurement harness", () => {
       ":(exclude,literal)results/bench.json",
       ":(exclude,glob)results/bench.json.lock*",
       ":(exclude,glob)results/bench.json.daemon-*.log",
-      `:(exclude,glob)results/bench.json.tmp-[0-9]*-${uuidGlob}`,
+      ":(exclude,literal)results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc",
     ]);
     expect(provenanceStatusArgs("/repo", "/tmp/bench.json")).toEqual([
       "status",
@@ -1713,11 +1737,46 @@ describe("bench-e2e measurement harness", () => {
     expect(trackedProbeArgs).toContain(
       ":(glob)results/bench.json.daemon-*.log",
     );
-    expect(trackedProbeArgs).toContainEqual(
-      expect.stringMatching(
-        /^:\(glob\)results\/bench\.json\.tmp-\[0-9\]\*-/,
-      ),
+    expect(trackedProbeArgs).not.toContainEqual(
+      expect.stringContaining("bench.json.tmp-[0-9]*"),
     );
+  });
+
+  it("probes an enumerated owned temp literally without hiding malformed siblings", async () => {
+    const ownedTemp =
+      "/repo/results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc";
+    let trackedProbeArgs = [];
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          listOwnedReceiptTemps: () => [ownedTemp],
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedProbeArgs = args;
+              return {
+                stdout: "results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc\n",
+                stderr: "",
+              };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output artifact/);
+    expect(trackedProbeArgs).toContain(
+      ":(literal)results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc",
+    );
+    expect(
+      provenanceStatusArgs("/repo", "/repo/results/bench.json", [
+        "/repo/results/bench.json.tmp-1-notes-12345678-1234-1234-1234-123456789abc",
+      ]),
+    ).not.toContainEqual(expect.stringContaining(".tmp-"));
   });
 
   it("attests provenance before creating the output reservation", async () => {

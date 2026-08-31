@@ -684,24 +684,34 @@ export async function createOutputReservation(outputPath, onFailure) {
 }
 
 async function cleanupAbandonedReceiptTemps(outputPath) {
-  const directory = dirname(outputPath);
-  const prefix = `${basename(outputPath)}.tmp-`;
-  const ownedSuffix =
-    /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const entries = await readdir(directory, { withFileTypes: true });
-  for (const entry of entries) {
-    if (
-      !entry.name.startsWith(prefix) ||
-      !ownedSuffix.test(entry.name.slice(prefix.length))
-    ) {
-      continue;
-    }
-    const candidate = join(directory, entry.name);
+  const ownedTemps = await listOwnedReceiptTemps(outputPath);
+  for (const { candidate, entry } of ownedTemps) {
     if (!entry.isFile() && !entry.isSymbolicLink()) {
       throw new Error(`refusing unexpected receipt temp artifact: ${candidate}`);
     }
     await rm(candidate, { force: true });
   }
+}
+
+const OWNED_RECEIPT_TEMP_SUFFIX =
+  /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function listOwnedReceiptTemps(outputPath) {
+  const directory = dirname(outputPath);
+  const prefix = `${basename(outputPath)}.tmp-`;
+  const entries = await readdir(directory, { withFileTypes: true }).catch(
+    (error) => {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    },
+  );
+  return entries
+    .filter(
+      (entry) =>
+        entry.name.startsWith(prefix) &&
+        OWNED_RECEIPT_TEMP_SUFFIX.test(entry.name.slice(prefix.length)),
+    )
+    .map((entry) => ({ entry, candidate: join(directory, entry.name) }));
 }
 
 function processIsLive(pid, signalPid = process.kill) {
@@ -824,7 +834,7 @@ async function closeLockHolder(child, label) {
   await closed;
 }
 
-async function publishWithLockHolder(child, from, to, label) {
+export async function publishWithLockHolder(child, from, to, label) {
   if (child.exitCode !== null || child.signalCode !== null) {
     throw new Error(`${label} lock holder exited before publication`);
   }
@@ -833,6 +843,7 @@ async function publishWithLockHolder(child, from, to, label) {
     let stdout = "";
     function cleanup() {
       child.stdout.off("data", onStdout);
+      child.stdin.off("error", onStdinError);
       child.off("error", onError);
       child.off("exit", onExit);
     }
@@ -849,6 +860,9 @@ async function publishWithLockHolder(child, from, to, label) {
     function onError(error) {
       fail(error);
     }
+    function onStdinError(error) {
+      fail(new Error(`${label} lock holder command pipe failed`, { cause: error }));
+    }
     function onExit(code, signal) {
       fail(
         new Error(
@@ -857,6 +871,7 @@ async function publishWithLockHolder(child, from, to, label) {
       );
     }
     child.stdout.on("data", onStdout);
+    child.stdin.once("error", onStdinError);
     child.once("error", onError);
     child.once("exit", onExit);
     child.stdin.write(
@@ -905,13 +920,24 @@ async function createPidLock(lockPath, label, onFailure) {
   });
   let releasing = false;
   let holderFailure = null;
-  const onUnexpectedExit = (code, signal) => {
+  const recordHolderFailure = (error) => {
     if (releasing || holderFailure) return;
-    holderFailure = new Error(
-      `${label} lock holder exited unexpectedly (exit ${code ?? signal ?? "unknown"})`,
-    );
+    holderFailure = error;
     onFailure?.(holderFailure);
   };
+  const onUnexpectedExit = (code, signal) => {
+    recordHolderFailure(
+      new Error(
+        `${label} lock holder exited unexpectedly (exit ${code ?? signal ?? "unknown"})`,
+      ),
+    );
+  };
+  const onStdinError = (error) => {
+    recordHolderFailure(
+      new Error(`${label} lock holder command pipe failed`, { cause: error }),
+    );
+  };
+  holder.stdin.on("error", onStdinError);
   try {
     await waitForLockHolder(holder, invocation, label, lockPath);
     holder.once("exit", onUnexpectedExit);
@@ -924,6 +950,7 @@ async function createPidLock(lockPath, label, onFailure) {
     releasing = true;
     holder.off("exit", onUnexpectedExit);
     await discardLockHolder(holder);
+    holder.stdin.off("error", onStdinError);
     await lockHandle.close().catch(() => undefined);
     throw error;
   }
@@ -942,8 +969,12 @@ async function createPidLock(lockPath, label, onFailure) {
       if (released) return;
       releasing = true;
       holder.off("exit", onUnexpectedExit);
-      await closeLockHolder(holder, label);
-      released = true;
+      try {
+        await closeLockHolder(holder, label);
+        released = true;
+      } finally {
+        holder.stdin.off("error", onStdinError);
+      }
     },
   };
 }
@@ -1826,7 +1857,7 @@ export async function assertArtifactProvenance(
   }
 }
 
-export function provenanceStatusArgs(root, outputPath) {
+export function provenanceStatusArgs(root, outputPath, ownedTempPaths = []) {
   const args = ["status", "--porcelain", "--untracked-files=all"];
   if (!outputPath) return args;
   const outputRelative = relative(resolve(root), resolve(outputPath));
@@ -1839,7 +1870,29 @@ export function provenanceStatusArgs(root, outputPath) {
   }
   const pathspec = outputRelative.split(sep).join("/");
   const globPathspec = escapeGitGlobPath(pathspec);
-  const tempGlobPathspec = receiptTempGlobPathspec(globPathspec);
+  const absoluteOutput = resolve(outputPath);
+  const tempPrefix = `${basename(absoluteOutput)}.tmp-`;
+  const tempExclusions = ownedTempPaths
+    .filter((tempPath) => {
+      const absoluteTemp = resolve(tempPath);
+      const tempName = basename(absoluteTemp);
+      return (
+        dirname(absoluteTemp) === dirname(absoluteOutput) &&
+        tempName.startsWith(tempPrefix) &&
+        OWNED_RECEIPT_TEMP_SUFFIX.test(tempName.slice(tempPrefix.length))
+      );
+    })
+    .map((tempPath) => relative(resolve(root), resolve(tempPath)))
+    .filter(
+      (tempRelative) =>
+        tempRelative !== "" &&
+        tempRelative !== ".." &&
+        !tempRelative.startsWith(`..${sep}`),
+    )
+    .map(
+      (tempRelative) =>
+        `:(exclude,literal)${tempRelative.split(sep).join("/")}`,
+    );
   return [
     ...args,
     "--",
@@ -1847,20 +1900,12 @@ export function provenanceStatusArgs(root, outputPath) {
     `:(exclude,literal)${pathspec}`,
     `:(exclude,glob)${globPathspec}.lock*`,
     `:(exclude,glob)${globPathspec}.daemon-*.log`,
-    `:(exclude,glob)${tempGlobPathspec}`,
+    ...tempExclusions,
   ];
 }
 
 function escapeGitGlobPath(pathspec) {
   return pathspec.replace(/[?*[\]\\]/g, "\\$&");
-}
-
-function receiptTempGlobPathspec(outputGlobPathspec) {
-  const hex = "[0-9a-f]";
-  const uuid = [8, 4, 4, 4, 12]
-    .map((length) => hex.repeat(length))
-    .join("-");
-  return `${outputGlobPathspec}.tmp-[0-9]*-${uuid}`;
 }
 
 export async function prepareBuiltEntries(config, deps = {}) {
@@ -1870,6 +1915,8 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const hashFile = deps.hashFile ?? sha256File;
   const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
   const resolveCliExecutable = deps.resolveExecutable ?? resolveExecutable;
+  const enumerateOwnedTemps =
+    deps.listOwnedReceiptTemps ?? listOwnedReceiptTemps;
   const execOptions = { env: config.env, signal: config.signal };
   const expectedMcpEntry = join(root, "dist", "index.js");
   const expectedDaemonEntry = join(root, "dist", "daemon.js");
@@ -1881,8 +1928,18 @@ export async function prepareBuiltEntries(config, deps = {}) {
       "custom built entries have unverifiable source provenance; use the repository dist/index.js and dist/daemon.js",
     );
   }
-  const readWorktreeStatus = () =>
-    exec("git", provenanceStatusArgs(root, config.out), execOptions);
+  const ownedTempPaths = async () =>
+    config.out
+      ? (await enumerateOwnedTemps(config.out)).map((temp) =>
+          typeof temp === "string" ? temp : temp.candidate,
+        )
+      : [];
+  const readWorktreeStatus = async () =>
+    exec(
+      "git",
+      provenanceStatusArgs(root, config.out, await ownedTempPaths()),
+      execOptions,
+    );
   const readHead = () =>
     exec("git", ["rev-parse", "HEAD"], execOptions);
   const outputRelative = config.out
@@ -1898,7 +1955,17 @@ export async function prepareBuiltEntries(config, deps = {}) {
     }
     const pathspec = outputRelative.split(sep).join("/");
     const globPathspec = escapeGitGlobPath(pathspec);
-    const tempGlobPathspec = receiptTempGlobPathspec(globPathspec);
+    const tempPathspecs = (await ownedTempPaths())
+      .map((tempPath) => relative(resolve(root), resolve(tempPath)))
+      .filter(
+        (tempRelative) =>
+          tempRelative !== "" &&
+          tempRelative !== ".." &&
+          !tempRelative.startsWith(`..${sep}`),
+      )
+      .map((tempRelative) =>
+        `:(literal)${tempRelative.split(sep).join("/")}`,
+      );
     const trackedOutput = await exec(
       "git",
       [
@@ -1908,7 +1975,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
         `:(literal)${pathspec}`,
         `:(glob)${globPathspec}.lock*`,
         `:(glob)${globPathspec}.daemon-*.log`,
-        `:(glob)${tempGlobPathspec}`,
+        ...tempPathspecs,
       ],
       execOptions,
     );
