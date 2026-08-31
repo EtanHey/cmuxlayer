@@ -1,12 +1,15 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import * as checkerModule from "../scripts/check-daemon-benchmark.mjs";
 import {
   baselineContentSha256,
   compareBenchmark,
   maximumBenchmarkMeasurements,
   performanceCeiling,
+  requireCanonicalRequestChangeReason,
   requireBaselineIncreaseReason,
   renderMarkdownComparison,
   runBenchmark,
@@ -49,7 +52,29 @@ const baseline = attest({
       "control_health",
       "spawn_close_during_sweep",
       "first_send_after_spawn",
+      "send_to_surface_10_parallel",
+      "read_screen_10_parallel",
     ],
+    row_metadata: {
+      list_surfaces: { sampling: "sampled", samples_per_run: 96 },
+      read_screen: { sampling: "sampled", samples_per_run: 96 },
+      send_to_surface_warm: { sampling: "sampled", samples_per_run: 96 },
+      send_to_agent_warm: { sampling: "sampled", samples_per_run: 96 },
+      list_agents: { sampling: "sampled", samples_per_run: 96 },
+      control_health: { sampling: "sampled", samples_per_run: 96 },
+      spawn_close_during_sweep: { sampling: "sampled", samples_per_run: 96 },
+      first_send_after_spawn: { sampling: "sampled", samples_per_run: 96 },
+      send_to_surface_10_parallel: {
+        sampling: "sampled",
+        samples_per_run: 12,
+        stress: true,
+      },
+      read_screen_10_parallel: {
+        sampling: "sampled",
+        samples_per_run: 12,
+        stress: true,
+      },
+    },
     bytes: {
       list_surfaces: 140,
       read_screen: 170,
@@ -59,6 +84,8 @@ const baseline = attest({
       control_health: 183,
       spawn_close_during_sweep: 184,
       first_send_after_spawn: 240,
+      send_to_surface_10_parallel: 2_000,
+      read_screen_10_parallel: 1_700,
     },
     request_sha256: {
       list_surfaces: "1".repeat(64),
@@ -69,6 +96,8 @@ const baseline = attest({
       control_health: "7".repeat(64),
       spawn_close_during_sweep: "8".repeat(64),
       first_send_after_spawn: "3".repeat(64),
+      send_to_surface_10_parallel: "a".repeat(64),
+      read_screen_10_parallel: "b".repeat(64),
     },
     transport: {
       list_surfaces: "socket",
@@ -79,6 +108,8 @@ const baseline = attest({
       control_health: "socket",
       spawn_close_during_sweep: "socket",
       first_send_after_spawn: "socket",
+      send_to_surface_10_parallel: "socket",
+      read_screen_10_parallel: "socket",
     },
   },
   measurements: {
@@ -93,6 +124,16 @@ const baseline = attest({
       p50_ms: 900,
       p95_ms: 900,
       lock_hold_ms: 20,
+    },
+    send_to_surface_10_parallel: {
+      p50_ms: 260,
+      p95_ms: 310,
+      lock_hold_ms: 120,
+    },
+    read_screen_10_parallel: {
+      p50_ms: 180,
+      p95_ms: 240,
+      lock_hold_ms: 0,
     },
     cli_send_ms: 700,
   },
@@ -126,6 +167,18 @@ const result = {
       control_health: {
         p50_ms: 95,
         p95_ms: 105,
+        lock_hold_ms: 0,
+        transport: "socket",
+      },
+      send_to_surface_10_parallel: {
+        p50_ms: 270,
+        p95_ms: 320,
+        lock_hold_ms: 125,
+        transport: "socket",
+      },
+      read_screen_10_parallel: {
+        p50_ms: 190,
+        p95_ms: 250,
         lock_hold_ms: 0,
         transport: "socket",
       },
@@ -175,6 +228,16 @@ describe("daemon performance budget", () => {
     expect(requireBaselineIncreaseReason([[99, 100]], "")).toBe(false);
   });
 
+  it("requires an explicit reason for an imported canonical-request change", () => {
+    expect(() => requireCanonicalRequestChangeReason(true, "")).toThrow(
+      /canonical request change without --reason/,
+    );
+    expect(
+      requireCanonicalRequestChangeReason(true, "verify parallel read identity"),
+    ).toBe(true);
+    expect(requireCanonicalRequestChangeReason(false, "")).toBe(false);
+  });
+
   it("requires a CI-runner source, canonical requests, and the 1.25 ratio", () => {
     expect(() => validateBaseline(baseline)).not.toThrow();
     expect(() =>
@@ -213,6 +276,263 @@ describe("daemon performance budget", () => {
         replay: { ...baseline.replay, rounds: 3 },
       }),
     ).toThrow(/canonical 8x12 replay/);
+    expect(() =>
+      validateBaseline(
+        attest({
+          ...baseline,
+          replay: { ...baseline.replay, row_metadata: undefined },
+        }),
+      ),
+    ).toThrow(/row_metadata/);
+    expect(() =>
+      validateBaseline(
+        attest({
+          ...baseline,
+          measurements: {
+            ...baseline.measurements,
+            list_surfaces: {
+              ...baseline.measurements.list_surfaces,
+              p95_ms: 1_001,
+            },
+          },
+        }),
+      ),
+    ).toThrow(/sanity cap/);
+  });
+
+  it("uses measured spread and five-run p50 variance only for earned sampled rows", () => {
+    const history = [90, 95, 100, 105, 110].map((p50_ms, index) => ({
+      source: { git_sha: String(index).padStart(40, "0"), workflow_run_id: index + 1 },
+      measurements: {
+        list_surfaces: { p50_ms, p95_ms: p50_ms + 20, lock_hold_ms: 0 },
+      },
+    }));
+    const comparison = compareBenchmark(baseline, result, { history });
+    const row = comparison.rows.find(
+      (entry) => entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+    );
+    expect(row).toMatchObject({
+      sampling: "sampled",
+      margin_ms: 40,
+      margin_rule: "measured (5 runs)",
+      ceiling: 140,
+    });
+
+    const highVarianceHistory = [50, 75, 100, 125, 150].map((p50_ms, index) => ({
+      source: { git_sha: `f${String(index).padStart(39, "0")}`, workflow_run_id: 100 + index },
+      measurements: {
+        list_surfaces: { p50_ms, p95_ms: p50_ms + 20, lock_hold_ms: 0 },
+      },
+    }));
+    const highVariance = compareBenchmark(baseline, result, {
+      history: highVarianceHistory,
+    }).rows.find(
+      (entry) => entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+    );
+    expect(highVariance?.margin_ms).toBeCloseTo(106.07, 2);
+    expect(highVariance?.ceiling).toBeCloseTo(206.07, 2);
+    expect(
+      compareBenchmark(baseline, result, { history: history.slice(0, 3) }).rows.find(
+        (entry) =>
+          entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+      )?.margin_rule,
+    ).toBe("measured (1 run)");
+  });
+
+  it("rejects single-shot metadata for every canonical row", () => {
+    const singleShot = attest({
+      ...baseline,
+      replay: {
+        ...baseline.replay,
+        row_metadata: {
+          ...baseline.replay.row_metadata,
+          list_surfaces: { sampling: "single_shot", samples_per_run: 1 },
+        },
+      },
+    });
+    expect(() => validateBaseline(singleShot)).toThrow(
+      /canonical sampled workload/,
+    );
+    const stressRow = compareBenchmark(baseline, result).rows.find(
+      (entry) =>
+        entry.operation === "send_to_surface_10_parallel" &&
+        entry.metric === "p50_ms",
+    );
+    expect(stressRow).toMatchObject({
+      stress: true,
+      margin_ms: 100,
+      margin_rule: "measured (1 run)",
+      ceiling: 360,
+    });
+    const markdown = renderMarkdownComparison(
+      baseline,
+      result,
+      compareBenchmark(baseline, result, {
+        history: Array.from({ length: 5 }, (_, index) => ({
+          measurements: {
+            list_surfaces: { p50_ms: 100 + index },
+          },
+        })),
+      }),
+    );
+    expect(markdown).toContain("| Margin rule |");
+    expect(markdown).toContain("measured (5 runs)");
+    expect(markdown).not.toContain("constant +300ms (single-shot)");
+  });
+
+  it("rejects weakened normal and stress sampling metadata", () => {
+    const weakNormal = attest({
+      ...baseline,
+      replay: {
+        ...baseline.replay,
+        row_metadata: {
+          ...baseline.replay.row_metadata,
+          list_surfaces: { sampling: "sampled", samples_per_run: 12 },
+        },
+      },
+    });
+    expect(() => validateBaseline(weakNormal)).toThrow(
+      /canonical sampled workload/,
+    );
+
+    const weakStress = attest({
+      ...baseline,
+      replay: {
+        ...baseline.replay,
+        row_metadata: {
+          ...baseline.replay.row_metadata,
+          send_to_surface_10_parallel: {
+            sampling: "sampled",
+            samples_per_run: 12,
+            stress: false,
+          },
+        },
+      },
+    });
+    expect(() => validateBaseline(weakStress)).toThrow(
+      /canonical sampled workload/,
+    );
+  });
+
+  it("records only green main runs and bounds append-only history to 50 runs", () => {
+    expect(checkerModule).toHaveProperty("appendGreenMainHistory");
+    const appendGreenMainHistory = (
+      checkerModule as typeof checkerModule & {
+        appendGreenMainHistory: (
+          history: unknown[],
+          result: unknown,
+          context: Record<string, unknown>,
+        ) => unknown[];
+      }
+    ).appendGreenMainHistory;
+    const existing = Array.from({ length: 50 }, (_, index) => ({
+      source: {
+        git_sha: String(index).padStart(40, "0"),
+        workflow_run_id: index + 1,
+      },
+      measurements: { list_surfaces: { p50_ms: index } },
+    }));
+    const unchanged = appendGreenMainHistory(existing, result, {
+      event_name: "pull_request",
+      ref: "refs/pull/1/merge",
+      git_sha: "f".repeat(40),
+      workflow_run_id: 999,
+    });
+    expect(unchanged).toEqual(existing);
+    const appended = appendGreenMainHistory(existing, result, {
+      event_name: "push",
+      ref: "refs/heads/main",
+      git_sha: "f".repeat(40),
+      workflow_run_id: 999,
+      baseline_content_sha256: baseline.refresh_attestation.content_sha256,
+    });
+    expect(appended).toHaveLength(50);
+    expect(appended[0]).toEqual(existing[1]);
+    expect(appended.at(-1)).toMatchObject({
+      source: { git_sha: "f".repeat(40), workflow_run_id: 999 },
+    });
+  });
+
+  it("renders corrupted history RED with visibly degraded wide-margin rows", async () => {
+    expect(checkerModule).toHaveProperty("readBenchmarkHistory");
+    const readBenchmarkHistory = (
+      checkerModule as typeof checkerModule & {
+        readBenchmarkHistory: (path: string, baselineSha?: string) => Promise<{
+          runs: unknown[];
+          degraded: boolean;
+          reason?: string;
+        }>;
+      }
+    ).readBenchmarkHistory;
+    const artifactDir = mkdtempSync(join(tmpdir(), "cmuxlayer-bad-history-"));
+    const historyPath = join(artifactDir, "history.json");
+    writeFileSync(historyPath, "{not-json");
+    try {
+      const corrupted = await readBenchmarkHistory(historyPath);
+      expect(corrupted).toMatchObject({
+        runs: [],
+        degraded: true,
+        reason: expect.stringContaining("history.json"),
+      });
+      const comparison = compareBenchmark(baseline, result, {
+        history: corrupted.runs,
+        historyDegraded: corrupted.degraded,
+        historyDegradedReason: corrupted.reason,
+      });
+      expect(comparison.passed).toBe(false);
+      expect(comparison.failures).toContainEqual(
+        expect.stringContaining("benchmark history degraded"),
+      );
+      expect(
+        comparison.rows.find(
+          (entry) =>
+            entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+        ),
+      ).toMatchObject({ history_degraded: true, margin_ms: 300 });
+      expect(renderMarkdownComparison(baseline, result, comparison)).toContain(
+        "history-degraded · wide-margin",
+      );
+      writeFileSync(historyPath, JSON.stringify({ runs: [{ source: { workflow_run_id: 1 } }] }));
+      await expect(readBenchmarkHistory(historyPath)).resolves.toMatchObject({
+        runs: [],
+        degraded: true,
+        reason: expect.stringContaining("malformed entry"),
+      });
+      const validRun = (
+        checkerModule as typeof checkerModule & {
+          appendGreenMainHistory: (
+            history: unknown[],
+            result: unknown,
+            context: Record<string, unknown>,
+          ) => unknown[];
+        }
+      ).appendGreenMainHistory([], result, {
+        event_name: "push",
+        ref: "refs/heads/main",
+        git_sha: "a".repeat(40),
+        workflow_run_id: 99,
+        baseline_content_sha256: baseline.refresh_attestation.content_sha256,
+      })[0];
+      writeFileSync(historyPath, JSON.stringify({ runs: [validRun] }));
+      await expect(
+        readBenchmarkHistory(
+          historyPath,
+          baseline.refresh_attestation.content_sha256,
+        ),
+      ).resolves.toMatchObject({
+        runs: [validRun],
+        degraded: false,
+      });
+      await expect(
+        readBenchmarkHistory(historyPath, "b".repeat(64)),
+      ).resolves.toMatchObject({
+        runs: [],
+        degraded: true,
+        reason: expect.stringContaining("different baseline"),
+      });
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+    }
   });
 
   it("fails the consistency assertion after a baseline-only hand edit", () => {
@@ -247,7 +567,7 @@ describe("daemon performance budget", () => {
 
     expect(comparison.passed).toBe(false);
     expect(comparison.failures).toContain(
-      "read_screen p50: 441ms exceeds 440ms",
+      "read_screen p50: 441ms exceeds 180ms",
     );
   });
 
@@ -291,17 +611,14 @@ describe("daemon performance budget", () => {
     ).toContain("| read_screen | cli |");
   });
 
-  it("fails the benchmark when the intrinsic CLI-send sample used fallback", () => {
+  it("fails the benchmark when the sampled CLI-send distribution used fallback", () => {
     const fallback = compareBenchmark(baseline, {
       ...result,
       latency: {
         ...result.latency,
-        first_send_after_spawn: {
-          ...result.latency.first_send_after_spawn,
-          surface: {
-            ...result.latency.first_send_after_spawn.surface,
-            transport: "cli",
-          },
+        send_to_surface_warm: {
+          ...result.latency.send_to_surface_warm,
+          transport: "cli",
         },
       },
     });
@@ -332,6 +649,16 @@ describe("daemon performance budget", () => {
     expect(maximumBenchmarkMeasurements([result, slower])).toEqual({
       list_surfaces: { p50_ms: 110, p95_ms: 200, lock_hold_ms: 0 },
       read_screen: { p50_ms: 190, p95_ms: 170, lock_hold_ms: 0 },
+      send_to_surface_10_parallel: {
+        p50_ms: 270,
+        p95_ms: 320,
+        lock_hold_ms: 125,
+      },
+      read_screen_10_parallel: {
+        p50_ms: 190,
+        p95_ms: 250,
+        lock_hold_ms: 0,
+      },
       send_to_surface_warm: {
         p50_ms: 210,
         p95_ms: 230,
@@ -354,7 +681,7 @@ describe("daemon performance budget", () => {
         p95_ms: 1_100,
         lock_hold_ms: 21,
       },
-      cli_send_ms: 900,
+      cli_send_ms: 210,
     });
     expect(() =>
       maximumBenchmarkMeasurements([
@@ -410,6 +737,7 @@ describe("daemon performance budget", () => {
         list_surfaces: {
           ...baseline.measurements.list_surfaces,
           p50_ms: 1,
+          p95_ms: 2,
         },
       },
     });
@@ -421,7 +749,7 @@ describe("daemon performance budget", () => {
           ...result.latency.daemon_path,
           list_surfaces: {
             ...result.latency.daemon_path.list_surfaces,
-            p50_ms: 302,
+            p50_ms: 4,
           },
         },
       },
@@ -432,9 +760,9 @@ describe("daemon performance budget", () => {
         (entry) =>
           entry.operation === "list_surfaces" && entry.metric === "p50_ms",
       )?.ceiling,
-    ).toBe(301);
+    ).toBe(3);
     expect(comparison.failures).toContain(
-      "list_surfaces p50: 302ms exceeds 301ms",
+      "list_surfaces p50: 4ms exceeds 3ms",
     );
   });
 
@@ -443,14 +771,14 @@ describe("daemon performance budget", () => {
       ...result,
       latency: {
         ...result.latency,
-        first_send_after_spawn: {
-          ...result.latency.first_send_after_spawn,
-          surface: { elapsed_ms: 1_001 },
+        send_to_surface_warm: {
+          ...result.latency.send_to_surface_warm,
+          p50_ms: 1_001,
         },
       },
     });
     expect(cli.failures).toContain(
-      "first_send_after_spawn cli_send: 1001ms exceeds 1000ms",
+      "send_to_surface_warm cli_send: 1001ms exceeds 875ms",
     );
 
     const replay = compareBenchmark(baseline, {
@@ -488,6 +816,32 @@ describe("daemon performance budget", () => {
     );
   });
 
+  it("fails closed when candidate sampling metadata is missing or incompatible", () => {
+    const missing = compareBenchmark(baseline, {
+      ...result,
+      replay: { ...result.replay, row_metadata: undefined },
+    });
+    expect(missing.passed).toBe(false);
+    expect(missing.failures).toContainEqual(
+      expect.stringContaining("candidate row_metadata.list_surfaces"),
+    );
+
+    const incompatible = compareBenchmark(baseline, {
+      ...result,
+      replay: {
+        ...result.replay,
+        row_metadata: {
+          ...result.replay.row_metadata,
+          list_surfaces: { sampling: "single_shot", samples_per_run: 1 },
+        },
+      },
+    });
+    expect(incompatible.passed).toBe(false);
+    expect(incompatible.failures).toContainEqual(
+      expect.stringContaining("candidate row_metadata.list_surfaces"),
+    );
+  });
+
   it("cannot reuse a stale result when the benchmark process fails", async () => {
     const artifactDir = mkdtempSync(join(tmpdir(), "cmuxlayer-stale-bench-"));
     writeFileSync(join(artifactDir, "result.json"), JSON.stringify(result));
@@ -520,10 +874,23 @@ describe("daemon performance budget", () => {
   });
 
   it("allows the explicit fast-round override but no implicit round drift", () => {
+    const fastRowMetadata = Object.fromEntries(
+      Object.entries(result.replay.row_metadata).map(([operation, metadata]) => [
+        operation,
+        {
+          ...metadata,
+          samples_per_run: metadata.samples_per_run / 4,
+        },
+      ]),
+    );
     const fast = {
       ...result,
       rounds: 3,
-      replay: { ...result.replay, rounds: 3 },
+      replay: {
+        ...result.replay,
+        rounds: 3,
+        row_metadata: fastRowMetadata,
+      },
     };
     expect(compareBenchmark(baseline, fast).failures).toContain(
       "replay rounds: 3 does not match expected 12",
@@ -542,13 +909,18 @@ describe("daemon performance budget", () => {
 
     expect(markdown).toContain("<!-- cmuxlayer-perf-budget -->");
     expect(markdown).toContain(
-      "| Operation | Transport | Metric | Baseline | Current | Ceiling | Status |",
+      "| Operation | Transport | Sampling | Margin rule | Metric |",
     );
     expect(markdown).toContain("first_send_after_spawn");
     expect(markdown).toContain("Runner regression ratio: 1.25x");
+    expect(markdown).toContain("rows unchanged");
+    expect(markdown).toContain("<details>");
+    expect(markdown).toContain("<summary>Full table</summary>");
+    const defaultTable = markdown.split("<details>")[0];
+    expect(defaultTable).not.toContain("| list_surfaces | socket | sampled | request_bytes |");
   });
 
-  it("commits a post-run-5 baseline with the full replay contract", () => {
+  it("commits only the canonical CI-attested sampled baseline", () => {
     const committed = JSON.parse(
       readFileSync(
         join(repoRoot, "benchmarks", "daemon-baseline.json"),
@@ -557,20 +929,30 @@ describe("daemon performance budget", () => {
     );
 
     expect(() => validateBaseline(committed)).not.toThrow();
+    expect(checkerModule).toHaveProperty("isAttestedLegacyBaseline");
+    expect(
+      (
+        checkerModule as typeof checkerModule & {
+          isAttestedLegacyBaseline: (candidate: unknown) => boolean;
+        }
+      ).isAttestedLegacyBaseline(committed),
+    ).toBe(false);
     expect(committed.source.git_sha).toMatch(/^[0-9a-f]{40}$/);
     expect(committed.replay).toMatchObject({ clients: 8, rounds: 12 });
-    expect(committed.replay.operations).toEqual([
-      "list_surfaces",
-      "read_screen",
+    expect(committed.replay.operations).toEqual(baseline.replay.operations);
+    expect(committed.replay.row_metadata).toEqual(baseline.replay.row_metadata);
+    for (const operation of [
       "send_to_surface_warm",
       "send_to_agent_warm",
-      "list_agents",
-      "control_health",
       "spawn_close_during_sweep",
       "first_send_after_spawn",
-    ]);
+    ]) {
+      expect(committed.measurements[operation].p95_ms).toBeGreaterThan(
+        committed.measurements[operation].p50_ms,
+      );
+    }
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
-    expect(committed.source.workflow_run_id).toBe(32988968639);
+    expect(committed.source.workflow_run_id).toBe(33380548570);
     expect(committed).not.toHaveProperty("ceilings");
     expect(committed.refresh_attestation.content_sha256).toMatch(
       /^[0-9a-f]{64}$/,
@@ -585,6 +967,16 @@ describe("daemon performance budget", () => {
 
     expect(source).toContain("const DEFAULT_CLIENTS = 8");
     expect(source).toContain("const DEFAULT_ROUNDS = 12");
+    expect(source).toContain("const PARALLEL_STRESS_COUNT = 10");
+    expect(source).toContain('sampling: "sampled"');
+    expect(source).toContain("samples_per_run");
+    expect(source).toContain("for (const [clientIndex, client] of clients.entries())");
+    expect(source).toContain("surface_receipts_waitable: samples.every");
+    expect(source).toContain('sample.surface.wait_for.delivery_state === "submitted"');
+    expect(source).toContain("sample.surface.wait_for.submit_verified === true");
+    expect(source).toContain(
+      "surface_receipt_is_waitable:\n        firstSendAfterSpawn.surface_receipts_waitable",
+    );
     expect(source).toContain("p95_ms");
     expect(source).toContain("request_bytes");
     expect(source).toContain("lock_hold_ms");
@@ -604,6 +996,80 @@ describe("daemon performance budget", () => {
       'receipt.transport || name === "control_health"',
     );
     expect(source).not.toContain("const transportReceipts = await Promise.all");
+    expect(source).toMatch(
+      /await Promise\.all\(stressClients\.map\(\(client\) => client\.close\(\)\)\);\n {4}stressClients = \[\];\n {4}const daemonRssMb = await totalRssMb/,
+    );
+    expect(source).not.toContain("onFirstSample");
+    expect(source).toContain("const surfaceStates = new Map()");
+    expect(source).toContain("const surfaceMutationQueues = new Map()");
+    expect(source).toContain("function fakeSurfaceStateKey(");
+    expect(source).toContain("fakeSurfaceStateKey(params.surface_id, surfaces)");
+    expect(source).toContain("await mutateFakeSurfaceState(");
+    expect(source).toContain(
+      "daemon_survived_replay:\n        daemon.exitCode === null &&\n        daemon.signalCode === null &&\n        daemonStats.rssKb > 0",
+    );
+    expect(source).toContain("get alive() {");
+    expect(source).toContain(
+      "benchmark_clients_survived_replay:\n        stressClientsSurvivedReplay &&\n        daemonClients.every((client) => client.alive)",
+    );
+    expect(source).toContain("function parallelStressSentinel(index, roundIndex)");
+    expect(source).toContain("readSurfaceState(surface)");
+    expect(source).toContain("writeSurfaceState(surface, surfaceState)");
+    expect(source).toContain("await requireSubmittedDelivery(client, receipt, label)");
+    expect(source).not.toContain("return requireSubmittedDelivery(client, receipt, label)");
+    expect(source).not.toContain("receipt.typed !== true || receipt.submit_attempted !== true");
+    expect(source).toContain("was not verified as submitted");
+    expect(source).toContain("text: surfaceSampleSentinel(sampleIndex)");
+    expect(source).toContain('"surface:bench-spawn"');
+    expect(source).toContain("read_back_verified: true");
+    expect(source).toContain("sample.surface.wait_for.read_back_verified === true");
+    expect(source).toContain(
+      "validateReceipt?.(receipt, requests[index], index, roundIndex)",
+    );
+    expect(source).toContain("parallel read returned the wrong surface");
+    expect(source).toContain("parallel read omitted its unique sentinel");
+    expect(source).toContain("function requireFiniteLockHold(");
+    expect(source).toContain("close_surface did not close the spawned surface");
+    expect(source).toContain("list_agents omitted the live spawned agent");
+    expect(source).not.toContain("compact(receipt).includes(spawnResult.agent_id)");
+    expect(source).toContain("Array.isArray(receipt.agents)");
+    expect(source).toContain("receipt.agents.some(");
+    expect(source).toContain("agent.agent_id === spawnResult.agent_id");
+    expect(source).toContain("{ lockHoldFromElapsed: true }");
+    expect(source).toContain(
+      "lock_hold_ms: lockHoldFromElapsed ? elapsedMs : 0",
+    );
+    expect(source.indexOf("await validateReceipt?.(receipt)")).toBeLessThan(
+      source.indexOf("elapsed_ms: round(nowMs() - startedAt)"),
+    );
+    expect(source).toMatch(
+      /await Promise\.all\([\s\S]*?validateReceipt\?\.[\s\S]*?\);\n {4}const elapsedMs = nowMs\(\) - startedAt;/,
+    );
+    expect(source).toContain('"sampled surface send initial receipt"');
+    expect(source).toContain(
+      'requireTerminalSubmission(receipt, "parallel send initial receipt")',
+    );
+    expect(source).toContain("beforeRound?.(roundIndex)");
+    expect(source).toContain("parallelStressSentinel(index, roundIndex)");
+    expect(source).toContain("args(index, roundIndex)");
+    expect(source).toContain(
+      '"parallel send",',
+    );
+    expect(source).toContain("firstSendAfterSpawn.sampled");
+    expect(source).toContain("firstSendAfterSpawn.send_to_agent_warm");
+    expect(source).toContain("firstSendAfterSpawn.send_to_surface_warm");
+    expect(source).not.toContain("firstSendAfterSpawn.first,\n");
+    expect(source).not.toContain("firstSendAfterSpawn.second,\n");
+    expect(source).not.toContain("firstSendAfterSpawn.surface,\n");
+  });
+
+  it("keeps the executable benchmark parseable by Node", () => {
+    const benchmarkPath = join(repoRoot, "scripts", "bench-daemon.mjs");
+    const checked = spawnSync("node", ["--check", benchmarkPath], {
+      encoding: "utf8",
+    });
+
+    expect(checked.status, checked.stderr).toBe(0);
   });
 
   it("wires a required PR/main job and edits a single comment even on RED", () => {
@@ -639,6 +1105,16 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("<!-- cmuxlayer-perf-budget -->");
     expect(workflow).toContain("updateComment");
     expect(workflow).toContain("createComment");
+    expect(workflow).toContain("actions/cache/restore");
+    expect(workflow).toContain("actions/cache/save");
+    expect(workflow).toContain("history.json");
+    expect(workflow).toContain("hashFiles('benchmarks/daemon-baseline.json')");
+    expect(
+      readFileSync(
+        join(repoRoot, "scripts", "check-daemon-benchmark.mjs"),
+        "utf8",
+      ),
+    ).toContain("GITHUB_STEP_SUMMARY");
   });
 
   it("refuses to refresh a baseline from an over-budget lock hold", () => {
@@ -654,6 +1130,7 @@ describe("daemon performance budget", () => {
     expect(source).toContain("GITHUB_RUN_ID");
     expect(source).toContain('GITHUB_ACTIONS !== "true"');
     expect(source).toContain("compareBenchmark(existing, sample)");
+    expect(source).toContain("migratingLegacyBaseline\n            ? measured");
     expect(source).toContain("replay?.bytes?.[operation]");
     expect(source).toContain(
       "refusing to raise a committed performance baseline",

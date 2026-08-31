@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -13,7 +14,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import net from "node:net";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 
@@ -22,6 +23,7 @@ const distIndex = join(repoRoot, "dist", "index.js");
 const distDaemon = join(repoRoot, "dist", "daemon.js");
 const DEFAULT_CLIENTS = 8;
 const DEFAULT_ROUNDS = 12;
+const PARALLEL_STRESS_COUNT = 10;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
 const READ_SCREEN_P50_BUDGET_MS = 250;
@@ -210,6 +212,10 @@ class McpProcess {
     return this.child.pid;
   }
 
+  get alive() {
+    return this.child.exitCode === null && this.child.signalCode === null;
+  }
+
   handleMessage(message) {
     if (!message || typeof message !== "object" || !("id" in message)) {
       return;
@@ -333,6 +339,28 @@ function writeState(state) {
 function patchState(patch) {
   writeState({ ...readState(), ...patch });
 }
+function keyedStatePath(kind, key) {
+  const safeKey = String(key || "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
+  return statePath + "." + kind + "-" + safeKey;
+}
+function readSurfaceState(surface) {
+  try { return JSON.parse(fs.readFileSync(keyedStatePath("surface", surface), "utf8")); }
+  catch { return { composer: "", transcript: "" }; }
+}
+function writeSurfaceState(surface, surfaceState) {
+  fs.writeFileSync(keyedStatePath("surface", surface), JSON.stringify(surfaceState));
+}
+function readBuffer(name) {
+  try { return fs.readFileSync(keyedStatePath("buffer", name), "utf8"); }
+  catch { return ""; }
+}
+function writeBuffer(name, value) {
+  fs.writeFileSync(keyedStatePath("buffer", name), value);
+}
+function optionValue(name, fallback = "") {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] || fallback : fallback;
+}
 const state = readState();
 const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   ref: "surface:bench-" + index,
@@ -374,31 +402,36 @@ if (command === "list-workspaces") {
   write({ terminals: surfaces.map((surface) => ({ surface_ref: surface.ref, current_directory: cwd })) });
 } else if (command === "read-screen") {
   const surface = args[args.indexOf("--surface") + 1] || surfaces[0].ref;
-  const composer = state.composer ? "› " + state.composer : "› ";
-  const transcript = state.transcript ? "\\n› " + state.transcript + "\\n" : "";
+  const surfaceState = readSurfaceState(surface);
+  const composer = surfaceState.composer ? "› " + surfaceState.composer : "› ";
+  const transcript = surfaceState.transcript ? "\\n› " + surfaceState.transcript + "\\n" : "";
   write({ surface_ref: surface, text: "╭ OpenAI Codex ╮\\nmodel: gpt-5.6-sol\\n" + transcript + "\\n" + composer, lines: 8, scrollback_used: false });
 } else if (command === "identify") {
   write({ caller: { workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: surfaces[0].ref }, focused: { workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: surfaces[0].ref } });
 } else if (command === "list-status") {
   write([]);
 } else if (command === "send") {
-  state.composer += args.at(-1) || "";
-  writeState(state);
+  const surface = optionValue("--surface", surfaces[0].ref);
+  const surfaceState = readSurfaceState(surface);
+  surfaceState.composer += args.at(-1) || "";
+  writeSurfaceState(surface, surfaceState);
   write({ ok: true });
 } else if (command === "set-buffer") {
-  state.buffer = args.at(-1) || "";
-  writeState(state);
+  writeBuffer(optionValue("--name", "default"), args.at(-1) || "");
   write({ ok: true });
 } else if (command === "paste-buffer") {
-  state.composer += state.buffer || "";
-  state.buffer = "";
-  writeState(state);
+  const surface = optionValue("--surface", surfaces[0].ref);
+  const surfaceState = readSurfaceState(surface);
+  surfaceState.composer += readBuffer(optionValue("--name", "default"));
+  writeSurfaceState(surface, surfaceState);
   write({ ok: true });
 } else if (command === "send-key") {
+  const surface = optionValue("--surface", surfaces[0].ref);
+  const surfaceState = readSurfaceState(surface);
   if ((args.at(-1) || "").toLowerCase() === "return") {
-    state.transcript = state.composer;
-    state.composer = "";
-    writeState(state);
+    surfaceState.transcript = surfaceState.composer;
+    surfaceState.composer = "";
+    writeSurfaceState(surface, surfaceState);
   }
   write({ ok: true });
 } else if (command === "rename-tab") {
@@ -415,6 +448,8 @@ if (command === "list-workspaces") {
 }
 
 async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
+  const surfaceStates = new Map();
+  const surfaceMutationQueues = new Map();
   const server = net.createServer((socket) => {
     // Benchmark clients may disappear while the fake server is replying.
     // Treat that expected teardown reset as connection-local evidence, not an
@@ -428,7 +463,14 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
-        void handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount);
+        handleFakeCmuxSocketLine(
+          socket,
+          line,
+          statePath,
+          surfaceCount,
+          surfaceStates,
+          surfaceMutationQueues,
+        ).catch((error) => socket.destroy(error));
       }
     });
   });
@@ -439,7 +481,48 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
   return server;
 }
 
-async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
+function fakeSurfaceStateKey(surfaceIdentifier, surfaces) {
+  const surface = surfaces.find(
+    (candidate) =>
+      candidate.ref === surfaceIdentifier || candidate.id === surfaceIdentifier,
+  );
+  return surface?.ref ?? surfaceIdentifier;
+}
+
+function mutateFakeSurfaceState(
+  surfaceId,
+  surfaceStates,
+  surfaceMutationQueues,
+  mutate,
+) {
+  const previous = surfaceMutationQueues.get(surfaceId) ?? Promise.resolve();
+  const currentMutation = previous.then(() => {
+    const current = surfaceStates.get(surfaceId) ?? {
+      composer: "",
+      transcript: "",
+    };
+    const updated = mutate(current);
+    surfaceStates.set(surfaceId, updated);
+    return updated;
+  });
+  surfaceMutationQueues.set(
+    surfaceId,
+    currentMutation.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return currentMutation;
+}
+
+async function handleFakeCmuxSocketLine(
+  socket,
+  line,
+  statePath,
+  surfaceCount,
+  surfaceStates,
+  surfaceMutationQueues,
+) {
   if (!line.startsWith("{")) {
     socket.write(`${line.startsWith("list_status") ? "[]" : "OK"}\n`);
     return;
@@ -537,18 +620,23 @@ async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
       result = { ...layout, surfaces };
       break;
     case "surface.read_text": {
-      const transcript = state.transcript ? `\n› ${state.transcript}\n` : "";
+      const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
+      const surfaceState = surfaceStates.get(surfaceKey) ?? {
+        composer: "",
+        transcript: "",
+      };
+      const transcript = surfaceState.transcript
+        ? `\n› ${surfaceState.transcript}\n`
+        : "";
       result = {
         surface_ref: params.surface_id,
-        text:
-          `╭ OpenAI Codex ╮\nmodel: gpt-5.6-sol\n${transcript}\n› ` +
-          (state.composer ?? ""),
+        text: `╭ OpenAI Codex ╮\nmodel: gpt-5.6-sol\n${transcript}\n› ${surfaceState.composer}`,
         lines: 8,
       };
       break;
     }
     case "surface.split":
-      await writeFile(statePath, JSON.stringify({ ...state, closed: false }));
+      await writeFakeState(statePath, { ...state, closed: false });
       result = {
         ...layout,
         surface_ref: spawned.ref,
@@ -557,36 +645,47 @@ async function handleFakeCmuxSocketLine(socket, line, statePath, surfaceCount) {
         type: "terminal",
       };
       break;
-    case "surface.send_text":
-      await writeFile(
-        statePath,
-        JSON.stringify({
-          ...state,
-          composer: `${state.composer ?? ""}${params.text ?? ""}`,
+    case "surface.send_text": {
+      const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
+      await mutateFakeSurfaceState(
+        surfaceKey,
+        surfaceStates,
+        surfaceMutationQueues,
+        (surfaceState) => ({
+          ...surfaceState,
+          composer: `${surfaceState.composer}${params.text ?? ""}`,
         }),
       );
       result = { ok: true };
       break;
-    case "surface.send_key":
-      await writeFile(
-        statePath,
-        JSON.stringify(
+    }
+    case "surface.send_key": {
+      const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
+      await mutateFakeSurfaceState(
+        surfaceKey,
+        surfaceStates,
+        surfaceMutationQueues,
+        (surfaceState) =>
           String(params.key).toLowerCase() === "return"
-            ? { ...state, transcript: state.composer ?? "", composer: "" }
-            : state,
-        ),
+            ? {
+                ...surfaceState,
+                transcript: surfaceState.composer,
+                composer: "",
+              }
+            : surfaceState,
       );
       result = { ok: true };
       break;
+    }
     case "surface.close":
-      await writeFile(statePath, JSON.stringify({ ...state, closed: true }));
+      await writeFakeState(statePath, { ...state, closed: true });
       result = { ok: true };
       break;
     case "tab.action":
-      await writeFile(
-        statePath,
-        JSON.stringify({ ...state, title: params.title ?? state.title }),
-      );
+      await writeFakeState(statePath, {
+        ...state,
+        title: params.title ?? state.title,
+      });
       result = { ok: true };
       break;
     case "workspace.select":
@@ -722,6 +821,12 @@ async function readFakeState(statePath) {
   }
 }
 
+async function writeFakeState(statePath, state) {
+  const temporaryPath = `${statePath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(state));
+  await rename(temporaryPath, statePath);
+}
+
 async function armSweepHold(statePath, holdToken) {
   await writeFile(
     statePath,
@@ -768,9 +873,111 @@ async function waitForLifecycleWaiter(
   throw new Error("close_surface never queued behind the held lifecycle sweep");
 }
 
-async function measureFirstSendAfterSpawn(
+function requireFiniteLockHold(value, operation) {
+  if (!Number.isFinite(value)) {
+    throw new Error(`${operation} omitted finite lock-hold timing`);
+  }
+  return value;
+}
+
+function requireTerminalSubmission(receipt, label) {
+  if (
+    receipt.terminal !== true ||
+    receipt.delivery_state !== "submitted" ||
+    receipt.submit_verified !== true
+  ) {
+    throw new Error(`${label} was not terminally submitted`);
+  }
+  return receipt;
+}
+
+async function requireSubmittedDelivery(client, receipt, label) {
+  if (
+    receipt.terminal === true &&
+    receipt.delivery_state === "submitted" &&
+    receipt.submit_verified === true
+  ) {
+    return receipt;
+  }
+  if (typeof receipt.delivery_id !== "string") {
+    throw new Error(`${label} omitted a waitable delivery id`);
+  }
+  const terminal = toolData(
+    await client.callTool(
+      "wait_for",
+      { delivery_id: receipt.delivery_id, timeout_ms: 2_000 },
+      30_000,
+    ),
+    `${label} wait_for`,
+  );
+  return requireTerminalSubmission(terminal, label);
+}
+
+async function requireSurfaceDeliveryProof(
+  client,
+  receipt,
+  requestArgs,
+  expectedRef,
+  label,
+) {
+  if (
+    (receipt.terminal === true &&
+      receipt.delivery_state === "submitted" &&
+      receipt.submit_verified === true) ||
+    typeof receipt.delivery_id === "string"
+  ) {
+    await requireSubmittedDelivery(client, receipt, label);
+  } else {
+    throw new Error(`${label} was not verified as submitted`);
+  }
+  const read = toolData(
+    await client.callTool(
+      "read_screen",
+      {
+        surface: requestArgs.surface,
+        workspace: requestArgs.workspace,
+        lines: 5,
+        raw: true,
+      },
+      30_000,
+    ),
+    `${label} read-back`,
+  );
+  if (
+    (read.surface !== requestArgs.surface && read.surface !== expectedRef) ||
+    !read.content?.includes(requestArgs.text)
+  ) {
+    throw new Error(`${label} failed attributable read-back verification`);
+  }
+  return read;
+}
+
+function summarizeTimedSamples(samples) {
+  const transports = samples.map((sample) => sample.transport);
+  const lockHolds = samples.map((sample) =>
+    requireFiniteLockHold(sample.lock_hold_ms, "sample"),
+  );
+  return {
+    request_bytes: samples[0]?.request_bytes,
+    request_sha256: samples[0]?.request_sha256,
+    p50_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 50)),
+    p95_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 95)),
+    lock_hold_ms: Math.max(...lockHolds),
+    transport: transports.every((value) => value === "socket")
+      ? "socket"
+      : "cli",
+    transport_fallbacks: [
+      ...new Set(samples.flatMap((sample) => sample.transport_fallbacks ?? [])),
+    ],
+    sample_count: samples.length,
+    sampling: "sampled",
+  };
+}
+
+async function measureSpawnLifecycleOnce(
   client,
   sweepHoldState,
+  sampleIndex,
 ) {
   const spawnResult = toolData(
     await client.callTool(
@@ -797,17 +1004,33 @@ async function measureFirstSendAfterSpawn(
     throw new Error(`spawn_agent omitted identity: ${compact(spawnResult)}`);
   }
 
-  const measureSend = async (args, { normalizeAgentId = false } = {}) => {
+  const measureSend = async (
+    args,
+    {
+      normalizeAgentId = false,
+      requireSubmitted = true,
+      canonicalText,
+      validateReceipt,
+    } = {},
+  ) => {
     const startedAt = nowMs();
     const receipt = toolData(await client.callTool("send_to", args), "send_to");
+    if (requireSubmitted) {
+      requireTerminalSubmission(receipt, `${args.mode} send`);
+    }
+    await validateReceipt?.(receipt);
     return {
       elapsed_ms: round(nowMs() - startedAt),
       request_bytes: requestBytes("send_to", args),
       request_sha256: requestSha256("send_to", {
         ...args,
+        ...(canonicalText ? { text: canonicalText } : {}),
         ...(normalizeAgentId ? { agent_id: "$SPAWNED_AGENT_ID" } : {}),
       }),
-      lock_hold_ms: receipt.timings_ms?.lock_hold ?? null,
+      lock_hold_ms: requireFiniteLockHold(
+        receipt.timings_ms?.lock_hold,
+        `${args.mode} send`,
+      ),
       transport: receipt.transport,
       receipt,
     };
@@ -841,65 +1064,48 @@ async function measureFirstSendAfterSpawn(
     },
     { normalizeAgentId: true },
   );
-  const surface = await measureSend({
+  const surfaceArgs = {
     mode: "surface",
     surface: spawnResult.surface_id,
     workspace: "workspace:bench",
-    text: "surface benchmark",
+    text: surfaceSampleSentinel(sampleIndex),
     press_enter: true,
-  });
-  let surfaceWaitFor;
-  if (typeof surface.receipt.delivery_id === "string") {
-    try {
-      surfaceWaitFor = toolData(
-        await client.callTool("wait_for", {
-          delivery_id: surface.receipt.delivery_id,
-          timeout_ms: 2_000,
-        }),
-        "wait_for(surface receipt)",
-      );
-    } catch (error) {
-      surfaceWaitFor = {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  } else {
-    surfaceWaitFor = {
-      ok: false,
-      error: "surface receipt omitted delivery_id",
-    };
-  }
-
-  const measureWarmTool = async (name, args) => {
-    const samples = [];
-    const transports = [];
-    const fallbackSources = new Set();
-    for (let index = 0; index < rounds; index += 1) {
-      const startedAt = nowMs();
-      const receipt = toolData(await client.callTool(name, args, 30_000), name);
-      samples.push(nowMs() - startedAt);
-      transports.push(operationTransport(receipt, name));
-      for (const source of receipt.transport_fallbacks ?? []) {
-        fallbackSources.add(source);
-      }
-    }
-    return {
-      request_bytes: requestBytes(name, args),
-      request_sha256: requestSha256(name, args),
-      lock_hold_ms: 0,
-      p50_ms: round(percentile(samples, 50)),
-      p95_ms: round(percentile(samples, 95)),
-      transport: transports.every((value) => value === "socket")
-        ? "socket"
-        : "cli",
-      transport_fallbacks: [...fallbackSources],
-    };
   };
-  const listAgents = await measureWarmTool("list_agents", {
-    detail: "summary",
+  let surfaceWaitFor;
+  const surface = await measureSend(surfaceArgs, {
+    requireSubmitted: false,
+    canonicalText: surfaceSampleSentinel("NNN"),
+    validateReceipt: async (receipt) => {
+      requireTerminalSubmission(
+        receipt,
+        "sampled surface send initial receipt",
+      );
+      try {
+        const terminal = await requireSubmittedDelivery(
+          client,
+          receipt,
+          "sampled surface send",
+        );
+        await requireSurfaceDeliveryProof(
+          client,
+          terminal,
+          surfaceArgs,
+          "surface:bench-spawn",
+          "sampled surface send",
+        );
+        surfaceWaitFor = {
+          ...terminal,
+          read_back_verified: true,
+        };
+      } catch (error) {
+        surfaceWaitFor = {
+          ok: false,
+          read_back_verified: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
   });
-  const controlHealth = await measureWarmTool("control_health", {});
 
   const closeArgs = {
     scope: "agent",
@@ -922,6 +1128,12 @@ async function measureFirstSendAfterSpawn(
   const closeOutcome = await closePromise;
   if ("error" in closeOutcome) throw closeOutcome.error;
   const closeReceipt = toolData(closeOutcome.value, "close_surface");
+  if (
+    closeReceipt.agent_stopped !== true ||
+    closeReceipt.surface_closed !== true
+  ) {
+    throw new Error("close_surface did not close the spawned surface");
+  }
   await waitForSweepHoldState(sweepHoldState, closeHoldToken, "complete");
   const spawnCloseDuringSweep = {
     elapsed_ms: round(nowMs() - closeStartedAt),
@@ -930,7 +1142,9 @@ async function measureFirstSendAfterSpawn(
       ...closeArgs,
       agent_id: "$SPAWNED_AGENT_ID",
     }),
-    lock_hold_ms: closeReceipt.timings_ms?.lock_hold ?? 0,
+    // close_surface is the waiter in this held-sweep scenario. Contention is
+    // enforced by elapsed time; the waiter's own lock hold is explicitly zero.
+    lock_hold_ms: 0,
     transport: closeReceipt.transport,
     transport_fallbacks: closeReceipt.transport_fallbacks ?? [],
     receipt: closeReceipt,
@@ -942,10 +1156,242 @@ async function measureFirstSendAfterSpawn(
     first,
     second,
     surface: { ...surface, wait_for: surfaceWaitFor },
-    list_agents: listAgents,
-    control_health: controlHealth,
     spawn_close_during_sweep: spawnCloseDuringSweep,
   };
+}
+
+async function measureWarmToolAcrossClients(
+  clients,
+  name,
+  args,
+  validateReceipt,
+  { lockHoldFromElapsed = false } = {},
+) {
+  const samples = [];
+  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    await Promise.all(
+      clients.map(async (client) => {
+        const startedAt = nowMs();
+        const receipt = toolData(
+          await client.callTool(name, args, 30_000),
+          name,
+        );
+        validateReceipt?.(receipt);
+        const elapsedMs = nowMs() - startedAt;
+        samples.push({
+          elapsed_ms: elapsedMs,
+          request_bytes: requestBytes(name, args),
+          request_sha256: requestSha256(name, args),
+          // list_agents performs its fresh scan under the lifecycle mutation
+          // lock. End-to-end elapsed time is a conservative upper bound that
+          // cannot understate its serialized occupancy.
+          lock_hold_ms: lockHoldFromElapsed ? elapsedMs : 0,
+          transport: operationTransport(receipt, name),
+          transport_fallbacks: receipt.transport_fallbacks ?? [],
+        });
+      }),
+    );
+  }
+  return summarizeTimedSamples(samples);
+}
+
+async function measureLiveListAgentsAcrossClients(clients) {
+  const spawnResult = toolData(
+    await clients[0].callTool(
+      "spawn_agent",
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+        authority: "worker",
+        placement: "right",
+        workspace: "workspace:bench",
+        cwd: repoRoot,
+        worktree: false,
+        mcp_profile: "sterile",
+        title: "bench-list-agents-live",
+        prompt: "benchmark live list agent",
+        boot_prompt_timeout_ms: 2_000,
+      },
+      30_000,
+    ),
+    "spawn_agent(list_agents fixture)",
+  );
+  if (!spawnResult.agent_id || !spawnResult.surface_id) {
+    throw new Error("list_agents fixture spawn omitted identity");
+  }
+  let measurement;
+  let measurementError;
+  try {
+    measurement = await measureWarmToolAcrossClients(
+      clients,
+      "list_agents",
+      { detail: "summary" },
+      (receipt) => {
+        if (
+          !Array.isArray(receipt.agents) ||
+          !receipt.agents.some(
+            (agent) => agent.agent_id === spawnResult.agent_id,
+          )
+        ) {
+          throw new Error("list_agents omitted the live spawned agent");
+        }
+      },
+      { lockHoldFromElapsed: true },
+    );
+  } catch (error) {
+    measurementError = error;
+  }
+  let closeError;
+  try {
+    const closeReceipt = toolData(
+      await clients[0].callTool(
+        "close_surface",
+        { scope: "agent", agent_id: spawnResult.agent_id, force: true },
+        30_000,
+      ),
+      "close_surface(list_agents fixture)",
+    );
+    if (
+      closeReceipt.agent_stopped !== true ||
+      closeReceipt.surface_closed !== true
+    ) {
+      throw new Error("list_agents fixture did not close cleanly");
+    }
+  } catch (error) {
+    closeError = error;
+  }
+  if (measurementError && closeError) {
+    throw new AggregateError(
+      [measurementError, closeError],
+      "list_agents measurement and fixture cleanup both failed",
+    );
+  }
+  if (measurementError) throw measurementError;
+  if (closeError) throw closeError;
+  return measurement;
+}
+
+async function measureSpawnLifecycleAcrossClients(
+  clients,
+  sweepHoldState,
+) {
+  const samples = [];
+  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    for (const [clientIndex, client] of clients.entries()) {
+      const sampleIndex = roundIndex * clients.length + clientIndex;
+      samples.push(
+        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex),
+      );
+    }
+  }
+  return {
+    first: samples[0].first,
+    second: samples[0].second,
+    surface: samples[0].surface,
+    spawn_close_sample: samples[0].spawn_close_during_sweep,
+    sampled: summarizeTimedSamples(samples.map((sample) => sample.first)),
+    send_to_agent_warm: summarizeTimedSamples(
+      samples.map((sample) => sample.second),
+    ),
+    send_to_surface_warm: summarizeTimedSamples(
+      samples.map((sample) => sample.surface),
+    ),
+    spawn_close_during_sweep: summarizeTimedSamples(
+      samples.map((sample) => sample.spawn_close_during_sweep),
+    ),
+    surface_receipts_waitable: samples.every(
+      (sample) =>
+        typeof sample.surface.receipt.delivery_id === "string" &&
+        sample.surface.wait_for.delivery_id ===
+          sample.surface.receipt.delivery_id &&
+        sample.surface.wait_for.terminal === true &&
+        sample.surface.wait_for.delivery_state === "submitted" &&
+        sample.surface.wait_for.submit_verified === true &&
+        sample.surface.wait_for.read_back_verified === true,
+    ),
+  };
+}
+
+function surfaceSampleSentinel(sampleIndex) {
+  return `surface bench ${String(sampleIndex).padStart(3, "0")}`;
+}
+
+function parallelStressSentinel(index, roundIndex) {
+  return roundIndex === undefined
+    ? `parallel surface benchmark ${index}`
+    : `parallel surface benchmark ${index} round ${String(roundIndex).padStart(2, "0")}`;
+}
+
+async function measureParallelStress(
+  clients,
+  name,
+  args,
+  validateReceipt,
+  { beforeRound } = {},
+) {
+  const samples = [];
+  const canonicalRequests = Array.from(
+    { length: PARALLEL_STRESS_COUNT },
+    (_, index) => (typeof args === "function" ? args(index, "RR") : args),
+  );
+  const request = {
+    parallel: PARALLEL_STRESS_COUNT,
+    name,
+    arguments: canonicalRequests,
+  };
+  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    await beforeRound?.(roundIndex);
+    const requests = Array.from(
+      { length: PARALLEL_STRESS_COUNT },
+      (_, index) =>
+        typeof args === "function" ? args(index, roundIndex) : args,
+    );
+    const startedAt = nowMs();
+    const receipts = await Promise.all(
+      requests.map(async (requestArgs, index) =>
+        toolData(
+          await clients[index].callTool(name, requestArgs, 30_000),
+          name,
+        ),
+      ),
+    );
+    await Promise.all(
+      receipts.map((receipt, index) =>
+        validateReceipt?.(receipt, requests[index], index, roundIndex),
+      ),
+    );
+    const elapsedMs = nowMs() - startedAt;
+    samples.push({
+      elapsed_ms: elapsedMs,
+      request_bytes: requests.reduce(
+        (total, requestArgs) => total + requestBytes(name, requestArgs),
+        0,
+      ),
+      request_sha256: createHash("sha256")
+        .update(JSON.stringify(canonicalize(request)))
+        .digest("hex"),
+      lock_hold_ms:
+        name === "read_screen"
+          ? 0
+          : Math.max(
+              ...receipts.map((receipt) =>
+                requireFiniteLockHold(receipt.timings_ms?.lock_hold, name),
+              ),
+            ),
+      transport: receipts.every(
+        (receipt) => operationTransport(receipt, name) === "socket",
+      )
+        ? "socket"
+        : "cli",
+      transport_fallbacks: [
+        ...new Set(
+          receipts.flatMap((receipt) => receipt.transport_fallbacks ?? []),
+        ),
+      ],
+    });
+  }
+  return { ...summarizeTimedSamples(samples), stress: true };
 }
 
 async function main() {
@@ -977,13 +1423,14 @@ async function main() {
   const daemonSocket = join(socketRoot, "d.sock");
   const missingCmuxSocket = join(socketRoot, "m.sock");
   const fakeCmuxState = join(tempRoot, "fake-cmux-state.json");
+  const surfaceCount = Math.max(clientCount, PARALLEL_STRESS_COUNT);
   const fakeCmuxSocketServer =
     process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1"
       ? net.createServer((socket) => socket.destroy())
       : await startFakeCmuxSocket(
           missingCmuxSocket,
           fakeCmuxState,
-          clientCount,
+          surfaceCount,
         );
   if (process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1") {
     await new Promise((resolvePromise, reject) => {
@@ -1000,7 +1447,7 @@ async function main() {
     CMUX_TAB_ID: "",
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     CMUX_SOCKET_PATH: missingCmuxSocket,
-    CMUXLAYER_BENCH_SURFACES: String(clientCount),
+    CMUXLAYER_BENCH_SURFACES: String(surfaceCount),
     CMUXLAYER_BENCH_STATE: fakeCmuxState,
     CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
     CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
@@ -1011,6 +1458,7 @@ async function main() {
 
   let baselineClients = [];
   let daemonClients = [];
+  let stressClients = [];
   let daemon = null;
   try {
     baselineClients = await startClients("baseline", clientCount, {
@@ -1056,14 +1504,111 @@ async function main() {
       );
     }
     const daemonLatency = await measureLatency(daemonClients);
-    const firstSendAfterSpawn = await measureFirstSendAfterSpawn(
-      daemonClients[0],
+    const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
+      daemonClients,
       sweepHoldState,
     );
+    const listAgents = await measureLiveListAgentsAcrossClients(daemonClients);
+    const controlHealth = await measureWarmToolAcrossClients(
+      daemonClients,
+      "control_health",
+      {},
+    );
+    stressClients = await startClients(
+      "daemon-stress",
+      PARALLEL_STRESS_COUNT,
+      {
+        ...baseEnv,
+        CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+      },
+    );
+    const sendToSurface10Parallel = await measureParallelStress(
+      stressClients,
+      "send_to",
+      (index, roundIndex) => ({
+        mode: "surface",
+        surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        workspace: "workspace:bench",
+        text: parallelStressSentinel(index, roundIndex),
+        press_enter: true,
+      }),
+      (receipt, requestArgs, index) => {
+        requireTerminalSubmission(receipt, "parallel send initial receipt");
+        return requireSurfaceDeliveryProof(
+          stressClients[index],
+          receipt,
+          requestArgs,
+          `surface:bench-${index}`,
+          "parallel send",
+        );
+      },
+    );
+    const readScreen10Parallel = await measureParallelStress(
+      stressClients,
+      "read_screen",
+      (index) => ({
+        surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        workspace: "workspace:bench",
+        lines: 5,
+        raw: true,
+      }),
+      (receipt, requestArgs, index, roundIndex) => {
+        const expectedRef = `surface:bench-${index}`;
+        if (
+          receipt.surface !== requestArgs.surface &&
+          receipt.surface !== expectedRef
+        ) {
+          throw new Error("parallel read returned the wrong surface");
+        }
+        if (
+          !receipt.content?.includes(
+            parallelStressSentinel(index, roundIndex),
+          )
+        ) {
+          throw new Error("parallel read omitted its unique sentinel");
+        }
+      },
+      {
+        beforeRound: async (roundIndex) => {
+          await Promise.all(
+            stressClients.map(async (client, index) => {
+              const receipt = toolData(
+                await client.callTool(
+                  "send_to",
+                  {
+                    mode: "surface",
+                    surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+                    workspace: "workspace:bench",
+                    text: parallelStressSentinel(index, roundIndex),
+                    press_enter: true,
+                  },
+                  30_000,
+                ),
+                "read_screen round setup",
+              );
+              await requireSurfaceDeliveryProof(
+                client,
+                receipt,
+                {
+                  surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+                  workspace: "workspace:bench",
+                  text: parallelStressSentinel(index, roundIndex),
+                },
+                `surface:bench-${index}`,
+                "read stress round setup",
+              );
+            }),
+          );
+        },
+      },
+    );
+    const stressClientsSurvivedReplay = stressClients.every(
+      (client) => client.alive,
+    );
+    await Promise.all(stressClients.map((client) => client.close()));
+    stressClients = [];
     const daemonRssMb = await totalRssMb(
-      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(
-        Boolean,
-      ),
+      [daemon.pid, ...daemonClients.map((client) => client.pid)].filter(Boolean),
     );
     const daemonStats = await processStats(daemon.pid);
     const truthfulState =
@@ -1074,6 +1619,13 @@ async function main() {
 
     const gates = {
       rss_improved: daemonRssMb < baselineRssMb,
+      daemon_survived_replay:
+        daemon.exitCode === null &&
+        daemon.signalCode === null &&
+        daemonStats.rssKb > 0,
+      benchmark_clients_survived_replay:
+        stressClientsSurvivedReplay &&
+        daemonClients.every((client) => client.alive),
       truthful_state: truthfulState,
       list_surfaces_p50_no_regression: latencyGate(
         baselineLatency,
@@ -1092,25 +1644,24 @@ async function main() {
             local_read_screen_p50_within_250ms:
               daemonLatency.read_screen.p50_ms <= READ_SCREEN_P50_BUDGET_MS,
             local_first_send_after_spawn_within_2s:
-              firstSendAfterSpawn.first.elapsed_ms <= 2_000,
+              firstSendAfterSpawn.sampled.p50_ms <= 2_000,
             local_cli_send_within_4s:
-              firstSendAfterSpawn.surface.elapsed_ms <= 4_000,
+              firstSendAfterSpawn.send_to_surface_warm.p50_ms <= 4_000,
           }
         : {}),
       surface_receipt_is_waitable:
-        typeof firstSendAfterSpawn.surface.receipt.delivery_id === "string" &&
-        firstSendAfterSpawn.surface.wait_for.delivery_id ===
-          firstSendAfterSpawn.surface.receipt.delivery_id &&
-        firstSendAfterSpawn.surface.wait_for.terminal === true,
+        firstSendAfterSpawn.surface_receipts_waitable,
       socket_transport_only: [
         daemonLatency.list_surfaces,
         daemonLatency.read_screen,
-        firstSendAfterSpawn.first,
-        firstSendAfterSpawn.second,
-        firstSendAfterSpawn.surface,
-        firstSendAfterSpawn.list_agents,
-        firstSendAfterSpawn.control_health,
+        firstSendAfterSpawn.sampled,
+        firstSendAfterSpawn.send_to_agent_warm,
+        firstSendAfterSpawn.send_to_surface_warm,
+        listAgents,
+        controlHealth,
         firstSendAfterSpawn.spawn_close_during_sweep,
+        sendToSurface10Parallel,
+        readScreen10Parallel,
       ].every((measurement) => measurement.transport === "socket"),
     };
     const green = Object.values(gates).every(Boolean);
@@ -1131,39 +1682,98 @@ async function main() {
           "control_health",
           "spawn_close_during_sweep",
           "first_send_after_spawn",
+          "send_to_surface_10_parallel",
+          "read_screen_10_parallel",
         ],
+        row_metadata: {
+          list_surfaces: {
+            sampling: "sampled",
+            samples_per_run: clientCount * rounds,
+          },
+          read_screen: {
+            sampling: "sampled",
+            samples_per_run: clientCount * rounds,
+          },
+          send_to_surface_warm: {
+            sampling: "sampled",
+            samples_per_run: firstSendAfterSpawn.send_to_surface_warm.sample_count,
+          },
+          send_to_agent_warm: {
+            sampling: "sampled",
+            samples_per_run: firstSendAfterSpawn.send_to_agent_warm.sample_count,
+          },
+          list_agents: {
+            sampling: "sampled",
+            samples_per_run: listAgents.sample_count,
+          },
+          control_health: {
+            sampling: "sampled",
+            samples_per_run: controlHealth.sample_count,
+          },
+          spawn_close_during_sweep: {
+            sampling: "sampled",
+            samples_per_run:
+              firstSendAfterSpawn.spawn_close_during_sweep.sample_count,
+          },
+          first_send_after_spawn: {
+            sampling: "sampled",
+            samples_per_run: firstSendAfterSpawn.sampled.sample_count,
+          },
+          send_to_surface_10_parallel: {
+            sampling: "sampled",
+            samples_per_run: sendToSurface10Parallel.sample_count,
+            stress: true,
+          },
+          read_screen_10_parallel: {
+            sampling: "sampled",
+            samples_per_run: readScreen10Parallel.sample_count,
+            stress: true,
+          },
+        },
         bytes: {
           list_surfaces: daemonLatency.list_surfaces.request_bytes,
           read_screen: daemonLatency.read_screen.request_bytes,
-          send_to_surface_warm: firstSendAfterSpawn.surface.request_bytes,
-          send_to_agent_warm: firstSendAfterSpawn.second.request_bytes,
-          list_agents: firstSendAfterSpawn.list_agents.request_bytes,
-          control_health: firstSendAfterSpawn.control_health.request_bytes,
+          send_to_surface_warm:
+            firstSendAfterSpawn.send_to_surface_warm.request_bytes,
+          send_to_agent_warm:
+            firstSendAfterSpawn.send_to_agent_warm.request_bytes,
+          list_agents: listAgents.request_bytes,
+          control_health: controlHealth.request_bytes,
           spawn_close_during_sweep:
             firstSendAfterSpawn.spawn_close_during_sweep.request_bytes,
-          first_send_after_spawn: firstSendAfterSpawn.first.request_bytes,
+          first_send_after_spawn: firstSendAfterSpawn.sampled.request_bytes,
+          send_to_surface_10_parallel: sendToSurface10Parallel.request_bytes,
+          read_screen_10_parallel: readScreen10Parallel.request_bytes,
         },
         request_sha256: {
           list_surfaces: daemonLatency.list_surfaces.request_sha256,
           read_screen: daemonLatency.read_screen.request_sha256,
-          send_to_surface_warm: firstSendAfterSpawn.surface.request_sha256,
-          send_to_agent_warm: firstSendAfterSpawn.second.request_sha256,
-          list_agents: firstSendAfterSpawn.list_agents.request_sha256,
-          control_health: firstSendAfterSpawn.control_health.request_sha256,
+          send_to_surface_warm:
+            firstSendAfterSpawn.send_to_surface_warm.request_sha256,
+          send_to_agent_warm:
+            firstSendAfterSpawn.send_to_agent_warm.request_sha256,
+          list_agents: listAgents.request_sha256,
+          control_health: controlHealth.request_sha256,
           spawn_close_during_sweep:
             firstSendAfterSpawn.spawn_close_during_sweep.request_sha256,
-          first_send_after_spawn: firstSendAfterSpawn.first.request_sha256,
+          first_send_after_spawn: firstSendAfterSpawn.sampled.request_sha256,
+          send_to_surface_10_parallel: sendToSurface10Parallel.request_sha256,
+          read_screen_10_parallel: readScreen10Parallel.request_sha256,
         },
         transport: {
           list_surfaces: daemonLatency.list_surfaces.transport,
           read_screen: daemonLatency.read_screen.transport,
-          send_to_surface_warm: firstSendAfterSpawn.surface.transport,
-          send_to_agent_warm: firstSendAfterSpawn.second.transport,
-          list_agents: firstSendAfterSpawn.list_agents.transport,
-          control_health: firstSendAfterSpawn.control_health.transport,
+          send_to_surface_warm:
+            firstSendAfterSpawn.send_to_surface_warm.transport,
+          send_to_agent_warm:
+            firstSendAfterSpawn.send_to_agent_warm.transport,
+          list_agents: listAgents.transport,
+          control_health: controlHealth.transport,
           spawn_close_during_sweep:
             firstSendAfterSpawn.spawn_close_during_sweep.transport,
-          first_send_after_spawn: firstSendAfterSpawn.first.transport,
+          first_send_after_spawn: firstSendAfterSpawn.sampled.transport,
+          send_to_surface_10_parallel: sendToSurface10Parallel.transport,
+          read_screen_10_parallel: readScreen10Parallel.transport,
         },
       },
       rss: {
@@ -1182,29 +1792,18 @@ async function main() {
         daemon_path: {
           list_surfaces: daemonLatency.list_surfaces,
           read_screen: daemonLatency.read_screen,
-          list_agents: firstSendAfterSpawn.list_agents,
-          control_health: firstSendAfterSpawn.control_health,
+          list_agents: listAgents,
+          control_health: controlHealth,
+          send_to_surface_10_parallel: sendToSurface10Parallel,
+          read_screen_10_parallel: readScreen10Parallel,
         },
         first_send_after_spawn: firstSendAfterSpawn,
-        send_to_surface_warm: {
-          p50_ms: firstSendAfterSpawn.surface.elapsed_ms,
-          p95_ms: firstSendAfterSpawn.surface.elapsed_ms,
-          lock_hold_ms: firstSendAfterSpawn.surface.lock_hold_ms ?? 0,
-          transport: firstSendAfterSpawn.surface.transport,
-        },
-        send_to_agent_warm: {
-          p50_ms: firstSendAfterSpawn.second.elapsed_ms,
-          p95_ms: firstSendAfterSpawn.second.elapsed_ms,
-          lock_hold_ms: firstSendAfterSpawn.second.lock_hold_ms ?? 0,
-          transport: firstSendAfterSpawn.second.transport,
-        },
-        spawn_close_during_sweep: {
-          p50_ms: firstSendAfterSpawn.spawn_close_during_sweep.elapsed_ms,
-          p95_ms: firstSendAfterSpawn.spawn_close_during_sweep.elapsed_ms,
-          lock_hold_ms:
-            firstSendAfterSpawn.spawn_close_during_sweep.lock_hold_ms,
-          transport: firstSendAfterSpawn.spawn_close_during_sweep.transport,
-        },
+        send_to_surface_warm: firstSendAfterSpawn.send_to_surface_warm,
+        send_to_agent_warm: firstSendAfterSpawn.send_to_agent_warm,
+        spawn_close_during_sweep:
+          firstSendAfterSpawn.spawn_close_during_sweep,
+        send_to_surface_10_parallel: sendToSurface10Parallel,
+        read_screen_10_parallel: readScreen10Parallel,
       },
       daemon_cpu_pct: round(daemonStats.cpuPct, 2),
       gates,
@@ -1237,7 +1836,9 @@ async function main() {
     }
   } finally {
     await Promise.all(
-      [...baselineClients, ...daemonClients].map((client) => client.close()),
+      [...baselineClients, ...daemonClients, ...stressClients].map((client) =>
+        client.close(),
+      ),
     );
     await stopChild(daemon);
     await new Promise((resolvePromise) =>

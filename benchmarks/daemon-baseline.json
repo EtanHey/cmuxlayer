@@ -1,10 +1,11 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "7e1bb96f9fc82d6f7676043b75dcaf1ed1c31837",
-    "measured_at": "2026-08-26T16:33:17.727Z",
+    "git_sha": "062d38af1c9296cd198f93d850f841729d9b49cc",
+    "measured_at": "2026-08-31T10:10:45.906Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 32988968639
+    "workflow_run_id": 33380548570,
+    "increase_reason": "list_agents fresh scans hold the lifecycle mutation lock; replace the false zero with the exact-run conservative elapsed upper bound, and retain terminal-confirmed surface-send timing."
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -22,8 +23,54 @@
       "list_agents",
       "control_health",
       "spawn_close_during_sweep",
-      "first_send_after_spawn"
+      "first_send_after_spawn",
+      "send_to_surface_10_parallel",
+      "read_screen_10_parallel"
     ],
+    "row_metadata": {
+      "list_surfaces": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "read_screen": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "send_to_surface_warm": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "send_to_agent_warm": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "list_agents": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "control_health": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "spawn_close_during_sweep": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "first_send_after_spawn": {
+        "sampling": "sampled",
+        "samples_per_run": 96
+      },
+      "send_to_surface_10_parallel": {
+        "sampling": "sampled",
+        "samples_per_run": 12,
+        "stress": true
+      },
+      "read_screen_10_parallel": {
+        "sampling": "sampled",
+        "samples_per_run": 12,
+        "stress": true
+      }
+    },
     "bytes": {
       "list_surfaces": 142,
       "read_screen": 161,
@@ -32,17 +79,21 @@
       "list_agents": 112,
       "control_health": 97,
       "spawn_close_during_sweep": 161,
-      "first_send_after_spawn": 231
+      "first_send_after_spawn": 231,
+      "send_to_surface_10_parallel": 2510,
+      "read_screen_10_parallel": 1930
     },
     "request_sha256": {
       "list_surfaces": "29b9c66db4de170a41fdd8ad608f356201f747970e6f7fa74ae605f360f85a33",
       "read_screen": "0f6c57ad85b668c2ae73f651d9d44c41525b8f2fba3d2f7783e6acb592dc2137",
-      "send_to_surface_warm": "d2b6d478fff8c5cf8568d2c2caaa48cbe98314a700477cccbc20657a0ba3058e",
+      "send_to_surface_warm": "02703281dd0f30c23e8b681d2ebe0702b7d8c4459e5948953e04b93162d6f844",
       "send_to_agent_warm": "ec21fdf5817b3568ba66b0f44b2b5982319c2778cd60a7de637c1231428ee6e1",
       "list_agents": "4f4fb87e95a8f7cded25a4fd1bb35d11492182997e1f7d14c856683f53cc0416",
       "control_health": "56e5969d5764757c0775d59e7c65e83cbd91d6f4f4a3279f1cc910fe6854a10f",
       "spawn_close_during_sweep": "1c7dfd23479835bd9d42cc8e74444cbac74e47aa8f288d3eb3278e777c96acdf",
-      "first_send_after_spawn": "811745b320e17eddf09602072cea6a0f8274bd3e6ecb6438796646803efbcc75"
+      "first_send_after_spawn": "811745b320e17eddf09602072cea6a0f8274bd3e6ecb6438796646803efbcc75",
+      "send_to_surface_10_parallel": "961824611592824755bfa4374fdf62aa941395dd057756be85eae3f187c2a4b3",
+      "read_screen_10_parallel": "366278b96955bd7c665f9793a8fa22ace224a74074e4d3af2b423afc7f806b2c"
     },
     "transport": {
       "list_surfaces": "socket",
@@ -52,54 +103,66 @@
       "list_agents": "socket",
       "control_health": "socket",
       "spawn_close_during_sweep": "socket",
-      "first_send_after_spawn": "socket"
+      "first_send_after_spawn": "socket",
+      "send_to_surface_10_parallel": "socket",
+      "read_screen_10_parallel": "socket"
     }
   },
   "measurements": {
     "list_surfaces": {
-      "p50_ms": 9.41,
-      "p95_ms": 34.2,
+      "p50_ms": 9.47,
+      "p95_ms": 50.94,
       "lock_hold_ms": 0
     },
     "read_screen": {
-      "p50_ms": 12.71,
-      "p95_ms": 28.58,
+      "p50_ms": 13.9,
+      "p95_ms": 23.75,
       "lock_hold_ms": 0
     },
     "send_to_surface_warm": {
-      "p50_ms": 69.58,
-      "p95_ms": 69.58,
-      "lock_hold_ms": 63
+      "p50_ms": 65.02,
+      "p95_ms": 71.2,
+      "lock_hold_ms": 178
     },
     "send_to_agent_warm": {
-      "p50_ms": 104.01,
-      "p95_ms": 104.01,
-      "lock_hold_ms": 66
+      "p50_ms": 93.26,
+      "p95_ms": 122.59,
+      "lock_hold_ms": 200
     },
     "list_agents": {
-      "p50_ms": 15.76,
-      "p95_ms": 63.22,
-      "lock_hold_ms": 0
+      "p50_ms": 67.66,
+      "p95_ms": 119.43,
+      "lock_hold_ms": 141.66617600002792
     },
     "control_health": {
-      "p50_ms": 23.13,
-      "p95_ms": 32.24,
+      "p50_ms": 132.77,
+      "p95_ms": 184.45,
       "lock_hold_ms": 0
     },
     "spawn_close_during_sweep": {
-      "p50_ms": 48.76,
-      "p95_ms": 48.76,
+      "p50_ms": 46.04,
+      "p95_ms": 143.28,
       "lock_hold_ms": 0
     },
     "first_send_after_spawn": {
-      "p50_ms": 134.91,
-      "p95_ms": 134.91,
-      "lock_hold_ms": 75
+      "p50_ms": 74.06,
+      "p95_ms": 86.29,
+      "lock_hold_ms": 120
     },
-    "cli_send_ms": 69.58
+    "send_to_surface_10_parallel": {
+      "p50_ms": 145.68,
+      "p95_ms": 368.97,
+      "lock_hold_ms": 353
+    },
+    "read_screen_10_parallel": {
+      "p50_ms": 31.4,
+      "p95_ms": 59.03,
+      "lock_hold_ms": 0
+    },
+    "cli_send_ms": 65.02
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "5e082ba864d9aa64876bd2f8901ad301adab6286da3d18623c9ae4cc8682e601"
+    "content_sha256": "1b9d5ad4e790624a5d75dfbb5fd7d1aa0693fda34c6039173b51b58db3aea33f"
   }
 }
