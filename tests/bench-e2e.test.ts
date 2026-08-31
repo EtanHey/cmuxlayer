@@ -1763,6 +1763,19 @@ describe("bench-e2e measurement harness", () => {
         assertOutputOutsideGitMetadata(output, directory),
       ).rejects.toThrow(/inside Git metadata/);
     }
+    await writeFile(
+      join(bareGit, "included.conf"),
+      "[core]\n\tbare = yes\n",
+      "utf8",
+    );
+    await writeFile(
+      join(bareGit, "config"),
+      "[include]\n\tpath = included.conf\n",
+      "utf8",
+    );
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
     await rm(directory, { recursive: true, force: true });
   });
 

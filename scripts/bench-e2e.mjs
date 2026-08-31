@@ -1960,17 +1960,55 @@ async function isBareGitRepositoryRoot(root) {
       lstat(join(root, "HEAD")),
       lstat(join(root, "objects")),
       lstat(join(root, "refs")),
-      readFile(join(root, "config"), "utf8"),
+      lstat(join(root, "config")),
     ]);
-    return (
-      head.isFile() &&
-      objects.isDirectory() &&
-      refs.isDirectory() &&
-      /^\s*bare(?:\s*=\s*(?:true|yes|on|1))?\s*$/im.test(config)
-    );
+    if (
+      !head.isFile() ||
+      !objects.isDirectory() ||
+      !refs.isDirectory() ||
+      !config.isFile()
+    ) {
+      return false;
+    }
   } catch (error) {
     if (error?.code === "ENOENT") return false;
     throw error;
+  }
+  const gitEnv = { ...process.env };
+  for (const name of Object.keys(gitEnv)) {
+    if (
+      name.startsWith("GIT_CONFIG_") ||
+      [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_WORK_TREE",
+      ].includes(name)
+    ) {
+      delete gitEnv[name];
+    }
+  }
+  try {
+    const result = await execCapture(
+      "git",
+      [
+        "config",
+        "--file",
+        join(root, "config"),
+        "--includes",
+        "--type=bool",
+        "--get",
+        "core.bare",
+      ],
+      { env: gitEnv },
+    );
+    return result.stdout.trim() === "true";
+  } catch {
+    // The directory has Git's bare control-file shape. If its configuration
+    // cannot be resolved safely, fail closed instead of permitting overwrite.
+    return true;
   }
 }
 
