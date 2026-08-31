@@ -284,6 +284,20 @@ describe("daemon performance budget", () => {
         }),
       ),
     ).toThrow(/row_metadata/);
+    expect(() =>
+      validateBaseline(
+        attest({
+          ...baseline,
+          measurements: {
+            ...baseline.measurements,
+            list_surfaces: {
+              ...baseline.measurements.list_surfaces,
+              p95_ms: 1_001,
+            },
+          },
+        }),
+      ),
+    ).toThrow(/sanity cap/);
   });
 
   it("uses measured spread and five-run p50 variance only for earned sampled rows", () => {
@@ -409,6 +423,7 @@ describe("daemon performance budget", () => {
       ref: "refs/heads/main",
       git_sha: "f".repeat(40),
       workflow_run_id: 999,
+      baseline_content_sha256: baseline.refresh_attestation.content_sha256,
     });
     expect(appended).toHaveLength(50);
     expect(appended[0]).toEqual(existing[1]);
@@ -421,7 +436,7 @@ describe("daemon performance budget", () => {
     expect(checkerModule).toHaveProperty("readBenchmarkHistory");
     const readBenchmarkHistory = (
       checkerModule as typeof checkerModule & {
-        readBenchmarkHistory: (path: string) => Promise<{
+        readBenchmarkHistory: (path: string, baselineSha?: string) => Promise<{
           runs: unknown[];
           degraded: boolean;
           reason?: string;
@@ -475,11 +490,24 @@ describe("daemon performance budget", () => {
         ref: "refs/heads/main",
         git_sha: "a".repeat(40),
         workflow_run_id: 99,
+        baseline_content_sha256: baseline.refresh_attestation.content_sha256,
       })[0];
       writeFileSync(historyPath, JSON.stringify({ runs: [validRun] }));
-      await expect(readBenchmarkHistory(historyPath)).resolves.toMatchObject({
+      await expect(
+        readBenchmarkHistory(
+          historyPath,
+          baseline.refresh_attestation.content_sha256,
+        ),
+      ).resolves.toMatchObject({
         runs: [validRun],
         degraded: false,
+      });
+      await expect(
+        readBenchmarkHistory(historyPath, "b".repeat(64)),
+      ).resolves.toMatchObject({
+        runs: [],
+        degraded: true,
+        reason: expect.stringContaining("different baseline"),
       });
     } finally {
       rmSync(artifactDir, { recursive: true, force: true });
@@ -963,10 +991,20 @@ describe("daemon performance budget", () => {
     expect(source).toContain(
       "benchmark_clients_survived_replay:\n        stressClientsSurvivedReplay &&\n        daemonClients.every((client) => client.alive)",
     );
-    expect(source).toContain("function parallelStressSentinel(index)");
-    expect(source).toContain("validateReceipt?.(receipt, requestArgs, index)");
+    expect(source).toContain("function parallelStressSentinel(index, roundIndex)");
+    expect(source).toContain(
+      "validateReceipt?.(receipt, requests[index], index, roundIndex)",
+    );
     expect(source).toContain("parallel read returned the wrong surface");
     expect(source).toContain("parallel read omitted its unique sentinel");
+    expect(source).toContain("function requireFiniteLockHold(");
+    expect(source).toContain("close_surface did not close the spawned surface");
+    expect(source).toContain("list_agents omitted the live spawned agent");
+    expect(source).toContain("beforeRound?.(roundIndex)");
+    expect(source).toContain("parallelStressSentinel(index, roundIndex)");
+    expect(source).toContain(
+      '"parallel send",',
+    );
     expect(source).toContain("firstSendAfterSpawn.sampled");
     expect(source).toContain("firstSendAfterSpawn.send_to_agent_warm");
     expect(source).toContain("firstSendAfterSpawn.send_to_surface_warm");
@@ -1020,6 +1058,7 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("actions/cache/restore");
     expect(workflow).toContain("actions/cache/save");
     expect(workflow).toContain("history.json");
+    expect(workflow).toContain("hashFiles('benchmarks/daemon-baseline.json')");
     expect(
       readFileSync(
         join(repoRoot, "scripts", "check-daemon-benchmark.mjs"),

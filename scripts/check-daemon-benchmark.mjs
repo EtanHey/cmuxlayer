@@ -70,6 +70,9 @@ function validHistoryEntry(entry) {
   ) {
     return false;
   }
+  if (!/^[0-9a-f]{64}$/.test(entry?.source?.baseline_content_sha256 ?? "")) {
+    return false;
+  }
   return [...CANONICAL_OPERATIONS, "cli_send_ms"].every((operation) => {
     const measurement = entry?.measurements?.[operation];
     if (!Number.isFinite(measurement?.p50_ms)) return false;
@@ -189,8 +192,21 @@ export function validateBaseline(baseline) {
       baseline.measurements?.[operation]?.lock_hold_ms,
       `measurements.${operation}.lock_hold_ms`,
     );
+    for (const metric of ["p50_ms", "p95_ms", "lock_hold_ms"]) {
+      if (
+        baseline.measurements[operation][metric] >
+        baseline.sanity_caps_ms.all_rows
+      ) {
+        throw new Error(
+          `baseline measurements.${operation}.${metric} exceeds sanity cap`,
+        );
+      }
+    }
   }
   finite(baseline.measurements?.cli_send_ms, "measurements.cli_send_ms");
+  if (baseline.measurements.cli_send_ms > baseline.sanity_caps_ms.cli_send) {
+    throw new Error("baseline measurements.cli_send_ms exceeds sanity cap");
+  }
   if (baseline.refresh_attestation?.algorithm !== "sha256") {
     throw new Error("baseline refresh_attestation.algorithm must be sha256");
   }
@@ -351,9 +367,12 @@ export function appendGreenMainHistory(history, result, context) {
   if (
     !/^[0-9a-f]{40}$/.test(context?.git_sha ?? "") ||
     !Number.isSafeInteger(context?.workflow_run_id) ||
-    context.workflow_run_id <= 0
+    context.workflow_run_id <= 0 ||
+    !/^[0-9a-f]{64}$/.test(context?.baseline_content_sha256 ?? "")
   ) {
-    throw new Error("green main history requires an exact SHA and workflow run id");
+    throw new Error(
+      "green main history requires an exact SHA, workflow run id, and baseline content SHA",
+    );
   }
   if (
     existing.some(
@@ -368,6 +387,7 @@ export function appendGreenMainHistory(history, result, context) {
       git_sha: context.git_sha,
       workflow_run_id: context.workflow_run_id,
       measured_at: context.measured_at ?? new Date().toISOString(),
+      baseline_content_sha256: context.baseline_content_sha256,
     },
     measurements: Object.fromEntries(
       [...CANONICAL_OPERATIONS, "cli_send_ms"].map((operation) => [
@@ -385,7 +405,10 @@ export function appendGreenMainHistory(history, result, context) {
   return [...existing, attestedEntry].slice(-BENCHMARK_HISTORY_LIMIT);
 }
 
-export async function readBenchmarkHistory(historyPath) {
+export async function readBenchmarkHistory(
+  historyPath,
+  expectedBaselineContentSha256,
+) {
   try {
     const parsed = JSON.parse(await readFile(historyPath, "utf8"));
     if (!Array.isArray(parsed?.runs)) {
@@ -400,6 +423,20 @@ export async function readBenchmarkHistory(historyPath) {
         runs: [],
         degraded: true,
         reason: `${historyPath} contains a malformed entry`,
+      };
+    }
+    if (
+      expectedBaselineContentSha256 &&
+      parsed.runs.some(
+        (entry) =>
+          entry.source.baseline_content_sha256 !==
+          expectedBaselineContentSha256,
+      )
+    ) {
+      return {
+        runs: [],
+        degraded: true,
+        reason: `${historyPath} belongs to a different baseline`,
       };
     }
     return { runs: parsed.runs, degraded: false };
@@ -831,7 +868,10 @@ async function main() {
   const historyPath =
     process.env.CMUXLAYER_BENCH_HISTORY_PATH ??
     join(runResult.artifactDir, "history.json");
-  const historyState = await readBenchmarkHistory(historyPath);
+  const historyState = await readBenchmarkHistory(
+    historyPath,
+    baseline.refresh_attestation.content_sha256,
+  );
   const comparison = compareBenchmark(baseline, runResult.result, {
     expectedRounds,
     history: historyState.runs,
@@ -857,6 +897,8 @@ async function main() {
       ref: process.env.GITHUB_REF,
       git_sha: process.env.GITHUB_SHA,
       workflow_run_id: Number(process.env.GITHUB_RUN_ID),
+      baseline_content_sha256:
+        baseline.refresh_attestation.content_sha256,
       },
     );
     if (nextHistory !== historyState.runs) {

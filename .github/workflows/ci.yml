@@ -43,8 +43,8 @@ jobs:
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: docs.local/scratch/perf-budget/history.json
-          key: daemon-perf-history-main-${{ github.run_id }}
-          restore-keys: daemon-perf-history-main-
+          key: daemon-perf-history-main-${{ hashFiles('benchmarks/daemon-baseline.json') }}-${{ github.run_id }}
+          restore-keys: daemon-perf-history-main-${{ hashFiles('benchmarks/daemon-baseline.json') }}-
 
       - name: Run daemon performance budget
         run: bun run bench:daemon:check
@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: docs.local/scratch/perf-budget/history.json
-          key: daemon-perf-history-main-${{ github.run_id }}
+          key: daemon-perf-history-main-${{ hashFiles('benchmarks/daemon-baseline.json') }}-${{ github.run_id }}
 
       - name: Upload performance evidence
         if: always()

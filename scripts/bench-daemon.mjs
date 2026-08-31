@@ -846,16 +846,98 @@ async function waitForLifecycleWaiter(
   throw new Error("close_surface never queued behind the held lifecycle sweep");
 }
 
+function requireFiniteLockHold(value, operation) {
+  if (!Number.isFinite(value)) {
+    throw new Error(`${operation} omitted finite lock-hold timing`);
+  }
+  return value;
+}
+
+function requireTerminalSubmission(receipt, label) {
+  if (
+    receipt.terminal !== true ||
+    receipt.delivery_state !== "submitted" ||
+    receipt.submit_verified !== true
+  ) {
+    throw new Error(`${label} was not terminally submitted`);
+  }
+  return receipt;
+}
+
+async function requireSubmittedDelivery(client, receipt, label) {
+  if (
+    receipt.terminal === true &&
+    receipt.delivery_state === "submitted" &&
+    receipt.submit_verified === true
+  ) {
+    return receipt;
+  }
+  if (typeof receipt.delivery_id !== "string") {
+    throw new Error(`${label} omitted a waitable delivery id`);
+  }
+  const terminal = toolData(
+    await client.callTool(
+      "wait_for",
+      { delivery_id: receipt.delivery_id, timeout_ms: 2_000 },
+      30_000,
+    ),
+    `${label} wait_for`,
+  );
+  return requireTerminalSubmission(terminal, label);
+}
+
+async function requireSurfaceDeliveryProof(
+  client,
+  receipt,
+  requestArgs,
+  index,
+  label,
+) {
+  if (
+    (receipt.terminal === true &&
+      receipt.delivery_state === "submitted" &&
+      receipt.submit_verified === true) ||
+    typeof receipt.delivery_id === "string"
+  ) {
+    return requireSubmittedDelivery(client, receipt, label);
+  }
+  if (receipt.typed !== true || receipt.submit_attempted !== true) {
+    throw new Error(`${label} was neither waitable nor typed`);
+  }
+  const read = toolData(
+    await client.callTool(
+      "read_screen",
+      {
+        surface: requestArgs.surface,
+        workspace: requestArgs.workspace,
+        lines: 5,
+        raw: true,
+      },
+      30_000,
+    ),
+    `${label} read-back`,
+  );
+  const expectedRef = `surface:bench-${index}`;
+  if (
+    (read.surface !== requestArgs.surface && read.surface !== expectedRef) ||
+    !read.content?.includes(requestArgs.text)
+  ) {
+    throw new Error(`${label} failed attributable read-back verification`);
+  }
+  return read;
+}
+
 function summarizeTimedSamples(samples) {
   const transports = samples.map((sample) => sample.transport);
+  const lockHolds = samples.map((sample) =>
+    requireFiniteLockHold(sample.lock_hold_ms, "sample"),
+  );
   return {
     request_bytes: samples[0]?.request_bytes,
     request_sha256: samples[0]?.request_sha256,
     p50_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 50)),
     p95_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 95)),
-    lock_hold_ms: Math.max(
-      ...samples.map((sample) => sample.lock_hold_ms ?? 0),
-    ),
+    lock_hold_ms: Math.max(...lockHolds),
     transport: transports.every((value) => value === "socket")
       ? "socket"
       : "cli",
@@ -896,9 +978,15 @@ async function measureSpawnLifecycleOnce(
     throw new Error(`spawn_agent omitted identity: ${compact(spawnResult)}`);
   }
 
-  const measureSend = async (args, { normalizeAgentId = false } = {}) => {
+  const measureSend = async (
+    args,
+    { normalizeAgentId = false, requireSubmitted = true } = {},
+  ) => {
     const startedAt = nowMs();
     const receipt = toolData(await client.callTool("send_to", args), "send_to");
+    if (requireSubmitted) {
+      requireTerminalSubmission(receipt, `${args.mode} send`);
+    }
     return {
       elapsed_ms: round(nowMs() - startedAt),
       request_bytes: requestBytes("send_to", args),
@@ -906,7 +994,10 @@ async function measureSpawnLifecycleOnce(
         ...args,
         ...(normalizeAgentId ? { agent_id: "$SPAWNED_AGENT_ID" } : {}),
       }),
-      lock_hold_ms: receipt.timings_ms?.lock_hold ?? null,
+      lock_hold_ms: requireFiniteLockHold(
+        receipt.timings_ms?.lock_hold,
+        `${args.mode} send`,
+      ),
       transport: receipt.transport,
       receipt,
     };
@@ -940,13 +1031,16 @@ async function measureSpawnLifecycleOnce(
     },
     { normalizeAgentId: true },
   );
-  const surface = await measureSend({
-    mode: "surface",
-    surface: spawnResult.surface_id,
-    workspace: "workspace:bench",
-    text: "surface benchmark",
-    press_enter: true,
-  });
+  const surface = await measureSend(
+    {
+      mode: "surface",
+      surface: spawnResult.surface_id,
+      workspace: "workspace:bench",
+      text: "surface benchmark",
+      press_enter: true,
+    },
+    { requireSubmitted: false },
+  );
   let surfaceWaitFor;
   if (typeof surface.receipt.delivery_id === "string") {
     try {
@@ -991,6 +1085,12 @@ async function measureSpawnLifecycleOnce(
   const closeOutcome = await closePromise;
   if ("error" in closeOutcome) throw closeOutcome.error;
   const closeReceipt = toolData(closeOutcome.value, "close_surface");
+  if (
+    closeReceipt.agent_stopped !== true ||
+    closeReceipt.surface_closed !== true
+  ) {
+    throw new Error("close_surface did not close the spawned surface");
+  }
   await waitForSweepHoldState(sweepHoldState, closeHoldToken, "complete");
   const spawnCloseDuringSweep = {
     elapsed_ms: round(nowMs() - closeStartedAt),
@@ -999,7 +1099,9 @@ async function measureSpawnLifecycleOnce(
       ...closeArgs,
       agent_id: "$SPAWNED_AGENT_ID",
     }),
-    lock_hold_ms: closeReceipt.timings_ms?.lock_hold ?? 0,
+    // close_surface is the waiter in this held-sweep scenario. Contention is
+    // enforced by elapsed time; the waiter's own lock hold is explicitly zero.
+    lock_hold_ms: 0,
     transport: closeReceipt.transport,
     transport_fallbacks: closeReceipt.transport_fallbacks ?? [],
     receipt: closeReceipt,
@@ -1015,7 +1117,7 @@ async function measureSpawnLifecycleOnce(
   };
 }
 
-async function measureWarmToolAcrossClients(clients, name, args) {
+async function measureWarmToolAcrossClients(clients, name, args, validateReceipt) {
   const samples = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     await Promise.all(
@@ -1025,11 +1127,13 @@ async function measureWarmToolAcrossClients(clients, name, args) {
           await client.callTool(name, args, 30_000),
           name,
         );
+        validateReceipt?.(receipt);
         samples.push({
           elapsed_ms: nowMs() - startedAt,
           request_bytes: requestBytes(name, args),
           request_sha256: requestSha256(name, args),
-          lock_hold_ms: receipt.timings_ms?.lock_hold ?? 0,
+          // These warm rows are read-only and never own the mutation lock.
+          lock_hold_ms: 0,
           transport: operationTransport(receipt, name),
           transport_fallbacks: receipt.transport_fallbacks ?? [],
         });
@@ -1037,6 +1141,60 @@ async function measureWarmToolAcrossClients(clients, name, args) {
     );
   }
   return summarizeTimedSamples(samples);
+}
+
+async function measureLiveListAgentsAcrossClients(clients) {
+  const spawnResult = toolData(
+    await clients[0].callTool(
+      "spawn_agent",
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+        authority: "worker",
+        placement: "right",
+        workspace: "workspace:bench",
+        cwd: repoRoot,
+        worktree: false,
+        mcp_profile: "sterile",
+        title: "bench-list-agents-live",
+        prompt: "benchmark live list agent",
+        boot_prompt_timeout_ms: 2_000,
+      },
+      30_000,
+    ),
+    "spawn_agent(list_agents fixture)",
+  );
+  if (!spawnResult.agent_id || !spawnResult.surface_id) {
+    throw new Error("list_agents fixture spawn omitted identity");
+  }
+  try {
+    return await measureWarmToolAcrossClients(
+      clients,
+      "list_agents",
+      { detail: "summary" },
+      (receipt) => {
+        if (!compact(receipt).includes(spawnResult.agent_id)) {
+          throw new Error("list_agents omitted the live spawned agent");
+        }
+      },
+    );
+  } finally {
+    const closeReceipt = toolData(
+      await clients[0].callTool(
+        "close_surface",
+        { scope: "agent", agent_id: spawnResult.agent_id, force: true },
+        30_000,
+      ),
+      "close_surface(list_agents fixture)",
+    );
+    if (
+      closeReceipt.agent_stopped !== true ||
+      closeReceipt.surface_closed !== true
+    ) {
+      throw new Error("list_agents fixture did not close cleanly");
+    }
+  }
 }
 
 async function measureSpawnLifecycleAcrossClients(
@@ -1076,11 +1234,19 @@ async function measureSpawnLifecycleAcrossClients(
   };
 }
 
-function parallelStressSentinel(index) {
-  return `parallel surface benchmark ${index}`;
+function parallelStressSentinel(index, roundIndex) {
+  return roundIndex === undefined
+    ? `parallel surface benchmark ${index}`
+    : `parallel surface benchmark ${index} round ${roundIndex}`;
 }
 
-async function measureParallelStress(clients, name, args, validateReceipt) {
+async function measureParallelStress(
+  clients,
+  name,
+  args,
+  validateReceipt,
+  { beforeRound } = {},
+) {
   const samples = [];
   const requests = Array.from({ length: PARALLEL_STRESS_COUNT }, (_, index) =>
     typeof args === "function" ? args(index) : args,
@@ -1091,19 +1257,24 @@ async function measureParallelStress(clients, name, args, validateReceipt) {
     arguments: requests,
   };
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    await beforeRound?.(roundIndex);
     const startedAt = nowMs();
     const receipts = await Promise.all(
-      requests.map(async (requestArgs, index) => {
-        const receipt = toolData(
+      requests.map(async (requestArgs, index) =>
+        toolData(
           await clients[index].callTool(name, requestArgs, 30_000),
           name,
-        );
-        validateReceipt?.(receipt, requestArgs, index);
-        return receipt;
-      }),
+        ),
+      ),
+    );
+    const elapsedMs = nowMs() - startedAt;
+    await Promise.all(
+      receipts.map((receipt, index) =>
+        validateReceipt?.(receipt, requests[index], index, roundIndex),
+      ),
     );
     samples.push({
-      elapsed_ms: nowMs() - startedAt,
+      elapsed_ms: elapsedMs,
       request_bytes: requests.reduce(
         (total, requestArgs) => total + requestBytes(name, requestArgs),
         0,
@@ -1111,9 +1282,14 @@ async function measureParallelStress(clients, name, args, validateReceipt) {
       request_sha256: createHash("sha256")
         .update(JSON.stringify(canonicalize(request)))
         .digest("hex"),
-      lock_hold_ms: Math.max(
-        ...receipts.map((receipt) => receipt.timings_ms?.lock_hold ?? 0),
-      ),
+      lock_hold_ms:
+        name === "read_screen"
+          ? 0
+          : Math.max(
+              ...receipts.map((receipt) =>
+                requireFiniteLockHold(receipt.timings_ms?.lock_hold, name),
+              ),
+            ),
       transport: receipts.every(
         (receipt) => operationTransport(receipt, name) === "socket",
       )
@@ -1243,11 +1419,7 @@ async function main() {
       daemonClients,
       sweepHoldState,
     );
-    const listAgents = await measureWarmToolAcrossClients(
-      daemonClients,
-      "list_agents",
-      { detail: "summary" },
-    );
+    const listAgents = await measureLiveListAgentsAcrossClients(daemonClients);
     const controlHealth = await measureWarmToolAcrossClients(
       daemonClients,
       "control_health",
@@ -1271,6 +1443,14 @@ async function main() {
         text: parallelStressSentinel(index),
         press_enter: true,
       }),
+      (receipt, requestArgs, index) =>
+        requireSurfaceDeliveryProof(
+          stressClients[index],
+          receipt,
+          requestArgs,
+          index,
+          "parallel send",
+        ),
     );
     const readScreen10Parallel = await measureParallelStress(
       stressClients,
@@ -1281,7 +1461,7 @@ async function main() {
         lines: 5,
         raw: true,
       }),
-      (receipt, requestArgs, index) => {
+      (receipt, requestArgs, index, roundIndex) => {
         const expectedRef = `surface:bench-${index}`;
         if (
           receipt.surface !== requestArgs.surface &&
@@ -1289,9 +1469,46 @@ async function main() {
         ) {
           throw new Error("parallel read returned the wrong surface");
         }
-        if (!receipt.content?.includes(parallelStressSentinel(index))) {
+        if (
+          !receipt.content?.includes(
+            parallelStressSentinel(index, roundIndex),
+          )
+        ) {
           throw new Error("parallel read omitted its unique sentinel");
         }
+      },
+      {
+        beforeRound: async (roundIndex) => {
+          await Promise.all(
+            stressClients.map(async (client, index) => {
+              const receipt = toolData(
+                await client.callTool(
+                  "send_to",
+                  {
+                    mode: "surface",
+                    surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+                    workspace: "workspace:bench",
+                    text: parallelStressSentinel(index, roundIndex),
+                    press_enter: true,
+                  },
+                  30_000,
+                ),
+                "read_screen round setup",
+              );
+              await requireSurfaceDeliveryProof(
+                client,
+                receipt,
+                {
+                  surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+                  workspace: "workspace:bench",
+                  text: parallelStressSentinel(index, roundIndex),
+                },
+                index,
+                "read stress round setup",
+              );
+            }),
+          );
+        },
       },
     );
     const stressClientsSurvivedReplay = stressClients.every(
