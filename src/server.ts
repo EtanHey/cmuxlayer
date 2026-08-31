@@ -6353,6 +6353,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
         submit_attempted: submitAttempted,
+        submit_dispatched: submitDispatched,
         submit_verified: verification.submit_verified,
         retry_count: 0,
         rpc_methods: [...rpcMethods],
