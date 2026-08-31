@@ -371,6 +371,7 @@ export class RetryableDeliveryError extends Error {
 type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
+  rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
   delivery?:
     | "submitted"
     | "queued"
@@ -7661,6 +7662,9 @@ export class AgentEngine {
             if (timeout) clearTimeout(timeout);
           });
           receipt.retry_count += result.retry_count;
+          if (Array.isArray(result.rpc_methods)) {
+            receipt.rpc_methods = [...result.rpc_methods];
+          }
           receipt.error = null;
           receipt.next_attempt_at = null;
           receipt.needs_attention = false;
@@ -7705,7 +7709,26 @@ export class AgentEngine {
             receipt.submit_verified = result.submit_verified;
           }
         } catch (error) {
-          if (error instanceof RetryableDeliveryError) {
+          const errorRpcMethods =
+            error &&
+            typeof error === "object" &&
+            "rpc_methods" in error &&
+            Array.isArray((error as { rpc_methods?: unknown }).rpc_methods)
+              ? [
+                  ...(error as {
+                    rpc_methods: Array<
+                      "surface.send_text" | "surface.send_key"
+                    >;
+                  }).rpc_methods,
+                ]
+              : [];
+          if (errorRpcMethods.length > 0) {
+            receipt.rpc_methods = errorRpcMethods;
+          }
+          if (
+            error instanceof RetryableDeliveryError &&
+            errorRpcMethods.length === 0
+          ) {
             receipt.submission_started_at = null;
             receipt.retry_count += 1;
             // The submitter proved that no mutation occurred. Persist that

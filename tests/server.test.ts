@@ -3089,6 +3089,40 @@ describe("tool handler integration", () => {
     ]);
   });
 
+  it("send_input failure receipts retain text RPC provenance when Return fails", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockRejectedValue(new Error("Buffer not found")),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_input");
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: "already typed\ninto the pane",
+        press_enter: true,
+      },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
+    expect(parsed.ok).toBe(false);
+    expect(mockClient.pasteText).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendKey).toHaveBeenCalledTimes(3);
+    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
+  });
+
   it("send_input retries a paste when its buffer disappears before paste-buffer", async () => {
     const pastedTexts: string[] = [];
     const mockClient = {

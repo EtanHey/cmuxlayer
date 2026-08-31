@@ -13797,6 +13797,39 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("persists RPC provenance returned by a drained queued delivery", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "queued-rpc-provenance",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      engine.setDeliverySubmitter(async () => ({
+        retry_count: 0,
+        submit_verified: true,
+        delivery: "submitted",
+        rpc_methods: ["surface.send_text", "surface.send_key"],
+      }));
+      const receipt = engine.queueDelivery({
+        agent_id: "queued-rpc-provenance",
+        text: "deliver after resume",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "submitted",
+        terminal: true,
+        submit_verified: true,
+        rpc_methods: ["surface.send_text", "surface.send_key"],
+      });
+    });
+
     it("persists a composer-accepted queue without replaying it", async () => {
       const submitter = vi.fn();
       engine.setDeliverySubmitter(submitter);
