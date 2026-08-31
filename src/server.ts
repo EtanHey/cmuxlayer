@@ -8219,6 +8219,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               source_event: lifecycle.source_event,
               retry_count: delivery.retry_count,
               rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               delivery_state: delivery.delivery,
             });
           } else if (delivery.delivery === "pending_verify") {
@@ -8230,6 +8232,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               source_event: lifecycle.source_event,
               retry_count: delivery.retry_count,
               rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
             });
           } else {
             lifecycle.engine.resolveDelivery({
@@ -10416,6 +10420,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               source_event: "send_to",
               retry_count: delivery.retry_count,
               rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               delivery_state: delivery.delivery,
             });
           } else if (delivery.delivery === "pending_verify") {
@@ -10427,6 +10433,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               source_event: "send_to",
               retry_count: delivery.retry_count,
               rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
             });
           } else {
             receiptEngine.resolveDelivery({
@@ -10444,6 +10452,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               terminal: true,
               retry_count: delivery.retry_count,
               rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               submit_verified: delivery.submit_verified,
               error:
                 delivery.delivery === "rescued"

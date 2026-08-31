@@ -8896,11 +8896,15 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(sent).toMatchObject({
       ok: true,
+      typed: true,
+      submit_dispatched: false,
       rpc_methods: ["surface.send_text"],
       delivery_id: expect.any(String),
     });
     expect(waited).toMatchObject({
       ok: true,
+      typed: true,
+      submit_dispatched: false,
       rpc_methods: ["surface.send_text"],
       delivery_id: sent.delivery_id,
     });
@@ -12996,7 +13000,7 @@ codex>
     const waited = parseToolResult(
       await registeredTestTool(server, "wait_for").handler(
         { delivery_id: delivered.delivery_id },
-        {} as any,
+        {},
       ),
     );
     expect(waited).toMatchObject({

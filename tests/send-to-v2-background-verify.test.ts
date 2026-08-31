@@ -341,6 +341,64 @@ describe("send_to v2 background verify", () => {
     });
   });
 
+  it("persists mutation evidence for a managed surface-mode pending receipt", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    const resultPromise = server._registeredTools.send_to.handler(
+      {
+        mode: "surface",
+        target: client.surface,
+        text: "surface pending evidence",
+        press_enter: true,
+      },
+      {},
+    );
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    const parsed = parseResult(await resultPromise);
+    const engine = server._registeredTools.interact._engine;
+
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
+      delivery_state: "pending_verify",
+      typed: true,
+      submit_dispatched: true,
+    });
+  });
+
+  it("persists mutation evidence for a managed background pending receipt", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    const engine = server._registeredTools.interact._engine;
+    const acceptPendingVerify = vi.spyOn(engine, "acceptPendingVerify");
+
+    const accepted = parseResult(
+      await server._registeredTools.send_to.handler(
+        {
+          mode: "surface",
+          target: client.surface,
+          text: "background pending evidence",
+          press_enter: true,
+          background: true,
+        },
+        {},
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    expect(accepted.delivery_id).toEqual(expect.any(String));
+    expect(acceptPendingVerify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        typed: true,
+        submit_dispatched: true,
+      }),
+    );
+  });
+
   it("presses Cursor's follow-up Return and receipts queued_followup once the composer is consumed", async () => {
     const client = new FakeAgentSurfaceClient();
     client.cli = "cursor";
