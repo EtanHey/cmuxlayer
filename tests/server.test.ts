@@ -4071,7 +4071,7 @@ describe("tool handler integration", () => {
         title: "New",
         type: "terminal",
       }),
-      selectWorkspace: vi.fn().mockResolvedValue(undefined),
+      selectWorkspace: vi.fn().mockResolvedValue(),
       send: vi.fn().mockImplementation((_surface: string, text: string) => {
         if (text === pointer) pointerSent = true;
         return Promise.resolve();

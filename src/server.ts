@@ -10273,6 +10273,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: args.press_enter,
               source_event: "send_to",
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
               delivery_state: delivery.delivery,
             });
           } else if (delivery.delivery === "pending_verify") {
@@ -10283,6 +10284,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: args.press_enter,
               source_event: "send_to",
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
             });
           } else {
             receiptEngine.resolveDelivery({
@@ -10299,6 +10301,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : "submitted",
               terminal: true,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
               submit_verified: delivery.submit_verified,
               error:
                 delivery.delivery === "rescued"

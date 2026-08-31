@@ -8865,6 +8865,46 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("send_to surface mode persists socket RPC provenance for wait_for", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-surface-rpc-receipt",
+      surface_id: "surface:worker-surface-rpc-receipt",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server } = await createBroadcastServer([record]);
+
+    const sent = parseToolResult(
+      await registeredTestTool(server, "send_to").handler(
+        {
+          mode: "surface",
+          target: record.surface_id,
+          text: "Persist surface receipt provenance",
+          press_enter: false,
+        },
+        {},
+      ),
+    );
+    const waited = parseToolResult(
+      await registeredTestTool(server, "wait_for").handler(
+        { delivery_id: sent.delivery_id },
+        {},
+      ),
+    );
+
+    expect(sent).toMatchObject({
+      ok: true,
+      rpc_methods: ["surface.send_text"],
+      delivery_id: expect.any(String),
+    });
+    expect(waited).toMatchObject({
+      ok: true,
+      rpc_methods: ["surface.send_text"],
+      delivery_id: sent.delivery_id,
+    });
+  });
+
   it("send_to resolves structured targeting by job function, workspace, ids, and exclude", async () => {
     const records = [
       makeServerAgentRecord({
