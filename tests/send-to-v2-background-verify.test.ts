@@ -633,6 +633,12 @@ describe("send_to v2 background verify", () => {
     expect(second.delivery_id).toBe(first.delivery_id);
     expect(second.duplicate_of).toBe(first.delivery_id);
     expect(second.delivery_state).toBe("pending_verify");
+    expect(second).toMatchObject({
+      typed: true,
+      submit_attempted: true,
+      submit_dispatched: true,
+      rpc_methods: [],
+    });
     expect(client.sendCalls.length).toBe(typedAfterFirst);
   });
 

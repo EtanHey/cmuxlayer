@@ -2055,6 +2055,17 @@ type RegisteredTestTool = {
 type TestLifecycleEngine = {
   stateMgr: { writeState(record: AgentRecord): void };
   getRegistry(): { set(agentId: string, record: AgentRecord): void };
+  acceptPendingVerify(input: {
+    delivery_id: string;
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+    source_event: "send_to";
+    retry_count: number;
+    rpc_methods: Array<"surface.send_text" | "surface.send_key">;
+    typed: boolean;
+    submit_dispatched: boolean;
+  }): unknown;
 };
 
 function registeredTestTool(server: unknown, name: string): RegisteredTestTool {
@@ -9436,6 +9447,53 @@ describe("agent lifecycle tool handlers", () => {
       }),
     ]);
     expect(sendCalls).toHaveLength(1);
+  });
+
+  it("send_to targeting preserves stored mutation evidence on a duplicate receipt", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "reviewer-duplicate",
+      surface_id: "surface:reviewer-duplicate",
+      state: "ready",
+      function: "reviewer",
+    });
+    const { server, sendCalls } = await createBroadcastServer([record]);
+    const engine = testLifecycleEngine(server);
+    engine.acceptPendingVerify({
+      delivery_id: "delivery-existing",
+      agent_id: record.agent_id,
+      text: "Review exactly once",
+      press_enter: true,
+      source_event: "send_to",
+      retry_count: 2,
+      rpc_methods: ["surface.send_text", "surface.send_key"],
+      typed: true,
+      submit_dispatched: true,
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Review exactly once",
+        press_enter: true,
+        targeting: { agent_ids: [record.agent_id] },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.receipts).toEqual([
+      expect.objectContaining({
+        agent_id: record.agent_id,
+        duplicate_of: "delivery-existing",
+        delivery_id: "delivery-existing",
+        delivery_state: "pending_verify",
+        typed: true,
+        submit_attempted: true,
+        submit_dispatched: true,
+        rpc_methods: ["surface.send_text", "surface.send_key"],
+      }),
+    ]);
+    expect(sendCalls).toHaveLength(0);
   });
 
   it("send_to targeting counts a rescued target as failed", async () => {

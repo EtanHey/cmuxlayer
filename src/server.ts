@@ -12080,6 +12080,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           press_enter: true,
                           source_event: "dispatch_nudge",
                           retry_count: delivered.retry_count,
+                          rpc_methods: delivered.rpc_methods,
+                          typed: delivered.typed,
+                          submit_dispatched: delivered.submit_dispatched,
                         })
                       : context.lifecycleSweepEngine.resolveDelivery({
                           delivery_id: deliveryId,
@@ -12090,6 +12093,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           delivery_state: "submitted",
                           terminal: true,
                           retry_count: delivered.retry_count,
+                          rpc_methods: delivered.rpc_methods,
+                          typed: delivered.typed,
+                          submit_dispatched: delivered.submit_dispatched,
                           submit_verified: delivered.submit_verified,
                           error: null,
                         });
@@ -13518,6 +13524,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: true,
           source_event: "report_to_parent",
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
           delivery_state: delivered.delivery,
         });
       } else if (delivered.delivery === "pending_verify") {
@@ -13528,6 +13537,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: true,
           source_event: "report_to_parent",
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
         });
       } else if (delivered.delivery === "rescued") {
         engine.resolveDelivery({
@@ -13539,6 +13551,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_state: "rescued",
           terminal: true,
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
           submit_verified: false,
           error: "Prompt appeared only after an external interrupt",
         });
@@ -13555,6 +13570,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_state: "submitted",
           terminal: true,
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
           submit_verified: delivered.submit_verified,
           error: null,
         });
@@ -17419,8 +17437,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ...buildPublicDeliveryReceipt({
                     delivery_state: duplicate.delivery_state,
                     delivery_id: duplicate.delivery_id,
-                    typed: false,
-                    submit_attempted: false,
+                    typed: duplicate.typed === true,
+                    submit_attempted: duplicate.press_enter,
+                    submit_dispatched: duplicate.submit_dispatched,
                     submit_verified: duplicate.submit_verified,
                     retry_count: duplicate.retry_count,
                     rpc_methods: duplicate.rpc_methods ?? [],
@@ -17705,8 +17724,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...buildPublicDeliveryReceipt({
                 delivery_state: duplicate.delivery_state,
                 delivery_id: duplicate.delivery_id,
-                typed: false,
-                submit_attempted: false,
+                typed: duplicate.typed === true,
+                submit_attempted: duplicate.press_enter,
+                submit_dispatched: duplicate.submit_dispatched,
                 submit_verified: duplicate.submit_verified,
                 retry_count: duplicate.retry_count,
                 rpc_methods: duplicate.rpc_methods ?? [],

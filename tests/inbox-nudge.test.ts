@@ -349,6 +349,9 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
       delivery_state: "submitted",
       terminal: true,
       source_event: "dispatch_nudge",
+      rpc_methods: [],
+      typed: true,
+      submit_dispatched: true,
     });
     // The pointer was typed into the agent's surface despite terminal state.
     const after = sendCalls(exec);
@@ -1265,6 +1268,14 @@ describe("report_to_parent hierarchy-bound escalation", () => {
       task: "Blocked on the signed release fixture",
     });
     expect(sendCalls(exec).at(-1)?.join(" ")).toContain("surface:new");
+    const engine = server._registeredTools["interact"]._engine;
+    expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
+      delivery_state: "submitted",
+      source_event: "report_to_parent",
+      rpc_methods: [],
+      typed: true,
+      submit_dispatched: true,
+    });
   });
 
   it("keeps a parent blocker durable and escalates past a foreign draft", async () => {
