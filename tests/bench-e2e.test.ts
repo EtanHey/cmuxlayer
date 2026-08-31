@@ -2169,6 +2169,39 @@ describe("bench-e2e measurement harness", () => {
     expect(config.out).toBe("/repo/package.json");
   });
 
+  it("rejects a receipt output that aliases an attested artifact", async () => {
+    const events: string[] = [];
+    const artifactPath = "/repo/dist/index.js";
+
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: artifactPath, cmuxBin: "cmux" },
+        {
+          canonicalize: (path) => path,
+          prepare: () => ({
+            entries: {
+              mcp: { path: artifactPath, sha256: "mcp" },
+            },
+            runtime_files: [
+              { path: artifactPath, sha256: "mcp" },
+              { path: "/repo/dist/daemon.js", sha256: "daemon" },
+            ],
+            cli_executable: {
+              path: "/opt/cmux/bin/cmux",
+              sha256: "cli",
+            },
+          }),
+          validate: () => events.push("validate"),
+          reserve: () => {
+            events.push("reserve");
+            return { release: () => undefined };
+          },
+        },
+      ),
+    ).rejects.toThrow(/output receipt aliases attested artifact.*index\.js/);
+    expect(events).toEqual(["validate"]);
+  });
+
   it("stops after preparation when reservation authority aborts", async () => {
     const controller = new AbortController();
     const events: string[] = [];

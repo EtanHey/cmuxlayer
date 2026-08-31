@@ -1918,15 +1918,19 @@ async function resolveExecutable(command, env) {
   return realpath(candidate);
 }
 
+function attestedArtifactEntries(provenance) {
+  return [
+    ...Object.values(provenance.entries ?? {}),
+    ...(provenance.runtime_files ?? []),
+    ...(provenance.cli_executable ? [provenance.cli_executable] : []),
+  ];
+}
+
 export async function assertArtifactProvenance(
   provenance,
   hashFile = sha256File,
 ) {
-  const attested = [
-    ...Object.values(provenance.entries),
-    ...(provenance.runtime_files ?? []),
-    ...(provenance.cli_executable ? [provenance.cli_executable] : []),
-  ];
+  const attested = attestedArtifactEntries(provenance);
   if (provenance.runtime_root && provenance.runtime_files) {
     const expectedPaths = provenance.runtime_files.map((entry) => entry.path);
     const observedPaths = await listRuntimeFiles(provenance.runtime_root);
@@ -1939,6 +1943,29 @@ export async function assertArtifactProvenance(
     if (observed !== entry.sha256) {
       throw new Error(
         `artifact changed after attestation: ${entry.path} expected ${entry.sha256}, observed ${observed}`,
+      );
+    }
+  }
+}
+
+async function canonicalArtifactPath(path) {
+  return realpath(resolve(path)).catch((error) => {
+    if (error?.code === "ENOENT") return resolve(path);
+    throw error;
+  });
+}
+
+export async function assertOutputOutsideArtifactProvenance(
+  outputPath,
+  provenance,
+  canonicalize = canonicalArtifactPath,
+) {
+  if (!outputPath) return;
+  const canonicalOutput = await canonicalize(outputPath);
+  for (const entry of attestedArtifactEntries(provenance)) {
+    if (canonicalOutput === (await canonicalize(entry.path))) {
+      throw new Error(
+        `output receipt aliases attested artifact: ${canonicalOutput}`,
       );
     }
   }
@@ -2094,36 +2121,26 @@ export async function assertOutputOutsideGitMetadata(
   }
 }
 
-export async function prepareBuiltEntries(config, deps = {}) {
-  const root = deps.repoRoot ?? repoRoot;
-  const exec = deps.exec ?? execCapture;
-  const exists = deps.exists ?? existsSync;
-  const hashFile = deps.hashFile ?? sha256File;
-  const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
-  const resolveCliExecutable = deps.resolveExecutable ?? resolveExecutable;
-  const enumerateOwnedSidecars =
-    deps.listOwnedReceiptSidecars ??
-    deps.listOwnedReceiptTemps ??
-    listOwnedReceiptSidecars;
-  const sourceEnv = config.env ?? process.env;
-  const redirectedGitEnvironmentNames = [
-    "GIT_DIR",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_WORK_TREE",
-  ];
-  const redirectedGitEnvironment = redirectedGitEnvironmentNames.filter(
+const REDIRECTED_GIT_ENVIRONMENT_NAMES = [
+  "GIT_DIR",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_WORK_TREE",
+];
+
+function provenanceExecEnvironment(sourceEnv, rejectRedirected) {
+  const redirected = REDIRECTED_GIT_ENVIRONMENT_NAMES.filter(
     (name) => sourceEnv[name],
   );
-  if (config.env && redirectedGitEnvironment.length > 0) {
+  if (rejectRedirected && redirected.length > 0) {
     throw new Error(
-      `redirected Git metadata is unsupported for benchmark provenance: ${redirectedGitEnvironment.join(", ")}`,
+      `redirected Git metadata is unsupported for benchmark provenance: ${redirected.join(", ")}`,
     );
   }
   const execEnv = { ...sourceEnv };
-  for (const name of redirectedGitEnvironmentNames) delete execEnv[name];
+  for (const name of REDIRECTED_GIT_ENVIRONMENT_NAMES) delete execEnv[name];
   for (const name of Object.keys(execEnv)) {
     if (name === "GIT_CONFIG" || name.startsWith("GIT_CONFIG_")) {
       delete execEnv[name];
@@ -2137,28 +2154,18 @@ export async function prepareBuiltEntries(config, deps = {}) {
   ]) {
     delete execEnv[name];
   }
-  const execOptions = { env: execEnv, signal: config.signal };
-  const expectedMcpEntry = join(root, "dist", "index.js");
-  const expectedDaemonEntry = join(root, "dist", "daemon.js");
-  if (
-    config.mcpEntry !== expectedMcpEntry ||
-    config.daemonEntry !== expectedDaemonEntry
-  ) {
-    throw new Error(
-      "custom built entries have unverifiable source provenance; use the repository dist/index.js and dist/daemon.js",
-    );
-  }
-  await assertOutputOutsideGitMetadata(
-    config.out,
-    root,
-    deps.resolveGitMetadataPaths,
-  );
-  const canonicalOutput = config.out
-    ? await canonicalOutputPath(config.out)
-    : null;
-  const outputRepositoryRoots = config.out
-    ? await resolveGitRepositoryRoots(root, canonicalOutput)
-    : [resolve(root)];
+  return execEnv;
+}
+
+function createProvenanceGitChecks({
+  config,
+  root,
+  exec,
+  execOptions,
+  enumerateOwnedSidecars,
+  canonicalOutput,
+  outputRepositoryRoots,
+}) {
   const ownedSidecarPaths = async () =>
     config.out
       ? (await enumerateOwnedSidecars(config.out)).map((sidecar) =>
@@ -2175,8 +2182,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
       ],
       execOptions,
     );
-  const readHead = () =>
-    exec("git", ["rev-parse", "HEAD"], execOptions);
+  const readHead = () => exec("git", ["rev-parse", "HEAD"], execOptions);
   const assertOutputUntracked = async () => {
     for (const [index, repositoryRoot] of outputRepositoryRoots.entries()) {
       const outputRelative = config.out
@@ -2203,8 +2209,9 @@ export async function prepareBuiltEntries(config, deps = {}) {
             tempRelative !== ".." &&
             !tempRelative.startsWith(`..${sep}`),
         )
-        .map((tempRelative) =>
-          `:(literal)${tempRelative.split(sep).join("/")}`,
+        .map(
+          (tempRelative) =>
+            `:(literal)${tempRelative.split(sep).join("/")}`,
         );
       const gitPrefix = index === 0 ? [] : ["-C", repositoryRoot];
       const trackedOutput = await exec(
@@ -2221,18 +2228,65 @@ export async function prepareBuiltEntries(config, deps = {}) {
         execOptions,
       );
       const trackedPath = trackedOutput.stdout.trim().split("\n")[0];
-      if (trackedPath) {
-        if (trackedPath === pathspec) {
-          throw new Error(
-            `refusing to use a tracked output receipt: ${config.out}`,
-          );
-        }
-        throw new Error(
-          `refusing to overwrite tracked output artifact: ${trackedPath}`,
-        );
+      if (!trackedPath) continue;
+      if (trackedPath === pathspec) {
+        throw new Error(`refusing to use a tracked output receipt: ${config.out}`);
       }
+      throw new Error(
+        `refusing to overwrite tracked output artifact: ${trackedPath}`,
+      );
     }
   };
+  return { assertOutputUntracked, readHead, readWorktreeStatus };
+}
+
+export async function prepareBuiltEntries(config, deps = {}) {
+  const root = deps.repoRoot ?? repoRoot;
+  const exec = deps.exec ?? execCapture;
+  const exists = deps.exists ?? existsSync;
+  const hashFile = deps.hashFile ?? sha256File;
+  const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
+  const resolveCliExecutable = deps.resolveExecutable ?? resolveExecutable;
+  const enumerateOwnedSidecars =
+    deps.listOwnedReceiptSidecars ??
+    deps.listOwnedReceiptTemps ??
+    listOwnedReceiptSidecars;
+  const execEnv = provenanceExecEnvironment(
+    config.env ?? process.env,
+    Boolean(config.env),
+  );
+  const execOptions = { env: execEnv, signal: config.signal };
+  const expectedMcpEntry = join(root, "dist", "index.js");
+  const expectedDaemonEntry = join(root, "dist", "daemon.js");
+  if (
+    config.mcpEntry !== expectedMcpEntry ||
+    config.daemonEntry !== expectedDaemonEntry
+  ) {
+    throw new Error(
+      "custom built entries have unverifiable source provenance; use the repository dist/index.js and dist/daemon.js",
+    );
+  }
+  await assertOutputOutsideGitMetadata(
+    config.out,
+    root,
+    deps.resolveGitMetadataPaths,
+  );
+  const canonicalOutput = config.out
+    ? await canonicalOutputPath(config.out)
+    : null;
+  const outputRepositoryRoots = config.out
+    ? await resolveGitRepositoryRoots(root, canonicalOutput)
+    : [resolve(root)];
+  const { assertOutputUntracked, readHead, readWorktreeStatus } =
+    createProvenanceGitChecks({
+      config,
+      root,
+      exec,
+      execOptions,
+      enumerateOwnedSidecars,
+      canonicalOutput,
+      outputRepositoryRoots,
+    });
   await assertOutputUntracked();
   const status = await readWorktreeStatus();
   if (status.stdout.trim()) {
@@ -2402,6 +2456,12 @@ export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
   signal?.throwIfAborted();
   config.cmuxBin = artifactProvenance.cli_executable.path;
   await validate(artifactProvenance);
+  signal?.throwIfAborted();
+  await assertOutputOutsideArtifactProvenance(
+    config.out,
+    artifactProvenance,
+    deps.canonicalizeArtifact,
+  );
   signal?.throwIfAborted();
   const outputReservation = await reserve(config.out);
   try {
