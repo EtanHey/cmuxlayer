@@ -2057,6 +2057,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
     "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_WORK_TREE",
   ].filter((name) => config.env?.[name]);
   if (redirectedGitEnvironment.length > 0) {
     throw new Error(

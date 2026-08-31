@@ -1758,6 +1758,23 @@ describe("bench-e2e measurement harness", () => {
         },
       ),
     ).rejects.toThrow(/redirected Git metadata/);
+
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/receipt.json",
+          env: { GIT_WORK_TREE: "/other-clean-checkout" },
+        },
+        {
+          repoRoot: "/repo",
+          exec: () => {
+            throw new Error("Git must not inspect a redirected worktree");
+          },
+        },
+      ),
+    ).rejects.toThrow(/redirected Git metadata/);
   });
 
   it("scrubs inherited Git pathspec controls from provenance commands", async () => {
