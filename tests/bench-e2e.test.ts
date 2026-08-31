@@ -568,6 +568,33 @@ describe("bench-e2e measurement harness", () => {
         "evidence against simple capacity exhaustion",
       );
     }
+
+    const contradictory = renderPhase1BeforePublication({
+      ...receipt,
+      rows: receipt.rows.map((row) => {
+        const replacement = [
+          ["c5", 450, 1],
+          ["c1", 900, 1],
+          ["c10", 520, 30],
+        ].find(
+          ([profile, payload]) =>
+            row.operation === "send_to" &&
+            row.client === "mcp" &&
+            row.concurrency_profile === profile &&
+            row.payload_chars === payload,
+        );
+        return replacement ? { ...row, failure_rate_pct: replacement[2] } : row;
+      }),
+    });
+    expect(contradictory).not.toContain("250/450 = 0% at c1, c5, and c10");
+    expect(contradictory).not.toContain(
+      "c1 = 0% at both 520 and 900 characters",
+    );
+    expect(contradictory).not.toContain(
+      "c10 fails less than c5 while latency rises substantially",
+    );
+    expect(contradictory).toContain("Observed boundary rates");
+    expect(contradictory).toContain("Observed high-payload rates and latency");
   });
 
   it("refuses production or ambiguous socket configuration", () => {

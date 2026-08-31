@@ -2095,9 +2095,11 @@ function d201Evidence(rows) {
   const observed = [
     "## D201 mechanism evidence",
     "",
-    `- Boundary: 250/450 = 0% at c1, c5, and c10 (${profiles.map((profile) => `${profile} ${row(profile, 250).failure_rate_pct}%/${row(profile, 450).failure_rate_pct}%`).join("; ")}).`,
-    `- Concurrency: c1 = 0% at both 520 and 900 characters (${row("c1", 520).failure_rate_pct}%/${row("c1", 900).failure_rate_pct}%).`,
-    `- Non-monotonic curve: c5 520/900 = ${row("c5", 520).failure_rate_pct}%/${row("c5", 900).failure_rate_pct}% at p50 ${row("c5", 520).p50_ms}/${row("c5", 900).p50_ms} ms; c10 520/900 = ${row("c10", 520).failure_rate_pct}%/${row("c10", 900).failure_rate_pct}% at p50 ${row("c10", 520).p50_ms}/${row("c10", 900).p50_ms} ms. c10 fails less than c5 while latency rises substantially.`,
+    `${boundaryZero ? "- Boundary: 250/450 = 0% at c1, c5, and c10" : "- Observed boundary rates (250/450)"} (${profiles.map((profile) => `${profile} ${row(profile, 250).failure_rate_pct}%/${row(profile, 450).failure_rate_pct}%`).join("; ")}).`,
+    `${c1Zero ? "- Concurrency: c1 = 0% at both 520 and 900 characters" : "- Observed c1 rates (520/900)"} (${row("c1", 520).failure_rate_pct}%/${row("c1", 900).failure_rate_pct}%).`,
+    c10FailsLess && c10LatencyRises
+      ? `- Non-monotonic curve: c5 520/900 = ${row("c5", 520).failure_rate_pct}%/${row("c5", 900).failure_rate_pct}% at p50 ${row("c5", 520).p50_ms}/${row("c5", 900).p50_ms} ms; c10 520/900 = ${row("c10", 520).failure_rate_pct}%/${row("c10", 900).failure_rate_pct}% at p50 ${row("c10", 520).p50_ms}/${row("c10", 900).p50_ms} ms. c10 fails less than c5 while latency rises substantially.`
+      : `- Observed high-payload rates and latency: c5 520/900 = ${row("c5", 520).failure_rate_pct}%/${row("c5", 900).failure_rate_pct}% at p50 ${row("c5", 520).p50_ms}/${row("c5", 900).p50_ms} ms; c10 520/900 = ${row("c10", 520).failure_rate_pct}%/${row("c10", 900).failure_rate_pct}% at p50 ${row("c10", 520).p50_ms}/${row("c10", 900).p50_ms} ms.`,
   ];
   if (boundaryZero && c1Zero && c10FailsLess && c10LatencyRises) {
     observed.push(
