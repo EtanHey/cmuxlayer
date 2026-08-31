@@ -8974,6 +8974,71 @@ describe("agent lifecycle tool handlers", () => {
     expect(failed.WARNING).not.toMatch(/message did not land/i);
   });
 
+  it("background delivery preserves CLI partial-delivery truth in snapshots and wait_for", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = makeServerAgentRecord({
+        agent_id: "worker-background-cli-partial",
+        surface_id: "surface:worker-background-cli-partial",
+        workspace_id: "workspace:one",
+        state: "ready",
+        function: "implementor",
+      });
+      const { server, client } = await createBroadcastServer([record]);
+      const pasteText = vi.fn().mockImplementation(() => {
+        recordCliFallback("paste_text");
+        return Promise.resolve();
+      });
+      (client as typeof client & { pasteText: typeof pasteText }).pasteText =
+        pasteText;
+      client.sendKey.mockRejectedValue(new Error("Buffer not found"));
+
+      const accepted = parseToolResult(
+        await registeredTestTool(server, "send_input").handler(
+          {
+            surface: record.surface_id,
+            text: "already pasted\ninto the composer",
+            press_enter: true,
+            background: true,
+            allow_long_inline: true,
+          },
+          {},
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const waited = parseToolResult(
+        await registeredTestTool(server, "wait_for").handler(
+          { delivery_id: accepted.delivery_id },
+          {},
+        ),
+      );
+      const screen = parseToolResult(
+        await registeredTestTool(server, "read_screen").handler(
+          { surface: record.surface_id, parsed_only: true },
+          {},
+        ),
+      );
+
+      expect(pasteText).toHaveBeenCalledTimes(1);
+      expect(waited).toMatchObject({
+        delivery_state: "failed",
+        typed: true,
+        rpc_methods: [],
+      });
+      expect(waited.WARNING).toMatch(/PARTIALLY DELIVERED/);
+      expect(waited.WARNING).toMatch(/do not resend/i);
+      expect(screen.delivery).toMatchObject({
+        status: "failed",
+        typed: true,
+        rpc_methods: [],
+      });
+      expect(screen.delivery.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("send_to resolves structured targeting by job function, workspace, ids, and exclude", async () => {
     const records = [
       makeServerAgentRecord({

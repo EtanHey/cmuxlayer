@@ -286,6 +286,10 @@ export interface AgentDeliveryReceipt {
   error: string | null;
   /** Successful socket RPCs used by this delivery; absent on legacy receipts. */
   rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+  /** Text reached the target through either socket or CLI transport. */
+  typed?: boolean;
+  /** A submit key reached the target through either socket or CLI transport. */
+  submit_dispatched?: boolean;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
