@@ -324,11 +324,10 @@ export interface AgentDeliveryReceipt {
 function snapshotDeliveryReceipt(
   receipt: AgentDeliveryReceipt,
 ): AgentDeliveryReceipt {
+  const { rpc_methods: rpcMethods, ...snapshot } = receipt;
   return {
-    ...receipt,
-    ...(receipt.rpc_methods === undefined
-      ? {}
-      : { rpc_methods: [...receipt.rpc_methods] }),
+    ...snapshot,
+    ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
 

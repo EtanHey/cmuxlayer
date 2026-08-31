@@ -17188,6 +17188,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_attempted: false,
                     submit_verified: duplicate.submit_verified,
                     retry_count: duplicate.retry_count,
+                    rpc_methods: duplicate.rpc_methods ?? [],
                     needs_attention: duplicate.needs_attention,
                     attention_reason: duplicate.attention_reason,
                   }),
@@ -17248,6 +17249,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         press_enter: args.press_enter,
                         source_event: "send_to",
                         retry_count: delivery.retry_count,
+                        rpc_methods: delivery.rpc_methods,
                         delivery_state: delivery.delivery,
                       })
                     : delivery.delivery === "pending_verify"
@@ -17258,6 +17260,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           press_enter: args.press_enter,
                           source_event: "send_to",
                           retry_count: delivery.retry_count,
+                          rpc_methods: delivery.rpc_methods,
                         })
                       : delivery.delivery === "rescued"
                         ? engine.resolveDelivery({
@@ -17269,6 +17272,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             delivery_state: "rescued",
                             terminal: true,
                             retry_count: delivery.retry_count,
+                            rpc_methods: delivery.rpc_methods,
                             submit_verified: false,
                             error:
                               "Prompt appeared only after an external interrupt",
@@ -17283,6 +17287,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                               delivery_state: "submitted",
                               terminal: true,
                               retry_count: delivery.retry_count,
+                              rpc_methods: delivery.rpc_methods,
                               submit_verified: delivery.submit_verified,
                               error: null,
                             })
@@ -17341,6 +17346,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       error instanceof SubmitVerificationError
                         ? error.retry_count
                         : 0,
+                    rpc_methods:
+                      error instanceof SubmitVerificationError
+                        ? error.receipt.rpc_methods
+                        : [],
                     submit_verified:
                       error instanceof SubmitVerificationError ? false : null,
                     error:
@@ -17450,6 +17459,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 submit_attempted: false,
                 submit_verified: duplicate.submit_verified,
                 retry_count: duplicate.retry_count,
+                rpc_methods: duplicate.rpc_methods ?? [],
                 needs_attention: duplicate.needs_attention,
                 attention_reason: duplicate.attention_reason,
                 timings_ms: timings,
@@ -17555,6 +17565,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   error instanceof SubmitVerificationError
                     ? error.retry_count
                     : 0,
+                rpc_methods:
+                  error instanceof SubmitVerificationError
+                    ? error.receipt.rpc_methods
+                    : [],
                 submit_verified:
                   error instanceof SubmitVerificationError ? false : null,
                 error: error instanceof Error ? error.message : String(error),
@@ -17598,6 +17612,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   press_enter: args.press_enter,
                   source_event: "send_to",
                   retry_count: delivery.retry_count,
+                  rpc_methods: delivery.rpc_methods,
                   delivery_state: delivery.delivery,
                 })
               : delivery.delivery === "pending_verify"
@@ -17608,6 +17623,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     press_enter: args.press_enter,
                     source_event: "send_to",
                     retry_count: delivery.retry_count,
+                    rpc_methods: delivery.rpc_methods,
                   })
                 : delivery.delivery === "rescued"
                   ? engine.resolveDelivery({
@@ -17619,6 +17635,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       delivery_state: "rescued",
                       terminal: true,
                       retry_count: delivery.retry_count,
+                      rpc_methods: delivery.rpc_methods,
                       submit_verified: false,
                       error: "Prompt appeared only after an external interrupt",
                     })
@@ -17632,6 +17649,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         delivery_state: "typed",
                         terminal: true,
                         retry_count: delivery.retry_count,
+                        rpc_methods: delivery.rpc_methods,
                         submit_verified: null,
                         error: null,
                       })
@@ -17645,6 +17663,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           delivery_state: "submitted",
                           terminal: true,
                           retry_count: delivery.retry_count,
+                          rpc_methods: delivery.rpc_methods,
                           submit_verified: delivery.submit_verified,
                           error: null,
                         })

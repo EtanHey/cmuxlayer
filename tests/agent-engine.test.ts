@@ -29,6 +29,7 @@ import {
   buildResumeCommand,
   extractSessionId,
   resolveSweepTiming,
+  type AgentDeliveryReceipt,
 } from "../src/agent-engine.js";
 import { launcherNameCandidates } from "../src/launcher-registry.js";
 import { toAgentStatePayload } from "../src/agent-facade.js";
@@ -13737,6 +13738,32 @@ Session ID: ${sessionId}`,
         text: "persist me",
         delivery_state: "queued",
       });
+    });
+
+    it("omits corrupt persisted RPC provenance instead of throwing", () => {
+      const receipt = engine.queueDelivery({
+        agent_id: "corrupt-rpc-methods",
+        text: "legacy receipt",
+        press_enter: false,
+        source_event: "send_to",
+      });
+      const receiptStore = (
+        engine as unknown as {
+          deliveryReceipts: Map<string, AgentDeliveryReceipt>;
+        }
+      ).deliveryReceipts;
+      receiptStore.set(receipt.delivery_id, {
+        ...receipt,
+        rpc_methods: null as unknown as AgentDeliveryReceipt["rpc_methods"],
+      });
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_id: receipt.delivery_id,
+        text: "legacy receipt",
+      });
+      expect(
+        engine.getDeliveryReceipt(receipt.delivery_id)?.rpc_methods,
+      ).toBeUndefined();
     });
 
     it("holds a queued delivery while the target is paused without typing or retrying", async () => {

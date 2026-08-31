@@ -996,6 +996,11 @@ describe("send_to v2 background verify", () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
     registerAgent(server);
+    client.getTransportHealth = () => ({
+      mode: "socket" as const,
+      degraded: false,
+      current_socket_path: "/tmp/cmux-send-to-v2-verify-test.sock",
+    });
 
     const sent = parseResult(
       await callTool(server, "send_to", {
@@ -1021,6 +1026,7 @@ describe("send_to v2 background verify", () => {
       delivery_id: sent.delivery_id,
       delivery_state: "submitted",
       terminal: true,
+      rpc_methods: ["surface.send_text", "surface.send_key"],
     });
   });
 
