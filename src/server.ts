@@ -1422,13 +1422,23 @@ class LauncherReadinessError extends Error {
 }
 
 class BootPromptDeliveryError extends Error {
+  readonly rpc_methods: DeliveryRpcMethod[];
+
   constructor(
     message: string,
     readonly delivered_chars: number,
     readonly submit_verification_error?: SubmitVerificationError,
+    readonly delivery_error?: unknown,
   ) {
-    super(message);
+    super(message, {
+      cause: delivery_error ?? submit_verification_error,
+    });
     this.name = "BootPromptDeliveryError";
+    const deliveryMethods = deliveryRpcMethodsFromError(delivery_error);
+    this.rpc_methods =
+      deliveryMethods.length > 0
+        ? deliveryMethods
+        : deliveryRpcMethodsFromError(submit_verification_error);
   }
 }
 
@@ -7570,6 +7580,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               `Boot prompt delivery failed after ${deliveredChars} chars: ${fallbackMessage}`,
               deliveredChars,
               error,
+              fallbackError,
             );
           }
           return {
@@ -7597,6 +7608,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         `Boot prompt delivery failed after ${deliveredChars} chars: ${message}`,
         deliveredChars,
         error instanceof SubmitVerificationError ? error : undefined,
+        error,
       );
     }
   };

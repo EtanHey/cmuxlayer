@@ -4052,6 +4052,72 @@ describe("tool handler integration", () => {
     expect(returnPresses).toHaveLength(2);
   });
 
+  it("new_split preserves boot prompt text RPC provenance through wrapper errors", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "failed-boot-return.md");
+    const pointer = `Read and follow ${promptPath}`;
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot through\npointer", "utf8");
+    let pointerSent = false;
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      newSplit: vi.fn().mockResolvedValue({
+        workspace: "workspace:1",
+        surface: "surface:2",
+        pane: "pane:1",
+        title: "New",
+        type: "terminal",
+      }),
+      selectWorkspace: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn().mockImplementation((_surface: string, text: string) => {
+        if (text === pointer) pointerSent = true;
+        return Promise.resolve();
+      }),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockRejectedValue(new Error("Buffer not found")),
+      readScreen: vi.fn().mockImplementation(() =>
+        Promise.resolve({
+          surface: "surface:2",
+          text: pointerSent ? codexComposerFrame(pointer) : "codex> ",
+          lines: 30,
+          scrollback_used: false,
+        }),
+      ),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "new_split");
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 50,
+      },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
+    expect(parsed.ok).toBe(false);
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:2",
+      pointer,
+      expect.any(Object),
+    );
+    expect(mockClient.sendKey).toHaveBeenCalledWith(
+      "surface:2",
+      "return",
+      expect.any(Object),
+    );
+    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
+  });
+
   it("send_command warns when a long single-paragraph boot_prompt_path remains inline", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "long-mandate.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });

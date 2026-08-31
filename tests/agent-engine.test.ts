@@ -13807,7 +13807,7 @@ Session ID: ${sessionId}`,
       );
       liveSurfaces = [makeSurface("surface:42")];
       await engine.getRegistry().reconstitute();
-      engine.setDeliverySubmitter(async () => ({
+      engine.setDeliverySubmitter(() => Promise.resolve({
         retry_count: 0,
         submit_verified: true,
         delivery: "submitted",
