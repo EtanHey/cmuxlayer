@@ -7154,6 +7154,8 @@ export class AgentEngine {
     source_event: DeliveryEventType;
     retry_count: number;
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+    typed?: boolean;
+    submit_dispatched?: boolean;
     delivery_state?: "queued" | "queued_followup";
   }): AgentDeliveryReceipt {
     const acceptedAt = new Date().toISOString();
@@ -7257,6 +7259,8 @@ export class AgentEngine {
     source_event: DeliveryEventType;
     retry_count: number;
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+    typed?: boolean;
+    submit_dispatched?: boolean;
     created_at?: string;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();

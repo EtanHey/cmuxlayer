@@ -15965,7 +15965,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 delivery_id: receipt.delivery_id,
                 delivery_state: receipt.delivery_state,
                 typed: receipt.typed === true,
-                submit_attempted: receipt.submit_dispatched === true,
+                submit_attempted: receipt.press_enter,
                 submit_dispatched: receipt.submit_dispatched === true,
                 submit_verified: receipt.submit_verified,
                 retry_count: receipt.retry_count,
@@ -17475,6 +17475,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         source_event: "send_to",
                         retry_count: delivery.retry_count,
                         rpc_methods: delivery.rpc_methods,
+                        typed: delivery.typed,
+                        submit_dispatched: delivery.submit_dispatched,
                         delivery_state: delivery.delivery,
                       })
                     : delivery.delivery === "pending_verify"
@@ -17486,6 +17488,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           source_event: "send_to",
                           retry_count: delivery.retry_count,
                           rpc_methods: delivery.rpc_methods,
+                          typed: delivery.typed,
+                          submit_dispatched: delivery.submit_dispatched,
                         })
                       : delivery.delivery === "rescued"
                         ? engine.resolveDelivery({
@@ -17498,6 +17502,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             terminal: true,
                             retry_count: delivery.retry_count,
                             rpc_methods: delivery.rpc_methods,
+                            typed: delivery.typed,
+                            submit_dispatched: delivery.submit_dispatched,
                             submit_verified: false,
                             error:
                               "Prompt appeared only after an external interrupt",
@@ -17513,6 +17519,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                               terminal: true,
                               retry_count: delivery.retry_count,
                               rpc_methods: delivery.rpc_methods,
+                              typed: delivery.typed,
+                              submit_dispatched: delivery.submit_dispatched,
                               submit_verified: delivery.submit_verified,
                               error: null,
                             })
@@ -17529,6 +17537,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_evidence: delivery.submit_evidence,
                     retry_count: delivery.retry_count,
                     rpc_methods: delivery.rpc_methods,
+                    submit_dispatched: delivery.submit_dispatched,
                     queued_behind_turn: delivery.queued_behind_turn,
                   }),
                   accepted: true,
@@ -17607,7 +17616,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_attempted:
                       error instanceof SubmitVerificationError
                         ? (error.receipt?.submit_attempted ?? args.press_enter)
-                        : errorSubmitDispatched,
+                        : args.press_enter,
                     submit_dispatched: errorSubmitDispatched,
                     submit_verified: failed.submit_verified,
                     retry_count: failed.retry_count,
@@ -17829,7 +17838,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 submit_attempted:
                   error instanceof SubmitVerificationError
                     ? (error.receipt?.submit_attempted ?? args.press_enter)
-                    : errorSubmitDispatched,
+                    : args.press_enter,
                 submit_dispatched: errorSubmitDispatched,
                 submit_verified: failedReceipt.submit_verified,
                 retry_count: failedReceipt.retry_count,
@@ -17850,6 +17859,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   source_event: "send_to",
                   retry_count: delivery.retry_count,
                   rpc_methods: delivery.rpc_methods,
+                  typed: delivery.typed,
+                  submit_dispatched: delivery.submit_dispatched,
                   delivery_state: delivery.delivery,
                 })
               : delivery.delivery === "pending_verify"
@@ -17861,6 +17872,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     source_event: "send_to",
                     retry_count: delivery.retry_count,
                     rpc_methods: delivery.rpc_methods,
+                    typed: delivery.typed,
+                    submit_dispatched: delivery.submit_dispatched,
                   })
                 : delivery.delivery === "rescued"
                   ? engine.resolveDelivery({
@@ -17873,6 +17886,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       terminal: true,
                       retry_count: delivery.retry_count,
                       rpc_methods: delivery.rpc_methods,
+                      typed: delivery.typed,
+                      submit_dispatched: delivery.submit_dispatched,
                       submit_verified: false,
                       error: "Prompt appeared only after an external interrupt",
                     })
@@ -17887,6 +17902,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         terminal: true,
                         retry_count: delivery.retry_count,
                         rpc_methods: delivery.rpc_methods,
+                        typed: delivery.typed,
+                        submit_dispatched: delivery.submit_dispatched,
                         submit_verified: null,
                         error: null,
                       })
@@ -17901,6 +17918,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           terminal: true,
                           retry_count: delivery.retry_count,
                           rpc_methods: delivery.rpc_methods,
+                          typed: delivery.typed,
+                          submit_dispatched: delivery.submit_dispatched,
                           submit_verified: delivery.submit_verified,
                           error: null,
                         })
@@ -17916,6 +17935,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             submit_evidence: delivery.submit_evidence,
             retry_count: delivery.retry_count,
             rpc_methods: delivery.rpc_methods,
+            submit_dispatched: delivery.submit_dispatched,
             queued_behind_turn: delivery.queued_behind_turn,
             timings_ms: timings,
           });

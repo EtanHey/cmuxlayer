@@ -8967,6 +8967,8 @@ describe("agent lifecycle tool handlers", () => {
     expect(failed).toMatchObject({
       delivery_state: "failed",
       typed: true,
+      submit_attempted: true,
+      submit_dispatched: false,
       rpc_methods: [],
     });
     expect(failed.WARNING).toMatch(/PARTIALLY DELIVERED/);
@@ -8982,6 +8984,8 @@ describe("agent lifecycle tool handlers", () => {
     expect(waited).toMatchObject({
       delivery_state: "failed",
       typed: true,
+      submit_attempted: true,
+      submit_dispatched: false,
       rpc_methods: [],
     });
     expect(waited.WARNING).toMatch(/PARTIALLY DELIVERED/);
@@ -12986,6 +12990,21 @@ codex>
       delivery_id: delivered.delivery_id,
       delivery_state: "submitted",
       terminal: true,
+      typed: true,
+      submit_dispatched: true,
+    });
+    const waited = parseToolResult(
+      await registeredTestTool(server, "wait_for").handler(
+        { delivery_id: delivered.delivery_id },
+        {} as any,
+      ),
+    );
+    expect(waited).toMatchObject({
+      delivery_id: delivered.delivery_id,
+      delivery_state: "submitted",
+      typed: true,
+      submit_attempted: true,
+      submit_dispatched: true,
     });
   });
 
