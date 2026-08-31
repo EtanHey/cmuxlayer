@@ -56,6 +56,7 @@ import {
   publishBenchmarkReceipt,
   renderMarkdownTable,
   releaseReservations,
+  resolveGitMetadataPaths,
   rollbackReservation,
   resolveStableWorkspaceId,
   runCliReadScreen,
@@ -1679,6 +1680,25 @@ describe("bench-e2e measurement harness", () => {
     ).rejects.toThrow(/inside Git metadata/);
   });
 
+  it("canonicalizes a symlinked gitdir marker before checking output containment", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const realGit = join(directory, "real-git");
+    const worktree = join(directory, "worktree");
+    await mkdir(realGit);
+    await mkdir(worktree);
+    await symlink(realGit, join(worktree, "git-link"), "dir");
+    await writeFile(join(worktree, ".git"), "gitdir: git-link\n", "utf8");
+
+    expect(await resolveGitMetadataPaths(worktree)).toContain(
+      await realpath(realGit),
+    );
+
+    await expect(
+      assertOutputOutsideGitMetadata(join(realGit, "HEAD"), worktree),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("refuses to exclude a tracked output receipt from provenance", async () => {
     let trackedPathspec;
     await expect(
@@ -1703,6 +1723,30 @@ describe("bench-e2e measurement harness", () => {
       ),
     ).rejects.toThrow(/tracked output receipt/);
     expect(trackedPathspec).toBe(":(literal):(literal)receipt.json");
+  });
+
+  it("probes HEAD as well as the index for a staged-deleted receipt", async () => {
+    let trackedProbeArgs = [];
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedProbeArgs = args;
+              return { stdout: "results/bench.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+    expect(trackedProbeArgs).toContain("--with-tree=HEAD");
   });
 
   it("rechecks that the output receipt remains untracked after the build", async () => {

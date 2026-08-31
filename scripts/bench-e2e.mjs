@@ -18,7 +18,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import net from "node:net";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -1920,7 +1928,7 @@ export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
   ];
 }
 
-async function resolveGitMetadataPaths(root) {
+export async function resolveGitMetadataPaths(root) {
   const markerPath = resolve(root, ".git");
   const markerStat = await lstat(markerPath).catch((error) => {
     if (error?.code === "ENOENT") return null;
@@ -1936,13 +1944,21 @@ async function resolveGitMetadataPaths(root) {
   } else {
     gitDirectory = await realpath(markerPath);
   }
+  gitDirectory = await realpath(gitDirectory);
   const commonDirectory = await readFile(join(gitDirectory, "commondir"), "utf8")
     .then((value) => resolve(gitDirectory, value.trim()))
     .catch((error) => {
       if (error?.code === "ENOENT") return gitDirectory;
       throw error;
     });
-  return [...new Set([markerPath, gitDirectory, commonDirectory].map(resolve))];
+  const canonicalCommonDirectory = await realpath(commonDirectory);
+  return [
+    ...new Set(
+      [markerPath, gitDirectory, canonicalCommonDirectory].map((path) =>
+        resolve(path),
+      ),
+    ),
+  ];
 }
 
 export async function assertOutputOutsideGitMetadata(
@@ -1951,13 +1967,16 @@ export async function assertOutputOutsideGitMetadata(
   resolveMetadata = resolveGitMetadataPaths,
 ) {
   if (!outputPath) return;
-  const absoluteOutput = resolve(outputPath);
+  const absoluteOutput = await canonicalOutputPath(outputPath);
   const metadataPaths = await resolveMetadata(root);
   for (const metadataPath of metadataPaths) {
     const absoluteMetadata = resolve(metadataPath);
+    const outputWithinMetadata = relative(absoluteMetadata, absoluteOutput);
     if (
-      absoluteOutput === absoluteMetadata ||
-      absoluteOutput.startsWith(`${absoluteMetadata}${sep}`)
+      outputWithinMetadata === "" ||
+      (outputWithinMetadata !== ".." &&
+        !outputWithinMetadata.startsWith(`..${sep}`) &&
+        !isAbsolute(outputWithinMetadata))
     ) {
       throw new Error(
         `refusing output path inside Git metadata: ${absoluteOutput}`,
@@ -2038,6 +2057,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
       [
         "ls-files",
         "--cached",
+        "--with-tree=HEAD",
         "--",
         `:(literal)${pathspec}`,
         ...sidecarPathspecs,
