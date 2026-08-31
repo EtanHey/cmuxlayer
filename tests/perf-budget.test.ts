@@ -339,7 +339,7 @@ describe("daemon performance budget", () => {
     ).toBe("measured (1 run)");
   });
 
-  it("keeps a wide margin only for honest single-shot rows", () => {
+  it("rejects single-shot metadata for every canonical row", () => {
     const singleShot = attest({
       ...baseline,
       replay: {
@@ -350,15 +350,9 @@ describe("daemon performance budget", () => {
         },
       },
     });
-    const singleRow = compareBenchmark(singleShot, result).rows.find(
-      (entry) => entry.operation === "list_surfaces" && entry.metric === "p50_ms",
+    expect(() => validateBaseline(singleShot)).toThrow(
+      /canonical sampled workload/,
     );
-    expect(singleRow).toMatchObject({
-      sampling: "single_shot",
-      margin_ms: 300,
-      margin_rule: "constant +300ms (single-shot)",
-      ceiling: 400,
-    });
     const stressRow = compareBenchmark(baseline, result).rows.find(
       (entry) =>
         entry.operation === "send_to_surface_10_parallel" &&
@@ -384,13 +378,40 @@ describe("daemon performance budget", () => {
     expect(markdown).toContain("| Margin rule |");
     expect(markdown).toContain("measured (5 runs)");
     expect(markdown).not.toContain("constant +300ms (single-shot)");
-    expect(
-      renderMarkdownComparison(
-        singleShot,
-        result,
-        compareBenchmark(singleShot, result),
-      ),
-    ).toContain("constant +300ms (single-shot)");
+  });
+
+  it("rejects weakened normal and stress sampling metadata", () => {
+    const weakNormal = attest({
+      ...baseline,
+      replay: {
+        ...baseline.replay,
+        row_metadata: {
+          ...baseline.replay.row_metadata,
+          list_surfaces: { sampling: "sampled", samples_per_run: 12 },
+        },
+      },
+    });
+    expect(() => validateBaseline(weakNormal)).toThrow(
+      /canonical sampled workload/,
+    );
+
+    const weakStress = attest({
+      ...baseline,
+      replay: {
+        ...baseline.replay,
+        row_metadata: {
+          ...baseline.replay.row_metadata,
+          send_to_surface_10_parallel: {
+            sampling: "sampled",
+            samples_per_run: 12,
+            stress: false,
+          },
+        },
+      },
+    });
+    expect(() => validateBaseline(weakStress)).toThrow(
+      /canonical sampled workload/,
+    );
   });
 
   it("records only green main runs and bounds append-only history to 50 runs", () => {
@@ -992,6 +1013,10 @@ describe("daemon performance budget", () => {
       "benchmark_clients_survived_replay:\n        stressClientsSurvivedReplay &&\n        daemonClients.every((client) => client.alive)",
     );
     expect(source).toContain("function parallelStressSentinel(index, roundIndex)");
+    expect(source).toContain("readSurfaceState(surface)");
+    expect(source).toContain("writeSurfaceState(surface, surfaceState)");
+    expect(source).toContain("await requireSubmittedDelivery(client, receipt, label)");
+    expect(source).not.toContain("return requireSubmittedDelivery(client, receipt, label)");
     expect(source).toContain(
       "validateReceipt?.(receipt, requests[index], index, roundIndex)",
     );
@@ -1002,6 +1027,7 @@ describe("daemon performance budget", () => {
     expect(source).toContain("list_agents omitted the live spawned agent");
     expect(source).toContain("beforeRound?.(roundIndex)");
     expect(source).toContain("parallelStressSentinel(index, roundIndex)");
+    expect(source).toContain("args(index, roundIndex)");
     expect(source).toContain(
       '"parallel send",',
     );

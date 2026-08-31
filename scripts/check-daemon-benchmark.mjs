@@ -145,29 +145,19 @@ export function validateBaseline(baseline) {
   }
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay?.row_metadata?.[operation];
-    if (!metadata || !["sampled", "single_shot"].includes(metadata.sampling)) {
-      throw new Error(
-        `baseline replay.row_metadata.${operation}.sampling must be sampled or single_shot`,
-      );
-    }
+    const stress = operation.endsWith("_10_parallel");
+    const expectedSamples = stress
+      ? CANONICAL_ROUNDS
+      : CANONICAL_CLIENTS * CANONICAL_ROUNDS;
     if (
-      !Number.isSafeInteger(metadata.samples_per_run) ||
-      metadata.samples_per_run <= 0
+      !metadata ||
+      metadata.sampling !== "sampled" ||
+      metadata.samples_per_run !== expectedSamples ||
+      Boolean(metadata.stress) !== stress
     ) {
       throw new Error(
-        `baseline replay.row_metadata.${operation}.samples_per_run must be a positive integer`,
+        `baseline replay.row_metadata.${operation} must match the canonical sampled workload (${expectedSamples} samples, stress=${stress})`,
       );
-    }
-    if (metadata.sampling === "sampled" && metadata.samples_per_run < 12) {
-      throw new Error(
-        `baseline sampled row ${operation} must have at least 12 samples per run`,
-      );
-    }
-    if (
-      metadata.stress !== undefined &&
-      typeof metadata.stress !== "boolean"
-    ) {
-      throw new Error(`baseline replay.row_metadata.${operation}.stress must be boolean`);
     }
     finite(baseline.replay?.bytes?.[operation], `replay.bytes.${operation}`);
     if (!/^[0-9a-f]{64}$/.test(baseline.replay?.request_sha256?.[operation])) {

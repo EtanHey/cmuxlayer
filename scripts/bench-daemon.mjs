@@ -339,6 +339,28 @@ function writeState(state) {
 function patchState(patch) {
   writeState({ ...readState(), ...patch });
 }
+function keyedStatePath(kind, key) {
+  const safeKey = String(key || "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
+  return statePath + "." + kind + "-" + safeKey;
+}
+function readSurfaceState(surface) {
+  try { return JSON.parse(fs.readFileSync(keyedStatePath("surface", surface), "utf8")); }
+  catch { return { composer: "", transcript: "" }; }
+}
+function writeSurfaceState(surface, surfaceState) {
+  fs.writeFileSync(keyedStatePath("surface", surface), JSON.stringify(surfaceState));
+}
+function readBuffer(name) {
+  try { return fs.readFileSync(keyedStatePath("buffer", name), "utf8"); }
+  catch { return ""; }
+}
+function writeBuffer(name, value) {
+  fs.writeFileSync(keyedStatePath("buffer", name), value);
+}
+function optionValue(name, fallback = "") {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] || fallback : fallback;
+}
 const state = readState();
 const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   ref: "surface:bench-" + index,
@@ -380,31 +402,36 @@ if (command === "list-workspaces") {
   write({ terminals: surfaces.map((surface) => ({ surface_ref: surface.ref, current_directory: cwd })) });
 } else if (command === "read-screen") {
   const surface = args[args.indexOf("--surface") + 1] || surfaces[0].ref;
-  const composer = state.composer ? "› " + state.composer : "› ";
-  const transcript = state.transcript ? "\\n› " + state.transcript + "\\n" : "";
+  const surfaceState = readSurfaceState(surface);
+  const composer = surfaceState.composer ? "› " + surfaceState.composer : "› ";
+  const transcript = surfaceState.transcript ? "\\n› " + surfaceState.transcript + "\\n" : "";
   write({ surface_ref: surface, text: "╭ OpenAI Codex ╮\\nmodel: gpt-5.6-sol\\n" + transcript + "\\n" + composer, lines: 8, scrollback_used: false });
 } else if (command === "identify") {
   write({ caller: { workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: surfaces[0].ref }, focused: { workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: surfaces[0].ref } });
 } else if (command === "list-status") {
   write([]);
 } else if (command === "send") {
-  state.composer += args.at(-1) || "";
-  writeState(state);
+  const surface = optionValue("--surface", surfaces[0].ref);
+  const surfaceState = readSurfaceState(surface);
+  surfaceState.composer += args.at(-1) || "";
+  writeSurfaceState(surface, surfaceState);
   write({ ok: true });
 } else if (command === "set-buffer") {
-  state.buffer = args.at(-1) || "";
-  writeState(state);
+  writeBuffer(optionValue("--name", "default"), args.at(-1) || "");
   write({ ok: true });
 } else if (command === "paste-buffer") {
-  state.composer += state.buffer || "";
-  state.buffer = "";
-  writeState(state);
+  const surface = optionValue("--surface", surfaces[0].ref);
+  const surfaceState = readSurfaceState(surface);
+  surfaceState.composer += readBuffer(optionValue("--name", "default"));
+  writeSurfaceState(surface, surfaceState);
   write({ ok: true });
 } else if (command === "send-key") {
+  const surface = optionValue("--surface", surfaces[0].ref);
+  const surfaceState = readSurfaceState(surface);
   if ((args.at(-1) || "").toLowerCase() === "return") {
-    state.transcript = state.composer;
-    state.composer = "";
-    writeState(state);
+    surfaceState.transcript = surfaceState.composer;
+    surfaceState.composer = "";
+    writeSurfaceState(surface, surfaceState);
   }
   write({ ok: true });
 } else if (command === "rename-tab") {
@@ -899,9 +926,8 @@ async function requireSurfaceDeliveryProof(
       receipt.submit_verified === true) ||
     typeof receipt.delivery_id === "string"
   ) {
-    return requireSubmittedDelivery(client, receipt, label);
-  }
-  if (receipt.typed !== true || receipt.submit_attempted !== true) {
+    await requireSubmittedDelivery(client, receipt, label);
+  } else if (receipt.typed !== true || receipt.submit_attempted !== true) {
     throw new Error(`${label} was neither waitable nor typed`);
   }
   const read = toolData(
@@ -1168,8 +1194,10 @@ async function measureLiveListAgentsAcrossClients(clients) {
   if (!spawnResult.agent_id || !spawnResult.surface_id) {
     throw new Error("list_agents fixture spawn omitted identity");
   }
+  let measurement;
+  let measurementError;
   try {
-    return await measureWarmToolAcrossClients(
+    measurement = await measureWarmToolAcrossClients(
       clients,
       "list_agents",
       { detail: "summary" },
@@ -1179,7 +1207,11 @@ async function measureLiveListAgentsAcrossClients(clients) {
         }
       },
     );
-  } finally {
+  } catch (error) {
+    measurementError = error;
+  }
+  let closeError;
+  try {
     const closeReceipt = toolData(
       await clients[0].callTool(
         "close_surface",
@@ -1194,7 +1226,18 @@ async function measureLiveListAgentsAcrossClients(clients) {
     ) {
       throw new Error("list_agents fixture did not close cleanly");
     }
+  } catch (error) {
+    closeError = error;
   }
+  if (measurementError && closeError) {
+    throw new AggregateError(
+      [measurementError, closeError],
+      "list_agents measurement and fixture cleanup both failed",
+    );
+  }
+  if (measurementError) throw measurementError;
+  if (closeError) throw closeError;
+  return measurement;
 }
 
 async function measureSpawnLifecycleAcrossClients(
@@ -1237,7 +1280,7 @@ async function measureSpawnLifecycleAcrossClients(
 function parallelStressSentinel(index, roundIndex) {
   return roundIndex === undefined
     ? `parallel surface benchmark ${index}`
-    : `parallel surface benchmark ${index} round ${roundIndex}`;
+    : `parallel surface benchmark ${index} round ${String(roundIndex).padStart(2, "0")}`;
 }
 
 async function measureParallelStress(
@@ -1248,16 +1291,22 @@ async function measureParallelStress(
   { beforeRound } = {},
 ) {
   const samples = [];
-  const requests = Array.from({ length: PARALLEL_STRESS_COUNT }, (_, index) =>
-    typeof args === "function" ? args(index) : args,
+  const canonicalRequests = Array.from(
+    { length: PARALLEL_STRESS_COUNT },
+    (_, index) => (typeof args === "function" ? args(index, "RR") : args),
   );
   const request = {
     parallel: PARALLEL_STRESS_COUNT,
     name,
-    arguments: requests,
+    arguments: canonicalRequests,
   };
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     await beforeRound?.(roundIndex);
+    const requests = Array.from(
+      { length: PARALLEL_STRESS_COUNT },
+      (_, index) =>
+        typeof args === "function" ? args(index, roundIndex) : args,
+    );
     const startedAt = nowMs();
     const receipts = await Promise.all(
       requests.map(async (requestArgs, index) =>
@@ -1436,11 +1485,11 @@ async function main() {
     const sendToSurface10Parallel = await measureParallelStress(
       stressClients,
       "send_to",
-      (index) => ({
+      (index, roundIndex) => ({
         mode: "surface",
         surface: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
         workspace: "workspace:bench",
-        text: parallelStressSentinel(index),
+        text: parallelStressSentinel(index, roundIndex),
         press_enter: true,
       }),
       (receipt, requestArgs, index) =>
