@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "557ae4c24a9de4a9d308bba3e1ba8497dc2ce254",
-    "measured_at": "2026-08-31T09:36:24.483Z",
+    "git_sha": "062d38af1c9296cd198f93d850f841729d9b49cc",
+    "measured_at": "2026-08-31T10:10:45.906Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 33377777123,
-    "increase_reason": "Per-sample warm-surface sentinels and verified-submit proof change the canonical request identity; rebase to exact intrinsic-GREEN runner evidence."
+    "workflow_run_id": 33380548570,
+    "increase_reason": "list_agents fresh scans hold the lifecycle mutation lock; replace the false zero with the exact-run conservative elapsed upper bound, and retain terminal-confirmed surface-send timing."
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -120,7 +120,7 @@
       "lock_hold_ms": 0
     },
     "send_to_surface_warm": {
-      "p50_ms": 64.52,
+      "p50_ms": 65.02,
       "p95_ms": 71.2,
       "lock_hold_ms": 178
     },
@@ -132,7 +132,7 @@
     "list_agents": {
       "p50_ms": 67.66,
       "p95_ms": 119.43,
-      "lock_hold_ms": 0
+      "lock_hold_ms": 141.66617600002792
     },
     "control_health": {
       "p50_ms": 132.77,
@@ -150,7 +150,7 @@
       "lock_hold_ms": 120
     },
     "send_to_surface_10_parallel": {
-      "p50_ms": 121.35,
+      "p50_ms": 145.68,
       "p95_ms": 368.97,
       "lock_hold_ms": 353
     },
@@ -159,10 +159,10 @@
       "p95_ms": 59.03,
       "lock_hold_ms": 0
     },
-    "cli_send_ms": 64.52
+    "cli_send_ms": 65.02
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "fd095a40e1578472e0818e09b1393fe82f507d006429710daef2681604f94e86"
+    "content_sha256": "1b9d5ad4e790624a5d75dfbb5fd7d1aa0693fda34c6039173b51b58db3aea33f"
   }
 }
