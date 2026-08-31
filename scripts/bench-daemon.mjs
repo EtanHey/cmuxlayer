@@ -1010,6 +1010,7 @@ async function measureSpawnLifecycleOnce(
       normalizeAgentId = false,
       requireSubmitted = true,
       canonicalText,
+      validateReceipt,
     } = {},
   ) => {
     const startedAt = nowMs();
@@ -1017,6 +1018,7 @@ async function measureSpawnLifecycleOnce(
     if (requireSubmitted) {
       requireTerminalSubmission(receipt, `${args.mode} send`);
     }
+    await validateReceipt?.(receipt);
     return {
       elapsed_ms: round(nowMs() - startedAt),
       request_bytes: requestBytes("send_to", args),
@@ -1069,35 +1071,37 @@ async function measureSpawnLifecycleOnce(
     text: surfaceSampleSentinel(sampleIndex),
     press_enter: true,
   };
+  let surfaceWaitFor;
   const surface = await measureSend(surfaceArgs, {
     requireSubmitted: false,
     canonicalText: surfaceSampleSentinel("NNN"),
+    validateReceipt: async (receipt) => {
+      try {
+        const terminal = await requireSubmittedDelivery(
+          client,
+          receipt,
+          "sampled surface send",
+        );
+        await requireSurfaceDeliveryProof(
+          client,
+          terminal,
+          surfaceArgs,
+          "surface:bench-spawn",
+          "sampled surface send",
+        );
+        surfaceWaitFor = {
+          ...terminal,
+          read_back_verified: true,
+        };
+      } catch (error) {
+        surfaceWaitFor = {
+          ok: false,
+          read_back_verified: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
   });
-  let surfaceWaitFor;
-  try {
-    const terminal = await requireSubmittedDelivery(
-      client,
-      surface.receipt,
-      "sampled surface send",
-    );
-    await requireSurfaceDeliveryProof(
-      client,
-      terminal,
-      surfaceArgs,
-      "surface:bench-spawn",
-      "sampled surface send",
-    );
-    surfaceWaitFor = {
-      ...terminal,
-      read_back_verified: true,
-    };
-  } catch (error) {
-    surfaceWaitFor = {
-      ok: false,
-      read_back_verified: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
 
   const closeArgs = {
     scope: "agent",
@@ -1152,7 +1156,13 @@ async function measureSpawnLifecycleOnce(
   };
 }
 
-async function measureWarmToolAcrossClients(clients, name, args, validateReceipt) {
+async function measureWarmToolAcrossClients(
+  clients,
+  name,
+  args,
+  validateReceipt,
+  { lockHoldFromElapsed = false } = {},
+) {
   const samples = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     await Promise.all(
@@ -1163,12 +1173,15 @@ async function measureWarmToolAcrossClients(clients, name, args, validateReceipt
           name,
         );
         validateReceipt?.(receipt);
+        const elapsedMs = nowMs() - startedAt;
         samples.push({
-          elapsed_ms: nowMs() - startedAt,
+          elapsed_ms: elapsedMs,
           request_bytes: requestBytes(name, args),
           request_sha256: requestSha256(name, args),
-          // These warm rows are read-only and never own the mutation lock.
-          lock_hold_ms: 0,
+          // list_agents performs its fresh scan under the lifecycle mutation
+          // lock. End-to-end elapsed time is a conservative upper bound that
+          // cannot understate its serialized occupancy.
+          lock_hold_ms: lockHoldFromElapsed ? elapsedMs : 0,
           transport: operationTransport(receipt, name),
           transport_fallbacks: receipt.transport_fallbacks ?? [],
         });
@@ -1220,6 +1233,7 @@ async function measureLiveListAgentsAcrossClients(clients) {
           throw new Error("list_agents omitted the live spawned agent");
         }
       },
+      { lockHoldFromElapsed: true },
     );
   } catch (error) {
     measurementError = error;
@@ -1338,12 +1352,12 @@ async function measureParallelStress(
         ),
       ),
     );
-    const elapsedMs = nowMs() - startedAt;
     await Promise.all(
       receipts.map((receipt, index) =>
         validateReceipt?.(receipt, requests[index], index, roundIndex),
       ),
     );
+    const elapsedMs = nowMs() - startedAt;
     samples.push({
       elapsed_ms: elapsedMs,
       request_bytes: requests.reduce(

@@ -1035,6 +1035,16 @@ describe("daemon performance budget", () => {
     expect(source).toContain("Array.isArray(receipt.agents)");
     expect(source).toContain("receipt.agents.some(");
     expect(source).toContain("agent.agent_id === spawnResult.agent_id");
+    expect(source).toContain("{ lockHoldFromElapsed: true }");
+    expect(source).toContain(
+      "lock_hold_ms: lockHoldFromElapsed ? elapsedMs : 0",
+    );
+    expect(source.indexOf("await validateReceipt?.(receipt)")).toBeLessThan(
+      source.indexOf("elapsed_ms: round(nowMs() - startedAt)"),
+    );
+    expect(source).toMatch(
+      /await Promise\.all\([\s\S]*?validateReceipt\?\.[\s\S]*?\);\n {4}const elapsedMs = nowMs\(\) - startedAt;/,
+    );
     expect(source).toContain("beforeRound?.(roundIndex)");
     expect(source).toContain("parallelStressSentinel(index, roundIndex)");
     expect(source).toContain("args(index, roundIndex)");
