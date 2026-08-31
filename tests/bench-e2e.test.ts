@@ -526,6 +526,15 @@ describe("bench-e2e measurement harness", () => {
     expect(fatalMarkdown.split("<details>")[0]).toContain(
       "Fatal gate failure: workspace release failed after measurement",
     );
+
+    const partialFatalMarkdown = renderPhase1BeforePublication({
+      ...receipt,
+      fatal_error: "daemon stopped before matrix completion",
+      rows: receipt.rows.filter((row) => row.operation === "read_screen"),
+    });
+    expect(partialFatalMarkdown).toContain(
+      "D201: INCONCLUSIVE — required sampled rows are incomplete:",
+    );
     expect(markdown).toContain("250/450 = 0% at c1, c5, and c10");
     expect(markdown).toContain("c1 = 0% at both 520 and 900 characters");
     expect(markdown).toContain(

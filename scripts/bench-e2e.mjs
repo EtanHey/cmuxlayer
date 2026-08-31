@@ -2051,8 +2051,31 @@ function requiredD201Row(rows, profile, payload) {
 }
 
 function d201Evidence(rows) {
-  const row = (profile, payload) => requiredD201Row(rows, profile, payload);
   const profiles = ["c1", "c5", "c10"];
+  const payloads = [250, 450, 520, 900];
+  const missingRows = profiles.flatMap((profile) =>
+    payloads
+      .filter((payload) => {
+        const candidate = rows.find(
+          (entry) =>
+            entry.operation === "send_to" &&
+            entry.client === "mcp" &&
+            entry.concurrency_profile === profile &&
+            entry.payload_chars === payload,
+        );
+        return !candidate || publicationMeasurementKind(candidate) !== "sampled";
+      })
+      .map((payload) => `${profile} payload=${payload}`),
+  );
+  if (missingRows.length > 0) {
+    return [
+      "## D201 mechanism evidence",
+      "",
+      `- D201: INCONCLUSIVE — required sampled rows are incomplete: ${missingRows.join(", ")}.`,
+    ].join("\n");
+  }
+
+  const row = (profile, payload) => requiredD201Row(rows, profile, payload);
   const boundaryZero = profiles.every(
     (profile) =>
       row(profile, 250).failure_rate_pct === 0 &&
