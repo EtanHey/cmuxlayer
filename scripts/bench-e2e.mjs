@@ -789,7 +789,8 @@ function processIsLive(pid, signalPid = process.kill) {
 }
 
 const LOCK_HOLDER_SCRIPT = String.raw`
-const { lstatSync, renameSync, statSync } = require("node:fs");
+const { closeSync, fsyncSync, lstatSync, openSync, renameSync, statSync } = require("node:fs");
+const { dirname } = require("node:path");
 let buffered = "";
 process.stdout.write("LOCKED\n");
 process.stdin.setEncoding("utf8");
@@ -822,6 +823,12 @@ process.stdin.on("data", (chunk) => {
         if (error.code !== "ENOENT") throw error;
       }
       renameSync(command.from, command.to);
+      const parentFd = openSync(dirname(command.to), "r");
+      try {
+        fsyncSync(parentFd);
+      } finally {
+        closeSync(parentFd);
+      }
       process.stdout.write("PUBLISHED " + command.id + "\n");
     } catch (error) {
       process.stderr.write("lock holder command failed: " + error.message + "\n");
@@ -985,12 +992,13 @@ export async function assertLockPathIdentity(
   openedStat,
   inspectPath = lstat,
 ) {
-  let pathStat;
-  try {
-    pathStat = await inspectPath(lockPath);
-  } catch (error) {
-    throw new Error(`lock path identity changed: ${lockPath}`, { cause: error });
-  }
+  const pathStat = await Promise.resolve()
+    .then(() => inspectPath(lockPath))
+    .catch((error) => {
+      throw new Error(`lock path identity changed: ${lockPath}`, {
+        cause: error,
+      });
+    });
   if (
     !pathStat.isFile() ||
     pathStat.nlink > 1 ||
@@ -1990,6 +1998,20 @@ export async function assertOutputOutsideArtifactProvenance(
 ) {
   if (!outputPath) return;
   const canonicalOutput = await canonicalize(outputPath);
+  if (provenance.runtime_root) {
+    const canonicalRuntimeRoot = await canonicalize(provenance.runtime_root);
+    const outputWithinRuntime = relative(canonicalRuntimeRoot, canonicalOutput);
+    if (
+      outputWithinRuntime === "" ||
+      (outputWithinRuntime !== ".." &&
+        !outputWithinRuntime.startsWith(`..${sep}`) &&
+        !isAbsolute(outputWithinRuntime))
+    ) {
+      throw new Error(
+        `output receipt is inside attested runtime root: ${canonicalOutput}`,
+      );
+    }
+  }
   for (const entry of attestedArtifactEntries(provenance)) {
     if (canonicalOutput === (await canonicalize(entry.path))) {
       throw new Error(
@@ -2424,6 +2446,35 @@ export async function rollbackReservation(primaryError, reservation, message) {
   throw primaryError;
 }
 
+async function syncReceiptTemp(path) {
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  try {
+    const entry = await handle.stat();
+    if (!entry.isFile() || entry.nlink !== 1) {
+      throw new Error(`receipt temp is not a singly linked regular file: ${path}`);
+    }
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncReceiptParent(path) {
+  const handle = await open(path, constants.O_RDONLY);
+  try {
+    const entry = await handle.stat();
+    if (!entry.isDirectory()) {
+      throw new Error(`receipt parent is not a directory: ${path}`);
+    }
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function publishBenchmarkReceipt(
   path,
   receipt,
@@ -2448,7 +2499,9 @@ export async function writeReceiptAtomically(
   deps = {},
 ) {
   const writeTemp = deps.writeTemp ?? writeFile;
+  const syncTemp = deps.syncTemp ?? syncReceiptTemp;
   const publishTemp = deps.publishTemp ?? rename;
+  const syncParent = deps.syncParent ?? syncReceiptParent;
   const removeTemp = deps.removeTemp ?? rm;
   const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
@@ -2458,8 +2511,10 @@ export async function writeReceiptAtomically(
       mode: 0o600,
       signal: abortSignal ?? undefined,
     });
+    await syncTemp(tempPath);
     abortSignal?.throwIfAborted();
     await publishTemp(tempPath, path);
+    await syncParent(dirname(path));
   } finally {
     await Promise.resolve(removeTemp(tempPath, { force: true })).catch(
       () => undefined,

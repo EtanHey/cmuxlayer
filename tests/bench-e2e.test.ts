@@ -2213,6 +2213,30 @@ describe("bench-e2e measurement harness", () => {
     expect(events).toEqual(["validate"]);
   });
 
+  it("rejects a receipt output anywhere inside the attested runtime root", async () => {
+    const events: string[] = [];
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: "/repo/dist/results/receipt.json", cmuxBin: "cmux" },
+        {
+          canonicalize: (path) => path,
+          prepare: () => ({
+            entries: {},
+            runtime_root: "/repo/dist",
+            runtime_files: [],
+            cli_executable: { path: "/opt/cmux/bin/cmux", sha256: "cli" },
+          }),
+          validate: () => events.push("validate"),
+          reserve: () => {
+            events.push("reserve");
+            return { release: () => undefined };
+          },
+        },
+      ),
+    ).rejects.toThrow(/output receipt is inside attested runtime root/);
+    expect(events).toEqual(["validate"]);
+  });
+
   it("rejects output recanonicalization after provenance and releases it", async () => {
     const events: string[] = [];
     await expect(
@@ -2634,6 +2658,25 @@ describe("bench-e2e measurement harness", () => {
     expect(events).toEqual([
       ["write", "wx", 0o600],
       ["cleanup"],
+    ]);
+  });
+
+  it("syncs receipt data and parent metadata before completing publication", async () => {
+    const events: string[] = [];
+    await writeReceiptAtomically("/repo/results/receipt.json", "{}\n", null, {
+      writeTemp: () => events.push("write"),
+      syncTemp: () => events.push("sync-temp"),
+      publishTemp: () => events.push("publish"),
+      syncParent: (path) => events.push(`sync-parent:${path}`),
+      removeTemp: () => events.push("cleanup"),
+    });
+
+    expect(events).toEqual([
+      "write",
+      "sync-temp",
+      "publish",
+      "sync-parent:/repo/results",
+      "cleanup",
     ]);
   });
 
