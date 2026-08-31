@@ -1954,12 +1954,12 @@ export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
   ];
 }
 
-async function isBareGitRepositoryRoot(root) {
+async function isGitMetadataRoot(root) {
   try {
     const [head, objects, refs] = await Promise.all([
       stat(join(root, "HEAD")),
-      lstat(join(root, "objects")),
-      lstat(join(root, "refs")),
+      stat(join(root, "objects")),
+      stat(join(root, "refs")),
     ]);
     if (
       !head.isFile() ||
@@ -1972,46 +1972,11 @@ async function isBareGitRepositoryRoot(root) {
     if (error?.code === "ENOENT") return false;
     throw error;
   }
-  const gitEnv = { ...process.env };
-  for (const name of Object.keys(gitEnv)) {
-    if (
-      name.startsWith("GIT_CONFIG_") ||
-      [
-        "GIT_DIR",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_WORK_TREE",
-      ].includes(name)
-    ) {
-      delete gitEnv[name];
-    }
-  }
-  try {
-    const result = await execCapture(
-      "git",
-      [
-        "config",
-        "--file",
-        join(root, "config"),
-        "--includes",
-        "--type=bool",
-        "--get",
-        "core.bare",
-      ],
-      { env: gitEnv },
-    );
-    return result.stdout.trim() === "true";
-  } catch {
-    // The directory has Git's bare control-file shape. If its configuration
-    // cannot be resolved safely, fail closed instead of permitting overwrite.
-    return true;
-  }
+  return true;
 }
 
 async function resolveGitMetadataPathsAtRoot(root) {
-  if (await isBareGitRepositoryRoot(root)) {
+  if (await isGitMetadataRoot(root)) {
     return [await realpath(root)];
   }
   const markerPath = resolve(root, ".git");
@@ -2062,7 +2027,7 @@ export async function resolveGitRepositoryRoots(root, outputPath = null) {
             if (error?.code === "ENOENT") return false;
             throw error;
           });
-        if (markerExists || (await isBareGitRepositoryRoot(candidate))) {
+        if (markerExists || (await isGitMetadataRoot(candidate))) {
           candidateRoots.push(candidate);
         }
       }
@@ -2135,6 +2100,11 @@ export async function prepareBuiltEntries(config, deps = {}) {
   }
   const execEnv = { ...sourceEnv };
   for (const name of redirectedGitEnvironmentNames) delete execEnv[name];
+  for (const name of Object.keys(execEnv)) {
+    if (name === "GIT_CONFIG" || name.startsWith("GIT_CONFIG_")) {
+      delete execEnv[name];
+    }
+  }
   for (const name of [
     "GIT_LITERAL_PATHSPECS",
     "GIT_GLOB_PATHSPECS",

@@ -1783,6 +1783,14 @@ describe("bench-e2e measurement harness", () => {
     await expect(
       assertOutputOutsideGitMetadata(output, directory),
     ).rejects.toThrow(/inside Git metadata/);
+    await writeFile(join(bareGit, "config"), "[core]\n\tbare = false\n", "utf8");
+    const linkedObjects = join(bareGit, "linked-objects");
+    await rm(join(bareGit, "objects"), { recursive: true });
+    await mkdir(linkedObjects);
+    await symlink("linked-objects", join(bareGit, "objects"), "dir");
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
     await rm(join(bareGit, "config"));
     await expect(
       assertOutputOutsideGitMetadata(output, directory),
@@ -1910,6 +1918,35 @@ describe("bench-e2e measurement harness", () => {
       if (previousWorkTree === undefined) delete process.env.GIT_WORK_TREE;
       else process.env.GIT_WORK_TREE = previousWorkTree;
     }
+  });
+
+  it("scrubs command-scope Git configuration from provenance commands", async () => {
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/package.json",
+          env: {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.worktree",
+            GIT_CONFIG_VALUE_0: "/other-clean-checkout",
+          },
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args, options) => {
+            if (args.includes("ls-files")) {
+              expect(options.env.GIT_CONFIG_COUNT).toBeUndefined();
+              expect(options.env.GIT_CONFIG_KEY_0).toBeUndefined();
+              expect(options.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+              return { stdout: "package.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
   });
 
   it("refuses to exclude a tracked output receipt from provenance", async () => {
