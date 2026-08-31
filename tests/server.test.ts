@@ -3013,6 +3013,11 @@ describe("tool handler integration", () => {
   it("send_input pastes short multiline text and presses return once", async () => {
     const events: Array<{ type: "paste" | "key"; value: string }> = [];
     const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
       send: vi.fn().mockResolvedValue(undefined),
       pasteText: vi.fn().mockImplementation((_surface, text) => {
         events.push({ type: "paste", value: text });
@@ -3051,10 +3056,48 @@ describe("tool handler integration", () => {
       "return",
       expect.any(Object),
     );
+    expect(parsed.rpc_methods).toEqual([
+      "surface.send_text",
+      "surface.send_key",
+    ]);
     expect(events).toEqual([
       { type: "paste", value: text },
       { type: "key", value: "return" },
     ]);
+  });
+
+  it("send_input retries a paste when its buffer disappears before paste-buffer", async () => {
+    const pastedTexts: string[] = [];
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Buffer not found: cmuxlayer-surface-1"))
+        .mockImplementationOnce((_surface: string, text: string) => {
+          pastedTexts.push(text);
+          return Promise.resolve();
+        }),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const text = "line one\nline two";
+
+    const result = await tool.handler(
+      { surface: "surface:1", text, press_enter: false },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockClient.pasteText).toHaveBeenCalledTimes(2);
+    expect(pastedTexts).toEqual([text]);
+    expect(mockClient.send).not.toHaveBeenCalled();
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
   });
 
   it("send_input refuses multi-paragraph inline text for a tracked Codex unless explicitly allowed", async () => {
@@ -4608,6 +4651,7 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.rpc_methods).toEqual([]);
   });
 
   it("send_input keeps coalesced paste operations under the paste batch cap", async () => {

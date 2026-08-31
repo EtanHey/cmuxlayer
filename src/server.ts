@@ -982,6 +982,7 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
   "submit_verified",
   "submit_evidence",
   "retry_count",
+  "rpc_methods",
   "needs_attention",
   "attention_reason",
   "queued_behind_turn",
@@ -1009,6 +1010,7 @@ export interface PublicDeliveryReceipt {
   submitted: boolean;
   submit_evidence?: SubmitEvidence | null;
   retry_count: number;
+  rpc_methods: Array<"surface.send_text" | "surface.send_key">;
   delivery?: PublicDeliveryState;
   delivery_state?: PublicDeliveryState;
   delivery_id?: string;
@@ -1086,6 +1088,7 @@ export function buildPublicDeliveryReceipt(input: {
   submit_verified: boolean | null;
   submit_evidence?: SubmitEvidence | null;
   retry_count: number;
+  rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
   needs_attention?: boolean;
   attention_reason?: string | null;
   queued_behind_turn?: boolean;
@@ -1123,6 +1126,7 @@ export function buildPublicDeliveryReceipt(input: {
       ? { submit_evidence: input.submit_evidence ?? null }
       : {}),
     retry_count: input.retry_count,
+    rpc_methods: input.rpc_methods ?? [],
     ...(evidencedState
       ? { delivery: evidencedState, delivery_state: evidencedState }
       : {}),
@@ -2371,7 +2375,9 @@ async function delay(ms: number): Promise<void> {
 
 function isRetryableDeliveryError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /socket|connection_|connection closed|timeout/i.test(message);
+  return /socket|connection_|connection closed|timeout|buffer not found/i.test(
+    message,
+  );
 }
 
 function formatToolValidationError(
@@ -4598,6 +4604,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : {}),
     };
   };
+  const directDeliveryRpcMethods = (
+    typed: boolean,
+    submitAttempted: boolean,
+  ): Array<"surface.send_text" | "surface.send_key"> => {
+    if (transportProvenance().transport !== "socket") return [];
+    return [
+      ...(typed ? (["surface.send_text"] as const) : []),
+      ...(submitAttempted ? (["surface.send_key"] as const) : []),
+    ];
+  };
   const attachTransportProvenance = (
     result: unknown,
     toolName: string,
@@ -6127,6 +6143,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_attempted: submitAttempted,
         submit_verified: verification.submit_verified,
         retry_count: 0,
+        rpc_methods: directDeliveryRpcMethods(false, submitAttempted),
         timings_ms: opts.timings,
         ...(submitAttempted && verification.submit_verified === null
           ? {
@@ -6393,6 +6410,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verified,
       submit_evidence,
       retry_count,
+      rpc_methods: directDeliveryRpcMethods(bytes > 0, Boolean(opts.press_enter)),
       timings_ms: opts.timings,
       WARNING:
         opts.press_enter &&

@@ -596,15 +596,7 @@ export class CmuxSocketClient {
     text: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    const cliFallback = this.cliFallbackPinned("paste_text");
-    if (cliFallback) {
-      return cliFallback.pasteText(surface, text, opts);
-    }
-
-    throw new CmuxSocketError(
-      "Atomic multiline paste requires the cmux CLI paste-buffer path; the socket protocol has no paste RPC, so pasteText is unavailable on a socket-only transport.",
-      "method_not_found",
-    );
+    return this.send(surface, text, opts);
   }
 
   async sendKey(
