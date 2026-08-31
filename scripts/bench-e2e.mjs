@@ -1009,6 +1009,19 @@ export async function assertLockPathIdentity(
   }
 }
 
+export function assertLockFileAuthority(
+  lockPath,
+  lockStat,
+  effectiveUid = process.geteuid?.(),
+) {
+  const wrongOwner =
+    effectiveUid !== undefined && lockStat.uid !== effectiveUid;
+  const peerPermissions = lockStat.mode & 0o022;
+  if (wrongOwner || peerPermissions !== 0) {
+    throw new Error(`lock path has unsafe owner or permissions: ${lockPath}`);
+  }
+}
+
 async function createPidLock(lockPath, label, onFailure) {
   await mkdir(dirname(lockPath), { recursive: true });
   const lockHandle = await open(
@@ -1024,6 +1037,12 @@ async function createPidLock(lockPath, label, onFailure) {
   if (lockStat.nlink > 1) {
     await lockHandle.close();
     throw new Error(`${label} lock path has multiple hard links: ${lockPath}`);
+  }
+  try {
+    assertLockFileAuthority(lockPath, lockStat);
+  } catch (error) {
+    await lockHandle.close();
+    throw error;
   }
   try {
     await assertLockPathIdentity(lockPath, lockStat);

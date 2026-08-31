@@ -22,6 +22,7 @@ import {
   assertNightlyIsolation,
   assertArtifactProvenance,
   assertLockPathIdentity,
+  assertLockFileAuthority,
   assertCliFairnessTrace,
   buildBenchmarkRows,
   buildAbsentComparisonRow,
@@ -1333,6 +1334,23 @@ describe("bench-e2e measurement harness", () => {
         () => ({ dev: 10, ino: 21, isFile: () => true, nlink: 1 }),
       ),
     ).rejects.toThrow(/lock path identity changed/);
+  });
+
+  it("rejects a lock inode owned by another user or writable by peers", () => {
+    expect(() =>
+      assertLockFileAuthority(
+        "/tmp/cmuxlayer-bench-workspace.lock",
+        { uid: 501, mode: 0o100600 },
+        502,
+      ),
+    ).toThrow(/lock path has unsafe owner or permissions/);
+    expect(() =>
+      assertLockFileAuthority(
+        "/tmp/cmuxlayer-bench-workspace.lock",
+        { uid: 502, mode: 0o100666 },
+        502,
+      ),
+    ).toThrow(/lock path has unsafe owner or permissions/);
   });
 
   it("canonicalizes a dangling output symlink to its future target", async () => {
