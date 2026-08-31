@@ -735,7 +735,7 @@ describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
     for (const state of ["failed", "failed_confirmed"] as const) {
       const receipt = buildPublicDeliveryReceipt({
         delivery_state: state,
-        typed: true,
+        typed: false,
         submit_attempted: true,
         submit_verified: false,
         retry_count: 0,

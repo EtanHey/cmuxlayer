@@ -1032,8 +1032,10 @@ export interface PublicDeliveryReceipt {
 
 type DeliveryRpcMethod = PublicDeliveryReceipt["rpc_methods"][number];
 
-type DeliveryErrorWithRpcMethods = {
+type DeliveryErrorEvidence = {
   rpc_methods: DeliveryRpcMethod[];
+  typed?: boolean;
+  submit_dispatched?: boolean;
 };
 
 const deliveryRpcMethodsFromError = (
@@ -1043,16 +1045,37 @@ const deliveryRpcMethodsFromError = (
   typeof error === "object" &&
   "rpc_methods" in error &&
   Array.isArray((error as { rpc_methods?: unknown }).rpc_methods)
-    ? [...(error as DeliveryErrorWithRpcMethods).rpc_methods]
+    ? [...(error as DeliveryErrorEvidence).rpc_methods]
     : error instanceof SubmitVerificationError
       ? [...error.receipt.rpc_methods]
       : [];
 
-const preserveDeliveryRpcMethodsOnError = (
+const deliveryTypedFromError = (error: unknown): boolean =>
+  Boolean(
+    error &&
+      typeof error === "object" &&
+      "typed" in error &&
+      (error as { typed?: unknown }).typed === true,
+  ) ||
+  (error instanceof SubmitVerificationError && error.receipt.typed === true);
+
+const deliverySubmitDispatchedFromError = (error: unknown): boolean =>
+  Boolean(
+    error &&
+      typeof error === "object" &&
+      "submit_dispatched" in error &&
+      (error as { submit_dispatched?: unknown }).submit_dispatched === true,
+  ) ||
+  (error instanceof SubmitVerificationError &&
+    error.receipt.submit_attempted === true);
+
+const preserveDeliveryEvidenceOnError = (
   error: unknown,
   rpcMethods: ReadonlySet<DeliveryRpcMethod>,
+  typed: boolean,
+  submitDispatched: boolean,
 ): unknown => {
-  if (rpcMethods.size === 0) return error;
+  if (rpcMethods.size === 0 && !typed && !submitDispatched) return error;
   const target =
     error && typeof error === "object"
       ? error
@@ -1063,6 +1086,20 @@ const preserveDeliveryRpcMethodsOnError = (
       enumerable: false,
       value: [...rpcMethods],
     });
+    if (typed) {
+      Object.defineProperty(target, "typed", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
+    if (submitDispatched) {
+      Object.defineProperty(target, "submit_dispatched", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
     return target;
   } catch {
     const wrapped = new Error(
@@ -1074,6 +1111,20 @@ const preserveDeliveryRpcMethodsOnError = (
       enumerable: false,
       value: [...rpcMethods],
     });
+    if (typed) {
+      Object.defineProperty(wrapped, "typed", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
+    if (submitDispatched) {
+      Object.defineProperty(wrapped, "submit_dispatched", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
     return wrapped;
   }
 };
@@ -1144,6 +1195,7 @@ export function buildPublicDeliveryReceipt(input: {
   queued_behind_turn?: boolean;
   timings_ms?: DeliveryPhaseTimings;
   observation?: PublicDeliveryReceipt["observation"];
+  submit_dispatched?: boolean;
   WARNING?: string;
 }): PublicDeliveryReceipt {
   const evidencedState =
@@ -1166,7 +1218,12 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "failed_confirmed";
   const warning =
     input.WARNING ??
-    defaultNonDeliveryWarning(evidencedState, input.rpc_methods ?? []);
+    defaultNonDeliveryWarning(
+      evidencedState,
+      input.rpc_methods ?? [],
+      input.typed,
+      input.submit_dispatched === true,
+    );
   return {
     delivered: evidencedState === "submitted" && input.submit_verified === true,
     terminal,
@@ -1210,6 +1267,8 @@ export function buildPublicDeliveryReceipt(input: {
 function defaultNonDeliveryWarning(
   state: PublicDeliveryState | undefined,
   rpcMethods: readonly DeliveryRpcMethod[],
+  typed: boolean,
+  submitDispatched: boolean,
 ): string | undefined {
   switch (state) {
     case "pending_verify":
@@ -1222,8 +1281,8 @@ function defaultNonDeliveryWarning(
       );
     case "failed":
     case "failed_confirmed":
-      if (rpcMethods.includes("surface.send_text")) {
-        return rpcMethods.includes("surface.send_key")
+      if (typed || rpcMethods.includes("surface.send_text")) {
+        return submitDispatched || rpcMethods.includes("surface.send_key")
           ? `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}) after ` +
               "text reached the target and the submission key was sent. The task " +
               "may have been submitted despite the later failure; do not resend. " +
@@ -6209,6 +6268,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   > => {
     const rpcMethods = new Set<DeliveryRpcMethod>();
+    let textDispatched = false;
+    let submitDispatched = false;
     try {
       await opts.beforeMutation?.();
       if (opts.key !== undefined) {
@@ -6233,6 +6294,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts.beforeMutation,
         ),
       );
+      submitDispatched = submitAttempted;
       if (keyRpcMethod) rpcMethods.add(keyRpcMethod);
       const verification =
         submitAttempted && opts.verify_submit
@@ -6325,6 +6387,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts.source_event === "spawn_agent",
           opts.beforeMutation,
         );
+        if (batch.text.length > 0) textDispatched = true;
         if (chunkRpcMethod) rpcMethods.add(chunkRpcMethod);
         for (const sentChunks of batch.deliveredChunkCounts) {
           opts.onChunkDelivered?.(sentChunks);
@@ -6406,6 +6469,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             opts.workspace,
             opts.beforeMutation,
           );
+          submitDispatched = true;
           if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
         });
         appendDeliveryEvent({
@@ -6548,7 +6612,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       return { ...receipt, bytes };
     } catch (error) {
-      throw preserveDeliveryRpcMethodsOnError(error, rpcMethods);
+      throw preserveDeliveryEvidenceOnError(
+        error,
+        rpcMethods,
+        textDispatched,
+        submitDispatched,
+      );
     }
   };
 
@@ -17400,9 +17469,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
               } catch (error) {
                 const errorRpcMethods = deliveryRpcMethodsFromError(error);
+                const errorTyped = deliveryTypedFromError(error);
+                const errorSubmitDispatched =
+                  deliverySubmitDispatchedFromError(error);
                 if (
                   error instanceof RetryableDeliveryError &&
-                  errorRpcMethods.length === 0
+                  errorRpcMethods.length === 0 &&
+                  !errorTyped &&
+                  !errorSubmitDispatched
                 ) {
                   const queued = engine.queueDelivery({
                     delivery_id: deliveryId,
@@ -17461,11 +17535,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     typed:
                       error instanceof SubmitVerificationError
                         ? (error.receipt?.typed ?? true)
-                        : errorRpcMethods.includes("surface.send_text"),
+                        : errorTyped,
                     submit_attempted:
                       error instanceof SubmitVerificationError
                         ? (error.receipt?.submit_attempted ?? args.press_enter)
-                        : errorRpcMethods.includes("surface.send_key"),
+                        : errorSubmitDispatched,
+                    submit_dispatched: errorSubmitDispatched,
                     submit_verified: failed.submit_verified,
                     retry_count: failed.retry_count,
                     rpc_methods: errorRpcMethods,
@@ -17614,9 +17689,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // retryable queue semantics and tell a lead its live worker was
             // dead. Hand back the queued receipt the drain loop will honour.
             const errorRpcMethods = deliveryRpcMethodsFromError(error);
+            const errorTyped = deliveryTypedFromError(error);
+            const errorSubmitDispatched =
+              deliverySubmitDispatchedFromError(error);
             if (
               error instanceof RetryableDeliveryError &&
-              errorRpcMethods.length === 0
+              errorRpcMethods.length === 0 &&
+              !errorTyped &&
+              !errorSubmitDispatched
             ) {
               const receipt = engine.queueDelivery({
                 delivery_id: deliveryId,
@@ -17675,11 +17755,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 typed:
                   error instanceof SubmitVerificationError
                     ? (error.receipt?.typed ?? true)
-                    : errorRpcMethods.includes("surface.send_text"),
+                    : errorTyped,
                 submit_attempted:
                   error instanceof SubmitVerificationError
                     ? (error.receipt?.submit_attempted ?? args.press_enter)
-                    : errorRpcMethods.includes("surface.send_key"),
+                    : errorSubmitDispatched,
+                submit_dispatched: errorSubmitDispatched,
                 submit_verified: failedReceipt.submit_verified,
                 retry_count: failedReceipt.retry_count,
                 rpc_methods: errorRpcMethods,

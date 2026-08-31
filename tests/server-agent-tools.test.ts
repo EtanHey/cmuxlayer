@@ -8915,8 +8915,9 @@ describe("agent lifecycle tool handlers", () => {
       function: "implementor",
     });
     const { server, client } = await createBroadcastServer([record]);
-    client.send.mockImplementation(async () => {
+    client.send.mockImplementation(() => {
       recordCliFallback("send_text");
+      return Promise.resolve();
     });
     const engine = testLifecycleEngine(server);
     const queued = engine.queueDelivery({
@@ -8932,6 +8933,45 @@ describe("agent lifecycle tool handlers", () => {
       terminal: true,
       rpc_methods: [],
     });
+  });
+
+  it("send_to reports partial delivery when CLI paste succeeds before Return fails", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-cli-paste-partial",
+      surface_id: "surface:worker-cli-paste-partial",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server, client } = await createBroadcastServer([record]);
+    const pasteText = vi.fn().mockImplementation(() => {
+      recordCliFallback("paste_text");
+      return Promise.resolve();
+    });
+    (client as typeof client & { pasteText: typeof pasteText }).pasteText =
+      pasteText;
+    client.sendKey.mockRejectedValue(new Error("Buffer not found"));
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "already pasted\ninto the composer",
+        press_enter: true,
+      },
+      {},
+    );
+    const failed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(pasteText).toHaveBeenCalledTimes(1);
+    expect(failed).toMatchObject({
+      delivery_state: "failed",
+      typed: true,
+      rpc_methods: [],
+    });
+    expect(failed.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    expect(failed.WARNING).toMatch(/do not resend/i);
+    expect(failed.WARNING).not.toMatch(/message did not land/i);
   });
 
   it("send_to resolves structured targeting by job function, workspace, ids, and exclude", async () => {
