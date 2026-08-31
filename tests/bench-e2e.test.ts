@@ -518,6 +518,14 @@ describe("bench-e2e measurement harness", () => {
     );
     expect(markdown).toContain("<summary>Full 15-row BEFORE table</summary>");
     expect(markdown).toContain("| read_screen | c1 | - | mcp | sampled | PASS |");
+
+    const fatalMarkdown = renderPhase1BeforePublication({
+      ...receipt,
+      fatal_error: "workspace release failed after measurement",
+    });
+    expect(fatalMarkdown.split("<details>")[0]).toContain(
+      "Fatal gate failure: workspace release failed after measurement",
+    );
     expect(markdown).toContain("250/450 = 0% at c1, c5, and c10");
     expect(markdown).toContain("c1 = 0% at both 520 and 900 characters");
     expect(markdown).toContain(

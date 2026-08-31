@@ -2106,12 +2106,16 @@ export function renderPhase1BeforePublication(receipt) {
   );
   const unchangedCount = rows.length - visibleRows.length;
   const gateFailures = benchmarkGateFailures(rows, receipt.fatal_error);
+  const fatalFailure = receipt.fatal_error
+    ? `Fatal gate failure: ${String(receipt.fatal_error).replace(/\s+/g, " ").trim()}`
+    : null;
   return [
     "<!-- cmuxlayer-run10-phase1-before -->",
     `## Run 10 Phase 1 BEFORE: ${gateFailures.length === 0 ? "GREEN" : "RED"}`,
     "",
     `Source: ${receipt.git_head ?? "unknown"} at ${receipt.started_at ?? "unknown"}. Surface-mode transport is **UNTRUSTED** under D180; reported socket provenance is not treated as attested transport.`,
     "",
+    ...(fatalFailure ? [fatalFailure, ""] : []),
     renderPublicationRows(visibleRows),
     "",
     `${unchangedCount} rows unchanged.`,
