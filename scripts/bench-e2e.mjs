@@ -670,8 +670,11 @@ export async function createOutputReservation(outputPath, onFailure) {
   try {
     await cleanupAbandonedReceiptTemps(canonicalOutput);
   } catch (error) {
-    await reservation.release();
-    throw error;
+    await rollbackReservation(
+      error,
+      reservation,
+      "receipt temp cleanup and output reservation rollback failed",
+    );
   }
   return Object.freeze({
     outputPath: canonicalOutput,
@@ -684,7 +687,9 @@ export async function createOutputReservation(outputPath, onFailure) {
 }
 
 async function cleanupAbandonedReceiptTemps(outputPath) {
-  const ownedTemps = await listOwnedReceiptTemps(outputPath);
+  const ownedTemps = (await listOwnedReceiptSidecars(outputPath)).filter(
+    ({ kind }) => kind === "temp",
+  );
   for (const { candidate, entry } of ownedTemps) {
     if (!entry.isFile() && !entry.isSymbolicLink()) {
       throw new Error(`refusing unexpected receipt temp artifact: ${candidate}`);
@@ -695,23 +700,47 @@ async function cleanupAbandonedReceiptTemps(outputPath) {
 
 const OWNED_RECEIPT_TEMP_SUFFIX =
   /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OWNED_DAEMON_LOG_SUFFIX = /^\d+-\d+\.log$/;
 
-async function listOwnedReceiptTemps(outputPath) {
+function ownedReceiptSidecarKind(outputPath, candidatePath) {
+  const absoluteOutput = resolve(outputPath);
+  const absoluteCandidate = resolve(candidatePath);
+  if (dirname(absoluteCandidate) !== dirname(absoluteOutput)) return null;
+  const outputName = basename(absoluteOutput);
+  const candidateName = basename(absoluteCandidate);
+  if (candidateName === `${outputName}.lock`) return "lock";
+  const tempPrefix = `${outputName}.tmp-`;
+  if (
+    candidateName.startsWith(tempPrefix) &&
+    OWNED_RECEIPT_TEMP_SUFFIX.test(candidateName.slice(tempPrefix.length))
+  ) {
+    return "temp";
+  }
+  const daemonPrefix = `${outputName}.daemon-`;
+  if (
+    candidateName.startsWith(daemonPrefix) &&
+    OWNED_DAEMON_LOG_SUFFIX.test(candidateName.slice(daemonPrefix.length))
+  ) {
+    return "daemon-log";
+  }
+  return null;
+}
+
+async function listOwnedReceiptSidecars(outputPath) {
   const directory = dirname(outputPath);
-  const prefix = `${basename(outputPath)}.tmp-`;
   const entries = await readdir(directory, { withFileTypes: true }).catch(
     (error) => {
       if (error?.code === "ENOENT") return [];
       throw error;
     },
   );
-  return entries
-    .filter(
-      (entry) =>
-        entry.name.startsWith(prefix) &&
-        OWNED_RECEIPT_TEMP_SUFFIX.test(entry.name.slice(prefix.length)),
-    )
-    .map((entry) => ({ entry, candidate: join(directory, entry.name) }));
+  return entries.flatMap((entry) => {
+    const candidate = join(directory, entry.name);
+    const kind = ownedReceiptSidecarKind(outputPath, candidate);
+    return kind
+      ? [{ entry, candidate, kind }]
+      : [];
+  });
 }
 
 function processIsLive(pid, signalPid = process.kill) {
@@ -1857,7 +1886,7 @@ export async function assertArtifactProvenance(
   }
 }
 
-export function provenanceStatusArgs(root, outputPath, ownedTempPaths = []) {
+export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
   const args = ["status", "--porcelain", "--untracked-files=all"];
   if (!outputPath) return args;
   const outputRelative = relative(resolve(root), resolve(outputPath));
@@ -1869,20 +1898,9 @@ export function provenanceStatusArgs(root, outputPath, ownedTempPaths = []) {
     return args;
   }
   const pathspec = outputRelative.split(sep).join("/");
-  const globPathspec = escapeGitGlobPath(pathspec);
-  const absoluteOutput = resolve(outputPath);
-  const tempPrefix = `${basename(absoluteOutput)}.tmp-`;
-  const tempExclusions = ownedTempPaths
-    .filter((tempPath) => {
-      const absoluteTemp = resolve(tempPath);
-      const tempName = basename(absoluteTemp);
-      return (
-        dirname(absoluteTemp) === dirname(absoluteOutput) &&
-        tempName.startsWith(tempPrefix) &&
-        OWNED_RECEIPT_TEMP_SUFFIX.test(tempName.slice(tempPrefix.length))
-      );
-    })
-    .map((tempPath) => relative(resolve(root), resolve(tempPath)))
+  const sidecarExclusions = ownedSidecarPaths
+    .filter((sidecarPath) => ownedReceiptSidecarKind(outputPath, sidecarPath))
+    .map((sidecarPath) => relative(resolve(root), resolve(sidecarPath)))
     .filter(
       (tempRelative) =>
         tempRelative !== "" &&
@@ -1898,14 +1916,54 @@ export function provenanceStatusArgs(root, outputPath, ownedTempPaths = []) {
     "--",
     ".",
     `:(exclude,literal)${pathspec}`,
-    `:(exclude,glob)${globPathspec}.lock*`,
-    `:(exclude,glob)${globPathspec}.daemon-*.log`,
-    ...tempExclusions,
+    ...sidecarExclusions,
   ];
 }
 
-function escapeGitGlobPath(pathspec) {
-  return pathspec.replace(/[?*[\]\\]/g, "\\$&");
+async function resolveGitMetadataPaths(root) {
+  const markerPath = resolve(root, ".git");
+  const markerStat = await lstat(markerPath).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!markerStat) return [markerPath];
+  let gitDirectory = markerPath;
+  if (markerStat.isFile()) {
+    const marker = await readFile(markerPath, "utf8");
+    const match = /^gitdir:\s*(.+)$/m.exec(marker);
+    if (!match) throw new Error(`invalid Git directory marker: ${markerPath}`);
+    gitDirectory = resolve(dirname(markerPath), match[1]);
+  } else {
+    gitDirectory = await realpath(markerPath);
+  }
+  const commonDirectory = await readFile(join(gitDirectory, "commondir"), "utf8")
+    .then((value) => resolve(gitDirectory, value.trim()))
+    .catch((error) => {
+      if (error?.code === "ENOENT") return gitDirectory;
+      throw error;
+    });
+  return [...new Set([markerPath, gitDirectory, commonDirectory].map(resolve))];
+}
+
+export async function assertOutputOutsideGitMetadata(
+  outputPath,
+  root,
+  resolveMetadata = resolveGitMetadataPaths,
+) {
+  if (!outputPath) return;
+  const absoluteOutput = resolve(outputPath);
+  const metadataPaths = await resolveMetadata(root);
+  for (const metadataPath of metadataPaths) {
+    const absoluteMetadata = resolve(metadataPath);
+    if (
+      absoluteOutput === absoluteMetadata ||
+      absoluteOutput.startsWith(`${absoluteMetadata}${sep}`)
+    ) {
+      throw new Error(
+        `refusing output path inside Git metadata: ${absoluteOutput}`,
+      );
+    }
+  }
 }
 
 export async function prepareBuiltEntries(config, deps = {}) {
@@ -1915,8 +1973,10 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const hashFile = deps.hashFile ?? sha256File;
   const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
   const resolveCliExecutable = deps.resolveExecutable ?? resolveExecutable;
-  const enumerateOwnedTemps =
-    deps.listOwnedReceiptTemps ?? listOwnedReceiptTemps;
+  const enumerateOwnedSidecars =
+    deps.listOwnedReceiptSidecars ??
+    deps.listOwnedReceiptTemps ??
+    listOwnedReceiptSidecars;
   const execOptions = { env: config.env, signal: config.signal };
   const expectedMcpEntry = join(root, "dist", "index.js");
   const expectedDaemonEntry = join(root, "dist", "daemon.js");
@@ -1928,16 +1988,21 @@ export async function prepareBuiltEntries(config, deps = {}) {
       "custom built entries have unverifiable source provenance; use the repository dist/index.js and dist/daemon.js",
     );
   }
-  const ownedTempPaths = async () =>
+  await assertOutputOutsideGitMetadata(
+    config.out,
+    root,
+    deps.resolveGitMetadataPaths,
+  );
+  const ownedSidecarPaths = async () =>
     config.out
-      ? (await enumerateOwnedTemps(config.out)).map((temp) =>
-          typeof temp === "string" ? temp : temp.candidate,
+      ? (await enumerateOwnedSidecars(config.out)).map((sidecar) =>
+          typeof sidecar === "string" ? sidecar : sidecar.candidate,
         )
       : [];
   const readWorktreeStatus = async () =>
     exec(
       "git",
-      provenanceStatusArgs(root, config.out, await ownedTempPaths()),
+      provenanceStatusArgs(root, config.out, await ownedSidecarPaths()),
       execOptions,
     );
   const readHead = () =>
@@ -1954,9 +2019,11 @@ export async function prepareBuiltEntries(config, deps = {}) {
       return;
     }
     const pathspec = outputRelative.split(sep).join("/");
-    const globPathspec = escapeGitGlobPath(pathspec);
-    const tempPathspecs = (await ownedTempPaths())
-      .map((tempPath) => relative(resolve(root), resolve(tempPath)))
+    const sidecarPathspecs = (await ownedSidecarPaths())
+      .filter((sidecarPath) =>
+        ownedReceiptSidecarKind(config.out, sidecarPath),
+      )
+      .map((sidecarPath) => relative(resolve(root), resolve(sidecarPath)))
       .filter(
         (tempRelative) =>
           tempRelative !== "" &&
@@ -1973,9 +2040,7 @@ export async function prepareBuiltEntries(config, deps = {}) {
         "--cached",
         "--",
         `:(literal)${pathspec}`,
-        `:(glob)${globPathspec}.lock*`,
-        `:(glob)${globPathspec}.daemon-*.log`,
-        ...tempPathspecs,
+        ...sidecarPathspecs,
       ],
       execOptions,
     );
@@ -2091,6 +2156,15 @@ export async function releaseReservations(reservations) {
   }
 }
 
+export async function rollbackReservation(primaryError, reservation, message) {
+  try {
+    await reservation.release();
+  } catch (releaseError) {
+    throw new AggregateError([primaryError, releaseError], message);
+  }
+  throw primaryError;
+}
+
 export async function publishBenchmarkReceipt(
   path,
   receipt,
@@ -2156,8 +2230,11 @@ export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
   try {
     signal?.throwIfAborted();
   } catch (error) {
-    await outputReservation.release();
-    throw error;
+    await rollbackReservation(
+      error,
+      outputReservation,
+      "preparation abort and output reservation rollback failed",
+    );
   }
   return { artifactProvenance, outputReservation };
 }

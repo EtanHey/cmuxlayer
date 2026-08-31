@@ -17,6 +17,7 @@ import { EventEmitter } from "node:events";
 import { spawn, spawnSync } from "node:child_process";
 import {
   advisoryLockInvocation,
+  assertOutputOutsideGitMetadata,
   assertNightlyIsolation,
   assertArtifactProvenance,
   assertCliFairnessTrace,
@@ -55,6 +56,7 @@ import {
   publishBenchmarkReceipt,
   renderMarkdownTable,
   releaseReservations,
+  rollbackReservation,
   resolveStableWorkspaceId,
   runCliReadScreen,
   installGracefulSignalAbort,
@@ -1624,8 +1626,14 @@ describe("bench-e2e measurement harness", () => {
   it("forces untracked provenance while excluding only the selected receipt artifacts", () => {
     const ownedTemp =
       "/repo/results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc";
+    const ownedLock = "/repo/results/bench.json.lock";
+    const ownedLog = "/repo/results/bench.json.daemon-42-1234.log";
     expect(
-      provenanceStatusArgs("/repo", "/repo/results/bench.json", [ownedTemp]),
+      provenanceStatusArgs("/repo", "/repo/results/bench.json", [
+        ownedLock,
+        ownedLog,
+        ownedTemp,
+      ]),
     ).toEqual([
       "status",
       "--porcelain",
@@ -1633,8 +1641,8 @@ describe("bench-e2e measurement harness", () => {
       "--",
       ".",
       ":(exclude,literal)results/bench.json",
-      ":(exclude,glob)results/bench.json.lock*",
-      ":(exclude,glob)results/bench.json.daemon-*.log",
+      ":(exclude,literal)results/bench.json.lock",
+      ":(exclude,literal)results/bench.json.daemon-42-1234.log",
       ":(exclude,literal)results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc",
     ]);
     expect(provenanceStatusArgs("/repo", "/tmp/bench.json")).toEqual([
@@ -1643,10 +1651,32 @@ describe("bench-e2e measurement harness", () => {
       "--untracked-files=all",
     ]);
     expect(
-      provenanceStatusArgs("/repo", "/repo/results/bench[1]*?.json"),
-    ).toContain(
-      ":(exclude,glob)results/bench\\[1\\]\\*\\?.json.daemon-*.log",
-    );
+      provenanceStatusArgs("/repo", "/repo/results/bench.json", [
+        "/repo/results/bench.json.lock-notes",
+        "/repo/results/bench.json.daemon-notes.log",
+      ]),
+    ).not.toContainEqual(expect.stringContaining("lock-notes"));
+  });
+
+  it("rejects receipt output inside worktree or resolved Git metadata", async () => {
+    await expect(
+      assertOutputOutsideGitMetadata("/repo/.git/HEAD", "/repo", () => [
+        "/repo/.git",
+        "/external/repo.git/worktrees/bench",
+        "/external/repo.git",
+      ]),
+    ).rejects.toThrow(/inside Git metadata/);
+    await expect(
+      assertOutputOutsideGitMetadata(
+        "/external/repo.git/config",
+        "/repo",
+        () => [
+          "/repo/.git",
+          "/external/repo.git/worktrees/bench",
+          "/external/repo.git",
+        ],
+      ),
+    ).rejects.toThrow(/inside Git metadata/);
   });
 
   it("refuses to exclude a tracked output receipt from provenance", async () => {
@@ -1718,11 +1748,15 @@ describe("bench-e2e measurement harness", () => {
         },
         {
           repoRoot: "/repo",
+          listOwnedReceiptSidecars: () => [
+            "/repo/results/bench.json.lock",
+            "/repo/results/bench.json.daemon-42-1234.log",
+          ],
           exec: (_command, args) => {
             if (args[0] === "ls-files") {
               trackedProbeArgs = args;
               const probesLock = args.includes(
-                ":(glob)results/bench.json.lock*",
+                ":(literal)results/bench.json.lock",
               );
               return {
                 stdout: probesLock ? "results/bench.json.lock\n" : "",
@@ -1735,10 +1769,10 @@ describe("bench-e2e measurement harness", () => {
       ),
     ).rejects.toThrow(/tracked output artifact.*bench\.json\.lock/);
     expect(trackedProbeArgs).toContain(
-      ":(glob)results/bench.json.daemon-*.log",
+      ":(literal)results/bench.json.daemon-42-1234.log",
     );
     expect(trackedProbeArgs).not.toContainEqual(
-      expect.stringContaining("bench.json.tmp-[0-9]*"),
+      expect.stringContaining(".tmp-"),
     );
   });
 
@@ -2081,6 +2115,22 @@ describe("bench-e2e measurement harness", () => {
       ],
     });
     expect(calls).toEqual(["output", "workspace"]);
+  });
+
+  it("preserves both a triggering failure and rollback failure", async () => {
+    const primary = new Error("temp cleanup failed");
+    const rollback = new Error("lock holder exited before release");
+
+    await expect(
+      rollbackReservation(
+        primary,
+        { release: () => Promise.reject(rollback) },
+        "reservation rollback failed",
+      ),
+    ).rejects.toMatchObject({
+      message: "reservation rollback failed",
+      errors: [primary, rollback],
+    });
   });
 
   it("holds the output reservation until receipt publication finishes", async () => {
