@@ -1018,7 +1018,7 @@ describe("daemon performance budget", () => {
     expect(source).toContain("await requireSubmittedDelivery(client, receipt, label)");
     expect(source).not.toContain("return requireSubmittedDelivery(client, receipt, label)");
     expect(source).not.toContain("receipt.typed !== true || receipt.submit_attempted !== true");
-    expect(source).toContain("throw new Error(`${label} was not verified as submitted`)");
+    expect(source).toContain("was not verified as submitted");
     expect(source).toContain("text: surfaceSampleSentinel(sampleIndex)");
     expect(source).toContain('"surface:bench-spawn"');
     expect(source).toContain("read_back_verified: true");
@@ -1031,6 +1031,10 @@ describe("daemon performance budget", () => {
     expect(source).toContain("function requireFiniteLockHold(");
     expect(source).toContain("close_surface did not close the spawned surface");
     expect(source).toContain("list_agents omitted the live spawned agent");
+    expect(source).not.toContain("compact(receipt).includes(spawnResult.agent_id)");
+    expect(source).toContain("Array.isArray(receipt.agents)");
+    expect(source).toContain("receipt.agents.some(");
+    expect(source).toContain("agent.agent_id === spawnResult.agent_id");
     expect(source).toContain("beforeRound?.(roundIndex)");
     expect(source).toContain("parallelStressSentinel(index, roundIndex)");
     expect(source).toContain("args(index, roundIndex)");

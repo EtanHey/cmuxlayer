@@ -1211,7 +1211,12 @@ async function measureLiveListAgentsAcrossClients(clients) {
       "list_agents",
       { detail: "summary" },
       (receipt) => {
-        if (!compact(receipt).includes(spawnResult.agent_id)) {
+        if (
+          !Array.isArray(receipt.agents) ||
+          !receipt.agents.some(
+            (agent) => agent.agent_id === spawnResult.agent_id,
+          )
+        ) {
           throw new Error("list_agents omitted the live spawned agent");
         }
       },
