@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   mkdir,
+  link,
   mkdtemp,
+  readFile,
+  realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -11,15 +15,21 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
+import { spawn, spawnSync } from "node:child_process";
 import {
+  advisoryLockInvocation,
+  assertOutputOutsideGitMetadata,
   assertNightlyIsolation,
   assertArtifactProvenance,
+  assertLockPathIdentity,
+  assertLockFileAuthority,
   assertCliFairnessTrace,
   buildBenchmarkRows,
   buildAbsentComparisonRow,
   buildRowsAndReserve,
   buildIsolatedRuntimeEnv,
   beginObservedTermination,
+  canonicalOutputPath,
   cliArgs,
   cleanupDaemonResources,
   createScratchTargets,
@@ -43,8 +53,14 @@ import {
   payloadText,
   readGitHead,
   prepareBuiltEntries,
+  prepareProvenanceThenReserveOutput,
+  provenanceStatusArgs,
+  publishWithLockHolder,
+  publishBenchmarkReceipt,
   renderMarkdownTable,
   releaseReservations,
+  resolveGitMetadataPaths,
+  rollbackReservation,
   resolveStableWorkspaceId,
   runCliReadScreen,
   installGracefulSignalAbort,
@@ -55,9 +71,38 @@ import {
   summarizeTransport,
   terminateChild,
   waitForSocket,
+  writeReceiptAtomically,
 } from "../scripts/bench-e2e.mjs";
 
 describe("bench-e2e measurement harness", () => {
+  it("uses the native advisory-lock command on Darwin and Linux", () => {
+    expect(advisoryLockInvocation("darwin", "/tmp/bench.lock")).toMatchObject({
+      command: "/usr/bin/lockf",
+      args: [
+        "-s",
+        "-k",
+        "-t",
+        "0",
+        "/tmp/bench.lock",
+        process.execPath,
+        "-e",
+        expect.stringContaining('process.stdout.write("LOCKED\\n")'),
+      ],
+      contendedStatus: 75,
+    });
+    expect(advisoryLockInvocation("linux", "/tmp/bench.lock")).toMatchObject({
+      command: "/usr/bin/flock",
+      args: [
+        "-n",
+        "/tmp/bench.lock",
+        process.execPath,
+        "-e",
+        expect.stringContaining('process.stdout.write("LOCKED\\n")'),
+      ],
+      contendedStatus: 1,
+    });
+  });
+
   it("uses nearest-rank percentiles instead of copying p50 into p95", () => {
     const samples = Array.from({ length: 20 }, (_, index) => index + 1);
 
@@ -210,6 +255,45 @@ describe("bench-e2e measurement harness", () => {
     controller.abort(new Error("stop now"));
     await expect(pending).rejects.toThrow("stop now");
     expect(starts).toBe(1);
+  });
+
+  it("drains every worker before propagating an abort", async () => {
+    const controller = new AbortController();
+    let releaseFirst;
+    let releaseSecond;
+    const firstGate = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise((resolve) => {
+      releaseSecond = resolve;
+    });
+    const started = [];
+    let settled = false;
+    let rejection = null;
+    const observed = runBenchmarkRow(
+      { concurrency: 2, samples_per_worker: 1 },
+      {
+        signal: controller.signal,
+        runOperation: async ({ worker }) => {
+          started.push(worker);
+          await (worker === 0 ? firstGate : secondGate);
+          return { ok: true, transport: "socket", transport_fallbacks: [] };
+        },
+      },
+    ).catch((error) => {
+      settled = true;
+      rejection = error;
+    });
+
+    expect(started).toEqual([0, 1]);
+    controller.abort(new Error("stop all workers"));
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    releaseSecond();
+    await observed;
+    expect(rejection).toMatchObject({ message: "stop all workers" });
   });
 
   it("counts transport and every fallback from the raw samples", () => {
@@ -483,6 +567,7 @@ describe("bench-e2e measurement harness", () => {
       comparison_status: "NOT_COMPARABLE",
     });
     expect(buildAbsentComparisonRow(cliRow)).toMatchObject({
+      concurrency_profile: "c5",
       attempt_count: 0,
       success_count: 0,
       failure_rate_pct: null,
@@ -998,6 +1083,318 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("refuses a symbolic-link lock without modifying its target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const target = join(directory, "do-not-touch.txt");
+    await writeFile(target, "preserve me\n", "utf8");
+    await symlink(target, `${output}.lock`);
+
+    await expect(createOutputReservation(output)).rejects.toThrow();
+    await expect(readFile(target, "utf8")).resolves.toBe("preserve me\n");
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("releases the kernel lock when the reserving process crashes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const moduleUrl = new URL("../scripts/bench-e2e.mjs", import.meta.url).href;
+    const crashed = spawn(
+      process.execPath,
+      [
+        "-e",
+        `import(${JSON.stringify(moduleUrl)}).then(async ({ createOutputReservation }) => { await createOutputReservation(${JSON.stringify(output)}); process.stdout.write("RESERVED\\n"); process.stdin.resume(); });`,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    try {
+      await new Promise<void>((resolveReady, reject) => {
+        let stdout = "";
+        let stderr = "";
+        crashed.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+          if (stdout.includes("RESERVED\n")) resolveReady();
+        });
+        crashed.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        crashed.once("error", reject);
+        crashed.once("exit", (code, signal) => {
+          reject(
+            new Error(
+              `reservation owner exited before readiness (${code ?? signal}): ${stderr}`,
+            ),
+          );
+        });
+      });
+      crashed.kill("SIGKILL");
+      await new Promise<void>((resolveClosed) => crashed.once("close", resolveClosed));
+
+      let reservation;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        try {
+          reservation = await createOutputReservation(output);
+          break;
+        } catch (error) {
+          if (!String(error).includes("already reserved") || attempt === 49) throw error;
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+        }
+      }
+      expect(reservation).toBeDefined();
+      await reservation.release();
+    } finally {
+      if (crashed.exitCode === null && crashed.signalCode === null) crashed.kill("SIGKILL");
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unexpected lock-holder exit immediately", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    let resolveHolderFailure;
+    const holderFailurePromise = new Promise((resolveFailure) => {
+      resolveHolderFailure = resolveFailure;
+    });
+    const reservation = await createOutputReservation(output, (error) => {
+      resolveHolderFailure(error);
+    });
+
+    process.kill(reservation.lockHolderPid, "SIGKILL");
+    const holderFailure = await Promise.race([
+      holderFailurePromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("lock holder exit was not reported")), 500),
+      ),
+    ]);
+
+    expect(holderFailure).toBeInstanceOf(Error);
+    expect(holderFailure.message).toMatch(/lock holder exited unexpectedly/);
+    await expect(reservation.release()).rejects.toThrow(/exited before release/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("turns lock-holder stdin EPIPE into a controlled publication failure", async () => {
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.stdout = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.write = () => {
+      queueMicrotask(() => {
+        const error = new Error("broken pipe");
+        error.code = "EPIPE";
+        child.stdin.emit("error", error);
+      });
+      return true;
+    };
+
+    await expect(
+      publishWithLockHolder(
+        child,
+        "/tmp/receipt.tmp",
+        "/tmp/receipt.json",
+        "benchmark output",
+      ),
+    ).rejects.toThrow(/command pipe failed/);
+  });
+
+  it("publishes the completed receipt from the process holding the kernel lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const temp = `${output}.tmp-test`;
+    const reservation = await createOutputReservation(output);
+    await writeFile(temp, "published\n", "utf8");
+
+    await reservation.publishTemp(temp, output);
+
+    await expect(readFile(output, "utf8")).resolves.toBe("published\n");
+    await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" });
+    reservation.assertHealthy();
+    await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("refuses a non-regular output substituted after reservation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const temp = `${output}.tmp-test`;
+    const reservation = await createOutputReservation(output);
+    await writeFile(temp, "published\n", "utf8");
+    expect(spawnSync("mkfifo", [output]).status).toBe(0);
+
+    await expect(reservation.publishTemp(temp, output)).rejects.toThrow(
+      /lock holder exited during publication/,
+    );
+    expect(spawnSync("test", ["-p", output]).status).toBe(0);
+    await expect(readFile(temp, "utf8")).resolves.toBe("published\n");
+    await expect(reservation.release()).rejects.toThrow(/exited before release/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("refuses publication after the reserved output directory is replaced", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-parent-"));
+    const directory = join(parent, "results");
+    const displaced = join(parent, "results-displaced");
+    const output = join(directory, "receipt.json");
+    const temp = `${output}.tmp-test`;
+    await mkdir(directory);
+    const reservation = await createOutputReservation(output);
+    await rename(directory, displaced);
+    await mkdir(directory);
+    await writeFile(temp, "published\n", "utf8");
+
+    await expect(reservation.publishTemp(temp, output)).rejects.toThrow(
+      /lock path identity changed/,
+    );
+    await expect(readFile(temp, "utf8")).resolves.toBe("published\n");
+    await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(reservation.release()).rejects.toThrow(
+      /lock path identity changed/,
+    );
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  it("cleans abandoned receipt temps only after winning the output lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const first = await createOutputReservation(output);
+    const temp = `${output}.tmp-1234-12345678-1234-1234-1234-123456789abc`;
+    const unrelated = `${output}.tmp-before-edit`;
+    await writeFile(temp, "partial\n", "utf8");
+    await writeFile(unrelated, "user data\n", "utf8");
+
+    await expect(createOutputReservation(output)).rejects.toThrow(
+      /already reserved/,
+    );
+    await expect(readFile(temp, "utf8")).resolves.toBe("partial\n");
+
+    await first.release();
+    const next = await createOutputReservation(output);
+    await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(unrelated, "utf8")).resolves.toBe("user data\n");
+    await next.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("canonicalizes a symlinked output to its real target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const target = join(directory, "tracked.json");
+    const output = join(directory, "receipt.json");
+    await writeFile(target, "{}\n", "utf8");
+    await symlink(target, output);
+
+    await expect(canonicalOutputPath(output)).resolves.toBe(
+      await realpath(target),
+    );
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects an existing output with another hard link", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const target = join(directory, "tracked.json");
+    const output = join(directory, "receipt.json");
+    await writeFile(target, "{}\n", "utf8");
+    await link(target, output);
+
+    await expect(canonicalOutputPath(output)).rejects.toThrow(
+      /multiple hard links/,
+    );
+    await expect(readFile(target, "utf8")).resolves.toBe("{}\n");
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects an existing non-regular output target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.fifo");
+    expect(spawnSync("mkfifo", [output]).status).toBe(0);
+
+    await expect(canonicalOutputPath(output)).rejects.toThrow(
+      /non-regular output path/,
+    );
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects a hard-linked lock file without modifying its shared inode", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const target = join(directory, "do-not-touch.txt");
+    await writeFile(target, "preserve me\n", "utf8");
+    await link(target, `${output}.lock`);
+
+    await expect(createOutputReservation(output)).rejects.toThrow(
+      /lock path has multiple hard links/,
+    );
+    await expect(readFile(target, "utf8")).resolves.toBe("preserve me\n");
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects a lock pathname that no longer names the opened inode", async () => {
+    await expect(
+      assertLockPathIdentity(
+        "/repo/receipt.json.lock",
+        { dev: 10, ino: 20 },
+        () => ({ dev: 10, ino: 21, isFile: () => true, nlink: 1 }),
+      ),
+    ).rejects.toThrow(/lock path identity changed/);
+  });
+
+  it("rejects a lock inode owned by another user or writable by peers", () => {
+    expect(() =>
+      assertLockFileAuthority(
+        "/tmp/cmuxlayer-bench-workspace.lock",
+        { uid: 501, mode: 0o100600 },
+        502,
+      ),
+    ).toThrow(/lock path has unsafe owner or permissions/);
+    expect(() =>
+      assertLockFileAuthority(
+        "/tmp/cmuxlayer-bench-workspace.lock",
+        { uid: 502, mode: 0o100666 },
+        502,
+      ),
+    ).toThrow(/lock path has unsafe owner or permissions/);
+  });
+
+  it("detects lock pathname replacement throughout the reservation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const reservation = await createOutputReservation(output);
+    await rm(reservation.lockPath);
+    await writeFile(reservation.lockPath, "replacement\n", { mode: 0o600 });
+
+    expect(() => reservation.assertHealthy()).toThrow(/lock path identity changed/);
+
+    await expect(reservation.release()).rejects.toThrow(
+      /lock path identity changed/,
+    );
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("canonicalizes a dangling output symlink to its future target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const target = join(directory, "future.json");
+    const output = join(directory, "receipt-link.json");
+    await symlink(target, output);
+
+    await expect(canonicalOutputPath(output)).resolves.toBe(
+      join(await realpath(directory), "future.json"),
+    );
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("canonicalizes beneath a missing parent without creating it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "missing", "nested", "receipt.json");
+
+    await expect(canonicalOutputPath(output)).resolves.toBe(
+      join(await realpath(directory), "missing", "nested", "receipt.json"),
+    );
+    await expect(stat(join(directory, "missing"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("uses one output lock through real and symbolic-link parent paths", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const realDirectory = join(directory, "real");
@@ -1020,10 +1417,34 @@ describe("bench-e2e measurement harness", () => {
   it("recovers an output lock whose recorded owner is gone", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
-    await writeFile(`${output}.lock`, "99999\n", "utf8");
+    const exitedChild = spawnSync(process.execPath, ["-e", ""]);
+    expect(exitedChild.status).toBe(0);
+    await writeFile(
+      `${output}.lock`,
+      `${JSON.stringify({ pid: exitedChild.pid, process_start: "exited-child" })}\n`,
+      "utf8",
+    );
     await utimes(`${output}.lock`, new Date(0), new Date(0));
     const reservation = await createOutputReservation(output);
     await reservation.release();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("ignores an abandoned legacy reclaim marker", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const exitedChild = spawnSync(process.execPath, ["-e", ""]);
+    expect(exitedChild.status).toBe(0);
+    await writeFile(
+      `${output}.lock.reclaim`,
+      `${JSON.stringify({ pid: exitedChild.pid, process_start: "exited-child" })}\n`,
+      "utf8",
+    );
+
+    const reservation = await createOutputReservation(output);
+
+    await reservation.release();
+    await expect(stat(`${output}.lock.reclaim`)).resolves.toBeDefined();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1040,13 +1461,12 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("preserves a legacy numeric lock while its PID is live", async () => {
+  it("does not treat legacy PID bytes as a live kernel lock", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
     await writeFile(`${output}.lock`, `${process.pid}\n`, "utf8");
-    await expect(createOutputReservation(output)).rejects.toThrow(
-      /already reserved/,
-    );
+    const reservation = await createOutputReservation(output);
+    await reservation.release();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1184,6 +1604,10 @@ describe("bench-e2e measurement harness", () => {
         CMUXLAYER_FORCE_INPROCESS: "1",
         CMUXLAYER_DEFAULT_PALETTE: "list_surfaces",
         CMUXLAYER_DAEMON_FD: "7",
+        CMUXLAYER_HEAP_GUARD_BYTES: "1",
+        CMUXLAYER_UNKNOWN_RUNTIME_TOGGLE: "enabled",
+        NODE_OPTIONS: "--require /tmp/untrusted-node-hook.cjs",
+        BUN_OPTIONS: "--preload /tmp/untrusted-bun-hook.ts",
         LISTEN_FDS: "1",
       },
       {
@@ -1197,6 +1621,10 @@ describe("bench-e2e measurement harness", () => {
     expect(env).not.toHaveProperty("CMUXLAYER_FORCE_INPROCESS");
     expect(env).not.toHaveProperty("CMUXLAYER_DEFAULT_PALETTE");
     expect(env).not.toHaveProperty("CMUXLAYER_DAEMON_FD");
+    expect(env).not.toHaveProperty("CMUXLAYER_HEAP_GUARD_BYTES");
+    expect(env).not.toHaveProperty("CMUXLAYER_UNKNOWN_RUNTIME_TOGGLE");
+    expect(env).not.toHaveProperty("NODE_OPTIONS");
+    expect(env).not.toHaveProperty("BUN_OPTIONS");
     expect(env).not.toHaveProperty("LISTEN_FDS");
   });
 
@@ -1233,7 +1661,7 @@ describe("bench-e2e measurement harness", () => {
         repoRoot: "/repo",
         exec: (_command, args) => {
           calls.push(args.join(" "));
-          if (args[0] === "status") return { stdout: "", stderr: "" };
+          if (args.includes("status")) return { stdout: "", stderr: "" };
           if (args[0] === "rev-parse") {
             return { stdout: "abc123\n", stderr: "" };
           }
@@ -1251,10 +1679,10 @@ describe("bench-e2e measurement harness", () => {
     );
 
     expect(calls).toEqual([
-      "status --porcelain --untracked-files=no",
+      "-C /repo status --porcelain --untracked-files=all",
       "rev-parse HEAD",
       "run build",
-      "status --porcelain --untracked-files=no",
+      "-C /repo status --porcelain --untracked-files=all",
       "rev-parse HEAD",
     ]);
     expect(result).toEqual({
@@ -1290,6 +1718,642 @@ describe("bench-e2e measurement harness", () => {
         sha256: "sha256:/opt/cmux/bin/cmux",
       },
     });
+  });
+
+  it("scrubs inherited runtime overrides from provenance builds", async () => {
+    await prepareBuiltEntries(
+      {
+        mcpEntry: "/repo/dist/index.js",
+        daemonEntry: "/repo/dist/daemon.js",
+        env: {
+          PATH: "/usr/bin",
+          NODE_OPTIONS: "--require /tmp/untrusted-node-hook.cjs",
+          NODE_PATH: "/tmp/untrusted-node-modules",
+          BUN_OPTIONS: "--preload /tmp/untrusted-bun-hook.ts",
+        },
+      },
+      {
+        repoRoot: "/repo",
+        exec: (_command, args, options) => {
+          if (args[0] === "run") {
+            expect(options.env).not.toHaveProperty("NODE_OPTIONS");
+            expect(options.env).not.toHaveProperty("NODE_PATH");
+            expect(options.env).not.toHaveProperty("BUN_OPTIONS");
+          }
+          if (args.includes("status")) return { stdout: "", stderr: "" };
+          if (args[0] === "rev-parse") {
+            return { stdout: "abc123\n", stderr: "" };
+          }
+          return { stdout: "built\n", stderr: "" };
+        },
+        exists: () => true,
+        hashFile: (path) => `sha256:${path}`,
+        listRuntimeFiles: () => [],
+        resolveExecutable: () => "/opt/cmux/bin/cmux",
+      },
+    );
+  });
+
+  it("forces untracked provenance while excluding only the selected receipt artifacts", () => {
+    const ownedTemp =
+      "/repo/results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc";
+    const ownedLock = "/repo/results/bench.json.lock";
+    const ownedLog = "/repo/results/bench.json.daemon-42-1234.log";
+    expect(
+      provenanceStatusArgs("/repo", "/repo/results/bench.json", [
+        ownedLock,
+        ownedLog,
+        ownedTemp,
+      ]),
+    ).toEqual([
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      "--",
+      ".",
+      ":(exclude,literal)results/bench.json",
+      ":(exclude,literal)results/bench.json.lock",
+      ":(exclude,literal)results/bench.json.daemon-42-1234.log",
+      ":(exclude,literal)results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc",
+    ]);
+    expect(provenanceStatusArgs("/repo", "/tmp/bench.json")).toEqual([
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+    ]);
+    expect(
+      provenanceStatusArgs("/repo", "/repo/results/bench.json", [
+        "/repo/results/bench.json.lock-notes",
+        "/repo/results/bench.json.daemon-notes.log",
+      ]),
+    ).not.toContainEqual(expect.stringContaining("lock-notes"));
+  });
+
+  it("rejects receipt output inside worktree or resolved Git metadata", async () => {
+    await expect(
+      assertOutputOutsideGitMetadata("/repo/.git/HEAD", "/repo", () => [
+        "/repo/.git",
+        "/external/repo.git/worktrees/bench",
+        "/external/repo.git",
+      ]),
+    ).rejects.toThrow(/inside Git metadata/);
+    await expect(
+      assertOutputOutsideGitMetadata(
+        "/external/repo.git/config",
+        "/repo",
+        () => [
+          "/repo/.git",
+          "/external/repo.git/worktrees/bench",
+          "/external/repo.git",
+        ],
+      ),
+    ).rejects.toThrow(/inside Git metadata/);
+  });
+
+  it("canonicalizes a symlinked gitdir marker before checking output containment", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const realGit = join(directory, "real-git");
+    const worktree = join(directory, "worktree");
+    await mkdir(realGit);
+    await mkdir(worktree);
+    await symlink(realGit, join(worktree, "git-link"), "dir");
+    await writeFile(join(worktree, ".git"), "gitdir: git-link\n", "utf8");
+
+    expect(await resolveGitMetadataPaths(worktree)).toContain(
+      await realpath(realGit),
+    );
+
+    await expect(
+      assertOutputOutsideGitMetadata(join(realGit, "HEAD"), worktree),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects receipt output inside nested checkout Git metadata", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const nested = join(directory, "ignored", "nested-checkout");
+    const nestedGit = join(nested, ".git");
+    const output = join(nestedGit, "HEAD");
+    await mkdir(nestedGit, { recursive: true });
+    await writeFile(output, "ref: refs/heads/main\n", "utf8");
+
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects receipt output inside a bare Git repository", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const bareGit = join(directory, "project.git");
+    const output = join(bareGit, "HEAD");
+    await mkdir(join(bareGit, "objects"), { recursive: true });
+    await mkdir(join(bareGit, "refs"), { recursive: true });
+    await writeFile(join(bareGit, "config"), "[core]\n\tbare = true\n", "utf8");
+    await writeFile(output, "ref: refs/heads/main\n", "utf8");
+
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    for (const bareSetting of ["bare = yes", "bare = on", "bare = 1", "bare"]) {
+      await writeFile(
+        join(bareGit, "config"),
+        `[core]\n\t${bareSetting}\n`,
+        "utf8",
+      );
+      await expect(
+        assertOutputOutsideGitMetadata(output, directory),
+      ).rejects.toThrow(/inside Git metadata/);
+    }
+    await writeFile(
+      join(bareGit, "included.conf"),
+      "[core]\n\tbare = yes\n",
+      "utf8",
+    );
+    await writeFile(
+      join(bareGit, "config"),
+      "[include]\n\tpath = included.conf\n",
+      "utf8",
+    );
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await mkdir(join(bareGit, "refs", "heads"), { recursive: true });
+    await writeFile(join(bareGit, "refs", "heads", "main"), "commit\n", "utf8");
+    await rm(output);
+    await symlink("refs/heads/main", output);
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await writeFile(join(bareGit, "config"), "[core]\n\tbare = false\n", "utf8");
+    const linkedObjects = join(bareGit, "linked-objects");
+    await rm(join(bareGit, "objects"), { recursive: true });
+    await mkdir(linkedObjects);
+    await symlink("linked-objects", join(bareGit, "objects"), "dir");
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(join(bareGit, "config"));
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects a receipt tracked by a nested checkout", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const nested = join(directory, "nested-checkout");
+    const output = join(nested, "receipt.json");
+    await mkdir(join(nested, ".git"), { recursive: true });
+    await writeFile(output, "tracked contents\n", "utf8");
+
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: join(directory, "dist", "index.js"),
+          daemonEntry: join(directory, "dist", "daemon.js"),
+          out: output,
+        },
+        {
+          repoRoot: directory,
+          exec: async (_command, args) => {
+            if (args[0] === "ls-files") return { stdout: "", stderr: "" };
+            if (args[0] === "-C" && args[1] === (await realpath(nested))) {
+              expect(args[2]).toBe("ls-files");
+              return { stdout: "receipt.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects redirected Git metadata before provenance checks", async () => {
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/external/repository.git/HEAD",
+          env: { ...process.env, GIT_DIR: "/external/repository.git" },
+        },
+        {
+          repoRoot: "/repo",
+          exec: () => {
+            throw new Error("Git must not run with redirected metadata");
+          },
+        },
+      ),
+    ).rejects.toThrow(/redirected Git metadata/);
+
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/receipt.json",
+          env: { GIT_WORK_TREE: "/other-clean-checkout" },
+        },
+        {
+          repoRoot: "/repo",
+          exec: () => {
+            throw new Error("Git must not inspect a redirected worktree");
+          },
+        },
+      ),
+    ).rejects.toThrow(/redirected Git metadata/);
+  });
+
+  it("scrubs inherited Git pathspec controls from provenance commands", async () => {
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/package.json",
+          env: { GIT_LITERAL_PATHSPECS: "1" },
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args, options) => {
+            if (args[0] === "ls-files") {
+              return {
+                stdout: options.env.GIT_LITERAL_PATHSPECS
+                  ? ""
+                  : "package.json\n",
+                stderr: "",
+              };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+  });
+
+  it("scrubs ambient Git redirection when no environment is supplied", async () => {
+    const previousWorkTree = process.env.GIT_WORK_TREE;
+    process.env.GIT_WORK_TREE = "/other-clean-checkout";
+    try {
+      await expect(
+        prepareBuiltEntries(
+          {
+            mcpEntry: "/repo/dist/index.js",
+            daemonEntry: "/repo/dist/daemon.js",
+            out: "/repo/package.json",
+          },
+          {
+            repoRoot: "/repo",
+            exec: (_command, args, options) => {
+              if (args[0] === "ls-files") {
+                expect(options.env.GIT_WORK_TREE).toBeUndefined();
+                return { stdout: "package.json\n", stderr: "" };
+              }
+              throw new Error(`unexpected command: ${args.join(" ")}`);
+            },
+          },
+        ),
+      ).rejects.toThrow(/tracked output receipt/);
+    } finally {
+      if (previousWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+      else process.env.GIT_WORK_TREE = previousWorkTree;
+    }
+  });
+
+  it("scrubs command-scope Git configuration from provenance commands", async () => {
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/package.json",
+          env: {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.worktree",
+            GIT_CONFIG_VALUE_0: "/other-clean-checkout",
+          },
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args, options) => {
+            if (args.includes("ls-files")) {
+              expect(options.env.GIT_CONFIG_COUNT).toBeUndefined();
+              expect(options.env.GIT_CONFIG_KEY_0).toBeUndefined();
+              expect(options.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+              return { stdout: "package.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+  });
+
+  it("refuses to exclude a tracked output receipt from provenance", async () => {
+    let trackedPathspec;
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/:(literal)receipt.json",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedPathspec = args.find((arg) =>
+                arg.startsWith(":(literal)"),
+              );
+              return { stdout: ":(literal)receipt.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+    expect(trackedPathspec).toBe(":(literal):(literal)receipt.json");
+  });
+
+  it("probes HEAD as well as the index for a staged-deleted receipt", async () => {
+    let trackedProbeArgs = [];
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedProbeArgs = args;
+              return { stdout: "results/bench.json\n", stderr: "" };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+    expect(trackedProbeArgs).toContain("--with-tree=HEAD");
+  });
+
+  it("rechecks that the output receipt remains untracked after the build", async () => {
+    let trackedChecks = 0;
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedChecks += 1;
+              return {
+                stdout: trackedChecks === 1 ? "" : "results/bench.json\n",
+                stderr: "",
+              };
+            }
+            if (args.includes("status")) return { stdout: "", stderr: "" };
+            if (args[0] === "rev-parse") {
+              return { stdout: "abc123\n", stderr: "" };
+            }
+            if (args[0] === "run") return { stdout: "built\n", stderr: "" };
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
+    expect(trackedChecks).toBe(2);
+  });
+
+  it("refuses to exclude a tracked receipt sidecar from provenance", async () => {
+    let trackedProbeArgs = [];
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          listOwnedReceiptSidecars: () => [
+            "/repo/results/bench.json.lock",
+            "/repo/results/bench.json.daemon-42-1234.log",
+          ],
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedProbeArgs = args;
+              const probesLock = args.includes(
+                ":(literal)results/bench.json.lock",
+              );
+              return {
+                stdout: probesLock ? "results/bench.json.lock\n" : "",
+                stderr: "",
+              };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output artifact.*bench\.json\.lock/);
+    expect(trackedProbeArgs).toContain(
+      ":(literal)results/bench.json.daemon-42-1234.log",
+    );
+    expect(trackedProbeArgs).not.toContainEqual(
+      expect.stringContaining(".tmp-"),
+    );
+  });
+
+  it("probes an enumerated owned temp literally without hiding malformed siblings", async () => {
+    const ownedTemp =
+      "/repo/results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc";
+    let trackedProbeArgs = [];
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/results/bench.json",
+        },
+        {
+          repoRoot: "/repo",
+          listOwnedReceiptTemps: () => [ownedTemp],
+          exec: (_command, args) => {
+            if (args[0] === "ls-files") {
+              trackedProbeArgs = args;
+              return {
+                stdout: "results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc\n",
+                stderr: "",
+              };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output artifact/);
+    expect(trackedProbeArgs).toContain(
+      ":(literal)results/bench.json.tmp-1234-12345678-1234-1234-1234-123456789abc",
+    );
+    expect(
+      provenanceStatusArgs("/repo", "/repo/results/bench.json", [
+        "/repo/results/bench.json.tmp-1-notes-12345678-1234-1234-1234-123456789abc",
+      ]),
+    ).not.toContainEqual(expect.stringContaining(".tmp-"));
+  });
+
+  it("attests provenance before creating the output reservation", async () => {
+    const events: string[] = [];
+    const config = { out: "/repo/bench.json", cmuxBin: "cmux" };
+    const provenance = {
+      cli_executable: { path: "/opt/cmux/bin/cmux" },
+    };
+
+    const result = await prepareProvenanceThenReserveOutput(config, {
+      canonicalize: (path) => path,
+      prepare: () => {
+        events.push("provenance");
+        return provenance;
+      },
+      validate: () => {
+        events.push("validate");
+      },
+      reserve: () => {
+        events.push("reserve-output");
+        return { release: () => undefined };
+      },
+    });
+
+    expect(events).toEqual(["provenance", "validate", "reserve-output"]);
+    expect(config.cmuxBin).toBe("/opt/cmux/bin/cmux");
+    expect(result.artifactProvenance).toBe(provenance);
+  });
+
+  it("canonicalizes the output target before provenance validation", async () => {
+    const config = { out: "/repo/receipt-link.json", cmuxBin: "cmux" };
+    await expect(
+      prepareProvenanceThenReserveOutput(config, {
+        canonicalize: () => "/repo/package.json",
+        prepare: (preparedConfig) => {
+          throw new Error(`tracked output receipt: ${preparedConfig.out}`);
+        },
+      }),
+    ).rejects.toThrow(/tracked output receipt: \/repo\/package\.json/);
+    expect(config.out).toBe("/repo/package.json");
+  });
+
+  it("rejects a receipt output that aliases an attested artifact", async () => {
+    const events: string[] = [];
+    const artifactPath = "/repo/dist/index.js";
+
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: artifactPath, cmuxBin: "cmux" },
+        {
+          canonicalize: (path) => path,
+          prepare: () => ({
+            entries: {
+              mcp: { path: artifactPath, sha256: "mcp" },
+            },
+            runtime_files: [
+              { path: artifactPath, sha256: "mcp" },
+              { path: "/repo/dist/daemon.js", sha256: "daemon" },
+            ],
+            cli_executable: {
+              path: "/opt/cmux/bin/cmux",
+              sha256: "cli",
+            },
+          }),
+          validate: () => events.push("validate"),
+          reserve: () => {
+            events.push("reserve");
+            return { release: () => undefined };
+          },
+        },
+      ),
+    ).rejects.toThrow(/output receipt aliases attested artifact.*index\.js/);
+    expect(events).toEqual(["validate"]);
+  });
+
+  it("rejects a receipt output anywhere inside the attested runtime root", async () => {
+    const events: string[] = [];
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: "/repo/dist/results/receipt.json", cmuxBin: "cmux" },
+        {
+          canonicalize: (path) => path,
+          prepare: () => ({
+            entries: {},
+            runtime_root: "/repo/dist",
+            runtime_files: [],
+            cli_executable: { path: "/opt/cmux/bin/cmux", sha256: "cli" },
+          }),
+          validate: () => events.push("validate"),
+          reserve: () => {
+            events.push("reserve");
+            return { release: () => undefined };
+          },
+        },
+      ),
+    ).rejects.toThrow(/output receipt is inside attested runtime root/);
+    expect(events).toEqual(["validate"]);
+  });
+
+  it("rejects output recanonicalization after provenance and releases it", async () => {
+    const events: string[] = [];
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: "/repo/dist/link/HEAD", cmuxBin: "cmux" },
+        {
+          canonicalize: (path) => path,
+          prepare: () => ({
+            entries: {},
+            cli_executable: { path: "/opt/cmux/bin/cmux", sha256: "cli" },
+          }),
+          validate: () => undefined,
+          reserve: () => ({
+            outputPath: "/repo/.git/HEAD",
+            release: () => events.push("release"),
+          }),
+        },
+      ),
+    ).rejects.toThrow(/output path changed after provenance validation/);
+    expect(events).toEqual(["release"]);
+  });
+
+  it("stops after preparation when reservation authority aborts", async () => {
+    const controller = new AbortController();
+    const events: string[] = [];
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: "/repo/bench.json", cmuxBin: "cmux" },
+        {
+          signal: controller.signal,
+          canonicalize: (path) => path,
+          prepare: (preparedConfig) => {
+            events.push(
+              preparedConfig.signal === controller.signal
+                ? "prepare"
+                : "bad-signal",
+            );
+            controller.abort(
+              new Error("workspace lock holder exited unexpectedly"),
+            );
+            return { cli_executable: { path: "/opt/cmux/bin/cmux" } };
+          },
+          validate: () => events.push("validate"),
+          reserve: () => events.push("reserve"),
+        },
+      ),
+    ).rejects.toThrow(/workspace lock holder exited unexpectedly/);
+    expect(events).toEqual(["prepare"]);
   });
 
   it("rejects mutable built entries whose hashes change after attestation", async () => {
@@ -1348,7 +2412,7 @@ describe("bench-e2e measurement harness", () => {
         {
           repoRoot: "/repo",
           exec: (_command, args) => {
-            if (args[0] === "status") return { stdout: "", stderr: "" };
+            if (args.includes("status")) return { stdout: "", stderr: "" };
             if (args[0] === "rev-parse") {
               headReads += 1;
               return {
@@ -1526,6 +2590,163 @@ describe("bench-e2e measurement harness", () => {
       ],
     });
     expect(calls).toEqual(["output", "workspace"]);
+  });
+
+  it("preserves both a triggering failure and rollback failure", async () => {
+    const primary = new Error("temp cleanup failed");
+    const rollback = new Error("lock holder exited before release");
+
+    await expect(
+      rollbackReservation(
+        primary,
+        { release: () => Promise.reject(rollback) },
+        "reservation rollback failed",
+      ),
+    ).rejects.toMatchObject({
+      message: "reservation rollback failed",
+      errors: [primary, rollback],
+    });
+  });
+
+  it("holds the output reservation until receipt publication finishes", async () => {
+    const events = [];
+    let finishWrite;
+    const writeGate = new Promise((resolve) => {
+      finishWrite = resolve;
+    });
+    const pending = publishBenchmarkReceipt(
+      "/tmp/receipt.json",
+      { schema_version: 1 },
+      {
+        release: () => {
+          events.push("output-release");
+        },
+      },
+      async () => {
+        events.push("write-start");
+        await writeGate;
+        events.push("write-finish");
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(["write-start"]);
+    finishWrite();
+    await pending;
+    expect(events).toEqual(["write-start", "write-finish", "output-release"]);
+  });
+
+  it("refuses publication after output reservation authority is lost", async () => {
+    const events = [];
+    await expect(
+      publishBenchmarkReceipt(
+        "/tmp/receipt.json",
+        { rows: [] },
+        {
+          assertHealthy() {
+            throw new Error("output lock holder exited unexpectedly");
+          },
+          release: () => events.push("release"),
+        },
+        () => events.push("write"),
+      ),
+    ).rejects.toThrow(/output lock holder exited unexpectedly/);
+    expect(events).toEqual([]);
+  });
+
+  it("cancels an in-flight atomic receipt write when lock authority is lost", async () => {
+    const controller = new AbortController();
+    let rejectWrite;
+    const pendingWrite = new Promise((_, reject) => {
+      rejectWrite = reject;
+    });
+    const events = [];
+    const publication = publishBenchmarkReceipt(
+      "/tmp/receipt.json",
+      { rows: [] },
+      {
+        assertHealthy() {
+          return undefined;
+        },
+        release: () => events.push("release"),
+      },
+      async (_path, _contents, signal) => {
+        events.push("write-start");
+        signal.addEventListener(
+          "abort",
+          () => rejectWrite(signal.reason),
+          { once: true },
+        );
+        await pendingWrite;
+        events.push("write-finish");
+      },
+      controller.signal,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error("output lock holder exited unexpectedly"));
+
+    await expect(publication).rejects.toThrow(/lock holder exited unexpectedly/);
+    expect(events).toEqual(["write-start"]);
+  });
+
+  it("does not publish an aborted atomic receipt temp file", async () => {
+    const controller = new AbortController();
+    const events = [];
+    let rejectWrite;
+    const pendingWrite = new Promise((_, reject) => {
+      rejectWrite = reject;
+    });
+    const publication = writeReceiptAtomically(
+      "/tmp/receipt.json",
+      "{}\n",
+      controller.signal,
+      {
+        async writeTemp(_path, _contents, options) {
+          events.push(["write", options.flag, options.mode]);
+          options.signal.addEventListener(
+            "abort",
+            () => rejectWrite(options.signal.reason),
+            { once: true },
+          );
+          await pendingWrite;
+        },
+        publishTemp() {
+          events.push(["publish"]);
+        },
+        removeTemp() {
+          events.push(["cleanup"]);
+        },
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error("lock authority lost"));
+
+    await expect(publication).rejects.toThrow(/lock authority lost/);
+    expect(events).toEqual([
+      ["write", "wx", 0o600],
+      ["cleanup"],
+    ]);
+  });
+
+  it("syncs receipt data and parent metadata before completing publication", async () => {
+    const events: string[] = [];
+    await writeReceiptAtomically("/repo/results/receipt.json", "{}\n", null, {
+      writeTemp: () => events.push("write"),
+      syncTemp: () => events.push("sync-temp"),
+      publishTemp: () => events.push("publish"),
+      syncParent: (path) => events.push(`sync-parent:${path}`),
+      removeTemp: () => events.push("cleanup"),
+    });
+
+    expect(events).toEqual([
+      "write",
+      "sync-temp",
+      "publish",
+      "sync-parent:/repo/results",
+      "cleanup",
+    ]);
   });
 
   it("cancels a pending socket retry without waiting for its deadline", async () => {

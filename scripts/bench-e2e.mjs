@@ -2,21 +2,31 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream, existsSync } from "node:fs";
+import { constants, createWriteStream, existsSync, lstatSync } from "node:fs";
 import {
-  link,
   mkdir,
   mkdtemp,
+  lstat,
+  open,
   readFile,
+  readlink,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import net from "node:net";
-import { basename, dirname, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -287,7 +297,12 @@ export async function runBenchmarkRow(row, deps) {
       return samples;
     })(),
   );
-  const samples = (await Promise.all(workerRuns)).flat();
+  const settledWorkers = await Promise.allSettled(workerRuns);
+  const rejectedWorker = settledWorkers.find(
+    (result) => result.status === "rejected",
+  );
+  if (rejectedWorker) throw rejectedWorker.reason;
+  const samples = settledWorkers.flatMap((result) => result.value);
   const latencies = samples
     .filter((sample) => sample.ok)
     .map((sample) => sample.latency_ms);
@@ -315,6 +330,7 @@ export async function runBenchmarkRow(row, deps) {
 export function buildAbsentComparisonRow(row) {
   return {
     ...row,
+    concurrency_profile: `c${row.concurrency}`,
     comparison_status: "NOT_COMPARABLE",
     attempt_count: 0,
     success_count: 0,
@@ -624,21 +640,141 @@ export async function createSocketReservation(requestedPath) {
   };
 }
 
-export async function createOutputReservation(outputPath) {
+export async function canonicalOutputPath(
+  outputPath,
+  seen = new Set(),
+  allowDirectory = false,
+) {
+  const absoluteOutput = resolve(outputPath);
+  if (seen.has(absoluteOutput)) {
+    throw new Error(`output path contains a symbolic-link cycle: ${absoluteOutput}`);
+  }
+  seen.add(absoluteOutput);
+  const outputStat = await lstat(absoluteOutput).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (outputStat?.isSymbolicLink()) {
+    const target = await readlink(absoluteOutput);
+    return canonicalOutputPath(
+      resolve(dirname(absoluteOutput), target),
+      seen,
+      allowDirectory,
+    );
+  }
+  if (outputStat?.isFile() && outputStat.nlink > 1) {
+    throw new Error(
+      `refusing output path with multiple hard links: ${absoluteOutput}`,
+    );
+  }
+  if (
+    outputStat &&
+    !outputStat.isFile() &&
+    !(allowDirectory && outputStat.isDirectory())
+  ) {
+    throw new Error(`refusing non-regular output path: ${absoluteOutput}`);
+  }
+  if (outputStat) return realpath(absoluteOutput);
+  const parent = dirname(absoluteOutput);
+  if (parent === absoluteOutput) return absoluteOutput;
+  return join(
+    await canonicalOutputPath(parent, seen, true),
+    basename(absoluteOutput),
+  );
+}
+
+export async function createOutputReservation(outputPath, onFailure) {
   const absoluteOutput = resolve(outputPath);
   await mkdir(dirname(absoluteOutput), { recursive: true });
-  const canonicalOutput = existsSync(absoluteOutput)
-    ? await realpath(absoluteOutput)
-    : join(await realpath(dirname(absoluteOutput)), basename(absoluteOutput));
+  const canonicalOutput = await canonicalOutputPath(absoluteOutput);
+  const canonicalParent = dirname(canonicalOutput);
+  const parentStat = await stat(canonicalParent);
+  const parentIdentity = {
+    path: canonicalParent,
+    dev: parentStat.dev,
+    ino: parentStat.ino,
+  };
   const lockPath = `${canonicalOutput}.lock`;
   const reservation = await createPidLock(
     lockPath,
     `benchmark output ${canonicalOutput}`,
+    onFailure,
   );
+  try {
+    await cleanupAbandonedReceiptTemps(canonicalOutput);
+  } catch (error) {
+    await rollbackReservation(
+      error,
+      reservation,
+      "receipt temp cleanup and output reservation rollback failed",
+    );
+  }
   return Object.freeze({
     outputPath: canonicalOutput,
     lockPath,
+    lockHolderPid: reservation.lockHolderPid,
+    assertHealthy: reservation.assertHealthy,
+    publishTemp(from, to) {
+      return reservation.publishTemp(from, to, parentIdentity);
+    },
     release: reservation.release,
+  });
+}
+
+async function cleanupAbandonedReceiptTemps(outputPath) {
+  const ownedTemps = (await listOwnedReceiptSidecars(outputPath)).filter(
+    ({ kind }) => kind === "temp",
+  );
+  for (const { candidate, entry } of ownedTemps) {
+    if (!entry.isFile() && !entry.isSymbolicLink()) {
+      throw new Error(`refusing unexpected receipt temp artifact: ${candidate}`);
+    }
+    await rm(candidate, { force: true });
+  }
+}
+
+const OWNED_RECEIPT_TEMP_SUFFIX =
+  /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OWNED_DAEMON_LOG_SUFFIX = /^\d+-\d+\.log$/;
+
+function ownedReceiptSidecarKind(outputPath, candidatePath) {
+  const absoluteOutput = resolve(outputPath);
+  const absoluteCandidate = resolve(candidatePath);
+  if (dirname(absoluteCandidate) !== dirname(absoluteOutput)) return null;
+  const outputName = basename(absoluteOutput);
+  const candidateName = basename(absoluteCandidate);
+  if (candidateName === `${outputName}.lock`) return "lock";
+  const tempPrefix = `${outputName}.tmp-`;
+  if (
+    candidateName.startsWith(tempPrefix) &&
+    OWNED_RECEIPT_TEMP_SUFFIX.test(candidateName.slice(tempPrefix.length))
+  ) {
+    return "temp";
+  }
+  const daemonPrefix = `${outputName}.daemon-`;
+  if (
+    candidateName.startsWith(daemonPrefix) &&
+    OWNED_DAEMON_LOG_SUFFIX.test(candidateName.slice(daemonPrefix.length))
+  ) {
+    return "daemon-log";
+  }
+  return null;
+}
+
+async function listOwnedReceiptSidecars(outputPath) {
+  const directory = dirname(outputPath);
+  const entries = await readdir(directory, { withFileTypes: true }).catch(
+    (error) => {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    },
+  );
+  return entries.flatMap((entry) => {
+    const candidate = join(directory, entry.name);
+    const kind = ownedReceiptSidecarKind(outputPath, candidate);
+    return kind
+      ? [{ entry, candidate, kind }]
+      : [];
   });
 }
 
@@ -652,119 +788,380 @@ function processIsLive(pid, signalPid = process.kill) {
   }
 }
 
-async function readProcessStartIdentity(pid) {
-  const result = await execCapture(
-    "/bin/ps",
-    ["-p", String(pid), "-o", "lstart="],
-    { env: { ...process.env, LC_ALL: "C", LANG: "C" } },
-  ).catch(() => null);
-  return nonEmptyString(result?.stdout.trim());
-}
-
-function parseLockOwner(text) {
-  let parsed = null;
-  try {
-    parsed = JSON.parse(text);
-    if (
-      isRecord(parsed) &&
-      Number.isSafeInteger(parsed.pid) &&
-      parsed.pid > 0
-    ) {
-      return {
-        pid: parsed.pid,
-        process_start: nonEmptyString(parsed.process_start),
-      };
-    }
-  } catch {
-    // Fall through to the legacy numeric format below.
-  }
-  const legacyPid = Number.parseInt(text.trim(), 10);
-  if (Number.isSafeInteger(legacyPid) && legacyPid > 0) {
-    return { pid: legacyPid, process_start: null };
-  }
-  return null;
-}
-
-async function createPidLock(lockPath, label) {
-  await mkdir(dirname(lockPath), { recursive: true });
-  const processStart = await readProcessStartIdentity(process.pid);
-  if (!processStart) {
-    throw new Error(`${label} could not attest process start identity`);
-  }
-  const ownerText = `${JSON.stringify({ pid: process.pid, process_start: processStart })}\n`;
-  const candidatePath = `${lockPath}.claim-${process.pid}-${randomUUID()}`;
-  const reclaimPath = `${lockPath}.reclaim`;
-  await writeFile(candidatePath, ownerText, { flag: "wx", mode: 0o600 });
-  let acquired = false;
-  try {
-    for (let attempt = 0; attempt < 20 && !acquired; attempt += 1) {
-      if (existsSync(reclaimPath)) {
-        await new Promise((resolvePause) => setTimeout(resolvePause, 10));
-        continue;
-      }
-      try {
-        await link(candidatePath, lockPath);
-        acquired = true;
-        break;
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
-      }
-      const observedText = await readFile(lockPath, "utf8").catch((error) => {
-        if (error?.code === "ENOENT") return null;
-        throw error;
-      });
-      if (observedText === null) continue;
-      const owner = parseLockOwner(observedText);
-      if (owner && processIsLive(owner.pid)) {
-        const observedStart = await readProcessStartIdentity(owner.pid);
+const LOCK_HOLDER_SCRIPT = String.raw`
+const { closeSync, fsyncSync, lstatSync, openSync, renameSync, statSync } = require("node:fs");
+const { dirname } = require("node:path");
+let buffered = "";
+process.stdout.write("LOCKED\n");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffered += chunk;
+  for (;;) {
+    const newline = buffered.indexOf("\n");
+    if (newline < 0) break;
+    const line = buffered.slice(0, newline);
+    buffered = buffered.slice(newline + 1);
+    if (!line) continue;
+    try {
+      const command = JSON.parse(line);
+      if (command.operation !== "publish") throw new Error("unsupported command");
+      if (command.parentIdentity) {
+        const parent = statSync(command.parentIdentity.path);
         if (
-          !owner.process_start ||
-          observedStart === null ||
-          observedStart === owner.process_start
+          parent.dev !== command.parentIdentity.dev ||
+          parent.ino !== command.parentIdentity.ino
         ) {
-          throw new Error(`${label} is already reserved by pid ${owner.pid}`);
+          throw new Error("reserved output directory identity changed");
         }
       }
-      let ownsReclaim = false;
       try {
-        await link(candidatePath, reclaimPath);
-        ownsReclaim = true;
+        const target = lstatSync(command.to);
+        if (!target.isFile() || target.nlink > 1) {
+          throw new Error("output target is not a singly linked regular file");
+        }
       } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
+        if (error.code !== "ENOENT") throw error;
       }
-      if (!ownsReclaim) {
-        await new Promise((resolvePause) => setTimeout(resolvePause, 10));
-        continue;
-      }
+      renameSync(command.from, command.to);
+      const parentFd = openSync(dirname(command.to), "r");
       try {
-        const currentText = await readFile(lockPath, "utf8").catch(() => null);
-        if (currentText !== observedText) continue;
-        await unlink(lockPath).catch((error) => {
-          if (error?.code !== "ENOENT") throw error;
-        });
-        await link(candidatePath, lockPath);
-        acquired = true;
+        fsyncSync(parentFd);
       } finally {
-        await unlink(reclaimPath).catch(() => undefined);
+        closeSync(parentFd);
       }
+      process.stdout.write("PUBLISHED " + command.id + "\n");
+    } catch (error) {
+      process.stderr.write("lock holder command failed: " + error.message + "\n");
+      process.exit(70);
     }
-  } finally {
-    await unlink(candidatePath).catch(() => undefined);
   }
-  if (!acquired) {
-    throw new Error(`${label} could not reclaim atomic lock ${lockPath}`);
+});
+process.stdin.resume();
+`;
+
+export function advisoryLockInvocation(platform, lockPath) {
+  const holderArgs = [process.execPath, "-e", LOCK_HOLDER_SCRIPT];
+  if (platform === "darwin") {
+    return {
+      command: "/usr/bin/lockf",
+      args: ["-s", "-k", "-t", "0", lockPath, ...holderArgs],
+      contendedStatus: 75,
+    };
+  }
+  if (platform === "linux") {
+    return {
+      command: "/usr/bin/flock",
+      args: ["-n", lockPath, ...holderArgs],
+      contendedStatus: 1,
+    };
+  }
+  throw new Error(`unsupported advisory-lock platform: ${platform}`);
+}
+
+async function waitForLockHolder(child, invocation, label, lockPath) {
+  await new Promise((resolveReady, reject) => {
+    let stdout = "";
+    let stderr = "";
+    function cleanup() {
+      child.stdout.off("data", onStdout);
+      child.stderr.off("data", onStderr);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    }
+    function onStdout(chunk) {
+      stdout += chunk.toString();
+      if (!stdout.includes("LOCKED\n")) return;
+      cleanup();
+      resolveReady();
+    }
+    function onStderr(chunk) {
+      stderr += chunk.toString();
+    }
+    function onError(error) {
+      cleanup();
+      reject(error);
+    }
+    function onExit(code, signal) {
+      cleanup();
+      if (code === invocation.contendedStatus) {
+        reject(new Error(`${label} is already reserved by another live process`));
+        return;
+      }
+      const detail = stderr.trim();
+      reject(
+        new Error(
+          `${label} could not acquire kernel lock ${lockPath} (exit ${code ?? signal ?? "unknown"})${detail ? `: ${detail}` : ""}`,
+        ),
+      );
+    }
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+async function closeLockHolder(child, label) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`${label} lock holder exited before release`);
+  }
+  const closed = new Promise((resolveClosed, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolveClosed();
+      else {
+        reject(
+          new Error(
+            `${label} lock holder failed during release (exit ${code ?? signal ?? "unknown"})`,
+          ),
+        );
+      }
+    });
+  });
+  child.stdin.end();
+  await closed;
+}
+
+export async function publishWithLockHolder(
+  child,
+  from,
+  to,
+  label,
+  parentIdentity = null,
+) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`${label} lock holder exited before publication`);
+  }
+  const commandId = randomUUID();
+  await new Promise((resolvePublished, reject) => {
+    let stdout = "";
+    function cleanup() {
+      child.stdout.off("data", onStdout);
+      child.stdin.off("error", onStdinError);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    }
+    function fail(error) {
+      cleanup();
+      reject(error);
+    }
+    function onStdout(chunk) {
+      stdout += chunk.toString();
+      if (!stdout.includes(`PUBLISHED ${commandId}\n`)) return;
+      cleanup();
+      resolvePublished();
+    }
+    function onError(error) {
+      fail(error);
+    }
+    function onStdinError(error) {
+      fail(new Error(`${label} lock holder command pipe failed`, { cause: error }));
+    }
+    function onExit(code, signal) {
+      fail(
+        new Error(
+          `${label} lock holder exited during publication (exit ${code ?? signal ?? "unknown"})`,
+        ),
+      );
+    }
+    child.stdout.on("data", onStdout);
+    child.stdin.once("error", onStdinError);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.stdin.write(
+      `${JSON.stringify({ operation: "publish", id: commandId, from, to, parentIdentity })}\n`,
+      (error) => {
+        if (error) fail(error);
+      },
+    );
+  });
+}
+
+async function discardLockHolder(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise((resolveClosed) => {
+    child.once("close", resolveClosed);
+    child.once("error", resolveClosed);
+  });
+  child.stdin.end();
+  await closed;
+}
+
+export async function assertLockPathIdentity(
+  lockPath,
+  openedStat,
+  inspectPath = lstat,
+) {
+  const pathStat = await Promise.resolve()
+    .then(() => inspectPath(lockPath))
+    .catch((error) => {
+      throw new Error(`lock path identity changed: ${lockPath}`, {
+        cause: error,
+      });
+    });
+  if (
+    !pathStat.isFile() ||
+    pathStat.nlink > 1 ||
+    pathStat.dev !== openedStat.dev ||
+    pathStat.ino !== openedStat.ino
+  ) {
+    throw new Error(`lock path identity changed: ${lockPath}`);
+  }
+}
+
+function assertLockPathIdentitySync(lockPath, openedStat) {
+  const pathStat = (() => {
+    try {
+      return lstatSync(lockPath);
+    } catch (error) {
+      throw new Error(`lock path identity changed: ${lockPath}`, {
+        cause: error,
+      });
+    }
+  })();
+  if (
+    !pathStat.isFile() ||
+    pathStat.nlink > 1 ||
+    pathStat.dev !== openedStat.dev ||
+    pathStat.ino !== openedStat.ino
+  ) {
+    throw new Error(`lock path identity changed: ${lockPath}`);
+  }
+}
+
+export function assertLockFileAuthority(
+  lockPath,
+  lockStat,
+  effectiveUid = process.geteuid?.(),
+) {
+  const wrongOwner =
+    effectiveUid !== undefined && lockStat.uid !== effectiveUid;
+  const peerPermissions = lockStat.mode & 0o022;
+  if (wrongOwner || peerPermissions !== 0) {
+    throw new Error(`lock path has unsafe owner or permissions: ${lockPath}`);
+  }
+}
+
+async function createPidLock(lockPath, label, onFailure) {
+  await mkdir(dirname(lockPath), { recursive: true });
+  const lockHandle = await open(
+    lockPath,
+    constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600,
+  );
+  const lockStat = await lockHandle.stat();
+  if (!lockStat.isFile()) {
+    await lockHandle.close();
+    throw new Error(`${label} lock path is not a regular file: ${lockPath}`);
+  }
+  if (lockStat.nlink > 1) {
+    await lockHandle.close();
+    throw new Error(`${label} lock path has multiple hard links: ${lockPath}`);
+  }
+  try {
+    assertLockFileAuthority(lockPath, lockStat);
+  } catch (error) {
+    await lockHandle.close();
+    throw error;
+  }
+  try {
+    await assertLockPathIdentity(lockPath, lockStat);
+  } catch (error) {
+    await lockHandle.close();
+    throw error;
+  }
+  const inheritedLockPath =
+    process.platform === "linux" ? "/proc/self/fd/3" : "/dev/fd/3";
+  const invocation = advisoryLockInvocation(
+    process.platform,
+    inheritedLockPath,
+  );
+  const holder = spawn(invocation.command, invocation.args, {
+    stdio: ["pipe", "pipe", "pipe", lockHandle.fd],
+  });
+  let releasing = false;
+  let holderFailure = null;
+  let identityMonitor = null;
+  const recordHolderFailure = (error) => {
+    if (releasing || holderFailure) return;
+    holderFailure = error;
+    onFailure?.(holderFailure);
+  };
+  const onUnexpectedExit = (code, signal) => {
+    recordHolderFailure(
+      new Error(
+        `${label} lock holder exited unexpectedly (exit ${code ?? signal ?? "unknown"})`,
+      ),
+    );
+  };
+  const onStdinError = (error) => {
+    recordHolderFailure(
+      new Error(`${label} lock holder command pipe failed`, { cause: error }),
+    );
+  };
+  holder.stdin.on("error", onStdinError);
+  try {
+    await waitForLockHolder(holder, invocation, label, lockPath);
+    await assertLockPathIdentity(lockPath, lockStat);
+    holder.once("exit", onUnexpectedExit);
+    if (holder.exitCode !== null || holder.signalCode !== null) {
+      onUnexpectedExit(holder.exitCode, holder.signalCode);
+    }
+    await lockHandle.close();
+    if (holderFailure) throw holderFailure;
+    identityMonitor = setInterval(() => {
+      try {
+        assertLockPathIdentitySync(lockPath, lockStat);
+      } catch (error) {
+        recordHolderFailure(error);
+      }
+    }, 25);
+    identityMonitor.unref();
+  } catch (error) {
+    releasing = true;
+    if (identityMonitor) clearInterval(identityMonitor);
+    holder.off("exit", onUnexpectedExit);
+    await discardLockHolder(holder);
+    holder.stdin.off("error", onStdinError);
+    await lockHandle.close().catch(() => undefined);
+    throw error;
   }
   let released = false;
+  const assertHealthy = () => {
+    if (holderFailure) throw holderFailure;
+    try {
+      assertLockPathIdentitySync(lockPath, lockStat);
+    } catch (error) {
+      recordHolderFailure(error);
+      throw holderFailure;
+    }
+  };
   return {
     lockPath,
+    lockHolderPid: holder.pid,
+    assertHealthy,
+    async publishTemp(from, to, parentIdentity = null) {
+      assertHealthy();
+      return await publishWithLockHolder(
+        holder,
+        from,
+        to,
+        label,
+        parentIdentity,
+      );
+    },
     async release() {
       if (released) return;
-      const currentText = await readFile(lockPath, "utf8");
-      if (currentText !== ownerText) {
-        throw new Error(`${label} ownership changed before release`);
+      releasing = true;
+      if (identityMonitor) clearInterval(identityMonitor);
+      holder.off("exit", onUnexpectedExit);
+      try {
+        await closeLockHolder(holder, label);
+        released = true;
+        if (holderFailure) throw holderFailure;
+      } finally {
+        holder.stdin.off("error", onStdinError);
       }
-      await rm(lockPath, { force: false });
-      released = true;
     },
   };
 }
@@ -773,6 +1170,7 @@ export function createWorkspaceReservation(
   cmuxSocketPath,
   workspace,
   lockRoot = "/tmp",
+  onFailure = undefined,
 ) {
   const key = createHash("sha256")
     .update(resolve(cmuxSocketPath))
@@ -782,6 +1180,7 @@ export function createWorkspaceReservation(
   return createPidLock(
     lockPath,
     `Nightly socket ${cmuxSocketPath} (requested workspace ${workspace})`,
+    onFailure,
   );
 }
 
@@ -844,13 +1243,19 @@ export function daemonLogPath(
 }
 
 export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
-  const cleanBaseEnv = { ...baseEnv };
-  delete cleanBaseEnv.CMUXLAYER_FORCE_INPROCESS;
-  delete cleanBaseEnv.CMUXLAYER_DEFAULT_PALETTE;
-  delete cleanBaseEnv.CMUXLAYER_DAEMON_FD;
-  delete cleanBaseEnv.LISTEN_FDS;
-  delete cleanBaseEnv.LISTEN_PID;
-  delete cleanBaseEnv.LISTEN_FDNAMES;
+  const blockedNames = new Set([
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "BUN_OPTIONS",
+    "LISTEN_FDS",
+    "LISTEN_PID",
+    "LISTEN_FDNAMES",
+  ]);
+  const cleanBaseEnv = Object.fromEntries(
+    Object.entries(baseEnv).filter(
+      ([name]) => !name.startsWith("CMUXLAYER_") && !blockedNames.has(name),
+    ),
+  );
   const root = reservation.ownerDirectory;
   const isolatedHome = join(root, "home");
   return stringEnv({
@@ -1613,15 +2018,19 @@ async function resolveExecutable(command, env) {
   return realpath(candidate);
 }
 
+function attestedArtifactEntries(provenance) {
+  return [
+    ...Object.values(provenance.entries ?? {}),
+    ...(provenance.runtime_files ?? []),
+    ...(provenance.cli_executable ? [provenance.cli_executable] : []),
+  ];
+}
+
 export async function assertArtifactProvenance(
   provenance,
   hashFile = sha256File,
 ) {
-  const attested = [
-    ...Object.values(provenance.entries),
-    ...(provenance.runtime_files ?? []),
-    ...(provenance.cli_executable ? [provenance.cli_executable] : []),
-  ];
+  const attested = attestedArtifactEntries(provenance);
   if (provenance.runtime_root && provenance.runtime_files) {
     const expectedPaths = provenance.runtime_files.map((entry) => entry.path);
     const observedPaths = await listRuntimeFiles(provenance.runtime_root);
@@ -1639,6 +2048,315 @@ export async function assertArtifactProvenance(
   }
 }
 
+function canonicalArtifactPath(path) {
+  return realpath(resolve(path)).catch((error) => {
+    if (error?.code === "ENOENT") return resolve(path);
+    throw error;
+  });
+}
+
+export async function assertOutputOutsideArtifactProvenance(
+  outputPath,
+  provenance,
+  canonicalize = canonicalArtifactPath,
+) {
+  if (!outputPath) return;
+  const canonicalOutput = await canonicalize(outputPath);
+  if (provenance.runtime_root) {
+    const canonicalRuntimeRoot = await canonicalize(provenance.runtime_root);
+    const outputWithinRuntime = relative(canonicalRuntimeRoot, canonicalOutput);
+    if (
+      outputWithinRuntime === "" ||
+      (outputWithinRuntime !== ".." &&
+        !outputWithinRuntime.startsWith(`..${sep}`) &&
+        !isAbsolute(outputWithinRuntime))
+    ) {
+      throw new Error(
+        `output receipt is inside attested runtime root: ${canonicalOutput}`,
+      );
+    }
+  }
+  for (const entry of attestedArtifactEntries(provenance)) {
+    if (canonicalOutput === (await canonicalize(entry.path))) {
+      throw new Error(
+        `output receipt aliases attested artifact: ${canonicalOutput}`,
+      );
+    }
+  }
+}
+
+export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
+  const args = ["status", "--porcelain", "--untracked-files=all"];
+  if (!outputPath) return args;
+  const outputRelative = relative(resolve(root), resolve(outputPath));
+  if (
+    outputRelative === "" ||
+    outputRelative === ".." ||
+    outputRelative.startsWith(`..${sep}`)
+  ) {
+    return args;
+  }
+  const pathspec = outputRelative.split(sep).join("/");
+  const sidecarExclusions = ownedSidecarPaths
+    .filter((sidecarPath) => ownedReceiptSidecarKind(outputPath, sidecarPath))
+    .map((sidecarPath) => relative(resolve(root), resolve(sidecarPath)))
+    .filter(
+      (tempRelative) =>
+        tempRelative !== "" &&
+        tempRelative !== ".." &&
+        !tempRelative.startsWith(`..${sep}`),
+    )
+    .map(
+      (tempRelative) =>
+        `:(exclude,literal)${tempRelative.split(sep).join("/")}`,
+    );
+  return [
+    ...args,
+    "--",
+    ".",
+    `:(exclude,literal)${pathspec}`,
+    ...sidecarExclusions,
+  ];
+}
+
+async function isGitMetadataRoot(root) {
+  try {
+    const [head, objects, refs] = await Promise.all([
+      stat(join(root, "HEAD")),
+      stat(join(root, "objects")),
+      stat(join(root, "refs")),
+    ]);
+    if (
+      !head.isFile() ||
+      !objects.isDirectory() ||
+      !refs.isDirectory()
+    ) {
+      return false;
+    }
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  return true;
+}
+
+async function resolveGitMetadataPathsAtRoot(root) {
+  if (await isGitMetadataRoot(root)) {
+    return [await realpath(root)];
+  }
+  const markerPath = resolve(root, ".git");
+  const markerStat = await lstat(markerPath).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!markerStat) return [markerPath];
+  let gitDirectory = markerPath;
+  if (markerStat.isFile()) {
+    const marker = await readFile(markerPath, "utf8");
+    const match = /^gitdir:\s*(.+)$/m.exec(marker);
+    if (!match) throw new Error(`invalid Git directory marker: ${markerPath}`);
+    gitDirectory = resolve(dirname(markerPath), match[1]);
+  } else {
+    gitDirectory = await realpath(markerPath);
+  }
+  gitDirectory = await realpath(gitDirectory);
+  const commonDirectory = await readFile(join(gitDirectory, "commondir"), "utf8")
+    .then((value) => resolve(gitDirectory, value.trim()))
+    .catch((error) => {
+      if (error?.code === "ENOENT") return gitDirectory;
+      throw error;
+    });
+  const canonicalCommonDirectory = await realpath(commonDirectory);
+  return [
+    ...new Set(
+      [markerPath, gitDirectory, canonicalCommonDirectory].map((path) =>
+        resolve(path),
+      ),
+    ),
+  ];
+}
+
+export async function resolveGitRepositoryRoots(root, outputPath = null) {
+  const absoluteRoot = await realpath(resolve(root)).catch((error) => {
+    if (error?.code === "ENOENT") return resolve(root);
+    throw error;
+  });
+  const candidateRoots = [absoluteRoot];
+  if (outputPath) {
+    const absoluteOutput = await canonicalOutputPath(outputPath);
+    for (let candidate = dirname(absoluteOutput); ; candidate = dirname(candidate)) {
+      if (candidate !== absoluteRoot) {
+        const markerExists = await lstat(join(candidate, ".git"))
+          .then(() => true)
+          .catch((error) => {
+            if (error?.code === "ENOENT") return false;
+            throw error;
+          });
+        if (markerExists || (await isGitMetadataRoot(candidate))) {
+          candidateRoots.push(candidate);
+        }
+      }
+      if (dirname(candidate) === candidate) break;
+    }
+  }
+  return [...new Set(candidateRoots)];
+}
+
+export async function resolveGitMetadataPaths(root, outputPath = null) {
+  const candidateRoots = await resolveGitRepositoryRoots(root, outputPath);
+  return [
+    ...new Set(
+      (await Promise.all(candidateRoots.map(resolveGitMetadataPathsAtRoot))).flat(),
+    ),
+  ];
+}
+
+export async function assertOutputOutsideGitMetadata(
+  outputPath,
+  root,
+  resolveMetadata = resolveGitMetadataPaths,
+) {
+  if (!outputPath) return;
+  const absoluteOutput = await canonicalOutputPath(outputPath);
+  const metadataPaths = await resolveMetadata(root, absoluteOutput);
+  for (const metadataPath of metadataPaths) {
+    const absoluteMetadata = resolve(metadataPath);
+    const outputWithinMetadata = relative(absoluteMetadata, absoluteOutput);
+    if (
+      outputWithinMetadata === "" ||
+      (outputWithinMetadata !== ".." &&
+        !outputWithinMetadata.startsWith(`..${sep}`) &&
+        !isAbsolute(outputWithinMetadata))
+    ) {
+      throw new Error(
+        `refusing output path inside Git metadata: ${absoluteOutput}`,
+      );
+    }
+  }
+}
+
+const REDIRECTED_GIT_ENVIRONMENT_NAMES = [
+  "GIT_DIR",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_WORK_TREE",
+];
+
+function provenanceExecEnvironment(sourceEnv, rejectRedirected) {
+  const redirected = REDIRECTED_GIT_ENVIRONMENT_NAMES.filter(
+    (name) => sourceEnv[name],
+  );
+  if (rejectRedirected && redirected.length > 0) {
+    throw new Error(
+      `redirected Git metadata is unsupported for benchmark provenance: ${redirected.join(", ")}`,
+    );
+  }
+  const execEnv = { ...sourceEnv };
+  for (const name of REDIRECTED_GIT_ENVIRONMENT_NAMES) delete execEnv[name];
+  for (const name of Object.keys(execEnv)) {
+    if (name === "GIT_CONFIG" || name.startsWith("GIT_CONFIG_")) {
+      delete execEnv[name];
+    }
+  }
+  for (const name of [
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+  ]) {
+    delete execEnv[name];
+  }
+  for (const name of ["NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS"]) {
+    delete execEnv[name];
+  }
+  return execEnv;
+}
+
+function createProvenanceGitChecks({
+  config,
+  root,
+  exec,
+  execOptions,
+  enumerateOwnedSidecars,
+  canonicalOutput,
+  outputRepositoryRoots,
+}) {
+  const ownedSidecarPaths = async () =>
+    config.out
+      ? (await enumerateOwnedSidecars(config.out)).map((sidecar) =>
+          typeof sidecar === "string" ? sidecar : sidecar.candidate,
+        )
+      : [];
+  const readWorktreeStatus = async () =>
+    exec(
+      "git",
+      [
+        "-C",
+        root,
+        ...provenanceStatusArgs(root, config.out, await ownedSidecarPaths()),
+      ],
+      execOptions,
+    );
+  const readHead = () => exec("git", ["rev-parse", "HEAD"], execOptions);
+  const assertOutputUntracked = async () => {
+    for (const [index, repositoryRoot] of outputRepositoryRoots.entries()) {
+      const outputRelative = config.out
+        ? relative(resolve(repositoryRoot), canonicalOutput)
+        : null;
+      if (
+        !outputRelative ||
+        outputRelative === ".." ||
+        outputRelative.startsWith(`..${sep}`)
+      ) {
+        continue;
+      }
+      const pathspec = outputRelative.split(sep).join("/");
+      const sidecarPathspecs = (await ownedSidecarPaths())
+        .filter((sidecarPath) =>
+          ownedReceiptSidecarKind(config.out, sidecarPath),
+        )
+        .map((sidecarPath) =>
+          relative(resolve(repositoryRoot), resolve(sidecarPath)),
+        )
+        .filter(
+          (tempRelative) =>
+            tempRelative !== "" &&
+            tempRelative !== ".." &&
+            !tempRelative.startsWith(`..${sep}`),
+        )
+        .map(
+          (tempRelative) =>
+            `:(literal)${tempRelative.split(sep).join("/")}`,
+        );
+      const gitPrefix = index === 0 ? [] : ["-C", repositoryRoot];
+      const trackedOutput = await exec(
+        "git",
+        [
+          ...gitPrefix,
+          "ls-files",
+          "--cached",
+          "--with-tree=HEAD",
+          "--",
+          `:(literal)${pathspec}`,
+          ...sidecarPathspecs,
+        ],
+        execOptions,
+      );
+      const trackedPath = trackedOutput.stdout.trim().split("\n")[0];
+      if (!trackedPath) continue;
+      if (trackedPath === pathspec) {
+        throw new Error(`refusing to use a tracked output receipt: ${config.out}`);
+      }
+      throw new Error(
+        `refusing to overwrite tracked output artifact: ${trackedPath}`,
+      );
+    }
+  };
+  return { assertOutputUntracked, readHead, readWorktreeStatus };
+}
+
 export async function prepareBuiltEntries(config, deps = {}) {
   const root = deps.repoRoot ?? repoRoot;
   const exec = deps.exec ?? execCapture;
@@ -1646,6 +2364,15 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const hashFile = deps.hashFile ?? sha256File;
   const enumerateRuntimeFiles = deps.listRuntimeFiles ?? listRuntimeFiles;
   const resolveCliExecutable = deps.resolveExecutable ?? resolveExecutable;
+  const enumerateOwnedSidecars =
+    deps.listOwnedReceiptSidecars ??
+    deps.listOwnedReceiptTemps ??
+    listOwnedReceiptSidecars;
+  const execEnv = provenanceExecEnvironment(
+    config.env ?? process.env,
+    Boolean(config.env),
+  );
+  const execOptions = { env: execEnv, signal: config.signal };
   const expectedMcpEntry = join(root, "dist", "index.js");
   const expectedDaemonEntry = join(root, "dist", "daemon.js");
   if (
@@ -1656,23 +2383,40 @@ export async function prepareBuiltEntries(config, deps = {}) {
       "custom built entries have unverifiable source provenance; use the repository dist/index.js and dist/daemon.js",
     );
   }
-  const readTrackedStatus = () =>
-    exec("git", ["status", "--porcelain", "--untracked-files=no"], {
-      env: config.env,
+  await assertOutputOutsideGitMetadata(
+    config.out,
+    root,
+    deps.resolveGitMetadataPaths,
+  );
+  const canonicalOutput = config.out
+    ? await canonicalOutputPath(config.out)
+    : null;
+  const outputRepositoryRoots = config.out
+    ? await resolveGitRepositoryRoots(root, canonicalOutput)
+    : [resolve(root)];
+  const { assertOutputUntracked, readHead, readWorktreeStatus } =
+    createProvenanceGitChecks({
+      config,
+      root,
+      exec,
+      execOptions,
+      enumerateOwnedSidecars,
+      canonicalOutput,
+      outputRepositoryRoots,
     });
-  const readHead = () =>
-    exec("git", ["rev-parse", "HEAD"], { env: config.env });
-  const status = await readTrackedStatus();
+  await assertOutputUntracked();
+  const status = await readWorktreeStatus();
   if (status.stdout.trim()) {
     throw new Error(
-      "refusing to benchmark built artifacts from a dirty tracked worktree",
+      "refusing to benchmark built artifacts from a dirty worktree",
     );
   }
   const head = await readHead();
-  await exec("bun", ["run", "build"], { env: config.env });
-  const finalStatus = await readTrackedStatus();
+  await exec("bun", ["run", "build"], execOptions);
+  await assertOutputUntracked();
+  const finalStatus = await readWorktreeStatus();
   if (finalStatus.stdout.trim()) {
-    throw new Error("tracked worktree changed during artifact build");
+    throw new Error("worktree changed during artifact build");
   }
   const finalHead = await readHead();
   if (finalHead.stdout.trim() !== head.stdout.trim()) {
@@ -1760,6 +2504,136 @@ export async function releaseReservations(reservations) {
   }
 }
 
+export async function rollbackReservation(primaryError, reservation, message) {
+  try {
+    await reservation.release();
+  } catch (releaseError) {
+    throw new AggregateError([primaryError, releaseError], message);
+  }
+  throw primaryError;
+}
+
+async function syncReceiptTemp(path) {
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  try {
+    const entry = await handle.stat();
+    if (!entry.isFile() || entry.nlink !== 1) {
+      throw new Error(`receipt temp is not a singly linked regular file: ${path}`);
+    }
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncReceiptParent(path) {
+  const handle = await open(path, constants.O_RDONLY);
+  try {
+    const entry = await handle.stat();
+    if (!entry.isDirectory()) {
+      throw new Error(`receipt parent is not a directory: ${path}`);
+    }
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function publishBenchmarkReceipt(
+  path,
+  receipt,
+  outputReservation,
+  writeReceipt = writeReceiptAtomically,
+  abortSignal = null,
+) {
+  abortSignal?.throwIfAborted();
+  outputReservation.assertHealthy?.();
+  await writeReceipt(path, `${JSON.stringify(receipt, null, 2)}\n`, abortSignal, {
+    publishTemp: outputReservation.publishTemp,
+  });
+  abortSignal?.throwIfAborted();
+  outputReservation.assertHealthy?.();
+  await outputReservation.release();
+}
+
+export async function writeReceiptAtomically(
+  path,
+  contents,
+  abortSignal = null,
+  deps = {},
+) {
+  const writeTemp = deps.writeTemp ?? writeFile;
+  const syncTemp = deps.syncTemp ?? syncReceiptTemp;
+  const publishTemp = deps.publishTemp ?? rename;
+  const syncParent = deps.syncParent ?? syncReceiptParent;
+  const removeTemp = deps.removeTemp ?? rm;
+  const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeTemp(tempPath, contents, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+      signal: abortSignal ?? undefined,
+    });
+    await syncTemp(tempPath);
+    abortSignal?.throwIfAborted();
+    await publishTemp(tempPath, path);
+    await syncParent(dirname(path));
+  } finally {
+    await Promise.resolve(removeTemp(tempPath, { force: true })).catch(
+      () => undefined,
+    );
+  }
+}
+
+export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
+  const signal = deps.signal ?? null;
+  const canonicalize = deps.canonicalize ?? canonicalOutputPath;
+  const prepare = deps.prepare ?? prepareBuiltEntries;
+  const validate = deps.validate ?? assertArtifactProvenance;
+  const reserve = deps.reserve ?? createOutputReservation;
+  signal?.throwIfAborted();
+  config.out = await canonicalize(config.out);
+  signal?.throwIfAborted();
+  const artifactProvenance = await prepare({
+    ...config,
+    env: process.env,
+    signal,
+  });
+  signal?.throwIfAborted();
+  config.cmuxBin = artifactProvenance.cli_executable.path;
+  await validate(artifactProvenance);
+  signal?.throwIfAborted();
+  await assertOutputOutsideArtifactProvenance(
+    config.out,
+    artifactProvenance,
+    deps.canonicalizeArtifact,
+  );
+  signal?.throwIfAborted();
+  const outputReservation = await reserve(config.out);
+  try {
+    signal?.throwIfAborted();
+    if (
+      outputReservation.outputPath !== undefined &&
+      resolve(outputReservation.outputPath) !== resolve(config.out)
+    ) {
+      throw new Error(
+        `output path changed after provenance validation: ${config.out} -> ${outputReservation.outputPath}`,
+      );
+    }
+  } catch (error) {
+    await rollbackReservation(
+      error,
+      outputReservation,
+      "preparation abort and output reservation rollback failed",
+    );
+  }
+  return { artifactProvenance, outputReservation };
+}
+
 async function main() {
   const config = parseConfig(process.argv.slice(2), process.env);
   if (config.help) {
@@ -1773,6 +2647,9 @@ async function main() {
     );
   }
   const abortController = new AbortController();
+  const abortForLockFailure = (error) => {
+    if (!abortController.signal.aborted) abortController.abort(error);
+  };
   const removeSignalHandlers = installGracefulSignalAbort(abortController);
   try {
     const stableWorkspaceId = await resolveStableWorkspaceId(config.workspace, {
@@ -1783,6 +2660,8 @@ async function main() {
     const workspaceReservation = await createWorkspaceReservation(
       isolation.cmuxSocketPath,
       stableWorkspaceId,
+      "/tmp",
+      abortForLockFailure,
     );
     let outputReservation = null;
     const releaseTopLevel = () =>
@@ -1791,13 +2670,20 @@ async function main() {
       );
     try {
       abortController.signal.throwIfAborted();
-      outputReservation = await createOutputReservation(config.out);
+      const prepared = await prepareProvenanceThenReserveOutput(config, {
+        signal: abortController.signal,
+        reserve: (outputPath) =>
+          createOutputReservation(outputPath, abortForLockFailure),
+      });
+      outputReservation = prepared.outputReservation;
       abortController.signal.throwIfAborted();
       await executeBenchmark(
         config,
         isolation,
         abortController.signal,
-        releaseTopLevel,
+        () => workspaceReservation.release(),
+        outputReservation,
+        prepared.artifactProvenance,
       );
     } finally {
       await releaseTopLevel();
@@ -1811,14 +2697,10 @@ async function executeBenchmark(
   config,
   isolation,
   abortSignal,
-  releaseTopLevel,
+  releaseWorkspaceReservation,
+  outputReservation,
+  artifactProvenance,
 ) {
-  const artifactProvenance = await prepareBuiltEntries({
-    ...config,
-    env: process.env,
-  });
-  config.cmuxBin = artifactProvenance.cli_executable.path;
-  await assertArtifactProvenance(artifactProvenance);
   abortSignal.throwIfAborted();
   const nightlySocket = await stat(isolation.cmuxSocketPath).catch(() => null);
   if (!nightlySocket?.isSocket()) {
@@ -1972,9 +2854,9 @@ async function executeBenchmark(
     fatalError = appendFatalError(fatalError, error, "artifact revalidation");
   }
   try {
-    await releaseTopLevel();
+    await releaseWorkspaceReservation();
   } catch (error) {
-    fatalError = appendFatalError(fatalError, error, "top-level release");
+    fatalError = appendFatalError(fatalError, error, "workspace release");
   }
 
   const receipt = {
@@ -2042,7 +2924,13 @@ async function executeBenchmark(
     rows: results,
     fatal_error: fatalError,
   };
-  await writeFile(config.out, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  await publishBenchmarkReceipt(
+    config.out,
+    receipt,
+    outputReservation,
+    undefined,
+    abortSignal,
+  );
   process.stdout.write(`${renderMarkdownTable(results)}\n`);
   process.stdout.write(`[bench-e2e] receipt ${config.out}\n`);
   if (fatalError || results.some((row) => row.error_count > 0)) {
