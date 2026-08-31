@@ -56,6 +56,7 @@ import {
   readWatchRegistry,
   sweepWatches,
 } from "../src/watch-spec.js";
+import { recordCliFallback } from "../src/transport-retry-context.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -8902,6 +8903,34 @@ describe("agent lifecycle tool handlers", () => {
       ok: true,
       rpc_methods: ["surface.send_text"],
       delivery_id: sent.delivery_id,
+    });
+  });
+
+  it("queued drains do not claim a socket RPC when deferred delivery falls back to CLI", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-queued-cli-fallback",
+      surface_id: "surface:worker-queued-cli-fallback",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server, client } = await createBroadcastServer([record]);
+    client.send.mockImplementation(async () => {
+      recordCliFallback("send_text");
+    });
+    const engine = testLifecycleEngine(server);
+    const queued = engine.queueDelivery({
+      agent_id: record.agent_id,
+      text: "Deliver after the lifecycle sweep",
+      press_enter: false,
+      source_event: "send_to",
+    });
+
+    await engine.drainDeliveryQueue();
+
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      terminal: true,
+      rpc_methods: [],
     });
   });
 

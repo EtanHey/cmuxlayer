@@ -13281,28 +13281,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
     // outside this lifecycle block).
     lifecycleAgentInputDeliverer = deliverAgentInput;
-    engine.setDeliverySubmitter(async (receipt) => {
-      const delivery = await deliverAgentInput({
-        agent_id: receipt.agent_id,
-        text: receipt.text,
-        press_enter: receipt.press_enter,
-        allow_busy: false,
-        source_event: receipt.source_event,
-        delivery_id: receipt.delivery_id,
-      });
-      return {
-        retry_count: delivery.retry_count,
-        submit_verified: delivery.submit_verified,
-        rpc_methods: delivery.rpc_methods,
-        ...(delivery.delivery === "submitted" ||
-        delivery.delivery === "queued" ||
-        delivery.delivery === "queued_followup" ||
-        delivery.delivery === "rescued" ||
-        delivery.delivery === "pending_verify"
-          ? { delivery: delivery.delivery }
-          : {}),
-      };
-    });
+    engine.setDeliverySubmitter((receipt) =>
+      withTransportRetryTracking(async () => {
+        const delivery = await deliverAgentInput({
+          agent_id: receipt.agent_id,
+          text: receipt.text,
+          press_enter: receipt.press_enter,
+          allow_busy: false,
+          source_event: receipt.source_event,
+          delivery_id: receipt.delivery_id,
+        });
+        return {
+          retry_count: delivery.retry_count,
+          submit_verified: delivery.submit_verified,
+          rpc_methods: delivery.rpc_methods,
+          ...(delivery.delivery === "submitted" ||
+          delivery.delivery === "queued" ||
+          delivery.delivery === "queued_followup" ||
+          delivery.delivery === "rescued" ||
+          delivery.delivery === "pending_verify"
+            ? { delivery: delivery.delivery }
+            : {}),
+        };
+      }),
+    );
 
     const deliverReportInboxPointer = async (
       recipient: AgentRecord,
