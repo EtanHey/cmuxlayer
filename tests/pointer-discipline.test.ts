@@ -875,6 +875,23 @@ describe("pane input pointer discipline", () => {
     context.dispose();
   });
 
+  it("fingerprints inline and file-backed prompt receipts without echoing them", async () => {
+    const promptPath = join(testDir, "receipt-prompt.md"), prompts = ["inline receipt secret", "file-backed receipt secret\nsecond line"];
+    writeFileSync(promptPath, prompts[1]!, "utf8");
+    const { createServer, createServerContext } = await loadServerModule();
+    for (const [index, prompt] of prompts.entries()) {
+      const context = createServerContext({ exec: makeLifecycleExec(), stateDir: join(testDir, `receipt-${index}`),
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      const result = await (createServer({ context }) as any)._registeredTools.spawn_agent.handler(
+        { repo: "brainlayer", model: "codex", cli: "codex", workspace: "workspace:1",
+          ...(index === 0 ? { prompt } : { boot_prompt_path: promptPath }) }, {} as any);
+      const receipt = parseToolResult(result).boot_prompt_receipt;
+      expect(receipt).toMatchObject({ prompt_bytes: Buffer.byteLength(prompt), prompt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(JSON.stringify(receipt)).not.toContain(prompt);
+      context.dispose();
+    }
+  });
+
   it.each([
     {
       toolName: "new_worktree_split",

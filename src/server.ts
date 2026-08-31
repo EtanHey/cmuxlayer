@@ -4,7 +4,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
 import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -677,7 +677,8 @@ const DeliveryReceiptOutputSchema = z
   .object({
     ...DeliveryOutputShape,
     bytes: z.number().int().nonnegative().optional(),
-    prompt_text: z.string().nullable().optional(),
+    prompt_bytes: z.number().int().nonnegative().optional(),
+    prompt_sha256: z.string().optional(),
     prompt_warning: z.string().nullable().optional(),
   })
   .passthrough();
@@ -7256,6 +7257,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
   };
 
+  const fingerprintPromptReceipt = <T extends object>(receipt: T, prompt: string) =>
+    Object.defineProperty(Object.assign(receipt, {
+      prompt_bytes: Buffer.byteLength(prompt, "utf8"),
+      prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
+    }), "prompt_text", { value: hasInlinePrompt(prompt) ? prompt : null }) as unknown as T & {
+      prompt_text: string | null;
+    };
+
   const deliverBootPrompt = async (opts: {
     surface: string;
     stableSurfaceIdentity?: string | null;
@@ -7281,7 +7290,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       !bootPromptPath &&
       !hasInlinePrompt(opts.injected_prompt)
     ) {
-      return {
+      return fingerprintPromptReceipt({
         ...buildPublicDeliveryReceipt({
           typed: false,
           submit_attempted: false,
@@ -7289,9 +7298,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           retry_count: 0,
         }),
         bytes: 0,
-        prompt_text: null,
         prompt_warning: null,
-      };
+      }, "");
     }
 
     const rawPrompt = bootPromptPath
@@ -7368,7 +7376,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       : undefined;
     if (readiness.delivery_state === "queued") {
-      return {
+      return fingerprintPromptReceipt({
         ...buildPublicDeliveryReceipt({
           delivery_state: "queued",
           typed: false,
@@ -7383,9 +7391,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "the live pane remains available for inspection or retry.",
         }),
         bytes: 0,
-        prompt_text: hasInlinePrompt(rawPrompt) ? rawPrompt : null,
         prompt_warning: promptWarning,
-      };
+      }, rawPrompt);
     }
     let sentChunks = 0;
 
@@ -7421,11 +7428,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stableSurfaceIdentity: opts.stableSurfaceIdentity,
         },
       );
-      return {
+      return fingerprintPromptReceipt({
         ...delivery,
-        prompt_text: hasInlinePrompt(rawPrompt) ? rawPrompt : null,
         prompt_warning: promptWarning,
-      };
+      }, rawPrompt);
     } catch (error) {
       if (error instanceof SurfaceGoneError) {
         throw error;
@@ -7467,7 +7473,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               error,
             );
           }
-          return {
+          return fingerprintPromptReceipt({
             ...buildPublicDeliveryReceipt({
               delivery_state: "submitted",
               typed: true,
@@ -7477,9 +7483,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               retry_count: error.retry_count,
             }),
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
-            prompt_text: rawPrompt,
             prompt_warning: promptWarning,
-          };
+          }, rawPrompt);
         }
       }
 
