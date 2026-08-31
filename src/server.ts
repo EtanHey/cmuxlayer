@@ -1164,7 +1164,9 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "rescued" ||
     evidencedState === "failed" ||
     evidencedState === "failed_confirmed";
-  const warning = input.WARNING ?? defaultNonDeliveryWarning(evidencedState);
+  const warning =
+    input.WARNING ??
+    defaultNonDeliveryWarning(evidencedState, input.rpc_methods ?? []);
   return {
     delivered: evidencedState === "submitted" && input.submit_verified === true,
     terminal,
@@ -1207,6 +1209,7 @@ export function buildPublicDeliveryReceipt(input: {
  */
 function defaultNonDeliveryWarning(
   state: PublicDeliveryState | undefined,
+  rpcMethods: readonly DeliveryRpcMethod[],
 ): string | undefined {
   switch (state) {
     case "pending_verify":
@@ -1219,6 +1222,17 @@ function defaultNonDeliveryWarning(
       );
     case "failed":
     case "failed_confirmed":
+      if (rpcMethods.includes("surface.send_text")) {
+        return rpcMethods.includes("surface.send_key")
+          ? `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}) after ` +
+              "text reached the target and the submission key was sent. The task " +
+              "may have been submitted despite the later failure; do not resend. " +
+              "Inspect the target pane before any recovery."
+          : `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}). The ` +
+              "text reached the target composer, but no submission key succeeded; " +
+              "it may remain there unsubmitted. Do not resend. Inspect the target " +
+              "pane before any recovery.";
+      }
       return (
         `NOT DELIVERED — terminal failure (${state}). The message did not ` +
         "land and will not be retried; do not relay as sent."
