@@ -21,6 +21,7 @@ import {
   assertOutputOutsideGitMetadata,
   assertNightlyIsolation,
   assertArtifactProvenance,
+  benchmarkGateFailures,
   assertLockPathIdentity,
   assertLockFileAuthority,
   assertCliFairnessTrace,
@@ -57,6 +58,7 @@ import {
   provenanceStatusArgs,
   publishWithLockHolder,
   publishBenchmarkReceipt,
+  renderPhase1BeforePublication,
   renderMarkdownTable,
   releaseReservations,
   resolveGitMetadataPaths,
@@ -328,6 +330,271 @@ describe("bench-e2e measurement harness", () => {
 
     expect(table).toContain("| attempts | successes | failure % | p50 ms |");
     expect(table).toContain("| 60 | 47 | 21.67 | 100 | 200 |");
+  });
+
+  it("fails the benchmark gate on every MCP CLI fallback", () => {
+    const directCliArm = {
+      operation: "read_screen",
+      client: "cli",
+      concurrency_profile: "c1",
+      error_count: 0,
+      transport_counts: { cli: 12 },
+      transport_fallback_counts: {},
+    };
+    const socketMcpArm = {
+      operation: "send_to",
+      client: "mcp",
+      concurrency_profile: "c1",
+      payload_chars: 450,
+      error_count: 0,
+      transport_counts: { UNTRUSTED: 12 },
+      transport_fallback_counts: { UNTRUSTED_D180: 12 },
+      reported_transport_counts: { socket: 12 },
+      reported_transport_fallback_counts: {},
+      inferred_transport: "socket",
+      transport_trust: "untrusted",
+    };
+
+    expect(benchmarkGateFailures([directCliArm, socketMcpArm], null)).toEqual(
+      [],
+    );
+
+    const failures = benchmarkGateFailures(
+      [
+        {
+          ...socketMcpArm,
+          concurrency_profile: "c5",
+          payload_chars: 520,
+          inferred_transport: "cli",
+        },
+        {
+          ...socketMcpArm,
+          operation: "read_screen",
+          transport_counts: { cli: 1, socket: 11 },
+        },
+        {
+          ...socketMcpArm,
+          operation: "list_surfaces",
+          transport_counts: { socket: 12 },
+          reported_transport_fallback_counts: { cli_fallback_active: 1 },
+        },
+        {
+          ...socketMcpArm,
+          operation: "read_screen",
+          transport_counts: { unknown: 12 },
+          reported_transport_counts: {},
+          inferred_transport: undefined,
+        },
+        {
+          ...socketMcpArm,
+          operation: "list_surfaces",
+          transport_counts: {},
+          reported_transport_counts: { socket: 12 },
+          inferred_transport: "socket",
+        },
+      ],
+      null,
+    );
+
+    expect(failures).toHaveLength(5);
+    expect(failures.slice(0, 3).every((failure) =>
+      failure.includes("cli fallback active"),
+    )).toBe(true);
+    expect(failures[0]).toContain("send_to mcp c5 payload=520");
+    expect(failures[3]).toContain("unattested transport: transport_counts.unknown=12");
+    expect(failures[4]).toContain("unattested transport: no attested transport");
+  });
+
+  it("renders the phase-1 BEFORE publication with tags, collapsed rows, and D201 evidence", () => {
+    const d201 = {
+      c1: {
+        250: [0, 100],
+        450: [0, 110],
+        520: [0, 120],
+        900: [0, 130],
+      },
+      c5: {
+        250: [0, 700],
+        450: [0, 710],
+        520: [25, 819.45],
+        900: [23.33, 1234.46],
+      },
+      c10: {
+        250: [0, 1400],
+        450: [0, 1500],
+        520: [8.33, 1753.81],
+        900: [6.67, 2198.73],
+      },
+    };
+    const sendRows = Object.entries(d201).flatMap(([profile, payloads]) =>
+      Object.entries(payloads).map(([payload, [failureRate, p50]]) => ({
+        operation: "send_to",
+        client: "mcp",
+        concurrency_profile: profile,
+        payload_chars: Number(payload),
+        comparison_status: "MEASURED",
+        sample_count: Number(profile.slice(1)) * 12,
+        attempt_count: Number(profile.slice(1)) * 12,
+        success_count:
+          (Number(profile.slice(1)) * 12 * (100 - failureRate)) / 100,
+        failure_rate_pct: failureRate,
+        p50_ms: p50,
+        p95_ms: p50 + 100,
+        error_count: failureRate === 0 ? 0 : 1,
+        transport_counts: { UNTRUSTED: Number(profile.slice(1)) * 12 },
+        transport_fallback_counts: {
+          UNTRUSTED_D180: Number(profile.slice(1)) * 12,
+        },
+        transport_trust: "untrusted",
+        inferred_transport: Number(payload) > 500 ? "cli" : "socket",
+      })),
+    );
+    const receipt = {
+      git_head: "a".repeat(40),
+      started_at: "2026-08-31T12:25:31.400Z",
+      fatal_error: null,
+      rows: [
+        ...sendRows,
+        {
+          operation: "read_screen",
+          client: "mcp",
+          concurrency_profile: "c1",
+          payload_chars: null,
+          comparison_status: "MEASURED",
+          sample_count: 12,
+          attempt_count: 12,
+          success_count: 12,
+          failure_rate_pct: 0,
+          p50_ms: 40,
+          p95_ms: 50,
+          error_count: 0,
+          transport_counts: { socket: 12 },
+          transport_fallback_counts: {},
+        },
+        {
+          operation: "list_surfaces",
+          client: "cli",
+          concurrency_profile: "c10",
+          payload_chars: null,
+          comparison_status: "MEASURED",
+          sample_count: 120,
+          attempt_count: 120,
+          success_count: 106,
+          failure_rate_pct: 11.67,
+          p50_ms: 655.48,
+          p95_ms: 859.84,
+          error_count: 14,
+          transport_counts: { cli: 106, unknown: 14 },
+          transport_fallback_counts: {},
+        },
+        {
+          operation: "send_to",
+          client: "cli",
+          concurrency_profile: "c1",
+          payload_chars: 250,
+          comparison_status: "NOT_COMPARABLE",
+          sample_count: 0,
+          attempt_count: 0,
+          success_count: 0,
+          failure_rate_pct: null,
+          p50_ms: null,
+          p95_ms: null,
+          error_count: 0,
+          transport_counts: {},
+          transport_fallback_counts: {},
+        },
+      ],
+    };
+    const markdown = renderPhase1BeforePublication(receipt);
+
+    const summary = markdown.split("<details>")[0];
+    expect(summary).toContain("7 rows unchanged");
+    expect(summary).not.toContain("| read_screen | c1 | - | mcp |");
+    expect(summary).toContain(
+      "| send_to | c5 | 520 | mcp | sampled | FAIL | CLI_FALLBACK, OPERATION_ERROR |",
+    );
+    expect(summary).toContain(
+      "| send_to | c1 | 250 | cli | single_shot | NOT_COMPARABLE | FAIRNESS_CONTRACT | — | — | — | — | — |",
+    );
+    expect(markdown).toContain("<summary>Full 15-row BEFORE table</summary>");
+    expect(markdown).toContain("| read_screen | c1 | - | mcp | sampled | PASS |");
+
+    const fatalMarkdown = renderPhase1BeforePublication({
+      ...receipt,
+      fatal_error: "workspace release failed after measurement",
+    });
+    expect(fatalMarkdown.split("<details>")[0]).toContain(
+      "Fatal gate failure: workspace release failed after measurement",
+    );
+
+    const partialFatalMarkdown = renderPhase1BeforePublication({
+      ...receipt,
+      fatal_error: "daemon stopped before matrix completion",
+      rows: receipt.rows.filter((row) => row.operation === "read_screen"),
+    });
+    expect(partialFatalMarkdown).toContain(
+      "D201: INCONCLUSIVE — required sampled rows are incomplete:",
+    );
+    expect(markdown).toContain("250/450 = 0% at c1, c5, and c10");
+    expect(markdown).toContain("c1 = 0% at both 520 and 900 characters");
+    expect(markdown).toContain(
+      "c5 520/900 = 25%/23.33% at p50 819.45/1234.46 ms",
+    );
+    expect(markdown).toContain(
+      "c10 520/900 = 8.33%/6.67% at p50 1753.81/2198.73 ms",
+    );
+    expect(markdown).toContain("evidence against simple capacity exhaustion");
+    expect(markdown).toContain("does not identify the racing party");
+
+    const predicateBreaks = [
+      ["c5", 450, 1],
+      ["c1", 900, 1],
+      ["c10", 520, 30],
+    ];
+    for (const [profile, payload, failureRate] of predicateBreaks) {
+      const inconclusive = renderPhase1BeforePublication({
+        ...receipt,
+        rows: receipt.rows.map((row) =>
+          row.operation === "send_to" &&
+          row.client === "mcp" &&
+          row.concurrency_profile === profile &&
+          row.payload_chars === payload
+            ? { ...row, failure_rate_pct: failureRate }
+            : row,
+        ),
+      });
+      expect(inconclusive).toContain("D201: INCONCLUSIVE");
+      expect(inconclusive).not.toContain(
+        "evidence against simple capacity exhaustion",
+      );
+    }
+
+    const contradictory = renderPhase1BeforePublication({
+      ...receipt,
+      rows: receipt.rows.map((row) => {
+        const replacement = [
+          ["c5", 450, 1],
+          ["c1", 900, 1],
+          ["c10", 520, 30],
+        ].find(
+          ([profile, payload]) =>
+            row.operation === "send_to" &&
+            row.client === "mcp" &&
+            row.concurrency_profile === profile &&
+            row.payload_chars === payload,
+        );
+        return replacement ? { ...row, failure_rate_pct: replacement[2] } : row;
+      }),
+    });
+    expect(contradictory).not.toContain("250/450 = 0% at c1, c5, and c10");
+    expect(contradictory).not.toContain(
+      "c1 = 0% at both 520 and 900 characters",
+    );
+    expect(contradictory).not.toContain(
+      "c10 fails less than c5 while latency rises substantially",
+    );
+    expect(contradictory).toContain("Observed boundary rates");
+    expect(contradictory).toContain("Observed high-payload rates and latency");
   });
 
   it("refuses production or ambiguous socket configuration", () => {

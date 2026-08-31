@@ -1918,6 +1918,245 @@ function compactCounts(counts) {
     : entries.map(([name, count]) => `${name}:${count}`).join(",");
 }
 
+function benchmarkRowIdentity(row) {
+  return `${row.operation} ${row.client} ${row.concurrency_profile ?? `c${row.concurrency}`} payload=${row.payload_chars ?? "-"}`;
+}
+
+function positiveCountEntries(counts) {
+  return Object.entries(counts ?? {}).filter(
+    ([, count]) => Number.isFinite(count) && count > 0,
+  );
+}
+
+export function benchmarkGateFailures(rows, fatalError) {
+  const failures = [];
+  if (fatalError) failures.push(`fatal: ${fatalError}`);
+  for (const row of rows) {
+    const identity = benchmarkRowIdentity(row);
+    if (Number(row.error_count) > 0) {
+      failures.push(`${identity} operation errors: ${row.error_count}`);
+    }
+    if (row.client !== "mcp") continue;
+    const evidence = [];
+    const unattested = [];
+    if (row.inferred_transport === "cli") {
+      evidence.push("inferred_transport=cli");
+    }
+    let hasAttestedTransport = false;
+    for (const field of ["transport_counts", "reported_transport_counts"]) {
+      for (const [transport, count] of positiveCountEntries(row[field])) {
+        if (/unknown/i.test(transport)) {
+          unattested.push(`${field}.${transport}=${count}`);
+        } else if (
+          field === "transport_counts" &&
+          ["cli", "socket"].includes(transport)
+        ) {
+          hasAttestedTransport = true;
+        }
+        if (/cli/i.test(transport)) {
+          evidence.push(`${field}.${transport}=${count}`);
+        }
+      }
+    }
+    for (const field of [
+      "transport_fallback_counts",
+      "reported_transport_fallback_counts",
+    ]) {
+      for (const [fallback, count] of positiveCountEntries(row[field])) {
+        if (fallback === "UNTRUSTED_D180") continue;
+        evidence.push(`${field}.${fallback}=${count}`);
+      }
+    }
+    if (evidence.length > 0) {
+      failures.push(`${identity} cli fallback active: ${evidence.join(", ")}`);
+    }
+    const isD180UntrustedSurface =
+      row.operation === "send_to" &&
+      row.transport_trust === "untrusted" &&
+      Number(row.transport_fallback_counts?.UNTRUSTED_D180) > 0;
+    if (
+      unattested.length > 0 ||
+      (!hasAttestedTransport && !isD180UntrustedSurface)
+    ) {
+      failures.push(
+        `${identity} unattested transport: ${unattested.join(", ") || "no attested transport"}`,
+      );
+    }
+  }
+  return failures;
+}
+
+function publicationMeasurementKind(row) {
+  return Number(row.sample_count) > 1 && Number(row.attempt_count) > 1
+    ? "sampled"
+    : "single_shot";
+}
+
+function publicationStatus(row) {
+  if (row.comparison_status === "NOT_COMPARABLE") return "NOT_COMPARABLE";
+  return benchmarkGateFailures([row], null).length === 0 ? "PASS" : "FAIL";
+}
+
+function publicationGateReason(row) {
+  if (row.comparison_status === "NOT_COMPARABLE") return "FAIRNESS_CONTRACT";
+  const failures = benchmarkGateFailures([row], null);
+  const reasons = [];
+  if (failures.some((failure) => failure.includes("cli fallback active"))) {
+    reasons.push("CLI_FALLBACK");
+  }
+  if (Number(row.error_count) > 0) reasons.push("OPERATION_ERROR");
+  if (failures.some((failure) => failure.includes("unattested transport"))) {
+    reasons.push("UNATTESTED_TRANSPORT");
+  }
+  return reasons.join(", ") || "—";
+}
+
+function publicationValue(row, value) {
+  if (publicationMeasurementKind(row) !== "sampled") return "—";
+  return value ?? "—";
+}
+
+function publicationTransport(row) {
+  if (row.operation === "send_to" && row.client === "mcp") {
+    return "UNTRUSTED (D180)";
+  }
+  return compactCounts(row.transport_counts ?? {});
+}
+
+function renderPublicationRows(rows) {
+  const lines = [
+    "| operation | profile | payload | client | measurement | status | reason | attempts | successes | failure % | p50 ms | p95 ms | transport |",
+    "|---|---:|---:|---|---|---|---|---:|---:|---:|---:|---:|---|",
+  ];
+  for (const row of rows) {
+    lines.push(
+      `| ${row.operation} | ${row.concurrency_profile} | ${row.payload_chars ?? "-"} | ${row.client} | ${publicationMeasurementKind(row)} | ${publicationStatus(row)} | ${publicationGateReason(row)} | ${publicationValue(row, row.attempt_count)} | ${publicationValue(row, row.success_count)} | ${publicationValue(row, row.failure_rate_pct)} | ${publicationValue(row, row.p50_ms)} | ${publicationValue(row, row.p95_ms)} | ${publicationTransport(row)} |`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function requiredD201Row(rows, profile, payload) {
+  const row = rows.find(
+    (candidate) =>
+      candidate.operation === "send_to" &&
+      candidate.client === "mcp" &&
+      candidate.concurrency_profile === profile &&
+      candidate.payload_chars === payload,
+  );
+  if (!row || publicationMeasurementKind(row) !== "sampled") {
+    throw new Error(`missing sampled D201 row ${profile} payload=${payload}`);
+  }
+  return row;
+}
+
+function d201Evidence(rows) {
+  const profiles = ["c1", "c5", "c10"];
+  const payloads = [250, 450, 520, 900];
+  const missingRows = profiles.flatMap((profile) =>
+    payloads
+      .filter((payload) => {
+        const candidate = rows.find(
+          (entry) =>
+            entry.operation === "send_to" &&
+            entry.client === "mcp" &&
+            entry.concurrency_profile === profile &&
+            entry.payload_chars === payload,
+        );
+        return !candidate || publicationMeasurementKind(candidate) !== "sampled";
+      })
+      .map((payload) => `${profile} payload=${payload}`),
+  );
+  if (missingRows.length > 0) {
+    return [
+      "## D201 mechanism evidence",
+      "",
+      `- D201: INCONCLUSIVE — required sampled rows are incomplete: ${missingRows.join(", ")}.`,
+    ].join("\n");
+  }
+
+  const row = (profile, payload) => requiredD201Row(rows, profile, payload);
+  const boundaryZero = profiles.every(
+    (profile) =>
+      row(profile, 250).failure_rate_pct === 0 &&
+      row(profile, 450).failure_rate_pct === 0,
+  );
+  const c1Zero = [520, 900].every(
+    (payload) => row("c1", payload).failure_rate_pct === 0,
+  );
+  const c10FailsLess = [520, 900].every(
+    (payload) =>
+      row("c10", payload).failure_rate_pct <
+      row("c5", payload).failure_rate_pct,
+  );
+  const c10LatencyRises = [520, 900].every(
+    (payload) => row("c10", payload).p50_ms > row("c5", payload).p50_ms,
+  );
+  const observed = [
+    "## D201 mechanism evidence",
+    "",
+    `${boundaryZero ? "- Boundary: 250/450 = 0% at c1, c5, and c10" : "- Observed boundary rates (250/450)"} (${profiles.map((profile) => `${profile} ${row(profile, 250).failure_rate_pct}%/${row(profile, 450).failure_rate_pct}%`).join("; ")}).`,
+    `${c1Zero ? "- Concurrency: c1 = 0% at both 520 and 900 characters" : "- Observed c1 rates (520/900)"} (${row("c1", 520).failure_rate_pct}%/${row("c1", 900).failure_rate_pct}%).`,
+    c10FailsLess && c10LatencyRises
+      ? `- Non-monotonic curve: c5 520/900 = ${row("c5", 520).failure_rate_pct}%/${row("c5", 900).failure_rate_pct}% at p50 ${row("c5", 520).p50_ms}/${row("c5", 900).p50_ms} ms; c10 520/900 = ${row("c10", 520).failure_rate_pct}%/${row("c10", 900).failure_rate_pct}% at p50 ${row("c10", 520).p50_ms}/${row("c10", 900).p50_ms} ms. c10 fails less than c5 while latency rises substantially.`
+      : `- Observed high-payload rates and latency: c5 520/900 = ${row("c5", 520).failure_rate_pct}%/${row("c5", 900).failure_rate_pct}% at p50 ${row("c5", 520).p50_ms}/${row("c5", 900).p50_ms} ms; c10 520/900 = ${row("c10", 520).failure_rate_pct}%/${row("c10", 900).failure_rate_pct}% at p50 ${row("c10", 520).p50_ms}/${row("c10", 900).p50_ms} ms.`,
+  ];
+  if (boundaryZero && c1Zero && c10FailsLess && c10LatencyRises) {
+    observed.push(
+      "- Interpretation: this is evidence against simple capacity exhaustion and for a bounded race window. It narrows candidates; it does not identify the racing party. Read the buffer store capacity and eviction policy before proposing a paste-path fix.",
+    );
+  } else {
+    const failedPredicates = [
+      [boundaryZero, "250/450 zero-rate boundary"],
+      [c1Zero, "c1 520/900 zero-rate condition"],
+      [c10FailsLess, "c10-below-c5 failure-rate condition"],
+      [c10LatencyRises, "c10-above-c5 latency condition"],
+    ]
+      .filter(([holds]) => !holds)
+      .map(([, label]) => label);
+    observed.push(
+      `- D201: INCONCLUSIVE — ${failedPredicates.join(", ")} did not hold. The observed rates remain recorded above, but no capacity/race interpretation is published.`,
+    );
+  }
+  return observed.join("\n");
+}
+
+export function renderPhase1BeforePublication(receipt) {
+  if (!Array.isArray(receipt?.rows) || receipt.rows.length === 0) {
+    throw new Error("phase-1 publication requires benchmark rows");
+  }
+  const rows = receipt.rows;
+  const visibleRows = rows.filter(
+    (row) => publicationStatus(row) !== "PASS" || row.moved === true,
+  );
+  const unchangedCount = rows.length - visibleRows.length;
+  const gateFailures = benchmarkGateFailures(rows, receipt.fatal_error);
+  const fatalFailure = receipt.fatal_error
+    ? `Fatal gate failure: ${String(receipt.fatal_error).replace(/\s+/g, " ").trim()}`
+    : null;
+  return [
+    "<!-- cmuxlayer-run10-phase1-before -->",
+    `## Run 10 Phase 1 BEFORE: ${gateFailures.length === 0 ? "GREEN" : "RED"}`,
+    "",
+    `Source: ${receipt.git_head ?? "unknown"} at ${receipt.started_at ?? "unknown"}. Surface-mode transport is **UNTRUSTED** under D180; reported socket provenance is not treated as attested transport.`,
+    "",
+    ...(fatalFailure ? [fatalFailure, ""] : []),
+    renderPublicationRows(visibleRows),
+    "",
+    `${unchangedCount} rows unchanged.`,
+    "",
+    "<details>",
+    `<summary>Full ${rows.length}-row BEFORE table</summary>`,
+    "",
+    renderPublicationRows(rows),
+    "",
+    "</details>",
+    "",
+    d201Evidence(rows),
+    "",
+  ].join("\n");
+}
+
 export function renderMarkdownTable(rows) {
   const lines = [
     "| operation | profile | payload | client | status | attempts | successes | failure % | p50 ms | p95 ms | transport | fallbacks |",
@@ -2859,6 +3098,7 @@ async function executeBenchmark(
     fatalError = appendFatalError(fatalError, error, "workspace release");
   }
 
+  const gateFailures = benchmarkGateFailures(results, fatalError);
   const receipt = {
     schema_version: 1,
     kind: "cmuxlayer-agent-side-e2e-benchmark",
@@ -2923,6 +3163,10 @@ async function executeBenchmark(
     },
     rows: results,
     fatal_error: fatalError,
+    ci_gate: {
+      verdict: gateFailures.length === 0 ? "GREEN" : "RED",
+      failures: gateFailures,
+    },
   };
   await publishBenchmarkReceipt(
     config.out,
@@ -2933,7 +3177,7 @@ async function executeBenchmark(
   );
   process.stdout.write(`${renderMarkdownTable(results)}\n`);
   process.stdout.write(`[bench-e2e] receipt ${config.out}\n`);
-  if (fatalError || results.some((row) => row.error_count > 0)) {
+  if (gateFailures.length > 0) {
     process.exitCode = 1;
   }
 }
