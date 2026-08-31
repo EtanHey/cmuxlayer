@@ -669,6 +669,9 @@ const DeliveryOutputShape = {
     .enum(["token_delta", "transcript_echo", "cleared_composer", "status_only"])
     .nullable()
     .optional(),
+  rpc_methods: z
+    .array(z.enum(["surface.send_text", "surface.send_key"]))
+    .optional(),
   delivery_id: z.string().optional(),
   duplicate_of: z.string().optional(),
   needs_attention: z.boolean().optional(),
@@ -772,12 +775,10 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
   wait_for: z
     .object({
       ...BaseOutputShape,
+      ...DeliveryOutputShape,
       agent_id: z.string().optional(),
       results: z.array(z.record(z.unknown())).optional(),
       watch: z.record(z.unknown()).optional(),
-      delivery_id: z.string().optional(),
-      delivery_state: z.string().optional(),
-      terminal: z.boolean().optional(),
       timed_out: z.boolean().optional(),
     })
     .passthrough(),
