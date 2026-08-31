@@ -917,7 +917,7 @@ async function requireSurfaceDeliveryProof(
   client,
   receipt,
   requestArgs,
-  index,
+  expectedRef,
   label,
 ) {
   if (
@@ -943,7 +943,6 @@ async function requireSurfaceDeliveryProof(
     ),
     `${label} read-back`,
   );
-  const expectedRef = `surface:bench-${index}`;
   if (
     (read.surface !== requestArgs.surface && read.surface !== expectedRef) ||
     !read.content?.includes(requestArgs.text)
@@ -978,6 +977,7 @@ function summarizeTimedSamples(samples) {
 async function measureSpawnLifecycleOnce(
   client,
   sweepHoldState,
+  sampleIndex,
 ) {
   const spawnResult = toolData(
     await client.callTool(
@@ -1006,7 +1006,11 @@ async function measureSpawnLifecycleOnce(
 
   const measureSend = async (
     args,
-    { normalizeAgentId = false, requireSubmitted = true } = {},
+    {
+      normalizeAgentId = false,
+      requireSubmitted = true,
+      canonicalText,
+    } = {},
   ) => {
     const startedAt = nowMs();
     const receipt = toolData(await client.callTool("send_to", args), "send_to");
@@ -1018,6 +1022,7 @@ async function measureSpawnLifecycleOnce(
       request_bytes: requestBytes("send_to", args),
       request_sha256: requestSha256("send_to", {
         ...args,
+        ...(canonicalText ? { text: canonicalText } : {}),
         ...(normalizeAgentId ? { agent_id: "$SPAWNED_AGENT_ID" } : {}),
       }),
       lock_hold_ms: requireFiniteLockHold(
@@ -1057,36 +1062,40 @@ async function measureSpawnLifecycleOnce(
     },
     { normalizeAgentId: true },
   );
-  const surface = await measureSend(
-    {
-      mode: "surface",
-      surface: spawnResult.surface_id,
-      workspace: "workspace:bench",
-      text: "surface benchmark",
-      press_enter: true,
-    },
-    { requireSubmitted: false },
-  );
+  const surfaceArgs = {
+    mode: "surface",
+    surface: spawnResult.surface_id,
+    workspace: "workspace:bench",
+    text: surfaceSampleSentinel(sampleIndex),
+    press_enter: true,
+  };
+  const surface = await measureSend(surfaceArgs, {
+    requireSubmitted: false,
+    canonicalText: surfaceSampleSentinel("NNN"),
+  });
   let surfaceWaitFor;
-  if (typeof surface.receipt.delivery_id === "string") {
-    try {
-      surfaceWaitFor = toolData(
-        await client.callTool("wait_for", {
-          delivery_id: surface.receipt.delivery_id,
-          timeout_ms: 2_000,
-        }),
-        "wait_for(surface receipt)",
-      );
-    } catch (error) {
-      surfaceWaitFor = {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  } else {
+  try {
+    const terminal = await requireSubmittedDelivery(
+      client,
+      surface.receipt,
+      "sampled surface send",
+    );
+    await requireSurfaceDeliveryProof(
+      client,
+      terminal,
+      surfaceArgs,
+      "surface:bench-spawn",
+      "sampled surface send",
+    );
+    surfaceWaitFor = {
+      ...terminal,
+      read_back_verified: true,
+    };
+  } catch (error) {
     surfaceWaitFor = {
       ok: false,
-      error: "surface receipt omitted delivery_id",
+      read_back_verified: false,
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 
@@ -1246,8 +1255,11 @@ async function measureSpawnLifecycleAcrossClients(
 ) {
   const samples = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
-    for (const client of clients) {
-      samples.push(await measureSpawnLifecycleOnce(client, sweepHoldState));
+    for (const [clientIndex, client] of clients.entries()) {
+      const sampleIndex = roundIndex * clients.length + clientIndex;
+      samples.push(
+        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex),
+      );
     }
   }
   return {
@@ -1272,9 +1284,14 @@ async function measureSpawnLifecycleAcrossClients(
           sample.surface.receipt.delivery_id &&
         sample.surface.wait_for.terminal === true &&
         sample.surface.wait_for.delivery_state === "submitted" &&
-        sample.surface.wait_for.submit_verified === true,
+        sample.surface.wait_for.submit_verified === true &&
+        sample.surface.wait_for.read_back_verified === true,
     ),
   };
+}
+
+function surfaceSampleSentinel(sampleIndex) {
+  return `surface bench ${String(sampleIndex).padStart(3, "0")}`;
 }
 
 function parallelStressSentinel(index, roundIndex) {
@@ -1497,7 +1514,7 @@ async function main() {
           stressClients[index],
           receipt,
           requestArgs,
-          index,
+          `surface:bench-${index}`,
           "parallel send",
         ),
     );
@@ -1552,7 +1569,7 @@ async function main() {
                   workspace: "workspace:bench",
                   text: parallelStressSentinel(index, roundIndex),
                 },
-                index,
+                `surface:bench-${index}`,
                 "read stress round setup",
               );
             }),

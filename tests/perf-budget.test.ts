@@ -970,7 +970,7 @@ describe("daemon performance budget", () => {
     expect(source).toContain("const PARALLEL_STRESS_COUNT = 10");
     expect(source).toContain('sampling: "sampled"');
     expect(source).toContain("samples_per_run");
-    expect(source).toContain("for (const client of clients)");
+    expect(source).toContain("for (const [clientIndex, client] of clients.entries())");
     expect(source).toContain("surface_receipts_waitable: samples.every");
     expect(source).toContain('sample.surface.wait_for.delivery_state === "submitted"');
     expect(source).toContain("sample.surface.wait_for.submit_verified === true");
@@ -1017,6 +1017,10 @@ describe("daemon performance budget", () => {
     expect(source).toContain("writeSurfaceState(surface, surfaceState)");
     expect(source).toContain("await requireSubmittedDelivery(client, receipt, label)");
     expect(source).not.toContain("return requireSubmittedDelivery(client, receipt, label)");
+    expect(source).toContain("text: surfaceSampleSentinel(sampleIndex)");
+    expect(source).toContain('"surface:bench-spawn"');
+    expect(source).toContain("read_back_verified: true");
+    expect(source).toContain("sample.surface.wait_for.read_back_verified === true");
     expect(source).toContain(
       "validateReceipt?.(receipt, requests[index], index, roundIndex)",
     );
