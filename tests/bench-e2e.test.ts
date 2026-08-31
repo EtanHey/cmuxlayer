@@ -21,6 +21,7 @@ import {
   assertOutputOutsideGitMetadata,
   assertNightlyIsolation,
   assertArtifactProvenance,
+  assertLockPathIdentity,
   assertCliFairnessTrace,
   buildBenchmarkRows,
   buildAbsentComparisonRow,
@@ -1324,6 +1325,16 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("rejects a lock pathname that no longer names the opened inode", async () => {
+    await expect(
+      assertLockPathIdentity(
+        "/repo/receipt.json.lock",
+        { dev: 10, ino: 20 },
+        () => ({ dev: 10, ino: 21, isFile: () => true, nlink: 1 }),
+      ),
+    ).rejects.toThrow(/lock path identity changed/);
+  });
+
   it("canonicalizes a dangling output symlink to its future target", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const target = join(directory, "future.json");
@@ -2200,6 +2211,28 @@ describe("bench-e2e measurement harness", () => {
       ),
     ).rejects.toThrow(/output receipt aliases attested artifact.*index\.js/);
     expect(events).toEqual(["validate"]);
+  });
+
+  it("rejects output recanonicalization after provenance and releases it", async () => {
+    const events: string[] = [];
+    await expect(
+      prepareProvenanceThenReserveOutput(
+        { out: "/repo/dist/link/HEAD", cmuxBin: "cmux" },
+        {
+          canonicalize: (path) => path,
+          prepare: () => ({
+            entries: {},
+            cli_executable: { path: "/opt/cmux/bin/cmux", sha256: "cli" },
+          }),
+          validate: () => undefined,
+          reserve: () => ({
+            outputPath: "/repo/.git/HEAD",
+            release: () => events.push("release"),
+          }),
+        },
+      ),
+    ).rejects.toThrow(/output path changed after provenance validation/);
+    expect(events).toEqual(["release"]);
   });
 
   it("stops after preparation when reservation authority aborts", async () => {

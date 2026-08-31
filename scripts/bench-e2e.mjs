@@ -980,6 +980,27 @@ async function discardLockHolder(child) {
   await closed;
 }
 
+export async function assertLockPathIdentity(
+  lockPath,
+  openedStat,
+  inspectPath = lstat,
+) {
+  let pathStat;
+  try {
+    pathStat = await inspectPath(lockPath);
+  } catch (error) {
+    throw new Error(`lock path identity changed: ${lockPath}`, { cause: error });
+  }
+  if (
+    !pathStat.isFile() ||
+    pathStat.nlink > 1 ||
+    pathStat.dev !== openedStat.dev ||
+    pathStat.ino !== openedStat.ino
+  ) {
+    throw new Error(`lock path identity changed: ${lockPath}`);
+  }
+}
+
 async function createPidLock(lockPath, label, onFailure) {
   await mkdir(dirname(lockPath), { recursive: true });
   const lockHandle = await open(
@@ -995,6 +1016,12 @@ async function createPidLock(lockPath, label, onFailure) {
   if (lockStat.nlink > 1) {
     await lockHandle.close();
     throw new Error(`${label} lock path has multiple hard links: ${lockPath}`);
+  }
+  try {
+    await assertLockPathIdentity(lockPath, lockStat);
+  } catch (error) {
+    await lockHandle.close();
+    throw error;
   }
   const inheritedLockPath =
     process.platform === "linux" ? "/proc/self/fd/3" : "/dev/fd/3";
@@ -1027,6 +1054,7 @@ async function createPidLock(lockPath, label, onFailure) {
   holder.stdin.on("error", onStdinError);
   try {
     await waitForLockHolder(holder, invocation, label, lockPath);
+    await assertLockPathIdentity(lockPath, lockStat);
     holder.once("exit", onUnexpectedExit);
     if (holder.exitCode !== null || holder.signalCode !== null) {
       onUnexpectedExit(holder.exitCode, holder.signalCode);
@@ -1948,7 +1976,7 @@ export async function assertArtifactProvenance(
   }
 }
 
-async function canonicalArtifactPath(path) {
+function canonicalArtifactPath(path) {
   return realpath(resolve(path)).catch((error) => {
     if (error?.code === "ENOENT") return resolve(path);
     throw error;
@@ -2466,6 +2494,14 @@ export async function prepareProvenanceThenReserveOutput(config, deps = {}) {
   const outputReservation = await reserve(config.out);
   try {
     signal?.throwIfAborted();
+    if (
+      outputReservation.outputPath !== undefined &&
+      resolve(outputReservation.outputPath) !== resolve(config.out)
+    ) {
+      throw new Error(
+        `output path changed after provenance validation: ${config.out} -> ${outputReservation.outputPath}`,
+      );
+    }
   } catch (error) {
     await rollbackReservation(
       error,
