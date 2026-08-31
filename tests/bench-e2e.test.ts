@@ -1244,11 +1244,13 @@ describe("bench-e2e measurement harness", () => {
     await writeFile(temp, "published\n", "utf8");
 
     await expect(reservation.publishTemp(temp, output)).rejects.toThrow(
-      /lock holder exited during publication/,
+      /lock path identity changed/,
     );
     await expect(readFile(temp, "utf8")).resolves.toBe("published\n");
     await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(reservation.release()).rejects.toThrow(/exited before release/);
+    await expect(reservation.release()).rejects.toThrow(
+      /lock path identity changed/,
+    );
     await rm(parent, { recursive: true, force: true });
   });
 
@@ -1351,6 +1353,21 @@ describe("bench-e2e measurement harness", () => {
         502,
       ),
     ).toThrow(/lock path has unsafe owner or permissions/);
+  });
+
+  it("detects lock pathname replacement throughout the reservation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const reservation = await createOutputReservation(output);
+    await rm(reservation.lockPath);
+    await writeFile(reservation.lockPath, "replacement\n", { mode: 0o600 });
+
+    expect(() => reservation.assertHealthy()).toThrow(/lock path identity changed/);
+
+    await expect(reservation.release()).rejects.toThrow(
+      /lock path identity changed/,
+    );
+    await rm(directory, { recursive: true, force: true });
   });
 
   it("canonicalizes a dangling output symlink to its future target", async () => {
@@ -1701,6 +1718,40 @@ describe("bench-e2e measurement harness", () => {
         sha256: "sha256:/opt/cmux/bin/cmux",
       },
     });
+  });
+
+  it("scrubs inherited runtime overrides from provenance builds", async () => {
+    await prepareBuiltEntries(
+      {
+        mcpEntry: "/repo/dist/index.js",
+        daemonEntry: "/repo/dist/daemon.js",
+        env: {
+          PATH: "/usr/bin",
+          NODE_OPTIONS: "--require /tmp/untrusted-node-hook.cjs",
+          NODE_PATH: "/tmp/untrusted-node-modules",
+          BUN_OPTIONS: "--preload /tmp/untrusted-bun-hook.ts",
+        },
+      },
+      {
+        repoRoot: "/repo",
+        exec: (_command, args, options) => {
+          if (args[0] === "run") {
+            expect(options.env).not.toHaveProperty("NODE_OPTIONS");
+            expect(options.env).not.toHaveProperty("NODE_PATH");
+            expect(options.env).not.toHaveProperty("BUN_OPTIONS");
+          }
+          if (args.includes("status")) return { stdout: "", stderr: "" };
+          if (args[0] === "rev-parse") {
+            return { stdout: "abc123\n", stderr: "" };
+          }
+          return { stdout: "built\n", stderr: "" };
+        },
+        exists: () => true,
+        hashFile: (path) => `sha256:${path}`,
+        listRuntimeFiles: () => [],
+        resolveExecutable: () => "/opt/cmux/bin/cmux",
+      },
+    );
   });
 
   it("forces untracked provenance while excluding only the selected receipt artifacts", () => {

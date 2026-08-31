@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, createWriteStream, existsSync } from "node:fs";
+import { constants, createWriteStream, existsSync, lstatSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -1009,6 +1009,23 @@ export async function assertLockPathIdentity(
   }
 }
 
+function assertLockPathIdentitySync(lockPath, openedStat) {
+  let pathStat;
+  try {
+    pathStat = lstatSync(lockPath);
+  } catch (error) {
+    throw new Error(`lock path identity changed: ${lockPath}`, { cause: error });
+  }
+  if (
+    !pathStat.isFile() ||
+    pathStat.nlink > 1 ||
+    pathStat.dev !== openedStat.dev ||
+    pathStat.ino !== openedStat.ino
+  ) {
+    throw new Error(`lock path identity changed: ${lockPath}`);
+  }
+}
+
 export function assertLockFileAuthority(
   lockPath,
   lockStat,
@@ -1061,6 +1078,7 @@ async function createPidLock(lockPath, label, onFailure) {
   });
   let releasing = false;
   let holderFailure = null;
+  let identityMonitor = null;
   const recordHolderFailure = (error) => {
     if (releasing || holderFailure) return;
     holderFailure = error;
@@ -1088,8 +1106,17 @@ async function createPidLock(lockPath, label, onFailure) {
     }
     await lockHandle.close();
     if (holderFailure) throw holderFailure;
+    identityMonitor = setInterval(() => {
+      try {
+        assertLockPathIdentitySync(lockPath, lockStat);
+      } catch (error) {
+        recordHolderFailure(error);
+      }
+    }, 25);
+    identityMonitor.unref();
   } catch (error) {
     releasing = true;
+    if (identityMonitor) clearInterval(identityMonitor);
     holder.off("exit", onUnexpectedExit);
     await discardLockHolder(holder);
     holder.stdin.off("error", onStdinError);
@@ -1097,23 +1124,32 @@ async function createPidLock(lockPath, label, onFailure) {
     throw error;
   }
   let released = false;
+  const assertHealthy = () => {
+    if (holderFailure) throw holderFailure;
+    try {
+      assertLockPathIdentitySync(lockPath, lockStat);
+    } catch (error) {
+      recordHolderFailure(error);
+      throw holderFailure;
+    }
+  };
   return {
     lockPath,
     lockHolderPid: holder.pid,
-    assertHealthy() {
-      if (holderFailure) throw holderFailure;
-    },
-    publishTemp(from, to, parentIdentity = null) {
-      if (holderFailure) throw holderFailure;
+    assertHealthy,
+    async publishTemp(from, to, parentIdentity = null) {
+      assertHealthy();
       return publishWithLockHolder(holder, from, to, label, parentIdentity);
     },
     async release() {
       if (released) return;
       releasing = true;
+      if (identityMonitor) clearInterval(identityMonitor);
       holder.off("exit", onUnexpectedExit);
       try {
         await closeLockHolder(holder, label);
         released = true;
+        if (holderFailure) throw holderFailure;
       } finally {
         holder.stdin.off("error", onStdinError);
       }
@@ -2221,6 +2257,9 @@ function provenanceExecEnvironment(sourceEnv, rejectRedirected) {
     "GIT_NOGLOB_PATHSPECS",
     "GIT_ICASE_PATHSPECS",
   ]) {
+    delete execEnv[name];
+  }
+  for (const name of ["NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS"]) {
     delete execEnv[name];
   }
   return execEnv;
