@@ -352,6 +352,7 @@ describe("bench-e2e measurement harness", () => {
       reported_transport_counts: { socket: 12 },
       reported_transport_fallback_counts: {},
       inferred_transport: "socket",
+      transport_trust: "untrusted",
     };
 
     expect(benchmarkGateFailures([directCliArm, socketMcpArm], null)).toEqual(
@@ -374,6 +375,7 @@ describe("bench-e2e measurement harness", () => {
         {
           ...socketMcpArm,
           operation: "list_surfaces",
+          transport_counts: { socket: 12 },
           reported_transport_fallback_counts: { cli_fallback_active: 1 },
         },
         {
@@ -383,16 +385,24 @@ describe("bench-e2e measurement harness", () => {
           reported_transport_counts: {},
           inferred_transport: undefined,
         },
+        {
+          ...socketMcpArm,
+          operation: "list_surfaces",
+          transport_counts: {},
+          reported_transport_counts: { socket: 12 },
+          inferred_transport: "socket",
+        },
       ],
       null,
     );
 
-    expect(failures).toHaveLength(4);
+    expect(failures).toHaveLength(5);
     expect(failures.slice(0, 3).every((failure) =>
       failure.includes("cli fallback active"),
     )).toBe(true);
     expect(failures[0]).toContain("send_to mcp c5 payload=520");
     expect(failures[3]).toContain("unattested transport: transport_counts.unknown=12");
+    expect(failures[4]).toContain("unattested transport: no attested transport");
   });
 
   it("renders the phase-1 BEFORE publication with tags, collapsed rows, and D201 evidence", () => {

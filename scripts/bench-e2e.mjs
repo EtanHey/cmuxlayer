@@ -1942,14 +1942,15 @@ export function benchmarkGateFailures(rows, fatalError) {
     if (row.inferred_transport === "cli") {
       evidence.push("inferred_transport=cli");
     }
-    let hasAttestedTransport = ["cli", "socket"].includes(
-      row.inferred_transport,
-    );
+    let hasAttestedTransport = false;
     for (const field of ["transport_counts", "reported_transport_counts"]) {
       for (const [transport, count] of positiveCountEntries(row[field])) {
         if (/unknown/i.test(transport)) {
           unattested.push(`${field}.${transport}=${count}`);
-        } else if (transport !== "UNTRUSTED") {
+        } else if (
+          field === "transport_counts" &&
+          ["cli", "socket"].includes(transport)
+        ) {
           hasAttestedTransport = true;
         }
         if (/cli/i.test(transport)) {
@@ -1969,7 +1970,14 @@ export function benchmarkGateFailures(rows, fatalError) {
     if (evidence.length > 0) {
       failures.push(`${identity} cli fallback active: ${evidence.join(", ")}`);
     }
-    if (unattested.length > 0 || !hasAttestedTransport) {
+    const isD180UntrustedSurface =
+      row.operation === "send_to" &&
+      row.transport_trust === "untrusted" &&
+      Number(row.transport_fallback_counts?.UNTRUSTED_D180) > 0;
+    if (
+      unattested.length > 0 ||
+      (!hasAttestedTransport && !isD180UntrustedSurface)
+    ) {
       failures.push(
         `${identity} unattested transport: ${unattested.join(", ") || "no attested transport"}`,
       );

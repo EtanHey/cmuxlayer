@@ -40,7 +40,7 @@
 ### Task 3: Verify and open the worker PR
 
 **Files:**
-- Modify in place after handoff: `/Users/etanheyman/.cmux/agents/cmuxlayerCodex-2c968dd2/report.md`
+- Modify in place after handoff: `<agent-report-path>`
 
 1. Run focused tests and inspect the full output.
 2. Run typecheck with socket variables present and with both socket variables unset.
