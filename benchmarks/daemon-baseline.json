@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "3f4303b49d8165f7756538d17fd19c3b2c9862d3",
-    "measured_at": "2026-08-30T17:23:34.781Z",
+    "git_sha": "26f2797eb3f031635ca5c7a61bf42506798040f8",
+    "measured_at": "2026-08-31T09:00:15.695Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 33324494030,
-    "increase_reason": "canonical stress requests now use per-surface sentinels and raw read identity verification"
+    "workflow_run_id": 33374877017,
+    "increase_reason": "Round-specific parallel-send sentinels add attributable freshness proof; rebase to the exact intrinsic-GREEN runner evidence."
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -80,7 +80,7 @@
       "control_health": 97,
       "spawn_close_during_sweep": 161,
       "first_send_after_spawn": 231,
-      "send_to_surface_10_parallel": 2420,
+      "send_to_surface_10_parallel": 2510,
       "read_screen_10_parallel": 1930
     },
     "request_sha256": {
@@ -92,7 +92,7 @@
       "control_health": "56e5969d5764757c0775d59e7c65e83cbd91d6f4f4a3279f1cc910fe6854a10f",
       "spawn_close_during_sweep": "1c7dfd23479835bd9d42cc8e74444cbac74e47aa8f288d3eb3278e777c96acdf",
       "first_send_after_spawn": "811745b320e17eddf09602072cea6a0f8274bd3e6ecb6438796646803efbcc75",
-      "send_to_surface_10_parallel": "987a52afdc7845b58174464c4b69b3c04b53dbe36c7ef95e31b7e04589de7aac",
+      "send_to_surface_10_parallel": "961824611592824755bfa4374fdf62aa941395dd057756be85eae3f187c2a4b3",
       "read_screen_10_parallel": "366278b96955bd7c665f9793a8fa22ace224a74074e4d3af2b423afc7f806b2c"
     },
     "transport": {
@@ -110,7 +110,7 @@
   },
   "measurements": {
     "list_surfaces": {
-      "p50_ms": 8.75,
+      "p50_ms": 8.87,
       "p95_ms": 50.94,
       "lock_hold_ms": 0
     },
@@ -125,7 +125,7 @@
       "lock_hold_ms": 178
     },
     "send_to_agent_warm": {
-      "p50_ms": 92.77,
+      "p50_ms": 93.26,
       "p95_ms": 122.59,
       "lock_hold_ms": 200
     },
@@ -136,11 +136,11 @@
     },
     "control_health": {
       "p50_ms": 132.77,
-      "p95_ms": 155.41,
+      "p95_ms": 184.45,
       "lock_hold_ms": 0
     },
     "spawn_close_during_sweep": {
-      "p50_ms": 45.91,
+      "p50_ms": 46.04,
       "p95_ms": 143.28,
       "lock_hold_ms": 0
     },
@@ -163,6 +163,6 @@
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "a076427666a2995fdfd6400206bf4168d13db7abfdf6dac837a9990f09c964ca"
+    "content_sha256": "b88c9f29fe04934fbb023bdc0b7faf7c6edf22d4afe11b86d425c1a6bc7b0338"
   }
 }
