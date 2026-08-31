@@ -2056,20 +2056,24 @@ export async function prepareBuiltEntries(config, deps = {}) {
     deps.listOwnedReceiptTemps ??
     listOwnedReceiptSidecars;
   const sourceEnv = config.env ?? process.env;
-  const redirectedGitEnvironment = [
+  const redirectedGitEnvironmentNames = [
     "GIT_DIR",
     "GIT_COMMON_DIR",
     "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_WORK_TREE",
-  ].filter((name) => config.env?.[name]);
-  if (redirectedGitEnvironment.length > 0) {
+  ];
+  const redirectedGitEnvironment = redirectedGitEnvironmentNames.filter(
+    (name) => sourceEnv[name],
+  );
+  if (config.env && redirectedGitEnvironment.length > 0) {
     throw new Error(
       `redirected Git metadata is unsupported for benchmark provenance: ${redirectedGitEnvironment.join(", ")}`,
     );
   }
   const execEnv = { ...sourceEnv };
+  for (const name of redirectedGitEnvironmentNames) delete execEnv[name];
   for (const name of [
     "GIT_LITERAL_PATHSPECS",
     "GIT_GLOB_PATHSPECS",

@@ -1834,6 +1834,35 @@ describe("bench-e2e measurement harness", () => {
     ).rejects.toThrow(/tracked output receipt/);
   });
 
+  it("scrubs ambient Git redirection when no environment is supplied", async () => {
+    const previousWorkTree = process.env.GIT_WORK_TREE;
+    process.env.GIT_WORK_TREE = "/other-clean-checkout";
+    try {
+      await expect(
+        prepareBuiltEntries(
+          {
+            mcpEntry: "/repo/dist/index.js",
+            daemonEntry: "/repo/dist/daemon.js",
+            out: "/repo/package.json",
+          },
+          {
+            repoRoot: "/repo",
+            exec: (_command, args, options) => {
+              if (args[0] === "ls-files") {
+                expect(options.env.GIT_WORK_TREE).toBeUndefined();
+                return { stdout: "package.json\n", stderr: "" };
+              }
+              throw new Error(`unexpected command: ${args.join(" ")}`);
+            },
+          },
+        ),
+      ).rejects.toThrow(/tracked output receipt/);
+    } finally {
+      if (previousWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+      else process.env.GIT_WORK_TREE = previousWorkTree;
+    }
+  });
+
   it("refuses to exclude a tracked output receipt from provenance", async () => {
     let trackedPathspec;
     await expect(
