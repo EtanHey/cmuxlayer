@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "26f2797eb3f031635ca5c7a61bf42506798040f8",
-    "measured_at": "2026-08-31T09:00:15.695Z",
+    "git_sha": "557ae4c24a9de4a9d308bba3e1ba8497dc2ce254",
+    "measured_at": "2026-08-31T09:36:24.483Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 33374877017,
-    "increase_reason": "Round-specific parallel-send sentinels add attributable freshness proof; rebase to the exact intrinsic-GREEN runner evidence."
+    "workflow_run_id": 33377777123,
+    "increase_reason": "Per-sample warm-surface sentinels and verified-submit proof change the canonical request identity; rebase to exact intrinsic-GREEN runner evidence."
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -86,7 +86,7 @@
     "request_sha256": {
       "list_surfaces": "29b9c66db4de170a41fdd8ad608f356201f747970e6f7fa74ae605f360f85a33",
       "read_screen": "0f6c57ad85b668c2ae73f651d9d44c41525b8f2fba3d2f7783e6acb592dc2137",
-      "send_to_surface_warm": "d2b6d478fff8c5cf8568d2c2caaa48cbe98314a700477cccbc20657a0ba3058e",
+      "send_to_surface_warm": "02703281dd0f30c23e8b681d2ebe0702b7d8c4459e5948953e04b93162d6f844",
       "send_to_agent_warm": "ec21fdf5817b3568ba66b0f44b2b5982319c2778cd60a7de637c1231428ee6e1",
       "list_agents": "4f4fb87e95a8f7cded25a4fd1bb35d11492182997e1f7d14c856683f53cc0416",
       "control_health": "56e5969d5764757c0775d59e7c65e83cbd91d6f4f4a3279f1cc910fe6854a10f",
@@ -110,12 +110,12 @@
   },
   "measurements": {
     "list_surfaces": {
-      "p50_ms": 8.87,
+      "p50_ms": 9.47,
       "p95_ms": 50.94,
       "lock_hold_ms": 0
     },
     "read_screen": {
-      "p50_ms": 13.55,
+      "p50_ms": 13.9,
       "p95_ms": 23.75,
       "lock_hold_ms": 0
     },
@@ -156,13 +156,13 @@
     },
     "read_screen_10_parallel": {
       "p50_ms": 31.4,
-      "p95_ms": 49.89,
+      "p95_ms": 59.03,
       "lock_hold_ms": 0
     },
     "cli_send_ms": 64.52
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "b88c9f29fe04934fbb023bdc0b7faf7c6edf22d4afe11b86d425c1a6bc7b0338"
+    "content_sha256": "fd095a40e1578472e0818e09b1393fe82f507d006429710daef2681604f94e86"
   }
 }
