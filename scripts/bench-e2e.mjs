@@ -1954,7 +1954,30 @@ export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
   ];
 }
 
+async function isBareGitRepositoryRoot(root) {
+  try {
+    const [head, objects, refs, config] = await Promise.all([
+      lstat(join(root, "HEAD")),
+      lstat(join(root, "objects")),
+      lstat(join(root, "refs")),
+      readFile(join(root, "config"), "utf8"),
+    ]);
+    return (
+      head.isFile() &&
+      objects.isDirectory() &&
+      refs.isDirectory() &&
+      /^\s*bare\s*=\s*true\s*$/im.test(config)
+    );
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function resolveGitMetadataPathsAtRoot(root) {
+  if (await isBareGitRepositoryRoot(root)) {
+    return [await realpath(root)];
+  }
   const markerPath = resolve(root, ".git");
   const markerStat = await lstat(markerPath).catch((error) => {
     if (error?.code === "ENOENT") return null;
@@ -2003,7 +2026,9 @@ export async function resolveGitRepositoryRoots(root, outputPath = null) {
             if (error?.code === "ENOENT") return false;
             throw error;
           });
-        if (markerExists) candidateRoots.push(candidate);
+        if (markerExists || (await isBareGitRepositoryRoot(candidate))) {
+          candidateRoots.push(candidate);
+        }
       }
       if (dirname(candidate) === candidate) break;
     }

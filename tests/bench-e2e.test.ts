@@ -1741,6 +1741,21 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("rejects receipt output inside a bare Git repository", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const bareGit = join(directory, "project.git");
+    const output = join(bareGit, "HEAD");
+    await mkdir(join(bareGit, "objects"), { recursive: true });
+    await mkdir(join(bareGit, "refs"), { recursive: true });
+    await writeFile(join(bareGit, "config"), "[core]\n\tbare = true\n", "utf8");
+    await writeFile(output, "ref: refs/heads/main\n", "utf8");
+
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("rejects a receipt tracked by a nested checkout", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const nested = join(directory, "nested-checkout");
