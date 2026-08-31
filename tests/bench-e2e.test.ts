@@ -1593,7 +1593,7 @@ describe("bench-e2e measurement harness", () => {
         repoRoot: "/repo",
         exec: (_command, args) => {
           calls.push(args.join(" "));
-          if (args[0] === "status") return { stdout: "", stderr: "" };
+          if (args.includes("status")) return { stdout: "", stderr: "" };
           if (args[0] === "rev-parse") {
             return { stdout: "abc123\n", stderr: "" };
           }
@@ -1611,10 +1611,10 @@ describe("bench-e2e measurement harness", () => {
     );
 
     expect(calls).toEqual([
-      "status --porcelain --untracked-files=all",
+      "-C /repo status --porcelain --untracked-files=all",
       "rev-parse HEAD",
       "run build",
-      "status --porcelain --untracked-files=all",
+      "-C /repo status --porcelain --untracked-files=all",
       "rev-parse HEAD",
     ]);
     expect(result).toEqual({
@@ -1780,6 +1780,10 @@ describe("bench-e2e measurement harness", () => {
     await writeFile(join(bareGit, "refs", "heads", "main"), "commit\n", "utf8");
     await rm(output);
     await symlink("refs/heads/main", output);
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(join(bareGit, "config"));
     await expect(
       assertOutputOutsideGitMetadata(output, directory),
     ).rejects.toThrow(/inside Git metadata/);
@@ -1977,7 +1981,7 @@ describe("bench-e2e measurement harness", () => {
                 stderr: "",
               };
             }
-            if (args[0] === "status") return { stdout: "", stderr: "" };
+            if (args.includes("status")) return { stdout: "", stderr: "" };
             if (args[0] === "rev-parse") {
               return { stdout: "abc123\n", stderr: "" };
             }
@@ -2190,7 +2194,7 @@ describe("bench-e2e measurement harness", () => {
         {
           repoRoot: "/repo",
           exec: (_command, args) => {
-            if (args[0] === "status") return { stdout: "", stderr: "" };
+            if (args.includes("status")) return { stdout: "", stderr: "" };
             if (args[0] === "rev-parse") {
               headReads += 1;
               return {

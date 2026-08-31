@@ -1956,17 +1956,15 @@ export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
 
 async function isBareGitRepositoryRoot(root) {
   try {
-    const [head, objects, refs, config] = await Promise.all([
+    const [head, objects, refs] = await Promise.all([
       stat(join(root, "HEAD")),
       lstat(join(root, "objects")),
       lstat(join(root, "refs")),
-      lstat(join(root, "config")),
     ]);
     if (
       !head.isFile() ||
       !objects.isDirectory() ||
-      !refs.isDirectory() ||
-      !config.isFile()
+      !refs.isDirectory()
     ) {
       return false;
     }
@@ -2176,7 +2174,11 @@ export async function prepareBuiltEntries(config, deps = {}) {
   const readWorktreeStatus = async () =>
     exec(
       "git",
-      provenanceStatusArgs(root, config.out, await ownedSidecarPaths()),
+      [
+        "-C",
+        root,
+        ...provenanceStatusArgs(root, config.out, await ownedSidecarPaths()),
+      ],
       execOptions,
     );
   const readHead = () =>
