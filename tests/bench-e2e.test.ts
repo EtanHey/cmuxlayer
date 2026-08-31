@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -1226,6 +1227,27 @@ describe("bench-e2e measurement harness", () => {
     await expect(readFile(temp, "utf8")).resolves.toBe("published\n");
     await expect(reservation.release()).rejects.toThrow(/exited before release/);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("refuses publication after the reserved output directory is replaced", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-parent-"));
+    const directory = join(parent, "results");
+    const displaced = join(parent, "results-displaced");
+    const output = join(directory, "receipt.json");
+    const temp = `${output}.tmp-test`;
+    await mkdir(directory);
+    const reservation = await createOutputReservation(output);
+    await rename(directory, displaced);
+    await mkdir(directory);
+    await writeFile(temp, "published\n", "utf8");
+
+    await expect(reservation.publishTemp(temp, output)).rejects.toThrow(
+      /lock holder exited during publication/,
+    );
+    await expect(readFile(temp, "utf8")).resolves.toBe("published\n");
+    await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(reservation.release()).rejects.toThrow(/exited before release/);
+    await rm(parent, { recursive: true, force: true });
   });
 
   it("cleans abandoned receipt temps only after winning the output lock", async () => {

@@ -687,6 +687,13 @@ export async function createOutputReservation(outputPath, onFailure) {
   const absoluteOutput = resolve(outputPath);
   await mkdir(dirname(absoluteOutput), { recursive: true });
   const canonicalOutput = await canonicalOutputPath(absoluteOutput);
+  const canonicalParent = dirname(canonicalOutput);
+  const parentStat = await stat(canonicalParent);
+  const parentIdentity = {
+    path: canonicalParent,
+    dev: parentStat.dev,
+    ino: parentStat.ino,
+  };
   const lockPath = `${canonicalOutput}.lock`;
   const reservation = await createPidLock(
     lockPath,
@@ -707,7 +714,9 @@ export async function createOutputReservation(outputPath, onFailure) {
     lockPath,
     lockHolderPid: reservation.lockHolderPid,
     assertHealthy: reservation.assertHealthy,
-    publishTemp: reservation.publishTemp,
+    publishTemp(from, to) {
+      return reservation.publishTemp(from, to, parentIdentity);
+    },
     release: reservation.release,
   });
 }
@@ -780,7 +789,7 @@ function processIsLive(pid, signalPid = process.kill) {
 }
 
 const LOCK_HOLDER_SCRIPT = String.raw`
-const { lstatSync, renameSync } = require("node:fs");
+const { lstatSync, renameSync, statSync } = require("node:fs");
 let buffered = "";
 process.stdout.write("LOCKED\n");
 process.stdin.setEncoding("utf8");
@@ -795,6 +804,15 @@ process.stdin.on("data", (chunk) => {
     try {
       const command = JSON.parse(line);
       if (command.operation !== "publish") throw new Error("unsupported command");
+      if (command.parentIdentity) {
+        const parent = statSync(command.parentIdentity.path);
+        if (
+          parent.dev !== command.parentIdentity.dev ||
+          parent.ino !== command.parentIdentity.ino
+        ) {
+          throw new Error("reserved output directory identity changed");
+        }
+      }
       try {
         const target = lstatSync(command.to);
         if (!target.isFile() || target.nlink > 1) {
@@ -897,7 +915,13 @@ async function closeLockHolder(child, label) {
   await closed;
 }
 
-export async function publishWithLockHolder(child, from, to, label) {
+export async function publishWithLockHolder(
+  child,
+  from,
+  to,
+  label,
+  parentIdentity = null,
+) {
   if (child.exitCode !== null || child.signalCode !== null) {
     throw new Error(`${label} lock holder exited before publication`);
   }
@@ -938,7 +962,7 @@ export async function publishWithLockHolder(child, from, to, label) {
     child.once("error", onError);
     child.once("exit", onExit);
     child.stdin.write(
-      `${JSON.stringify({ operation: "publish", id: commandId, from, to })}\n`,
+      `${JSON.stringify({ operation: "publish", id: commandId, from, to, parentIdentity })}\n`,
       (error) => {
         if (error) fail(error);
       },
@@ -1024,9 +1048,9 @@ async function createPidLock(lockPath, label, onFailure) {
     assertHealthy() {
       if (holderFailure) throw holderFailure;
     },
-    publishTemp(from, to) {
+    publishTemp(from, to, parentIdentity = null) {
       if (holderFailure) throw holderFailure;
-      return publishWithLockHolder(holder, from, to, label);
+      return publishWithLockHolder(holder, from, to, label, parentIdentity);
     },
     async release() {
       if (released) return;
