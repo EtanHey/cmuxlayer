@@ -62,6 +62,11 @@ class FakeAgentSurfaceClient {
   private transcriptTail: string | null = null;
   private followUps: string[] = [];
   private followUpNeedsEnter = false;
+  declare getTransportHealth?: () => {
+    mode: "socket";
+    degraded: false;
+    current_socket_path: string;
+  };
 
   async log() {}
   async setStatus() {}
@@ -1023,7 +1028,7 @@ describe("send_to v2 background verify", () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
     registerAgent(server);
-    (client as any).getTransportHealth = () => ({
+    client.getTransportHealth = () => ({
       mode: "socket" as const,
       degraded: false,
       current_socket_path: "/tmp/cmux-send-to-v2-verify-test.sock",
