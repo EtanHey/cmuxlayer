@@ -1019,6 +1019,62 @@ describe("send_to v2 background verify", () => {
     });
   });
 
+  it("preserves socket RPC provenance in background snapshots and terminal wait_for receipts", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    (client as any).getTransportHealth = () => ({
+      mode: "socket" as const,
+      degraded: false,
+      current_socket_path: "/tmp/cmux-send-to-v2-verify-test.sock",
+    });
+
+    const sent = parseResult(
+      await callTool(server, "send_input", {
+        surface: client.surface,
+        text: "background provenance",
+        press_enter: false,
+        background: true,
+      }),
+    );
+    expect(sent).toMatchObject({
+      delivery_id: expect.any(String),
+      status: "delivering",
+      rpc_methods: [],
+    });
+
+    const snapshot = parseResult(
+      await callTool(server, "read_screen", {
+        surface: client.surface,
+        parsed_only: true,
+      }),
+    );
+    expect(snapshot.delivery).toMatchObject({
+      delivery_id: sent.delivery_id,
+      status: "delivered",
+      rpc_methods: ["surface.send_text"],
+    });
+
+    const waited = parseResult(
+      await callTool(server, "wait_for", {
+        delivery_id: sent.delivery_id,
+        timeout_ms: 1_000,
+      }),
+    );
+    expect(waited).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "typed",
+      terminal: true,
+      rpc_methods: ["surface.send_text"],
+    });
+    waited.rpc_methods.push("surface.send_key");
+    expect(
+      server._registeredTools.interact._engine.getDeliveryReceipt(
+        sent.delivery_id,
+      ).rpc_methods,
+    ).toEqual(["surface.send_text"]);
+  });
+
   it("bounds list_agents detail=full deliveries to the last 20 unresolved or attention receipts", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);

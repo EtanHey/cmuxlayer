@@ -1210,6 +1210,7 @@ export interface DeliveryRecord {
   submit_verification_reason?: SubmitVerificationFailureReason;
   retry_safe?: false;
   retry_count: number;
+  rpc_methods: DeliveryRpcMethod[];
   rename_to_task?: string;
   started_at: string;
   completed_at?: string;
@@ -4834,6 +4835,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verification_reason: record.submit_verification_reason ?? null,
     retry_safe: record.retry_safe ?? null,
     retry_count: record.retry_count,
+    rpc_methods: [...record.rpc_methods],
   });
 
   const collectServerRoleSurfaceIds = (
@@ -8006,6 +8008,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
         record.submit_verified = delivery.submit_verified;
         record.retry_count = delivery.retry_count;
+        record.rpc_methods = [...delivery.rpc_methods];
         finishDelivery(record, "delivered");
         if (lifecycle) {
           if (
@@ -8019,6 +8022,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: record.press_enter,
               source_event: lifecycle.source_event,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
               delivery_state: delivery.delivery,
             });
           } else if (delivery.delivery === "pending_verify") {
@@ -8029,6 +8033,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: record.press_enter,
               source_event: lifecycle.source_event,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
             });
           } else {
             lifecycle.engine.resolveDelivery({
@@ -8045,6 +8050,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : "submitted",
               terminal: true,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
               submit_verified: delivery.submit_verified,
               error:
                 delivery.delivery === "rescued"
@@ -8059,6 +8065,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           record.submit_verification_reason = error.reason;
           record.retry_safe = error.retry_safe;
           record.retry_count = error.retry_count;
+          record.rpc_methods = [...error.receipt.rpc_methods];
         } else if (error instanceof DeliverySafetyGateError) {
           record.submit_verified = error.submit_verified;
         }
@@ -8076,6 +8083,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             delivery_state: "failed",
             terminal: true,
             retry_count: record.retry_count,
+            rpc_methods: record.rpc_methods,
             submit_verified: record.submit_verified,
             error: message,
           });
@@ -10085,6 +10093,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             verify_submit: shouldVerifySubmit,
             submit_verified: null,
             retry_count: 0,
+            rpc_methods: [],
             rename_to_task: args.rename_to_task,
             started_at: new Date().toISOString(),
             stableSurfaceIdentity: route.stableSurfaceIdentity,
@@ -10107,6 +10116,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               text: sanitizedText,
               press_enter: args.press_enter,
               source_event: sourceEvent,
+              rpc_methods: [],
             });
           }
           startBackgroundDelivery(record, backgroundLifecycle);
@@ -15738,6 +15748,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               submit_verified: receipt.submit_verified,
               agent_id: receipt.agent_id,
               retry_count: receipt.retry_count,
+              rpc_methods: receipt.rpc_methods ?? [],
               ...(receipt.needs_attention === true
                 ? {
                     needs_attention: true,
