@@ -1010,12 +1010,15 @@ export async function assertLockPathIdentity(
 }
 
 function assertLockPathIdentitySync(lockPath, openedStat) {
-  let pathStat;
-  try {
-    pathStat = lstatSync(lockPath);
-  } catch (error) {
-    throw new Error(`lock path identity changed: ${lockPath}`, { cause: error });
-  }
+  const pathStat = (() => {
+    try {
+      return lstatSync(lockPath);
+    } catch (error) {
+      throw new Error(`lock path identity changed: ${lockPath}`, {
+        cause: error,
+      });
+    }
+  })();
   if (
     !pathStat.isFile() ||
     pathStat.nlink > 1 ||
@@ -1139,7 +1142,13 @@ async function createPidLock(lockPath, label, onFailure) {
     assertHealthy,
     async publishTemp(from, to, parentIdentity = null) {
       assertHealthy();
-      return publishWithLockHolder(holder, from, to, label, parentIdentity);
+      return await publishWithLockHolder(
+        holder,
+        from,
+        to,
+        label,
+        parentIdentity,
+      );
     },
     async release() {
       if (released) return;
