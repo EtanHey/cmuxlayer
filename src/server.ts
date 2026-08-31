@@ -664,6 +664,7 @@ const DeliveryOutputShape = {
   terminal: z.boolean().optional(),
   typed: z.boolean().optional(),
   submit_attempted: z.boolean().optional(),
+  submit_dispatched: z.boolean().optional(),
   submit_verified: z.boolean().nullable().optional(),
   submit_evidence: z
     .enum(["token_delta", "transcript_echo", "cleared_composer", "status_only"])
@@ -1008,6 +1009,7 @@ export interface PublicDeliveryReceipt {
   terminal: boolean;
   typed: boolean;
   submit_attempted: boolean;
+  submit_dispatched?: boolean;
   submit_verified: boolean | null;
   submitted: boolean;
   submit_evidence?: SubmitEvidence | null;
@@ -1229,6 +1231,9 @@ export function buildPublicDeliveryReceipt(input: {
     terminal,
     typed: input.typed,
     submit_attempted: input.submit_attempted,
+    ...(input.submit_dispatched !== undefined
+      ? { submit_dispatched: input.submit_dispatched }
+      : {}),
     submit_verified: input.submit_verified,
     submitted: input.submit_verified === true,
     ...(input.submit_verified !== null
@@ -1499,6 +1504,8 @@ class LauncherReadinessError extends Error {
 
 class BootPromptDeliveryError extends Error {
   readonly rpc_methods: DeliveryRpcMethod[];
+  readonly typed: boolean;
+  readonly submit_dispatched: boolean;
 
   constructor(
     message: string,
@@ -1515,6 +1522,12 @@ class BootPromptDeliveryError extends Error {
       deliveryMethods.length > 0
         ? deliveryMethods
         : deliveryRpcMethodsFromError(submit_verification_error);
+    this.typed =
+      deliveryTypedFromError(delivery_error) ||
+      deliveryTypedFromError(submit_verification_error);
+    this.submit_dispatched =
+      deliverySubmitDispatchedFromError(delivery_error) ||
+      deliverySubmitDispatchedFromError(submit_verification_error);
   }
 }
 
@@ -1709,6 +1722,23 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const rpcMethods = deliveryRpcMethodsFromError(error);
   const deliveryRpcExtra =
     rpcMethods.length > 0 ? { rpc_methods: rpcMethods } : {};
+  const deliveryTyped = deliveryTypedFromError(error);
+  const deliverySubmitDispatched = deliverySubmitDispatchedFromError(error);
+  const deliveryMutationExtra =
+    deliveryTyped || deliverySubmitDispatched
+      ? {
+          typed: deliveryTyped,
+          submit_attempted: deliverySubmitDispatched,
+          submit_dispatched: deliverySubmitDispatched,
+          rpc_methods: rpcMethods,
+          WARNING: defaultNonDeliveryWarning(
+            "failed",
+            rpcMethods,
+            deliveryTyped,
+            deliverySubmitDispatched,
+          ),
+        }
+      : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -1739,6 +1769,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...lifecycleTimeoutExtra,
     ...readinessExtra,
     ...deliveryRpcExtra,
+    ...deliveryMutationExtra,
     ...extra,
     ...createdIdentityFromError(error),
   };
@@ -6593,6 +6624,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery_id: opts.delivery_id,
       typed: bytes > 0,
       submit_attempted: Boolean(opts.press_enter),
+      submit_dispatched: submitDispatched,
       submit_verified,
       submit_evidence,
       retry_count,
@@ -8172,6 +8204,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         record.retry_count = delivery.retry_count;
         record.rpc_methods = [...delivery.rpc_methods];
         record.typed = delivery.typed;
+        record.submit_dispatched = delivery.submit_dispatched === true;
         finishDelivery(record, "delivered");
         if (lifecycle) {
           if (
@@ -8214,6 +8247,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               terminal: true,
               retry_count: delivery.retry_count,
               rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               submit_verified: delivery.submit_verified,
               error:
                 delivery.delivery === "rescued"
@@ -8266,7 +8301,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
 
     setTimeout(() => {
-      void withTransportRetryTracking(run);
+      withTransportRetryTracking(run);
     }, 0);
   };
 
@@ -13387,6 +13422,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           retry_count: delivery.retry_count,
           submit_verified: delivery.submit_verified,
           rpc_methods: delivery.rpc_methods,
+          typed: delivery.typed,
+          submit_dispatched: delivery.submit_dispatched,
           ...(delivery.delivery === "submitted" ||
           delivery.delivery === "queued" ||
           delivery.delivery === "queued_followup" ||
@@ -17544,6 +17581,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         ? error.retry_count
                         : 0,
                     rpc_methods: errorRpcMethods,
+                    typed: errorTyped,
+                    submit_dispatched: errorSubmitDispatched,
                     submit_verified:
                       error instanceof SubmitVerificationError ? false : null,
                     error:
@@ -17767,6 +17806,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ? error.retry_count
                     : 0,
                 rpc_methods: errorRpcMethods,
+                typed: errorTyped,
+                submit_dispatched: errorSubmitDispatched,
                 submit_verified:
                   error instanceof SubmitVerificationError ? false : null,
                 error: error instanceof Error ? error.message : String(error),

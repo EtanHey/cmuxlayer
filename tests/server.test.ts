@@ -4073,7 +4073,10 @@ describe("tool handler integration", () => {
       }),
       selectWorkspace: vi.fn().mockResolvedValue(),
       send: vi.fn().mockImplementation((_surface: string, text: string) => {
-        if (text === pointer) pointerSent = true;
+        if (text === pointer) {
+          pointerSent = true;
+          recordCliFallback("send_text");
+        }
         return Promise.resolve();
       }),
       pasteText: vi.fn().mockResolvedValue(),
@@ -4115,7 +4118,10 @@ describe("tool handler integration", () => {
       "return",
       expect.any(Object),
     );
-    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
+    expect(parsed.rpc_methods).toEqual([]);
+    expect(parsed.typed).toBe(true);
+    expect(parsed.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    expect(parsed.WARNING).toMatch(/do not resend/i);
   });
 
   it("send_command warns when a long single-paragraph boot_prompt_path remains inline", async () => {

@@ -376,6 +376,8 @@ type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
   rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+  typed?: boolean;
+  submit_dispatched?: boolean;
   delivery?:
     | "submitted"
     | "queued"
@@ -7669,6 +7671,8 @@ export class AgentEngine {
           if (Array.isArray(result.rpc_methods)) {
             receipt.rpc_methods = [...result.rpc_methods];
           }
+          receipt.typed = result.typed === true;
+          receipt.submit_dispatched = result.submit_dispatched === true;
           receipt.error = null;
           receipt.next_attempt_at = null;
           receipt.needs_attention = false;
@@ -7726,12 +7730,29 @@ export class AgentEngine {
                   }).rpc_methods,
                 ]
               : [];
+          const errorTyped = Boolean(
+            error &&
+              typeof error === "object" &&
+              "typed" in error &&
+              (error as { typed?: unknown }).typed === true,
+          );
+          const errorSubmitDispatched = Boolean(
+            error &&
+              typeof error === "object" &&
+              "submit_dispatched" in error &&
+              (error as { submit_dispatched?: unknown }).submit_dispatched ===
+                true,
+          );
           if (errorRpcMethods.length > 0) {
             receipt.rpc_methods = errorRpcMethods;
           }
+          receipt.typed = errorTyped;
+          receipt.submit_dispatched = errorSubmitDispatched;
           if (
             error instanceof RetryableDeliveryError &&
-            errorRpcMethods.length === 0
+            errorRpcMethods.length === 0 &&
+            !errorTyped &&
+            !errorSubmitDispatched
           ) {
             receipt.submission_started_at = null;
             receipt.retry_count += 1;

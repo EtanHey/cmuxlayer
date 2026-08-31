@@ -13830,6 +13830,43 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("terminalizes a queued CLI partial delivery and persists its mutation evidence", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "queued-cli-partial",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      engine.setDeliverySubmitter(() =>
+        Promise.reject(
+          Object.assign(new RetryableDeliveryError("Buffer not found"), {
+            rpc_methods: [],
+            typed: true,
+            submit_dispatched: false,
+          }),
+        ),
+      );
+      const receipt = engine.queueDelivery({
+        agent_id: "queued-cli-partial",
+        text: "already pasted\ninto the composer",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "failed",
+        terminal: true,
+        rpc_methods: [],
+        typed: true,
+        submit_dispatched: false,
+      });
+    });
+
     it("persists a composer-accepted queue without replaying it", async () => {
       const submitter = vi.fn();
       engine.setDeliverySubmitter(submitter);

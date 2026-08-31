@@ -8972,6 +8972,20 @@ describe("agent lifecycle tool handlers", () => {
     expect(failed.WARNING).toMatch(/PARTIALLY DELIVERED/);
     expect(failed.WARNING).toMatch(/do not resend/i);
     expect(failed.WARNING).not.toMatch(/message did not land/i);
+
+    const waited = parseToolResult(
+      await registeredTestTool(server, "wait_for").handler(
+        { delivery_id: failed.delivery_id },
+        {},
+      ),
+    );
+    expect(waited).toMatchObject({
+      delivery_state: "failed",
+      typed: true,
+      rpc_methods: [],
+    });
+    expect(waited.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    expect(waited.WARNING).toMatch(/do not resend/i);
   });
 
   it("background delivery preserves CLI partial-delivery truth in snapshots and wait_for", async () => {
@@ -9034,6 +9048,58 @@ describe("agent lifecycle tool handlers", () => {
         rpc_methods: [],
       });
       expect(screen.delivery.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("background delivery records a successful CLI submit dispatch", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = makeServerAgentRecord({
+        agent_id: "worker-background-cli-submit",
+        surface_id: "surface:worker-background-cli-submit",
+        workspace_id: "workspace:one",
+        state: "done",
+        function: "implementor",
+      });
+      const { server, client } = await createBroadcastServer([record]);
+      client.send.mockImplementation(() => {
+        recordCliFallback("send_text");
+        return Promise.resolve();
+      });
+      client.sendKey.mockImplementation(() => {
+        recordCliFallback("send_key");
+        return Promise.resolve();
+      });
+
+      const accepted = parseToolResult(
+        await registeredTestTool(server, "send_input").handler(
+          {
+            surface: record.surface_id,
+            text: "submit this",
+            press_enter: true,
+            background: true,
+          },
+          {},
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const screen = parseToolResult(
+        await registeredTestTool(server, "read_screen").handler(
+          { surface: record.surface_id, parsed_only: true },
+          {},
+        ),
+      );
+
+      expect(screen.delivery).toMatchObject({
+        status: "delivered",
+        typed: true,
+        submit_dispatched: true,
+        rpc_methods: [],
+      });
+      expect(accepted.delivery_id).toBe(screen.delivery.delivery_id);
     } finally {
       vi.useRealTimers();
     }
