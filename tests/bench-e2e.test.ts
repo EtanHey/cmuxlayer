@@ -1211,6 +1211,23 @@ describe("bench-e2e measurement harness", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("refuses a non-regular output substituted after reservation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.json");
+    const temp = `${output}.tmp-test`;
+    const reservation = await createOutputReservation(output);
+    await writeFile(temp, "published\n", "utf8");
+    expect(spawnSync("mkfifo", [output]).status).toBe(0);
+
+    await expect(reservation.publishTemp(temp, output)).rejects.toThrow(
+      /lock holder exited during publication/,
+    );
+    expect(spawnSync("test", ["-p", output]).status).toBe(0);
+    await expect(readFile(temp, "utf8")).resolves.toBe("published\n");
+    await expect(reservation.release()).rejects.toThrow(/exited before release/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("cleans abandoned receipt temps only after winning the output lock", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
     const output = join(directory, "receipt.json");
@@ -1257,6 +1274,17 @@ describe("bench-e2e measurement harness", () => {
       /multiple hard links/,
     );
     await expect(readFile(target, "utf8")).resolves.toBe("{}\n");
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects an existing non-regular output target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const output = join(directory, "receipt.fifo");
+    expect(spawnSync("mkfifo", [output]).status).toBe(0);
+
+    await expect(canonicalOutputPath(output)).rejects.toThrow(
+      /non-regular output path/,
+    );
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1697,6 +1725,66 @@ describe("bench-e2e measurement harness", () => {
       assertOutputOutsideGitMetadata(join(realGit, "HEAD"), worktree),
     ).rejects.toThrow(/inside Git metadata/);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects receipt output inside nested checkout Git metadata", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cmuxlayer-bench-e2e-"));
+    const nested = join(directory, "ignored", "nested-checkout");
+    const nestedGit = join(nested, ".git");
+    const output = join(nestedGit, "HEAD");
+    await mkdir(nestedGit, { recursive: true });
+    await writeFile(output, "ref: refs/heads/main\n", "utf8");
+
+    await expect(
+      assertOutputOutsideGitMetadata(output, directory),
+    ).rejects.toThrow(/inside Git metadata/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects redirected Git metadata before provenance checks", async () => {
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/external/repository.git/HEAD",
+          env: { ...process.env, GIT_DIR: "/external/repository.git" },
+        },
+        {
+          repoRoot: "/repo",
+          exec: () => {
+            throw new Error("Git must not run with redirected metadata");
+          },
+        },
+      ),
+    ).rejects.toThrow(/redirected Git metadata/);
+  });
+
+  it("scrubs inherited Git pathspec controls from provenance commands", async () => {
+    await expect(
+      prepareBuiltEntries(
+        {
+          mcpEntry: "/repo/dist/index.js",
+          daemonEntry: "/repo/dist/daemon.js",
+          out: "/repo/package.json",
+          env: { GIT_LITERAL_PATHSPECS: "1" },
+        },
+        {
+          repoRoot: "/repo",
+          exec: (_command, args, options) => {
+            if (args[0] === "ls-files") {
+              return {
+                stdout: options.env.GIT_LITERAL_PATHSPECS
+                  ? ""
+                  : "package.json\n",
+                stderr: "",
+              };
+            }
+            throw new Error(`unexpected command: ${args.join(" ")}`);
+          },
+        },
+      ),
+    ).rejects.toThrow(/tracked output receipt/);
   });
 
   it("refuses to exclude a tracked output receipt from provenance", async () => {

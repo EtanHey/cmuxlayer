@@ -640,7 +640,11 @@ export async function createSocketReservation(requestedPath) {
   };
 }
 
-export async function canonicalOutputPath(outputPath, seen = new Set()) {
+export async function canonicalOutputPath(
+  outputPath,
+  seen = new Set(),
+  allowDirectory = false,
+) {
   const absoluteOutput = resolve(outputPath);
   if (seen.has(absoluteOutput)) {
     throw new Error(`output path contains a symbolic-link cycle: ${absoluteOutput}`);
@@ -652,17 +656,31 @@ export async function canonicalOutputPath(outputPath, seen = new Set()) {
   });
   if (outputStat?.isSymbolicLink()) {
     const target = await readlink(absoluteOutput);
-    return canonicalOutputPath(resolve(dirname(absoluteOutput), target), seen);
+    return canonicalOutputPath(
+      resolve(dirname(absoluteOutput), target),
+      seen,
+      allowDirectory,
+    );
   }
   if (outputStat?.isFile() && outputStat.nlink > 1) {
     throw new Error(
       `refusing output path with multiple hard links: ${absoluteOutput}`,
     );
   }
+  if (
+    outputStat &&
+    !outputStat.isFile() &&
+    !(allowDirectory && outputStat.isDirectory())
+  ) {
+    throw new Error(`refusing non-regular output path: ${absoluteOutput}`);
+  }
   if (outputStat) return realpath(absoluteOutput);
   const parent = dirname(absoluteOutput);
   if (parent === absoluteOutput) return absoluteOutput;
-  return join(await canonicalOutputPath(parent, seen), basename(absoluteOutput));
+  return join(
+    await canonicalOutputPath(parent, seen, true),
+    basename(absoluteOutput),
+  );
 }
 
 export async function createOutputReservation(outputPath, onFailure) {
@@ -762,7 +780,7 @@ function processIsLive(pid, signalPid = process.kill) {
 }
 
 const LOCK_HOLDER_SCRIPT = String.raw`
-const { renameSync } = require("node:fs");
+const { lstatSync, renameSync } = require("node:fs");
 let buffered = "";
 process.stdout.write("LOCKED\n");
 process.stdin.setEncoding("utf8");
@@ -777,6 +795,14 @@ process.stdin.on("data", (chunk) => {
     try {
       const command = JSON.parse(line);
       if (command.operation !== "publish") throw new Error("unsupported command");
+      try {
+        const target = lstatSync(command.to);
+        if (!target.isFile() || target.nlink > 1) {
+          throw new Error("output target is not a singly linked regular file");
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
       renameSync(command.from, command.to);
       process.stdout.write("PUBLISHED " + command.id + "\n");
     } catch (error) {
@@ -1928,7 +1954,7 @@ export function provenanceStatusArgs(root, outputPath, ownedSidecarPaths = []) {
   ];
 }
 
-export async function resolveGitMetadataPaths(root) {
+async function resolveGitMetadataPathsAtRoot(root) {
   const markerPath = resolve(root, ".git");
   const markerStat = await lstat(markerPath).catch((error) => {
     if (error?.code === "ENOENT") return null;
@@ -1961,6 +1987,34 @@ export async function resolveGitMetadataPaths(root) {
   ];
 }
 
+export async function resolveGitMetadataPaths(root, outputPath = null) {
+  const absoluteRoot = await realpath(resolve(root)).catch((error) => {
+    if (error?.code === "ENOENT") return resolve(root);
+    throw error;
+  });
+  const candidateRoots = [absoluteRoot];
+  if (outputPath) {
+    const absoluteOutput = await canonicalOutputPath(outputPath);
+    for (let candidate = dirname(absoluteOutput); ; candidate = dirname(candidate)) {
+      if (candidate !== absoluteRoot) {
+        const markerExists = await lstat(join(candidate, ".git"))
+          .then(() => true)
+          .catch((error) => {
+            if (error?.code === "ENOENT") return false;
+            throw error;
+          });
+        if (markerExists) candidateRoots.push(candidate);
+      }
+      if (dirname(candidate) === candidate) break;
+    }
+  }
+  return [
+    ...new Set(
+      (await Promise.all(candidateRoots.map(resolveGitMetadataPathsAtRoot))).flat(),
+    ),
+  ];
+}
+
 export async function assertOutputOutsideGitMetadata(
   outputPath,
   root,
@@ -1968,7 +2022,7 @@ export async function assertOutputOutsideGitMetadata(
 ) {
   if (!outputPath) return;
   const absoluteOutput = await canonicalOutputPath(outputPath);
-  const metadataPaths = await resolveMetadata(root);
+  const metadataPaths = await resolveMetadata(root, absoluteOutput);
   for (const metadataPath of metadataPaths) {
     const absoluteMetadata = resolve(metadataPath);
     const outputWithinMetadata = relative(absoluteMetadata, absoluteOutput);
@@ -1996,7 +2050,29 @@ export async function prepareBuiltEntries(config, deps = {}) {
     deps.listOwnedReceiptSidecars ??
     deps.listOwnedReceiptTemps ??
     listOwnedReceiptSidecars;
-  const execOptions = { env: config.env, signal: config.signal };
+  const sourceEnv = config.env ?? process.env;
+  const redirectedGitEnvironment = [
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  ].filter((name) => config.env?.[name]);
+  if (redirectedGitEnvironment.length > 0) {
+    throw new Error(
+      `redirected Git metadata is unsupported for benchmark provenance: ${redirectedGitEnvironment.join(", ")}`,
+    );
+  }
+  const execEnv = { ...sourceEnv };
+  for (const name of [
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+  ]) {
+    delete execEnv[name];
+  }
+  const execOptions = { env: execEnv, signal: config.signal };
   const expectedMcpEntry = join(root, "dist", "index.js");
   const expectedDaemonEntry = join(root, "dist", "daemon.js");
   if (
