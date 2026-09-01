@@ -101,6 +101,15 @@ import {
   type WatchSpec,
 } from "./watch-spec.js";
 import {
+  canonicalAgentId,
+  resolveWatchOwner,
+  resolveWatchOwnerFromSources,
+  watchNotificationOwner,
+  watchOwnerIncludesCanonical,
+  watchRecordOwner,
+  type WatchOwnerCandidate,
+} from "./watch-owner.js";
+import {
   AgentDiscovery,
   SurfaceBindingChangedDuringDiscoveryError,
   type DiscoveredAgent,
@@ -294,6 +303,121 @@ import {
   SurfaceWriteLivenessTracker,
 } from "./surface-write-liveness.js";
 import type { FleetSidebarPublisherLike } from "./fleet-sidebar.js";
+
+const DUPLICATE_WATCH_OWNER_RANK = {
+  INTERACTIVE: 0,
+  ACTIVE: 1,
+  OBSERVED_INTERACTIVE: 2,
+  TERMINAL: 3,
+  DEGRADED_DELIVERABLE: 4,
+  STARTING_OR_INDIRECT: 5,
+  ERROR: 6,
+  UNKNOWN: 7,
+} as const;
+
+const DUPLICATE_WATCH_OWNER_STATES = new Set([
+  "creating",
+  "booting",
+  "ready",
+  "working",
+  "idle",
+  "done",
+  "error",
+]);
+
+/**
+ * Total order for duplicate report-watch owners. Lower ranks win.
+ *
+ * 0 interactive and deliverable; 1 direct screen activity; 2 directly
+ * observed interactive but not ordinarily deliverable; 3 terminal but still
+ * attemptable; 4 degraded/error-screened but deliverable; 5 starting or only
+ * indirectly live; 6 known error; 7 missing or unenumerated evidence.
+ *
+ * Screen evidence is mapped positively: error is degraded, working is active,
+ * done is terminal, ready/idle is interactive, and creating/booting is
+ * starting. No unenumerated state can enter a preferred rank; it receives the
+ * explicit worst-attemptable rank instead.
+ */
+export function rankDuplicateWatchOwnerCandidate(
+  live: LiveAgentState | null,
+): number {
+  if (live === null) return DUPLICATE_WATCH_OWNER_RANK.UNKNOWN;
+  if (
+    !DUPLICATE_WATCH_OWNER_STATES.has(live.state) ||
+    (live.screen_state !== null &&
+      !DUPLICATE_WATCH_OWNER_STATES.has(live.screen_state)) ||
+    (live.source !== "screen" && live.source !== "registry")
+  ) {
+    return DUPLICATE_WATCH_OWNER_RANK.UNKNOWN;
+  }
+
+  const deliverable = isLiveDeliverable(live);
+  switch (live.screen_state) {
+    case "error":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.ERROR;
+    case "working":
+      if (live.source === "screen") {
+        return DUPLICATE_WATCH_OWNER_RANK.ACTIVE;
+      }
+      break;
+    case "done":
+      return DUPLICATE_WATCH_OWNER_RANK.TERMINAL;
+    case "creating":
+    case "booting":
+      return DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "ready":
+    case "idle":
+    case null:
+      break;
+  }
+
+  switch (live.state) {
+    case "ready":
+    case "idle":
+      if (deliverable) return DUPLICATE_WATCH_OWNER_RANK.INTERACTIVE;
+      if (
+        live.source === "screen" &&
+        (live.screen_state === "ready" || live.screen_state === "idle")
+      ) {
+        return DUPLICATE_WATCH_OWNER_RANK.OBSERVED_INTERACTIVE;
+      }
+      return DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "working":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "done":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.OBSERVED_INTERACTIVE
+        : DUPLICATE_WATCH_OWNER_RANK.UNKNOWN;
+    case "creating":
+    case "booting":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.STARTING_OR_INDIRECT;
+    case "error":
+      return deliverable
+        ? DUPLICATE_WATCH_OWNER_RANK.DEGRADED_DELIVERABLE
+        : DUPLICATE_WATCH_OWNER_RANK.ERROR;
+  }
+}
+
+export function selectDuplicateWatchOwnerCandidate<T>(
+  probed: readonly { candidate: T; live: LiveAgentState | null }[],
+): T | undefined {
+  let best = probed[0];
+  let bestRank = rankDuplicateWatchOwnerCandidate(best?.live ?? null);
+  for (const entry of probed.slice(1)) {
+    const rank = rankDuplicateWatchOwnerCandidate(entry.live);
+    if (rank < bestRank) {
+      best = entry;
+      bestRank = rank;
+    }
+  }
+  return best?.candidate;
+}
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -4338,6 +4462,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   }) => Promise<void> = async () => {};
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
   let lifecycleScheduleChildReportWatchPrune: (() => void) | null = null;
+  const snapshotWatchOwnerCandidates = (): AgentRecord[] =>
+    [
+      ...(context.lifecycleRegistry?.list() ?? []),
+      ...stateMgr.listStates(),
+    ].filter(
+      (candidate, index, rows) =>
+        rows.findIndex((row) => row.agent_id === candidate.agent_id) === index,
+    );
+  const removeOwnedWatchesFor = async (
+    agentId: string,
+    candidates: readonly WatchOwnerCandidate[],
+  ): Promise<number> => {
+    const target = canonicalAgentId(agentId);
+    return removeWatches(
+      (watch) => {
+        const resolution = resolveWatchOwner(
+          watchRecordOwner(watch),
+          candidates,
+        );
+        return (
+          resolution.kind === "resolved" &&
+          watchOwnerIncludesCanonical(resolution, target)
+        );
+      },
+      {
+        registryPath:
+          opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+      },
+    );
+  };
   const pruneChildReportWatchesFor = (agentId: string): void => {
     lifecycleScheduleChildReportWatchPrune?.();
     removeWatches(
@@ -9287,11 +9441,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         }
         const caller = resolveCurrentCallerAgent();
-        const callerOwners = new Set(
-          [caller?.agent_id, caller?.seat_id].filter(
-            (value): value is string => Boolean(value),
-          ),
-        );
+        const callerCanonicalId = caller
+          ? canonicalAgentId(caller.agent_id)
+          : null;
         const watches = caller
           ? readWatchRegistry({
               registryPath:
@@ -9299,9 +9451,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 join(context.stateDir, "watch-specs.json"),
             }).watches
               .filter(
-                (watch) =>
-                  callerOwners.has(watch.owner) &&
-                  (watch.state === "armed" || watch.state === "firing"),
+                (watch) => {
+                  const ownerResolution = resolveWatchOwner(
+                    watchRecordOwner(watch),
+                    [caller],
+                  );
+                  return (
+                    callerCanonicalId !== null &&
+                    watchOwnerIncludesCanonical(
+                      ownerResolution,
+                      callerCanonicalId,
+                    ) &&
+                    (watch.state === "armed" || watch.state === "firing")
+                  );
+                },
               )
               .map(({ watch_id, target, state }) => ({
                 watch_id,
@@ -11279,6 +11442,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // stop, then close the pane for real and say which halves happened.
           const boundAgent =
             context.lifecycleRegistry?.get(args.agent_id) ?? null;
+          // Capture alias evidence before stop_agent can evict the terminal
+          // record. Cleanup receives a stable resolution universe.
+          const watchOwnerCandidates = snapshotWatchOwnerCandidates();
           const boundSurface = boundAgent?.surface_id?.trim() || null;
           const boundWorkspace = boundAgent?.workspace_id ?? undefined;
           if (
@@ -11352,10 +11518,46 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             );
           }
+          let removedOwnedWatches: number;
+          try {
+            removedOwnedWatches = await removeOwnedWatchesFor(
+              args.agent_id,
+              watchOwnerCandidates,
+            );
+          } catch (cleanupError) {
+            lifecycleScheduleChildReportWatchPrune?.();
+            const cleanupReason =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
+            let surfaceClosed = false;
+            if (boundSurface) {
+              try {
+                surfaceClosed =
+                  (await findSurfaceByRef(boundSurface, boundWorkspace)) ===
+                  null;
+              } catch {
+                surfaceClosed = false;
+              }
+            }
+            return err(
+              new Error(
+                `close_surface scope=agent stopped ${args.agent_id}, but synchronous owned-watch cleanup failed: ${cleanupReason}`,
+              ),
+              {
+                ...stopContent,
+                scope: "agent",
+                agent_stopped: true,
+                surface: boundSurface,
+                surface_closed: surfaceClosed,
+                watch_cleanup: "failed",
+                watch_cleanup_error: cleanupReason,
+              },
+            );
+          }
           const watchCleanup = {
-            watch_cleanup: lifecycleScheduleChildReportWatchPrune
-              ? ("scheduled" as const)
-              : ("best_effort" as const),
+            watch_cleanup: "completed" as const,
+            watches_removed: removedOwnedWatches,
           };
           if (!boundSurface) {
             const data = {
@@ -12695,92 +12897,114 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
-            const externalNotify =
-              event.notify === true ? opts?.watchNotify : undefined;
-            const subjectStillBelongsToOwner = (): boolean => {
+            const externalNotifyOptedIn =
+              event.notify === true && Boolean(opts?.watchNotify);
+            const deliverExternalNotification = async (): Promise<boolean> => {
+              if (!externalNotifyOptedIn || !opts?.watchNotify) return false;
+              try {
+                return (await opts.watchNotify(event)) !== false;
+              } catch {
+                return false;
+              }
+            };
+            const subjectStillBelongsToOwner = (
+              resolvedOwnerId: string | null,
+            ): boolean => {
               if (!event.subject_agent_id) return true;
+              if (!resolvedOwnerId) return false;
               const subject =
                 registry.get(event.subject_agent_id) ??
                 stateMgr.readState(event.subject_agent_id);
               return Boolean(
                 subject &&
-                subject.parent_agent_id === event.owner &&
+                subject.parent_agent_id === resolvedOwnerId &&
                 subject.user_killed !== true &&
                 !subject.deletion_intent,
               );
             };
-            if (!subjectStillBelongsToOwner()) {
-              return true;
-            }
-            const liveOwnerCandidates = [
-              ...registry.list(),
-              ...stateMgr.listStates(),
-            ].filter(
-              (candidate, index, rows) =>
-                rows.findIndex(
-                  (row) => row.agent_id === candidate.agent_id,
-                ) === index &&
-                candidate.user_killed !== true &&
-                !candidate.deletion_intent,
+            const ownerResolution = resolveWatchOwnerFromSources(
+              watchNotificationOwner(event),
+              registry.list(),
+              stateMgr.listStates(),
             );
-            const owner =
-              liveOwnerCandidates.find(
-                (candidate) => candidate.agent_id === event.owner,
-              ) ??
-              liveOwnerCandidates.find(
-                (candidate) => candidate.seat_id?.trim() === event.owner,
-              ) ??
-              (() => {
-                const prefixMatches = liveOwnerCandidates.filter((candidate) =>
-                  candidate.agent_id.startsWith(`${event.owner}-`),
-                );
-                return prefixMatches.length === 1
-                  ? prefixMatches[0]
-                  : undefined;
-              })();
-            let externalDelivered = true;
-            if (event.reason !== "predicate_matched" && externalNotify) {
-              try {
-                externalDelivered = (await externalNotify(event)) !== false;
-              } catch {
-                externalDelivered = false;
+            const subjectBoundOwner = (() => {
+              if (!event.subject_agent_id) return null;
+              const subject =
+                registry.get(event.subject_agent_id) ??
+                stateMgr.readState(event.subject_agent_id);
+              if (
+                !subject?.parent_agent_id ||
+                subject.user_killed === true ||
+                subject.deletion_intent
+              ) {
+                return undefined;
               }
-            }
-            if (!subjectStillBelongsToOwner()) {
-              return true;
+              const parentId = canonicalAgentId(subject.parent_agent_id);
+              if (!watchOwnerIncludesCanonical(ownerResolution, parentId)) {
+                return undefined;
+              }
+              return ownerResolution.candidates.find(
+                (candidate) => candidate.agent_id === subject.parent_agent_id,
+              );
+            })();
+            const subjectBindingMismatch = Boolean(
+              event.subject_agent_id &&
+                ownerResolution.kind !== "unresolved" &&
+                !subjectBoundOwner,
+            );
+            const owner = await (async () => {
+              if (event.subject_agent_id) return subjectBoundOwner;
+              if (ownerResolution.kind === "resolved") {
+                return ownerResolution.candidates[0];
+              }
+              if (ownerResolution.kind === "ambiguous") {
+                const probed = await Promise.all(
+                  ownerResolution.candidates.map(async (candidate) => ({
+                    candidate,
+                    live: await freshLiveAgentStateProbe(candidate),
+                  })),
+                );
+                return selectDuplicateWatchOwnerCandidate(probed);
+              }
+              return undefined;
+            })();
+            let externalDelivered = false;
+            if (event.reason !== "predicate_matched") {
+              externalDelivered = await deliverExternalNotification();
             }
             if (!owner) {
-              if (event.reason === "predicate_matched" && externalNotify) {
-                try {
-                  externalDelivered =
-                    (await externalNotify(event)) !== false;
-                } catch {
-                  externalDelivered = false;
-                }
+              if (event.reason === "predicate_matched") {
+                externalDelivered = await deliverExternalNotification();
               }
-              if (externalNotify && externalDelivered) {
+              if (externalDelivered) {
                 return true;
               }
               return {
                 delivered: false,
                 retryable: false,
-                reason: "owner_not_live",
+                reason: subjectBindingMismatch
+                  ? "subject_not_owned"
+                  : "owner_not_live",
               };
+            }
+            if (!subjectStillBelongsToOwner(owner.agent_id)) {
+              return externalDelivered
+                ? true
+                : {
+                    delivered: false,
+                    retryable: false,
+                    reason: "subject_not_owned",
+                  };
             }
             if (owner && lifecycleAgentInputDeliverer) {
               const externalFallbackAfterLocalFailure = async () => {
-                if (
-                  event.reason !== "predicate_matched" ||
-                  !externalNotify
-                ) {
-                  return false;
+                if (!subjectStillBelongsToOwner(owner.agent_id)) {
+                  return externalDelivered;
                 }
-                if (!subjectStillBelongsToOwner()) return true;
-                try {
-                  return (await externalNotify(event)) !== false;
-                } catch {
-                  return false;
+                if (event.reason !== "predicate_matched") {
+                  return externalDelivered;
                 }
+                return deliverExternalNotification();
               };
               const text = (() => {
                 if (
@@ -12821,11 +13045,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
             if (event.reason !== "predicate_matched") {
-              return externalNotify ? externalDelivered : false;
+              return externalDelivered;
             }
-            return externalNotify
-              ? (await externalNotify(event)) !== false
-              : false;
+            return deliverExternalNotification();
           },
           closeForensicsRunner: opts?.enableCloseForensics
             ? createDefaultCloseForensicsRunner({
@@ -12919,7 +13141,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await awaitLifecycleStart();
-          const watch = await engine.armWatch(args as WatchSpec);
+          const publicSpec = { ...(args as WatchSpec) };
+          delete (publicSpec as WatchSpec & { provenance?: unknown })
+            .provenance;
+          const watch = await engine.armWatch({
+            ...publicSpec,
+            provenance: "public",
+          });
           return ok({ watch });
         } catch (error) {
           if (error instanceof WatchArmError) {
@@ -13598,16 +13826,37 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return `Report watch was not armed: ${childAgentId} is not a direct child of ${parentAgentId}`;
         }
         const reportPath = resolve(coordination.report_path);
+        const legacyEngineReportPath = resolve(
+          issueSpawnCoordination(childAgentId).report_path,
+        );
+        const canonicalParent = canonicalAgentId(parentAgentId);
+        const ownerCandidates = snapshotWatchOwnerCandidates();
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
         }).watches.find(
-          (watch) =>
-            watch.owner === parentAgentId &&
-            (!watch.subject_agent_id ||
-              watch.subject_agent_id === childAgentId) &&
-            watch.target === reportPath &&
-            watch.change === "content" &&
-            watch.state !== "failed",
+          (watch) => {
+            // Lifecycle may only adopt rows it owns. Provenance-absent rows are
+            // legacy engine rows only at the engine-derived child report path;
+            // an arbitrary/public row must remain independent even when its
+            // owner alias, target, and change happen to match this contract.
+            const lifecycleOwned =
+              watch.provenance === "engine" ||
+              (watch.provenance === undefined &&
+                resolve(watch.target) === legacyEngineReportPath);
+            const ownerResolution = resolveWatchOwner(
+              watchRecordOwner(watch),
+              ownerCandidates,
+            );
+            return (
+              lifecycleOwned &&
+              watchOwnerIncludesCanonical(ownerResolution, canonicalParent) &&
+              (!watch.subject_agent_id ||
+                watch.subject_agent_id === childAgentId) &&
+              watch.target === reportPath &&
+              watch.change === "content" &&
+              watch.state !== "failed"
+            );
+          },
         );
         if (existing) {
           if (!existing.subject_agent_id) {
@@ -13623,6 +13872,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           owner: parentAgentId,
           subject_agent_id: childAgentId,
           target: reportPath,
+          provenance: "engine",
           change: "content",
           deadline: Number.MAX_SAFE_INTEGER,
         });
@@ -15972,8 +16222,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 "wait_for watch is mutually exclusive with agent_id, ids, mine, and delivery_id",
               );
             }
+            const publicSpec = { ...(args.watch as WatchSpec) };
+            delete (publicSpec as WatchSpec & { provenance?: unknown })
+              .provenance;
             const result = await engine.waitForWatch(
-              args.watch as WatchSpec,
+              { ...publicSpec, provenance: "public" },
               args.timeout_ms,
             );
             return okFormatted(

@@ -2527,12 +2527,14 @@ describe("agent lifecycle tool handlers", () => {
     // should report.
     const agentId = "cmuxlayerCodex-stable-resume-contract";
     const parentId = "cmuxlayerClaude-resume-parent";
+    const parentSeat = "cmuxlayerClaude";
     const resumeInboxDir = mkdtempSync(join(tmpdir(), "p11b-resume-inbox-"));
     const watchRegistryPath = join(resumeInboxDir, "watch-specs.json");
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeServerAgentRecord({
         agent_id: parentId,
+        seat_id: parentSeat,
         repo: "cmuxlayer",
         cli: "claude",
         role: "orchestrator",
@@ -2557,9 +2559,21 @@ describe("agent lifecycle tool handlers", () => {
     });
     mkdirSync(join(resumeInboxDir, agentId), { recursive: true });
     writeFileSync(expected.report_path, "", "utf8");
+    const exec = makeLifecycleExec();
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      inboxBaseDir: resumeInboxDir,
+      watchRegistryPath,
+    });
+    await serverContexts.at(-1)?.lifecycleStartPromise;
+    // Arm after startup pruning so this assertion isolates resume's dedupe
+    // boundary rather than the separate terminal-child startup policy.
     const oldWatch = await armWatch(
       {
-        owner: parentId,
+        owner: parentSeat,
         subject_agent_id: agentId,
         target: expected.report_path,
         change: "content",
@@ -2577,16 +2591,6 @@ describe("agent lifecycle tool handlers", () => {
         (watch) => watch.watch_id === oldWatch.watch_id,
       )?.state,
     ).toBe("armed");
-    const exec = makeLifecycleExec();
-    const server = createTrackedServer({
-      exec,
-      stateDir: TEST_DIR,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-      inboxBaseDir: resumeInboxDir,
-      watchRegistryPath,
-    });
-    await serverContexts.at(-1)?.lifecycleStartPromise;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     try {
@@ -2625,12 +2629,11 @@ describe("agent lifecycle tool handlers", () => {
       expect(detail.done_marker).toBe(expected.done_marker);
       const reportWatches = readWatchRegistry({
         registryPath: watchRegistryPath,
-      }).watches.filter(
-        (watch) =>
-          watch.owner === parentId && watch.target === expected.report_path,
-      );
+      }).watches.filter((watch) => watch.target === expected.report_path);
       expect(reportWatches).toHaveLength(1);
       expect(reportWatches[0]).toMatchObject({
+        watch_id: oldWatch.watch_id,
+        owner: parentSeat,
         subject_agent_id: agentId,
         change: "content",
         state: "armed",

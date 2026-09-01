@@ -806,7 +806,7 @@ describe("control health", () => {
       JSON.stringify({
         version: 1,
         watches: [
-          watch("mine-live", "caller-agent", "armed"),
+          watch("mine-live", "caller", "armed"),
           watch("mine-dropped", "caller-seat", "fired"),
           watch("foreign-live", "another-agent", "armed"),
           watch("stale-live", "stale-recycled-agent", "armed"),
