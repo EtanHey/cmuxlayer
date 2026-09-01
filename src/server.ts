@@ -64,6 +64,7 @@ import {
 } from "./agent-engine.js";
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
+  COORDINATION_CONTRACT_POINTER_NOT_VERIFIED,
   COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
@@ -14752,10 +14753,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           result.coordination_footer_bytes =
             coordinationFooterBytes(coordination);
           result.contract_path = bootContract.contract_path ?? undefined;
-          result.coordination_footer_delivered =
-            bootContract.contract_path !== null;
+          result.coordination_footer_delivered = false;
           result.coordination_footer_note = bootContract.contract_path
-            ? COORDINATION_CONTRACT_DELIVERED_NOTE
+            ? COORDINATION_CONTRACT_POINTER_NOT_VERIFIED
             : COORDINATION_FOOTER_NOT_DELIVERED;
           try {
             const patched = stateMgr.updateRecord(result.agent_id, {
@@ -14826,6 +14826,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     timeout_ms: args.boot_prompt_timeout_ms,
                   }),
               });
+              if (bootContract.contract_path !== null) {
+                result.coordination_footer_delivered =
+                  isBootPromptDelivered(bootPromptDelivery);
+                result.coordination_footer_note =
+                  result.coordination_footer_delivered
+                    ? COORDINATION_CONTRACT_DELIVERED_NOTE
+                    : COORDINATION_CONTRACT_POINTER_NOT_VERIFIED;
+              }
 
               await captureSpawnSessionBestEffort(result);
               if (bootPromptDelivery.prompt_text !== null) {

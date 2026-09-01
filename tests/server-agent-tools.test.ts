@@ -7407,6 +7407,8 @@ describe("agent lifecycle tool handlers", () => {
       submit_verified: null,
       prompt_text: null,
     });
+    expect(result.coordination_footer_delivered).toBe(false);
+    expect(result.coordination_footer_note).toMatch(/not verified/i);
     const state = parseToolResult(
       await getState.handler({ agent_id: result.agent_id }, {} as any),
     );

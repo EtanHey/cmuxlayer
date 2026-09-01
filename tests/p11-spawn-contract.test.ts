@@ -54,8 +54,9 @@ function makeExec(
   primarySurfaceUuid?: string,
 ): ExecFn {
   let promptPending = false;
+  let pendingPromptText = "";
   let promptSurface = "surface:new";
-  let pastePending = false;
+  let pastePending = "";
   let currentScreenText = screenText;
   const surfaces: TestSurface[] = [
     {
@@ -163,18 +164,27 @@ function makeExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        setScreenText("Claude Code\n✻ Working\n", promptSurface);
+        setScreenText(
+          `Claude Code\n${pendingPromptText}\n✻ Working\n`,
+          promptSurface,
+        );
         promptPending = false;
       }
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("set-buffer")) {
-      pastePending = String(args.at(-1) ?? "").trim().length > 0;
+      pastePending = String(args.at(-1) ?? "");
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("paste-buffer")) {
-      if (pastePending) promptPending = true;
-      pastePending = false;
+      if (pastePending.trim()) {
+        promptPending = true;
+        pendingPromptText = pastePending;
+        promptSurface =
+          surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
+        setScreenText(`Claude Code\n❯ ${pastePending}`, promptSurface);
+      }
+      pastePending = "";
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("send")) {
@@ -185,6 +195,7 @@ function makeExec(
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
+        pendingPromptText = text;
         promptSurface =
           surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
         setScreenText(`Claude Code\n❯ ${text}`, promptSurface);
@@ -2626,6 +2637,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const spawnedChildUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     let holdNextSplit = false;
     let releaseSplit: (() => void) | null = null;
+    const spawnedSurface: TestSurface = {
+      id: spawnedChildUuid,
+      ref: "surface:spawned",
+      title: "spawned-child",
+      text: "Claude Code\nWhat can I help you with?\n❯ ",
+    };
     const baseExec = makeExec(
       "Claude Code\nWhat can I help you with?\n❯ ",
       "parent-pane",
@@ -2637,17 +2654,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           title: "existing-child",
           text: "Claude Code\nWhat can I help you with?\n❯ ",
         },
-        {
-          id: spawnedChildUuid,
-          ref: "surface:spawned",
-          title: "spawned-child",
-          text: "Claude Code\nWhat can I help you with?\n❯ ",
-        },
+        spawnedSurface,
       ],
       parentUuid,
     );
     exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (args.includes("new-split")) {
+        spawnedSurface.text = "Claude Code\nWhat can I help you with?\n❯ ";
         if (holdNextSplit) {
           holdNextSplit = false;
           await new Promise<void>((resolve) => {
@@ -2718,6 +2731,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     const beforeConcurrent = splitCalls();
     holdNextSplit = true;
+    releaseSplit = null;
     const winningSpawn = spawn({
       parent_agent_id: parent.agent_id,
       report_path: concurrentOverride,
@@ -2732,6 +2746,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     await Promise.resolve();
     holdNextSplit = false;
+    await vi.waitFor(() => expect(releaseSplit).toBeTypeOf("function"));
     releaseSplit?.();
     const concurrent = await Promise.all([winningSpawn, rejectedSpawn]);
     // This fixture's one successful spawn uses two new-split calls: placement
@@ -2757,6 +2772,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     const beforeIsolated = splitCalls();
     holdNextSplit = true;
+    releaseSplit = null;
     const isolatedWinner = spawn(
       {
         parent_agent_id: parent.agent_id,
@@ -2773,6 +2789,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       isolatedServerB,
     );
     await Promise.resolve();
+    await vi.waitFor(() => expect(releaseSplit).toBeTypeOf("function"));
     releaseSplit?.();
     const isolated = await Promise.all([isolatedWinner, isolatedLoser]);
     expect(isolated.map((result) => result.ok).sort()).toEqual([false, true]);

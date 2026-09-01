@@ -308,6 +308,9 @@ export function writeBootContractFile(
 export const COORDINATION_CONTRACT_DELIVERED_NOTE =
   "delivered_via_contract_file: the boot prompt is a one-line pointer at contract_path, which carries the mailbox contract AND report_path/done_marker. The pointer keeps boot delivery under the 500-char chunk threshold, so it is not split. Caveat: an agent that ignores the pointer never reads the contract. That is OBSERVABLE IN PRINCIPLE -- the file is on disk unread, unlike a chunked boot prompt that never submitted -- but NO health or closure path checks it today; nothing here detects it for you. coordination_footer_bytes measures the inline one-line rendering, which is NOT what was sent: the wire carried a ~130-byte pointer and the contract lives in a file of a different size again.";
 
+export const COORDINATION_CONTRACT_POINTER_NOT_VERIFIED =
+  "not_delivered: the contract file was written, but its pointer was folded into a boot prompt whose submission was not verified. The LEAD must relay contract_path, report_path, and done_marker to this worker.";
+
 /**
  * Resume provenance (#462 item 2). The contract file is refreshed on resume --
  * idempotent, since both strings derive from agent_id alone -- but no pointer
