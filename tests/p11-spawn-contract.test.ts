@@ -3357,6 +3357,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       subject_agent_id: foreignChild.agent_id,
       target: reportPath,
       change: "content",
+      notify: true,
       deadline: Number.MAX_SAFE_INTEGER,
     });
     const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;

@@ -12984,6 +12984,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               return undefined;
             })();
+            if (subjectBindingMismatch) {
+              return {
+                delivered: false,
+                retryable: false,
+                reason: "subject_not_owned",
+              };
+            }
             let externalDelivered = false;
             if (event.reason !== "predicate_matched") {
               externalDelivered = await deliverExternalNotification();
@@ -12998,9 +13005,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return {
                 delivered: false,
                 retryable: false,
-                reason: subjectBindingMismatch
-                  ? "subject_not_owned"
-                  : "owner_not_live",
+                reason: "owner_not_live",
               };
             }
             if (!subjectStillBelongsToOwner(owner.agent_id)) {
