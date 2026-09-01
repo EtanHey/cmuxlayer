@@ -626,7 +626,7 @@ describe("lean spawn tool responses", () => {
       ?.shape?.report_path?.description ?? "";
 
     expect(description).toMatch(
-      /resume_agent_id.*coordination_footer_note.*lost.*context.*contract_path is present.*queued or unverified.*relay contract_path, report_path, and done_marker.*contract_path is absent.*could not be written.*relay report_path and done_marker/,
+      /resume_agent_id.*coordination_footer_note.*lost.*context.*contract_path is present.*queued or unverified.*relay contract_path, report_path, and done_marker.*contract_path is absent.*inline mode.*could not be written.*relay report_path and done_marker/,
     );
   });
 
