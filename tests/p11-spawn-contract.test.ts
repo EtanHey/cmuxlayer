@@ -2196,7 +2196,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
-    expect(watch?.fingerprint).not.toBe(watch?.observed_value);
+    expect(watch?.fingerprint).toBe(watch?.observed_value);
   });
 
   it("re-arms after owner_not_live and wakes the resumed owner for the next revision", async () => {
@@ -2263,10 +2263,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       notification_attempts: 0,
       notification_exhausted_reason: "owner_not_live",
     });
-    expect(afterOwnerLoss?.fingerprint).toBe(initialFingerprint);
-    expect(afterOwnerLoss?.fingerprint).not.toBe(
-      afterOwnerLoss?.observed_value,
-    );
+    expect(afterOwnerLoss?.fingerprint).toBe(afterOwnerLoss?.observed_value);
+    expect(afterOwnerLoss?.fingerprint).not.toBe(initialFingerprint);
+
+    watchNow = 1_500;
+    await engine.sweepWatchesBestEffort();
+    expect(unavailableExternalNotify).toHaveBeenCalledOnce();
 
     const resumedOwner = { ...parentRecord(parentUuid), agent_id: ownerId };
     engine.stateMgr.writeState(resumedOwner);

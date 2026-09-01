@@ -1280,6 +1280,7 @@ export async function sweepWatches(
             return {
               ...persistent,
               state: "armed" as const,
+              fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
               notification_pending: false,
               notification_exhausted_at_ms: observedAt,
