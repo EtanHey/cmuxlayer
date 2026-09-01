@@ -6747,6 +6747,9 @@ export class AgentEngine {
           ownerRecord &&
           ownerAgentId &&
           !liveAgentIds.has(ownerAgentId) &&
+          (ownerRecord.user_killed === true ||
+            Boolean(ownerRecord.deletion_intent) ||
+            TERMINAL_STATES.has(ownerRecord.state)) &&
           !hasActiveSubjectOwnership
         ) {
           return true;

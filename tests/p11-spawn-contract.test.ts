@@ -948,15 +948,27 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       state: "done" as const,
       user_killed: true,
     };
+    const resumableMissingOwner = {
+      ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+      agent_id: "resumable-missing-owner",
+      surface_id: "surface:temporarily-missing",
+      state: "working" as const,
+    };
     engine.stateMgr.writeState(liveAliasOwner);
     engine.stateMgr.writeState(deadOwner);
+    engine.stateMgr.writeState(resumableMissingOwner);
     engine.getRegistry().set(liveAliasOwner.agent_id, liveAliasOwner);
     engine.getRegistry().set(deadOwner.agent_id, deadOwner);
+    engine.getRegistry().set(
+      resumableMissingOwner.agent_id,
+      resumableMissingOwner,
+    );
 
     const targets = {
       dead: join(inboxDir, "dead-owner-watch.md"),
       alias: join(inboxDir, "live-alias-watch.md"),
       unresolved: join(inboxDir, "unresolved-owner-watch.md"),
+      resumable: join(inboxDir, "resumable-owner-watch.md"),
     };
     for (const target of Object.values(targets)) {
       writeFileSync(target, "waiting\n", "utf8");
@@ -982,6 +994,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       change: "content",
       deadline: Number.MAX_SAFE_INTEGER,
     });
+    await engine.armWatch({
+      owner: resumableMissingOwner.agent_id,
+      target: targets.resumable,
+      provenance: "engine",
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
     await server.close();
 
     server = createServer(
@@ -1003,7 +1022,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       readWatchRegistry({ registryPath: watchRegistryPath }).watches.map(
         ({ owner }) => owner,
       ),
-    ).toEqual([liveAliasOwner.seat_id, "unresolved-owner"]);
+    ).toEqual([
+      liveAliasOwner.seat_id,
+      "unresolved-owner",
+      resumableMissingOwner.agent_id,
+    ]);
   });
 
   it("retains an active child when its parent owner is a resolved alias", async () => {
