@@ -788,6 +788,17 @@ describe("control health", () => {
       model: "codex",
       cli: "codex",
     } as any);
+    stateMgr.writeState({
+      agent_id: "caller-shadow-agent",
+      seat_id: "shadow-seat",
+      surface_id: "surface:shadow",
+      surface_uuid: null,
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+    } as any);
     const watch = (watch_id: string, owner: string, state: string) => ({
       watch_id,
       owner,
@@ -806,7 +817,8 @@ describe("control health", () => {
       JSON.stringify({
         version: 1,
         watches: [
-          watch("mine-live", "caller-agent", "armed"),
+          watch("mine-live", "caller", "armed"),
+          watch("mine-exact", "caller-agent", "armed"),
           watch("mine-dropped", "caller-seat", "fired"),
           watch("foreign-live", "another-agent", "armed"),
           watch("stale-live", "stale-recycled-agent", "armed"),
@@ -844,7 +856,11 @@ describe("control health", () => {
     expect(terse.structuredContent.health.caller_live_watches).toEqual({
       count: 1,
       watches: [
-        { watch_id: "mine-live", target: "/reports/mine-live.md", state: "armed" },
+        {
+          watch_id: "mine-exact",
+          target: "/reports/mine-exact.md",
+          state: "armed",
+        },
       ],
     });
     expect(unscopedTerse.structuredContent.health.caller_live_watches).toEqual({

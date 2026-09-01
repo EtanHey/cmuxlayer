@@ -16,6 +16,7 @@ import { httpDeliver } from "./outbox-drainer.js";
 
 export type WatchState = "armed" | "firing" | "fired" | "failed";
 export type WatchObservedSource = "process" | "screen";
+export type WatchProvenance = "engine" | "public";
 export const WATCH_AGENT_PREDICATES = [
   "thinking",
   "working",
@@ -33,6 +34,7 @@ export interface WatchObserved<T> {
 
 export interface WatchSpec {
   owner: string;
+  provenance?: WatchProvenance;
   /** Managed child whose lifecycle owns this watch. */
   subject_agent_id?: string;
   /** Opt in to the configured external notification transport. */
@@ -332,6 +334,13 @@ function isWatchRecord(value: unknown): value is WatchRecord {
     return false;
   }
   if (value.notify !== undefined && typeof value.notify !== "boolean") {
+    return false;
+  }
+  if (
+    value.provenance !== undefined &&
+    value.provenance !== "engine" &&
+    value.provenance !== "public"
+  ) {
     return false;
   }
   if (
@@ -835,9 +844,14 @@ export async function armWatch(
   const source: WatchObservedSource =
     checked.targetKind === "file" ? "process" : "screen";
   const subjectAgentId = cleanString(spec.subject_agent_id);
+  const provenance =
+    spec.provenance === "engine" || spec.provenance === "public"
+      ? spec.provenance
+      : undefined;
   const record: WatchRecord = {
     watch_id: randomUUID(),
     owner: checked.owner,
+    ...(provenance ? { provenance } : {}),
     ...(subjectAgentId ? { subject_agent_id: subjectAgentId } : {}),
     ...(spec.notify === true ? { notify: true } : {}),
     target,
@@ -1332,7 +1346,7 @@ export async function sweepWatches(
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
               notification_pending: false,
-              notification_attempts: attempts,
+              notification_attempts: 0,
               notification_exhausted_at_ms: observedAt,
               notification_exhausted_reason: "retry_limit_exhausted",
             };

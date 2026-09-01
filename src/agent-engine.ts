@@ -130,6 +130,14 @@ import {
   type WatchSpec,
 } from "./watch-spec.js";
 import {
+  canonicalAgentId,
+  canonicalAgentIdValue,
+  resolveWatchOwnerFromSources,
+  watchOwnerIncludesCanonical,
+  watchRecordOwner,
+  type WatchOwnerResolution,
+} from "./watch-owner.js";
+import {
   classifyPromptDisposition,
   cleanScreenText,
   containsPromptApprovalChooser,
@@ -139,6 +147,16 @@ import {
   parseScreen,
   type PromptDisposition,
 } from "./screen-parser.js";
+
+export function isSubjectSideReportWatchPruneEligible(
+  watch: Pick<WatchRecord, "target_kind" | "change" | "provenance">,
+): boolean {
+  return (
+    watch.provenance !== "public" &&
+    watch.target_kind === "file" &&
+    watch.change === "content"
+  );
+}
 import {
   canonicalRoleColumn,
   chooseAgentSpawnPlacement,
@@ -6574,15 +6592,18 @@ export class AgentEngine {
   }
 
   /**
-   * A daemon restart must not re-arm report watches owned by children that are
-   * already closed or no longer belong to the recorded parent. New rows carry
+   * A daemon restart must not re-arm watches whose owner is confirmed dead, or
+   * report watches whose child is already closed or no longer belongs to the
+   * recorded parent. Owner aliases use delivery-style exact/seat/prefix
+   * resolution and retain on zero or multiple matches. New report rows carry
    * subject_agent_id; legacy rows are pruned only when their target exactly
    * matches a persisted child's engine-issued report_path.
    */
-  private async pruneClosedChildReportWatches(): Promise<void> {
-    if (!this.watchRegistryPath) return;
+  private async pruneClosedChildReportWatches(): Promise<boolean> {
+    if (!this.watchRegistryPath) return false;
     const agents = this.registry.list();
-    const pruneObservedAt = Date.now();
+    const pruneObservedAt = this.watchRegistryNow?.() ?? Date.now();
+    const persistedAgents = this.stateMgr.listStates();
     const byReportPath = new Map<string, AgentRecord[]>();
     for (const agent of agents) {
       if (!agent.report_path) continue;
@@ -6596,7 +6617,7 @@ export class AgentEngine {
       persistedWatches.map((watch) => [watch.watch_id, JSON.stringify(watch)]),
     );
     const subjectIdsByWatch = new Map<string, string[]>();
-    const missingLegacyChannelWatchIds = new Set<string>();
+    const missingLegacyStateWatchIds = new Set<string>();
     const channelBaseDir = resolve(
       dirname(agentDir("__cmuxlayer_channel_probe__", this.inboxOpts)),
     );
@@ -6610,6 +6631,9 @@ export class AgentEngine {
         : (byReportPath.get(resolve(watch.target)) ?? []);
       if (subjects.length === 0 && !watch.subject_agent_id) {
         const targetDir = resolve(dirname(watch.target));
+        // Provenance-absent rows are legacy engine watches only inside the
+        // exact <channelBaseDir>/<agentId>/report.md shape. Arbitrary public
+        // file watches from before provenance existed must never enter it.
         const targetLooksEngineIssued =
           basename(watch.target) === "report.md" &&
           resolve(dirname(targetDir)) === channelBaseDir;
@@ -6619,8 +6643,8 @@ export class AgentEngine {
             this.registry.get(inferredAgentId) ??
             this.stateMgr.readState(inferredAgentId);
           if (inferred) subjects = [inferred];
-          else if (!existsSync(targetDir)) {
-            missingLegacyChannelWatchIds.add(watch.watch_id);
+          else if (!this.stateMgr.hasStateFile(inferredAgentId)) {
+            missingLegacyStateWatchIds.add(watch.watch_id);
           }
         }
       }
@@ -6628,39 +6652,66 @@ export class AgentEngine {
         ...new Set(subjects.map((subject) => subject.agent_id)),
       ]);
     }
-    const liveSubjectIds = new Set<string>();
-    const candidateSubjectIds = new Set([...subjectIdsByWatch.values()].flat());
+    const ownerResolutionByWatch = new Map<
+      string,
+      WatchOwnerResolution<AgentRecord>
+    >();
+    for (const watch of persistedWatches) {
+      ownerResolutionByWatch.set(
+        watch.watch_id,
+        resolveWatchOwnerFromSources(
+          watchRecordOwner(watch),
+          agents,
+          persistedAgents,
+        ),
+      );
+    }
+    const liveAgentIds = new Set<string>();
+    const candidateAgentIds = new Set([
+      ...[...subjectIdsByWatch.values()].flat(),
+      ...[...ownerResolutionByWatch.values()].flatMap((resolution) =>
+        resolution.canonical_id
+          ? [canonicalAgentIdValue(resolution.canonical_id)]
+          : [],
+      ),
+    ]);
     await Promise.all(
-      [...candidateSubjectIds].map(async (subjectAgentId) => {
+      [...candidateAgentIds].map(async (agentId) => {
         const subject =
-          this.registry.get(subjectAgentId) ??
-          this.stateMgr.readState(subjectAgentId);
+          this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
         if (
           subject &&
           subject.user_killed !== true &&
           !subject.deletion_intent &&
           (await this.registry.isSurfaceAlive(subject))
         ) {
-          liveSubjectIds.add(subjectAgentId);
+          liveAgentIds.add(agentId);
         }
       }),
     );
+    let retainedNeedsRecheck = false;
     await removeWatches(
       (watch) => {
+        if (watch.notification_pending) {
+          retainedNeedsRecheck = true;
+          return false;
+        }
         // The predicate runs under the watch-registry write lock. If a sweep
         // changed this row after our snapshot, retain it for the next prune.
         if (
           persistedWatchSnapshots.get(watch.watch_id) !== JSON.stringify(watch)
         ) {
+          retainedNeedsRecheck = true;
           return false;
         }
         if (watch.state === "failed" && !watch.notification_pending) {
           return (watch.waiter_expires_at_ms ?? 0) <= pruneObservedAt;
         }
-        if (watch.target_kind !== "file" || watch.change !== "content") {
-          return false;
-        }
-        if (watch.notification_pending) return false;
+        const ownerResolution = ownerResolutionByWatch.get(watch.watch_id);
+        // Raw owner keys are not identities. Zero and multiple matches retain
+        // fail-safe; a subject can still prove that an ambiguous alias includes
+        // its canonical parent, but ambiguity cannot authorize deletion.
+        if (!ownerResolution) return false;
         const subjects = (subjectIdsByWatch.get(watch.watch_id) ?? [])
           .map(
             (subjectAgentId) =>
@@ -6668,24 +6719,59 @@ export class AgentEngine {
               this.stateMgr.readState(subjectAgentId),
           )
           .filter((subject): subject is AgentRecord => Boolean(subject));
-        if (
-          subjects.length === 0 &&
-          missingLegacyChannelWatchIds.has(watch.watch_id)
-        ) {
-          return true;
-        }
-        if (subjects.length === 0) return Boolean(watch.subject_agent_id);
-        return !subjects.some(
+        const hasActiveSubjectOwnership = subjects.some(
           (subject) =>
             subject.user_killed !== true &&
             !subject.deletion_intent &&
             (!TERMINAL_STATES.has(subject.state) ||
-              liveSubjectIds.has(subject.agent_id)) &&
-            subject.parent_agent_id === watch.owner,
+              liveAgentIds.has(subject.agent_id)) &&
+            Boolean(
+              subject.parent_agent_id &&
+                watchOwnerIncludesCanonical(
+                  ownerResolution,
+                  canonicalAgentId(subject.parent_agent_id),
+                ),
+            ),
         );
+        const ownerAgentId = ownerResolution.canonical_id
+          ? canonicalAgentIdValue(ownerResolution.canonical_id)
+          : null;
+        const ownerRecord = ownerAgentId
+          ? (this.registry.get(ownerAgentId) ??
+            this.stateMgr.readState(ownerAgentId))
+          : null;
+        // A live child still owns its report path even if its parent pane is
+        // gone. Preserve that reservation; dead-owner pruning is destructive
+        // only when no active subject ownership remains.
+        if (
+          ownerRecord &&
+          ownerAgentId &&
+          !liveAgentIds.has(ownerAgentId) &&
+          (ownerRecord.user_killed === true ||
+            Boolean(ownerRecord.deletion_intent) ||
+            TERMINAL_STATES.has(ownerRecord.state)) &&
+          !hasActiveSubjectOwnership
+        ) {
+          return true;
+        }
+        // Owner death and subject death answer different questions. A
+        // confirmed-dead owner makes every watch kind undeliverable, including
+        // marker and agent watches. Subject-side lifecycle pruning is narrower
+        // and may only inspect report-content rows.
+        if (!isSubjectSideReportWatchPruneEligible(watch)) return false;
+        if (
+          subjects.length === 0 &&
+          missingLegacyStateWatchIds.has(watch.watch_id)
+        ) {
+          return true;
+        }
+        if (subjects.length === 0) return Boolean(watch.subject_agent_id);
+        if (ownerResolution.kind !== "resolved") return false;
+        return !hasActiveSubjectOwnership;
       },
       { registryPath: this.watchRegistryPath },
     );
+    return retainedNeedsRecheck;
   }
 
   scheduleClosedChildReportWatchPrune(): void {
@@ -6696,7 +6782,9 @@ export class AgentEngine {
     if (!this.childReportWatchPrunePending) return;
     this.childReportWatchPrunePending = false;
     try {
-      await this.pruneClosedChildReportWatches();
+      if (await this.pruneClosedChildReportWatches()) {
+        this.childReportWatchPrunePending = true;
+      }
     } catch (error) {
       this.childReportWatchPrunePending = true;
       this.sweepDebugLog(
@@ -9448,12 +9536,18 @@ export class AgentEngine {
       throw new Error("WatchSpec registry is not configured");
     }
     const startedAt = Date.now();
-    const armed = await armDeclaredWatch(spec, {
-      registryPath: this.watchRegistryPath,
-      now: this.watchRegistryNow,
-      agentObservation: this.watchAgentObservation,
-      waiterExpiresAtMs: Date.now() + Math.max(0, timeoutMs) + 60_000,
-    });
+    const armed = await armDeclaredWatch(
+      spec,
+      {
+        registryPath: this.watchRegistryPath,
+        now: this.watchRegistryNow,
+        agentObservation: this.watchAgentObservation,
+        waiterExpiresAtMs:
+          (this.watchRegistryNow?.() ?? Date.now()) +
+          Math.max(0, timeoutMs) +
+          60_000,
+      },
+    );
     const releaseWaiterBestEffort = async (): Promise<void> => {
       try {
         const released = await releaseWatchWaiter(armed.watch_id, {

@@ -951,9 +951,18 @@ describe("WatchSpec arm contract", () => {
       watch_id: armed.watch_id,
       state: "armed",
       notification_pending: false,
-      notification_attempts: 8,
+      notification_attempts: 0,
       notification_exhausted_reason: "retry_limit_exhausted",
     });
+
+    now += 60_000;
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => now,
+      notify,
+      onNotificationExhausted,
+    });
+    expect(notify).toHaveBeenCalledTimes(8);
 
     writeFileSync(target, "second revision\n", "utf8");
     now += 60_000;

@@ -2535,19 +2535,26 @@ describe("agent lifecycle tool handlers", () => {
     expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
   });
 
-  it("P11b/#462: resume issues, persists, and REFRESHES the contract -- and says it was not re-delivered", async () => {
+  it("P11b/#462: resume refreshes a custom contract and adopts its legacy watch", async () => {
     // Before this, resume returned no contract at all: no report_path, no
     // done_marker, no contract file. The crash-recovery case this repo exists
     // for was the one case where a lead could not even see where its worker
     // should report.
     const agentId = "cmuxlayerCodex-stable-resume-contract";
     const parentId = "cmuxlayerClaude-resume-parent";
+    const parentSeat = "cmuxlayerClaude";
     const resumeInboxDir = mkdtempSync(join(tmpdir(), "p11b-resume-inbox-"));
     const watchRegistryPath = join(resumeInboxDir, "watch-specs.json");
+    const customReportPath = join(
+      resumeInboxDir,
+      "custom",
+      "resume-report.md",
+    );
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeServerAgentRecord({
         agent_id: parentId,
+        seat_id: parentSeat,
         repo: "cmuxlayer",
         cli: "claude",
         role: "orchestrator",
@@ -2565,16 +2572,30 @@ describe("agent lifecycle tool handlers", () => {
         cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         parent_agent_id: parentId,
         spawn_depth: 1,
+        report_path: customReportPath,
       }),
     );
     const expected = issueCoordinationContract(agentId, {
       baseDir: resumeInboxDir,
+      reportPath: customReportPath,
     });
-    mkdirSync(join(resumeInboxDir, agentId), { recursive: true });
+    mkdirSync(join(resumeInboxDir, "custom"), { recursive: true });
     writeFileSync(expected.report_path, "", "utf8");
+    const exec = makeLifecycleExec();
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      inboxBaseDir: resumeInboxDir,
+      watchRegistryPath,
+    });
+    await serverContexts.at(-1)?.lifecycleStartPromise;
+    // Arm after startup pruning so this assertion isolates resume's dedupe
+    // boundary rather than the separate terminal-child startup policy.
     const oldWatch = await armWatch(
       {
-        owner: parentId,
+        owner: parentSeat,
         subject_agent_id: agentId,
         target: expected.report_path,
         change: "content",
@@ -2592,21 +2613,11 @@ describe("agent lifecycle tool handlers", () => {
         (watch) => watch.watch_id === oldWatch.watch_id,
       )?.state,
     ).toBe("armed");
-    const exec = makeLifecycleExec();
-    const server = createTrackedServer({
-      exec,
-      stateDir: TEST_DIR,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-      inboxBaseDir: resumeInboxDir,
-      watchRegistryPath,
-    });
-    await serverContexts.at(-1)?.lifecycleStartPromise;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     try {
       const result = await spawn.handler(
-        { resume_agent_id: agentId },
+        { resume_agent_id: agentId, report_path: customReportPath },
         {} as any,
       );
       const parsed = parseToolResult(result) as Record<string, any>;
@@ -2640,12 +2651,11 @@ describe("agent lifecycle tool handlers", () => {
       expect(detail.done_marker).toBe(expected.done_marker);
       const reportWatches = readWatchRegistry({
         registryPath: watchRegistryPath,
-      }).watches.filter(
-        (watch) =>
-          watch.owner === parentId && watch.target === expected.report_path,
-      );
+      }).watches.filter((watch) => watch.target === expected.report_path);
       expect(reportWatches).toHaveLength(1);
       expect(reportWatches[0]).toMatchObject({
+        watch_id: oldWatch.watch_id,
+        owner: parentSeat,
         subject_agent_id: agentId,
         change: "content",
         state: "armed",
