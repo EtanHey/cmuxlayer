@@ -617,13 +617,17 @@ describe("lifecycle dependency seams", () => {
 describe("lean spawn tool responses", () => {
   it("documents every false coordination-footer outcome", () => {
     const server = createLifecycleServer(makeLifecycleExec());
-    const description = (server as any)._registeredTools["spawn_agent"]
-      .inputSchema.shape.report_path.description;
+    const description = (
+      server as unknown as {
+        _registeredTools: Record<
+          string,
+          { inputSchema: { shape: Record<string, { description: string }> } }
+        >;
+      }
+    )._registeredTools.spawn_agent!.inputSchema.shape.report_path!.description;
 
-    expect(description).toContain("could not be written");
-    expect(description).toContain("queued or unverified");
-    expect(description).toContain(
-      "must relay contract_path, report_path, and done_marker",
+    expect(description).toMatch(
+      /contract_path is present.*queued or unverified.*relay contract_path, report_path, and done_marker.*contract_path is absent.*could not be written.*relay report_path and done_marker/,
     );
   });
 

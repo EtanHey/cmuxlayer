@@ -14084,7 +14084,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
           .optional()
           .describe(
-            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and folds a pointer into the boot prompt; check `coordination_footer_delivered` -- if false the contract file could not be written or folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker, or a done worker renders closure:"artifact_missing". Pass this only to place the report somewhere you already watch (e.g. a collab dir).',
+            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and folds a pointer into the boot prompt; check `coordination_footer_delivered`. If false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, the contract file could not be written, so YOU must relay report_path and done_marker, or a done worker renders closure:"artifact_missing". Pass this only to place the report somewhere you already watch (e.g. a collab dir).',
           ),
         force_new: z
           .boolean()
