@@ -164,10 +164,7 @@ function makeExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        setScreenText(
-          `Claude Code\n${pendingPromptText}\n✻ Working\n`,
-          promptSurface,
-        );
+        setScreenText(`Claude Code\n${pendingPromptText}\n✻ Working\n`, promptSurface);
         promptPending = false;
       }
       return { stdout: "{}", stderr: "" };
@@ -180,8 +177,7 @@ function makeExec(
       if (pastePending.trim()) {
         promptPending = true;
         pendingPromptText = pastePending;
-        promptSurface =
-          surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
+        promptSurface = surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
         setScreenText(`Claude Code\n❯ ${pastePending}`, promptSurface);
       }
       pastePending = "";
@@ -2637,12 +2633,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const spawnedChildUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     let holdNextSplit = false;
     let releaseSplit: (() => void) | null = null;
-    const spawnedSurface: TestSurface = {
-      id: spawnedChildUuid,
-      ref: "surface:spawned",
-      title: "spawned-child",
-      text: "Claude Code\nWhat can I help you with?\n❯ ",
-    };
+    const spawnedSurface: TestSurface = { id: spawnedChildUuid, ref: "surface:spawned", title: "spawned-child", text: "Claude Code\nWhat can I help you with?\n❯ " };
     const baseExec = makeExec(
       "Claude Code\nWhat can I help you with?\n❯ ",
       "parent-pane",
