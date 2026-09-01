@@ -617,17 +617,25 @@ describe("lifecycle dependency seams", () => {
 describe("lean spawn tool responses", () => {
   it("documents every false coordination-footer outcome", () => {
     const server = createLifecycleServer(makeLifecycleExec());
-    const description = (
+    const spawnTool = (
       server as unknown as {
         _registeredTools: Record<
           string,
           { inputSchema: { shape: Record<string, { description: string }> } }
         >;
       }
-    )._registeredTools.spawn_agent!.inputSchema.shape.report_path!.description;
+    )._registeredTools.spawn_agent;
+
+    expect(spawnTool).toBeDefined();
+    if (!spawnTool) {
+      throw new Error("spawn_agent tool was not registered");
+    }
+    const description = spawnTool.inputSchema.shape.report_path?.description;
+
+    expect(description).toBeDefined();
 
     expect(description).toMatch(
-      /contract_path is present.*queued or unverified.*relay contract_path, report_path, and done_marker.*contract_path is absent.*could not be written.*relay report_path and done_marker/,
+      /resume_agent_id.*coordination_footer_note.*lost.*context.*contract_path is present.*queued or unverified.*relay contract_path, report_path, and done_marker.*contract_path is absent.*could not be written.*relay report_path and done_marker/,
     );
   });
 
@@ -7402,7 +7410,6 @@ describe("agent lifecycle tool handlers", () => {
       disableSpawnPreflight: true,
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const getState = (server as any)._registeredTools["get_agent_state"];
 
     const result = parseToolResult(
       await spawn.handler(
@@ -7425,9 +7432,7 @@ describe("agent lifecycle tool handlers", () => {
     });
     expect(result.coordination_footer_delivered).toBe(false);
     expect(result.coordination_footer_note).toMatch(/not verified/i);
-    const state = parseToolResult(
-      await getState.handler({ agent_id: result.agent_id }, {} as any),
-    );
+    const state = new StateManager(TEST_DIR).readState(result.agent_id);
     expect(state).toMatchObject({
       state: "booting",
       surface_id: "surface:new",
