@@ -5,6 +5,12 @@
 
 set -uo pipefail
 
+# Guard 1 — no tracked docs.local/ (personal data; see scripts/guard-no-docslocal.sh)
+if [ -f scripts/guard-no-docslocal.sh ]; then
+  bash scripts/guard-no-docslocal.sh || exit 1
+fi
+
+# Guard 2 — regression harness
 [ ! -f scripts/run_tests.sh ] && { echo "⚠️  no scripts/run_tests.sh"; exit 0; }
 
 env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bash scripts/run_tests.sh

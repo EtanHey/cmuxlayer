@@ -20,6 +20,18 @@ permissions:
   contents: read
 
 jobs:
+  docs-local-guard:
+    name: No tracked docs.local
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Guard against tracked docs.local
+        run: bash scripts/guard-no-docslocal.sh
+
   perf-budget:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
