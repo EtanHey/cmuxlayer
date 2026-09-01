@@ -9444,6 +9444,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const callerCanonicalId = caller
           ? canonicalAgentId(caller.agent_id)
           : null;
+        const callerWatchOwnerCandidates = caller
+          ? snapshotWatchOwnerCandidates()
+          : [];
         const watches = caller
           ? readWatchRegistry({
               registryPath:
@@ -9454,10 +9457,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 (watch) => {
                   const ownerResolution = resolveWatchOwner(
                     watchRecordOwner(watch),
-                    [caller],
+                    callerWatchOwnerCandidates,
                   );
                   return (
                     callerCanonicalId !== null &&
+                    ownerResolution.kind === "resolved" &&
                     watchOwnerIncludesCanonical(
                       ownerResolution,
                       callerCanonicalId,
@@ -11521,7 +11525,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           let removedOwnedWatches: number;
           try {
             removedOwnedWatches = await removeOwnedWatchesFor(
-              args.agent_id,
+              boundAgent?.agent_id ?? args.agent_id,
               watchOwnerCandidates,
             );
           } catch (cleanupError) {
@@ -12924,8 +12928,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
             const ownerResolution = resolveWatchOwnerFromSources(
               watchNotificationOwner(event),
-              registry.list(),
-              stateMgr.listStates(),
+              registry
+                .list()
+                .filter(
+                  (candidate) =>
+                    candidate.user_killed !== true &&
+                    !candidate.deletion_intent,
+                ),
+              stateMgr
+                .listStates()
+                .filter(
+                  (candidate) =>
+                    candidate.user_killed !== true &&
+                    !candidate.deletion_intent,
+                ),
             );
             const subjectBoundOwner = (() => {
               if (!event.subject_agent_id) return null;
@@ -13829,6 +13845,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const legacyEngineReportPath = resolve(
           issueSpawnCoordination(childAgentId).report_path,
         );
+        const persistedChildReportPath = child.report_path
+          ? resolve(child.report_path)
+          : null;
         const canonicalParent = canonicalAgentId(parentAgentId);
         const ownerCandidates = snapshotWatchOwnerCandidates();
         const existing = readWatchRegistry({
@@ -13842,7 +13861,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const lifecycleOwned =
               watch.provenance === "engine" ||
               (watch.provenance === undefined &&
-                resolve(watch.target) === legacyEngineReportPath);
+                (resolve(watch.target) === legacyEngineReportPath ||
+                  resolve(watch.target) === persistedChildReportPath));
             const ownerResolution = resolveWatchOwner(
               watchRecordOwner(watch),
               ownerCandidates,
@@ -13852,7 +13872,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               watchOwnerIncludesCanonical(ownerResolution, canonicalParent) &&
               (!watch.subject_agent_id ||
                 watch.subject_agent_id === childAgentId) &&
-              watch.target === reportPath &&
+              resolve(watch.target) === reportPath &&
               watch.change === "content" &&
               watch.state !== "failed"
             );

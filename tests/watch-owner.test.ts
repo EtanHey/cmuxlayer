@@ -46,6 +46,14 @@ describe("watch owner source parity", () => {
       ids: ["lead-one", "lead-two"],
     },
     {
+      shape: "duplicate id across sources",
+      owner: "lead-seat",
+      registry: [candidate("lead-dup", "lead-seat")],
+      states: [candidate("lead-dup", "stale-seat")],
+      kind: "resolved",
+      ids: ["lead-dup"],
+    },
+    {
       shape: "registry-dead but state-live alias",
       owner: "lead-seat",
       registry: [candidate("lead-dead", "lead-seat")],

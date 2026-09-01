@@ -955,6 +955,15 @@ describe("WatchSpec arm contract", () => {
       notification_exhausted_reason: "retry_limit_exhausted",
     });
 
+    now += 60_000;
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => now,
+      notify,
+      onNotificationExhausted,
+    });
+    expect(notify).toHaveBeenCalledTimes(8);
+
     writeFileSync(target, "second revision\n", "utf8");
     now += 60_000;
     const secondRevision = await sweepWatches({

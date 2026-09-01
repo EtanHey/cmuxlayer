@@ -1702,6 +1702,81 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
   });
 
+  it("excludes intentionally retired records before duplicate-owner delivery", async () => {
+    await server.close();
+    const retiredUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const liveUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    exec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "retired-owner-pane",
+      undefined,
+      [
+        {
+          id: liveUuid,
+          ref: "surface:live-owner",
+          title: "live-owner-pane",
+          text: "Claude Code\n✻ Working\n",
+        },
+      ],
+      retiredUuid,
+    );
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+        watchRegistryPath,
+      }),
+    );
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const retiredOwner: AgentRecord = {
+      ...parentRecord(retiredUuid),
+      agent_id: "cmuxlayerClaude-retired-ready",
+      seat_id: "cmuxlayerClaude",
+      user_killed: true,
+    };
+    const liveOwner: AgentRecord = {
+      ...parentRecord(liveUuid),
+      agent_id: "cmuxlayerClaude-live-working",
+      seat_id: "cmuxlayerClaude",
+      surface_id: "surface:live-owner",
+      state: "working",
+    };
+    for (const record of [retiredOwner, liveOwner]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    const target = join(inboxDir, "retired-owner-filter.md");
+    writeFileSync(target, "before\n", "utf8");
+    await engine.armWatch({
+      owner: "cmuxlayerClaude",
+      target,
+      change: "content",
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(target, "after\n", "utf8");
+
+    await engine.sweepWatchesBestEffort();
+
+    const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    expect(
+      wakeCalls.some(
+        ([, args]: [string, string[]]) =>
+          args.includes("surface:live-owner") &&
+          args.some((arg) => arg.includes(target)),
+      ),
+    ).toBe(true);
+    expect(
+      wakeCalls.some(
+        ([, args]: [string, string[]]) =>
+          args.includes("surface:new") && args.some((arg) => arg.includes(target)),
+      ),
+    ).toBe(false);
+  });
+
   const liveState = (
     overrides: Partial<LiveAgentState> = {},
   ): LiveAgentState => ({
@@ -4260,12 +4335,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(watch?.fingerprint).not.toBe(initialFingerprint);
   });
 
-  it("removes a terminal owner's aliased watch after stop eviction", async () => {
+  it("removes a terminal owner's watch when close uses its pending alias", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
+    const pendingOwnerId = "cmuxlayerClaude-pending-owner";
+    const finalOwnerId = "cmuxlayerClaude-terminal-owner";
     const owner = {
       ...parentRecord(),
-      agent_id: "cmuxlayerClaude-terminal-owner",
+      agent_id: pendingOwnerId,
       seat_id: "cmuxlayerClaude",
       surface_id: "surface:already-gone",
       state: "done" as const,
@@ -4276,15 +4353,17 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     writeFileSync(target, "waiting\n", "utf8");
     engine.stateMgr.writeState(owner);
     engine.getRegistry().set(owner.agent_id, owner);
+    const renamed = engine.stateMgr.renameState(pendingOwnerId, finalOwnerId);
+    engine.getRegistry().rename(pendingOwnerId, finalOwnerId, renamed);
     await engine.armWatch({
-      owner: "cmuxlayerClaude",
+      owner: finalOwnerId,
       target,
       marker: "DONE",
       deadline: Number.MAX_SAFE_INTEGER,
     });
 
     const closeResult = await server._registeredTools.close_surface.handler(
-      { scope: "agent", agent_id: owner.agent_id, force: true },
+      { scope: "agent", agent_id: pendingOwnerId, force: true },
       {} as never,
     );
 
