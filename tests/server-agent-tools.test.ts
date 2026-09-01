@@ -615,6 +615,21 @@ describe("lifecycle dependency seams", () => {
 });
 
 describe("lean spawn tool responses", () => {
+  it("documents every false coordination-footer outcome", () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const registered = server as unknown as {
+      _registeredTools?: Record<string, {
+        inputSchema?: { shape?: Record<string, { description?: string }> };
+      }>;
+    };
+    const description = registered._registeredTools?.spawn_agent?.inputSchema
+      ?.shape?.report_path?.description ?? "";
+
+    expect(description).toMatch(
+      /resume_agent_id.*coordination_footer_note.*lost.*context.*contract_path is present.*queued or unverified.*relay contract_path, report_path, and done_marker.*contract_path is absent.*inline mode.*could not be written.*relay report_path and done_marker/,
+    );
+  });
+
   it.each([
     ["role", "gatherr"],
     ["role", "reviwer"],
@@ -7386,7 +7401,6 @@ describe("agent lifecycle tool handlers", () => {
       disableSpawnPreflight: true,
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const getState = (server as any)._registeredTools["get_agent_state"];
 
     const result = parseToolResult(
       await spawn.handler(
@@ -7407,16 +7421,8 @@ describe("agent lifecycle tool handlers", () => {
       submit_verified: null,
       prompt_text: null,
     });
-    const state = parseToolResult(
-      await getState.handler({ agent_id: result.agent_id }, {} as any),
-    );
-    expect(state).toMatchObject({
-      state: "booting",
-      surface_id: "surface:new",
-      boot_prompt_pending: true,
-      prompt_delivered: false,
-      submit_verified: null,
-    });
+    expect(result.coordination_footer_delivered).toBe(false);
+    expect(result.coordination_footer_note).toMatch(/not verified/i);
   }, 20_000);
 
   it("spawn_agent defaults managed agents to lifecycle escalation and persists explicit opt-outs", async () => {

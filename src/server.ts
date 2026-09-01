@@ -64,6 +64,7 @@ import {
 } from "./agent-engine.js";
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
+  COORDINATION_CONTRACT_POINTER_NOT_VERIFIED,
   COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
@@ -14083,7 +14084,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
           .optional()
           .describe(
-            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and points the boot prompt at it, so the worker is told; check `coordination_footer_delivered` -- if false the contract file could not be written and YOU must relay report_path and done_marker, or a done worker renders closure:"artifact_missing". Pass this only to place the report somewhere you already watch (e.g. a collab dir).',
+            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and folds a pointer into the boot prompt; check `coordination_footer_delivered`. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker, or a done worker renders closure:"artifact_missing". Pass this only to place the report somewhere you already watch (e.g. a collab dir).',
           ),
         force_new: z
           .boolean()
@@ -14752,10 +14753,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           result.coordination_footer_bytes =
             coordinationFooterBytes(coordination);
           result.contract_path = bootContract.contract_path ?? undefined;
-          result.coordination_footer_delivered =
-            bootContract.contract_path !== null;
+          result.coordination_footer_delivered = false;
           result.coordination_footer_note = bootContract.contract_path
-            ? COORDINATION_CONTRACT_DELIVERED_NOTE
+            ? COORDINATION_CONTRACT_POINTER_NOT_VERIFIED
             : COORDINATION_FOOTER_NOT_DELIVERED;
           try {
             const patched = stateMgr.updateRecord(result.agent_id, {
@@ -14826,6 +14826,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     timeout_ms: args.boot_prompt_timeout_ms,
                   }),
               });
+              if (bootContract.contract_path !== null) {
+                result.coordination_footer_delivered =
+                  isBootPromptDelivered(bootPromptDelivery);
+                result.coordination_footer_note =
+                  result.coordination_footer_delivered
+                    ? COORDINATION_CONTRACT_DELIVERED_NOTE
+                    : COORDINATION_CONTRACT_POINTER_NOT_VERIFIED;
+              }
 
               await captureSpawnSessionBestEffort(result);
               if (bootPromptDelivery.prompt_text !== null) {
