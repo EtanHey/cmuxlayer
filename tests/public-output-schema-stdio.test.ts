@@ -89,6 +89,7 @@ describe("public tool output schemas over stdio", () => {
           "model",
           "agent_type",
           "duplicate_of",
+          "rpc_methods",
           "boot_prompt_delivered",
           "boot_prompt_receipt",
           "boot_prompt_bytes",
@@ -98,6 +99,12 @@ describe("public tool output schemas over stdio", () => {
           "screen",
           "state_conflict",
           "health",
+        ],
+        wait_for: [
+          "delivery_id",
+          "delivery_state",
+          "terminal",
+          "rpc_methods",
         ],
         close_surface: [
           "state",
@@ -121,6 +128,20 @@ describe("public tool output schemas over stdio", () => {
           );
         }
       }
+      const sendToSchema = tools.find((tool) => tool.name === "send_to")
+        ?.outputSchema as
+        | {
+            properties?: {
+              receipts?: {
+                items?: { properties?: Record<string, unknown> };
+              };
+            };
+          }
+        | undefined;
+      expect(
+        sendToSchema?.properties?.receipts?.items?.properties,
+        "send_to.receipts[].rpc_methods",
+      ).toHaveProperty("rpc_methods");
 
       for (const toolName of PUBLIC_TOOL_NAMES) {
         const result = await client.callTool({

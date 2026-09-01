@@ -284,6 +284,12 @@ export interface AgentDeliveryReceipt {
   retry_count: number;
   submit_verified: boolean | null;
   error: string | null;
+  /** Successful socket RPCs used by this delivery; absent on legacy receipts. */
+  rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+  /** Text reached the target through either socket or CLI transport. */
+  typed?: boolean;
+  /** A submit key reached the target through either socket or CLI transport. */
+  submit_dispatched?: boolean;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
@@ -317,6 +323,16 @@ export interface AgentDeliveryReceipt {
   retry_screen_fingerprint?: string | null;
   /** Delivery is owned by an already-running direct surface write, not the retry drain. */
   externally_managed?: boolean;
+}
+
+function snapshotDeliveryReceipt(
+  receipt: AgentDeliveryReceipt,
+): AgentDeliveryReceipt {
+  const { rpc_methods: rpcMethods, ...snapshot } = receipt;
+  return {
+    ...snapshot,
+    ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
+  };
 }
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
@@ -359,6 +375,9 @@ export class RetryableDeliveryError extends Error {
 type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
+  rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+  typed?: boolean;
+  submit_dispatched?: boolean;
   delivery?:
     | "submitted"
     | "queued"
@@ -7069,6 +7088,7 @@ export class AgentEngine {
       created_at: existing?.created_at ?? new Date().toISOString(),
       resolved_at: null,
       retry_count: existing?.retry_count ?? 0,
+      rpc_methods: existing?.rpc_methods ? [...existing.rpc_methods] : [],
       submit_verified: null,
       error: null,
       submission_started_at: null,
@@ -7088,7 +7108,7 @@ export class AgentEngine {
       throw error;
     }
     this.appendDeliveryReceiptEventBestEffort(receipt);
-    return { ...receipt };
+    return snapshotDeliveryReceipt(receipt);
   }
 
   registerExternalDelivery(input: {
@@ -7097,6 +7117,7 @@ export class AgentEngine {
     text: string;
     press_enter: boolean;
     source_event: DeliveryEventType;
+    rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
     const receipt: AgentDeliveryReceipt = {
@@ -7106,6 +7127,7 @@ export class AgentEngine {
       created_at: now,
       resolved_at: null,
       retry_count: 0,
+      rpc_methods: input.rpc_methods ? [...input.rpc_methods] : [],
       submit_verified: null,
       error: null,
       submission_started_at: now,
@@ -7121,7 +7143,7 @@ export class AgentEngine {
       this.deliveryReceipts.delete(receipt.delivery_id);
       throw error;
     }
-    return { ...receipt };
+    return snapshotDeliveryReceipt(receipt);
   }
 
   acceptComposerQueue(input: {
@@ -7131,6 +7153,9 @@ export class AgentEngine {
     press_enter: boolean;
     source_event: DeliveryEventType;
     retry_count: number;
+    rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+    typed?: boolean;
+    submit_dispatched?: boolean;
     delivery_state?: "queued" | "queued_followup";
   }): AgentDeliveryReceipt {
     const acceptedAt = new Date().toISOString();
@@ -7145,6 +7170,11 @@ export class AgentEngine {
       resolved_at: null,
       submit_verified: null,
       error: null,
+      rpc_methods: input.rpc_methods
+        ? [...input.rpc_methods]
+        : existing?.rpc_methods
+          ? [...existing.rpc_methods]
+          : [],
       submission_started_at: existing?.submission_started_at ?? acceptedAt,
       next_attempt_at: null,
       composer_accepted: true,
@@ -7160,7 +7190,7 @@ export class AgentEngine {
       this.deliveryReceipts.delete(receipt.delivery_id);
       throw error;
     }
-    return { ...receipt };
+    return snapshotDeliveryReceipt(receipt);
   }
 
   resolveDelivery(
@@ -7169,8 +7199,14 @@ export class AgentEngine {
     },
     opts?: { appendFailureEvent?: boolean },
   ): AgentDeliveryReceipt {
+    const existing = this.deliveryReceipts.get(input.delivery_id);
     const receipt: AgentDeliveryReceipt = {
       ...input,
+      rpc_methods: input.rpc_methods
+        ? [...input.rpc_methods]
+        : existing?.rpc_methods
+          ? [...existing.rpc_methods]
+          : [],
       created_at: input.created_at ?? new Date().toISOString(),
       resolved_at: new Date().toISOString(),
     };
@@ -7183,18 +7219,16 @@ export class AgentEngine {
     ) {
       this.appendDeliveryReceiptEventBestEffort(receipt);
     }
-    return { ...receipt };
+    return snapshotDeliveryReceipt(receipt);
   }
 
   getDeliveryReceipt(deliveryId: string): AgentDeliveryReceipt | null {
     const receipt = this.deliveryReceipts.get(deliveryId);
-    return receipt ? { ...receipt } : null;
+    return receipt ? snapshotDeliveryReceipt(receipt) : null;
   }
 
   listDeliveryReceipts(): AgentDeliveryReceipt[] {
-    return [...this.deliveryReceipts.values()].map((receipt) => ({
-      ...receipt,
-    }));
+    return [...this.deliveryReceipts.values()].map(snapshotDeliveryReceipt);
   }
 
   findOpenDuplicate(input: {
@@ -7211,7 +7245,7 @@ export class AgentEngine {
         receipt.text === input.text &&
         receipt.press_enter === input.press_enter
       ) {
-        return { ...receipt };
+        return snapshotDeliveryReceipt(receipt);
       }
     }
     return null;
@@ -7224,6 +7258,9 @@ export class AgentEngine {
     press_enter: boolean;
     source_event: DeliveryEventType;
     retry_count: number;
+    rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
+    typed?: boolean;
+    submit_dispatched?: boolean;
     created_at?: string;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
@@ -7236,6 +7273,11 @@ export class AgentEngine {
       resolved_at: null,
       submit_verified: null,
       error: null,
+      rpc_methods: input.rpc_methods
+        ? [...input.rpc_methods]
+        : existing?.rpc_methods
+          ? [...existing.rpc_methods]
+          : [],
       submission_started_at: existing?.submission_started_at ?? now,
       next_attempt_at: null,
       verify_deadline_at:
@@ -7244,7 +7286,7 @@ export class AgentEngine {
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     this.persistDeliveryReceipts();
-    return { ...receipt };
+    return snapshotDeliveryReceipt(receipt);
   }
 
   async waitForDelivery(
@@ -7630,6 +7672,11 @@ export class AgentEngine {
             if (timeout) clearTimeout(timeout);
           });
           receipt.retry_count += result.retry_count;
+          if (Array.isArray(result.rpc_methods)) {
+            receipt.rpc_methods = [...result.rpc_methods];
+          }
+          receipt.typed = result.typed === true;
+          receipt.submit_dispatched = result.submit_dispatched === true;
           receipt.error = null;
           receipt.next_attempt_at = null;
           receipt.needs_attention = false;
@@ -7674,7 +7721,43 @@ export class AgentEngine {
             receipt.submit_verified = result.submit_verified;
           }
         } catch (error) {
-          if (error instanceof RetryableDeliveryError) {
+          const errorRpcMethods =
+            error &&
+            typeof error === "object" &&
+            "rpc_methods" in error &&
+            Array.isArray((error as { rpc_methods?: unknown }).rpc_methods)
+              ? [
+                  ...(error as {
+                    rpc_methods: Array<
+                      "surface.send_text" | "surface.send_key"
+                    >;
+                  }).rpc_methods,
+                ]
+              : [];
+          const errorTyped = Boolean(
+            error &&
+              typeof error === "object" &&
+              "typed" in error &&
+              (error as { typed?: unknown }).typed === true,
+          );
+          const errorSubmitDispatched = Boolean(
+            error &&
+              typeof error === "object" &&
+              "submit_dispatched" in error &&
+              (error as { submit_dispatched?: unknown }).submit_dispatched ===
+                true,
+          );
+          if (errorRpcMethods.length > 0) {
+            receipt.rpc_methods = errorRpcMethods;
+          }
+          receipt.typed = errorTyped;
+          receipt.submit_dispatched = errorSubmitDispatched;
+          if (
+            error instanceof RetryableDeliveryError &&
+            errorRpcMethods.length === 0 &&
+            !errorTyped &&
+            !errorSubmitDispatched
+          ) {
             receipt.submission_started_at = null;
             receipt.retry_count += 1;
             // The submitter proved that no mutation occurred. Persist that

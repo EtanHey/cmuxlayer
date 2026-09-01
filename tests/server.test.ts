@@ -21,6 +21,7 @@ import {
   currentCallerContext,
   runWithCallerContext,
 } from "../src/caller-context.js";
+import { recordCliFallback } from "../src/transport-retry-context.js";
 
 type InputDeliveryTestModule = typeof import("../src/server.js") & {
   SEND_INPUT_PASTE_BATCH_MAX_BYTES: number;
@@ -127,6 +128,29 @@ function createServer(
   };
   openServers.add(server);
   return server;
+}
+
+type RegisteredTestTool = {
+  handler: (
+    args: Record<string, unknown>,
+    extra: Record<string, never>,
+  ) => Promise<{
+    structuredContent?: Record<string, unknown>;
+    content: Array<{ text: string }>;
+  }>;
+};
+
+function registeredTestTool(
+  server: ReturnType<typeof createServerImpl>,
+  name: string,
+): RegisteredTestTool {
+  const tool = (
+    server as unknown as {
+      _registeredTools: Record<string, RegisteredTestTool>;
+    }
+  )._registeredTools[name];
+  if (!tool) throw new Error(`Missing registered test tool: ${name}`);
+  return tool;
 }
 
 function createServerWithoutCallerContext(
@@ -3012,27 +3036,34 @@ describe("tool handler integration", () => {
 
   it("send_input pastes short multiline text and presses return once", async () => {
     const events: Array<{ type: "paste" | "key"; value: string }> = [];
+    let transportMode: "socket" | "cli" = "socket";
     const mockClient = {
-      send: vi.fn().mockResolvedValue(undefined),
-      pasteText: vi.fn().mockImplementation((_surface, text) => {
+      getTransportHealth: () => ({
+        mode: transportMode,
+        degraded: transportMode === "cli",
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockImplementation((_surface: string, text: string) => {
         events.push({ type: "paste", value: text });
         return Promise.resolve();
       }),
-      sendKey: vi.fn().mockImplementation((_surface, key) => {
+      sendKey: vi.fn().mockImplementation((_surface: string, key: string) => {
         events.push({ type: "key", value: key });
+        transportMode = "cli";
         return Promise.resolve();
       }),
     };
     const server = createServer({
-      client: mockClient as any,
+      client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = registeredTestTool(server, "send_input");
     const text = "Objective\n\nConstraints\n\nAcceptance criteria";
 
     const result = await tool.handler(
       { surface: "surface:1", text, press_enter: true },
-      {} as any,
+      {},
     );
 
     const parsed =
@@ -3051,10 +3082,172 @@ describe("tool handler integration", () => {
       "return",
       expect.any(Object),
     );
+    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
     expect(events).toEqual([
       { type: "paste", value: text },
       { type: "key", value: "return" },
     ]);
+  });
+
+  it("send_input failure receipts retain text RPC provenance when Return fails", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockRejectedValue(new Error("Buffer not found")),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_input");
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: "already typed\ninto the pane",
+        press_enter: true,
+      },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
+    expect(parsed.ok).toBe(false);
+    expect(mockClient.pasteText).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendKey).toHaveBeenCalledTimes(3);
+    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
+  });
+
+  it("send_input retries a paste when its buffer disappears before paste-buffer", async () => {
+    const pastedTexts: string[] = [];
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Buffer not found: cmuxlayer-surface-1"))
+        .mockImplementationOnce((_surface: string, text: string) => {
+          pastedTexts.push(text);
+          return Promise.resolve();
+        }),
+      sendKey: vi.fn().mockResolvedValue(),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_input");
+    const text = "line one\nline two";
+
+    const result = await tool.handler(
+      { surface: "surface:1", text, press_enter: false },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockClient.pasteText).toHaveBeenCalledTimes(2);
+    expect(pastedTexts).toEqual([text]);
+    expect(mockClient.send).not.toHaveBeenCalled();
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
+  });
+
+  it("send_input receipts omit RPC methods for an internal CLI paste fallback", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockImplementation(() => {
+        recordCliFallback("paste_text");
+        return Promise.resolve();
+      }),
+      sendKey: vi.fn().mockResolvedValue(),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_input");
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: "line one\nline two",
+        press_enter: false,
+      },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
+    expect(parsed.rpc_methods).toEqual([]);
+  });
+
+  it("send_key receipts include socket RPC provenance for non-submit keys", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockResolvedValue(),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_key");
+
+    const result = await tool.handler(
+      { surface: "surface:1", key: "escape" },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
+    expect(parsed.rpc_methods).toEqual(["surface.send_key"]);
+  });
+
+  it("send_input receipts include socket RPC provenance for empty text", async () => {
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      send: vi.fn().mockResolvedValue(),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockResolvedValue(),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "send_input");
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: "", press_enter: false },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:1",
+      "",
+      expect.any(Object),
+    );
+    expect(parsed.rpc_methods).toEqual(["surface.send_text"]);
   });
 
   it("send_input refuses multi-paragraph inline text for a tracked Codex unless explicitly allowed", async () => {
@@ -3859,6 +4052,78 @@ describe("tool handler integration", () => {
     expect(returnPresses).toHaveLength(2);
   });
 
+  it("new_split preserves boot prompt text RPC provenance through wrapper errors", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "failed-boot-return.md");
+    const pointer = `Read and follow ${promptPath}`;
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot through\npointer", "utf8");
+    let pointerSent = false;
+    const mockClient = {
+      getTransportHealth: () => ({
+        mode: "socket" as const,
+        degraded: false,
+        current_socket_path: "/tmp/cmux-test.sock",
+      }),
+      newSplit: vi.fn().mockResolvedValue({
+        workspace: "workspace:1",
+        surface: "surface:2",
+        pane: "pane:1",
+        title: "New",
+        type: "terminal",
+      }),
+      selectWorkspace: vi.fn().mockResolvedValue(),
+      send: vi.fn().mockImplementation((_surface: string, text: string) => {
+        if (text === pointer) {
+          pointerSent = true;
+          recordCliFallback("send_text");
+        }
+        return Promise.resolve();
+      }),
+      pasteText: vi.fn().mockResolvedValue(),
+      sendKey: vi.fn().mockRejectedValue(new Error("Buffer not found")),
+      readScreen: vi.fn().mockImplementation(() =>
+        Promise.resolve({
+          surface: "surface:2",
+          text: pointerSent ? codexComposerFrame(pointer) : "codex> ",
+          lines: 30,
+          scrollback_used: false,
+        }),
+      ),
+    };
+    const server = createServer({
+      client: mockClient as unknown as CreateServerOptions["client"],
+      skipAgentLifecycle: true,
+    });
+    const tool = registeredTestTool(server, "new_split");
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 50,
+      },
+      {},
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0]?.text ?? "{}");
+    expect(parsed.ok).toBe(false);
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:2",
+      pointer,
+      expect.any(Object),
+    );
+    expect(mockClient.sendKey).toHaveBeenCalledWith(
+      "surface:2",
+      "return",
+      expect.any(Object),
+    );
+    expect(parsed.rpc_methods).toEqual([]);
+    expect(parsed.typed).toBe(true);
+    expect(parsed.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    expect(parsed.WARNING).toMatch(/do not resend/i);
+  });
+
   it("send_command warns when a long single-paragraph boot_prompt_path remains inline", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "long-mandate.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -4608,6 +4873,7 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.rpc_methods).toEqual([]);
   });
 
   it("send_input keeps coalesced paste operations under the paste batch cap", async () => {

@@ -62,6 +62,11 @@ class FakeAgentSurfaceClient {
   private transcriptTail: string | null = null;
   private followUps: string[] = [];
   private followUpNeedsEnter = false;
+  declare getTransportHealth?: () => {
+    mode: "socket";
+    degraded: false;
+    current_socket_path: string;
+  };
 
   async log() {}
   async setStatus() {}
@@ -336,6 +341,64 @@ describe("send_to v2 background verify", () => {
     });
   });
 
+  it("persists mutation evidence for a managed surface-mode pending receipt", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    const resultPromise = server._registeredTools.send_to.handler(
+      {
+        mode: "surface",
+        target: client.surface,
+        text: "surface pending evidence",
+        press_enter: true,
+      },
+      {},
+    );
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    const parsed = parseResult(await resultPromise);
+    const engine = server._registeredTools.interact._engine;
+
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
+      delivery_state: "pending_verify",
+      typed: true,
+      submit_dispatched: true,
+    });
+  });
+
+  it("persists mutation evidence for a managed background pending receipt", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    const engine = server._registeredTools.interact._engine;
+    const acceptPendingVerify = vi.spyOn(engine, "acceptPendingVerify");
+
+    const accepted = parseResult(
+      await server._registeredTools.send_to.handler(
+        {
+          mode: "surface",
+          target: client.surface,
+          text: "background pending evidence",
+          press_enter: true,
+          background: true,
+        },
+        {},
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    expect(accepted.delivery_id).toEqual(expect.any(String));
+    expect(acceptPendingVerify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        typed: true,
+        submit_dispatched: true,
+      }),
+    );
+  });
+
   it("presses Cursor's follow-up Return and receipts queued_followup once the composer is consumed", async () => {
     const client = new FakeAgentSurfaceClient();
     client.cli = "cursor";
@@ -570,6 +633,12 @@ describe("send_to v2 background verify", () => {
     expect(second.delivery_id).toBe(first.delivery_id);
     expect(second.duplicate_of).toBe(first.delivery_id);
     expect(second.delivery_state).toBe("pending_verify");
+    expect(second).toMatchObject({
+      typed: true,
+      submit_attempted: true,
+      submit_dispatched: true,
+      rpc_methods: [],
+    });
     expect(client.sendCalls.length).toBe(typedAfterFirst);
   });
 
@@ -991,6 +1060,11 @@ describe("send_to v2 background verify", () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
     registerAgent(server);
+    client.getTransportHealth = () => ({
+      mode: "socket" as const,
+      degraded: false,
+      current_socket_path: "/tmp/cmux-send-to-v2-verify-test.sock",
+    });
 
     const sent = parseResult(
       await callTool(server, "send_to", {
@@ -1016,7 +1090,64 @@ describe("send_to v2 background verify", () => {
       delivery_id: sent.delivery_id,
       delivery_state: "submitted",
       terminal: true,
+      rpc_methods: ["surface.send_text", "surface.send_key"],
     });
+  });
+
+  it("preserves socket RPC provenance in background snapshots and terminal wait_for receipts", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    client.getTransportHealth = () => ({
+      mode: "socket" as const,
+      degraded: false,
+      current_socket_path: "/tmp/cmux-send-to-v2-verify-test.sock",
+    });
+
+    const sent = parseResult(
+      await callTool(server, "send_input", {
+        surface: client.surface,
+        text: "background provenance",
+        press_enter: false,
+        background: true,
+      }),
+    );
+    expect(sent).toMatchObject({
+      delivery_id: expect.any(String),
+      status: "delivering",
+      rpc_methods: [],
+    });
+
+    const snapshot = parseResult(
+      await callTool(server, "read_screen", {
+        surface: client.surface,
+        parsed_only: true,
+      }),
+    );
+    expect(snapshot.delivery).toMatchObject({
+      delivery_id: sent.delivery_id,
+      status: "delivered",
+      rpc_methods: ["surface.send_text"],
+    });
+
+    const waited = parseResult(
+      await callTool(server, "wait_for", {
+        delivery_id: sent.delivery_id,
+        timeout_ms: 1_000,
+      }),
+    );
+    expect(waited).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "typed",
+      terminal: true,
+      rpc_methods: ["surface.send_text"],
+    });
+    waited.rpc_methods.push("surface.send_key");
+    expect(
+      server._registeredTools.interact._engine.getDeliveryReceipt(
+        sent.delivery_id,
+      ).rpc_methods,
+    ).toEqual(["surface.send_text"]);
   });
 
   it("bounds list_agents detail=full deliveries to the last 20 unresolved or attention receipts", async () => {

@@ -34,6 +34,7 @@ import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { agentProcessMayBeAlive } from "./process-liveness.js";
 import {
+  currentCliFallbackCount,
   currentCliFallbackSources,
   currentCliFallbackUsed,
   currentTransportRetryCount,
@@ -663,10 +664,14 @@ const DeliveryOutputShape = {
   terminal: z.boolean().optional(),
   typed: z.boolean().optional(),
   submit_attempted: z.boolean().optional(),
+  submit_dispatched: z.boolean().optional(),
   submit_verified: z.boolean().nullable().optional(),
   submit_evidence: z
     .enum(["token_delta", "transcript_echo", "cleared_composer", "status_only"])
     .nullable()
+    .optional(),
+  rpc_methods: z
+    .array(z.enum(["surface.send_text", "surface.send_key"]))
     .optional(),
   delivery_id: z.string().optional(),
   duplicate_of: z.string().optional(),
@@ -772,12 +777,10 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
   wait_for: z
     .object({
       ...BaseOutputShape,
+      ...DeliveryOutputShape,
       agent_id: z.string().optional(),
       results: z.array(z.record(z.unknown())).optional(),
       watch: z.record(z.unknown()).optional(),
-      delivery_id: z.string().optional(),
-      delivery_state: z.string().optional(),
-      terminal: z.boolean().optional(),
       timed_out: z.boolean().optional(),
     })
     .passthrough(),
@@ -983,6 +986,7 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
   "submit_verified",
   "submit_evidence",
   "retry_count",
+  "rpc_methods",
   "needs_attention",
   "attention_reason",
   "queued_behind_turn",
@@ -1006,10 +1010,12 @@ export interface PublicDeliveryReceipt {
   terminal: boolean;
   typed: boolean;
   submit_attempted: boolean;
+  submit_dispatched?: boolean;
   submit_verified: boolean | null;
   submitted: boolean;
   submit_evidence?: SubmitEvidence | null;
   retry_count: number;
+  rpc_methods: Array<"surface.send_text" | "surface.send_key">;
   delivery?: PublicDeliveryState;
   delivery_state?: PublicDeliveryState;
   delivery_id?: string;
@@ -1026,6 +1032,105 @@ export interface PublicDeliveryReceipt {
   };
   WARNING?: string;
 }
+
+type DeliveryRpcMethod = PublicDeliveryReceipt["rpc_methods"][number];
+
+type DeliveryErrorEvidence = {
+  rpc_methods: DeliveryRpcMethod[];
+  typed?: boolean;
+  submit_dispatched?: boolean;
+};
+
+const deliveryRpcMethodsFromError = (
+  error: unknown,
+): DeliveryRpcMethod[] =>
+  error &&
+  typeof error === "object" &&
+  "rpc_methods" in error &&
+  Array.isArray((error as { rpc_methods?: unknown }).rpc_methods)
+    ? [...(error as DeliveryErrorEvidence).rpc_methods]
+    : error instanceof SubmitVerificationError
+      ? [...error.receipt.rpc_methods]
+      : [];
+
+const deliveryTypedFromError = (error: unknown): boolean =>
+  Boolean(
+    error &&
+      typeof error === "object" &&
+      "typed" in error &&
+      (error as { typed?: unknown }).typed === true,
+  ) ||
+  (error instanceof SubmitVerificationError && error.receipt.typed === true);
+
+const deliverySubmitDispatchedFromError = (error: unknown): boolean =>
+  Boolean(
+    error &&
+      typeof error === "object" &&
+      "submit_dispatched" in error &&
+      (error as { submit_dispatched?: unknown }).submit_dispatched === true,
+  ) ||
+  (error instanceof SubmitVerificationError &&
+    error.receipt.submit_attempted === true);
+
+const preserveDeliveryEvidenceOnError = (
+  error: unknown,
+  rpcMethods: ReadonlySet<DeliveryRpcMethod>,
+  typed: boolean,
+  submitDispatched: boolean,
+): unknown => {
+  if (rpcMethods.size === 0 && !typed && !submitDispatched) return error;
+  const target =
+    error && typeof error === "object"
+      ? error
+      : new Error(String(error), { cause: error });
+  try {
+    Object.defineProperty(target, "rpc_methods", {
+      configurable: true,
+      enumerable: false,
+      value: [...rpcMethods],
+    });
+    if (typed) {
+      Object.defineProperty(target, "typed", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
+    if (submitDispatched) {
+      Object.defineProperty(target, "submit_dispatched", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
+    return target;
+  } catch {
+    const wrapped = new Error(
+      error instanceof Error ? error.message : String(error),
+      { cause: error },
+    );
+    Object.defineProperty(wrapped, "rpc_methods", {
+      configurable: true,
+      enumerable: false,
+      value: [...rpcMethods],
+    });
+    if (typed) {
+      Object.defineProperty(wrapped, "typed", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
+    if (submitDispatched) {
+      Object.defineProperty(wrapped, "submit_dispatched", {
+        configurable: true,
+        enumerable: false,
+        value: true,
+      });
+    }
+    return wrapped;
+  }
+};
 
 type DeliveryPhase =
   "route" | "lock" | "lock_hold" | "enumerate" | "type" | "verify";
@@ -1087,11 +1192,13 @@ export function buildPublicDeliveryReceipt(input: {
   submit_verified: boolean | null;
   submit_evidence?: SubmitEvidence | null;
   retry_count: number;
+  rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
   needs_attention?: boolean;
   attention_reason?: string | null;
   queued_behind_turn?: boolean;
   timings_ms?: DeliveryPhaseTimings;
   observation?: PublicDeliveryReceipt["observation"];
+  submit_dispatched?: boolean;
   WARNING?: string;
 }): PublicDeliveryReceipt {
   const evidencedState =
@@ -1112,18 +1219,29 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "rescued" ||
     evidencedState === "failed" ||
     evidencedState === "failed_confirmed";
-  const warning = input.WARNING ?? defaultNonDeliveryWarning(evidencedState);
+  const warning =
+    input.WARNING ??
+    defaultNonDeliveryWarning(
+      evidencedState,
+      input.rpc_methods ?? [],
+      input.typed,
+      input.submit_dispatched === true,
+    );
   return {
     delivered: evidencedState === "submitted" && input.submit_verified === true,
     terminal,
     typed: input.typed,
     submit_attempted: input.submit_attempted,
+    ...(input.submit_dispatched !== undefined
+      ? { submit_dispatched: input.submit_dispatched }
+      : {}),
     submit_verified: input.submit_verified,
     submitted: input.submit_verified === true,
     ...(input.submit_verified !== null
       ? { submit_evidence: input.submit_evidence ?? null }
       : {}),
     retry_count: input.retry_count,
+    rpc_methods: input.rpc_methods ?? [],
     ...(evidencedState
       ? { delivery: evidencedState, delivery_state: evidencedState }
       : {}),
@@ -1154,6 +1272,9 @@ export function buildPublicDeliveryReceipt(input: {
  */
 function defaultNonDeliveryWarning(
   state: PublicDeliveryState | undefined,
+  rpcMethods: readonly DeliveryRpcMethod[],
+  typed: boolean,
+  submitDispatched: boolean,
 ): string | undefined {
   switch (state) {
     case "pending_verify":
@@ -1166,6 +1287,17 @@ function defaultNonDeliveryWarning(
       );
     case "failed":
     case "failed_confirmed":
+      if (typed || rpcMethods.includes("surface.send_text")) {
+        return submitDispatched || rpcMethods.includes("surface.send_key")
+          ? `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}) after ` +
+              "text reached the target and the submission key was sent. The task " +
+              "may have been submitted despite the later failure; do not resend. " +
+              "Inspect the target pane before any recovery."
+          : `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}). The ` +
+              "text reached the target composer, but no submission key succeeded; " +
+              "it may remain there unsubmitted. Do not resend. Inspect the target " +
+              "pane before any recovery.";
+      }
       return (
         `NOT DELIVERED — terminal failure (${state}). The message did not ` +
         "land and will not be retried; do not relay as sent."
@@ -1204,6 +1336,9 @@ export interface DeliveryRecord {
   submit_verification_reason?: SubmitVerificationFailureReason;
   retry_safe?: false;
   retry_count: number;
+  rpc_methods: DeliveryRpcMethod[];
+  typed: boolean;
+  submit_dispatched: boolean;
   rename_to_task?: string;
   started_at: string;
   completed_at?: string;
@@ -1369,13 +1504,31 @@ class LauncherReadinessError extends Error {
 }
 
 class BootPromptDeliveryError extends Error {
+  readonly rpc_methods: DeliveryRpcMethod[];
+  readonly typed: boolean;
+  readonly submit_dispatched: boolean;
+
   constructor(
     message: string,
     readonly delivered_chars: number,
     readonly submit_verification_error?: SubmitVerificationError,
+    readonly delivery_error?: unknown,
   ) {
-    super(message);
+    super(message, {
+      cause: delivery_error ?? submit_verification_error,
+    });
     this.name = "BootPromptDeliveryError";
+    const deliveryMethods = deliveryRpcMethodsFromError(delivery_error);
+    this.rpc_methods =
+      deliveryMethods.length > 0
+        ? deliveryMethods
+        : deliveryRpcMethodsFromError(submit_verification_error);
+    this.typed =
+      deliveryTypedFromError(delivery_error) ||
+      deliveryTypedFromError(submit_verification_error);
+    this.submit_dispatched =
+      deliverySubmitDispatchedFromError(delivery_error) ||
+      deliverySubmitDispatchedFromError(submit_verification_error);
   }
 }
 
@@ -1567,6 +1720,26 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const readinessExtra = readinessTimeout
     ? { last_10_lines: readinessTimeout.last_10_lines }
     : {};
+  const rpcMethods = deliveryRpcMethodsFromError(error);
+  const deliveryRpcExtra =
+    rpcMethods.length > 0 ? { rpc_methods: rpcMethods } : {};
+  const deliveryTyped = deliveryTypedFromError(error);
+  const deliverySubmitDispatched = deliverySubmitDispatchedFromError(error);
+  const deliveryMutationExtra =
+    deliveryTyped || deliverySubmitDispatched
+      ? {
+          typed: deliveryTyped,
+          submit_attempted: deliverySubmitDispatched,
+          submit_dispatched: deliverySubmitDispatched,
+          rpc_methods: rpcMethods,
+          WARNING: defaultNonDeliveryWarning(
+            "failed",
+            rpcMethods,
+            deliveryTyped,
+            deliverySubmitDispatched,
+          ),
+        }
+      : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -1596,6 +1769,8 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...placementWorkspaceExtra,
     ...lifecycleTimeoutExtra,
     ...readinessExtra,
+    ...deliveryRpcExtra,
+    ...deliveryMutationExtra,
     ...extra,
     ...createdIdentityFromError(error),
   };
@@ -2372,7 +2547,9 @@ async function delay(ms: number): Promise<void> {
 
 function isRetryableDeliveryError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /socket|connection_|connection closed|timeout/i.test(message);
+  return /socket|connection_|connection closed|timeout|buffer not found/i.test(
+    message,
+  );
 }
 
 function formatToolValidationError(
@@ -4599,6 +4776,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : {}),
     };
   };
+  const successfulDispatchRpcMethod = (
+    method: DeliveryRpcMethod,
+    cliFallbackCountBeforeDispatch: number,
+  ): DeliveryRpcMethod | null =>
+    currentCliFallbackCount() === cliFallbackCountBeforeDispatch &&
+    getTransportHealth(client)?.mode === "socket"
+      ? method
+      : null;
   const attachTransportProvenance = (
     result: unknown,
     toolName: string,
@@ -4803,22 +4988,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   }
 
-  const snapshotDelivery = (record: DeliveryRecord) => ({
-    delivery_id: record.delivery_id,
-    surface: record.surface,
-    status: record.status,
-    sent_chunks: record.sent_chunks,
-    total_chunks: record.total_chunks,
-    chunk_size: record.chunk_size,
-    started_at: record.started_at,
-    completed_at: record.completed_at ?? null,
-    failed_chunk: record.failed_chunk ?? null,
-    error: record.error ?? null,
-    submit_verified: record.submit_verified,
-    submit_verification_reason: record.submit_verification_reason ?? null,
-    retry_safe: record.retry_safe ?? null,
-    retry_count: record.retry_count,
-  });
+  const snapshotDelivery = (record: DeliveryRecord) => {
+    const warning = defaultNonDeliveryWarning(
+      record.status === "failed" ? "failed" : undefined,
+      record.rpc_methods,
+      record.typed,
+      record.submit_dispatched,
+    );
+    return {
+      delivery_id: record.delivery_id,
+      surface: record.surface,
+      status: record.status,
+      sent_chunks: record.sent_chunks,
+      total_chunks: record.total_chunks,
+      chunk_size: record.chunk_size,
+      started_at: record.started_at,
+      completed_at: record.completed_at ?? null,
+      failed_chunk: record.failed_chunk ?? null,
+      error: record.error ?? null,
+      submit_verified: record.submit_verified,
+      submit_verification_reason: record.submit_verification_reason ?? null,
+      retry_safe: record.retry_safe ?? null,
+      retry_count: record.retry_count,
+      rpc_methods: [...record.rpc_methods],
+      typed: record.typed,
+      submit_dispatched: record.submit_dispatched,
+      ...(warning ? { WARNING: warning } : {}),
+    };
+  };
 
   const collectServerRoleSurfaceIds = (
     liveSurfaceIds?: ReadonlySet<string>,
@@ -5152,13 +5349,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     shouldPaste: boolean,
     avoidDuplicateOnAmbiguousRetry: boolean,
     beforeMutation?: () => Promise<void>,
-  ) => {
+  ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
     let lastError: unknown;
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
+      let attemptedRpcMethod: DeliveryRpcMethod | null = null;
+      let cliFallbackCountBeforeDispatch = currentCliFallbackCount();
       try {
         await beforeMutation?.();
+        cliFallbackCountBeforeDispatch = currentCliFallbackCount();
+        attemptedRpcMethod =
+          getTransportHealth(client)?.mode === "socket"
+            ? "surface.send_text"
+            : null;
         if (shouldPaste) {
           if (typeof client.pasteText !== "function") {
             throw pasteRequiredError("client does not support pasteText");
@@ -5177,8 +5381,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await client.send(surface, chunk, opts);
         }
         invalidateSurfaceTopologyCallScope(client as object);
-        return;
+        return successfulDispatchRpcMethod(
+          "surface.send_text",
+          cliFallbackCountBeforeDispatch,
+        );
       } catch (error) {
+        if (currentCliFallbackCount() !== cliFallbackCountBeforeDispatch) {
+          attemptedRpcMethod = null;
+        }
         lastError = error;
         attempt += 1;
         if (
@@ -5212,7 +5422,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 (screenShowsPendingInput(snapshot.text, chunk) ||
                   screenShowsPendingShellInput(snapshot.text, chunk))
               ) {
-                return;
+                return attemptedRpcMethod;
               }
             } catch (observeError) {
               if (observeError instanceof SurfaceGoneError) {
@@ -5255,16 +5465,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     key: string,
     workspace?: string,
     beforeMutation?: () => Promise<void>,
-  ) => {
+  ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
+    let lastError: unknown;
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
         await beforeMutation?.();
+        const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
         await client.sendKey(surface, key, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
-        return;
+        return successfulDispatchRpcMethod(
+          "surface.send_key",
+          cliFallbackCountBeforeDispatch,
+        );
       } catch (error) {
+        lastError = error;
         attempt += 1;
         if (
           !isRetryableDeliveryError(error) ||
@@ -5275,6 +5491,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await delay(SEND_INPUT_RETRY_DELAY_MS);
       }
     }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Failed to send key ${key} to ${surface}`);
   };
 
   const appendDeliveryEvent = (event: Omit<DeliveryTelemetryEvent, "ts">) => {
@@ -5574,6 +5794,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     pre_return_screen?: string | null;
     pre_return_metrics?: RawSubmitEvidenceMetrics | null;
     beforeMutation?: () => Promise<void>;
+    rpcMethods: Set<DeliveryRpcMethod>;
   }): Promise<{
     submit_verified: boolean | null;
     submit_evidence: SubmitEvidence | null;
@@ -5869,12 +6090,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         Date.now() - retryEligiblePendingSince >= retryObserveMs
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
-        await sendKeyWithRetry(
+        const recoveryRpcMethod = await sendKeyWithRetry(
           opts.surface,
           "return",
           opts.workspace,
           opts.beforeMutation,
         );
+        if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
         retryCount += 1;
         appendDeliveryEvent({
           event_type: "press_enter",
@@ -6090,8 +6312,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verification_reason?: SubmitKeyVerificationReason | null;
     }
   > => {
-    await opts.beforeMutation?.();
-    if (opts.key !== undefined) {
+    const rpcMethods = new Set<DeliveryRpcMethod>();
+    let textDispatched = false;
+    let submitDispatched = false;
+    try {
+      await opts.beforeMutation?.();
+      if (opts.key !== undefined) {
       if (opts.chunks.length > 0 || opts.press_enter) {
         throw new Error(
           "Delivery engine key input is mutually exclusive with text submission",
@@ -6105,7 +6331,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
-      await timeDeliveryPhase(opts.timings, "type", () =>
+      const keyRpcMethod = await timeDeliveryPhase(opts.timings, "type", () =>
         sendKeyWithRetry(
           opts.surface,
           key,
@@ -6113,6 +6339,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts.beforeMutation,
         ),
       );
+      submitDispatched = submitAttempted;
+      if (keyRpcMethod) rpcMethods.add(keyRpcMethod);
       const verification =
         submitAttempted && opts.verify_submit
           ? await timeDeliveryPhase(opts.timings, "verify", () =>
@@ -6126,8 +6354,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
         submit_attempted: submitAttempted,
+        submit_dispatched: submitDispatched,
         submit_verified: verification.submit_verified,
         retry_count: 0,
+        rpc_methods: [...rpcMethods],
         timings_ms: opts.timings,
         ...(submitAttempted && verification.submit_verified === null
           ? {
@@ -6191,7 +6421,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
     await timeDeliveryPhase(opts.timings, "type", async () => {
       for (const [index, batch] of deliveryBatches.entries()) {
-        await sendChunkWithRetry(
+        const chunkRpcMethod = await sendChunkWithRetry(
           opts.surface,
           batch.text,
           {
@@ -6203,6 +6433,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts.source_event === "spawn_agent",
           opts.beforeMutation,
         );
+        if (batch.text.length > 0) textDispatched = true;
+        if (chunkRpcMethod) rpcMethods.add(chunkRpcMethod);
         for (const sentChunks of batch.deliveredChunkCounts) {
           opts.onChunkDelivered?.(sentChunks);
         }
@@ -6277,12 +6509,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         await timeDeliveryPhase(opts.timings, "type", async () => {
           await delay(computeEnterDelayMs(bytes, opts.chunks.length));
-          await sendKeyWithRetry(
+          const submitRpcMethod = await sendKeyWithRetry(
             opts.surface,
             "return",
             opts.workspace,
             opts.beforeMutation,
           );
+          submitDispatched = true;
+          if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
         });
         appendDeliveryEvent({
           event_type: "press_enter",
@@ -6316,6 +6550,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 requireObservedPayloadBeforeEnter,
               require_working_status: opts.source_event === "boot_prompt",
               beforeMutation: opts.beforeMutation,
+              rpcMethods,
             }),
         );
         submit_verified = verification.submit_verified;
@@ -6391,9 +6626,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery_id: opts.delivery_id,
       typed: bytes > 0,
       submit_attempted: Boolean(opts.press_enter),
+      submit_dispatched: submitDispatched,
       submit_verified,
       submit_evidence,
       retry_count,
+      rpc_methods: [...rpcMethods],
       timings_ms: opts.timings,
       WARNING:
         opts.press_enter &&
@@ -6420,7 +6657,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     }
 
-    return { ...receipt, bytes };
+      return { ...receipt, bytes };
+    } catch (error) {
+      throw preserveDeliveryEvidenceOnError(
+        error,
+        rpcMethods,
+        textDispatched,
+        submitDispatched,
+      );
+    }
   };
 
   const waitForBootPromptReady = async (opts: {
@@ -7471,6 +7716,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               `Boot prompt delivery failed after ${deliveredChars} chars: ${fallbackMessage}`,
               deliveredChars,
               error,
+              fallbackError,
             );
           }
           return fingerprintPromptReceipt({
@@ -7481,6 +7727,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               submit_verified: true,
               submit_evidence: submitEvidence,
               retry_count: error.retry_count,
+              rpc_methods: error.receipt.rpc_methods,
             }),
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
             prompt_warning: promptWarning,
@@ -7496,6 +7743,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         `Boot prompt delivery failed after ${deliveredChars} chars: ${message}`,
         deliveredChars,
         error instanceof SubmitVerificationError ? error : undefined,
+        error,
       );
     }
   };
@@ -7960,6 +8208,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
         record.submit_verified = delivery.submit_verified;
         record.retry_count = delivery.retry_count;
+        record.rpc_methods = [...delivery.rpc_methods];
+        record.typed = delivery.typed;
+        record.submit_dispatched = delivery.submit_dispatched === true;
         finishDelivery(record, "delivered");
         if (lifecycle) {
           if (
@@ -7973,6 +8224,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: record.press_enter,
               source_event: lifecycle.source_event,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               delivery_state: delivery.delivery,
             });
           } else if (delivery.delivery === "pending_verify") {
@@ -7983,6 +8237,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: record.press_enter,
               source_event: lifecycle.source_event,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
             });
           } else {
             lifecycle.engine.resolveDelivery({
@@ -7999,6 +8256,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : "submitted",
               terminal: true,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               submit_verified: delivery.submit_verified,
               error:
                 delivery.delivery === "rescued"
@@ -8008,11 +8268,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
       } catch (error) {
+        const errorRpcMethods = deliveryRpcMethodsFromError(error);
+        const errorTyped = deliveryTypedFromError(error);
+        const errorSubmitDispatched =
+          deliverySubmitDispatchedFromError(error);
+        if (errorRpcMethods.length > 0) {
+          record.rpc_methods = errorRpcMethods;
+        }
+        record.typed = errorTyped;
+        record.submit_dispatched = errorSubmitDispatched;
         if (error instanceof SubmitVerificationError) {
           record.submit_verified = false;
           record.submit_verification_reason = error.reason;
           record.retry_safe = error.retry_safe;
           record.retry_count = error.retry_count;
+          record.rpc_methods = [...error.receipt.rpc_methods];
         } else if (error instanceof DeliverySafetyGateError) {
           record.submit_verified = error.submit_verified;
         }
@@ -8030,6 +8300,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             delivery_state: "failed",
             terminal: true,
             retry_count: record.retry_count,
+            rpc_methods: record.rpc_methods,
+            typed: record.typed,
+            submit_dispatched: record.submit_dispatched,
             submit_verified: record.submit_verified,
             error: message,
           });
@@ -8038,7 +8311,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
 
     setTimeout(() => {
-      void run();
+      withTransportRetryTracking(run);
     }, 0);
   };
 
@@ -10039,6 +10312,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             verify_submit: shouldVerifySubmit,
             submit_verified: null,
             retry_count: 0,
+            rpc_methods: [],
+            typed: false,
+            submit_dispatched: false,
             rename_to_task: args.rename_to_task,
             started_at: new Date().toISOString(),
             stableSurfaceIdentity: route.stableSurfaceIdentity,
@@ -10061,6 +10337,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               text: sanitizedText,
               press_enter: args.press_enter,
               source_event: sourceEvent,
+              rpc_methods: [],
             });
           }
           startBackgroundDelivery(record, backgroundLifecycle);
@@ -10148,6 +10425,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: args.press_enter,
               source_event: "send_to",
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               delivery_state: delivery.delivery,
             });
           } else if (delivery.delivery === "pending_verify") {
@@ -10158,6 +10438,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: args.press_enter,
               source_event: "send_to",
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
             });
           } else {
             receiptEngine.resolveDelivery({
@@ -10174,6 +10457,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : "submitted",
               terminal: true,
               retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods,
+              typed: delivery.typed,
+              submit_dispatched: delivery.submit_dispatched,
               submit_verified: delivery.submit_verified,
               error:
                 delivery.delivery === "rescued"
@@ -11800,6 +12086,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           press_enter: true,
                           source_event: "dispatch_nudge",
                           retry_count: delivered.retry_count,
+                          rpc_methods: delivered.rpc_methods,
+                          typed: delivered.typed,
+                          submit_dispatched: delivered.submit_dispatched,
                         })
                       : context.lifecycleSweepEngine.resolveDelivery({
                           delivery_id: deliveryId,
@@ -11810,6 +12099,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           delivery_state: "submitted",
                           terminal: true,
                           retry_count: delivered.retry_count,
+                          rpc_methods: delivered.rpc_methods,
+                          typed: delivered.typed,
+                          submit_dispatched: delivered.submit_dispatched,
                           submit_verified: delivered.submit_verified,
                           error: null,
                         });
@@ -13138,27 +13430,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
     // outside this lifecycle block).
     lifecycleAgentInputDeliverer = deliverAgentInput;
-    engine.setDeliverySubmitter(async (receipt) => {
-      const delivery = await deliverAgentInput({
-        agent_id: receipt.agent_id,
-        text: receipt.text,
-        press_enter: receipt.press_enter,
-        allow_busy: false,
-        source_event: receipt.source_event,
-        delivery_id: receipt.delivery_id,
-      });
-      return {
-        retry_count: delivery.retry_count,
-        submit_verified: delivery.submit_verified,
-        ...(delivery.delivery === "submitted" ||
-        delivery.delivery === "queued" ||
-        delivery.delivery === "queued_followup" ||
-        delivery.delivery === "rescued" ||
-        delivery.delivery === "pending_verify"
-          ? { delivery: delivery.delivery }
-          : {}),
-      };
-    });
+    engine.setDeliverySubmitter((receipt) =>
+      withTransportRetryTracking(async () => {
+        const delivery = await deliverAgentInput({
+          agent_id: receipt.agent_id,
+          text: receipt.text,
+          press_enter: receipt.press_enter,
+          allow_busy: false,
+          source_event: receipt.source_event,
+          delivery_id: receipt.delivery_id,
+        });
+        return {
+          retry_count: delivery.retry_count,
+          submit_verified: delivery.submit_verified,
+          rpc_methods: delivery.rpc_methods,
+          typed: delivery.typed,
+          submit_dispatched: delivery.submit_dispatched,
+          ...(delivery.delivery === "submitted" ||
+          delivery.delivery === "queued" ||
+          delivery.delivery === "queued_followup" ||
+          delivery.delivery === "rescued" ||
+          delivery.delivery === "pending_verify"
+            ? { delivery: delivery.delivery }
+            : {}),
+        };
+      }),
+    );
 
     const deliverReportInboxPointer = async (
       recipient: AgentRecord,
@@ -13233,6 +13530,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: true,
           source_event: "report_to_parent",
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
           delivery_state: delivered.delivery,
         });
       } else if (delivered.delivery === "pending_verify") {
@@ -13243,6 +13543,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: true,
           source_event: "report_to_parent",
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
         });
       } else if (delivered.delivery === "rescued") {
         engine.resolveDelivery({
@@ -13254,6 +13557,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_state: "rescued",
           terminal: true,
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
           submit_verified: false,
           error: "Prompt appeared only after an external interrupt",
         });
@@ -13270,6 +13576,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_state: "submitted",
           terminal: true,
           retry_count: delivered.retry_count,
+          rpc_methods: delivered.rpc_methods,
+          typed: delivered.typed,
+          submit_dispatched: delivered.submit_dispatched,
           submit_verified: delivered.submit_verified,
           error: null,
         });
@@ -15686,12 +15995,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               args.timeout_ms,
             );
             const data = {
-              delivery_id: receipt.delivery_id,
-              delivery_state: receipt.delivery_state,
-              terminal: receipt.terminal,
-              submit_verified: receipt.submit_verified,
+              ...buildPublicDeliveryReceipt({
+                delivery_id: receipt.delivery_id,
+                delivery_state: receipt.delivery_state,
+                typed: receipt.typed === true,
+                submit_attempted: receipt.press_enter,
+                submit_dispatched: receipt.submit_dispatched === true,
+                submit_verified: receipt.submit_verified,
+                retry_count: receipt.retry_count,
+                rpc_methods: receipt.rpc_methods ?? [],
+                needs_attention: receipt.needs_attention,
+                attention_reason: receipt.attention_reason,
+              }),
               agent_id: receipt.agent_id,
-              retry_count: receipt.retry_count,
               ...(receipt.needs_attention === true
                 ? {
                     needs_attention: true,
@@ -17127,10 +17443,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ...buildPublicDeliveryReceipt({
                     delivery_state: duplicate.delivery_state,
                     delivery_id: duplicate.delivery_id,
-                    typed: false,
-                    submit_attempted: false,
+                    typed: duplicate.typed === true,
+                    submit_attempted: duplicate.press_enter,
+                    submit_dispatched: duplicate.submit_dispatched,
                     submit_verified: duplicate.submit_verified,
                     retry_count: duplicate.retry_count,
+                    rpc_methods: duplicate.rpc_methods ?? [],
                     needs_attention: duplicate.needs_attention,
                     attention_reason: duplicate.attention_reason,
                   }),
@@ -17191,6 +17509,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         press_enter: args.press_enter,
                         source_event: "send_to",
                         retry_count: delivery.retry_count,
+                        rpc_methods: delivery.rpc_methods,
+                        typed: delivery.typed,
+                        submit_dispatched: delivery.submit_dispatched,
                         delivery_state: delivery.delivery,
                       })
                     : delivery.delivery === "pending_verify"
@@ -17201,6 +17522,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           press_enter: args.press_enter,
                           source_event: "send_to",
                           retry_count: delivery.retry_count,
+                          rpc_methods: delivery.rpc_methods,
+                          typed: delivery.typed,
+                          submit_dispatched: delivery.submit_dispatched,
                         })
                       : delivery.delivery === "rescued"
                         ? engine.resolveDelivery({
@@ -17212,6 +17536,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                             delivery_state: "rescued",
                             terminal: true,
                             retry_count: delivery.retry_count,
+                            rpc_methods: delivery.rpc_methods,
+                            typed: delivery.typed,
+                            submit_dispatched: delivery.submit_dispatched,
                             submit_verified: false,
                             error:
                               "Prompt appeared only after an external interrupt",
@@ -17226,6 +17553,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                               delivery_state: "submitted",
                               terminal: true,
                               retry_count: delivery.retry_count,
+                              rpc_methods: delivery.rpc_methods,
+                              typed: delivery.typed,
+                              submit_dispatched: delivery.submit_dispatched,
                               submit_verified: delivery.submit_verified,
                               error: null,
                             })
@@ -17241,12 +17571,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_verified: delivery.submit_verified,
                     submit_evidence: delivery.submit_evidence,
                     retry_count: delivery.retry_count,
+                    rpc_methods: delivery.rpc_methods,
+                    submit_dispatched: delivery.submit_dispatched,
                     queued_behind_turn: delivery.queued_behind_turn,
                   }),
                   accepted: true,
                 });
               } catch (error) {
-                if (error instanceof RetryableDeliveryError) {
+                const errorRpcMethods = deliveryRpcMethodsFromError(error);
+                const errorTyped = deliveryTypedFromError(error);
+                const errorSubmitDispatched =
+                  deliverySubmitDispatchedFromError(error);
+                if (
+                  error instanceof RetryableDeliveryError &&
+                  errorRpcMethods.length === 0 &&
+                  !errorTyped &&
+                  !errorSubmitDispatched
+                ) {
                   const queued = engine.queueDelivery({
                     delivery_id: deliveryId,
                     agent_id: agent.agent_id,
@@ -17283,6 +17624,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       error instanceof SubmitVerificationError
                         ? error.retry_count
                         : 0,
+                    rpc_methods: errorRpcMethods,
+                    typed: errorTyped,
+                    submit_dispatched: errorSubmitDispatched,
                     submit_verified:
                       error instanceof SubmitVerificationError ? false : null,
                     error:
@@ -17303,13 +17647,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     typed:
                       error instanceof SubmitVerificationError
                         ? (error.receipt?.typed ?? true)
-                        : false,
+                        : errorTyped,
                     submit_attempted:
                       error instanceof SubmitVerificationError
                         ? (error.receipt?.submit_attempted ?? args.press_enter)
-                        : false,
+                        : args.press_enter,
+                    submit_dispatched: errorSubmitDispatched,
                     submit_verified: failed.submit_verified,
                     retry_count: failed.retry_count,
+                    rpc_methods: errorRpcMethods,
                   }),
                   accepted: false,
                   error: failed.error,
@@ -17384,10 +17730,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...buildPublicDeliveryReceipt({
                 delivery_state: duplicate.delivery_state,
                 delivery_id: duplicate.delivery_id,
-                typed: false,
-                submit_attempted: false,
+                typed: duplicate.typed === true,
+                submit_attempted: duplicate.press_enter,
+                submit_dispatched: duplicate.submit_dispatched,
                 submit_verified: duplicate.submit_verified,
                 retry_count: duplicate.retry_count,
+                rpc_methods: duplicate.rpc_methods ?? [],
                 needs_attention: duplicate.needs_attention,
                 attention_reason: duplicate.attention_reason,
                 timings_ms: timings,
@@ -17453,7 +17801,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // `failed` receipt here would contradict the delivery engine's
             // retryable queue semantics and tell a lead its live worker was
             // dead. Hand back the queued receipt the drain loop will honour.
-            if (error instanceof RetryableDeliveryError) {
+            const errorRpcMethods = deliveryRpcMethodsFromError(error);
+            const errorTyped = deliveryTypedFromError(error);
+            const errorSubmitDispatched =
+              deliverySubmitDispatchedFromError(error);
+            if (
+              error instanceof RetryableDeliveryError &&
+              errorRpcMethods.length === 0 &&
+              !errorTyped &&
+              !errorSubmitDispatched
+            ) {
               const receipt = engine.queueDelivery({
                 delivery_id: deliveryId,
                 agent_id: agentId,
@@ -17493,6 +17850,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   error instanceof SubmitVerificationError
                     ? error.retry_count
                     : 0,
+                rpc_methods: errorRpcMethods,
+                typed: errorTyped,
+                submit_dispatched: errorSubmitDispatched,
                 submit_verified:
                   error instanceof SubmitVerificationError ? false : null,
                 error: error instanceof Error ? error.message : String(error),
@@ -17510,13 +17870,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 typed:
                   error instanceof SubmitVerificationError
                     ? (error.receipt?.typed ?? true)
-                    : false,
+                    : errorTyped,
                 submit_attempted:
                   error instanceof SubmitVerificationError
                     ? (error.receipt?.submit_attempted ?? args.press_enter)
-                    : false,
+                    : args.press_enter,
+                submit_dispatched: errorSubmitDispatched,
                 submit_verified: failedReceipt.submit_verified,
                 retry_count: failedReceipt.retry_count,
+                rpc_methods: errorRpcMethods,
                 timings_ms: timings,
               }),
             };
@@ -17532,6 +17894,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   press_enter: args.press_enter,
                   source_event: "send_to",
                   retry_count: delivery.retry_count,
+                  rpc_methods: delivery.rpc_methods,
+                  typed: delivery.typed,
+                  submit_dispatched: delivery.submit_dispatched,
                   delivery_state: delivery.delivery,
                 })
               : delivery.delivery === "pending_verify"
@@ -17542,6 +17907,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     press_enter: args.press_enter,
                     source_event: "send_to",
                     retry_count: delivery.retry_count,
+                    rpc_methods: delivery.rpc_methods,
+                    typed: delivery.typed,
+                    submit_dispatched: delivery.submit_dispatched,
                   })
                 : delivery.delivery === "rescued"
                   ? engine.resolveDelivery({
@@ -17553,6 +17921,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       delivery_state: "rescued",
                       terminal: true,
                       retry_count: delivery.retry_count,
+                      rpc_methods: delivery.rpc_methods,
+                      typed: delivery.typed,
+                      submit_dispatched: delivery.submit_dispatched,
                       submit_verified: false,
                       error: "Prompt appeared only after an external interrupt",
                     })
@@ -17566,6 +17937,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         delivery_state: "typed",
                         terminal: true,
                         retry_count: delivery.retry_count,
+                        rpc_methods: delivery.rpc_methods,
+                        typed: delivery.typed,
+                        submit_dispatched: delivery.submit_dispatched,
                         submit_verified: null,
                         error: null,
                       })
@@ -17579,6 +17953,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           delivery_state: "submitted",
                           terminal: true,
                           retry_count: delivery.retry_count,
+                          rpc_methods: delivery.rpc_methods,
+                          typed: delivery.typed,
+                          submit_dispatched: delivery.submit_dispatched,
                           submit_verified: delivery.submit_verified,
                           error: null,
                         })
@@ -17593,6 +17970,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             submit_verified: delivery.submit_verified,
             submit_evidence: delivery.submit_evidence,
             retry_count: delivery.retry_count,
+            rpc_methods: delivery.rpc_methods,
+            submit_dispatched: delivery.submit_dispatched,
             queued_behind_turn: delivery.queued_behind_turn,
             timings_ms: timings,
           });

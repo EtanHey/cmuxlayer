@@ -735,7 +735,7 @@ describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
     for (const state of ["failed", "failed_confirmed"] as const) {
       const receipt = buildPublicDeliveryReceipt({
         delivery_state: state,
-        typed: true,
+        typed: false,
         submit_attempted: true,
         submit_verified: false,
         retry_count: 0,
@@ -745,6 +745,30 @@ describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
       expect(receipt.WARNING).toMatch(/do not relay as sent/i);
     }
   });
+
+  it.each([
+    [["surface.send_text"]],
+    [["surface.send_text", "surface.send_key"]],
+  ] as const)(
+    "warns against resending when a failed delivery already used %j",
+    async (rpcMethods) => {
+      const { buildPublicDeliveryReceipt } = await loadServerModule();
+      const receipt = buildPublicDeliveryReceipt({
+        delivery_state: "failed",
+        delivery_id: "d-partial",
+        typed: true,
+        submit_attempted: true,
+        submit_verified: false,
+        retry_count: 0,
+        rpc_methods: [...rpcMethods],
+      });
+
+      expect(receipt.WARNING).toMatch(/PARTIALLY DELIVERED/);
+      expect(receipt.WARNING).toMatch(/text reached the target/i);
+      expect(receipt.WARNING).toMatch(/do not resend/i);
+      expect(receipt.WARNING).not.toMatch(/message did not land/i);
+    },
+  );
 
   it("leaves a verified submitted receipt unwarned and keeps an explicit WARNING", async () => {
     const { buildPublicDeliveryReceipt, pausedTargetWarning } =

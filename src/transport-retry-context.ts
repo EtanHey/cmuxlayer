@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 interface TransportRetryContext {
   retryCount: number;
   cliFallbackUsed: boolean;
+  cliFallbackCount: number;
   cliFallbackSources: string[];
 }
 
@@ -10,7 +11,12 @@ const retryStorage = new AsyncLocalStorage<TransportRetryContext>();
 
 export function withTransportRetryTracking<T>(fn: () => T): T {
   return retryStorage.run(
-    { retryCount: 0, cliFallbackUsed: false, cliFallbackSources: [] },
+    {
+      retryCount: 0,
+      cliFallbackUsed: false,
+      cliFallbackCount: 0,
+      cliFallbackSources: [],
+    },
     fn,
   );
 }
@@ -28,6 +34,7 @@ export function recordCliFallback(source = "unspecified"): void {
   const context = retryStorage.getStore();
   if (context) {
     context.cliFallbackUsed = true;
+    context.cliFallbackCount += 1;
     if (!context.cliFallbackSources.includes(source)) {
       context.cliFallbackSources.push(source);
     }
@@ -36,6 +43,10 @@ export function recordCliFallback(source = "unspecified"): void {
 
 export function currentCliFallbackUsed(): boolean {
   return retryStorage.getStore()?.cliFallbackUsed ?? false;
+}
+
+export function currentCliFallbackCount(): number {
+  return retryStorage.getStore()?.cliFallbackCount ?? 0;
 }
 
 export function currentCliFallbackSources(): string[] {

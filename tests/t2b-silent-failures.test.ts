@@ -308,6 +308,7 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
       const data = payload(result);
       expect(result.isError).toBeUndefined();
       expect(data.submit_attempted).toBe(true);
+      expect(data.submit_dispatched).toBe(true);
       expect(data.key_dispatched).toBe(true);
     },
   );

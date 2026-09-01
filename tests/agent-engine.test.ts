@@ -29,6 +29,7 @@ import {
   buildResumeCommand,
   extractSessionId,
   resolveSweepTiming,
+  type AgentDeliveryReceipt,
 } from "../src/agent-engine.js";
 import { launcherNameCandidates } from "../src/launcher-registry.js";
 import { toAgentStatePayload } from "../src/agent-facade.js";
@@ -13739,6 +13740,32 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("omits corrupt persisted RPC provenance instead of throwing", () => {
+      const receipt = engine.queueDelivery({
+        agent_id: "corrupt-rpc-methods",
+        text: "legacy receipt",
+        press_enter: false,
+        source_event: "send_to",
+      });
+      const receiptStore = (
+        engine as unknown as {
+          deliveryReceipts: Map<string, AgentDeliveryReceipt>;
+        }
+      ).deliveryReceipts;
+      receiptStore.set(receipt.delivery_id, {
+        ...receipt,
+        rpc_methods: null as unknown as AgentDeliveryReceipt["rpc_methods"],
+      });
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_id: receipt.delivery_id,
+        text: "legacy receipt",
+      });
+      expect(
+        engine.getDeliveryReceipt(receipt.delivery_id)?.rpc_methods,
+      ).toBeUndefined();
+    });
+
     it("holds a queued delivery while the target is paused without typing or retrying", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -13767,6 +13794,76 @@ Session ID: ${sessionId}`,
         delivery_state: "queued",
         terminal: false,
         retry_count: 0,
+      });
+    });
+
+    it("persists RPC provenance returned by a drained queued delivery", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "queued-rpc-provenance",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      engine.setDeliverySubmitter(() => Promise.resolve({
+        retry_count: 0,
+        submit_verified: true,
+        delivery: "submitted",
+        rpc_methods: ["surface.send_text", "surface.send_key"],
+      }));
+      const receipt = engine.queueDelivery({
+        agent_id: "queued-rpc-provenance",
+        text: "deliver after resume",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "submitted",
+        terminal: true,
+        submit_verified: true,
+        rpc_methods: ["surface.send_text", "surface.send_key"],
+      });
+    });
+
+    it("terminalizes a queued CLI partial delivery and persists its mutation evidence", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "queued-cli-partial",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      engine.setDeliverySubmitter(() =>
+        Promise.reject(
+          Object.assign(new RetryableDeliveryError("Buffer not found"), {
+            rpc_methods: [],
+            typed: true,
+            submit_dispatched: false,
+          }),
+        ),
+      );
+      const receipt = engine.queueDelivery({
+        agent_id: "queued-cli-partial",
+        text: "already pasted\ninto the composer",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "failed",
+        terminal: true,
+        rpc_methods: [],
+        typed: true,
+        submit_dispatched: false,
       });
     });
 

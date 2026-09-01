@@ -56,6 +56,7 @@ import {
   readWatchRegistry,
   sweepWatches,
 } from "../src/watch-spec.js";
+import { recordCliFallback } from "../src/transport-retry-context.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -1893,6 +1894,11 @@ function makeBroadcastClient(
   };
 
   const client = {
+    getTransportHealth: () => ({
+      mode: "socket" as const,
+      degraded: false,
+      current_socket_path: "/tmp/cmuxlayer-test.sock",
+    }),
     listWorkspaces: vi.fn().mockImplementation(async () =>
       opts.malformedEnumeration
         ? { workspaces: null }
@@ -2049,6 +2055,17 @@ type RegisteredTestTool = {
 type TestLifecycleEngine = {
   stateMgr: { writeState(record: AgentRecord): void };
   getRegistry(): { set(agentId: string, record: AgentRecord): void };
+  acceptPendingVerify(input: {
+    delivery_id: string;
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+    source_event: "send_to";
+    retry_count: number;
+    rpc_methods: Array<"surface.send_text" | "surface.send_key">;
+    typed: boolean;
+    submit_dispatched: boolean;
+  }): unknown;
 };
 
 function registeredTestTool(server: unknown, name: string): RegisteredTestTool {
@@ -8835,6 +8852,278 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("send_to preserves socket RPC provenance in a rebuilt agent receipt", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-rpc-receipt",
+      surface_id: "surface:worker-rpc-receipt",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server } = await createBroadcastServer([record]);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "Inspect receipt provenance",
+        press_enter: false,
+      },
+      {},
+    );
+
+    expect(parseToolResult(result)).toMatchObject({
+      ok: true,
+      rpc_methods: ["surface.send_text"],
+    });
+  });
+
+  it("send_to surface mode persists socket RPC provenance for wait_for", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-surface-rpc-receipt",
+      surface_id: "surface:worker-surface-rpc-receipt",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server } = await createBroadcastServer([record]);
+
+    const sent = parseToolResult(
+      await registeredTestTool(server, "send_to").handler(
+        {
+          mode: "surface",
+          target: record.surface_id,
+          text: "Persist surface receipt provenance",
+          press_enter: false,
+        },
+        {},
+      ),
+    );
+    const waited = parseToolResult(
+      await registeredTestTool(server, "wait_for").handler(
+        { delivery_id: sent.delivery_id },
+        {},
+      ),
+    );
+
+    expect(sent).toMatchObject({
+      ok: true,
+      typed: true,
+      submit_dispatched: false,
+      rpc_methods: ["surface.send_text"],
+      delivery_id: expect.any(String),
+    });
+    expect(waited).toMatchObject({
+      ok: true,
+      typed: true,
+      submit_dispatched: false,
+      rpc_methods: ["surface.send_text"],
+      delivery_id: sent.delivery_id,
+    });
+  });
+
+  it("queued drains do not claim a socket RPC when deferred delivery falls back to CLI", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-queued-cli-fallback",
+      surface_id: "surface:worker-queued-cli-fallback",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server, client } = await createBroadcastServer([record]);
+    client.send.mockImplementation(() => {
+      recordCliFallback("send_text");
+      return Promise.resolve();
+    });
+    const engine = testLifecycleEngine(server);
+    const queued = engine.queueDelivery({
+      agent_id: record.agent_id,
+      text: "Deliver after the lifecycle sweep",
+      press_enter: false,
+      source_event: "send_to",
+    });
+
+    await engine.drainDeliveryQueue();
+
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      terminal: true,
+      rpc_methods: [],
+    });
+  });
+
+  it("send_to reports partial delivery when CLI paste succeeds before Return fails", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "worker-cli-paste-partial",
+      surface_id: "surface:worker-cli-paste-partial",
+      workspace_id: "workspace:one",
+      state: "ready",
+      function: "implementor",
+    });
+    const { server, client } = await createBroadcastServer([record]);
+    const pasteText = vi.fn().mockImplementation(() => {
+      recordCliFallback("paste_text");
+      return Promise.resolve();
+    });
+    (client as typeof client & { pasteText: typeof pasteText }).pasteText =
+      pasteText;
+    client.sendKey.mockRejectedValue(new Error("Buffer not found"));
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "already pasted\ninto the composer",
+        press_enter: true,
+      },
+      {},
+    );
+    const failed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(pasteText).toHaveBeenCalledTimes(1);
+    expect(failed).toMatchObject({
+      delivery_state: "failed",
+      typed: true,
+      submit_attempted: true,
+      submit_dispatched: false,
+      rpc_methods: [],
+    });
+    expect(failed.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    expect(failed.WARNING).toMatch(/do not resend/i);
+    expect(failed.WARNING).not.toMatch(/message did not land/i);
+
+    const waited = parseToolResult(
+      await registeredTestTool(server, "wait_for").handler(
+        { delivery_id: failed.delivery_id },
+        {},
+      ),
+    );
+    expect(waited).toMatchObject({
+      delivery_state: "failed",
+      typed: true,
+      submit_attempted: true,
+      submit_dispatched: false,
+      rpc_methods: [],
+    });
+    expect(waited.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    expect(waited.WARNING).toMatch(/do not resend/i);
+  });
+
+  it("background delivery preserves CLI partial-delivery truth in snapshots and wait_for", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = makeServerAgentRecord({
+        agent_id: "worker-background-cli-partial",
+        surface_id: "surface:worker-background-cli-partial",
+        workspace_id: "workspace:one",
+        state: "ready",
+        function: "implementor",
+      });
+      const { server, client } = await createBroadcastServer([record]);
+      const pasteText = vi.fn().mockImplementation(() => {
+        recordCliFallback("paste_text");
+        return Promise.resolve();
+      });
+      (client as typeof client & { pasteText: typeof pasteText }).pasteText =
+        pasteText;
+      client.sendKey.mockRejectedValue(new Error("Buffer not found"));
+
+      const accepted = parseToolResult(
+        await registeredTestTool(server, "send_input").handler(
+          {
+            surface: record.surface_id,
+            text: "already pasted\ninto the composer",
+            press_enter: true,
+            background: true,
+            allow_long_inline: true,
+          },
+          {},
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const waited = parseToolResult(
+        await registeredTestTool(server, "wait_for").handler(
+          { delivery_id: accepted.delivery_id },
+          {},
+        ),
+      );
+      const screen = parseToolResult(
+        await registeredTestTool(server, "read_screen").handler(
+          { surface: record.surface_id, parsed_only: true },
+          {},
+        ),
+      );
+
+      expect(pasteText).toHaveBeenCalledTimes(1);
+      expect(waited).toMatchObject({
+        delivery_state: "failed",
+        typed: true,
+        rpc_methods: [],
+      });
+      expect(waited.WARNING).toMatch(/PARTIALLY DELIVERED/);
+      expect(waited.WARNING).toMatch(/do not resend/i);
+      expect(screen.delivery).toMatchObject({
+        status: "failed",
+        typed: true,
+        rpc_methods: [],
+      });
+      expect(screen.delivery.WARNING).toMatch(/PARTIALLY DELIVERED/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("background delivery records a successful CLI submit dispatch", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = makeServerAgentRecord({
+        agent_id: "worker-background-cli-submit",
+        surface_id: "surface:worker-background-cli-submit",
+        workspace_id: "workspace:one",
+        state: "done",
+        function: "implementor",
+      });
+      const { server, client } = await createBroadcastServer([record]);
+      client.send.mockImplementation(() => {
+        recordCliFallback("send_text");
+        return Promise.resolve();
+      });
+      client.sendKey.mockImplementation(() => {
+        recordCliFallback("send_key");
+        return Promise.resolve();
+      });
+
+      const accepted = parseToolResult(
+        await registeredTestTool(server, "send_input").handler(
+          {
+            surface: record.surface_id,
+            text: "submit this",
+            press_enter: true,
+            background: true,
+          },
+          {},
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const screen = parseToolResult(
+        await registeredTestTool(server, "read_screen").handler(
+          { surface: record.surface_id, parsed_only: true },
+          {},
+        ),
+      );
+
+      expect(screen.delivery).toMatchObject({
+        status: "delivered",
+        typed: true,
+        submit_dispatched: true,
+        rpc_methods: [],
+      });
+      expect(accepted.delivery_id).toBe(screen.delivery.delivery_id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("send_to resolves structured targeting by job function, workspace, ids, and exclude", async () => {
     const records = [
       makeServerAgentRecord({
@@ -8908,6 +9197,7 @@ describe("agent lifecycle tool handlers", () => {
           terminal: true,
           submit_verified: true,
           submit_evidence: "status_only",
+          rpc_methods: ["surface.send_text", "surface.send_key"],
         }),
         expect.objectContaining({
           requested_agent_id: "reviewer-excluded",
@@ -9157,6 +9447,53 @@ describe("agent lifecycle tool handlers", () => {
       }),
     ]);
     expect(sendCalls).toHaveLength(1);
+  });
+
+  it("send_to targeting preserves stored mutation evidence on a duplicate receipt", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "reviewer-duplicate",
+      surface_id: "surface:reviewer-duplicate",
+      state: "ready",
+      function: "reviewer",
+    });
+    const { server, sendCalls } = await createBroadcastServer([record]);
+    const engine = testLifecycleEngine(server);
+    engine.acceptPendingVerify({
+      delivery_id: "delivery-existing",
+      agent_id: record.agent_id,
+      text: "Review exactly once",
+      press_enter: true,
+      source_event: "send_to",
+      retry_count: 2,
+      rpc_methods: ["surface.send_text", "surface.send_key"],
+      typed: true,
+      submit_dispatched: true,
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Review exactly once",
+        press_enter: true,
+        targeting: { agent_ids: [record.agent_id] },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.receipts).toEqual([
+      expect.objectContaining({
+        agent_id: record.agent_id,
+        duplicate_of: "delivery-existing",
+        delivery_id: "delivery-existing",
+        delivery_state: "pending_verify",
+        typed: true,
+        submit_attempted: true,
+        submit_dispatched: true,
+        rpc_methods: ["surface.send_text", "surface.send_key"],
+      }),
+    ]);
+    expect(sendCalls).toHaveLength(0);
   });
 
   it("send_to targeting counts a rescued target as failed", async () => {
@@ -12715,6 +13052,21 @@ codex>
       delivery_id: delivered.delivery_id,
       delivery_state: "submitted",
       terminal: true,
+      typed: true,
+      submit_dispatched: true,
+    });
+    const waited = parseToolResult(
+      await registeredTestTool(server, "wait_for").handler(
+        { delivery_id: delivered.delivery_id },
+        {},
+      ),
+    );
+    expect(waited).toMatchObject({
+      delivery_id: delivered.delivery_id,
+      delivery_state: "submitted",
+      typed: true,
+      submit_attempted: true,
+      submit_dispatched: true,
     });
   });
 
