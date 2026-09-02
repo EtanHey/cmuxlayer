@@ -724,6 +724,12 @@ const SendToArgsSchema = z.object({
   press_enter: z.boolean().optional().default(true),
   allow_busy: z.boolean().optional().default(false),
   allow_long_inline: z.boolean().optional().default(false),
+  override_foreign_draft: z
+    .string()
+    .optional()
+    .describe(
+      'Acknowledge a prior blocked_by_foreign_draft refusal: pass the EXACT composer text that error reported. Delivery proceeds only if the composer still holds exactly that text; if it changed, the send is refused as blocked_by_draft_override_stale rather than typed over. Use when the "draft" is UI ghost text (an autocomplete suggestion over an empty composer), which this guard cannot distinguish from a real draft on a flattened frame.',
+    ),
   targeting: z
     .object({
       role: z.enum(["implementor", "reviewer", "gatherer"]).optional(),
@@ -1571,15 +1577,18 @@ class DeliverySafetyGateError extends Error {
     readonly error_code:
       | "blocked_by_interactive_prompt"
       | "blocked_by_permission_prompt"
-      | "blocked_by_foreign_draft",
+      | "blocked_by_foreign_draft"
+      | "blocked_by_draft_override_stale",
     readonly screen: ParsedScreenResult,
     readonly draftText?: string,
   ) {
     super(
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
+        : error_code === "blocked_by_draft_override_stale"
+          ? `override_foreign_draft did not match the composer: it now holds ${JSON.stringify(draftText ?? "unknown")}; refused before typing because the text changed after you observed it`
         : error_code === "blocked_by_foreign_draft"
-          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; refused before typing`
+          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; refused before typing. If this is UI ghost text over an empty composer, re-send with override_foreign_draft set to exactly that string.`
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -5819,6 +5828,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     cli?: CliType;
     /** When set, also refuse a composer already holding someone else's text. */
     draftGuardText?: string;
+    /** Caller's acknowledgement of a prior refusal; see the draft guard below. */
+    draftOverrideText?: string;
   }): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
     const { surface, workspace, cli } = opts;
     const snapshot = await readParsedSurface(surface, workspace, {
@@ -5858,11 +5869,42 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.draftGuardText !== undefined &&
       composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
     ) {
-      throw new DeliverySafetyGateError(
-        "blocked_by_foreign_draft",
-        snapshot.parsed,
-        extractComposerInputRegion(snapshot.text)?.trim() || undefined,
-      );
+      const observed =
+        extractComposerInputRegion(snapshot.text)?.trim() || undefined;
+
+      // AIDEV-NOTE (#442/#504): the frame this guard reads is FLATTENED, so a
+      // human's real draft and UI ghost text (an autocomplete suggestion drawn
+      // over an EMPTY composer) are byte-identical here. There is no attribute
+      // to test until #504 wires render_grid styling into this path, so the
+      // guard cannot classify -- and it must not pretend to.
+      //
+      // `override_foreign_draft` is therefore an ACKNOWLEDGEMENT, not a bypass:
+      // the caller echoes back the exact text the refusal reported, and the
+      // send proceeds only if the composer STILL holds exactly that. That keeps
+      // the property #442 exists to protect. A human mid-draft is TYPING, so
+      // their text moves between the refusal and the retry and the echo stops
+      // matching; static ghost text does not move. A blanket boolean would have
+      // traded this guard away, which is why this is a compare-and-swap.
+      const ack = opts.draftOverrideText?.trim();
+      if (ack === undefined || ack.length === 0) {
+        throw new DeliverySafetyGateError(
+          "blocked_by_foreign_draft",
+          snapshot.parsed,
+          observed,
+        );
+      }
+      if (observed === undefined || observed !== ack) {
+        // The composer moved after the caller looked. That is the dangerous
+        // case, and it gets its OWN code: conflating it with the refusal above
+        // is what made a stale acknowledgement indistinguishable from a fresh
+        // one.
+        throw new DeliverySafetyGateError(
+          "blocked_by_draft_override_stale",
+          snapshot.parsed,
+          observed,
+        );
+      }
+      // Acknowledged and still current: fall through and deliver.
     }
 
     return snapshot;
@@ -6454,6 +6496,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     delivery_id?: string;
     verify_submit?: boolean;
     allow_recovery_enter_retry?: boolean;
+    /** Caller acknowledgement forwarded to the draft guard. */
+    draftOverrideText?: string;
     require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
     stableSurfaceIdentity?: string | null;
@@ -6559,6 +6603,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace: opts.workspace,
       ...(draftGuardedEvent && draftGuardText.trim().length > 0
         ? { draftGuardText }
+        : {}),
+      ...(opts.draftOverrideText !== undefined
+        ? { draftOverrideText: opts.draftOverrideText }
         : {}),
     });
     // Boot delivery is always attributable. Established relay paths retain
@@ -10395,6 +10442,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
         ),
+      override_foreign_draft: z
+        .string()
+        .optional()
+        .describe(
+          "Acknowledge a prior blocked_by_foreign_draft refusal: pass the EXACT composer text that error reported. Delivery proceeds only if the composer still holds exactly that text; if it changed, the send is refused as blocked_by_draft_override_stale rather than typed over.",
+        ),
     },
     ANNOTATIONS.mutating,
     async (args) => {
@@ -10558,6 +10611,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
               press_enter: args.press_enter,
               rename_to_task: args.rename_to_task,
+              draftOverrideText: args.override_foreign_draft,
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: sourceEvent,
               delivery_id: deliveryId,
@@ -13374,6 +13428,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       allow_busy?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
+      /** Forwarded to the draft guard; see assertDeliveryTargetIsSafe. */
+      draft_override_text?: string;
       timings?: DeliveryPhaseTimings;
     }) => {
       const routeStartedAt = Date.now();
@@ -13626,6 +13682,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
+            draftOverrideText: args.draft_override_text,
             source_event: args.source_event,
             source_agent: args.agent_id,
             delivery_id: args.delivery_id,
@@ -17510,6 +17567,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     press_enter: args.press_enter,
                     rename_to_task: args.rename_to_task,
                     allow_long_inline: args.allow_long_inline,
+                    override_foreign_draft: args.override_foreign_draft,
                     _cmuxlayer_source_event: "send_to",
                     _cmuxlayer_delivery_id: deliveryId,
                     _cmuxlayer_timings: timings,
@@ -17781,6 +17839,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
+                  draft_override_text: args.override_foreign_draft,
                   allow_busy: args.allow_busy,
                   source_event: "send_to",
                   delivery_id: deliveryId,
@@ -18075,6 +18134,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               agent_id: agentId,
               text: args.text,
               press_enter: args.press_enter,
+              draft_override_text: args.override_foreign_draft,
               allow_busy: args.allow_busy,
               source_event: "send_to",
               delivery_id: deliveryId,

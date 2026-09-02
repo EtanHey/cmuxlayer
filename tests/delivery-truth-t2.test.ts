@@ -225,6 +225,120 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     context.dispose();
   });
 
+  // AIDEV-NOTE (#442/#504): `override_foreign_draft` is an ACKNOWLEDGEMENT, not a
+  // bypass. The frame the guard reads is flattened, so UI ghost text over an empty
+  // composer is byte-identical to a human draft; the caller echoes the exact text the
+  // refusal reported and the send proceeds only if the composer STILL holds it. The
+  // three cases below are one property from three sides -- the last two are the ones
+  // that keep it from becoming a blanket bypass.
+  it("send_to delivers over ghost text when the caller echoes it back exactly", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n\u276f ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+
+    // A cmux autocomplete SUGGESTION rendered over an empty composer. Indistinguishable
+    // from a draft on this frame -- which is the whole reason the override exists.
+    screenText = "Claude Code\n> merge #208 when green and send me the commit\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      {
+        mode: "agent",
+        agent_id: agentId,
+        text: "fleet message",
+        press_enter: true,
+        override_foreign_draft:
+          "merge #208 when green and send me the commit",
+      },
+      {} as any,
+    );
+
+    expect(parseToolResult(result).ok).toBe(true);
+    expect(mutatedPane(mockExec)).toBe(true);
+    context.dispose();
+  }, 20_000);
+
+  it("send_to refuses a STALE acknowledgement with its own error code, and types nothing", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n\u276f ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+
+    // The composer MOVED after the caller looked -- a human is mid-keystroke. This is
+    // the case a boolean override would have typed straight over.
+    screenText = "Claude Code\n> so about the release, I think we should\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      {
+        mode: "agent",
+        agent_id: agentId,
+        text: "fleet message",
+        press_enter: true,
+        override_foreign_draft: "merge #208 when green and send me the commit",
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      delivered: false,
+      terminal: true,
+      error_code: "blocked_by_draft_override_stale",
+    });
+    // The two refusals must not be conflated: a caller retrying on a stale ack is
+    // exactly the caller who must NOT be told "ghost text, go ahead".
+    expect(parsed.error_code).not.toBe("blocked_by_foreign_draft");
+    expect(parsed.error).toMatch(/did not match the composer/i);
+    expect(mutatedPane(mockExec)).toBe(false);
+    context.dispose();
+  }, 20_000);
+
+  it("send_to without an acknowledgement still refuses, and points at the override", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n\u276f ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+
+    screenText = "Claude Code\n> merge #208 when green and send me the commit\n";
+    mockExec.mockClear();
+
+    const result = await (server as any)._registeredTools["send_to"].handler(
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("blocked_by_foreign_draft");
+    expect(parsed.error).toMatch(/override_foreign_draft/);
+    expect(mutatedPane(mockExec)).toBe(false);
+    context.dispose();
+  }, 20_000);
+
   it("interact skill refuses a non-empty composer and names its contents", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";
