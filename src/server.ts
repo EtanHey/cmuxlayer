@@ -1481,6 +1481,16 @@ export interface DeliveryRecord {
   surfaceObserverIdentity?: string | null;
   beforeMutation?: () => Promise<void>;
   lockKey?: string;
+  /**
+   * The caller's foreign-draft acknowledgement, carried onto the BACKGROUND path.
+   * Without it, `override_foreign_draft` was accepted and then silently dropped
+   * whenever `background: true`: the delivery still threw `blocked_by_foreign_draft`
+   * after the caller had done exactly what the tool description asks. The
+   * synchronous path forwarded it; `DeliveryRecord` had no field to carry it, so the
+   * background path could not. `send_to({ mode: 'surface', background: true })`
+   * inherited the same gap by delegation. Found in review by CodeRabbit on #585.
+   */
+  draftOverrideText?: string;
 }
 
 class DeliveryError extends Error {
@@ -8404,6 +8414,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_id: lifecycle ? record.delivery_id : undefined,
           verify_submit: record.verify_submit,
           beforeMutation: record.beforeMutation,
+          draftOverrideText: record.draftOverrideText,
           onChunkDelivered: (sentChunks) => {
             record.sent_chunks = sentChunks;
           },
@@ -10539,6 +10550,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             rename_to_task: args.rename_to_task,
             started_at: new Date().toISOString(),
             stableSurfaceIdentity: route.stableSurfaceIdentity,
+            draftOverrideText: args.override_foreign_draft,
             beforeMutation: route.assertCurrent,
           };
           const receiptEngine = context.lifecycleSweepEngine;
