@@ -35,6 +35,30 @@ function parseToolResult(result: any) {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
+/**
+ * Typed accessor for the MCP server's registered-tool table.
+ *
+ * The surrounding tests reach `_registeredTools` through an untyped cast; that is
+ * grandfathered, but new code cannot introduce untyped values (DeepSource blocks
+ * them), so these cases go through one narrow cast kept in a single place.
+ */
+type ToolResult = {
+  isError?: boolean;
+  structuredContent?: unknown;
+  content?: Array<{ text: string }>;
+};
+
+type ToolHandler = (
+  args: Record<string, unknown>,
+  extra: Record<string, unknown>,
+) => Promise<ToolResult>;
+
+function sendToHandler(server: unknown): ToolHandler {
+  return (
+    server as { _registeredTools: Record<string, { handler: ToolHandler }> }
+  )._registeredTools["send_to"].handler;
+}
+
 async function spawnReadyAgent(
   server: any,
   cli: "claude" | "codex" = "claude",
@@ -249,7 +273,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     screenText = "Claude Code\n> merge #208 when green and send me the commit\n";
     mockExec.mockClear();
 
-    const result = await (server as any)._registeredTools["send_to"].handler(
+    const result = await sendToHandler(server)(
       {
         mode: "agent",
         agent_id: agentId,
@@ -258,7 +282,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         override_foreign_draft:
           "merge #208 when green and send me the commit",
       },
-      {} as any,
+      {},
     );
 
     expect(parseToolResult(result).ok).toBe(true);
@@ -284,7 +308,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     screenText = "Claude Code\n> so about the release, I think we should\n";
     mockExec.mockClear();
 
-    const result = await (server as any)._registeredTools["send_to"].handler(
+    const result = await sendToHandler(server)(
       {
         mode: "agent",
         agent_id: agentId,
@@ -292,7 +316,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         press_enter: true,
         override_foreign_draft: "merge #208 when green and send me the commit",
       },
-      {} as any,
+      {},
     );
 
     const parsed = parseToolResult(result);
@@ -326,9 +350,9 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     screenText = "Claude Code\n> merge #208 when green and send me the commit\n";
     mockExec.mockClear();
 
-    const result = await (server as any)._registeredTools["send_to"].handler(
+    const result = await sendToHandler(server)(
       { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
-      {} as any,
+      {},
     );
 
     const parsed = parseToolResult(result);
