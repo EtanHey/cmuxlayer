@@ -135,6 +135,16 @@ export function heartbeatPath(agentId: string, opts?: InboxOpts): string {
   return join(agentDir(agentId, opts), "monitor.heartbeat");
 }
 
+/**
+ * Where the agent records the pid of its detached inbox tail. The boot contract hands
+ * this path over so a seat stopping its own tail addresses a PID, never a PATTERN:
+ * `pkill -f 'inbox.jsonl' -P 1` folds the trailing flags into the pattern under BSD
+ * getopt and SIGTERMs every process with a `1` in its argv (2026-09-05 incident).
+ */
+export function inboxTailPidPath(agentId: string, opts?: InboxOpts): string {
+  return join(agentDir(agentId, opts), "inbox-tail.pid");
+}
+
 function channelMarkerDir(opts?: InboxOpts): string {
   return join(baseDirOf(opts), ".channel-dirs");
 }

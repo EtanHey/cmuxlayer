@@ -195,6 +195,8 @@ export function coordinationContractPath(
 /** Mailbox half of the contract, as the boot prompt used to carry it inline. */
 export interface MailboxContractFields {
   monitor_command: string;
+  /** Where the seat records the detached tail's pid, so teardown needs no pattern. */
+  tail_pid_path: string;
   cursor_update_command: string;
   cursor_update_env: string;
 }
@@ -235,10 +237,28 @@ export function renderBootContractFile(input: BootContractFileInput): string {
     // supposed to model against. Those callers are the F5 follow-up (#461).
     // The canonical command stays a verbatim substring of the line below, so a
     // consumer matching on it still matches.
+    // AIDEV-NOTE (D232 / 2026-09-05 mass-kill): this block used to stop at the
+    // backgrounded tail and say nothing about stopping it. A seat with a detached
+    // job and no teardown improvises one, and what it improvised was
+    // `pkill -f 'inbox.jsonl' -P 1` -- BSD getopt stops at the first non-option
+    // operand, so `-P` and `1` folded INTO the pattern and SIGTERM went to every
+    // process whose argv held a `1`: 20 launchd jobs and every
+    // `--model claude-opus-5[1m]` Claude seat. The contract now hands over a PID.
+    // Keeping the pidfile write on the SAME line as the tail keeps
+    // `monitor_command` a verbatim substring, so consumers matching on it (receipts,
+    // nudges, tool descriptions) still match -- the F5 constraint above still holds.
     "Run this in the BACKGROUND -- it blocks, and holding a turn open on it is a",
-    "self-deadlock (ledger #24). Detach it, then return:",
+    "self-deadlock (ledger #24). Detach it, record its pid, then return:",
     "",
-    `    ${input.mailbox.monitor_command} &`,
+    `    ${input.mailbox.monitor_command} & echo $! > ${input.mailbox.tail_pid_path}`,
+    "",
+    "To stop it, kill that PID -- never a pattern:",
+    "",
+    `    kill "$(cat ${input.mailbox.tail_pid_path})"`,
+    "",
+    "Do NOT reach for a pattern-matching killer here. Trailing flags fold into the",
+    "pattern under BSD getopt, which is how one such command SIGTERM'd 20 launchd",
+    "jobs and every Claude seat on this machine on 2026-09-05.",
     "",
     `After each handled message run: ${input.mailbox.cursor_update_env}=<handled-message-id> ${input.mailbox.cursor_update_command}`,
     "",
