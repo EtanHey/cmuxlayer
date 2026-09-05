@@ -186,6 +186,7 @@ import {
   ensureInboxFile,
   formatInboxPing,
   inboxCursorPath,
+  inboxTailPidPath,
   inboxMonitorState,
   inboxPath,
   monitorAlive,
@@ -4414,6 +4415,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           agentId,
           mailbox: {
             monitor_command: monitorBoot.monitor_command,
+            // Contract-file only, deliberately NOT on the monitor_boot receipt: the
+            // pidfile is the seat's own teardown handle, not engine-observed state.
+            tail_pid_path: inboxTailPidPath(agentId, inboxOpts),
             cursor_update_command: monitorBoot.cursor_update_command,
             cursor_update_env: monitorBoot.cursor_update_env,
           },
