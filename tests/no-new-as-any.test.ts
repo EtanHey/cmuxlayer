@@ -48,18 +48,33 @@ const SRC_CEILING = 2;
 const PINNED_SRC_PATHS: readonly string[] = ["src/entry.ts", "src/server.ts"];
 
 /**
- * Whitespace-flexible, so padding the cast out with extra spaces is not a free
- * pass. The trailing word boundary keeps lookalike suffixes (`...thing`,
- * `...Of`) from matching. Written with a character class rather than the bare
- * phrase so this file does not match itself.
+ * TypeScript treats whitespace and comments alike as trivia, so every one of
+ * these compiles and every one of them is a real escape hatch:
+ *
+ *   x AS ANY            x AS <slash-star c star-slash> ANY
+ *   x AS  (newline) ANY x AS <slash-slash c> (newline) ANY
+ *
+ * The separator group therefore accepts a whitespace character, a block
+ * comment, or a line comment, repeated. Each alternative is a SINGLE unit
+ * (`\s`, not `\s+`) with the `+` on the outside: that leaves exactly one way to
+ * match a run of whitespace, so the nested quantifiers cannot backtrack
+ * exponentially on a near-miss. This test reads every file in the repo, so a
+ * ReDoS here would be a self-inflicted hang.
+ *
+ * The trailing word boundary keeps lookalike suffixes (`...thing`, `...Of`)
+ * from matching. The `[a]ny` character class stops this file matching itself.
  */
-const ESCAPE_HATCH = /\bas\s+[a]ny\b/g;
+const ESCAPE_HATCH =
+  /\bas(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))+[a]ny\b/g;
 
 /**
- * The literal phrase, assembled from parts. Spelling it out in a fixture would
- * make this file self-matching and inflate the burn-down number it reports.
+ * The two keywords, kept apart so fixtures can join them with whatever
+ * separator a case needs. Spelling the pair out literally anywhere in this file
+ * would make it self-matching and inflate the burn-down number it reports.
  */
-const HATCH = ["as", "any"].join(" ");
+const AS = "as";
+const ANY = "any";
+const HATCH = `${AS} ${ANY}`;
 
 type Site = { path: string; line: number };
 
@@ -89,13 +104,33 @@ async function scannableFiles(directory: string): Promise<string[]> {
   return files;
 }
 
-/** Every occurrence, not every line: two casts on one line count as two. */
+/**
+ * Every occurrence, not every line: two casts on one line count as two.
+ *
+ * Matches against the WHOLE source rather than line by line. Splitting first
+ * would hide any cast whose separator contains a newline — a line-wrapped cast
+ * or one broken by a line comment — which is the same class of miss the
+ * separator group above exists to close.
+ *
+ * Line numbers come from a single forward walk over the source (matchAll yields
+ * matches in ascending index order), so this stays linear in file length rather
+ * than re-slicing the file once per match. A multi-line match reports the line
+ * its `as` starts on.
+ */
 function sitesIn(source: string, path: string): Site[] {
-  return source
-    .split("\n")
-    .flatMap((line, index) =>
-      [...line.matchAll(ESCAPE_HATCH)].map(() => ({ path, line: index + 1 })),
-    );
+  const sites: Site[] = [];
+  let cursor = 0;
+  let line = 1;
+
+  for (const match of source.matchAll(ESCAPE_HATCH)) {
+    const index = match.index ?? 0;
+    for (; cursor < index; cursor += 1) {
+      if (source[cursor] === "\n") line += 1;
+    }
+    sites.push({ path, line });
+  }
+
+  return sites;
 }
 
 async function scanDirectory(directoryName: string): Promise<Site[]> {
@@ -202,6 +237,30 @@ describe("as-any ratchet", () => {
     expect(sitesIn(doubled, "fixtures/double.ts")).toEqual([
       { path: "fixtures/double.ts", line: 1 },
       { path: "fixtures/double.ts", line: 1 },
+    ]);
+  });
+
+  it("matches a cast split by a block comment", () => {
+    const source = `const a = x ${AS} /* compatibility */ ${ANY};\n`;
+
+    expect(sitesIn(source, "fixtures/block.ts")).toEqual([
+      { path: "fixtures/block.ts", line: 1 },
+    ]);
+  });
+
+  it("matches a cast split by a line comment", () => {
+    const source = `const a = x ${AS} // why\n  ${ANY};\n`;
+
+    expect(sitesIn(source, "fixtures/line.ts")).toEqual([
+      { path: "fixtures/line.ts", line: 1 },
+    ]);
+  });
+
+  it("matches a line-wrapped cast", () => {
+    const source = `const a = x ${AS}\n  ${ANY};\n`;
+
+    expect(sitesIn(source, "fixtures/wrapped.ts")).toEqual([
+      { path: "fixtures/wrapped.ts", line: 1 },
     ]);
   });
 
