@@ -71,7 +71,9 @@ async function decide(
     },
   };
   const github = {
-    paginate: async () => files,
+    // Promise-returning rather than `async`: the workflow script awaits this,
+    // but an `async` function with no `await` inside trips DeepSource JS-0116.
+    paginate: () => Promise.resolve(files),
     rest: { pulls: { listFiles: null } },
   };
   const context = {
