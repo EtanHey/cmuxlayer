@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
+import { shellQuote } from "./shell-safe.js";
 
 // AIDEV-NOTE (P11 / U10): engine-issued coordination paths. Before this, the
 // DONE signal's producer (the worker, told a path in the lead's prose brief)
@@ -215,6 +216,9 @@ export interface BootContractFileInput {
  * bounded by a keystroke threshold.
  */
 export function renderBootContractFile(input: BootContractFileInput): string {
+  // Agent dirs are user-configurable (CMUXLAYER_INBOX_BASE_DIR), so the path can
+  // carry spaces. Both generated commands are pasted into a shell verbatim.
+  const pidFile = shellQuote(input.mailbox.tail_pid_path);
   const lines = [
     `# cmuxlayer contract for ${input.agentId}`,
     "",
@@ -250,11 +254,13 @@ export function renderBootContractFile(input: BootContractFileInput): string {
     "Run this in the BACKGROUND -- it blocks, and holding a turn open on it is a",
     "self-deadlock (ledger #24). Detach it, record its pid, then return:",
     "",
-    `    ${input.mailbox.monitor_command} & echo $! > ${input.mailbox.tail_pid_path}`,
+    `    ${input.mailbox.monitor_command} & echo $! > ${pidFile}`,
     "",
     "To stop it, kill that PID -- never a pattern:",
     "",
-    `    kill "$(cat ${input.mailbox.tail_pid_path})"`,
+    // `rm -f` on success: a pidfile outliving its tail is a stale PID, and PIDs
+    // are reused -- a second teardown would then SIGTERM whatever inherited it.
+    `    kill "$(cat ${pidFile})" && rm -f ${pidFile}`,
     "",
     "Do NOT reach for a pattern-matching killer here. Trailing flags fold into the",
     "pattern under BSD getopt, which is how one such command SIGTERM'd 20 launchd",
