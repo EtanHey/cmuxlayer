@@ -634,7 +634,7 @@ export function AnimatedDemo() {
   }
 
   useEffect(() => {
-    if (startedRef.current) return;
+    if (startedRef.current) return undefined;
     startedRef.current = true;
 
     // Start on scroll
