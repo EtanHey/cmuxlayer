@@ -3,7 +3,7 @@ const withoutItems = [
   "Copy-paste output from one agent to another",
   "Manually check if each agent finished",
   "One agent at a time, sequential work",
-  "~142ms per CLI subprocess call",
+  "A new CLI subprocess for every call",
 ];
 
 const withItems = [
@@ -11,7 +11,7 @@ const withItems = [
   "One agent reads another's screen directly",
   "Auto-monitor with parsed status and done signals",
   "Parallel multi-agent orchestration",
-  "0.1ms persistent socket (1,423x faster)",
+  "One persistent Unix socket, CLI fallback",
 ];
 
 function XIcon() {

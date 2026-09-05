@@ -27,9 +27,9 @@ interface SetupStep {
 const setupSteps: SetupStep[] = [
   {
     num: "01",
-    text: "Install from npm",
-    code: "npm install -g cmuxlayer",
-    copyText: "npm install -g cmuxlayer",
+    text: "Install with Homebrew",
+    code: "brew install etanhey/layers/cmuxlayer",
+    copyText: "brew install etanhey/layers/cmuxlayer",
   },
   {
     num: "02",

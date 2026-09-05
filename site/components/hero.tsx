@@ -6,7 +6,7 @@ export function Hero() {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText("npm install -g cmuxlayer").then(() => {
+    navigator.clipboard.writeText("brew install etanhey/layers/cmuxlayer").then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
@@ -95,7 +95,7 @@ export function Hero() {
             onClick={handleCopy}
           >
             <code className="text-text flex-1">
-              <span className="text-text-dim">$</span> npm install -g cmuxlayer
+              <span className="text-text-dim">$</span> brew install etanhey/layers/cmuxlayer
             </code>
             <button
               className="bg-transparent border-none text-text-dim cursor-pointer p-0 transition-colors duration-200 flex items-center justify-center w-6 h-6 shrink-0 hover:text-accent"

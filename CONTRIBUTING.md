@@ -14,7 +14,7 @@ bun install
 
 1. Branch from `main`
 2. Write tests for your changes
-3. Run tests: `bun test`
+3. Run tests: `bun run test` (vitest)
 4. Open a PR against `main`
 
 ## PR Process

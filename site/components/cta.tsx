@@ -18,7 +18,7 @@ export function Cta() {
           Stop being the clipboard.
         </h2>
         <p className="text-text-secondary text-[15px] mb-9 font-light">
-          npm install. Add to MCP config. Start orchestrating.
+          brew install. Add to MCP config. Start orchestrating.
         </p>
         <div className="flex items-center justify-center gap-3 max-[480px]:flex-col">
           <a

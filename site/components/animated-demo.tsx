@@ -53,7 +53,6 @@ export function AnimatedDemo() {
   const tabsRef = useRef<HTMLDivElement>(null);
   const surfacesRef = useRef<HTMLSpanElement>(null);
   const agentsRef = useRef<HTMLSpanElement>(null);
-  const latencyRef = useRef<HTMLSpanElement>(null);
   const statusRef = useRef<HTMLSpanElement>(null);
   const statusBarRef = useRef<HTMLDivElement>(null);
   const layoutRef = useRef<HTMLDivElement>(null);
@@ -638,14 +637,6 @@ export function AnimatedDemo() {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    // Latency flicker
-    const latencyId = setInterval(() => {
-      if (latencyRef.current) {
-        latencyRef.current.textContent =
-          (0.1 + Math.random() * 0.2).toFixed(1) + "ms";
-      }
-    }, 1800);
-
     // Start on scroll
     const obs = new IntersectionObserver(
       (entries) => {
@@ -681,7 +672,6 @@ export function AnimatedDemo() {
 
     return () => {
       unmountedRef.current = true;
-      clearInterval(latencyId);
       if (cronInterval.current) clearInterval(cronInterval.current);
       obs.disconnect();
     };
@@ -770,7 +760,6 @@ export function AnimatedDemo() {
             </span>
             <span ref={surfacesRef}>2 surfaces</span>
             <span ref={agentsRef}>0 agents</span>
-            <span ref={latencyRef}>0.2ms</span>
             <span className="ml-auto" ref={statusRef}>
               ready
             </span>
