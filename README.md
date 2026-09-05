@@ -6,10 +6,10 @@ cmuxLayer exposes a 10-tool public MCP surface for controlling cmux terminal wor
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
 </p>
 
-[![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
+[![install](https://img.shields.io/badge/install-brew%20install%20etanhey%2Flayers%2Fcmuxlayer-22c55e)](#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![MCP Tools](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-3023%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-3759%20passing-brightgreen.svg)](#testing)
 
 ## Quick start
 
@@ -113,7 +113,7 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-cmuxLayer retains 45 internal tool definitions; only 10 are registered and callable through MCP. The other 35 are not exposed through ToolSearch or any other MCP path. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+cmuxLayer retains 45 internal tool definitions; only 10 are registered and callable through MCP. The other 35 are not exposed through ToolSearch or any other MCP path. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent routing workflow
 
@@ -171,7 +171,7 @@ The other 35 internal definitions, including `interact`, are not callable. The d
 | `send_command` | Deprecated one-release alias for `send_to(mode:"command")` |
 | `send_key` | Deprecated one-release alias for `send_to(mode:"key")` |
 | `rename_tab` | Rename a surface tab |
-| `update_surface` | Update a surface title or metadata |
+| `update_surface` | Move or rename one terminal surface |
 | `notify` | Show a cmux notification banner |
 | `set_status` | Set sidebar status key-value pair |
 | `set_progress` | Set progress indicator (0.0-1.0) |
@@ -186,7 +186,7 @@ The other 35 internal definitions, including `interact`, are not callable. The d
 | `wait_for_all` | Deprecated one-release alias for `wait_for(ids:[...])` |
 | `interact` | Send interactive input (confirm, cancel, resume) |
 | `broadcast` | Fan out a guarded message to agents by role |
-| `report_to_parent` | Report structured completion to a parent agent |
+| `report_to_parent` | Raise a short blocker to the managed agent's registry parent |
 | `supersede_agent_goal` | Replace a managed agent's active file-backed goal |
 | `register_monitor` | Register or re-arm a monitor deadman record |
 | `signal_monitor` | Refresh a monitor heartbeat |
@@ -197,7 +197,7 @@ The other 35 internal definitions, including `interact`, are not callable. The d
 
 | Tool | What it does |
 |------|-------------|
-| `close_surface` | Close a terminal or browser pane |
+| `close_surface` | Close one surface, managed agent, or workspace, with live-agent guards |
 | `stop_agent` | Gracefully stop an agent |
 | `kill` | Force-kill agent processes |
 
@@ -219,19 +219,14 @@ The other 35 internal definitions, including `interact`, are not callable. The d
 ```text
 AI Agent  ─── MCP ───>  cmuxLayer  ─── Unix socket ───>  cmux
                          ├── Agent engine (spawn → monitor → teardown)
-                         ├── Screen parser (5 agent formats)
+                         ├── Screen parser (Claude Code, Codex, Gemini, Cursor)
                          ├── Mode policy (autonomous vs manual)
                          ├── State manager + event log
                          ├── Metacomm READ  — harness JSONL (real tokens/context/model)
                          └── Metacomm WRITE — per-agent inbox file + Monitor dispatch
 ```
 
-The socket client connects to cmux through a Unix socket. It reconnects after a disconnect and falls back to a CLI subprocess when the socket is unavailable.
-
-| Connection | Latency | Speedup |
-|------------|---------|---------|
-| CLI subprocess | ~142ms | baseline |
-| Unix socket | ~0.1ms | **1,423x** |
+The socket client connects to cmux through a persistent Unix socket instead of starting a `cmux` CLI subprocess per call. It reconnects after a disconnect and falls back to the CLI subprocess when the socket is unavailable.
 
 ## Troubleshooting
 
@@ -255,7 +250,7 @@ repositories. The error lists every path it searched.
 ## Testing
 
 ```bash
-bun run test        # 3023 tests via vitest
+bun run test        # 3759 tests via vitest
 npm run typecheck   # Type checking
 ```
 

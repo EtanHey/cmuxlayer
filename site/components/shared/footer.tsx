@@ -73,7 +73,7 @@ const PRODUCT_LINKS: Record<
       external: true,
     },
     {
-      label: "npm",
+      label: "Install",
       href: "https://github.com/EtanHey/cmuxlayer#quick-start",
       external: true,
     },

@@ -30,7 +30,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "cmuxLayer — Terminal MCP for AI Agents",
     description:
-      "10 public MCP tools. 0.2ms socket latency. Spawn agents, send input, and read screens through one Unix socket.",
+      "10 public MCP tools. Spawn agents, send input, and read screens through one Unix socket.",
     url: "https://cmuxlayer.etanheyman.com",
     siteName: "cmuxLayer",
     type: "website",
@@ -47,7 +47,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "cmuxLayer — Terminal MCP for AI Agents",
     description:
-      "10 public MCP tools. 0.2ms socket latency. Spawn agents, send input, and read screens.",
+      "10 public MCP tools. Spawn agents, send input, and read screens.",
     images: ["/og.png"],
   },
   icons: {

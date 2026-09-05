@@ -1,8 +1,8 @@
 const stats = [
-  { value: "0.2ms", label: "socket latency" },
+  { value: "Apache 2.0", label: "license" },
   { value: "10", label: "public MCP tools" },
   { value: "5", label: "agent CLIs" },
-  { value: "326", label: "tests passing" },
+  { value: "3,759", label: "tests passing" },
 ];
 
 export function StatStrip() {
