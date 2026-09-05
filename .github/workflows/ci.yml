@@ -73,8 +73,16 @@ jobs:
               'package.json',
               'bun.lock',
               'package-lock.json',
+              // `bench:daemon:check` runs `bun run build` (tsc -p tsconfig.json)
+              // and benchmarks dist/daemon.js, so compiler settings decide what
+              // is actually measured. Prefix, to cover tsconfig.*.json too.
+              'tsconfig',
               '.github/workflows/ci.yml',
             ];
+
+            // pulls.listFiles caps its response at 3000 entries, so on a larger
+            // diff a src/ change can sit past the cap and read as absent.
+            const LIST_FILES_CAP = 3000;
 
             if (context.eventName !== 'pull_request') {
               core.setOutput('run', 'true');
@@ -92,9 +100,28 @@ jobs:
               per_page: 100,
             });
 
+            // Renames expose the pre-rename path as `previous_filename`. Moving
+            // src/daemon.ts out of src/ changes daemon code while the new name
+            // matches nothing, so both sides of a rename have to be checked.
             const touched = files
-              .map((file) => file.filename)
-              .filter((name) => PERF_RELEVANT.some((prefix) => name.startsWith(prefix)));
+              .filter((file) =>
+                [file.filename, file.previous_filename].some(
+                  (name) =>
+                    name && PERF_RELEVANT.some((prefix) => name.startsWith(prefix)),
+                ),
+              )
+              .map((file) => file.filename);
+
+            if (files.length >= LIST_FILES_CAP) {
+              core.setOutput('run', 'true');
+              core.setOutput(
+                'reason',
+                `Diff reports ${files.length} changed file(s), at or past the ${LIST_FILES_CAP}-entry `
+                  + `listFiles cap, so a performance-relevant path may be hidden past the cap. `
+                  + `Running the budget rather than guessing.`,
+              );
+              return;
+            }
 
             if (touched.length > 0) {
               const shown = touched.slice(0, 10);
