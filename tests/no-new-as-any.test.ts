@@ -164,7 +164,7 @@ function assertSrcRatchet(sites: Site[]): void {
     throw new Error(
       `as-any ratchet slipped: ${SOURCE_GLOB} has ${sites.length} ` +
         `occurrences, ceiling is ${SRC_CEILING}.\n${render(sites)}\n` +
-        `Remove the new one, or lower the ceiling only if you removed a pinned site.`,
+        "Remove the new one, or lower the ceiling only if you removed a pinned site.",
     );
   }
 
@@ -172,7 +172,7 @@ function assertSrcRatchet(sites: Site[]): void {
     throw new Error(
       `as-any ratchet slipped: ${unpinned.length} occurrence(s) outside the ` +
         `pinned sites [${PINNED_SRC_PATHS.join(", ")}].\n${render(unpinned)}\n` +
-        `The ratchet pins by path; a new file may not acquire one.`,
+        "The ratchet pins by path; a new file may not acquire one.",
     );
   }
 }
@@ -196,13 +196,17 @@ describe("as-any ratchet", () => {
     // Not an assertion on the value: this number is tracked, never enforced.
     //
     // Written straight to fd 1 rather than through `console`. Vitest intercepts
-    // worker console output and ships it to the main thread over the same
-    // `onTaskUpdate` RPC that carries task results; on a loaded machine that
-    // round-trip times out and fails the whole run with
-    // `[vitest-worker]: Timeout calling "onTaskUpdate"` while all tests pass.
-    // This is the only test in the suite that prints, so it was the only one
-    // paying that cost. `writeSync` bypasses the interception and still lands
-    // on the report line.
+    // worker console output and ships it over the same `onTaskUpdate` RPC that
+    // carries task results, and this is the only test in the suite that prints,
+    // so `console.log` here would be the only such round-trip in the run.
+    // `writeSync` avoids it and still lands on the report line.
+    //
+    // Context, stated honestly: this suite intermittently fails with
+    // `[vitest-worker]: Timeout calling "onTaskUpdate"` while every test passes
+    // (see scripts/run_tests.sh:48-51, which documents the same condition).
+    // Avoiding console here is cheap insurance, NOT a proven fix — measured
+    // 1/3 runs failing with this file present vs 0/3 without, which at n=3
+    // establishes nothing.
     writeSync(1, `as-any burn-down: tests=${sites.length}\n`);
 
     // The only guard here is that the scanner still works. A silent 0 would
