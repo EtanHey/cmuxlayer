@@ -46,12 +46,90 @@ jobs:
         with:
           persist-credentials: false
 
+      # The benchmark measures a live daemon on a shared runner, so its p95 rows
+      # carry real variance. On a pull request that cannot alter runtime
+      # behaviour, a red row is noise that costs a re-run and teaches people to
+      # ignore the check. Scope it to diffs that could actually move the numbers
+      # and warn-and-skip otherwise.
+      #
+      # This is a step rather than an `on.pull_request.paths` filter because a
+      # paths filter is workflow-level: ci.yml carries seven jobs, and gating the
+      # file would silently gate test, build-site, launcher-parity and the rest
+      # along with this one. GitHub has no per-job paths filter.
+      - name: Decide whether the benchmark must run
+        id: scope
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            // Anything that can move a daemon timing. Deliberately wider than
+            // src/: skipping a baseline or harness edit would let a budget
+            // change land unmeasured, which is the one failure this guard must
+            // not introduce.
+            const PERF_RELEVANT = [
+              'src/',
+              'benchmarks/',
+              'scripts/bench-daemon',
+              'scripts/check-daemon-benchmark',
+              'package.json',
+              'bun.lock',
+              'package-lock.json',
+              '.github/workflows/ci.yml',
+            ];
+
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('run', 'true');
+              core.setOutput(
+                'reason',
+                `Event \`${context.eventName}\` always runs the budget, so main keeps a complete green-main history.`,
+              );
+              return;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+
+            const touched = files
+              .map((file) => file.filename)
+              .filter((name) => PERF_RELEVANT.some((prefix) => name.startsWith(prefix)));
+
+            if (touched.length > 0) {
+              const shown = touched.slice(0, 10);
+              const more = touched.length - shown.length;
+              core.setOutput('run', 'true');
+              core.setOutput(
+                'reason',
+                `Diff touches ${touched.length} performance-relevant path(s), so the budget is enforced strictly:\n`
+                  + shown.map((name) => `- \`${name}\``).join('\n')
+                  + (more > 0 ? `\n- ...and ${more} more` : ''),
+              );
+              return;
+            }
+
+            core.warning(
+              `Skipping the daemon performance budget: none of the ${files.length} changed file(s) `
+                + `can affect daemon runtime (matched none of: ${PERF_RELEVANT.join(', ')}).`,
+            );
+            core.setOutput('run', 'false');
+            core.setOutput(
+              'reason',
+              `None of the ${files.length} changed file(s) can affect daemon runtime, so the benchmark was not run.\n\n`
+                + `The budget stays strict on any diff touching: ${PERF_RELEVANT.map((p) => `\`${p}\``).join(', ')}.`,
+            );
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        if: steps.scope.outputs.run == 'true'
 
       - run: rm -f package-lock.json
+        if: steps.scope.outputs.run == 'true'
       - run: bun install
+        if: steps.scope.outputs.run == 'true'
 
       - name: Restore bounded green-main benchmark history
+        if: steps.scope.outputs.run == 'true'
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: docs.local/scratch/perf-budget/history.json
@@ -59,10 +137,27 @@ jobs:
           restore-keys: daemon-perf-history-main-${{ hashFiles('benchmarks/daemon-baseline.json') }}-
 
       - name: Run daemon performance budget
+        if: steps.scope.outputs.run == 'true'
         run: bun run bench:daemon:check
 
+      # Write the skip into the same report the comment step already publishes,
+      # so a skipped run reads as SKIPPED rather than as the step's
+      # "did not produce a report" ERROR fallback.
+      - name: Report skipped performance budget
+        if: steps.scope.outputs.run != 'true'
+        env:
+          REASON: ${{ steps.scope.outputs.reason }}
+        run: |
+          set -euo pipefail
+          mkdir -p docs.local/scratch/perf-budget
+          {
+            printf '%s\n' '<!-- cmuxlayer-perf-budget -->'
+            printf '%s\n\n' '## Daemon performance budget: SKIPPED'
+            printf '%s\n' "$REASON"
+          } > docs.local/scratch/perf-budget/comment.md
+
       - name: Save bounded green-main benchmark history
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: success() && steps.scope.outputs.run == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: docs.local/scratch/perf-budget/history.json
