@@ -238,4 +238,18 @@ describe("daemon-first MCP entry", () => {
     });
     expect(logger.error).not.toHaveBeenCalled();
   });
+
+  it("keeps a report-watch deadline override isolated from a shared daemon", async () => {
+    const opts = createEntryOptions({
+      env: { CMUXLAYER_REPORT_WATCH_DEADLINE_MS: "250" },
+    });
+
+    const result = await runDaemonFirstEntry(opts);
+
+    expect(result.mode).toBe("in-process");
+    expect(opts.probeDaemon).not.toHaveBeenCalled();
+    expect(opts.spawnDaemon).not.toHaveBeenCalled();
+    expect(opts.runProxy).not.toHaveBeenCalled();
+    expect(opts.startInProcess).toHaveBeenCalledWith({ env: opts.env });
+  });
 });

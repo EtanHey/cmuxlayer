@@ -553,6 +553,16 @@ export async function runDaemonFirstEntry(
     };
   }
 
+  if (env.CMUXLAYER_REPORT_WATCH_DEADLINE_MS !== undefined) {
+    // Like palette selection, this option belongs to the spawning MCP process;
+    // an already-running shared daemon cannot observe its environment.
+    return {
+      mode: "in-process",
+      server: await startInProcess({ env }),
+      fallbackWarnings: [],
+    };
+  }
+
   if (isEnabled(env.CMUXLAYER_FORCE_INPROCESS)) {
     return fallback(
       "CMUXLAYER_FORCE_INPROCESS=1; using heavy in-process runtime instead of daemon proxy",
