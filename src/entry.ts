@@ -382,10 +382,7 @@ export async function startInProcessRuntime(
     { defaultWatchRegistryPath, httpNotifyWatch },
     { ensureNodeMaxOldSpaceEnv, installHeapGuard },
     { FleetSidebarPublisher },
-    {
-      makeSelfRegistrationSessionLookup,
-      makeSelfRegistrationSessionResolver,
-    },
+    { makeSelfRegistrationSessionLookup, makeSelfRegistrationSessionResolver },
   ] = await Promise.all([
     import("@modelcontextprotocol/sdk/server/stdio.js"),
     import("./stdio-lifecycle.js"),
@@ -404,6 +401,17 @@ export async function startInProcessRuntime(
   const client = await createCmuxClient();
   const runtimeEnv = opts.env ?? process.env;
   const explicitStateDir = runtimeEnv.CMUXLAYER_STATE_DIR?.trim();
+  const rawReportWatchDeadlineMs =
+    runtimeEnv.CMUXLAYER_REPORT_WATCH_DEADLINE_MS?.trim();
+  const reportWatchDeadlineMs = Number(rawReportWatchDeadlineMs);
+  if (
+    rawReportWatchDeadlineMs !== undefined &&
+    (!Number.isFinite(reportWatchDeadlineMs) || reportWatchDeadlineMs <= 0)
+  ) {
+    throw new Error(
+      "CMUXLAYER_REPORT_WATCH_DEADLINE_MS must be a finite positive number",
+    );
+  }
   const serverOpts: CreateServerOptions = {
     client,
     safetyCallerContextProvider: () => callerContextFromEnv(runtimeEnv),
@@ -418,6 +426,9 @@ export async function startInProcessRuntime(
     fleetSidebarPublisher: new FleetSidebarPublisher(),
     defaultPalette: opts.env?.CMUXLAYER_DEFAULT_PALETTE,
     ...(explicitStateDir ? { stateDir: explicitStateDir } : {}),
+    ...(rawReportWatchDeadlineMs !== undefined
+      ? { reportWatchDeadlineMs }
+      : {}),
     ...(opts.fallbackWarnings
       ? { controlHealthWarnings: opts.fallbackWarnings }
       : {}),
@@ -535,6 +546,16 @@ export async function runDaemonFirstEntry(
   if (env.CMUXLAYER_DEFAULT_PALETTE?.trim()) {
     // A shared daemon cannot observe a child MCP process's environment. Keep
     // palette selection in this process so it remains session-local.
+    return {
+      mode: "in-process",
+      server: await startInProcess({ env }),
+      fallbackWarnings: [],
+    };
+  }
+
+  if (env.CMUXLAYER_REPORT_WATCH_DEADLINE_MS !== undefined) {
+    // Like palette selection, this option belongs to the spawning MCP process;
+    // an already-running shared daemon cannot observe its environment.
     return {
       mode: "in-process",
       server: await startInProcess({ env }),

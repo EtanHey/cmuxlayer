@@ -21,6 +21,7 @@ import {
   releaseWatchReportPathReservation,
   removeWatches,
   sweepWatches,
+  updateWatchDeadline,
 } from "../src/watch-spec.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-watch-spec-test");
@@ -36,6 +37,18 @@ describe("WatchSpec arm contract", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
+  it("updates a legacy watch deadline atomically", async () => {
+    const target = join(TEST_DIR, "legacy-deadline.md");
+    writeFileSync(target, "", "utf8");
+    const armed = await armWatch(
+      { owner: "lead-a", target, change: "content", deadline: 9_000 },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    expect(await updateWatchDeadline(armed.watch_id, 3_000,
+      { registryPath: registryPath(), now: () => 1_500 })).toBe(true);
+    expect(readWatchRegistry({ registryPath: registryPath() }).watches[0])
+      .toMatchObject({ watch_id: armed.watch_id, armed_at_ms: 1_500, deadline: 3_000 });
+  });
   it("notifies the transport only when the declared watch opts in", async () => {
     const silentTarget = join(TEST_DIR, "silent.md");
     const notifyingTarget = join(TEST_DIR, "notifying.md");
@@ -983,6 +996,143 @@ describe("WatchSpec arm contract", () => {
       notification_pending: false,
       notification_attempts: 0,
       notification_delivered_at_ms: now,
+    });
+  });
+
+  it("keeps an engine report watch alive when its deadline notice is undelivered", async () => {
+    const target = join(TEST_DIR, "undelivered-report.md");
+    writeFileSync(target, "", "utf8");
+    const notify = vi.fn().mockResolvedValue(false);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        provenance: "engine",
+        target,
+        change: "content",
+        deadline: 2_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    const deadline = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+    expect(deadline).toMatchObject({ armed: [armed.watch_id], failed: [] });
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      deadline_notified_at_ms: 2_000,
+      notification_exhausted_reason: "terminal_notice_fire_once",
+    });
+
+    writeFileSync(target, "late report\n", "utf8");
+    const revision = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_001,
+      notify,
+    });
+    expect(revision.fired).toEqual([armed.watch_id]);
+  });
+
+  it("keeps public content-watch deadline failure terminal", async () => {
+    const target = join(TEST_DIR, "public-content.md");
+    writeFileSync(target, "", "utf8");
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        provenance: "public",
+        target,
+        change: "content",
+        deadline: 2_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify: vi.fn().mockResolvedValue(true),
+    });
+    expect(result.failed).toEqual([armed.watch_id]);
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({ state: "failed", terminal_reason: "deadline_elapsed" });
+  });
+
+  it("rolls an engine report deadline forward after content activity", async () => {
+    const target = join(TEST_DIR, "active-report.md");
+    writeFileSync(target, "", "utf8");
+    const notify = vi.fn().mockResolvedValue(true);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        provenance: "engine",
+        target,
+        change: "content",
+        deadline: 2_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    writeFileSync(target, "activity\n", "utf8");
+
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 1_900,
+      notify,
+    });
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({ state: "armed", armed_at_ms: 1_900, deadline: 2_900 });
+
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+    expect(notify).toHaveBeenCalledTimes(1);
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_900,
+      notify,
+    });
+    expect(notify).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        watch_id: armed.watch_id,
+        reason: "deadline_elapsed",
+      }),
+    );
+  });
+
+  it("never rolls an engine report deadline beyond MAX_SAFE_INTEGER", async () => {
+    const target = join(TEST_DIR, "legacy-infinite-report.md");
+    writeFileSync(target, "before\n", "utf8");
+    await armWatch(
+      {
+        owner: "lead-a",
+        provenance: "engine",
+        target,
+        change: "content",
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    writeFileSync(target, "after\n", "utf8");
+
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify: vi.fn().mockResolvedValue(true),
+    });
+
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      armed_at_ms: 2_000,
+      deadline: Number.MAX_SAFE_INTEGER,
     });
   });
 

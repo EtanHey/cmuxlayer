@@ -67,6 +67,7 @@ export interface WatchRecord extends WatchSpec {
   notification_attempts?: number;
   notification_next_attempt_at_ms?: number;
   notification_delivered_at_ms?: number;
+  deadline_notified_at_ms?: number;
   notification_exhausted_at_ms?: number;
   notification_exhausted_reason?: string;
   waiter_expires_at_ms?: number;
@@ -276,6 +277,8 @@ function hasValidNotificationMetadata(
       isFiniteNumber(value.notification_next_attempt_at_ms)) &&
     (value.notification_delivered_at_ms === undefined ||
       isFiniteNumber(value.notification_delivered_at_ms)) &&
+    (value.deadline_notified_at_ms === undefined ||
+      isFiniteNumber(value.deadline_notified_at_ms)) &&
     (value.notification_exhausted_at_ms === undefined ||
       isFiniteNumber(value.notification_exhausted_at_ms)) &&
     (value.notification_exhausted_reason === undefined ||
@@ -619,6 +622,118 @@ function storedContentDigest(
   return legacy?.[1] ?? fingerprint;
 }
 
+export function isInterruptedEngineDeadlineClaim(
+  record: Pick<
+    WatchRecord,
+    | "provenance"
+    | "target_kind"
+    | "change"
+    | "state"
+    | "terminal_reason"
+    | "notification_pending"
+    | "deadline_notified_at_ms"
+    | "observed_value"
+  >,
+): record is typeof record & { observed_value: string } {
+  return (
+    record.provenance === "engine" &&
+    record.target_kind === "file" &&
+    record.change === "content" &&
+    record.state === "failed" &&
+    record.terminal_reason === "deadline_elapsed" &&
+    record.notification_pending === false &&
+    record.deadline_notified_at_ms === undefined &&
+    typeof record.observed_value === "string"
+  );
+}
+
+function recoverInterruptedEngineDeadlineClaim(
+  record: WatchRecord,
+  observedAt: number,
+): WatchRecord {
+  if (!isInterruptedEngineDeadlineClaim(record)) return record;
+  const {
+    terminal_reason: _terminalReason,
+    terminal_at_ms: terminalAt,
+    notification_exhausted_at_ms: _exhaustedAt,
+    notification_exhausted_reason: _exhaustedReason,
+    ...persistent
+  } = record;
+  return {
+    ...persistent,
+    state: "armed",
+    fingerprint: record.observed_value,
+    deadline_notified_at_ms: terminalAt ?? observedAt,
+    notification_pending: false,
+    notification_next_attempt_at_ms: undefined,
+  };
+}
+
+function rolledEngineContentDeadline(
+  record: WatchRecord,
+  reason: WatchNotificationReason,
+  observedAt: number,
+): Partial<WatchRecord> {
+  if (record.provenance !== "engine" || reason !== "target_changed") {
+    return {};
+  }
+  const intervalMs = Math.max(1, record.deadline - record.armed_at_ms);
+  return {
+    armed_at_ms: observedAt,
+    deadline: Math.min(Number.MAX_SAFE_INTEGER, observedAt + intervalMs),
+    deadline_notified_at_ms: undefined,
+  };
+}
+
+function settleEngineDeadlineNotification(
+  record: WatchRecord,
+  notification: WatchNotification,
+  delivered: boolean,
+  terminalFailureReason: string | null,
+  attempts: number,
+  observedAt: number,
+): { record: WatchRecord; exhausted: WatchNotificationExhausted | null } | null {
+  if (
+    record.provenance !== "engine" ||
+    record.change !== "content" ||
+    notification.reason !== "deadline_elapsed" ||
+    typeof notification.observed_value !== "string"
+  ) {
+    return null;
+  }
+  const reason =
+    terminalFailureReason ??
+    (delivered ? null : "terminal_notice_fire_once");
+  const {
+    terminal_reason: _terminalReason,
+    terminal_at_ms: _terminalAt,
+    notification_exhausted_at_ms: _exhaustedAt,
+    notification_exhausted_reason: _exhaustedReason,
+    ...persistent
+  } = record;
+  return {
+    record: {
+      ...persistent,
+      ...rolledEngineContentDeadline(record, notification.reason, observedAt),
+      state: "armed",
+      fingerprint: notification.observed_value,
+      observed_value: notification.observed_value,
+      deadline_notified_at_ms: observedAt,
+      notification_pending: false,
+      notification_attempts: attempts,
+      notification_next_attempt_at_ms: undefined,
+      ...(delivered
+        ? { notification_delivered_at_ms: observedAt }
+        : {
+            notification_exhausted_at_ms: observedAt,
+            notification_exhausted_reason:
+              reason ?? "terminal_notice_fire_once",
+          }),
+    },
+    exhausted: reason ? { notification, attempts, reason } : null,
+  };
+}
+
 function assertSpec(
   spec: WatchSpec,
   opts: WatchRegistryOptions,
@@ -898,6 +1013,27 @@ export function removeWatches(
   });
 }
 
+export function updateWatchDeadline(watchId: string, deadline: number,
+  opts: WatchRegistryOptions = {}): Promise<boolean> {
+  const path = registryPathFor(opts);
+  return withWriteLock(path, () => {
+    const armedAt = nowMs(opts);
+    const registry = readRegistryState(path);
+    let updated = false;
+    const rows = registry.rows.map((row) => {
+      if (!isWatchRecord(row) || row.watch_id !== watchId) return row;
+      updated = true;
+      return {
+        ...row,
+        armed_at_ms: armedAt,
+        deadline,
+        deadline_notified_at_ms: undefined,
+      };
+    });
+    if (updated) writeRegistry(path, registry.version, rows); return updated;
+  });
+}
+
 export function releaseWatchWaiter(
   watchId: string,
   opts: WatchRegistryOptions = {},
@@ -1008,7 +1144,7 @@ export async function sweepWatches(
     // skipcq: JS-R1005
     const watches = registry.rows.map((row) => {
       if (!isWatchRecord(row)) return row;
-      const record = row;
+      const record = recoverInterruptedEngineDeadlineClaim(row, observedAt);
       if (record.state === "firing" && record.terminal_reason) {
         const migrated: WatchRecord = {
           ...record,
@@ -1105,23 +1241,30 @@ export async function sweepWatches(
         }, notification);
       }
 
-      if (observedAt >= record.deadline) {
+      if (
+        record.change !== "content" &&
+        observedAt >= record.deadline &&
+        record.deadline_notified_at_ms === undefined
+      ) {
         const notification = notificationFor(
           record,
           "deadline_elapsed",
           observedAt,
         );
         result.failed.push(record.watch_id);
-        return claimFailedNotification({
-          ...record,
-          ...heartbeat,
-          state: "failed" as const,
-          terminal_reason: "deadline_elapsed" as const,
-          terminal_at_ms: observedAt,
-          notification_pending: true,
-          notification_attempts: 0,
-          notification_next_attempt_at_ms: observedAt,
-        }, notification);
+        return claimFailedNotification(
+          {
+            ...record,
+            ...heartbeat,
+            state: "failed" as const,
+            terminal_reason: "deadline_elapsed" as const,
+            terminal_at_ms: observedAt,
+            notification_pending: true,
+            notification_attempts: 0,
+            notification_next_attempt_at_ms: observedAt,
+          },
+          notification,
+        );
       }
 
       const observedValue =
@@ -1160,6 +1303,38 @@ export async function sweepWatches(
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
         };
+      }
+
+      if (
+        record.change === "content" &&
+        observedAt >= record.deadline &&
+        record.deadline_notified_at_ms === undefined
+      ) {
+        const notification = notificationFor(
+          record,
+          "deadline_elapsed",
+          observedAt,
+          observedValue,
+        );
+        if (record.provenance === "engine") {
+          result.armed.push(record.watch_id);
+        } else {
+          result.failed.push(record.watch_id);
+        }
+        return claimFailedNotification(
+          {
+            ...record,
+            ...heartbeat,
+            state: "failed" as const,
+            terminal_reason: "deadline_elapsed" as const,
+            terminal_at_ms: observedAt,
+            observed_value: observedValue,
+            notification_pending: true,
+            notification_attempts: 0,
+            notification_next_attempt_at_ms: observedAt,
+          },
+          notification,
+        );
       }
 
       if (
@@ -1234,6 +1409,18 @@ export async function sweepWatches(
           claimedFailedWatchIds.has(record.watch_id)
         ) {
           const attempts = record.notification_attempts ?? 1;
+          const engineDeadline = settleEngineDeadlineNotification(
+            record,
+            notification,
+            delivered,
+            terminalFailureReason,
+            attempts,
+            observedAt,
+          );
+          if (engineDeadline) {
+            exhausted = engineDeadline.exhausted;
+            return engineDeadline.record;
+          }
           if (delivered) {
             const {
               notification_exhausted_at_ms: _exhaustedAt,
@@ -1279,6 +1466,11 @@ export async function sweepWatches(
             } = record;
             return {
               ...persistent,
+              ...rolledEngineContentDeadline(
+                record,
+                notification.reason,
+                observedAt,
+              ),
               state: "armed" as const,
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
@@ -1309,6 +1501,11 @@ export async function sweepWatches(
             } = record;
             return {
               ...persistent,
+              ...rolledEngineContentDeadline(
+                record,
+                notification.reason,
+                observedAt,
+              ),
               state: "armed" as const,
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
@@ -1342,6 +1539,11 @@ export async function sweepWatches(
             } = record;
             return {
               ...persistent,
+              ...rolledEngineContentDeadline(
+                record,
+                notification.reason,
+                observedAt,
+              ),
               state: "armed" as const,
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,

@@ -97,6 +97,7 @@ import {
   removeWatches,
   reserveWatchReportPath,
   scopeWatchToSubject,
+  updateWatchDeadline,
   WatchArmError,
   type WatchNotify,
   type WatchSpec,
@@ -3936,6 +3937,8 @@ export interface CreateServerOptions {
   watchRegistryPath?: string;
   watchRegistryNow?: () => number;
   watchNotify?: WatchNotify;
+  /** Silence deadline for engine-owned child report watches. Defaults to one hour. */
+  reportWatchDeadlineMs?: number;
   /**
    * Enable close forensics: ingest cmux's OWN app-level `tab_close` events from
    * `~/.cmuxterm/events.jsonl` and attribute them each sweep. Omitted/false by
@@ -3982,6 +3985,7 @@ export type LifecycleAgentInputDeliverer = (args: {
 }) => Promise<PublicDeliveryReceipt & { bytes: number }>;
 
 export const DEFAULT_LIFECYCLE_START_TIMEOUT_MS = 60_000;
+export const DEFAULT_REPORT_WATCH_DEADLINE_MS = 60 * 60 * 1_000;
 
 /** Lifecycle initialization never settled inside its bound (#529). */
 export class LifecycleStartTimeoutError extends Error {
@@ -13983,6 +13987,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
         const canonicalParent = canonicalAgentId(parentAgentId);
         const ownerCandidates = snapshotWatchOwnerCandidates();
+        const reportWatchArmedAt = opts?.watchRegistryNow?.() ?? Date.now();
+        const reportWatchDeadline = reportWatchArmedAt +
+          (opts?.reportWatchDeadlineMs ?? DEFAULT_REPORT_WATCH_DEADLINE_MS);
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
         }).watches.find(
@@ -14017,6 +14024,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               registryPath: watchRegistryPath,
             });
           }
+          await updateWatchDeadline(existing.watch_id, reportWatchDeadline, {
+            registryPath: watchRegistryPath,
+            now: () => reportWatchArmedAt,
+          });
           return null;
         }
         await mkdir(dirname(reportPath), { recursive: true });
@@ -14027,7 +14038,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           target: reportPath,
           provenance: "engine",
           change: "content",
-          deadline: Number.MAX_SAFE_INTEGER,
+          deadline: reportWatchDeadline,
         });
         return null;
       } catch (error) {

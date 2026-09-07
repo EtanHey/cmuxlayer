@@ -5,7 +5,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useHarnessHome } from "./helpers/harness-home.js";
 import {
-  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -2536,7 +2535,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
   });
 
-  it("P11b/#462: resume refreshes a custom contract and adopts its legacy watch", async () => {
+  it("P11b/#462: resume re-arms an already-notified report watch", async () => {
     // Before this, resume returned no contract at all: no report_path, no
     // done_marker, no contract file. The crash-recovery case this repo exists
     // for was the one case where a lead could not even see where its worker
@@ -2551,6 +2550,7 @@ describe("agent lifecycle tool handlers", () => {
       "custom",
       "resume-report.md",
     );
+    let watchNow = 1_000;
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeServerAgentRecord({
@@ -2590,6 +2590,8 @@ describe("agent lifecycle tool handlers", () => {
       sessionIdentityResolver: () => null,
       inboxBaseDir: resumeInboxDir,
       watchRegistryPath,
+      watchRegistryNow: () => watchNow,
+      reportWatchDeadlineMs: 2_000,
     });
     await serverContexts.at(-1)?.lifecycleStartPromise;
     // Arm after startup pruning so this assertion isolates resume's dedupe
@@ -2599,29 +2601,32 @@ describe("agent lifecycle tool handlers", () => {
         owner: parentSeat,
         subject_agent_id: agentId,
         target: expected.report_path,
+        provenance: "engine",
         change: "content",
-        deadline: Number.MAX_SAFE_INTEGER,
+        deadline: 3_000,
       },
-      { registryPath: watchRegistryPath },
+      { registryPath: watchRegistryPath, now: () => watchNow },
     );
-    appendFileSync(expected.report_path, "first revision\n", "utf8");
+    watchNow = 3_000;
     await sweepWatches({
       registryPath: watchRegistryPath,
-      notify: async () => true,
+      now: () => watchNow,
+      notify: () => Promise.resolve(true),
     });
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
         (watch) => watch.watch_id === oldWatch.watch_id,
-      )?.state,
-    ).toBe("armed");
-    const spawn = (server as any)._registeredTools["spawn_agent"];
+      ),
+    ).toMatchObject({ state: "armed", deadline_notified_at_ms: 3_000 });
+    watchNow = 10_000;
+    const spawn = registeredTestTool(server, "spawn_agent");
 
     try {
       const result = await spawn.handler(
         { resume_agent_id: agentId, report_path: customReportPath },
-        {} as any,
+        {},
       );
-      const parsed = parseToolResult(result) as Record<string, any>;
+      const parsed = parseToolResult(result);
       expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
       expect(parsed.resumed).toBe(true);
 
@@ -2644,12 +2649,9 @@ describe("agent lifecycle tool handlers", () => {
       );
 
       // Persisted, so the closure consumer reads what resume issued.
-      const stateTool = (server as any)._registeredTools["get_agent_state"];
-      const detail = parseToolResult(
-        await stateTool.handler({ agent_id: agentId }, {} as any),
-      ) as Record<string, unknown>;
-      expect(detail.report_path).toBe(expected.report_path);
-      expect(detail.done_marker).toBe(expected.done_marker);
+      const detail = stateMgr.readState(agentId);
+      expect(detail?.report_path).toBe(expected.report_path);
+      expect(detail?.done_marker).toBe(expected.done_marker);
       const reportWatches = readWatchRegistry({
         registryPath: watchRegistryPath,
       }).watches.filter((watch) => watch.target === expected.report_path);
@@ -2660,7 +2662,10 @@ describe("agent lifecycle tool handlers", () => {
         subject_agent_id: agentId,
         change: "content",
         state: "armed",
+        armed_at_ms: 10_000,
+        deadline: 12_000,
       });
+      expect(reportWatches[0]?.deadline_notified_at_ms).toBeUndefined();
     } finally {
       rmSync(resumeInboxDir, { recursive: true, force: true });
     }
