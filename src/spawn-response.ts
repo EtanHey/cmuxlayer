@@ -114,7 +114,7 @@ export function shapeSpawnResponse(
   const lean: JsonObject = {};
   if (full.ok !== undefined) lean.ok = full.ok;
   for (const field of ESSENTIAL_FIELDS) {
-    if (full[field] !== undefined) lean[field] = full[field];
+    if (full[field] !== undefined && !(field.startsWith("boot_prompt_") && full[field] === null)) lean[field] = full[field];
   }
 
   const worktree = leanWorktree(full.worktree);

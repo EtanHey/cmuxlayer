@@ -363,7 +363,7 @@ function createTrackedServer(
   if (sendToTool?.handler) {
     const sendToHandler = sendToTool.handler.bind(sendToTool);
     sendToTool.handler = (args: Record<string, unknown>, toolContext: unknown) =>
-      sendToHandler({ mode: "agent", ...args }, toolContext);
+      sendToHandler({ mode: "agent", verbose: true, ...args }, toolContext);
   }
   if (defaultCallerContext) {
     const registeredTools = (server as any)._registeredTools as Record<
@@ -1061,6 +1061,7 @@ describe("lean spawn tool responses", () => {
       cli: "claude",
       role: "reviewer",
       force_new: true,
+      verbose: true,
     });
 
     const result = await runWithCallerContext(
@@ -10984,7 +10985,7 @@ codex>
     ).agent_id;
 
     const result = await sendTo.handler(
-      { agent_id: agentId, text: "hello", press_enter: true },
+      { agent_id: agentId, text: "hello", press_enter: true, verbose: true },
       {} as any,
     );
     const parsed = parseToolResult(result);

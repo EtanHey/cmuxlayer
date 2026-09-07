@@ -13,7 +13,6 @@ const base = {
   role: "worker",
   cwd: "/tmp/cmuxlayer",
   boot_prompt_delivered: false,
-  boot_prompt_submit_verified: null,
 };
 
 describe("spawn response shaping", () => {

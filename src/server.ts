@@ -725,6 +725,7 @@ const SendToArgsSchema = z.object({
   press_enter: z.boolean().optional().default(true),
   allow_busy: z.boolean().optional().default(false),
   allow_long_inline: z.boolean().optional().default(false),
+  verbose: z.boolean().optional().default(false).describe("Return the full legacy success receipt, including transport and timing diagnostics. Failures always keep full detail."),
   targeting: z
     .object({
       role: z.enum(["implementor", "reviewer", "gatherer"]).optional(),
@@ -1784,6 +1785,37 @@ function okFormatted(
   return {
     content: [{ type: "text", text: formattedText }],
     structuredContent: payload,
+  };
+}
+
+function shapeSuccessfulSendToResult(result: ToolReturn, args: Record<string, unknown>): ToolReturn {
+  const full = result.structuredContent;
+  if (
+    result.isError === true ||
+    !full ||
+    full.ok !== true ||
+    full.delivery_state !== "submitted" ||
+    full.submitted !== true
+  ) {
+    return result;
+  }
+
+  const surfaceMode = args.mode === "surface";
+  const identityKey = surfaceMode ? "surface" : "agent_id";
+  const identity = full[identityKey] ?? args[identityKey];
+  const text = typeof args.text === "string" ? sanitizeTerminalInput(args.text) : "";
+  const lean: Record<string, unknown> = {
+    ok: true,
+    ...(typeof identity === "string" ? { [identityKey]: identity } : {}),
+    delivery_state: "submitted",
+    submitted: true,
+    bytes: typeof full.bytes === "number" ? full.bytes : Buffer.byteLength(text, "utf8"),
+    ...(typeof full.delivery_id === "string" ? { delivery_id: full.delivery_id } : {}),
+  };
+  return {
+    ...result,
+    content: [{ type: "text", text: JSON.stringify(lean) }],
+    structuredContent: lean,
   };
 }
 
@@ -4946,6 +4978,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const attachTransportProvenance = (
     result: unknown,
     toolName: string,
+    verbose = false,
   ): unknown => {
     if (
       toolName !== "spawn_agent" &&
@@ -4962,6 +4995,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const toolResult = result as ToolReturn;
     const structured = toolResult.structuredContent;
     if (!structured || typeof structured !== "object") return result;
+    const leanSuccessfulReceipt =
+      !verbose &&
+      toolResult.isError !== true &&
+      structured.ok === true &&
+      (toolName === "spawn_agent" ||
+        (toolName === "send_to" &&
+          structured.delivery_state === "submitted" &&
+          structured.submitted === true));
+    if (leanSuccessfulReceipt) return result;
     const provenance = transportProvenance();
     const existingWarnings = Array.isArray(structured.warnings)
       ? structured.warnings
@@ -5075,12 +5117,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (typeof handler === "function") {
       const trackedHandler = (...handlerArgs: unknown[]) =>
         runWithSurfaceTopologyCallScope(() =>
-          withTransportRetryTracking(async () =>
-            attachTransportProvenance(
-              await handler(...handlerArgs),
-              typeof toolName === "string" ? toolName : "",
-            ),
-          ),
+          withTransportRetryTracking(async () => {
+            const toolNameString =
+              typeof toolName === "string" ? toolName : "";
+            const rawArgs =
+              handlerArgs[0] && typeof handlerArgs[0] === "object"
+                ? (handlerArgs[0] as Record<string, unknown>)
+                : {};
+            const verbose = rawArgs.verbose === true;
+            const handled = (await handler(...handlerArgs)) as ToolReturn;
+            const shaped =
+              toolNameString === "send_to" && !verbose
+                ? shapeSuccessfulSendToResult(handled, rawArgs)
+                : handled;
+            return attachTransportProvenance(shaped, toolNameString, verbose);
+          }),
         );
       args[handlerIndex] = trackedHandler;
       if (typeof toolName === "string") {
@@ -14223,7 +14274,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot prompts return evidence-backed receipts.",
+      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
       {
         version: z
           .literal(1)
@@ -17432,7 +17483,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text or a key through the shared delivery engine. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode.",
+      "Send text or a key through the shared delivery engine. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A verified successful submission returns at most six fields by default: ok, target identity, delivery_state, submitted, bytes, and delivery_id when available. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(

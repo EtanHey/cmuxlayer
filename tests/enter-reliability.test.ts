@@ -553,7 +553,7 @@ function createReliabilityServer(client: FakeClaudeSurfaceClient) {
   const sendTo = (server as any)._registeredTools.send_to;
   const sendToHandler = sendTo.handler.bind(sendTo);
   sendTo.handler = (args: Record<string, unknown>, context: unknown) =>
-    sendToHandler({ mode: "agent", ...args }, context);
+    sendToHandler({ mode: "agent", verbose: true, ...args }, context);
   // These tests exercise registry routing and submit verification, not the
   // periodic reconciliation loop. Stop its wall-clock sweep so it cannot race
   // the five-second submit deadline or add unrelated work under parallel load.
@@ -906,6 +906,7 @@ describe("enter reliability", () => {
       surface: client.surface,
       text: "surface receipt parity",
       press_enter: false,
+      verbose: true,
     });
     const contentReceipt = JSON.parse(result.content[0].text);
 
@@ -930,6 +931,7 @@ describe("enter reliability", () => {
       agent_id: "agent-1",
       text: "lean successful receipt",
       press_enter: true,
+      verbose: false,
     });
     const parsed = parseResult(result);
 
@@ -939,7 +941,18 @@ describe("enter reliability", () => {
     expect(parsed).not.toHaveProperty("timings_ms");
     expect(parsed).not.toHaveProperty("transport");
     expect(parsed).not.toHaveProperty("WARNING");
-    expect(parsed).not.toHaveProperty("boot_prompt_receipt");
+    expect(result.content[0]!.text).toBe(JSON.stringify(parsed));
+
+    const verboseResult = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "verbose successful receipt",
+      press_enter: true,
+      verbose: true,
+    });
+    const verboseParsed = parseResult(verboseResult);
+
+    expect(verboseResult.isError).not.toBe(true);
+    expect(verboseParsed).toMatchObject({ delivery_state: "submitted", submitted: true, rpc_methods: expect.any(Array), timings_ms: expect.any(Object), transport: expect.any(String), socket_path: null });
   });
 
   it("resolves agent-mode composer-only delivery as terminal typed on the same ID", async () => {
@@ -1073,6 +1086,7 @@ describe("enter reliability", () => {
         ...target,
         text: "timed send",
         press_enter: true,
+        verbose: true,
       });
       const parsed = parseResult(result);
 
