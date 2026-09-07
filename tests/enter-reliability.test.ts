@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer, __submitEvidenceTestHooks } from "../src/server.js";
+import {
+  createServer,
+  __leanReceiptTestHooks,
+  __submitEvidenceTestHooks,
+} from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-enter-reliability-test");
@@ -138,6 +144,15 @@ class FakeClaudeSurfaceClient {
   private returnCount = 0;
   private queuedCodexReadsRemaining = 0;
   private mode: "idle" | "working" = "idle";
+  transportHealth: {
+    mode: "socket";
+    degraded: boolean;
+    current_socket_path: string;
+  } | null = null;
+
+  getTransportHealth() {
+    return this.transportHealth;
+  }
 
   async listWorkspaces() {
     return {
@@ -542,7 +557,10 @@ class FakeUnavailableVerificationScreenClient extends FakeClaudeSurfaceClient {
   }
 }
 
-function createReliabilityServer(client: FakeClaudeSurfaceClient) {
+function createReliabilityServer(
+  client: FakeClaudeSurfaceClient,
+  legacyVerboseDefault = true,
+) {
   const server = createServer({
     client: client as any,
     stateDir: TEST_DIR,
@@ -550,10 +568,25 @@ function createReliabilityServer(client: FakeClaudeSurfaceClient) {
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
-  const sendTo = (server as any)._registeredTools.send_to;
-  const sendToHandler = sendTo.handler.bind(sendTo);
-  sendTo.handler = (args: Record<string, unknown>, context: unknown) =>
-    sendToHandler({ mode: "agent", verbose: true, ...args }, context);
+  if (legacyVerboseDefault) {
+    const sendTo = (
+      server as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (
+              args: Record<string, unknown>,
+              context: unknown,
+            ) => unknown;
+          }
+        >;
+      }
+    )._registeredTools.send_to;
+    if (!sendTo) throw new Error("send_to test handler is not registered");
+    const sendToHandler = sendTo.handler.bind(sendTo);
+    sendTo.handler = (args: Record<string, unknown>, context: unknown) =>
+      sendToHandler({ mode: "agent", verbose: true, ...args }, context);
+  }
   // These tests exercise registry routing and submit verification, not the
   // periodic reconciliation loop. Stop its wall-clock sweep so it cannot race
   // the five-second submit deadline or add unrelated work under parallel load.
@@ -921,23 +954,100 @@ describe("enter reliability", () => {
   });
 
   it("keeps a successful send_to receipt lean unless verbose is requested", async () => {
+    vi.useRealTimers();
     const client = new FakeClaudeSurfaceClient();
-    client.requiredReturns = 1; client.completionMode = "idle";
-    server = createReliabilityServer(client);
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    client.transportHealth = {
+      mode: "socket",
+      degraded: false,
+      current_socket_path: "/tmp/cmuxlayer-test.sock",
+    };
+    server = createReliabilityServer(client, false);
     registerAgent(server, { state: "idle" });
-    const send = (text: string, verbose: boolean) => callTool(server, "send_to", { agent_id: "agent-1", text, press_enter: true, verbose });
-    const result = await send("lean successful receipt", false);
-    const parsed = parseResult(result);
+    const mcpClient = new Client({
+      name: "lean-receipt-test",
+      version: "0.1.0",
+    });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await Promise.all([
+      server.connect(serverTransport),
+      mcpClient.connect(clientTransport),
+    ]);
+    await mcpClient.listTools();
+    const result = await mcpClient.callTool({
+      name: "send_to",
+      arguments: {
+        mode: "agent",
+        agent_id: "agent-1",
+        text: "lean successful receipt",
+        press_enter: true,
+      },
+    });
+    const parsed = result.structuredContent as Record<string, unknown>;
     expect(result.isError).not.toBe(true);
-    expect(Object.keys(parsed).length).toBeLessThanOrEqual(6);
+    expect(parsed).toEqual({
+      ok: true,
+      retry_count: 0,
+      agent_id: "agent-1",
+      delivery_state: "submitted",
+      submitted: true,
+      delivery_id: expect.any(String),
+    });
+    expect(Buffer.byteLength(JSON.stringify(parsed))).toBe(147);
     for (const field of ["rpc_methods", "timings_ms", "transport", "WARNING"])
       expect(parsed).not.toHaveProperty(field);
-    expect(result.content[0]!.text).toBe(JSON.stringify(parsed));
-    const verboseResult = await send("verbose successful receipt", true);
-    const verboseParsed = parseResult(verboseResult);
-    expect(verboseResult.isError).not.toBe(true);
-    expect(verboseParsed).toMatchObject({ delivery_state: "submitted", submitted: true, rpc_methods: expect.any(Array), timings_ms: expect.any(Object), transport: expect.any(String), socket_path: null });
-  });
+    expect(result.content).toEqual([
+      { type: "text", text: JSON.stringify(parsed) },
+    ]);
+
+    await mcpClient.close();
+  }, 10_000);
+
+  it.each(["surface", "command", "key"] as const)(
+    "keeps surface identity on a shaped %s-mode success",
+    (mode) => {
+      const full =
+        mode === "key"
+          ? {
+              ok: true,
+              retry_count: 0,
+              surface: "surface:agent",
+              submit_attempted: true,
+              submit_dispatched: true,
+              submit_verified: true,
+            }
+          : {
+              ok: true,
+              retry_count: 0,
+              surface: "surface:agent",
+              delivery_state: "submitted",
+              submitted: true,
+              delivery_id: "delivery:test",
+            };
+      const result = __leanReceiptTestHooks.shapeSuccessfulSendToResult(
+        {
+          content: [{ type: "text", text: JSON.stringify(full) }],
+          structuredContent: full,
+        },
+        { mode, surface: "surface:agent", text: "probe" },
+      );
+
+      expect(result.structuredContent).toMatchObject({
+        surface: "surface:agent",
+        delivery_state: "submitted",
+        submitted: true,
+        ...(mode === "key"
+          ? {
+              submit_verified: true,
+              submit_verification_reason: null,
+            }
+          : {}),
+      });
+      expect(result.structuredContent).not.toHaveProperty("agent_id");
+    },
+  );
 
   it("resolves agent-mode composer-only delivery as terminal typed on the same ID", async () => {
     const client = new FakeClaudeSurfaceClient();

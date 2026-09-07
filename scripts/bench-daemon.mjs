@@ -886,7 +886,9 @@ function requireTerminalSubmission(receipt, label) {
     receipt.delivery_state !== "submitted" ||
     receipt.submit_verified !== true
   ) {
-    throw new Error(`${label} was not terminally submitted`);
+    throw new Error(
+      `${label} was not terminally submitted: ${compact(receipt)}`,
+    );
   }
   return receipt;
 }
@@ -1014,7 +1016,13 @@ async function measureSpawnLifecycleOnce(
     } = {},
   ) => {
     const startedAt = nowMs();
-    const receipt = toolData(await client.callTool("send_to", args), "send_to");
+    // Receipt diagnostics are benchmark instrumentation, not workload input.
+    // Keep canonical request bytes/hashes based on args while opting into the
+    // timing, terminal, and transport fields the benchmark validates below.
+    const receipt = toolData(
+      await client.callTool("send_to", { ...args, verbose: true }),
+      "send_to",
+    );
     if (requireSubmitted) {
       requireTerminalSubmission(receipt, `${args.mode} send`);
     }
@@ -1076,10 +1084,6 @@ async function measureSpawnLifecycleOnce(
     requireSubmitted: false,
     canonicalText: surfaceSampleSentinel("NNN"),
     validateReceipt: async (receipt) => {
-      requireTerminalSubmission(
-        receipt,
-        "sampled surface send initial receipt",
-      );
       try {
         const terminal = await requireSubmittedDelivery(
           client,
@@ -1351,7 +1355,13 @@ async function measureParallelStress(
     const receipts = await Promise.all(
       requests.map(async (requestArgs, index) =>
         toolData(
-          await clients[index].callTool(name, requestArgs, 30_000),
+          await clients[index].callTool(
+            name,
+            name === "send_to"
+              ? { ...requestArgs, verbose: true }
+              : requestArgs,
+            30_000,
+          ),
           name,
         ),
       ),

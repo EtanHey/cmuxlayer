@@ -10985,7 +10985,7 @@ codex>
     ).agent_id;
 
     const result = await sendTo.handler(
-      { agent_id: agentId, text: "hello", press_enter: true, verbose: true },
+      { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
     );
     const parsed = parseToolResult(result);
@@ -10993,6 +10993,7 @@ codex>
     expect(parsed.terminal).toBe(true);
     expect(parsed.delivery_state).toBe("submitted");
     expect(parsed.submit_verified).toBe(true);
+    expect(parsed.rpc_methods).toEqual(expect.any(Array));
   });
 
   it("send_to_agent leaves an idle agent idle when submitted delivery fails", async () => {
@@ -11195,6 +11196,7 @@ codex>
         agent_id: agentId,
         text: "interject while working",
         press_enter: true,
+        verbose: false,
       },
       {} as any,
     );
@@ -11209,9 +11211,6 @@ codex>
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.queued_behind_turn).toBe(true);
-    expect(parsed.transport).toBe("cli");
-    expect(parsed.socket_path).toBeNull();
-    expect(parsed.socket_path_state).toBe("unavailable");
     expect(parsed.warnings).toContain("cli_fallback_active");
     expect(deliveredText).toBe("interject while working");
     expect(sendCalls[0]?.[1]).toEqual(

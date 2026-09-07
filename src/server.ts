@@ -1788,29 +1788,59 @@ function okFormatted(
   };
 }
 
-function shapeSuccessfulSendToResult(result: ToolReturn, args: Record<string, unknown>): ToolReturn {
+/** Reduce verified send_to successes without discarding routing or safety state. */
+function shapeSuccessfulSendToResult(
+  result: ToolReturn,
+  args: Record<string, unknown>,
+): ToolReturn {
   const full = result.structuredContent;
+  const verifiedSubmit =
+    (full?.delivery_state === "submitted" && full.submitted === true) ||
+    (args.mode === "key" &&
+      full?.submit_attempted === true &&
+      full.submit_dispatched === true &&
+      full.submit_verified === true);
   if (
     result.isError === true ||
     !full ||
     full.ok !== true ||
-    full.delivery_state !== "submitted" ||
-    full.submitted !== true
+    !verifiedSubmit
   ) {
     return result;
   }
 
-  const surfaceMode = args.mode === "surface";
+  const surfaceMode = args.mode !== "agent";
   const identityKey = surfaceMode ? "surface" : "agent_id";
-  const identity = full[identityKey] ?? args[identityKey];
-  const text = typeof args.text === "string" ? sanitizeTerminalInput(args.text) : "";
+  const identity =
+    full[identityKey] ??
+    args[identityKey] ??
+    (surfaceMode ? args.target : undefined);
   const lean: Record<string, unknown> = {
     ok: true,
+    retry_count:
+      typeof full.retry_count === "number"
+        ? full.retry_count
+        : currentTransportRetryCount(),
     ...(typeof identity === "string" ? { [identityKey]: identity } : {}),
     delivery_state: "submitted",
     submitted: true,
-    bytes: typeof full.bytes === "number" ? full.bytes : Buffer.byteLength(text, "utf8"),
-    ...(typeof full.delivery_id === "string" ? { delivery_id: full.delivery_id } : {}),
+    ...(args.mode === "key"
+      ? {
+          submit_verified: full.submit_verified,
+          submit_verification_reason:
+            full.submit_verification_reason ?? null,
+        }
+      : {}),
+    ...(typeof full.delivery_id === "string"
+      ? { delivery_id: full.delivery_id }
+      : {}),
+    ...(full.queued_behind_turn === true ? { queued_behind_turn: true } : {}),
+    ...(typeof full.duplicate_of === "string"
+      ? { duplicate_of: full.duplicate_of }
+      : {}),
+    ...(Array.isArray(full.warnings) && full.warnings.length > 0
+      ? { warnings: full.warnings }
+      : {}),
   };
   return {
     ...result,
@@ -1818,6 +1848,8 @@ function shapeSuccessfulSendToResult(result: ToolReturn, args: Record<string, un
     structuredContent: lean,
   };
 }
+
+export const __leanReceiptTestHooks = { shapeSuccessfulSendToResult };
 
 function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const message = error instanceof Error ? error.message : String(error);
@@ -4975,6 +5007,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     getTransportHealth(client)?.mode === "socket"
       ? method
       : null;
+  /** Attach full transport diagnostics, or warnings alone on lean successes. */
   const attachTransportProvenance = (
     result: unknown,
     toolName: string,
@@ -5003,7 +5036,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         (toolName === "send_to" &&
           structured.delivery_state === "submitted" &&
           structured.submitted === true));
-    if (leanSuccessfulReceipt) return result;
     const provenance = transportProvenance();
     const existingWarnings = Array.isArray(structured.warnings)
       ? structured.warnings
@@ -5012,6 +5044,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ? provenance.warnings
       : [];
     const warnings = [...new Set([...existingWarnings, ...provenanceWarnings])];
+    if (leanSuccessfulReceipt) {
+      if (warnings.length === 0) return result;
+      const nextStructured = { ...structured, warnings };
+      return {
+        ...toolResult,
+        content: toolResult.content.map((entry) =>
+          entry.type === "text"
+            ? { ...entry, text: JSON.stringify(nextStructured) }
+            : entry,
+        ),
+        structuredContent: nextStructured,
+      };
+    }
     const nextStructured = {
       ...structured,
       ...provenance,
@@ -17483,7 +17528,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text or a key through the shared delivery engine. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A verified successful submission returns at most six fields by default: ok, target identity, delivery_state, submitted, bytes, and delivery_id when available. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
+      "Send text or a key through the shared delivery engine. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns six fields by default: ok, retry_count, target identity, delivery_state, submitted, and delivery_id. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -18395,6 +18440,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               agent_id: agentId,
               target: undefined,
               targeting: undefined,
+              verbose: true,
             },
             {},
           );

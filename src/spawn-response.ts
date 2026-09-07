@@ -105,17 +105,26 @@ function leanWorktree(value: unknown): JsonObject | undefined {
   );
 }
 
+/** Retain actionable spawn identity and evidence while omitting routine detail. */
 export function shapeSpawnResponse(
   full: JsonObject,
   verbose = false,
 ): JsonObject {
   if (verbose) return full;
 
-  const lean: JsonObject = {};
+  const hasBootPromptReceipt = record(full.boot_prompt_receipt) !== null;
+  const lean: JsonObject = Object.fromEntries(
+    ESSENTIAL_FIELDS.filter(
+      (field) =>
+        full[field] !== undefined &&
+        !(
+          field.startsWith("boot_prompt_") &&
+          full[field] === null &&
+          !(field === "boot_prompt_submit_verified" && hasBootPromptReceipt)
+        ),
+    ).map((field) => [field, full[field]]),
+  );
   if (full.ok !== undefined) lean.ok = full.ok;
-  for (const field of ESSENTIAL_FIELDS) {
-    if (full[field] !== undefined && !(field.startsWith("boot_prompt_") && full[field] === null)) lean[field] = full[field];
-  }
 
   const worktree = leanWorktree(full.worktree);
   if (worktree) lean.worktree = worktree;
