@@ -180,7 +180,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true, verbose: true },
       {} as any,
     );
 
@@ -526,7 +526,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     mockExec.mockClear();
 
     const result = await (server as any)._registeredTools["send_to"].handler(
-      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true },
+      { mode: "agent", agent_id: agentId, text: "fleet message", press_enter: true, verbose: true },
       {} as any,
     );
 

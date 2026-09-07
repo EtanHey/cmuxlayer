@@ -342,8 +342,11 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
+    expect(data.key).toBe("return");
     expect(data.submit_verified).toBe(true);
     expect(data.submit_verification_reason).toBeNull();
+    expect(data).not.toHaveProperty("delivery_state");
+    expect(data).not.toHaveProperty("submitted");
   });
 
   it("does not verify Return when the composer was already empty", async () => {
@@ -381,8 +384,11 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
+    expect(data.key).toBe("return");
     expect(data.submit_verified).toBe(true);
     expect(data.submit_verification_reason).toBeNull();
+    expect(data).not.toHaveProperty("delivery_state");
+    expect(data).not.toHaveProperty("submitted");
   });
 
   it("does not infer key failure from a composer that remains populated", async () => {
