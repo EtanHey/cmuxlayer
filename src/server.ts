@@ -1815,22 +1815,27 @@ function shapeSuccessfulSendToResult(
     full[identityKey] ??
     args[identityKey] ??
     (surfaceMode ? args.target : undefined);
-  const lean: Record<string, unknown> = {
+  const receiptFloor = {
     ok: true,
     retry_count:
       typeof full.retry_count === "number"
         ? full.retry_count
         : currentTransportRetryCount(),
     ...(typeof identity === "string" ? { [identityKey]: identity } : {}),
-    delivery_state: "submitted",
-    submitted: true,
+  };
+  const lean: Record<string, unknown> = {
+    ...receiptFloor,
     ...(args.mode === "key"
       ? {
+          key: full.key ?? args.text,
           submit_verified: full.submit_verified,
           submit_verification_reason:
             full.submit_verification_reason ?? null,
         }
-      : {}),
+      : {
+          delivery_state: "submitted",
+          submitted: true,
+        }),
     ...(typeof full.delivery_id === "string"
       ? { delivery_id: full.delivery_id }
       : {}),
@@ -5034,8 +5039,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       structured.ok === true &&
       (toolName === "spawn_agent" ||
         (toolName === "send_to" &&
-          structured.delivery_state === "submitted" &&
-          structured.submitted === true));
+          ((structured.delivery_state === "submitted" &&
+            structured.submitted === true) ||
+            (typeof structured.key === "string" &&
+              structured.submit_verified === true))));
     const provenance = transportProvenance();
     const existingWarnings = Array.isArray(structured.warnings)
       ? structured.warnings

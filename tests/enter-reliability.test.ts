@@ -1034,17 +1034,24 @@ describe("enter reliability", () => {
         { mode, surface: "surface:agent", text: "probe" },
       );
 
-      expect(result.structuredContent).toMatchObject({
-        surface: "surface:agent",
-        delivery_state: "submitted",
-        submitted: true,
-        ...(mode === "key"
+      expect(result.structuredContent).toMatchObject(
+        mode === "key"
           ? {
+              surface: "surface:agent",
+              key: "probe",
               submit_verified: true,
               submit_verification_reason: null,
             }
-          : {}),
-      });
+          : {
+              surface: "surface:agent",
+              delivery_state: "submitted",
+              submitted: true,
+            },
+      );
+      if (mode === "key") {
+        expect(result.structuredContent).not.toHaveProperty("delivery_state");
+        expect(result.structuredContent).not.toHaveProperty("submitted");
+      }
       expect(result.structuredContent).not.toHaveProperty("agent_id");
     },
   );
