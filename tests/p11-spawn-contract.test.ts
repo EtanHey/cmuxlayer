@@ -20,6 +20,8 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawn as nodeSpawn } from "node:child_process";
+import { once } from "node:events";
 import {
   createServer,
   createServerContext,
@@ -513,6 +515,140 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         notification_pending: false,
       }),
     ]);
+  });
+
+  it("recovers a report watch after a process crash before deadline settlement", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const baseExec = makeExec(
+      "Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane",
+      undefined,
+      [
+        {
+          id: childUuid,
+          ref: "surface:child",
+          title: "child-pane",
+          text: "Claude Code\nWhat can I help you with?\n❯ ",
+        },
+      ],
+      parentUuid,
+    );
+    exec = vi.fn().mockImplementation((cmd, args: string[]) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:child",
+            surface_id: childUuid,
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    let watchNow = 1_000;
+    const serverOptions = withTestSurfaceObserver({
+      exec,
+      stateDir: STATE_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir,
+      watchRegistryPath,
+      watchRegistryNow: () => watchNow,
+      reportWatchDeadlineMs: 2_000,
+    });
+    server = createServer(serverOptions);
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id });
+    await server.close();
+
+    const moduleUrl = new URL("../src/watch-spec.ts", import.meta.url).href;
+    const crashScript = `
+      const { sweepWatches } = await import(process.env.TEST_WATCH_MODULE_URL);
+      await sweepWatches({
+        registryPath: process.env.TEST_WATCH_REGISTRY_PATH,
+        now: () => 3000,
+        notify: () => new Promise(() => {
+          process.send?.({ phase: "pre-settlement" });
+        }),
+      });
+    `;
+    const crashingSweep = nodeSpawn(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", crashScript],
+      {
+        env: {
+          ...process.env,
+          TEST_WATCH_MODULE_URL: moduleUrl,
+          TEST_WATCH_REGISTRY_PATH: watchRegistryPath,
+        },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      },
+    );
+    let crashStderr = "";
+    crashingSweep.stderr?.on("data", (chunk) => {
+      crashStderr += String(chunk);
+    });
+    try {
+      const [message] = await once(crashingSweep, "message");
+      expect(message).toEqual({ phase: "pre-settlement" });
+      expect(
+        readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+      ).toMatchObject({
+        state: "failed",
+        terminal_reason: "deadline_elapsed",
+        notification_pending: false,
+      });
+      crashingSweep.kill("SIGKILL");
+      const [, signal] = (await once(crashingSweep, "exit")) as [
+        number | null,
+        NodeJS.Signals | null,
+      ];
+      expect(signal, crashStderr).toBe("SIGKILL");
+    } finally {
+      if (crashingSweep.exitCode === null && crashingSweep.signalCode === null) {
+        crashingSweep.kill("SIGKILL");
+      }
+    }
+
+    watchNow = 3_001;
+    server = createServer(serverOptions);
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const restartedEngine = server._registeredTools.interact._engine;
+    await restartedEngine.sweepWatchesBestEffort();
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+    ).toEqual([
+      expect.objectContaining({
+        watch_id: expect.any(String),
+        state: "armed",
+        deadline_notified_at_ms: 3_000,
+        notification_pending: false,
+      }),
+    ]);
+
+    const beforeReport = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(child.report_path, "late report after crash\n", "utf8");
+    watchNow = 3_002;
+    await restartedEngine.sweepWatchesBestEffort();
+    const reportCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      beforeReport,
+    );
+    expect(
+      reportCalls.some(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) =>
+            arg.includes("[report]") && arg.includes(child.report_path),
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("drops a child-scoped report watch when close_surface closes the agent", async () => {

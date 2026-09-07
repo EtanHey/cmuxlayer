@@ -2619,14 +2619,14 @@ describe("agent lifecycle tool handlers", () => {
       ),
     ).toMatchObject({ state: "armed", deadline_notified_at_ms: 3_000 });
     watchNow = 10_000;
-    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const spawn = registeredTestTool(server, "spawn_agent");
 
     try {
       const result = await spawn.handler(
         { resume_agent_id: agentId, report_path: customReportPath },
-        {} as any,
+        {},
       );
-      const parsed = parseToolResult(result) as Record<string, any>;
+      const parsed = parseToolResult(result);
       expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
       expect(parsed.resumed).toBe(true);
 

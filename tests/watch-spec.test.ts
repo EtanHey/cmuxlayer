@@ -1106,6 +1106,36 @@ describe("WatchSpec arm contract", () => {
     );
   });
 
+  it("never rolls an engine report deadline beyond MAX_SAFE_INTEGER", async () => {
+    const target = join(TEST_DIR, "legacy-infinite-report.md");
+    writeFileSync(target, "before\n", "utf8");
+    await armWatch(
+      {
+        owner: "lead-a",
+        provenance: "engine",
+        target,
+        change: "content",
+        deadline: Number.MAX_SAFE_INTEGER,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    writeFileSync(target, "after\n", "utf8");
+
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify: vi.fn().mockResolvedValue(true),
+    });
+
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      armed_at_ms: 2_000,
+      deadline: Number.MAX_SAFE_INTEGER,
+    });
+  });
+
   it("persists and delivers deadline_elapsed through the retryable transition", async () => {
     const target = join(TEST_DIR, "deadline.md");
     writeFileSync(target, "", "utf8");

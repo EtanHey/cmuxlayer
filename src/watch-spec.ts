@@ -622,6 +622,53 @@ function storedContentDigest(
   return legacy?.[1] ?? fingerprint;
 }
 
+export function isInterruptedEngineDeadlineClaim(
+  record: Pick<
+    WatchRecord,
+    | "provenance"
+    | "target_kind"
+    | "change"
+    | "state"
+    | "terminal_reason"
+    | "notification_pending"
+    | "deadline_notified_at_ms"
+    | "observed_value"
+  >,
+): record is typeof record & { observed_value: string } {
+  return (
+    record.provenance === "engine" &&
+    record.target_kind === "file" &&
+    record.change === "content" &&
+    record.state === "failed" &&
+    record.terminal_reason === "deadline_elapsed" &&
+    record.notification_pending === false &&
+    record.deadline_notified_at_ms === undefined &&
+    typeof record.observed_value === "string"
+  );
+}
+
+function recoverInterruptedEngineDeadlineClaim(
+  record: WatchRecord,
+  observedAt: number,
+): WatchRecord {
+  if (!isInterruptedEngineDeadlineClaim(record)) return record;
+  const {
+    terminal_reason: _terminalReason,
+    terminal_at_ms: terminalAt,
+    notification_exhausted_at_ms: _exhaustedAt,
+    notification_exhausted_reason: _exhaustedReason,
+    ...persistent
+  } = record;
+  return {
+    ...persistent,
+    state: "armed",
+    fingerprint: record.observed_value,
+    deadline_notified_at_ms: terminalAt ?? observedAt,
+    notification_pending: false,
+    notification_next_attempt_at_ms: undefined,
+  };
+}
+
 function rolledEngineContentDeadline(
   record: WatchRecord,
   reason: WatchNotificationReason,
@@ -633,7 +680,7 @@ function rolledEngineContentDeadline(
   const intervalMs = Math.max(1, record.deadline - record.armed_at_ms);
   return {
     armed_at_ms: observedAt,
-    deadline: observedAt + intervalMs,
+    deadline: Math.min(Number.MAX_SAFE_INTEGER, observedAt + intervalMs),
     deadline_notified_at_ms: undefined,
   };
 }
@@ -1097,7 +1144,7 @@ export async function sweepWatches(
     // skipcq: JS-R1005
     const watches = registry.rows.map((row) => {
       if (!isWatchRecord(row)) return row;
-      const record = row;
+      const record = recoverInterruptedEngineDeadlineClaim(row, observedAt);
       if (record.state === "firing" && record.terminal_reason) {
         const migrated: WatchRecord = {
           ...record,

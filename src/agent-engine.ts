@@ -120,6 +120,7 @@ import {
 import type { CloseForensicsSweepResult } from "./close-forensics.js";
 import {
   armWatch as armDeclaredWatch,
+  isInterruptedEngineDeadlineClaim,
   readWatchRegistry,
   releaseWatchWaiter,
   removeWatches,
@@ -6693,6 +6694,10 @@ export class AgentEngine {
     await removeWatches(
       (watch) => {
         if (watch.notification_pending) {
+          retainedNeedsRecheck = true;
+          return false;
+        }
+        if (isInterruptedEngineDeadlineClaim(watch)) {
           retainedNeedsRecheck = true;
           return false;
         }
