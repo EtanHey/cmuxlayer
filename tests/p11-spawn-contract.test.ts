@@ -383,7 +383,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         inboxBaseDir: inboxDir,
         watchRegistryPath,
         watchRegistryNow: () => watchNow,
-        reportWatchDeadlineMs: 60 * 60 * 1_000,
+        reportWatchDeadlineMs: 2_000,
         watchNotify: unavailableExternalNotify,
       }),
     );
@@ -405,13 +405,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         target: child.report_path,
         provenance: "engine",
         change: "content",
-        deadline: 3_601_000,
+        deadline: 3_000,
         state: "armed",
       }),
     ]);
 
     const beforeDeadline = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
-    watchNow = 3_601_000;
+    watchNow = 3_000;
     await engine.sweepWatchesBestEffort();
     const deadlineCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       beforeDeadline,
@@ -435,7 +435,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         inboxBaseDir: inboxDir,
         watchRegistryPath,
         watchRegistryNow: () => watchNow,
-        reportWatchDeadlineMs: 60 * 60 * 1_000,
+        reportWatchDeadlineMs: 2_000,
         watchNotify: unavailableExternalNotify,
       }),
     );
@@ -1747,10 +1747,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
     expect(
       wakeCalls.some(([, args]: [string, string[]]) =>
-        args.includes("surface:new") &&
-        args.some(
-          (arg) => arg.includes("[report]") && arg.includes(reportPath),
-        ),
+          args.includes("surface:new") &&
+          args.some(
+            (arg) => arg.includes("[report]") && arg.includes(reportPath),
+          ),
       ),
     ).toBe(true);
     expect(

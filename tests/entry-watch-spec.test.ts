@@ -58,4 +58,22 @@ describe("in-process WatchSpec production wiring", () => {
       stateDir: "/tmp/cmuxlayer-prompt-freeze-probe-state",
     });
   });
+
+  it("passes a validated report-watch deadline override into createServer", async () => {
+    await startInProcessRuntime({
+      env: { CMUXLAYER_REPORT_WATCH_DEADLINE_MS: "250" },
+    });
+
+    expect(captured.options).toMatchObject({ reportWatchDeadlineMs: 250 });
+  });
+
+  it("rejects an invalid report-watch deadline override", async () => {
+    await expect(
+      startInProcessRuntime({
+        env: { CMUXLAYER_REPORT_WATCH_DEADLINE_MS: "0" },
+      }),
+    ).rejects.toThrow(
+      "CMUXLAYER_REPORT_WATCH_DEADLINE_MS must be a finite positive number",
+    );
+  });
 });

@@ -622,6 +622,22 @@ function storedContentDigest(
   return legacy?.[1] ?? fingerprint;
 }
 
+function rolledEngineContentDeadline(
+  record: WatchRecord,
+  reason: WatchNotificationReason,
+  observedAt: number,
+): Partial<WatchRecord> {
+  if (record.provenance !== "engine" || reason !== "target_changed") {
+    return {};
+  }
+  const intervalMs = Math.max(1, record.deadline - record.armed_at_ms);
+  return {
+    armed_at_ms: observedAt,
+    deadline: observedAt + intervalMs,
+    deadline_notified_at_ms: undefined,
+  };
+}
+
 function assertSpec(
   spec: WatchSpec,
   opts: WatchRegistryOptions,
@@ -1183,7 +1199,11 @@ export async function sweepWatches(
           observedAt,
           observedValue,
         );
-        result.failed.push(record.watch_id);
+        if (record.provenance === "engine") {
+          result.armed.push(record.watch_id);
+        } else {
+          result.failed.push(record.watch_id);
+        }
         return claimFailedNotification(
           {
             ...record,
@@ -1272,31 +1292,46 @@ export async function sweepWatches(
           claimedFailedWatchIds.has(record.watch_id)
         ) {
           const attempts = record.notification_attempts ?? 1;
+          if (
+            record.provenance === "engine" &&
+            record.change === "content" &&
+            notification.reason === "deadline_elapsed" &&
+            typeof notification.observed_value === "string"
+          ) {
+            const reason =
+              terminalFailureReason ??
+              (delivered ? null : "terminal_notice_fire_once");
+            if (reason) exhausted = { notification, attempts, reason };
+            const {
+              terminal_reason: _terminalReason,
+              terminal_at_ms: _terminalAt,
+              notification_exhausted_at_ms: _exhaustedAt,
+              notification_exhausted_reason: _exhaustedReason,
+              ...persistent
+            } = record;
+            return {
+              ...persistent,
+              ...rolledEngineContentDeadline(
+                record,
+                notification.reason,
+                observedAt,
+              ),
+              state: "armed" as const,
+              fingerprint: notification.observed_value,
+              observed_value: notification.observed_value,
+              deadline_notified_at_ms: observedAt,
+              notification_pending: false,
+              notification_attempts: attempts,
+              notification_next_attempt_at_ms: undefined,
+              ...(delivered
+                ? { notification_delivered_at_ms: observedAt }
+                : {
+                    notification_exhausted_at_ms: observedAt,
+                    notification_exhausted_reason: reason!,
+                  }),
+            };
+          }
           if (delivered) {
-            if (
-              record.change === "content" &&
-              notification.reason === "deadline_elapsed" &&
-              typeof notification.observed_value === "string"
-            ) {
-              const {
-                terminal_reason: _terminalReason,
-                terminal_at_ms: _terminalAt,
-                notification_exhausted_at_ms: _exhaustedAt,
-                notification_exhausted_reason: _exhaustedReason,
-                ...persistent
-              } = record;
-              return {
-                ...persistent,
-                state: "armed" as const,
-                fingerprint: notification.observed_value,
-                observed_value: notification.observed_value,
-                deadline_notified_at_ms: observedAt,
-                notification_pending: false,
-                notification_attempts: attempts,
-                notification_next_attempt_at_ms: undefined,
-                notification_delivered_at_ms: observedAt,
-              };
-            }
             const {
               notification_exhausted_at_ms: _exhaustedAt,
               notification_exhausted_reason: _exhaustedReason,
@@ -1341,6 +1376,11 @@ export async function sweepWatches(
             } = record;
             return {
               ...persistent,
+              ...rolledEngineContentDeadline(
+                record,
+                notification.reason,
+                observedAt,
+              ),
               state: "armed" as const,
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
@@ -1371,6 +1411,11 @@ export async function sweepWatches(
             } = record;
             return {
               ...persistent,
+              ...rolledEngineContentDeadline(
+                record,
+                notification.reason,
+                observedAt,
+              ),
               state: "armed" as const,
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
@@ -1404,6 +1449,11 @@ export async function sweepWatches(
             } = record;
             return {
               ...persistent,
+              ...rolledEngineContentDeadline(
+                record,
+                notification.reason,
+                observedAt,
+              ),
               state: "armed" as const,
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
