@@ -32,13 +32,14 @@ function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
-async function callTool(
+function callTool(
   server: any,
   name: string,
   args: Record<string, unknown>,
 ) {
   const tool = server._registeredTools[name];
   if (!tool) throw new Error(`Tool not found: ${name}`);
+  if (name === "send_to") args = { verbose: true, ...args };
   return tool.handler(args, {} as any);
 }
 

@@ -363,7 +363,7 @@ function createTrackedServer(
   if (sendToTool?.handler) {
     const sendToHandler = sendToTool.handler.bind(sendToTool);
     sendToTool.handler = (args: Record<string, unknown>, toolContext: unknown) =>
-      sendToHandler({ mode: "agent", ...args }, toolContext);
+      sendToHandler({ mode: "agent", verbose: true, ...args }, toolContext);
   }
   if (defaultCallerContext) {
     const registeredTools = (server as any)._registeredTools as Record<
@@ -1061,6 +1061,7 @@ describe("lean spawn tool responses", () => {
       cli: "claude",
       role: "reviewer",
       force_new: true,
+      verbose: true,
     });
 
     const result = await runWithCallerContext(
@@ -10998,6 +10999,7 @@ codex>
     expect(parsed.terminal).toBe(true);
     expect(parsed.delivery_state).toBe("submitted");
     expect(parsed.submit_verified).toBe(true);
+    expect(parsed.rpc_methods).toEqual(expect.any(Array));
   });
 
   it("send_to_agent leaves an idle agent idle when submitted delivery fails", async () => {
@@ -11200,6 +11202,7 @@ codex>
         agent_id: agentId,
         text: "interject while working",
         press_enter: true,
+        verbose: false,
       },
       {} as any,
     );
@@ -11214,9 +11217,6 @@ codex>
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.queued_behind_turn).toBe(true);
-    expect(parsed.transport).toBe("cli");
-    expect(parsed.socket_path).toBeNull();
-    expect(parsed.socket_path_state).toBe("unavailable");
     expect(parsed.warnings).toContain("cli_fallback_active");
     expect(deliveredText).toBe("interject while working");
     expect(sendCalls[0]?.[1]).toEqual(

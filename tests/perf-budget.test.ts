@@ -1045,7 +1045,10 @@ describe("daemon performance budget", () => {
     expect(source).toMatch(
       /await Promise\.all\([\s\S]*?validateReceipt\?\.[\s\S]*?\);\n {4}const elapsedMs = nowMs\(\) - startedAt;/,
     );
-    expect(source).toContain('"sampled surface send initial receipt"');
+    expect(source).not.toContain('"sampled surface send initial receipt"');
+    expect(source).toContain(
+      "const terminal = await requireSubmittedDelivery(\n          client,\n          receipt,\n          \"sampled surface send\"",
+    );
     expect(source).toContain(
       'requireTerminalSubmission(receipt, "parallel send initial receipt")',
     );

@@ -13,7 +13,6 @@ const base = {
   role: "worker",
   cwd: "/tmp/cmuxlayer",
   boot_prompt_delivered: false,
-  boot_prompt_submit_verified: null,
 };
 
 describe("spawn response shaping", () => {
@@ -151,6 +150,28 @@ describe("spawn response shaping", () => {
 
     expect(shaped.readiness_recovered).toBe(true);
     expect(shaped.readiness_cleared).toEqual(["wenfnng"]);
+  });
+
+  it("distinguishes no boot prompt from an attempted but unverified prompt", () => {
+    const noPrompt = shapeSpawnResponse({
+      ...base,
+      boot_prompt_receipt: null,
+      boot_prompt_submit_verified: null,
+    });
+    const attempted = shapeSpawnResponse({
+      ...base,
+      boot_prompt_receipt: { submit_verified: null },
+      boot_prompt_submit_verified: null,
+    });
+
+    expect(noPrompt.boot_prompt_delivered).toBe(false);
+    expect(noPrompt).not.toHaveProperty("boot_prompt_receipt");
+    expect(noPrompt).not.toHaveProperty("boot_prompt_submit_verified");
+    expect(attempted).toMatchObject({
+      boot_prompt_delivered: false,
+      boot_prompt_receipt: { submit_verified: null },
+      boot_prompt_submit_verified: null,
+    });
   });
 
   it("uses the same lean payload for text and structured content", () => {
