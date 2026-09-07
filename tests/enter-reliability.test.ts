@@ -919,6 +919,29 @@ describe("enter reliability", () => {
     expect(contentReceipt).toEqual(result.structuredContent);
   });
 
+  it("keeps a successful send_to receipt lean unless verbose is requested", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "idle" });
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "lean successful receipt",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(Object.keys(parsed).length).toBeLessThanOrEqual(6);
+    expect(parsed).not.toHaveProperty("rpc_methods");
+    expect(parsed).not.toHaveProperty("timings_ms");
+    expect(parsed).not.toHaveProperty("transport");
+    expect(parsed).not.toHaveProperty("WARNING");
+    expect(parsed).not.toHaveProperty("boot_prompt_receipt");
+  });
+
   it("resolves agent-mode composer-only delivery as terminal typed on the same ID", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";
