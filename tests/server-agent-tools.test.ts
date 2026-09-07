@@ -54,6 +54,7 @@ import { MODEL_OVERRIDE_ENV } from "../src/model-policy.js";
 import {
   armWatch,
   readWatchRegistry,
+  removeWatches,
   sweepWatches,
 } from "../src/watch-spec.js";
 import { recordCliFallback } from "../src/transport-retry-context.js";
@@ -2535,7 +2536,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
   });
 
-  it("P11b/#462: resume refreshes a custom contract and adopts its legacy watch", async () => {
+  it("P11b/#462: resume adopts legacy and re-arms a notified watch", async () => {
     // Before this, resume returned no contract at all: no report_path, no
     // done_marker, no contract file. The crash-recovery case this repo exists
     // for was the one case where a lead could not even see where its worker
@@ -2589,8 +2590,10 @@ describe("agent lifecycle tool handlers", () => {
       sessionIdentityResolver: () => null,
       inboxBaseDir: resumeInboxDir,
       watchRegistryPath,
+      reportWatchDeadlineMs: 2_000,
     });
-    await serverContexts.at(-1)?.lifecycleStartPromise;
+    const lifecycleContext = serverContexts.at(-1)!;
+    await lifecycleContext.lifecycleStartPromise;
     // Arm after startup pruning so this assertion isolates resume's dedupe
     // boundary rather than the separate terminal-child startup policy.
     const oldWatch = await armWatch(
@@ -2643,12 +2646,9 @@ describe("agent lifecycle tool handlers", () => {
       );
 
       // Persisted, so the closure consumer reads what resume issued.
-      const stateTool = (server as any)._registeredTools["get_agent_state"];
-      const detail = parseToolResult(
-        await stateTool.handler({ agent_id: agentId }, {} as any),
-      ) as Record<string, unknown>;
-      expect(detail.report_path).toBe(expected.report_path);
-      expect(detail.done_marker).toBe(expected.done_marker);
+      const detail = lifecycleContext.stateMgr.readState(agentId);
+      expect(detail?.report_path).toBe(expected.report_path);
+      expect(detail?.done_marker).toBe(expected.done_marker);
       const reportWatches = readWatchRegistry({
         registryPath: watchRegistryPath,
       }).watches.filter((watch) => watch.target === expected.report_path);
@@ -2660,6 +2660,59 @@ describe("agent lifecycle tool handlers", () => {
         change: "content",
         state: "armed",
       });
+      expect(reportWatches[0]!.deadline - reportWatches[0]!.armed_at_ms)
+        .toBe(2_000);
+
+      await removeWatches(
+        (watch) => watch.watch_id === oldWatch.watch_id,
+        { registryPath: watchRegistryPath },
+      );
+      const notifiedWatch = await armWatch(
+        {
+          owner: parentSeat,
+          subject_agent_id: agentId,
+          target: expected.report_path,
+          provenance: "engine",
+          change: "content",
+          deadline: 14_000,
+        },
+        { registryPath: watchRegistryPath, now: () => 12_000 },
+      );
+      await sweepWatches({
+        registryPath: watchRegistryPath,
+        now: () => 14_000,
+        notify: async () => true,
+      });
+      expect(
+        readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
+          (watch) => watch.watch_id === notifiedWatch.watch_id,
+        ),
+      ).toMatchObject({ deadline_notified_at_ms: 14_000 });
+
+      const engineStateMgr = lifecycleContext.lifecycleSweepEngine!.stateMgr;
+      const terminalRecord = {
+        ...engineStateMgr.readState(agentId)!,
+        state: "done" as const,
+      };
+      engineStateMgr.writeState(terminalRecord);
+      lifecycleContext.lifecycleRegistry!.set(agentId, terminalRecord);
+      const resumedAgain = parseToolResult(
+        await spawn.handler(
+          { resume_agent_id: agentId, report_path: customReportPath },
+          {} as never,
+        ),
+      ) as Record<string, unknown>;
+      expect(resumedAgain.ok, JSON.stringify(resumedAgain)).toBe(true);
+      const resumedWatch =
+        readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
+          (watch) => watch.watch_id === notifiedWatch.watch_id,
+        );
+      expect(resumedWatch).toMatchObject({
+        state: "armed",
+      });
+      expect(resumedWatch?.deadline_notified_at_ms).toBeUndefined();
+      expect(resumedWatch!.deadline - resumedWatch!.armed_at_ms).toBe(2_000);
+      expect(resumedWatch!.armed_at_ms).toBeGreaterThan(14_000);
     } finally {
       rmSync(resumeInboxDir, { recursive: true, force: true });
     }

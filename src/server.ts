@@ -13864,7 +13864,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
         const canonicalParent = canonicalAgentId(parentAgentId);
         const ownerCandidates = snapshotWatchOwnerCandidates();
-        const reportWatchDeadline = (opts?.watchRegistryNow?.() ?? Date.now()) +
+        const reportWatchArmedAt = opts?.watchRegistryNow?.() ?? Date.now();
+        const reportWatchDeadline = reportWatchArmedAt +
           (opts?.reportWatchDeadlineMs ?? DEFAULT_REPORT_WATCH_DEADLINE_MS);
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
@@ -13900,10 +13901,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               registryPath: watchRegistryPath,
             });
           }
-          if (existing.deadline === Number.MAX_SAFE_INTEGER) {
-            await updateWatchDeadline(existing.watch_id, reportWatchDeadline,
-              { registryPath: watchRegistryPath, now: opts?.watchRegistryNow });
-          }
+          await updateWatchDeadline(existing.watch_id, reportWatchDeadline, {
+            registryPath: watchRegistryPath,
+            now: () => reportWatchArmedAt,
+          });
           return null;
         }
         await mkdir(dirname(reportPath), { recursive: true });

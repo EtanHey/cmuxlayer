@@ -976,7 +976,12 @@ export function updateWatchDeadline(watchId: string, deadline: number,
     const rows = registry.rows.map((row) => {
       if (!isWatchRecord(row) || row.watch_id !== watchId) return row;
       updated = true;
-      return { ...row, armed_at_ms: armedAt, deadline };
+      return {
+        ...row,
+        armed_at_ms: armedAt,
+        deadline,
+        deadline_notified_at_ms: undefined,
+      };
     });
     if (updated) writeRegistry(path, registry.version, rows); return updated;
   });
