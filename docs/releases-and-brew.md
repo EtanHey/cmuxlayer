@@ -255,6 +255,30 @@ Manual equivalent, if you prefer:
 The formula also carries a `head` block, so `--HEAD` installs always track
 `main` with **no** sha/tag bump — that is the on-the-go dogfood path.
 
+### A release is not done at the tag
+
+**Tag pushed ≠ tap published ≠ installed ≠ served.** Steps 1–3 above produce a tag; they produce
+nothing anyone can run. A release is done only when all four of these are true, checked in order:
+
+1. **Tag pushed** — `git ls-remote --tags origin vX.Y.Z` returns the tag.
+2. **Tap published** — `brew info cmuxlayer` reports `stable: X.Y.Z`. Until the formula points at the
+   new tag, `brew upgrade cmuxlayer` is a **no-op** and every Mac stays on the old build.
+3. **Installed on every Mac** — `brew list --versions cmuxlayer` is X.Y.Z, and the running daemon's
+   path is `Cellar/cmuxlayer/X.Y.Z/libexec/dist/daemon.js`. The daemon replaces itself on upgrade;
+   confirm the path rather than assuming it.
+4. **Served** — the installed binary actually serves the change. Drive
+   `/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer` as a real MCP client (`initialize` + `tools/list`) and
+   confirm `serverInfo.version` is X.Y.Z and the behaviour you shipped is present in what it serves.
+   Per-seat MCP servers are separate processes from the daemon, so a seat keeps serving the OLD build
+   until it is reconnected: `/mcp reconnect cmuxlayer` on **every Claude seat**, verified on screen —
+   the send receipt says only that text was typed.
+
+**Why this block exists.** v0.4.71 was tagged and its release PR merged on 2026-09-07 while the tap was
+never bumped. `brew info` still resolved `stable: 0.4.70`, so the release was not installable by anyone
+and #600's merge SHA was served by nothing, with zero reconnect receipts — while the lane read as done
+because the tag existed. The procedure above was already correct; it was stopped at step 3.
+
+
 ## Pre-deploy hygiene: archive the outbox before shipping outbox-semantics changes
 
 Any release that could change how `outbox-drainer.ts` derives dedup ids or
