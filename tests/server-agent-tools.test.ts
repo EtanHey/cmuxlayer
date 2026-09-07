@@ -2683,7 +2683,7 @@ describe("agent lifecycle tool handlers", () => {
       await sweepWatches({
         registryPath: watchRegistryPath,
         now: () => 14_000,
-        notify: async () => true,
+        notify: () => Promise.resolve(true),
       });
       expect(
         readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
