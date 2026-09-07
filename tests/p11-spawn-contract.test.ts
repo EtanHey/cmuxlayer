@@ -339,7 +339,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.done_marker).toBe(parsed.done_marker);
   });
 
-  it("wakes the parent once per distinct report content", async () => {
+  it("warns once at the report deadline, then wakes once per distinct content after restart", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -383,6 +383,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         inboxBaseDir: inboxDir,
         watchRegistryPath,
         watchRegistryNow: () => watchNow,
+        reportWatchDeadlineMs: 60 * 60 * 1_000,
         watchNotify: unavailableExternalNotify,
       }),
     );
@@ -404,9 +405,26 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         target: child.report_path,
         provenance: "engine",
         change: "content",
+        deadline: 3_601_000,
         state: "armed",
       }),
     ]);
+
+    const beforeDeadline = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    watchNow = 3_601_000;
+    await engine.sweepWatchesBestEffort();
+    const deadlineCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      beforeDeadline,
+    );
+    expect(
+      deadlineCalls.filter(([, args]: [string, string[]]) =>
+        args.some(
+          (arg) =>
+            arg.includes("[watch] deadline elapsed") &&
+            arg.includes(child.report_path),
+        ),
+      ),
+    ).toHaveLength(1);
 
     await server.close();
     server = createServer(
@@ -417,11 +435,24 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         inboxBaseDir: inboxDir,
         watchRegistryPath,
         watchRegistryNow: () => watchNow,
+        reportWatchDeadlineMs: 60 * 60 * 1_000,
         watchNotify: unavailableExternalNotify,
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
     engine = server._registeredTools.interact._engine;
+    const beforeRestartSweep = (exec as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    watchNow += 1;
+    await engine.sweepWatchesBestEffort();
+    const restartCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
+      beforeRestartSweep,
+    );
+    expect(
+      restartCalls.some(([, args]: [string, string[]]) =>
+        args.some((arg) => arg.includes("[watch] deadline elapsed")),
+      ),
+    ).toBe(false);
     const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     writeFileSync(
       child.report_path,
