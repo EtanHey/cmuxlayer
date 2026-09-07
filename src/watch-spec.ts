@@ -67,6 +67,7 @@ export interface WatchRecord extends WatchSpec {
   notification_attempts?: number;
   notification_next_attempt_at_ms?: number;
   notification_delivered_at_ms?: number;
+  deadline_notified_at_ms?: number;
   notification_exhausted_at_ms?: number;
   notification_exhausted_reason?: string;
   waiter_expires_at_ms?: number;
@@ -276,6 +277,8 @@ function hasValidNotificationMetadata(
       isFiniteNumber(value.notification_next_attempt_at_ms)) &&
     (value.notification_delivered_at_ms === undefined ||
       isFiniteNumber(value.notification_delivered_at_ms)) &&
+    (value.deadline_notified_at_ms === undefined ||
+      isFiniteNumber(value.deadline_notified_at_ms)) &&
     (value.notification_exhausted_at_ms === undefined ||
       isFiniteNumber(value.notification_exhausted_at_ms)) &&
     (value.notification_exhausted_reason === undefined ||
@@ -1105,23 +1108,30 @@ export async function sweepWatches(
         }, notification);
       }
 
-      if (observedAt >= record.deadline) {
+      if (
+        record.change !== "content" &&
+        observedAt >= record.deadline &&
+        record.deadline_notified_at_ms === undefined
+      ) {
         const notification = notificationFor(
           record,
           "deadline_elapsed",
           observedAt,
         );
         result.failed.push(record.watch_id);
-        return claimFailedNotification({
-          ...record,
-          ...heartbeat,
-          state: "failed" as const,
-          terminal_reason: "deadline_elapsed" as const,
-          terminal_at_ms: observedAt,
-          notification_pending: true,
-          notification_attempts: 0,
-          notification_next_attempt_at_ms: observedAt,
-        }, notification);
+        return claimFailedNotification(
+          {
+            ...record,
+            ...heartbeat,
+            state: "failed" as const,
+            terminal_reason: "deadline_elapsed" as const,
+            terminal_at_ms: observedAt,
+            notification_pending: true,
+            notification_attempts: 0,
+            notification_next_attempt_at_ms: observedAt,
+          },
+          notification,
+        );
       }
 
       const observedValue =
@@ -1160,6 +1170,34 @@ export async function sweepWatches(
           notification_attempts: 0,
           notification_next_attempt_at_ms: observedAt,
         };
+      }
+
+      if (
+        record.change === "content" &&
+        observedAt >= record.deadline &&
+        record.deadline_notified_at_ms === undefined
+      ) {
+        const notification = notificationFor(
+          record,
+          "deadline_elapsed",
+          observedAt,
+          observedValue,
+        );
+        result.failed.push(record.watch_id);
+        return claimFailedNotification(
+          {
+            ...record,
+            ...heartbeat,
+            state: "failed" as const,
+            terminal_reason: "deadline_elapsed" as const,
+            terminal_at_ms: observedAt,
+            observed_value: observedValue,
+            notification_pending: true,
+            notification_attempts: 0,
+            notification_next_attempt_at_ms: observedAt,
+          },
+          notification,
+        );
       }
 
       if (
@@ -1235,6 +1273,30 @@ export async function sweepWatches(
         ) {
           const attempts = record.notification_attempts ?? 1;
           if (delivered) {
+            if (
+              record.change === "content" &&
+              notification.reason === "deadline_elapsed" &&
+              typeof notification.observed_value === "string"
+            ) {
+              const {
+                terminal_reason: _terminalReason,
+                terminal_at_ms: _terminalAt,
+                notification_exhausted_at_ms: _exhaustedAt,
+                notification_exhausted_reason: _exhaustedReason,
+                ...persistent
+              } = record;
+              return {
+                ...persistent,
+                state: "armed" as const,
+                fingerprint: notification.observed_value,
+                observed_value: notification.observed_value,
+                deadline_notified_at_ms: observedAt,
+                notification_pending: false,
+                notification_attempts: attempts,
+                notification_next_attempt_at_ms: undefined,
+                notification_delivered_at_ms: observedAt,
+              };
+            }
             const {
               notification_exhausted_at_ms: _exhaustedAt,
               notification_exhausted_reason: _exhaustedReason,

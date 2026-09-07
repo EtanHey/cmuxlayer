@@ -3834,6 +3834,8 @@ export interface CreateServerOptions {
   watchRegistryPath?: string;
   watchRegistryNow?: () => number;
   watchNotify?: WatchNotify;
+  /** Silence deadline for engine-owned child report watches. Defaults to one hour. */
+  reportWatchDeadlineMs?: number;
   /**
    * Enable close forensics: ingest cmux's OWN app-level `tab_close` events from
    * `~/.cmuxterm/events.jsonl` and attribute them each sweep. Omitted/false by
@@ -3880,6 +3882,7 @@ export type LifecycleAgentInputDeliverer = (args: {
 }) => Promise<PublicDeliveryReceipt & { bytes: number }>;
 
 export const DEFAULT_LIFECYCLE_START_TIMEOUT_MS = 60_000;
+export const DEFAULT_REPORT_WATCH_DEADLINE_MS = 60 * 60 * 1_000;
 
 /** Lifecycle initialization never settled inside its bound (#529). */
 export class LifecycleStartTimeoutError extends Error {
@@ -13904,7 +13907,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           target: reportPath,
           provenance: "engine",
           change: "content",
-          deadline: Number.MAX_SAFE_INTEGER,
+          deadline:
+            (opts?.watchRegistryNow?.() ?? Date.now()) +
+            (opts?.reportWatchDeadlineMs ??
+              DEFAULT_REPORT_WATCH_DEADLINE_MS),
         });
         return null;
       } catch (error) {
