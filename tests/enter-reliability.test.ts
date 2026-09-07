@@ -922,35 +922,19 @@ describe("enter reliability", () => {
 
   it("keeps a successful send_to receipt lean unless verbose is requested", async () => {
     const client = new FakeClaudeSurfaceClient();
-    client.requiredReturns = 1;
-    client.completionMode = "idle";
+    client.requiredReturns = 1; client.completionMode = "idle";
     server = createReliabilityServer(client);
     registerAgent(server, { state: "idle" });
-
-    const result = await callTool(server, "send_to", {
-      agent_id: "agent-1",
-      text: "lean successful receipt",
-      press_enter: true,
-      verbose: false,
-    });
+    const send = (text: string, verbose: boolean) => callTool(server, "send_to", { agent_id: "agent-1", text, press_enter: true, verbose });
+    const result = await send("lean successful receipt", false);
     const parsed = parseResult(result);
-
     expect(result.isError).not.toBe(true);
     expect(Object.keys(parsed).length).toBeLessThanOrEqual(6);
-    expect(parsed).not.toHaveProperty("rpc_methods");
-    expect(parsed).not.toHaveProperty("timings_ms");
-    expect(parsed).not.toHaveProperty("transport");
-    expect(parsed).not.toHaveProperty("WARNING");
+    for (const field of ["rpc_methods", "timings_ms", "transport", "WARNING"])
+      expect(parsed).not.toHaveProperty(field);
     expect(result.content[0]!.text).toBe(JSON.stringify(parsed));
-
-    const verboseResult = await callTool(server, "send_to", {
-      agent_id: "agent-1",
-      text: "verbose successful receipt",
-      press_enter: true,
-      verbose: true,
-    });
+    const verboseResult = await send("verbose successful receipt", true);
     const verboseParsed = parseResult(verboseResult);
-
     expect(verboseResult.isError).not.toBe(true);
     expect(verboseParsed).toMatchObject({ delivery_state: "submitted", submitted: true, rpc_methods: expect.any(Array), timings_ms: expect.any(Object), transport: expect.any(String), socket_path: null });
   });
