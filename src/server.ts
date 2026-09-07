@@ -428,6 +428,39 @@ type ToolReturn = {
   isError?: boolean;
 };
 
+const TRANSPORT_PROVENANCE_TOOLS = new Set([
+  "spawn_agent",
+  "send_to",
+  "close_surface",
+  "control_health",
+  "list_surfaces",
+  "read_screen",
+  "list_agents",
+]);
+
+function isLeanSuccessfulTransportReceipt(
+  toolResult: ToolReturn,
+  toolName: string,
+  verbose: boolean,
+): boolean {
+  const structured = toolResult.structuredContent;
+  if (
+    verbose ||
+    toolResult.isError === true ||
+    !structured ||
+    structured.ok !== true
+  ) {
+    return false;
+  }
+  if (toolName === "spawn_agent") return true;
+  if (toolName !== "send_to") return false;
+  const submittedReceipt =
+    structured.delivery_state === "submitted" && structured.submitted === true;
+  const verifiedKeyReceipt =
+    typeof structured.key === "string" && structured.submit_verified === true;
+  return submittedReceipt || verifiedKeyReceipt;
+}
+
 class SurfaceEnumerationError extends Error {
   constructor(message: string) {
     super(message);
@@ -5018,31 +5051,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     toolName: string,
     verbose = false,
   ): unknown => {
-    if (
-      toolName !== "spawn_agent" &&
-      toolName !== "send_to" &&
-      toolName !== "close_surface" &&
-      toolName !== "control_health" &&
-      toolName !== "list_surfaces" &&
-      toolName !== "read_screen" &&
-      toolName !== "list_agents"
-    ) {
+    if (!TRANSPORT_PROVENANCE_TOOLS.has(toolName)) {
       return result;
     }
     if (!result || typeof result !== "object") return result;
     const toolResult = result as ToolReturn;
     const structured = toolResult.structuredContent;
     if (!structured || typeof structured !== "object") return result;
-    const leanSuccessfulReceipt =
-      !verbose &&
-      toolResult.isError !== true &&
-      structured.ok === true &&
-      (toolName === "spawn_agent" ||
-        (toolName === "send_to" &&
-          ((structured.delivery_state === "submitted" &&
-            structured.submitted === true) ||
-            (typeof structured.key === "string" &&
-              structured.submit_verified === true))));
+    const leanSuccessfulReceipt = isLeanSuccessfulTransportReceipt(
+      toolResult,
+      toolName,
+      verbose,
+    );
     const provenance = transportProvenance();
     const existingWarnings = Array.isArray(structured.warnings)
       ? structured.warnings
