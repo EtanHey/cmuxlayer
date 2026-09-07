@@ -21,6 +21,7 @@ import {
   releaseWatchReportPathReservation,
   removeWatches,
   sweepWatches,
+  updateWatchDeadline,
 } from "../src/watch-spec.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-watch-spec-test");
@@ -34,6 +35,20 @@ describe("WatchSpec arm contract", () => {
 
   afterEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("updates a legacy watch deadline atomically", async () => {
+    const target = join(TEST_DIR, "legacy-deadline.md");
+    writeFileSync(target, "", "utf8");
+    const armed = await armWatch(
+      { owner: "lead-a", target, change: "content", deadline: 9_000 },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    expect(await updateWatchDeadline(armed.watch_id, 3_000,
+      { registryPath: registryPath() })).toBe(true);
+    expect(readWatchRegistry({ registryPath: registryPath() }).watches[0])
+      .toMatchObject({ watch_id: armed.watch_id, deadline: 3_000 });
   });
 
   it("notifies the transport only when the declared watch opts in", async () => {

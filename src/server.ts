@@ -97,6 +97,7 @@ import {
   removeWatches,
   reserveWatchReportPath,
   scopeWatchToSubject,
+  updateWatchDeadline,
   WatchArmError,
   type WatchNotify,
   type WatchSpec,
@@ -13863,6 +13864,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
         const canonicalParent = canonicalAgentId(parentAgentId);
         const ownerCandidates = snapshotWatchOwnerCandidates();
+        const reportWatchDeadline = (opts?.watchRegistryNow?.() ?? Date.now()) +
+          (opts?.reportWatchDeadlineMs ?? DEFAULT_REPORT_WATCH_DEADLINE_MS);
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
         }).watches.find(
@@ -13897,6 +13900,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               registryPath: watchRegistryPath,
             });
           }
+          if (existing.deadline === Number.MAX_SAFE_INTEGER) {
+            await updateWatchDeadline(existing.watch_id, reportWatchDeadline,
+              { registryPath: watchRegistryPath });
+          }
           return null;
         }
         await mkdir(dirname(reportPath), { recursive: true });
@@ -13907,10 +13914,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           target: reportPath,
           provenance: "engine",
           change: "content",
-          deadline:
-            (opts?.watchRegistryNow?.() ?? Date.now()) +
-            (opts?.reportWatchDeadlineMs ??
-              DEFAULT_REPORT_WATCH_DEADLINE_MS),
+          deadline: reportWatchDeadline,
         });
         return null;
       } catch (error) {
