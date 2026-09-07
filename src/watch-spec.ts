@@ -638,6 +638,55 @@ function rolledEngineContentDeadline(
   };
 }
 
+function settleEngineDeadlineNotification(
+  record: WatchRecord,
+  notification: WatchNotification,
+  delivered: boolean,
+  terminalFailureReason: string | null,
+  attempts: number,
+  observedAt: number,
+): { record: WatchRecord; exhausted: WatchNotificationExhausted | null } | null {
+  if (
+    record.provenance !== "engine" ||
+    record.change !== "content" ||
+    notification.reason !== "deadline_elapsed" ||
+    typeof notification.observed_value !== "string"
+  ) {
+    return null;
+  }
+  const reason =
+    terminalFailureReason ??
+    (delivered ? null : "terminal_notice_fire_once");
+  const {
+    terminal_reason: _terminalReason,
+    terminal_at_ms: _terminalAt,
+    notification_exhausted_at_ms: _exhaustedAt,
+    notification_exhausted_reason: _exhaustedReason,
+    ...persistent
+  } = record;
+  return {
+    record: {
+      ...persistent,
+      ...rolledEngineContentDeadline(record, notification.reason, observedAt),
+      state: "armed",
+      fingerprint: notification.observed_value,
+      observed_value: notification.observed_value,
+      deadline_notified_at_ms: observedAt,
+      notification_pending: false,
+      notification_attempts: attempts,
+      notification_next_attempt_at_ms: undefined,
+      ...(delivered
+        ? { notification_delivered_at_ms: observedAt }
+        : {
+            notification_exhausted_at_ms: observedAt,
+            notification_exhausted_reason:
+              reason ?? "terminal_notice_fire_once",
+          }),
+    },
+    exhausted: reason ? { notification, attempts, reason } : null,
+  };
+}
+
 function assertSpec(
   spec: WatchSpec,
   opts: WatchRegistryOptions,
@@ -1308,44 +1357,17 @@ export async function sweepWatches(
           claimedFailedWatchIds.has(record.watch_id)
         ) {
           const attempts = record.notification_attempts ?? 1;
-          if (
-            record.provenance === "engine" &&
-            record.change === "content" &&
-            notification.reason === "deadline_elapsed" &&
-            typeof notification.observed_value === "string"
-          ) {
-            const reason =
-              terminalFailureReason ??
-              (delivered ? null : "terminal_notice_fire_once");
-            if (reason) exhausted = { notification, attempts, reason };
-            const {
-              terminal_reason: _terminalReason,
-              terminal_at_ms: _terminalAt,
-              notification_exhausted_at_ms: _exhaustedAt,
-              notification_exhausted_reason: _exhaustedReason,
-              ...persistent
-            } = record;
-            return {
-              ...persistent,
-              ...rolledEngineContentDeadline(
-                record,
-                notification.reason,
-                observedAt,
-              ),
-              state: "armed" as const,
-              fingerprint: notification.observed_value,
-              observed_value: notification.observed_value,
-              deadline_notified_at_ms: observedAt,
-              notification_pending: false,
-              notification_attempts: attempts,
-              notification_next_attempt_at_ms: undefined,
-              ...(delivered
-                ? { notification_delivered_at_ms: observedAt }
-                : {
-                    notification_exhausted_at_ms: observedAt,
-                    notification_exhausted_reason: reason ?? "terminal_notice_fire_once",
-                  }),
-            };
+          const engineDeadline = settleEngineDeadlineNotification(
+            record,
+            notification,
+            delivered,
+            terminalFailureReason,
+            attempts,
+            observedAt,
+          );
+          if (engineDeadline) {
+            exhausted = engineDeadline.exhausted;
+            return engineDeadline.record;
           }
           if (delivered) {
             const {
