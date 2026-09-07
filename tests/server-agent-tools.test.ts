@@ -2116,6 +2116,14 @@ function parseToolResult(result: TestToolResult): Record<string, unknown> {
   );
 }
 
+function requireTestValue<T>(
+  value: T | null | undefined,
+  message: string,
+): T {
+  if (value === null || value === undefined) throw new Error(message);
+  return value;
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {
@@ -2592,8 +2600,10 @@ describe("agent lifecycle tool handlers", () => {
       watchRegistryPath,
       reportWatchDeadlineMs: 2_000,
     });
-    const lifecycleContext = serverContexts.at(-1);
-    if (!lifecycleContext) throw new Error("missing lifecycle test context");
+    const lifecycleContext = requireTestValue(
+      serverContexts.at(-1),
+      "missing lifecycle test context",
+    );
     await lifecycleContext.lifecycleStartPromise;
     // Arm after startup pruning so this assertion isolates resume's dedupe
     // boundary rather than the separate terminal-child startup policy.
@@ -2661,8 +2671,10 @@ describe("agent lifecycle tool handlers", () => {
         change: "content",
         state: "armed",
       });
-      const reportWatch = reportWatches[0];
-      if (!reportWatch) throw new Error("missing adopted legacy report watch");
+      const reportWatch = requireTestValue(
+        reportWatches[0],
+        "missing adopted legacy report watch",
+      );
       expect(reportWatch.deadline - reportWatch.armed_at_ms).toBe(2_000);
 
       await removeWatches(
@@ -2691,18 +2703,24 @@ describe("agent lifecycle tool handlers", () => {
         ),
       ).toMatchObject({ deadline_notified_at_ms: 14_000 });
 
-      const lifecycleEngine = lifecycleContext.lifecycleSweepEngine;
-      if (!lifecycleEngine) throw new Error("missing lifecycle test engine");
+      const lifecycleEngine = requireTestValue(
+        lifecycleContext.lifecycleSweepEngine,
+        "missing lifecycle test engine",
+      );
       const engineStateMgr = lifecycleEngine.stateMgr;
-      const resumedRecord = engineStateMgr.readState(agentId);
-      if (!resumedRecord) throw new Error("missing resumed agent state");
+      const resumedRecord = requireTestValue(
+        engineStateMgr.readState(agentId),
+        "missing resumed agent state",
+      );
       const terminalRecord = {
         ...resumedRecord,
         state: "done" as const,
       };
       engineStateMgr.writeState(terminalRecord);
-      const lifecycleRegistry = lifecycleContext.lifecycleRegistry;
-      if (!lifecycleRegistry) throw new Error("missing lifecycle test registry");
+      const lifecycleRegistry = requireTestValue(
+        lifecycleContext.lifecycleRegistry,
+        "missing lifecycle test registry",
+      );
       lifecycleRegistry.set(agentId, terminalRecord);
       const resumedAgain = parseToolResult(
         await spawn.handler(
@@ -2718,10 +2736,13 @@ describe("agent lifecycle tool handlers", () => {
       expect(resumedWatch).toMatchObject({
         state: "armed",
       });
-      if (!resumedWatch) throw new Error("missing resumed report watch");
-      expect(resumedWatch.deadline_notified_at_ms).toBeUndefined();
-      expect(resumedWatch.deadline - resumedWatch.armed_at_ms).toBe(2_000);
-      expect(resumedWatch.armed_at_ms).toBeGreaterThan(14_000);
+      const adoptedWatch = requireTestValue(
+        resumedWatch,
+        "missing resumed report watch",
+      );
+      expect(adoptedWatch.deadline_notified_at_ms).toBeUndefined();
+      expect(adoptedWatch.deadline - adoptedWatch.armed_at_ms).toBe(2_000);
+      expect(adoptedWatch.armed_at_ms).toBeGreaterThan(14_000);
     } finally {
       rmSync(resumeInboxDir, { recursive: true, force: true });
     }
