@@ -44,13 +44,11 @@ describe("WatchSpec arm contract", () => {
       { owner: "lead-a", target, change: "content", deadline: 9_000 },
       { registryPath: registryPath(), now: () => 1_000 },
     );
-
     expect(await updateWatchDeadline(armed.watch_id, 3_000,
-      { registryPath: registryPath() })).toBe(true);
+      { registryPath: registryPath(), now: () => 1_500 })).toBe(true);
     expect(readWatchRegistry({ registryPath: registryPath() }).watches[0])
-      .toMatchObject({ watch_id: armed.watch_id, deadline: 3_000 });
+      .toMatchObject({ watch_id: armed.watch_id, armed_at_ms: 1_500, deadline: 3_000 });
   });
-
   it("notifies the transport only when the declared watch opts in", async () => {
     const silentTarget = join(TEST_DIR, "silent.md");
     const notifyingTarget = join(TEST_DIR, "notifying.md");

@@ -924,12 +924,13 @@ export function updateWatchDeadline(
 ): Promise<boolean> {
   const path = registryPathFor(opts);
   return withWriteLock(path, () => {
+    const armedAt = nowMs(opts);
     const registry = readRegistryState(path);
     let updated = false;
     const rows = registry.rows.map((row) => {
       if (!isWatchRecord(row) || row.watch_id !== watchId) return row;
       updated = true;
-      return { ...row, deadline };
+      return { ...row, armed_at_ms: armedAt, deadline };
     });
     if (updated) writeRegistry(path, registry.version, rows);
     return updated;
@@ -1346,8 +1347,7 @@ export async function sweepWatches(
                 ? { notification_delivered_at_ms: observedAt }
                 : {
                     notification_exhausted_at_ms: observedAt,
-                    notification_exhausted_reason:
-                      reason ?? "terminal_notice_fire_once",
+                    notification_exhausted_reason: reason ?? "terminal_notice_fire_once",
                   }),
             };
           }

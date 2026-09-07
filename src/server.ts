@@ -13902,7 +13902,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (existing.deadline === Number.MAX_SAFE_INTEGER) {
             await updateWatchDeadline(existing.watch_id, reportWatchDeadline,
-              { registryPath: watchRegistryPath });
+              { registryPath: watchRegistryPath, now: opts?.watchRegistryNow });
           }
           return null;
         }
