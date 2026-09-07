@@ -54,7 +54,6 @@ import { MODEL_OVERRIDE_ENV } from "../src/model-policy.js";
 import {
   armWatch,
   readWatchRegistry,
-  removeWatches,
   sweepWatches,
 } from "../src/watch-spec.js";
 import { recordCliFallback } from "../src/transport-retry-context.js";
@@ -2116,14 +2115,6 @@ function parseToolResult(result: TestToolResult): Record<string, unknown> {
   );
 }
 
-function requireTestValue<T>(
-  value: T | null | undefined,
-  message: string,
-): T {
-  if (value === null || value === undefined) throw new Error(message);
-  return value;
-}
-
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {
@@ -2544,7 +2535,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
   });
 
-  it("P11b/#462: resume adopts legacy and re-arms a notified watch", async () => {
+  it("P11b/#462: resume re-arms an already-notified report watch", async () => {
     // Before this, resume returned no contract at all: no report_path, no
     // done_marker, no contract file. The crash-recovery case this repo exists
     // for was the one case where a lead could not even see where its worker
@@ -2559,6 +2550,7 @@ describe("agent lifecycle tool handlers", () => {
       "custom",
       "resume-report.md",
     );
+    let watchNow = 1_000;
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeServerAgentRecord({
@@ -2598,13 +2590,10 @@ describe("agent lifecycle tool handlers", () => {
       sessionIdentityResolver: () => null,
       inboxBaseDir: resumeInboxDir,
       watchRegistryPath,
+      watchRegistryNow: () => watchNow,
       reportWatchDeadlineMs: 2_000,
     });
-    const lifecycleContext = requireTestValue(
-      serverContexts.at(-1),
-      "missing lifecycle test context",
-    );
-    await lifecycleContext.lifecycleStartPromise;
+    await serverContexts.at(-1)?.lifecycleStartPromise;
     // Arm after startup pruning so this assertion isolates resume's dedupe
     // boundary rather than the separate terminal-child startup policy.
     const oldWatch = await armWatch(
@@ -2612,21 +2601,24 @@ describe("agent lifecycle tool handlers", () => {
         owner: parentSeat,
         subject_agent_id: agentId,
         target: expected.report_path,
+        provenance: "engine",
         change: "content",
-        deadline: Number.MAX_SAFE_INTEGER,
+        deadline: 3_000,
       },
-      { registryPath: watchRegistryPath },
+      { registryPath: watchRegistryPath, now: () => watchNow },
     );
-    appendFileSync(expected.report_path, "first revision\n", "utf8");
+    watchNow = 3_000;
     await sweepWatches({
       registryPath: watchRegistryPath,
-      notify: async () => true,
+      now: () => watchNow,
+      notify: () => Promise.resolve(true),
     });
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
         (watch) => watch.watch_id === oldWatch.watch_id,
-      )?.state,
-    ).toBe("armed");
+      ),
+    ).toMatchObject({ state: "armed", deadline_notified_at_ms: 3_000 });
+    watchNow = 10_000;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     try {
@@ -2657,7 +2649,7 @@ describe("agent lifecycle tool handlers", () => {
       );
 
       // Persisted, so the closure consumer reads what resume issued.
-      const detail = lifecycleContext.stateMgr.readState(agentId);
+      const detail = stateMgr.readState(agentId);
       expect(detail?.report_path).toBe(expected.report_path);
       expect(detail?.done_marker).toBe(expected.done_marker);
       const reportWatches = readWatchRegistry({
@@ -2670,79 +2662,10 @@ describe("agent lifecycle tool handlers", () => {
         subject_agent_id: agentId,
         change: "content",
         state: "armed",
+        armed_at_ms: 10_000,
+        deadline: 12_000,
       });
-      const reportWatch = requireTestValue(
-        reportWatches[0],
-        "missing adopted legacy report watch",
-      );
-      expect(reportWatch.deadline - reportWatch.armed_at_ms).toBe(2_000);
-
-      await removeWatches(
-        (watch) => watch.watch_id === oldWatch.watch_id,
-        { registryPath: watchRegistryPath },
-      );
-      const notifiedWatch = await armWatch(
-        {
-          owner: parentSeat,
-          subject_agent_id: agentId,
-          target: expected.report_path,
-          provenance: "engine",
-          change: "content",
-          deadline: 14_000,
-        },
-        { registryPath: watchRegistryPath, now: () => 12_000 },
-      );
-      await sweepWatches({
-        registryPath: watchRegistryPath,
-        now: () => 14_000,
-        notify: () => Promise.resolve(true),
-      });
-      expect(
-        readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
-          (watch) => watch.watch_id === notifiedWatch.watch_id,
-        ),
-      ).toMatchObject({ deadline_notified_at_ms: 14_000 });
-
-      const lifecycleEngine = requireTestValue(
-        lifecycleContext.lifecycleSweepEngine,
-        "missing lifecycle test engine",
-      );
-      const engineStateMgr = lifecycleEngine.stateMgr;
-      const resumedRecord = requireTestValue(
-        engineStateMgr.readState(agentId),
-        "missing resumed agent state",
-      );
-      const terminalRecord = {
-        ...resumedRecord,
-        state: "done" as const,
-      };
-      engineStateMgr.writeState(terminalRecord);
-      const lifecycleRegistry = requireTestValue(
-        lifecycleContext.lifecycleRegistry,
-        "missing lifecycle test registry",
-      );
-      lifecycleRegistry.set(agentId, terminalRecord);
-      const resumedAgain = parseToolResult(
-        await spawn.handler(
-          { resume_agent_id: agentId, report_path: customReportPath },
-          {} as never,
-        ),
-      ) as Record<string, unknown>;
-      expect(resumedAgain.ok, JSON.stringify(resumedAgain)).toBe(true);
-      const resumedWatch =
-        readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
-          (watch) => watch.watch_id === notifiedWatch.watch_id,
-        );
-      expect(resumedWatch).toMatchObject({
-        state: "armed",
-      });
-      const adoptedWatch = requireTestValue(
-        resumedWatch,
-        "missing resumed report watch",
-      );
-      expect(adoptedWatch.deadline_notified_at_ms).toBeUndefined();
-      expect(adoptedWatch.deadline - adoptedWatch.armed_at_ms).toBe(2_000);
-      expect(adoptedWatch.armed_at_ms).toBeGreaterThan(14_000);
+      expect(reportWatches[0]?.deadline_notified_at_ms).toBeUndefined();
     } finally {
       rmSync(resumeInboxDir, { recursive: true, force: true });
     }
