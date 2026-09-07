@@ -917,11 +917,8 @@ export function removeWatches(
   });
 }
 
-export function updateWatchDeadline(
-  watchId: string,
-  deadline: number,
-  opts: WatchRegistryOptions = {},
-): Promise<boolean> {
+export function updateWatchDeadline(watchId: string, deadline: number,
+  opts: WatchRegistryOptions = {}): Promise<boolean> {
   const path = registryPathFor(opts);
   return withWriteLock(path, () => {
     const armedAt = nowMs(opts);
@@ -932,8 +929,7 @@ export function updateWatchDeadline(
       updated = true;
       return { ...row, armed_at_ms: armedAt, deadline };
     });
-    if (updated) writeRegistry(path, registry.version, rows);
-    return updated;
+    if (updated) writeRegistry(path, registry.version, rows); return updated;
   });
 }
 
