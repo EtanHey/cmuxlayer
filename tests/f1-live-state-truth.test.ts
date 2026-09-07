@@ -32,7 +32,7 @@ function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
-async function callTool(
+function callTool(
   server: any,
   name: string,
   args: Record<string, unknown>,
