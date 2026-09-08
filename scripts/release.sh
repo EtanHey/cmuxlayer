@@ -132,10 +132,16 @@ if [ "$DRY" -ne 1 ]; then
 fi
 
 # --- CI status of the commit being released (#490) -------------------------
-# Six tagged releases shipped while publish.yml failed on every single run and
-# cmuxlayer never reached npm at all. Nothing in the release said so. The receipt
-# now carries CI's verdict on the released commit, and the banner prints it, so
-# "the release looked clean" can never again mean "nobody opened the log".
+# Six tagged releases shipped while publish.yml failed on every single run.
+# Nothing in the release said so. The receipt now carries CI's verdict on the
+# released commit, and the banner prints it, so "the release looked clean" can
+# never again mean "nobody opened the log".
+#
+# The npm half of #490 is settled: Etan ruled 2026-09-08 that cmuxlayer is not
+# published to npm, and publish.yml was deleted. Homebrew builds from the GitHub
+# tag tarball and never reads the registry, so npm was never in the install
+# path. This check is kept because its lesson was never about npm -- it is that
+# a release must carry evidence, not an absence of complaints.
 if [ "$DRY" -eq 1 ]; then
   printf 'DRY  %s\n' "read CI status for HEAD"
 else
