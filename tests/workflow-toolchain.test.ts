@@ -49,10 +49,20 @@ function suiteJobs(): Job[] {
  * The suite spawns `bun` (tests/fleet-sidebar.test.ts) and release.sh shells out
  * to `bun run`, so a bun-less runner fails on missing toolchain rather than on
  * anything about the code. Nobody read the log, so cmuxlayer never reached npm.
+ *
+ * publish.yml was deleted 2026-09-08 (#490: Etan ruled cmuxlayer is not
+ * published to npm; Homebrew builds from the tag tarball and never reads the
+ * registry). The specimen below moved to ci.yml:test, but the assertion is NOT
+ * cosmetic and must not be dropped: it is the anti-vacuity guard for the test
+ * beneath it. If `suiteJobs()` ever matches nothing -- a renamed workflow, a
+ * changed invocation -- "every suite-running job installs bun" passes over an
+ * empty list and proves nothing. Keep at least one known-good label asserted.
  */
 describe("workflow toolchain matches what the suite spawns", () => {
   it("finds the jobs that run the suite", () => {
-    expect(suiteJobs().map((job) => job.label)).toContain("publish.yml:publish");
+    const labels = suiteJobs().map((job) => job.label);
+    expect(labels).toContain("ci.yml:test");
+    expect(labels.length).toBeGreaterThan(0);
   });
 
   it("gives every suite-running job the bun the tests spawn", () => {
