@@ -538,7 +538,7 @@ describe("createServer", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("returns the exact missing-mode error and a working SDK invalid-mode example", async () => {
+  it("defaults an omitted mode and still gives an invalid mode a working example", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-send-to-schema-error");
     rmSync(stateDir, { recursive: true, force: true });
     const server = createServer({
@@ -566,12 +566,15 @@ describe("createServer", () => {
           text: "hello",
         },
       });
-      expect(missingMode.isError).toBe(true);
+      // #611: this arm used to assert the bare "mode required" refusal, which
+      // is precisely the bug -- the schema advertised mode as optional and the
+      // runtime rejected omitting it. Omission must now be accepted and take
+      // the documented default, so what is guarded here is inverted on purpose.
       const missingModeText = missingMode.content
         .filter((item) => item.type === "text")
         .map((item) => item.text)
         .join("\n");
-      expect(JSON.parse(missingModeText).error).toBe(
+      expect(missingModeText).not.toContain(
         "mode required (agent|surface|command|key)",
       );
 
@@ -876,8 +879,14 @@ describe("tool registration", () => {
 
   it("documents allow_busy as a deprecated no-op for immediate send delivery", () => {
     const source = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf8");
-    expect(source.match(/Deprecated no-op retained for compatibility/g)).toHaveLength(2);
-    expect(source.match(/queued_behind_turn, not a nonterminal queued state/g)).toHaveLength(2);
+    // #611: this pinned 300+ chars of prose per site, twice. What it should
+    // guard is that allow_busy is still marked deprecated AND that the safety
+    // gates it does NOT bypass are stated -- not the exact wording, which is
+    // what made a description trim look like a behaviour regression.
+    expect(source.match(/Deprecated no-op\./g)).toHaveLength(2);
+    expect(
+      source.match(/Safety gates still refuse text at a picker\/menu/g),
+    ).toHaveLength(2);
   });
 
   it("warns when the active socket transport reports degraded health", async () => {
