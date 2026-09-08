@@ -1,8 +1,22 @@
 name: Publish to npm
 
+# NOT tag-triggered. cmuxlayer is not distributed through npm: Homebrew builds
+# it from the GitHub tag tarball (`bun install --frozen-lockfile` + `bun run
+# build`, node_modules vendored into the cellar) and never reads the npm
+# registry, and `npx cmuxlayer` cannot work standalone because the server needs
+# the cmux app. So this workflow published nothing anyone installs -- it only
+# fired on every `v*` tag and failed on `ENEEDAUTH`, because no NPM_TOKEN
+# exists. A red check on every release that everyone learns to ignore is worse
+# than no check: it is how a real release failure gets missed later (#490).
+#
+# Kept as manual-only rather than deleted, so the capability survives if npm
+# publishing is later wanted for discoverability. If it is, do NOT add a
+# long-lived NPM_TOKEN -- use npm trusted publishing (OIDC): keep the
+# `id-token: write` permission below, drop token auth entirely, and note that
+# it requires npm CLI >= 11.5.1 and Node >= 22.14.0, and that npm binds a
+# trusted publisher through a package's settings page.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,6 +42,15 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Fail with an explanation rather than a bare ENEEDAUTH stack. Nothing is
+      # configured to authenticate this publish today; that is deliberate, and
+      # a manual run should say so instead of making the next person re-diagnose
+      # it from npm's error output.
+      - name: Check publish auth is configured
+        run: |
+          echo "::error::npm publishing is not configured for cmuxlayer, and this workflow is manual-only by design."
+          echo "cmuxlayer is installed via Homebrew from the GitHub tag tarball; the npm registry is not in its install path (#490)."
+          echo "To enable publishing, configure npm trusted publishing (OIDC) for the package -- do not add a long-lived NPM_TOKEN."
+          exit 1
+
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
