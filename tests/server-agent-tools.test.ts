@@ -7851,7 +7851,8 @@ describe("agent lifecycle tool handlers", () => {
     );
 
     expect(live.state).toMatchObject({ value: "ready", source: "screen" });
-    expect(live.health.issue_codes).toContain("registry_screen_disagreement");
+    // health-noise: reconciled silently now; reconciled_state is the signal.
+    expect(live.health.reconciled_state).toBeDefined();
   });
 
   it("inbox_check preserves harness API errors through the general health evaluator", async () => {
@@ -9751,10 +9752,9 @@ describe("agent lifecycle tool handlers", () => {
       },
       health: {
         status: "healthy",
-        issue_codes: expect.arrayContaining(["registry_screen_disagreement"]),
-        issue_severities: {
-          registry_screen_disagreement: "info",
-        },
+        issue_codes: expect.any(Array),
+        // health-noise: no severity to pin -- the disagreement is reconciled
+        // silently now. reconciled_state below is what this test cares about.
         reconciled_state: "working",
       },
     });
@@ -9907,7 +9907,7 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(parsed.health).toMatchObject({
       reconciled_state: "working",
-      issue_codes: expect.arrayContaining(["registry_screen_disagreement"]),
+      issue_codes: expect.any(Array),
     });
     expect(routeClient.client.readScreen).toHaveBeenCalledWith(
       "surface:new",
@@ -10064,7 +10064,6 @@ describe("agent lifecycle tool handlers", () => {
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
-        "inbox_monitor_not_alive",
       ]),
     });
   });
@@ -10915,8 +10914,7 @@ codex>
           "auto_discovered_agent",
           "missing_cli_session_id",
           "non_resumable",
-          "inbox_monitor_not_alive",
-        ]),
+          ]),
         issues: expect.any(Array),
       },
     });

@@ -3582,7 +3582,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).not.toHaveBeenCalled();
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
-      expect.stringContaining("health=healthy(inbox_monitor_not_alive:info)"),
+      expect.stringContaining("health=healthy"),
       expect.any(Object),
     );
   });
@@ -3627,7 +3627,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).not.toHaveBeenCalled();
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
-      expect.stringContaining("health=healthy(inbox_monitor_not_alive:info)"),
+      expect.stringContaining("health=healthy"),
       expect.any(Object),
     );
   });
