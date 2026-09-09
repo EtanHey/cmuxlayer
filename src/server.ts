@@ -723,6 +723,15 @@ const READY_PATTERN_CLIS: CliType[] = [
 const SEND_TO_WORKING_EXAMPLE =
   'Example: send_to({ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" })';
 const SendToArgsSchema = z.object({
+  // AIDEV-NOTE (#611): `.default("agent")`, NOT `.optional()`. This field was
+  // declared optional while the runtime threw when it was omitted, so the
+  // published contract and the behaviour disagreed and a correct reading of the
+  // schema produced a failing call. Agents rediscovered that by trial and error
+  // and paid 2-3 turns each time -- one of them said out loud that "the
+  // coordination tool rejected its documented default mode". Either the schema
+  // tells the truth or it must not claim optionality: agent mode is what
+  // essentially every caller means, so it is now a real default that the
+  // runtime honours.
   mode: z
     .enum(["agent", "surface", "command", "key"], {
       errorMap: () => ({
@@ -731,7 +740,7 @@ const SendToArgsSchema = z.object({
           SEND_TO_WORKING_EXAMPLE,
       }),
     })
-    .optional(),
+    .default("agent"),
   target: z
     .union([z.string(), z.number().transform((value) => String(value))])
     .optional(),
@@ -11087,7 +11096,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     "read_screen",
     "Read a terminal screen and parsed harness status. Use raw=true for full text or parsed_only=true for monitoring.",
     {
-      surface: z.string().describe("Target surface ref"),
+      surface: z.string().optional().describe("Target surface ref"),
+      // AIDEV-NOTE (#611): `surface_id` is accepted because WE taught it. Our
+      // own spawn_agent output schema and every list_agents row EMIT
+      // `surface_id`, so the natural workflow -- list_agents, then read the
+      // surface it named -- hands that key straight back and got a validation
+      // error. The value was always right; only the name was, and the tool that
+      // taught the wrong name was ours. This is an alias for that reason, not
+      // for backwards compatibility.
+      surface_id: z
+        .string()
+        .optional()
+        .describe("Alias for `surface`, as emitted by list_agents/spawn_agent."),
       workspace: z.string().optional().describe("Target workspace ref"),
       lines: z
         .number()
@@ -11120,6 +11140,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.readOnly,
     async (args) => {
       try {
+        // #611: accept either spelling, then use one resolved value below.
+        const surfaceRef = args.surface ?? args.surface_id;
+        if (!surfaceRef) {
+          throw new Error(
+            'read_screen requires a surface. Example: read_screen({ surface: "surface:122" }) -- the surface_id from list_agents is accepted too.',
+          );
+        }
         let codexAgentBeforeRead: AgentRecord | null = null;
         const hasCodexRolloutCandidate = stateMgr
           .listStates()
@@ -11134,7 +11161,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.workspace,
           ).catch(() => null);
           codexAgentBeforeRead = resolveCodexAgentForSurface(
-            args.surface,
+            surfaceRef,
             topologyBeforeRead,
           );
         }
@@ -11145,7 +11172,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "remapped_from" | "remapped_to"
         > = {};
         const snapshotOpts = {
-          surface: args.surface,
+          surface: surfaceRef,
           workspace: args.workspace,
           lines: args.lines,
           scrollback: args.scrollback,
@@ -11154,12 +11181,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ({ result, topology } = await readScreenSnapshot(snapshotOpts));
         } catch (readError) {
           const route = await resolveRawSurfaceMutationRoute(
-            args.surface,
+            surfaceRef,
             args.workspace,
             "read_screen",
           );
           if (
-            route.surface === args.surface &&
+            route.surface === surfaceRef &&
             (route.workspace ?? null) === (args.workspace ?? null)
           ) {
             throw readError;
@@ -11178,20 +11205,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
         const requestedIsLive =
-          topology?.workspaceBySurface.has(args.surface) === true ||
-          topology?.surfaceIdByRef.has(args.surface) === true;
+          topology?.workspaceBySurface.has(surfaceRef) === true ||
+          topology?.surfaceIdByRef.has(surfaceRef) === true;
         if (
           topology?.complete === true &&
           !requestedIsLive &&
           !screenRemap.remapped_from
         ) {
           const route = await resolveRawSurfaceMutationRoute(
-            args.surface,
+            surfaceRef,
             args.workspace,
             "read_screen",
           );
           screenRemap = remapFields(route);
-          if (route.surface !== args.surface) {
+          if (route.surface !== surfaceRef) {
             const remapped = await readScreenSnapshot({
               ...snapshotOpts,
               surface: route.surface,
@@ -14497,7 +14524,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
           .optional()
           .describe(
-            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and folds a pointer into the boot prompt; check `coordination_footer_delivered`. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker, or a done worker renders closure:"artifact_missing". Pass this only to place the report somewhere you already watch (e.g. a collab dir).',
+            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
           ),
         force_new: z
           .boolean()
@@ -17576,7 +17603,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "Deprecated no-op retained for compatibility: send_to always attempts immediate delivery. Input landing behind an active turn is reported as queued_behind_turn, not a nonterminal queued state. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
+          "Deprecated no-op. Safety gates still refuse text at a picker/menu or permission prompt; use mode=key to drive those deliberately.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
@@ -17586,11 +17613,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (rawArgs) => {
         let failedReceiptPayload: Record<string, unknown> = {};
         try {
-          if (rawArgs.mode === undefined) {
-            throw new Error("mode required (agent|surface|command|key)");
-          }
+          // #611: an omitted mode is no longer an error -- the schema now
+          // defaults it to "agent". Only an explicitly invalid value fails, and
+          // that goes through the enum errorMap, which already carries a
+          // copy-pasteable example.
           if ("message" in rawArgs || "command" in rawArgs || "key" in rawArgs) {
-            throw new Error("send_to accepts one payload parameter: text");
+            throw new Error(
+              "send_to accepts one payload parameter: text. " +
+                SEND_TO_WORKING_EXAMPLE,
+            );
           }
           for (const field of ["surface", "target"] as const) {
             if (typeof rawArgs[field] === "number") {
@@ -17609,7 +17640,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const args = parsedArgs.data;
           const mode = args.mode;
           if (!mode) {
-            throw new Error("mode required (agent|surface|command|key)");
+            // Defensive only: the schema default makes this unreachable. If it
+            // ever fires, say what to do rather than what went wrong (#611).
+            throw new Error(
+              `mode required (agent|surface|command|key). ${SEND_TO_WORKING_EXAMPLE}`,
+            );
           }
           if (args.targeting && mode !== "agent") {
             throw new Error(
@@ -18441,7 +18476,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "Deprecated no-op retained for compatibility: send_to_agent uses send_to and always attempts immediate delivery. Input landing behind an active turn is reported as queued_behind_turn, not a nonterminal queued state.",
+          "Deprecated no-op. Safety gates still refuse text at a picker/menu or permission prompt; use mode=key to drive those deliberately.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",

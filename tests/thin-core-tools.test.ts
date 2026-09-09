@@ -338,12 +338,15 @@ describe("send_to consolidated modes", () => {
     );
   });
 
-  it("requires mode and accepts only text as the payload parameter", async () => {
+  it("defaults an omitted mode and accepts only text as the payload parameter", async () => {
     const server = createServer({ exec: makeExec(), controlHealthIntervalMs: 0 }) as any;
     const tool = server._registeredTools.send_to;
 
+    // #611: omitting mode is legal and takes the schema default. This test was
+    // named "requires mode" and asserted the refusal, which is exactly the
+    // contract lie the fix removes: the tool advertised mode as optional.
     const missing = await tool.handler({ target: "surface:1", text: "pwd" }, {});
-    expect(parseResult(missing).error).toBe(
+    expect(parseResult(missing).error).not.toBe(
       "mode required (agent|surface|command|key)",
     );
     for (const alias of ["message", "command", "key"] as const) {

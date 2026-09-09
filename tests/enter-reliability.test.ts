@@ -1005,6 +1005,60 @@ describe("enter reliability", () => {
     await mcpClient.close();
   }, 10_000);
 
+  // AIDEV-NOTE (#611): the schema declared `mode` optional while the runtime
+  // threw when it was omitted, so a correct reading of the published contract
+  // produced a failing call. These go through a REAL MCP client because the
+  // defect was in the served contract, not in an internal helper.
+  it("delivers a send_to that omits mode, per the schema default", async () => {
+    vi.useRealTimers();
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client, false);
+    registerAgent(server, { state: "idle" });
+    const mcpClient = new Client({ name: "mode-default-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await Promise.all([
+      server.connect(serverTransport),
+      mcpClient.connect(clientTransport),
+    ]);
+    const result = await mcpClient.callTool({
+      name: "send_to",
+      arguments: { agent_id: "agent-1", text: "no mode supplied" },
+    });
+    const parsed = result.structuredContent as Record<string, unknown>;
+    expect(result.isError).not.toBe(true);
+    expect(JSON.stringify(parsed)).not.toContain("mode required");
+    expect(parsed.agent_id).toBe("agent-1");
+    await mcpClient.close();
+  }, 10_000);
+
+  it("publishes mode as defaulted, so the contract matches the runtime", async () => {
+    vi.useRealTimers();
+    const client = new FakeClaudeSurfaceClient();
+    server = createReliabilityServer(client, false);
+    const mcpClient = new Client({ name: "mode-contract-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await Promise.all([
+      server.connect(serverTransport),
+      mcpClient.connect(clientTransport),
+    ]);
+    const { tools } = await mcpClient.listTools();
+    const sendTo = tools.find((tool) => tool.name === "send_to");
+    const schema = sendTo?.inputSchema as
+      | { properties?: Record<string, { default?: unknown }>; required?: string[] }
+      | undefined;
+    // Either the schema supplies the default the runtime honours, or it marks
+    // mode required. What it must never do again is claim plain optionality.
+    const modeProperty = schema?.properties?.mode;
+    const declaresDefault = modeProperty?.default === "agent";
+    const declaresRequired = schema?.required?.includes("mode") === true;
+    expect(declaresDefault || declaresRequired).toBe(true);
+    await mcpClient.close();
+  }, 10_000);
+
   it.each(["surface", "command", "key"] as const)(
     "keeps surface identity on a shaped %s-mode success",
     (mode) => {
