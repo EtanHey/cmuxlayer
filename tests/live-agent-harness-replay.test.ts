@@ -550,8 +550,13 @@ describe("MCP-shaped no-live harness replay", () => {
       { monitor_alive: true, screen_status: "done" },
     );
 
+    // health-noise: the guard that matters is the first line -- the replay
+    // CLASSIFIER must not own a registry/screen disagreement. That still holds.
+    // agent-health no longer emits a code for it at all: it reconciles from the
+    // screen silently, and reconciled_state is where the information lives now.
     expect(classifierResult.failures).toEqual([]);
-    expect(health.issue_codes).toContain("registry_screen_disagreement");
+    expect(health.issue_codes).not.toContain("registry_screen_disagreement");
+    expect(health.reconciled_state).toBe("done");
   });
 });
 

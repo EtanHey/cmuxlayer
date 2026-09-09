@@ -102,13 +102,15 @@ describe("agent lifecycle health", () => {
       "auto_discovered_agent",
       "missing_cli_session_id",
       "non_resumable",
-      "inbox_monitor_not_alive",
+      // health-noise: inbox_monitor_not_alive is gone from this list on
+      // purpose. This agent has an EMPTY inbox, and the shipped contract's
+      // bare `tail` cannot write a heartbeat, so its absence was never
+      // evidence of anything.
     ]);
     expect(health.issue_severities).toMatchObject({
       auto_discovered_agent: "info",
       missing_cli_session_id: "info",
       non_resumable: "info",
-      inbox_monitor_not_alive: "info",
     });
   });
 
@@ -139,9 +141,9 @@ describe("agent lifecycle health", () => {
       },
     );
 
-    expect(withinGrace.issue_severities?.inbox_monitor_not_alive).toBe("info");
+    expect(withinGrace.issue_codes).not.toContain("inbox_monitor_not_alive");
     expect(withinGrace.status).toBe("healthy");
-    expect(pastGrace.issue_severities?.inbox_monitor_not_alive).toBe("info");
+    expect(pastGrace.issue_codes).not.toContain("inbox_monitor_not_alive");
     expect(pastGrace.status).toBe("healthy");
     expect(pastGrace.reconciled_state).toBeUndefined();
   });
@@ -185,7 +187,7 @@ describe("agent lifecycle health", () => {
     );
 
     expect(health.status).toBe("healthy");
-    expect(health.issue_severities?.inbox_monitor_not_alive).toBe("info");
+    expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
   });
 
   it("distinguishes a deleted inbox channel dir from a never-armed monitor", () => {
@@ -193,8 +195,13 @@ describe("agent lifecycle health", () => {
       monitor_alive: false,
       inbox_channel_dir_deleted: true,
     });
+    // health-noise: the distinction this guards is still exercised, but with
+    // UNREAD work present. An absent heartbeat on an EMPTY inbox is now silent,
+    // because the shipped contract (a bare `tail`) cannot write a heartbeat, so
+    // that state said nothing about liveness. Unread + no heartbeat still does.
     const neverArmed = evaluateAgentHealth(makeRecord(), {
       monitor_alive: false,
+      unread_count: 2,
     });
 
     expect(deleted.issue_codes).toContain("inbox_channel_dir_deleted");
@@ -238,18 +245,33 @@ describe("agent lifecycle health", () => {
     expect(health.issue_severities?.ambiguous_repo_cwd_label).toBe("info");
   });
 
-  it("marks non-Claude orchestrators as role health failures", () => {
-    const health = evaluateAgentHealth(
+  it("accepts a non-Claude orchestrator in column 0 and flags only a mis-placed one", () => {
+    // health-noise: a Codex orchestrator in the leftmost column is the fleet's
+    // STANDARD Astra topology. Flagging it -- as BLOCKING -- made every send_to
+    // to every Astra report "unhealthy", which is how a health blob stops being
+    // read. It is only worth saying when the seat is genuinely mis-placed.
+    const coordinator = evaluateAgentHealth(
       makeRecord({
         cli: "codex",
         role: "orchestrator",
         surface_provenance: "cmuxlayer_spawn",
       }),
-      { monitor_alive: true },
+      { monitor_alive: true, topology: { column: 0, column_count: 2 } },
     );
+    expect(coordinator.issue_codes).not.toContain("non_claude_orchestrator");
+    expect(coordinator.status).not.toBe("unhealthy");
 
-    expect(health.status).toBe("unhealthy");
-    expect(health.issue_codes).toContain("non_claude_orchestrator");
+    const misplaced = evaluateAgentHealth(
+      makeRecord({
+        cli: "codex",
+        role: "orchestrator",
+        surface_provenance: "cmuxlayer_spawn",
+      }),
+      { monitor_alive: true, topology: { column: 1, column_count: 2 } },
+    );
+    expect(misplaced.issue_codes).toContain("non_claude_orchestrator");
+    // Still not blocking: it is advice about placement, and it blocks nothing.
+    expect(misplaced.issue_severities?.non_claude_orchestrator).toBe("info");
   });
 
   it("#378 health: flags a Claude orchestrator spawned by a worker", () => {
@@ -289,10 +311,13 @@ describe("agent lifecycle health", () => {
       },
     );
 
+    // health-noise: the reconciliation is the whole point and it still happens.
+    // What is gone is the COMPLAINT about staleness we just self-healed in the
+    // same object -- emitting that put a permanent issue on nearly every
+    // dispatch. `reconciled_state` remains the caller-visible truth.
     expect(health.status).toBe("healthy");
     expect(health.reconciled_state).toBe("working");
-    expect(health.issue_codes).toContain("registry_screen_disagreement");
-    expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
+    expect(health.issue_codes).not.toContain("registry_screen_disagreement");
   });
 
   it("blocks a live-spinner pane after repeated recent broken-pipe writes", () => {
@@ -309,9 +334,7 @@ describe("agent lifecycle health", () => {
     expect(health.status).toBe("unhealthy");
     expect(health.issue_codes).toContain("pane_pty_dead");
     expect(health.issue_severities?.pane_pty_dead).toBe("blocking");
-    expect(health.issue_severities?.registry_screen_disagreement).toBe(
-      "degraded",
-    );
+    expect(health.reconciled_state).toBeDefined();
   });
 
   it("does not flag one transient broken-pipe write", () => {
@@ -326,7 +349,7 @@ describe("agent lifecycle health", () => {
     });
 
     expect(health.issue_codes).not.toContain("pane_pty_dead");
-    expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
+    expect(health.reconciled_state).toBe("working");
     expect(health.status).toBe("healthy");
   });
 
@@ -357,11 +380,9 @@ describe("agent lifecycle health", () => {
       },
     );
 
-    expect(health.status).toBe("degraded");
-    expect(health.issue_codes).toContain("registry_screen_disagreement");
-    expect(health.issue_severities?.registry_screen_disagreement).toBe(
-      "degraded",
-    );
+    expect(health.status).toBe("healthy");
+    expect(health.issue_codes).not.toContain("registry_screen_disagreement");
+    expect(health.reconciled_state).toBeDefined();
   });
 
   it("reconciles a ready registry agent whose pane fell back to a bare shell as errored", () => {
@@ -386,8 +407,7 @@ describe("agent lifecycle health", () => {
     });
 
     expect(health.reconciled_state).toBe("ready");
-    expect(health.issue_codes).toContain("registry_screen_disagreement");
-    expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
+    expect(health.issue_codes).not.toContain("registry_screen_disagreement");
     expect(health.status).toBe("healthy");
   });
 
@@ -424,8 +444,9 @@ describe("agent lifecycle health", () => {
     });
 
     expect(health.status).toBe("healthy");
-    expect(health.issue_codes).toContain("inbox_monitor_not_alive");
-    expect(health.issue_severities?.inbox_monitor_not_alive).toBe("info");
+    // health-noise: silent now -- a bare `tail` (what the contract instructs)
+    // cannot write a heartbeat, so its absence on an empty inbox said nothing.
+    expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
     expect(health.issue_codes).not.toContain("agent_wedged");
   });
 
