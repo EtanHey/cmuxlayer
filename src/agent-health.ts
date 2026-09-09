@@ -65,7 +65,13 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   topology_three_or_more_columns: "blocking",
   orchestrator_not_leftmost: "blocking",
   worker_in_leftmost_column: "blocking",
-  non_claude_orchestrator: "blocking",
+  // AIDEV-NOTE (health-noise): NOT blocking. A non-Claude agent in an
+  // orchestrator role is the fleet's STANDARD topology -- every Astra seat
+  // (brainlayerCodex, golemsCodex, orchestratorCodex, voicelayerCodex) runs
+  // exactly this way. Marked blocking, it made deriveStatus() return
+  // "unhealthy" on EVERY send_to to any Astra, so the whole health blob cried
+  // wolf on every dispatch until nobody read any of it.
+  non_claude_orchestrator: "info",
   worker_spawned_orchestrator: "blocking",
   inbox_channel_dir_deleted: "blocking",
   monitor_collapsed: "blocking",
@@ -418,12 +424,32 @@ export function evaluateAgentHealth(
       "inbox_channel_dir_deleted",
       "agent inbox channel dir was deleted after creation; next inbox write will recreate it",
     );
-  } else if (input.monitor_alive === false) {
+  } else if (
+    input.monitor_alive === false &&
+    ((input.unread_count ?? 0) > 0 || (input.stale_count ?? 0) > 0)
+  ) {
+    // AIDEV-NOTE (health-noise): only when there is something UNREAD to miss.
+    //
+    // An agent-sourced heartbeat has exactly one writer -- the ACK path in
+    // inbox.ts, which runs when the agent handles a message. The engine-issued
+    // contract tells a worker to run a bare `tail -n0 -F inbox.jsonl`, and a
+    // bare tail cannot write a heartbeat. So a seat that follows the contract
+    // EXACTLY and has simply received no messages has no agent heartbeat by
+    // construction, and inboxMonitorState() reports "never-armed" forever.
+    // (The other writer is source "server_boot", which readLastAgentHeartbeat
+    // deliberately ignores.)
+    //
+    // Firing on that made a healthy idle seat indistinguishable from a dead
+    // monitor, on nearly every dispatch -- the published contract and the
+    // liveness check disagreeing, which is the same defect shape as #611.
+    //
+    // The signal worth keeping is the ACTIONABLE one: messages are waiting and
+    // nothing is reading them. That is what this now says.
     addIssue(
       issueCodes,
       issues,
       "inbox_monitor_not_alive",
-      "agent inbox monitor heartbeat is absent or stale",
+      `agent has ${(input.unread_count ?? 0) + (input.stale_count ?? 0)} unhandled inbox message(s) and no live monitor heartbeat; nothing is reading its inbox`,
     );
   }
 
@@ -499,13 +525,14 @@ export function evaluateAgentHealth(
     );
   }
   if (screenConfirmedState && screenConfirmedState !== agent.state) {
+    // Reconcile SILENTLY. The screen is authoritative and we are correcting the
+    // registry from it right here -- the caller's request succeeded and nothing
+    // is wrong with it. Emitting an issue for staleness we just self-healed put
+    // a permanent complaint on nearly every dispatch, and `reconciled_state`
+    // already tells any caller that cares. A self-healed disagreement is not a
+    // health problem; an UNhealable one would be, and that surfaces elsewhere
+    // (agent_shell_fallback, pane_pty_dead).
     reconciledState = screenConfirmedState;
-    addIssue(
-      issueCodes,
-      issues,
-      "registry_screen_disagreement",
-      `registry state is ${agent.state} while screen confirms ${screenConfirmedState}`,
-    );
   }
 
   if (
@@ -587,14 +614,6 @@ export function evaluateAgentHealth(
     }
   }
 
-  if (agent.cli !== "claude" && role === "orchestrator") {
-    addIssue(
-      issueCodes,
-      issues,
-      "non_claude_orchestrator",
-      "non-Claude agent was assigned orchestrator topology role; use worker unless this is the single explicit left-side coordinator",
-    );
-  }
   if (
     agent.cli === "claude" &&
     role === "orchestrator" &&
@@ -610,6 +629,25 @@ export function evaluateAgentHealth(
 
   const topology = input.topology;
   const topologyRole = inferTopologyRole(agent, input) ?? role;
+
+  // Only fires when the seat is GENUINELY mis-placed. A non-Claude orchestrator
+  // in the leftmost column IS the explicit left-side coordinator the old
+  // message told you to be -- so the old check was advice to do the thing it
+  // was already doing, emitted as BLOCKING, on every dispatch to every Astra.
+  if (
+    agent.cli !== "claude" &&
+    role === "orchestrator" &&
+    topology &&
+    topology.column !== null &&
+    topology.column > 0
+  ) {
+    addIssue(
+      issueCodes,
+      issues,
+      "non_claude_orchestrator",
+      `non-Claude agent holds an orchestrator role in column ${topology.column}; the left-side coordinator is column 0, so use role=worker here`,
+    );
+  }
   if (topology && topology.column_count !== null) {
     if (topology.column_count >= 3) {
       addIssue(
