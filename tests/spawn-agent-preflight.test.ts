@@ -99,7 +99,7 @@ describe("spawn_agent launcher preflight", () => {
     expect(mockClient.newSplit).not.toHaveBeenCalled();
   });
 
-  it("rejects an unknown Codex model from Codex's bundled model list before creating anything", async () => {
+  it("rejects an unknown Codex model from Codex's account model list before creating anything", async () => {
     const registryPath = join(TEST_DIR, "launchers.zsh");
     writeFileSync(
       registryPath,
@@ -130,5 +130,103 @@ describe("spawn_agent launcher preflight", () => {
       defaultEngine.dispose();
       vi.unstubAllEnvs();
     }
+  });
+
+  // AIDEV-NOTE: the catalog stubs below are ARGS-AWARE on purpose. The bug was
+  // which catalog we asked, so a stub that answers every call identically
+  // cannot tell `debug models` from `debug models --bundled` and proves nothing.
+  const catalogRunner =
+    (account: string[] | "throws", bundled: string[] | "throws") =>
+    async (args: string[]) => {
+      const list = args.includes("--bundled") ? bundled : account;
+      if (list === "throws") throw new Error("catalog unavailable (offline)");
+      return {
+        stdout: JSON.stringify({ models: list.map((slug) => ({ slug })) }),
+        stderr: "",
+      };
+    };
+
+  const spawnWith = async (
+    runner: (args: string[]) => Promise<{ stdout: string; stderr: string }>,
+    model: string,
+  ) => {
+    const registryPath = join(TEST_DIR, "launchers.zsh");
+    writeFileSync(
+      registryPath,
+      'repoGolem cmuxlayer "/home/test-user/Gits/cmuxlayer"\n',
+    );
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+    const engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => []),
+      mockClient,
+      { codexModelListRunner: runner },
+    );
+    try {
+      return await engine
+        .spawnAgent({ repo: "cmuxlayer", model, cli: "codex", prompt: "" })
+        .then(
+          () => ({ ok: true as const, error: null }),
+          (error: unknown) => ({
+            ok: false as const,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+    } finally {
+      engine.dispose();
+      vi.unstubAllEnvs();
+    }
+  };
+
+  it("accepts a model the ACCOUNT catalog lists even when the bundled list omits it", async () => {
+    // The live specimen: gpt-5.3-codex-spark is in `codex debug models` with
+    // medium supported, and absent from `--bundled`. Validating against
+    // bundled made 100% of Etan's Spark quota unreachable at 3% general.
+    const result = await spawnWith(
+      catalogRunner(
+        ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.3-codex-spark"],
+        ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.4"],
+      ),
+      "gpt-5.3-codex-spark",
+    );
+    expect(result.error ?? "").not.toMatch(/Unsupported Codex model/);
+  });
+
+  it("rejects a model only the bundled list carries when the account catalog lacks it", async () => {
+    // The other direction of the same defect: bundled green-lit models the
+    // account does not have, which would only fail later, at runtime.
+    const result = await spawnWith(
+      catalogRunner(["gpt-6-astra", "gpt-5.6-sol"], ["gpt-6-astra", "gpt-5.4"]),
+      "gpt-5.4",
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Unsupported Codex model "gpt-5\.4".*No agent was spawned/s);
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
+  });
+
+  it("does not invent a rejection from the bundled list when the account catalog is unreachable", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await spawnWith(
+        catalogRunner("throws", ["gpt-6-astra", "gpt-5.6-sol"]),
+        "gpt-5.3-codex-spark",
+      );
+      expect(result.error ?? "").not.toMatch(/Unsupported Codex model/);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/bundled omission is not proof/),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("fails closed when neither catalog can be read", async () => {
+    const result = await spawnWith(
+      catalogRunner("throws", "throws"),
+      "gpt-5.3-codex-spark",
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Unable to discover Codex models.*No agent was spawned/s);
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
   });
 });

@@ -659,19 +659,53 @@ async function validateCodexModel(
 ): Promise<void> {
   if (!model?.trim() || model.trim().toLowerCase() === "codex") return;
 
-  let result: { stdout: string; stderr?: string };
-  try {
-    result = await runner(["debug", "models", "--bundled"]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+  // AIDEV-NOTE: validate against the ACCOUNT catalog, not `--bundled`.
+  //
+  // `--bundled` is the list the installed codex binary shipped with. It is
+  // wrong in BOTH directions against a real account, verified 2026-09-10:
+  //   - it OMITS gpt-5.3-codex-spark, which the account lists with medium
+  //     supported. That rejection made 100% of Etan's Spark quota unreachable
+  //     while his general weekly sat at 3%.
+  //   - it INCLUDES gpt-5.4, gpt-5.4-mini, gpt-5.2 and
+  //     gpt-daybreak-red-latest, which the account does NOT list -- so those
+  //     passed validation here and would only fail later, at runtime.
+  //
+  // A bundled omission is not proof of unavailability. So the account catalog
+  // is authoritative, and bundled is a FALLBACK that may only warn: if the
+  // account list cannot be fetched (offline, auth), we must not invent a
+  // rejection from a list we already know disagrees with the account.
+  const readCatalog = async (
+    args: string[],
+  ): Promise<string[] | { error: string }> => {
+    try {
+      const result = await runner(args);
+      return parseCodexModelSlugs(result.stdout);
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
+  const account = await readCatalog(["debug", "models"]);
+  if (Array.isArray(account)) {
+    if (!account.includes(model.trim())) {
+      throw new Error(
+        `Unsupported Codex model "${model.trim()}". Codex models: ${account.join(", ")}. No agent was spawned.`,
+      );
+    }
+    return;
+  }
+
+  // Account catalog unavailable. Fall back to bundled, but only to catch an
+  // obvious typo -- never to reject a model the bundled list simply predates.
+  const bundled = await readCatalog(["debug", "models", "--bundled"]);
+  if (!Array.isArray(bundled)) {
     throw new Error(
-      `Unable to discover Codex models: ${message}. No agent was spawned.`,
+      `Unable to discover Codex models: ${account.error}. No agent was spawned.`,
     );
   }
-  const models = parseCodexModelSlugs(result.stdout);
-  if (!models.includes(model.trim())) {
-    throw new Error(
-      `Unsupported Codex model "${model.trim()}". Codex models: ${models.join(", ")}. No agent was spawned.`,
+  if (!bundled.includes(model.trim())) {
+    console.warn(
+      `[cmuxlayer] Codex account catalog unavailable (${account.error}); "${model.trim()}" is not in the BUNDLED list either. Proceeding anyway: a bundled omission is not proof the account lacks the model. Bundled: ${bundled.join(", ")}`,
     );
   }
 }
