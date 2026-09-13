@@ -174,6 +174,22 @@ describe("spawn response shaping", () => {
     });
   });
 
+  it("names false/null boot submission as partial in lean and verbose receipts", () => {
+    for (const submit_verified of [false, null]) {
+      for (const verbose of [false, true]) {
+        const result = buildSpawnToolReturn({ ...base,
+          spawn_state: "boot_unsubmitted",
+          boot_prompt_receipt: { submit_verified } }, verbose, "legacy");
+        expect(result.structuredContent).toMatchObject({ ok: true,
+          spawn_state: "boot_unsubmitted", agent_id: "agent-1",
+          surface_id: "surface:1", workspace_id: "workspace:1",
+          next_action: expect.stringContaining('send_to({mode:"key"'),
+          boot_prompt_receipt: { submit_verified } });
+        expect(result.content[0]!.text.split("\n")[0]).toContain("boot_unsubmitted");
+      }
+    }
+  });
+
   it("uses the same lean payload for text and structured content", () => {
     const result = buildSpawnToolReturn({ ...base, retry_count: 0 });
 

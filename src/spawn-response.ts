@@ -6,10 +6,13 @@ const FRESH_SPAWN_INFO_CODES = new Set([
 ]);
 
 const ESSENTIAL_FIELDS = [
+  "spawn_state",
+  "next_action",
   "retry_count",
   "agent_id",
   "surface_id",
   "workspace_id",
+  "delivered_chars",
   "state",
   "model",
   "requested_model",
@@ -41,7 +44,6 @@ const ESSENTIAL_FIELDS = [
 ] as const;
 
 type JsonObject = Record<string, unknown>;
-
 export interface SpawnToolReturn {
   [key: string]: unknown;
   content: Array<{ type: "text"; text: string }>;
@@ -52,6 +54,11 @@ function record(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : null;
+}
+
+function bootUnsubmittedNextAction(surface: unknown): string {
+  const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
+  return `Read the pane with read_screen({surface:"${surfaceRef}"}); if the brief is still in the composer, submit it with send_to({mode:"key",surface:"${surfaceRef}",key:"return"}); never re-spawn.`;
 }
 
 function leanHealth(value: unknown): JsonObject | undefined {
@@ -155,7 +162,11 @@ export function buildSpawnToolReturn(
   legacyText?: string,
   leanData?: JsonObject,
 ): SpawnToolReturn {
-  const full = { ok: true, ...data };
+  const state = data.spawn_state;
+  const full = { ok: true, ...data,
+    ...(state === "boot_unsubmitted"
+      ? { next_action: bootUnsubmittedNextAction(data.surface_id) }
+      : {}) };
   const payload = verbose
     ? full
     : leanData
@@ -165,7 +176,12 @@ export function buildSpawnToolReturn(
     content: [
       {
         type: "text",
-        text: verbose && legacyText ? legacyText : JSON.stringify(payload),
+        text:
+          verbose && legacyText && state
+            ? `spawn_state: ${state}\n${legacyText}`
+            : verbose && legacyText
+              ? legacyText
+            : JSON.stringify(payload),
       },
     ],
     structuredContent: payload,

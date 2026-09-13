@@ -126,6 +126,7 @@ const AGENT_TOOLS = [
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
+  bootPromptFailure?: "return" | "surface-gone";
   shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
@@ -175,6 +176,9 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
+        if (opts?.bootPromptFailure === "return") {
+          throw new Error("Return delivery failed");
+        }
         readyText =
           activeCli === "codex"
             ? `${pendingText}\n${workingText()}`
@@ -292,6 +296,11 @@ function makeLifecycleExec(opts?: {
     }
 
     if (args.includes("read-screen")) {
+      if (promptPending && opts?.bootPromptFailure === "surface-gone") {
+        throw Object.assign(new Error("surface disappeared"), {
+          stderr: "not_found: Surface not found for the given surface_id",
+        });
+      }
       return {
         stdout: JSON.stringify({
           surface: currentSurface,
@@ -5337,6 +5346,8 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.spawn_state).toBe("started");
+    expect(parsed).not.toHaveProperty("next_action");
     expect(
       mockExec.mock.calls.some(
         ([, args]) =>
@@ -7299,6 +7310,38 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it.each(["return", "surface-gone"] as const)(
+    "spawn_agent distinguishes a live boot delivery error from %s",
+    async (bootPromptFailure) => {
+    const promptPath = join(TEST_DIR, `${bootPromptFailure}.md`);
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const server = createLifecycleServer(
+      makeLifecycleExec({ bootPromptFailure }),
+    );
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+    const result = await spawn.handler(
+      { repo: "brainlayer", model: "codex", cli: "codex",
+        boot_prompt_path: promptPath, boot_prompt_timeout_ms: 20 },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+    if (bootPromptFailure === "surface-gone") {
+      expect(result.isError).toBe(true);
+      expect(parsed).toMatchObject({ ok: false, error_code: "pane_died" });
+    } else {
+      expect(result.isError).not.toBe(true);
+      expect(parsed).toMatchObject({ ok: true, spawn_state: "boot_unsubmitted",
+        next_action: expect.stringContaining("never re-spawn"),
+        delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
+      expect(result.content[0]!.text.split("\n")[0]).toContain("boot_unsubmitted");
+      const state = parseToolResult(
+        await getState.handler({ agent_id: parsed.agent_id }, {} as any));
+      expect(state).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false });
+      expect(state.state).not.toBe("error");
+    }
+  });
+
   it("spawn_agent keeps a live registered pane when front-matter delivery reaches its queued deadline", async () => {
     const promptPath = join(TEST_DIR, "front-matter.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
@@ -7355,6 +7398,8 @@ describe("agent lifecycle tool handlers", () => {
     );
 
     expect(result.ok).toBe(true);
+    expect(result.spawn_state).toBe("boot_unsubmitted");
+    expect(result.next_action).toContain("never re-spawn");
     expect(result.surface_id).toBe("surface:new");
     expect(result.boot_prompt_receipt).toMatchObject({
       delivery_state: "queued",
