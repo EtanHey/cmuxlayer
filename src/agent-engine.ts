@@ -3044,18 +3044,65 @@ export class AgentEngine {
         },
       );
       this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
-      const surface =
+      // AIDEV-NOTE (#510): target the pane by its STABLE id, not its positional
+      // ref. `placement.pane` is a `pane:N` ref chosen from the observation above,
+      // and positional refs renumber when panes close -- so by the time
+      // `new-surface` ran, `pane:N` could name a different pane or none at all
+      // (#510: pane:103 vs actual pane:104; 2026-09-13: pane:49 in a workspace
+      // whose only pane was pane:2). `cmux new-surface --pane` accepts `<id|ref>`,
+      // and every CmuxPane already carries its UUID via `--id-format both`, so a
+      // UUID target cannot drift. `new-split` was hardened against raw pane refs
+      // in June via a surface anchor; this closes the other placement command.
+      // Falls back to the ref only when a pane carries no id.
+      const newSurfacePaneTarget =
         placement.kind === "surface"
-          ? await this.client.newSurface({
-              pane: placement.pane,
-              type: "terminal",
-              workspace,
-            })
-          : await this.client.newSplit(placement.direction, {
-              ...(placement.pane ? { pane: placement.pane } : {}),
-              workspace,
-              type: "terminal",
-            });
+          ? (panes.panes.find((pane) => pane.ref === placement.pane)?.id ??
+            placement.pane)
+          : undefined;
+      let surface;
+      try {
+        surface =
+          placement.kind === "surface"
+            ? await this.client.newSurface({
+                pane: newSurfacePaneTarget ?? placement.pane,
+                type: "terminal",
+                workspace,
+              })
+            : await this.client.newSplit(placement.direction, {
+                ...(placement.pane ? { pane: placement.pane } : {}),
+                workspace,
+                type: "terminal",
+              });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const code =
+          error && typeof error === "object" && "code" in error
+            ? String((error as { code?: unknown }).code)
+            : "";
+        const paneGone =
+          placement.kind === "surface" &&
+          (code === "not_found" || /\bnot_found\b/.test(message)) &&
+          /pane/i.test(message);
+        if (paneGone) {
+          // With a UUID target this is no longer a drifted ref -- the pane is
+          // genuinely gone. Do NOT re-place inside this call: that would re-run
+          // placement against a fresh observation under the SAME observer epoch,
+          // which is exactly what the refusals above exist to prevent. Fail
+          // loudly instead. A caller that swallows this and continues with a
+          // native subagent leaves an invisible worker (#510, #519 consequence).
+          throw new PlacementSurfaceBindingError(
+            `Target pane ${placement.pane}${
+              newSurfacePaneTarget && newSurfacePaneTarget !== placement.pane
+                ? ` (id ${newSurfacePaneTarget})`
+                : ""
+            } no longer exists; NO agent surface was created. ` +
+              "The pane closed between observation and placement. Retry " +
+              "spawn_agent (it re-observes from scratch); do not substitute an " +
+              `untracked native worker. cmux said: ${message}`,
+          );
+        }
+        throw error;
+      }
       // Transfer the created handle to the caller before any post-mutation
       // epoch assertion can throw. The caller owns cleanup until it durably
       // binds this exact surface into agent state.
