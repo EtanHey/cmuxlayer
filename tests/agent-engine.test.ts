@@ -1768,6 +1768,118 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
 
+    // AIDEV-NOTE (#510): spawn must target a pane by its STABLE id. A positional
+    // `pane:N` ref renumbers when panes close, so it can name a different pane --
+    // or none -- by the time `new-surface` runs (#510 pane:103 vs pane:104;
+    // 2026-09-13 pane:49 in a workspace whose only pane was pane:2).
+    const twoPaneWorkspace = (withIds: boolean) => {
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ...(withIds ? { id: "0A359EEC-LEFT-4DAE-837C-F3703C447E87" } : {}),
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive-left"],
+          },
+          {
+            ...(withIds ? { id: "42959CA1-RGHT-465C-8971-CA441DB0E23D" } : {}),
+            ref: "pane:right",
+            index: 1,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:interactive-right"],
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: pane ?? "pane:left",
+        surfaces:
+          pane === "pane:right"
+            ? [makeSurface("surface:interactive-right")]
+            : [makeSurface("surface:interactive-left")],
+      }));
+    };
+
+    it("targets new-surface by the pane's stable id, not its positional ref (#510)", async () => {
+      twoPaneWorkspace(true);
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "42959CA1-RGHT-465C-8971-CA441DB0E23D",
+        type: "terminal",
+        workspace: "ws:1",
+      });
+      expect(mockClient.newSurface).not.toHaveBeenCalledWith(
+        expect.objectContaining({ pane: "pane:right" }),
+      );
+    });
+
+    it("fails loudly with no surface created when the target pane is gone, and does not retry", async () => {
+      twoPaneWorkspace(true);
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error(
+          "cmux new-surface failed: Command failed: cmux --json --id-format both new-surface --pane 42959CA1-RGHT-465C-8971-CA441DB0E23D --type terminal (Error: not_found: Pane not found, exit 1)",
+        ),
+      );
+      const agentsBefore = engine.listAgents().length;
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Fix gap F",
+          workspace: "ws:1",
+        }),
+      ).rejects.toThrow(
+        /pane:right \(id 42959CA1-RGHT-465C-8971-CA441DB0E23D\) no longer exists; NO agent surface was created.*do not substitute an untracked native worker/s,
+      );
+
+      // Exactly one attempt: no hidden re-placement under the same observer
+      // epoch, which the placement refusals exist to prevent.
+      expect(mockClient.newSurface).toHaveBeenCalledTimes(1);
+      expect(engine.listAgents()).toHaveLength(agentsBefore);
+    });
+
+    it("passes a non-pane new-surface failure through unchanged", async () => {
+      twoPaneWorkspace(true);
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("cmux new-surface failed: access denied (exit 1)"),
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Fix gap F",
+          workspace: "ws:1",
+        }),
+      ).rejects.toThrow(/access denied/);
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Fix gap F",
+          workspace: "ws:1",
+        }),
+      ).resolves.toBeDefined();
+    });
+
     it("reuses the rightmost pane as worker tabs when a worker pane already exists", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -2857,8 +2969,11 @@ describe("AgentEngine", () => {
         workspace: "ws:1",
       });
 
+      // #510: this is the one fixture whose panes carry stable ids, so the
+      // target is now the pane UUID, not the positional `pane:right` ref. A
+      // positional ref renumbers when panes close; the id cannot drift.
       expect(mockClient.newSurface).toHaveBeenCalledWith({
-        pane: "pane:right",
+        pane: "pane-right-id",
         type: "terminal",
         workspace: "ws:1",
       });
