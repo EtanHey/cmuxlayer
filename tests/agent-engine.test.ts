@@ -4225,26 +4225,26 @@ describe("AgentEngine", () => {
 
     // Shared by the #629 fixture guard and the #629 it.fails, so both see the same record and screen.
     async function seedModelDriftAgent(): Promise<void> {
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: "agent-model-drift",
-        state: "ready",
-        surface_id: "surface:model-drift",
-        cli: "codex",
-        model: "gpt-5.3-codex-spark",
-        effort: "medium",
-        parsed_model: "gpt-5.3-codex-spark medium",
-        model_mismatch: false,
-      }),
-    );
-    liveSurfaces = [makeSurface("surface:model-drift")];
-    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
-      surface: "surface:model-drift",
-      text: TERRA_CODEX_SCREEN,
-      lines: 20,
-      scrollback_used: false,
-    });
-    await engine.getRegistry().reconstitute();
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-model-drift",
+          state: "ready",
+          surface_id: "surface:model-drift",
+          cli: "codex",
+          model: "gpt-5.3-codex-spark",
+          effort: "medium",
+          parsed_model: "gpt-5.3-codex-spark medium",
+          model_mismatch: false,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:model-drift")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:model-drift",
+        text: TERRA_CODEX_SCREEN,
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
     }
 
     it("guard for #629: the sweep reaches the drift fixture (same record and screen as the it.fails)", async () => {
@@ -4252,12 +4252,13 @@ describe("AgentEngine", () => {
 
       await engine.runSweep();
 
-      expect(engine.getAgentState("agent-model-drift")).toBeDefined();
+      expect(engine.getAgentState("agent-model-drift")).toMatchObject({ state: "ready" });
       expect(mockClient.readScreen).toHaveBeenCalledWith(
         "surface:model-drift",
         expect.anything(),
       );
     });
+
     // AIDEV-NOTE: #629. parsed_model/model_mismatch are only reconciled in maybeMarkBootReady,
     // which returns early unless state === "booting", so a model switch after boot is never seen.
     // Flip to `it` when #629 lands.
