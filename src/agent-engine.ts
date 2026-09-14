@@ -4240,17 +4240,17 @@ export class AgentEngine {
       case "awaiting_input":
         return (
           `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the prompt, ` +
-          `send_key(surface: "${agent.surface_id}", key: "return")`
+          `send_to({mode: "key", surface: "${agent.surface_id}", text: "return"})`
         );
       case "idle_without_done":
-        return `interact(agent: "${agent.agent_id}", action: "send", text: "Continue and report status.")`;
+        return `send_to({agent_id: "${agent.agent_id}", text: "Continue and report status."})`;
       case "wedged":
-        return `interact(agent: "${agent.agent_id}", action: "interrupt")`;
+        return `send_to({mode: "key", surface: "${agent.surface_id}", text: "escape"})`;
       case "paused":
         return (
           `read_screen(surface: "${agent.surface_id}", parsed_only: true); ` +
           `the child is paused and cannot act — unpause the pane before send_to, ` +
-          `or send_key(surface: "${agent.surface_id}", key: "return") if the screen says to resume`
+          `or send_to({mode: "key", surface: "${agent.surface_id}", text: "return"}) if the screen says to resume`
         );
       case "harness_api_error":
         return `inspect the harness API error and request ID on surface ${agent.surface_id}, then retry or resume the harness turn`;
