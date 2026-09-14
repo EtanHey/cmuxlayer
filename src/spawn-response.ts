@@ -180,7 +180,9 @@ export function buildSpawnToolReturn(
       {
         type: "text",
         text: verbose && legacyText
-          ? `${JSON.stringify(payload)}\n${legacyText}`
+          ? state
+            ? `${JSON.stringify(payload)}\n${legacyText}`
+            : legacyText
           : JSON.stringify(payload),
       },
     ],

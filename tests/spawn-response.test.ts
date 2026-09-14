@@ -192,6 +192,23 @@ describe("spawn response shaping", () => {
     }
   });
 
+  it.each([
+    {
+      caller: "new_worktree_split",
+      data: { retry_count: 0, agent_id: "agent-1", worktree: { path: "/tmp/wt" } },
+      legacyText: '{"ok":true,"tool":"new_worktree_split"}',
+    },
+    {
+      caller: "spawn_in_workspace",
+      data: { retry_count: 0, workspace: "workspace:1", agents: [] },
+      legacyText: '{"ok":true,"tool":"spawn_in_workspace"}',
+    },
+  ])("keeps $caller stateless verbose legacy text bare", ({ data, legacyText }) => {
+    const result = buildSpawnToolReturn(data, true, legacyText);
+
+    expect(result.content[0]!.text).toBe(legacyText);
+  });
+
   it("uses the same lean payload for text and structured content", () => {
     const result = buildSpawnToolReturn({ ...base, retry_count: 0 });
 

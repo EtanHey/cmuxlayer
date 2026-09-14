@@ -137,6 +137,7 @@ function makeLifecycleExec(opts?: {
   let pendingText = "";
   let activeCli: "claude" | "codex" | "cursor" = "claude";
   let createdSurfaceCount = 0;
+  let bootPromptReturnFailures = 0;
   let currentSurface = "surface:new";
   const listedSurface = () =>
     surfaceLive
@@ -176,7 +177,10 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        if (opts?.bootPromptFailure === "return") {
+        if (
+          opts?.bootPromptFailure === "return" &&
+          bootPromptReturnFailures++ === 0
+        ) {
           throw new Error("Return delivery failed");
         }
         readyText =
@@ -7346,7 +7350,7 @@ describe("agent lifecycle tool handlers", () => {
       const call = parsed.next_action.match(/send_to\((\{.*?\})\)/)?.[1];
       const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
       const sendResult = parseToolResult(await sendTo.handler(sendArgs, {} as any));
-      expect(String(sendResult.error ?? "")).not.toMatch(/one payload parameter/);
+      expect(sendResult, JSON.stringify(sendResult)).toMatchObject({ ok: true });
       expect(result.content[0]!.text).toMatch(
         /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
       );
