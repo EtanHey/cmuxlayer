@@ -20,7 +20,6 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { computeModelMismatch } from "../src/agent-engine.js";
 import { parseScreen } from "../src/screen-parser.js";
 import {
   AgentEngine,
@@ -29,6 +28,7 @@ import {
   buildLaunchCommand,
   buildRawResumeCommand,
   buildResumeCommand,
+  computeModelMismatch,
   extractSessionId,
   resolveSweepTiming,
   type AgentDeliveryReceipt,
@@ -3251,130 +3251,6 @@ describe("AgentEngine", () => {
       }
     });
 
-    // AIDEV-NOTE: #460-family known defects, pinned as `it.fails` (test-only branch, 2026-09-14, orc).
-    // Each `it.fails` PASSES while its defect exists and turns RED when the fix lands: the fixer then
-    // flips it to `it`. `it.fails` passes on ANY failed assertion, so each one has a plain `it` guard
-    // proving its precondition. Otherwise a broken fixture would pass forever.
-    describe("#460 family: registry truth (known defects, it.fails until fixed)", () => {
-      const TERRA_CODEX_SCREEN = [
-        ">_ OpenAI Codex",
-        "› Ask Codex to do anything",
-        "",
-        "gpt-5.6-terra medium · ~/Gits/cmuxlayer/.worktrees/lane-458",
-      ].join("\n");
-      const TASK_DONE_SCREEN = "Claude Code\nTASK_DONE";
-
-      async function sweepPastTaskDoneConfirmation(
-        agentId: string,
-        surfaceId: string,
-      ): Promise<void> {
-        const t0 = new Date("2026-09-14T10:02:00.000Z");
-        vi.setSystemTime(t0);
-        liveSurfaces = [makeSurface(surfaceId)];
-        await engine.getRegistry().reconstitute();
-        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
-          surface: surfaceId,
-          text: TASK_DONE_SCREEN,
-          lines: 20,
-          scrollback_used: false,
-        });
-        await engine.runSweep();
-        vi.setSystemTime(new Date(t0.getTime() + 5_001));
-        await engine.runSweep();
-        expect(engine.getAgentState(agentId)).toBeDefined();
-      }
-
-      it("guard for #629: the switched-model pane parses to terra and mismatches the spark pin", () => {
-        const parsed = parseScreen(TERRA_CODEX_SCREEN).model;
-        expect(parsed).toBe("gpt-5.6-terra medium");
-        expect(computeModelMismatch("gpt-5.3-codex-spark", parsed)).toBe(true);
-      });
-
-      // AIDEV-NOTE: #629. parsed_model/model_mismatch are only reconciled in maybeMarkBootReady,
-      // which returns early unless state === "booting", so a model switch after boot is never seen.
-      // Flip to `it` when #629 lands.
-      it.fails("#629: a booted agent whose pane switches model is flagged model_mismatch", async () => {
-        stateMgr.writeState(
-          makeRecord({
-            agent_id: "agent-model-drift",
-            state: "ready",
-            surface_id: "surface:model-drift",
-            cli: "codex",
-            model: "gpt-5.3-codex-spark",
-            effort: "medium",
-            parsed_model: "gpt-5.3-codex-spark medium",
-            model_mismatch: false,
-          }),
-        );
-        liveSurfaces = [makeSurface("surface:model-drift")];
-        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
-          surface: "surface:model-drift",
-          text: TERRA_CODEX_SCREEN,
-          lines: 20,
-          scrollback_used: false,
-        });
-        await engine.getRegistry().reconstitute();
-
-        await engine.runSweep();
-
-        expect(engine.getAgentState("agent-model-drift")).toMatchObject({
-          parsed_model: "gpt-5.6-terra medium",
-          model_mismatch: true,
-        });
-      });
-
-      it("guard for #630: without a report contract, the same TASK_DONE screen becomes done", async () => {
-        vi.useFakeTimers();
-        try {
-          stateMgr.writeState(
-            makeRecord({
-              agent_id: "taskdone-uncontracted",
-              state: "ready",
-              surface_id: "surface:taskdone-uncontracted",
-              cli: "claude",
-              role: "worker",
-            }),
-          );
-          await sweepPastTaskDoneConfirmation(
-            "taskdone-uncontracted",
-            "surface:taskdone-uncontracted",
-          );
-          expect(engine.getAgentState("taskdone-uncontracted")?.state).toBe("done");
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
-      // AIDEV-NOTE: #630. maybeMarkTaskDone confirms a screen TASK_DONE after 5 s without consulting
-      // the report_path/done_marker contract, so an intake-stage TASK_DONE marks a lane done that
-      // never ran. Flip to `it` when #630 lands.
-      it.fails("#630: a contracted worker with an empty report is not done on a screen TASK_DONE alone", async () => {
-        vi.useFakeTimers();
-        try {
-          const reportPath = join(TEST_DIR, "taskdone-contracted-report.md");
-          writeFileSync(reportPath, "", "utf8");
-          stateMgr.writeState(
-            makeRecord({
-              agent_id: "taskdone-contracted",
-              state: "ready",
-              surface_id: "surface:taskdone-contracted",
-              cli: "claude",
-              role: "worker",
-              report_path: reportPath,
-              done_marker: "DONE_TASKDONE_CONTRACTED",
-            }),
-          );
-          await sweepPastTaskDoneConfirmation(
-            "taskdone-contracted",
-            "surface:taskdone-contracted",
-          );
-          expect(engine.getAgentState("taskdone-contracted")?.state).not.toBe("done");
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-    });
-
     it("does not close done workers even when TASK_DONE auto-archive delay has elapsed", async () => {
       const previousMs = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
       const previousMinutes =
@@ -4306,6 +4182,146 @@ describe("AgentEngine", () => {
       await engine.runSweep();
 
       expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+  });
+
+  // AIDEV-NOTE: #460-family known defects, pinned as `it.fails` (test-only branch, 2026-09-14, orc).
+  // Each `it.fails` PASSES while its defect exists and turns RED when the fix lands: the fixer then
+  // flips it to `it`. `it.fails` passes on ANY failed assertion, so each one has a plain `it` guard
+  // proving its precondition. Otherwise a broken fixture would pass forever.
+  describe("#460 family: registry truth (known defects, it.fails until fixed)", () => {
+    const TERRA_CODEX_SCREEN = [
+      ">_ OpenAI Codex",
+      "› Ask Codex to do anything",
+      "",
+      "gpt-5.6-terra medium · ~/Gits/cmuxlayer/.worktrees/lane-458",
+    ].join("\n");
+    const TASK_DONE_SCREEN = "Claude Code\nTASK_DONE";
+
+    async function sweepPastTaskDoneConfirmation(
+      agentId: string,
+      surfaceId: string,
+    ): Promise<void> {
+      const t0 = new Date("2026-09-14T10:02:00.000Z");
+      vi.setSystemTime(t0);
+      liveSurfaces = [makeSurface(surfaceId)];
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: surfaceId,
+        text: TASK_DONE_SCREEN,
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.runSweep();
+      vi.setSystemTime(new Date(t0.getTime() + 5_001));
+      await engine.runSweep();
+    }
+
+    it("guard for #629: the switched-model pane parses to terra and mismatches the spark pin", () => {
+      const parsed = parseScreen(TERRA_CODEX_SCREEN).model;
+      expect(parsed).toBe("gpt-5.6-terra medium");
+      expect(computeModelMismatch("gpt-5.3-codex-spark", parsed)).toBe(true);
+    });
+
+    // Shared by the #629 fixture guard and the #629 it.fails, so both see the same record and screen.
+    async function seedModelDriftAgent(): Promise<void> {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "agent-model-drift",
+        state: "ready",
+        surface_id: "surface:model-drift",
+        cli: "codex",
+        model: "gpt-5.3-codex-spark",
+        effort: "medium",
+        parsed_model: "gpt-5.3-codex-spark medium",
+        model_mismatch: false,
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:model-drift")];
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+      surface: "surface:model-drift",
+      text: TERRA_CODEX_SCREEN,
+      lines: 20,
+      scrollback_used: false,
+    });
+    await engine.getRegistry().reconstitute();
+    }
+
+    it("guard for #629: the sweep reaches the drift fixture (same record and screen as the it.fails)", async () => {
+      await seedModelDriftAgent();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-model-drift")).toBeDefined();
+      expect(mockClient.readScreen).toHaveBeenCalledWith(
+        "surface:model-drift",
+        expect.anything(),
+      );
+    });
+    // AIDEV-NOTE: #629. parsed_model/model_mismatch are only reconciled in maybeMarkBootReady,
+    // which returns early unless state === "booting", so a model switch after boot is never seen.
+    // Flip to `it` when #629 lands.
+    it.fails("#629: a booted agent whose pane switches model is flagged model_mismatch", async () => {
+      await seedModelDriftAgent();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-model-drift")).toMatchObject({
+        parsed_model: "gpt-5.6-terra medium",
+        model_mismatch: true,
+      });
+    });
+
+    it("guard for #630: without a report contract, the same TASK_DONE screen becomes done", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "taskdone-uncontracted",
+            state: "ready",
+            surface_id: "surface:taskdone-uncontracted",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        await sweepPastTaskDoneConfirmation(
+          "taskdone-uncontracted",
+          "surface:taskdone-uncontracted",
+        );
+        expect(engine.getAgentState("taskdone-uncontracted")).toBeDefined();
+        expect(engine.getAgentState("taskdone-uncontracted")?.state).toBe("done");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // AIDEV-NOTE: #630. maybeMarkTaskDone confirms a screen TASK_DONE after 5 s without consulting
+    // the report_path/done_marker contract, so an intake-stage TASK_DONE marks a lane done that
+    // never ran. Flip to `it` when #630 lands.
+    it.fails("#630: a contracted worker with an empty report is not done on a screen TASK_DONE alone", async () => {
+      vi.useFakeTimers();
+      try {
+        const reportPath = join(TEST_DIR, "taskdone-contracted-report.md");
+        writeFileSync(reportPath, "", "utf8");
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "taskdone-contracted",
+            state: "ready",
+            surface_id: "surface:taskdone-contracted",
+            cli: "claude",
+            role: "worker",
+            report_path: reportPath,
+            done_marker: "DONE_TASKDONE_CONTRACTED",
+          }),
+        );
+        await sweepPastTaskDoneConfirmation(
+          "taskdone-contracted",
+          "surface:taskdone-contracted",
+        );
+        expect(engine.getAgentState("taskdone-contracted")?.state).not.toBe("done");
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
