@@ -11,6 +11,7 @@ vi.mock("node:child_process", () => ({
 
 import {
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -41,6 +42,7 @@ import {
 import type { CmuxClient } from "../src/cmux-client.js";
 import {
   MAX_CHILDREN,
+  type AgentHaltType,
   type AgentRecord,
   type AgentRoute,
   type CloseForensicsEvent,
@@ -10618,7 +10620,7 @@ Session ID: ${sessionId}`,
           to: parent.agent_id,
           tag: "agent_halt_awaiting_input",
           task: expect.stringMatching(
-            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_key\(surface: "surface:halt-awaiting", key: "return"\).*codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fad12-1111-7222-8333-444455556666/s,
+            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_to\(\{mode: "key", surface: "surface:halt-awaiting", text: "return"\}\).*codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fad12-1111-7222-8333-444455556666/s,
           ),
         }),
       ]);
@@ -10704,7 +10706,7 @@ Session ID: ${sessionId}`,
         expect.objectContaining({
           tag: "agent_halt_idle_without_done",
           task: expect.stringContaining(
-            'interact(agent: "halt-idle-child", action: "send", text: "Continue and report status.")',
+            'send_to({agent_id: "halt-idle-child", text: "Continue and report status."})',
           ),
         }),
       ]);
@@ -11302,7 +11304,7 @@ Session ID: ${sessionId}`,
       ).toEqual([
         expect.objectContaining({
           task: expect.stringMatching(
-            /halt-wedged-child.*surface:halt-wedged-child.*interact\(agent: "halt-wedged-child", action: "interrupt"\)/s,
+            /halt-wedged-child.*surface:halt-wedged-child.*send_to\(\{mode: "key", surface: "surface:halt-wedged-child", text: "escape"\}\)/s,
           ),
         }),
       ]);
@@ -11310,6 +11312,96 @@ Session ID: ${sessionId}`,
         messages.some((message) => message.task.includes(healthy.agent_id)),
       ).toBe(false);
     });
+
+    it("keeps halt unblock calls served and send_to payloads valid", async () => {
+      const { createServer } = await import("../src/server.js");
+      type ToolServer = {
+        _registeredTools: Record<string, { handler: unknown }>;
+        close(): Promise<void>;
+      };
+      type HaltInspectableEngine = {
+        haltUnblockAction(
+          agent: AgentRecord,
+          type: AgentHaltType,
+        ): string;
+      };
+      const serverStateDir = mkdtempSync(
+        join(tmpdir(), "cmux-agent-engine-halt-hint-server-"),
+      );
+      const server = createServer({
+        client: mockClient,
+        stateDir: serverStateDir,
+        disableSpawnPreflight: true,
+        exposeInternalToolsForTests: false,
+      });
+      const toolServer = server as unknown as ToolServer;
+      const inspectableEngine = engine as unknown as HaltInspectableEngine;
+      const registeredToolNames = new Set(
+        Object.keys(toolServer._registeredTools),
+      );
+      const sendTo = toolServer._registeredTools.send_to.handler as (
+        args: Record<string, unknown>,
+        extra: Record<string, never>,
+      ) => Promise<unknown>;
+      const child = makeRecord({
+        agent_id: "halt-hint-child",
+        surface_id: "surface:halt-hint-child",
+        state: "working",
+      });
+      stateMgr.writeState(child);
+      new StateManager(serverStateDir).writeState(child);
+      liveSurfaces = [makeSurface(child.surface_id)];
+      let completedReturnCount = 0;
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => {
+          const returnCount = (
+            mockClient.sendKey as ReturnType<typeof vi.fn>
+          ).mock.calls.filter(([, key]) => key === "return").length;
+          const text =
+            returnCount > completedReturnCount
+              ? "OpenAI Codex\nWorking (1s · esc to interrupt)"
+              : "Claude Code\n\nDo you want to allow this command?\n\n> 1. Allow for this session\n  2. Allow once\n  3. Deny\n\n[y/n]";
+          completedReturnCount = returnCount;
+          return { surface, text, lines: 20, scrollback_used: false };
+        },
+      );
+
+      try {
+        const haltTypes = {
+          awaiting_input: true,
+          idle_without_done: true,
+          wedged: true,
+          paused: true,
+          harness_api_error: true,
+        } satisfies Record<AgentHaltType, true>;
+        for (const haltType of Object.keys(haltTypes) as AgentHaltType[]) {
+          const action = inspectableEngine.haltUnblockAction(child, haltType);
+          const toolNames = [...action.matchAll(/\b([a-z_]+)\s*\(/g)].map(
+            ([, name]) => name,
+          );
+          for (const toolName of toolNames) {
+            expect(registeredToolNames).toContain(toolName);
+          }
+
+          const sendToPayloads = [...action.matchAll(/send_to\((\{[^)]*\})\)/g)].map(
+            ([, objectLiteral]) => Function(`return (${objectLiteral})`)() as Record<
+              string,
+              unknown
+            >,
+          );
+          for (const payload of sendToPayloads) {
+            expect(payload).not.toHaveProperty("key");
+            const result = await sendTo(payload, {});
+            expect(JSON.stringify(result)).not.toMatch(
+              /invalid arguments|requires (?:agent_id|target|text)|accepts one payload parameter|(?:unexpected|unknown|unsupported).*\bkey\b/i,
+            );
+          }
+        }
+      } finally {
+        await toolServer.close();
+        rmSync(serverStateDir, { recursive: true, force: true });
+      }
+    }, 15_000);
 
     it("routes past a halted parent to the nearest live ancestor and honors opt-out", async () => {
       let nowMs = Date.parse("2026-08-13T11:00:00.000Z");
