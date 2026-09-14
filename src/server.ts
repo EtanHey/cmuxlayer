@@ -15407,10 +15407,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   candidate instanceof DeliverySafetyGateError,
               );
               if (safetyError) {
-                return err(
-                  new Error(`Boot prompt delivery failed: ${safetyError.message}`),
-                  { ...extra, delivered_chars: e.delivered_chars },
-                );
+                return err(safetyError, {
+                  ...extra, delivered_chars: e.delivered_chars,
+                });
               }
               const bootPromptReceipt = e.submit_verification_error
                 ? { ...submitVerificationFailurePayload(e.submit_verification_error),
@@ -15427,6 +15426,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     }),
                     bytes: e.delivered_chars,
                   };
+              await refreshManagedMetadataBestEffort(result.agent_id);
+              await lifecycleSeatManifestPublisher({ agentId: result.agent_id });
               return buildSpawnToolReturn(
                 {
                   retry_count: currentTransportRetryCount(),

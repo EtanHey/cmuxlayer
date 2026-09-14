@@ -58,7 +58,7 @@ function record(value: unknown): JsonObject | null {
 
 function bootUnsubmittedNextAction(surface: unknown): string {
   const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
-  return `Read the pane with read_screen({surface:"${surfaceRef}"}); if the brief is still in the composer, submit it with send_to({mode:"key",surface:"${surfaceRef}",key:"return"}); never re-spawn.`;
+  return `Read the pane with read_screen({surface:"${surfaceRef}"}); if the brief is still in the composer, submit it with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}); never re-spawn.`;
 }
 
 function leanHealth(value: unknown): JsonObject | undefined {
@@ -120,8 +120,9 @@ export function shapeSpawnResponse(
   if (verbose) return full;
 
   const hasBootPromptReceipt = record(full.boot_prompt_receipt) !== null;
-  const lean: JsonObject = Object.fromEntries(
-    ESSENTIAL_FIELDS.filter(
+  const lean: JsonObject = {
+    ...(full.ok !== undefined ? { ok: full.ok } : {}),
+    ...Object.fromEntries(ESSENTIAL_FIELDS.filter(
       (field) =>
         full[field] !== undefined &&
         !(
@@ -129,9 +130,8 @@ export function shapeSpawnResponse(
           full[field] === null &&
           !(field === "boot_prompt_submit_verified" && hasBootPromptReceipt)
         ),
-    ).map((field) => [field, full[field]]),
-  );
-  if (full.ok !== undefined) lean.ok = full.ok;
+    ).map((field) => [field, full[field]])),
+  };
 
   const worktree = leanWorktree(full.worktree);
   if (worktree) lean.worktree = worktree;
@@ -163,25 +163,25 @@ export function buildSpawnToolReturn(
   leanData?: JsonObject,
 ): SpawnToolReturn {
   const state = data.spawn_state;
-  const full = { ok: true, ...data,
-    ...(state === "boot_unsubmitted"
-      ? { next_action: bootUnsubmittedNextAction(data.surface_id) }
-      : {}) };
+  const stateFields = state
+    ? { spawn_state: state,
+        ...(state === "boot_unsubmitted"
+          ? { next_action: bootUnsubmittedNextAction(data.surface_id) }
+          : {}) }
+    : {};
+  const full = { ok: true, ...stateFields, ...data };
   const payload = verbose
     ? full
     : leanData
-      ? { ok: true, ...leanData }
+      ? { ok: true, ...stateFields, ...leanData }
       : shapeSpawnResponse(full);
   return {
     content: [
       {
         type: "text",
-        text:
-          verbose && legacyText && state
-            ? `spawn_state: ${state}\n${legacyText}`
-            : verbose && legacyText
-              ? legacyText
-            : JSON.stringify(payload),
+        text: verbose && legacyText
+          ? `${JSON.stringify(payload)}\n${legacyText}`
+          : JSON.stringify(payload),
       },
     ],
     structuredContent: payload,

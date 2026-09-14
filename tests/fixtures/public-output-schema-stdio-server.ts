@@ -37,7 +37,7 @@ for (const toolName of PUBLIC_TOOL_NAMES) {
         ? {
             spawn_state: "boot_unsubmitted",
             next_action:
-              'Read the pane with read_screen({surface:"surface:test"}); if the brief is still in the composer, submit it with send_to({mode:"key",surface:"surface:test",key:"return"}); never re-spawn.',
+              'Read the pane with read_screen({surface:"surface:test"}); if the brief is still in the composer, submit it with send_to({mode:"key",surface:"surface:test",text:"return"}); never re-spawn.',
             agent_id: "cmuxlayerCodex-test",
             surface_id: "surface:test",
             workspace_id: "workspace:test",
