@@ -881,6 +881,9 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       coordination_footer_delivered: z.boolean().optional(),
       coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
+      spawn_state: z.enum(["started", "boot_unsubmitted"]).optional(),
+      next_action: z.string().optional(),
+      delivered_chars: z.number().int().nonnegative().optional(),
     })
     .passthrough(),
   report_to_parent: z
@@ -14714,6 +14717,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...(focusRestoreWarning ? [focusRestoreWarning] : []),
             ];
             const resumed = {
+              spawn_state: "started" as const,
               version: 1,
               type: "agent",
               resumed: true,
@@ -15283,7 +15287,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     bootPromptPath,
                   ),
                   boot_prompt_pending:
-                    bootPromptDelivery.delivery_state === "queued",
+                    bootPromptDelivery.submit_verified !== true,
                   prompt_delivered: bootPromptDelivery.submit_verified === true,
                   submit_verified: bootPromptDelivery.submit_verified,
                 });
@@ -15332,7 +15336,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 // A readiness timeout happens before delivery. Preserve the
                 // pending marker so a later idle CLI cannot be mistaken for a
                 // successfully tasked agent by the lifecycle sweep.
-                boot_prompt_pending: e instanceof BootPromptTimeoutError,
+                boot_prompt_pending:
+                  e instanceof BootPromptTimeoutError ||
+                  e instanceof BootPromptDeliveryError,
                 prompt_delivered: false,
                 submit_verified:
                   e instanceof BootPromptDeliveryError ? false : null,
@@ -15346,6 +15352,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               let updated = clearBootPromptPending();
               if (
                 !(e instanceof BootPromptTimeoutError) &&
+                !(e instanceof BootPromptDeliveryError) &&
                 updated.state !== "done" &&
                 updated.state !== "error"
               ) {
@@ -15393,7 +15400,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               });
             }
             if (e instanceof BootPromptDeliveryError) {
-              return err(e, { ...extra, delivered_chars: e.delivered_chars });
+              const safetyError = findErrorInChain(
+                e,
+                (candidate): candidate is ManualModeMutationError | DeliverySafetyGateError =>
+                  candidate instanceof ManualModeMutationError ||
+                  candidate instanceof DeliverySafetyGateError,
+              );
+              if (safetyError) {
+                return err(safetyError, {
+                  ...extra, delivered_chars: e.delivered_chars,
+                });
+              }
+              const bootPromptReceipt = e.submit_verification_error
+                ? { ...submitVerificationFailurePayload(e.submit_verification_error),
+                    bytes: e.delivered_chars }
+                : {
+                    ...buildPublicDeliveryReceipt({
+                      delivery_state: "pending_verify",
+                      typed: e.typed || e.delivered_chars > 0,
+                      submit_attempted: e.submit_dispatched,
+                      submit_dispatched: e.submit_dispatched,
+                      submit_verified: false,
+                      retry_count: currentTransportRetryCount(),
+                      rpc_methods: e.rpc_methods,
+                    }),
+                    bytes: e.delivered_chars,
+                  };
+              await refreshManagedMetadataBestEffort(result.agent_id);
+              await lifecycleSeatManifestPublisher({ agentId: result.agent_id });
+              return buildSpawnToolReturn(
+                {
+                  retry_count: currentTransportRetryCount(),
+                  ...result,
+                  spawn_state: "boot_unsubmitted",
+                  workspace_id: result.workspace_id,
+                  delivered_chars: e.delivered_chars,
+                  boot_prompt_delivered: false,
+                  boot_prompt_receipt: bootPromptReceipt,
+                  boot_prompt_submit_verified: false,
+                },
+                args.verbose,
+              );
             }
             return err(e, extra);
           }
@@ -15456,6 +15503,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           const responseData = {
             ...result,
+            spawn_state:
+              bootPromptDelivery && bootPromptDelivery.submit_verified !== true
+                ? "boot_unsubmitted"
+                : "started",
             worktree: worktree.prepared,
             mcp_profile: worktree.mcpProfileLabel,
             role: args.version === 1 ? normalizedRole.function : topologyRole,

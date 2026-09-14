@@ -6,10 +6,13 @@ const FRESH_SPAWN_INFO_CODES = new Set([
 ]);
 
 const ESSENTIAL_FIELDS = [
+  "spawn_state",
+  "next_action",
   "retry_count",
   "agent_id",
   "surface_id",
   "workspace_id",
+  "delivered_chars",
   "state",
   "model",
   "requested_model",
@@ -41,7 +44,6 @@ const ESSENTIAL_FIELDS = [
 ] as const;
 
 type JsonObject = Record<string, unknown>;
-
 export interface SpawnToolReturn {
   [key: string]: unknown;
   content: Array<{ type: "text"; text: string }>;
@@ -52,6 +54,11 @@ function record(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : null;
+}
+
+function bootUnsubmittedNextAction(surface: unknown): string {
+  const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
+  return `Read the pane with read_screen({surface:"${surfaceRef}"}); if the brief is still in the composer, submit it with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}); never re-spawn.`;
 }
 
 function leanHealth(value: unknown): JsonObject | undefined {
@@ -113,8 +120,9 @@ export function shapeSpawnResponse(
   if (verbose) return full;
 
   const hasBootPromptReceipt = record(full.boot_prompt_receipt) !== null;
-  const lean: JsonObject = Object.fromEntries(
-    ESSENTIAL_FIELDS.filter(
+  const lean: JsonObject = {
+    ...(full.ok !== undefined ? { ok: full.ok } : {}),
+    ...Object.fromEntries(ESSENTIAL_FIELDS.filter(
       (field) =>
         full[field] !== undefined &&
         !(
@@ -122,9 +130,8 @@ export function shapeSpawnResponse(
           full[field] === null &&
           !(field === "boot_prompt_submit_verified" && hasBootPromptReceipt)
         ),
-    ).map((field) => [field, full[field]]),
-  );
-  if (full.ok !== undefined) lean.ok = full.ok;
+    ).map((field) => [field, full[field]])),
+  };
 
   const worktree = leanWorktree(full.worktree);
   if (worktree) lean.worktree = worktree;
@@ -155,17 +162,26 @@ export function buildSpawnToolReturn(
   legacyText?: string,
   leanData?: JsonObject,
 ): SpawnToolReturn {
-  const full = { ok: true, ...data };
+  const state = data.spawn_state;
+  const stateFields = state
+    ? { spawn_state: state,
+        ...(state === "boot_unsubmitted"
+          ? { next_action: bootUnsubmittedNextAction(data.surface_id) }
+          : {}) }
+    : {};
+  const full = { ok: true, ...stateFields, ...data };
   const payload = verbose
     ? full
     : leanData
-      ? { ok: true, ...leanData }
+      ? { ok: true, ...stateFields, ...leanData }
       : shapeSpawnResponse(full);
   return {
     content: [
       {
         type: "text",
-        text: verbose && legacyText ? legacyText : JSON.stringify(payload),
+        text: verbose && legacyText
+          ? `${JSON.stringify(payload)}\n${legacyText}`
+          : JSON.stringify(payload),
       },
     ],
     structuredContent: payload,

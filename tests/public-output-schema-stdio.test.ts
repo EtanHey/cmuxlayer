@@ -72,7 +72,8 @@ describe("public tool output schemas over stdio", () => {
         });
       }
       const declaredFields: Record<string, string[]> = {
-        spawn_agent: ["type", "cwd", "title", "cwd_receipt"],
+        spawn_agent: ["type", "cwd", "title", "cwd_receipt", "spawn_state",
+          "next_action", "delivered_chars"],
         report_to_parent: [
           "child_agent_id",
           "parent_agent_id",
@@ -153,6 +154,13 @@ describe("public tool output schemas over stdio", () => {
           retry_count: 0,
           stdio_contract_probe: toolName,
         });
+        if (toolName === "spawn_agent") {
+          expect(result.structuredContent).toMatchObject({
+            spawn_state: "boot_unsubmitted", next_action: expect.stringContaining("send_to"),
+            agent_id: "cmuxlayerCodex-test", surface_id: "surface:test",
+            workspace_id: "workspace:test", delivered_chars: 42,
+            boot_prompt_receipt: { submit_verified: false } });
+        }
       }
     } finally {
       await client.close();

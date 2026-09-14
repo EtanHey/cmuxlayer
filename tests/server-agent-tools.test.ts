@@ -126,6 +126,7 @@ const AGENT_TOOLS = [
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
+  bootPromptFailure?: "return" | "surface-gone";
   shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
@@ -175,6 +176,9 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
+        if (opts?.bootPromptFailure === "return") {
+          throw new Error("Return delivery failed");
+        }
         readyText =
           activeCli === "codex"
             ? `${pendingText}\n${workingText()}`
@@ -292,6 +296,11 @@ function makeLifecycleExec(opts?: {
     }
 
     if (args.includes("read-screen")) {
+      if (promptPending && opts?.bootPromptFailure === "surface-gone") {
+        throw Object.assign(new Error("surface disappeared"), {
+          stderr: "not_found: Surface not found for the given surface_id",
+        });
+      }
       return {
         stdout: JSON.stringify({
           surface: currentSurface,
@@ -3916,7 +3925,8 @@ describe("agent lifecycle tool handlers", () => {
     const parsed = parseToolResult(result);
 
     expect(result.isError).toBe(true);
-    expect(parsed.error).toMatch(/boot prompt.*manual mode/i);
+    expect(parsed).toMatchObject({ error_code: "manual_mode", control: "manual" });
+    expect(parsed.error).toMatch(/manual mode/i);
     expect(mockExec).not.toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "must not type in manual mode"]),
@@ -5337,6 +5347,8 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.spawn_state).toBe("started");
+    expect(parsed).not.toHaveProperty("next_action");
     expect(
       mockExec.mock.calls.some(
         ([, args]) =>
@@ -7299,7 +7311,54 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
-  it("spawn_agent keeps a live registered pane when front-matter delivery reaches its queued deadline", async () => {
+  it.each([
+    { bootPromptFailure: "return", verbose: false },
+    { bootPromptFailure: "return", verbose: true },
+    { bootPromptFailure: "surface-gone", verbose: false },
+  ] as const)(
+    "spawn_agent distinguishes $bootPromptFailure with verbose=$verbose",
+    async ({ bootPromptFailure, verbose }) => {
+    const promptPath = join(TEST_DIR, `${bootPromptFailure}.md`);
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const manifests: SeatManifest[] = [];
+    const server = createTrackedServer({
+      exec: makeLifecycleExec({ bootPromptFailure }), stateDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      seatManifestWriter: async (manifest) => manifests.push(manifest),
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+    const result = await spawn.handler(
+      { repo: "brainlayer", model: "codex", cli: "codex",
+        boot_prompt_path: promptPath, boot_prompt_timeout_ms: 20, verbose },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+    if (bootPromptFailure === "surface-gone") {
+      expect(result.isError).toBe(true);
+      expect(parsed).toMatchObject({ ok: false, error_code: "pane_died" });
+    } else {
+      expect(result.isError).not.toBe(true);
+      expect(parsed).toMatchObject({ ok: true, spawn_state: "boot_unsubmitted",
+        next_action: expect.stringContaining("never re-spawn"),
+        delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
+      const call = parsed.next_action.match(/send_to\((\{.*?\})\)/)?.[1];
+      const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
+      const sendResult = parseToolResult(await sendTo.handler(sendArgs, {} as any));
+      expect(String(sendResult.error ?? "")).not.toMatch(/one payload parameter/);
+      expect(result.content[0]!.text).toMatch(
+        /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
+      );
+      expect(manifests[0]?.agent_id).toBe(parsed.agent_id);
+      const state = parseToolResult(
+        await getState.handler({ agent_id: parsed.agent_id }, {} as any));
+      expect(state).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false });
+      expect(state.state).not.toBe("error");
+    }
+  });
+
+  it.each([false, true])("spawn_agent keeps a live registered pane when queued with verbose=%s", async (verbose) => {
     const promptPath = join(TEST_DIR, "front-matter.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     const baseExec = makeLifecycleExec();
@@ -7341,20 +7400,25 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
-    const result = parseToolResult(
-      await spawn.handler(
+    const rawResult = await spawn.handler(
         {
           repo: "brainlayer",
           model: "codex",
           cli: "codex",
           boot_prompt_path: promptPath,
           boot_prompt_timeout_ms: 250,
+          verbose,
         },
         {} as any,
-      ),
-    );
+      );
+    const result = parseToolResult(rawResult);
 
     expect(result.ok).toBe(true);
+    expect(rawResult.content[0]!.text).toMatch(
+      /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
+    );
+    expect(result.spawn_state).toBe("boot_unsubmitted");
+    expect(result.next_action).toContain("never re-spawn");
     expect(result.surface_id).toBe("surface:new");
     expect(result.boot_prompt_receipt).toMatchObject({
       delivery_state: "queued",
