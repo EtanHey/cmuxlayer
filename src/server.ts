@@ -4529,12 +4529,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
     try {
+      const agent = stateMgr.readState(agentId);
       const written = writeBootContractFile(
         {
           agentId,
-          role: stateMgr.readState(agentId)?.role,
-          leadAgentId: stateMgr.readState(agentId)?.parent_agent_id,
-          collabPath: stateMgr.readState(agentId)?.collab_path,
+          role: agent?.role,
+          leadAgentId: agent?.parent_agent_id,
+          collabPath: agent?.collab_path,
           mailbox: {
             monitor_command: monitorBoot.monitor_command,
             // Contract-file only, deliberately NOT on the monitor_boot receipt: the
@@ -14979,6 +14980,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? inferRecordRoleOrNull(callerAgent)
             : null;
           const callerIsWorker = callerRole === "worker";
+          if (callerAgent && !callerIsWorker && args.collab_path) {
+            const collabPath = args.collab_path.trim();
+            if (!isAbsolute(collabPath)) throw new Error("collab_path must be absolute");
+            const adopted = stateMgr.updateRecord(callerAgent.agent_id, { collab_path: collabPath });
+            registry.set(callerAgent.agent_id, adopted);
+          }
           const effectiveParentAgentId = callerIsWorker
             ? callerAgent!.agent_id
             : (args.parent_agent_id ?? callerAgent?.agent_id);
@@ -16895,7 +16902,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     type ListAgentsObservedRow = ObservedPublicAgent & {
       cli: CliType;
       role: AgentRole | null;
-      collab_path: string | null;
+      collab_path?: string;
       surface_id: string;
       send_via: "send_to";
       closure: ClosureState;
@@ -17034,7 +17041,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   repo: agent.repo,
                   cli: agent.cli,
                   role: agent.role,
-                  collab_path: agent.collab_path ?? null,
+                  ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                   state: agent.state.value,
                   surface_id: agent.surface_id,
                   model: agent.model.value,
@@ -17221,7 +17228,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     }),
                     cli: agent.cli,
                     role: inferRecordRoleOrNull(agent),
-                    collab_path: agent.collab_path ?? null,
+                    ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
                     // #481: computed on every listMerged, read only by the
