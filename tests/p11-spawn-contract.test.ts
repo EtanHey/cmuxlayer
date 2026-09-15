@@ -566,6 +566,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toHaveLength(1);
 
     await settlePendingDeliveries();
+    console.info("D1_WATCH_AFTER_DEADLINE", JSON.stringify({ watchNow, watches: readWatchRegistry({ registryPath: watchRegistryPath }).watches, deliveries: engine.listDeliveryReceipts() }));
     await server.close();
     server = createServer(
       withTestSurfaceObserver({
@@ -603,6 +604,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       before,
     );
+    console.info("D1_WATCH_AFTER_REPORT", JSON.stringify({ watchNow, watches: readWatchRegistry({ registryPath: watchRegistryPath }).watches, deliveries: engine.listDeliveryReceipts() }));
     expect(
       afterCalls.some(([, args]: [string, string[]]) =>
         args.some(

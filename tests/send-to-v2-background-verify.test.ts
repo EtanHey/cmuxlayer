@@ -632,6 +632,12 @@ describe("send_to v2 background verify", () => {
   it("#636 D1 ownership revocation survives an awaited read, stale save, and restart", async () => {
     const client = new ClaudeDeliverySurface(); const sent = await instantDelivery(client);
     const engine = server._registeredTools.interact._engine; engine.dispose();
+    const phases: unknown[] = [];
+    const recordPhase = (phase: string, currentEngine = engine) => {
+      const current = currentEngine.getDeliveryReceipt(sent.delivery_id);
+      const persisted = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8")).find((receipt: any) => receipt.delivery_id === sent.delivery_id);
+      phases.push({ phase, keys: [...client.sendKeyCalls], current: current.claude_submit, persisted: persisted.claude_submit });
+    };
     await vi.advanceTimersByTimeAsync(2_001);
     const staleEvidence = engine.getDeliveryReceipt(sent.delivery_id).claude_submit;
     let release!: () => void; let reading = false; let firstRead = true;
@@ -648,14 +654,20 @@ describe("send_to v2 background verify", () => {
     try {
       client.composer = "";
       expect(parseResult(await observer._registeredTools.read_screen.handler({ surface: client.surface }, {})).ok).toBe(true);
+      recordPhase("observed-clear");
       client.composer = "636 unique delivery";
       release(); await verification;
+      recordPhase("held-read-resolved");
       engine.updateClaudeDeliveryEvidence(sent.delivery_id, staleEvidence);
+      recordPhase("stale-save");
     } finally { release(); await observer.close(); }
     await server.close();
     server = createVerifyServer(client);
+    recordPhase("restarted", server._registeredTools.interact._engine);
     await vi.advanceTimersByTimeAsync(2_001);
     await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    recordPhase("verified-after-restart", server._registeredTools.interact._engine);
+    console.info("D1_OWNERSHIP_PHASES", JSON.stringify(phases));
     expect(client.sendKeyCalls).toEqual(["return"]);
     expect(client.sendCalls).toEqual(["636 unique delivery"]);
   });
