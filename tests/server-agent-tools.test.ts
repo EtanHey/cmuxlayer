@@ -2503,10 +2503,10 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
-  it.each([{ requiredPromptReturns: 2, knownSender: false }, { requiredPromptReturns: 99, knownSender: false }, { requiredPromptReturns: 99, knownSender: true }])("#636 D1 boot pending recovers or exhausts ($requiredPromptReturns Returns, sender=$knownSender)", async ({ requiredPromptReturns, knownSender }) => {
+  it.each([{ requiredPromptReturns: 2, knownSender: false, captureSession: false }, { requiredPromptReturns: 99, knownSender: false, captureSession: false }, { requiredPromptReturns: 99, knownSender: true, captureSession: false }, { requiredPromptReturns: 2, knownSender: false, captureSession: true }])("#636 D1 boot pending recovers or exhausts ($requiredPromptReturns Returns, sender=$knownSender, capture=$captureSession)", async ({ requiredPromptReturns, knownSender, captureSession }) => {
     vi.useFakeTimers();
     try {
-      const baseExec = makeLifecycleExec({ requiredPromptReturns, ...(knownSender ? { surfaceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } : {}) });
+      const baseExec = makeLifecycleExec({ requiredPromptReturns, ...(knownSender || captureSession ? { surfaceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } : {}) });
       const exec = vi.fn(async (command, args) => {
         const result = await baseExec(command, args);
         if (!knownSender) return result;
@@ -2521,7 +2521,9 @@ describe("agent lifecycle tool handlers", () => {
         return result;
       });
       const inboxBaseDir = join(TEST_DIR, "boot-failure-inbox");
-      const server = createTrackedServer({ exec, stateDir: TEST_DIR, inboxBaseDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      const server = createTrackedServer({ exec, stateDir: TEST_DIR, inboxBaseDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+        ...(captureSession ? { selfRegistrationSessionResolver: (agent: AgentRecord) => engine.listDeliveryReceipts().some((receipt: any) => receipt.agent_id === agent.agent_id && receipt.source_event === "boot_prompt")
+          ? { session_id: FIXTURE_SESSIONS[0]!, pid: process.pid, pid_registered_at: agent.created_at } : null } : {}) });
       const engine = (server as any)._registeredTools.interact._engine;
       const collab = join(TEST_DIR, "boot-caller-collab.md");
       const sender = makeServerAgentRecord({ agent_id: "boot-caller", surface_id: "surface:caller", surface_uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", workspace_id: "workspace:1", state: "ready", role: "lead", collab_path: collab });
@@ -2533,6 +2535,7 @@ describe("agent lifecycle tool handlers", () => {
       expect(settled).toBe(true);
       const result = parseToolResult(await task);
       expect(result).toMatchObject({ boot_prompt_submit_verified: null, boot_prompt_delivered: false });
+      if (captureSession) expect(engine.getAgentState(result.agent_id).cli_session_id).toBe(FIXTURE_SESSIONS[0]);
       const id = result.boot_prompt_receipt.delivery_id;
       expect(engine.getDeliveryReceipt(id)).toMatchObject({ delivery_state: "pending_verify", retry_count: 0 });
       const textCalls = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send") || args.includes("set-buffer")).length;
