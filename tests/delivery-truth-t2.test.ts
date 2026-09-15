@@ -162,6 +162,40 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
+  it.each([
+    { cli: "codex", frame: "› Ask Codex to do anything" },
+    { cli: "codex", frame: "› Ask Codex to do anything\n\n  esc again to edit previous message" },
+    { cli: "claude", frame: "Claude Code\n❯ Press up to edit queued messages" },
+  ] as const)("#645 shares placeholder classification for text and Return ($cli, $frame)", async ({ cli, frame }) => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screen = "Claude Code\n❯ ";
+    const exec = makeLifecycleExec(() => screen);
+    const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context }) as any;
+      const targetId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const target = { ...engine.getRegistry().get(targetId), cli, state: "ready" };
+      engine.stateMgr.writeState(target);
+      engine.getRegistry().set(targetId, target);
+      for (const mode of ["agent", "key"] as const) {
+        screen = frame;
+        exec.mockClear();
+        const result = parseToolResult(await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {}));
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        expect(mutatedPane(exec)).toBe(true);
+        screen = frame.split("\n").slice(0, -1).concat(cli === "codex" ? "› Write tests for @server.ts" : "❯ Press up to edit queued messages that I wrote").join("\n");
+        exec.mockClear();
+        const refused = await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {});
+        const data = parseToolResult(refused);
+        expect(data.error_code).toBe("blocked_by_foreign_draft");
+        expect(data.error).toContain("try again in ~20 s or after your next turn");
+        expect(JSON.parse(refused.content[0].text)).toMatchObject({ error: data.error, caller_agent_id: null });
+        expect(mutatedPane(exec)).toBe(false);
+      }
+    } finally { context.dispose(); }
+  });
+
   it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other"])("#636 key Return draft ownership (%s)", async (kind) => {
     const { createServer, createServerContext } = await loadServerModule();
     const { runWithCallerContext } = await import("../src/caller-context.js");
