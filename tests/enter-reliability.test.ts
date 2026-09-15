@@ -76,8 +76,12 @@ async function callTool(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
-  const resultPromise = tool.handler(args, {} as any);
-  await vi.advanceTimersByTimeAsync(10_000);
+  let settled = false;
+  const resultPromise = tool.handler(args, {} as any).finally(() => { settled = true; });
+  // Observe the immediate receipt. Background outcomes are asserted separately.
+  for (let elapsed = 0; elapsed < 10_000 && !settled; elapsed += 50) {
+    await vi.advanceTimersByTimeAsync(50);
+  }
   return resultPromise;
 }
 
@@ -90,11 +94,28 @@ async function callToolInTimerSteps(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
-  const resultPromise = tool.handler(args, {} as any);
-  for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+  let settled = false;
+  const resultPromise = tool.handler(args, {} as any).finally(() => { settled = true; });
+  for (let elapsed = 0; elapsed < 10_000 && !settled; elapsed += 100) {
     await vi.advanceTimersByTimeAsync(100);
   }
   return resultPromise;
+}
+
+async function finalClaudeReceipt(server: any, result: any, initialState = "pending_verify") {
+  const initial = parseResult(result);
+  expect(initial).toMatchObject({ delivery_state: initialState, terminal: false, submit_verified: null });
+  const engine = server._registeredTools.interact._engine;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await vi.advanceTimersByTimeAsync(2_000);
+    await engine.verifyPendingDeliveries();
+    const current = engine.getDeliveryReceipt(initial.delivery_id);
+    if (current.terminal) {
+      expect(current).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+      return current;
+    }
+  }
+  throw new Error("Claude delivery never reached attributable submission");
 }
 
 function readEventLog(): Array<Record<string, unknown>> {
@@ -141,6 +162,7 @@ class FakeClaudeSurfaceClient {
   postReturnScreenText: string | null = null;
   postReturnPendingScreenText: string | null = null;
   private pendingText = "";
+  private readonly acceptedTranscript: string[] = [];
   private returnCount = 0;
   private queuedCodexReadsRemaining = 0;
   private mode: "idle" | "working" = "idle";
@@ -240,6 +262,7 @@ class FakeClaudeSurfaceClient {
     this.returnCount += 1;
     this.queuedCodexReadsRemaining = this.queuedCodexReadsAfterReturn;
     if (this.returnCount >= this.requiredReturns) {
+      this.acceptedTranscript.push(this.pendingText);
       this.pendingText = "";
       this.mode = this.completionMode;
       return;
@@ -335,11 +358,9 @@ class FakeClaudeSurfaceClient {
       return `OpenAI Codex\n${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
     }
 
-    if (this.mode === "working") {
-      return "Claude Code\n✻ Working\n";
-    }
-
-    return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
+    const transcript = this.acceptedTranscript.map(text => `> ${text}`).join("\n");
+    const active = this.mode === "working" ? "✻ Working\n" : "";
+    return `Claude Code\n${transcript}\n${active}❯ ${tail}\nCLAUDE_COUNTER:1\n`;
   }
 }
 
@@ -513,9 +534,12 @@ class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
       return `Cursor Agent\ncursor> ${tail}\nAuto\n`;
     }
     if (!tail && this.submittedText !== null) {
-      return "Claude Code\n✻ Working\n";
+      return `Claude Code\n> ${this.submittedText}\n✻ Working\n❯ \n`;
     }
-    return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
+    // Accepted input can remain painted while the turn is active. It is not
+    // safe to press Return again merely because this slow frame still has text.
+    const active = this.submittedText === null ? "" : "✻ Working\n";
+    return `Claude Code\n${active}❯ ${tail}\nCLAUDE_COUNTER:1\n`;
   }
 }
 
@@ -729,14 +753,14 @@ describe("enter reliability", () => {
       text: "ping",
       press_enter: true,
     });
-    const parsed = parseResult(result);
+    const parsed = await finalClaudeReceipt(server, result);
     const events = readEventLog().filter(
-      (event) => event.event_type === "send_to",
+      (event) => event.delivery_id === parsed.delivery_id && event.delivery_state === "submitted",
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parseResult(result).ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
-    expect(parsed.submit_evidence).toBe("cleared_composer");
+    expect(parsed.claude_submit.submit_evidence).toBe("transcript_echo");
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -770,13 +794,18 @@ describe("enter reliability", () => {
       ).toHaveLength(1);
       expect(client.duplicateSubmits).toBe(0);
       expect(parsed.ok).toBe(true);
-      expect(parsed.submit_verified).toBe(true);
+      if (cli === "claude") {
+        expect(parsed).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(1);
+        expect(client.duplicateSubmits).toBe(0);
+      } else expect(parsed.submit_verified).toBe(true);
       expect(parsed.retry_count).toBe(0);
     },
   );
 
   it.each(["throw", "blank"] as const)(
-    "bounds a short pointer send with %s verification to one second",
+    "bounds a short pointer send with %s pre-Return evidence to one second",
     async (mode) => {
     const client = new FakeUnavailableVerificationScreenClient(mode);
     client.requiredReturns = 1;
@@ -812,7 +841,7 @@ describe("enter reliability", () => {
     expect(settledAt).not.toBeNull();
     expect(settledAt! - startedAt).toBeLessThanOrEqual(1_000);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
+      0,
     );
   }, 10_000);
 
@@ -881,6 +910,7 @@ describe("enter reliability", () => {
       press_enter: true,
     });
     const parsed = parseResult(result);
+    await finalClaudeReceipt(server, result);
     const waited = await callTool(server, "wait_for", {
       delivery_id: parsed.delivery_id,
       timeout_ms: 1_000,
@@ -957,6 +987,7 @@ describe("enter reliability", () => {
     vi.useRealTimers();
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
+    client.cli = "codex";
     client.completionMode = "idle";
     client.transportHealth = {
       mode: "socket",
@@ -964,7 +995,7 @@ describe("enter reliability", () => {
       current_socket_path: "/tmp/cmuxlayer-test.sock",
     };
     server = createReliabilityServer(client, false);
-    registerAgent(server, { state: "idle" });
+    registerAgent(server, { state: "idle", cli: "codex" });
     const mcpClient = new Client({
       name: "lean-receipt-test",
       version: "0.1.0",
@@ -1165,6 +1196,7 @@ describe("enter reliability", () => {
       {} as any,
     );
     const parsed = parseResult(result);
+    await finalClaudeReceipt(server, result, "queued");
     const waitedPromise = server._registeredTools.wait_for.handler(
       { delivery_id: parsed.delivery_id, timeout_ms: 1_000 },
       {} as any,
@@ -1222,7 +1254,8 @@ describe("enter reliability", () => {
 
     expect(settledBeforeSweepRelease).toBe(true);
     expect(result.isError).not.toBe(true);
-    expect(parseResult(result).submit_verified).toBe(true);
+    expect(parseResult(result).submit_verified).toBeNull();
+    await finalClaudeReceipt(server, result);
   });
 
   it.each([
@@ -1301,10 +1334,10 @@ describe("enter reliability", () => {
       text: "mid-session prompt",
       press_enter: true,
     });
-    const parsed = parseResult(result);
+    const parsed = await finalClaudeReceipt(server, result);
     const events = readEventLog();
 
-    expect(parsed.ok).toBe(true);
+    expect(parseResult(result).ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
@@ -1313,7 +1346,7 @@ describe("enter reliability", () => {
     expect(
       events.some(
         (event) =>
-          event.event_type === "send_to" &&
+          event.delivery_id === parsed.delivery_id &&
           event.submit_verified === true &&
           event.retry_count === 0,
       ),
@@ -1331,10 +1364,10 @@ describe("enter reliability", () => {
       text: "land once despite EAGAIN",
       press_enter: true,
     });
-    const parsed = parseResult(result);
+    const parsed = await finalClaudeReceipt(server, result);
 
     expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(parseResult(result).ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
     expect(client.verificationReadAttempts).toBeGreaterThanOrEqual(2);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
@@ -1346,7 +1379,7 @@ describe("enter reliability", () => {
     ["unavailable reads", "throw", "surface_read_unavailable"],
     ["blank screens", "blank", "surface_screen_empty"],
   ] as const)(
-    "returns pending_verify after a full verification window of %s instead of a terminal fail",
+    "returns pending_verify immediately and keeps observing %s without submitting",
     async (_name, mode, _expectedReason) => {
       const client = new FakeUnavailableVerificationScreenClient(mode);
       client.requiredReturns = 1;
@@ -1368,7 +1401,7 @@ describe("enter reliability", () => {
       });
 
       await vi.advanceTimersByTimeAsync(4_900);
-      expect(settled).toBe(false);
+      expect(settled).toBe(true);
       expect(client.verificationReadAttempts).toBeGreaterThan(1);
 
       await vi.advanceTimersByTimeAsync(1_000);
@@ -1382,11 +1415,11 @@ describe("enter reliability", () => {
       expect(parsed.submit_verified).toBeNull();
       expect(
         client.sendKeyCalls.filter((key) => key === "return"),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
     },
   );
 
-  it("does not retry Enter for send_command when the agent composer remains ambiguously pending", async () => {
+  it("send_command returns pending then retries only Return for owned input", async () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);
     registerAgent(server);
@@ -1396,26 +1429,13 @@ describe("enter reliability", () => {
       command: "y".repeat(2000),
       allow_long_inline: true,
     });
-    const parsed = parseResult(result);
-    const events = readEventLog();
-
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.submit_verification_reason).toBe("input_still_pending");
-    expect(parsed.retry_safe).toBe(false);
-    expect(parsed.retry_count).toBe(0);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
-    );
-    expect(
-      events.some(
-        (event) =>
-          event.event_type === "send_command" &&
-          event.submit_verified === false &&
-          event.retry_count === 0,
-      ),
-    ).toBe(true);
+    expect(result.isError).not.toBe(true);
+    expect(parseResult(result)).toMatchObject({ ok: true, delivery_state: "pending_verify", submit_verified: null, retry_count: 0 });
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    const final = await finalClaudeReceipt(server, result);
+    expect(final.retry_count).toBe(1);
+    expect(client.sendCalls).toHaveLength(1);
+    expect(client.sendKeyCalls).toEqual(["return", "return"]);
   }, 10_000);
 
   it("reports short send_command input as still pending when the composer never clears", async () => {
@@ -1429,25 +1449,14 @@ describe("enter reliability", () => {
       command: "ping",
     });
     const parsed = parseResult(result);
-    const events = readEventLog();
-
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.submit_verification_reason).toBe("input_still_pending");
-    expect(parsed.retry_safe).toBe(false);
-    expect(parsed.retry_count).toBe(0);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
-    );
-    expect(
-      events.some(
-        (event) =>
-          event.event_type === "send_command" &&
-          event.submit_verified === false &&
-          event.retry_count === 0,
-      ),
-    ).toBe(true);
+    expect(result.isError).not.toBe(true);
+    expect(parsed).toMatchObject({ ok: true, delivery_state: "pending_verify", submit_verified: null, retry_count: 0 });
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const final = server._registeredTools.interact._engine.getDeliveryReceipt(parsed.delivery_id);
+    expect(final).toMatchObject({ delivery_state: "failed_confirmed", retry_count: 3, submit_verified: false });
+    expect(client.sendCalls).toEqual(["ping"]);
+    expect(client.sendKeyCalls).toEqual(["return", "return", "return", "return"]);
   }, 10_000);
 
   it("reports short send_input as still pending when the composer never clears", async () => {
@@ -1983,10 +1992,10 @@ describe("enter reliability", () => {
       text: "delivered before a transient screen read failure",
       press_enter: true,
     });
-    const parsed = parseResult(result);
+    const parsed = await finalClaudeReceipt(server, result);
 
     expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(parseResult(result).ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
     expect(parsed.retry_count).toBe(0);
     expect(client.postReturnScreenReadAttempts).toBeGreaterThanOrEqual(2);
@@ -2346,21 +2355,23 @@ describe("enter reliability", () => {
     server = createReliabilityServer(client);
     registerAgent(server);
 
-    await callTool(server, "send_to", {
+    const first = await callTool(server, "send_to", {
       agent_id: "agent-1",
       text: "first\n".repeat(300),
       press_enter: true,
       allow_long_inline: true,
     });
-    await callTool(server, "send_to", {
+    await finalClaudeReceipt(server, first);
+    const second = await callTool(server, "send_to", {
       agent_id: "agent-1",
       text: "second\n".repeat(300),
       press_enter: true,
       allow_long_inline: true,
     });
 
+    await finalClaudeReceipt(server, second);
     const events = readEventLog().filter(
-      (event) => event.event_type === "send_to",
+      (event) => event.event_type === "send_to" && event.delivery_state === "submitted",
     );
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       2,

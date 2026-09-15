@@ -128,6 +128,7 @@ function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
   bootPromptFailure?: "return" | "surface-gone";
+  requiredPromptReturns?: number;
   shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
@@ -139,6 +140,7 @@ function makeLifecycleExec(opts?: {
   let activeCli: "claude" | "codex" | "cursor" = "claude";
   let createdSurfaceCount = 0;
   let bootPromptReturnFailures = 0;
+  let promptReturns = 0;
   let currentSurface = "surface:new";
   const listedSurface = () =>
     surfaceLive
@@ -178,6 +180,7 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
+        if (++promptReturns < (opts?.requiredPromptReturns ?? 1)) return { stdout: "{}", stderr: "" };
         if (
           opts?.bootPromptFailure === "return" &&
           bootPromptReturnFailures++ === 0
@@ -2484,6 +2487,34 @@ describe("agent lifecycle tool handlers", () => {
       "surface:secondary",
       expect.objectContaining({ workspace: "workspace:secondary" }),
     );
+  });
+
+  it.each([2, 99])("#636 D1 boot pending recovers or exhausts with %i required Returns", async requiredPromptReturns => {
+    vi.useFakeTimers();
+    try {
+      const exec = makeLifecycleExec({ requiredPromptReturns });
+      const server = createLifecycleServer(exec); const engine = (server as any)._registeredTools.interact._engine;
+      let settled = false;
+      const task = (server as any)._registeredTools.spawn_agent.handler({ repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "boot recovery specimen", verbose: true }, {}).then((value: any) => { settled = true; return value; });
+      for (let elapsed = 0; elapsed < 1_500 && !settled; elapsed += 50) await vi.advanceTimersByTimeAsync(50);
+      expect(settled).toBe(true);
+      const result = parseToolResult(await task);
+      expect(result).toMatchObject({ boot_prompt_submit_verified: null, boot_prompt_delivered: false });
+      const id = result.boot_prompt_receipt.delivery_id;
+      expect(engine.getDeliveryReceipt(id)).toMatchObject({ delivery_state: "pending_verify", retry_count: 0 });
+      const textCalls = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send") || args.includes("set-buffer")).length;
+      const beforeText = textCalls();
+      await vi.advanceTimersByTimeAsync(10_000);
+      const receipt = engine.getDeliveryReceipt(id);
+      if (requiredPromptReturns === 2) {
+        expect(receipt).toMatchObject({ delivery_state: "submitted", retry_count: 1 });
+        expect(engine.getAgentState(result.agent_id)).toMatchObject({ state: "ready", boot_prompt_pending: false, prompt_delivered: true, submit_verified: true });
+      } else {
+        expect(receipt).toMatchObject({ delivery_state: "failed_confirmed", retry_count: 3 });
+        expect(engine.getAgentState(result.agent_id)).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false, submit_verified: false });
+      }
+      expect(textCalls()).toBe(beforeText);
+    } finally { vi.useRealTimers(); }
   });
 
   it("spawn_agent returns agent_id and surface_id", async () => {

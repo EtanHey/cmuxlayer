@@ -68,6 +68,7 @@ function makeExec(
 ): ExecFn {
   let promptPending = false;
   let pendingPromptText = "";
+  const acceptedTranscript = new Map<string, string[]>();
   let promptSurface = "surface:new";
   let pastePending = "";
   let currentScreenText = screenText;
@@ -182,7 +183,9 @@ function makeExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        setScreenText(`Claude Code\n${pendingPromptText}\n✻ Working\n`, promptSurface);
+        const history = acceptedTranscript.get(promptSurface) ?? [];
+        history.push(pendingPromptText); acceptedTranscript.set(promptSurface, history);
+        setScreenText(`Claude Code\n${history.join("\n")}\n✻ Working\n❯ `, promptSurface);
         promptPending = false;
       }
       return { stdout: "{}", stderr: "" };
@@ -196,7 +199,7 @@ function makeExec(
         promptPending = true;
         pendingPromptText = pastePending;
         promptSurface = surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
-        setScreenText(`Claude Code\n❯ ${pastePending}`, promptSurface);
+        setScreenText(`Claude Code\n${(acceptedTranscript.get(promptSurface) ?? []).join("\n")}\n❯ ${pastePending}`, promptSurface);
       }
       pastePending = "";
       return { stdout: "{}", stderr: "" };
@@ -212,7 +215,7 @@ function makeExec(
         pendingPromptText = text;
         promptSurface =
           surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
-        setScreenText(`Claude Code\n❯ ${text}`, promptSurface);
+        setScreenText(`Claude Code\n${(acceptedTranscript.get(promptSurface) ?? []).join("\n")}\n❯ ${text}`, promptSurface);
       }
     }
     return {

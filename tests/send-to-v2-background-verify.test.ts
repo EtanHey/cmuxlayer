@@ -400,6 +400,33 @@ describe("send_to v2 background verify", () => {
     expect(engine.getDeliveryReceipt(sent.delivery_id).submitted).not.toBe(true);
   });
 
+  it.each(["session", "cli"])("#636 D1b a %s replacement during a read cannot receive a retry", async binding => {
+    const client = new ClaudeDeliverySurface(); const sent = await instantDelivery(client);
+    const engine = server._registeredTools.interact._engine; engine.dispose();
+    await vi.advanceTimersByTimeAsync(2_000);
+    client.onRead = () => {
+      const current = engine.getAgentState("agent-1");
+      const replacement = { ...current, ...(binding === "session" ? { cli_session_id: "new-during-read" } : { cli: "codex" }) };
+      engine.stateMgr.writeState(replacement); engine.getRegistry().set("agent-1", replacement);
+    };
+    await engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    expect(engine.getDeliveryReceipt(sent.delivery_id).submitted).not.toBe(true);
+  });
+
+  it("#636 D1b promotes an idle target only after attributable submission", async () => {
+    const client = new ClaudeDeliverySurface(); client.requiredReturns = 2;
+    server = createVerifyServer(client); registerAgent(server, { state: "idle" });
+    const result = server._registeredTools.send_to.handler({ mode: "agent", agent_id: "agent-1", text: "636 promotion", press_enter: true }, {});
+    await vi.advanceTimersByTimeAsync(500); const sent = parseResult(await result);
+    const engine = server._registeredTools.interact._engine;
+    expect(sent).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
+    expect(engine.getAgentState("agent-1").state).toBe("idle");
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+    expect(engine.getAgentState("agent-1").state).toBe("working");
+  });
+
   it("#636 D1b a read resolving after dispose cannot send a late Return", async () => {
     const client = new ClaudeDeliverySurface(); await instantDelivery(client);
     const engine = server._registeredTools.interact._engine; engine.dispose();
