@@ -318,6 +318,65 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     rmSync(inboxDir, { recursive: true, force: true });
   });
 
+  it.each(["claude", "codex"] as const)("#636 B accepts an unobserved %s inbox pointer durably without retyping its pending delivery", async cli => {
+    await server.close();
+    vi.useFakeTimers({ now: new Date("2026-08-17T20:00:00.000Z") });
+    try {
+      const screen = cli === "claude" ? "Claude Code\n❯ " : "codex>\n gpt-5.5 xhigh · 100% context left\n› ";
+      const baseExec = makeExec(screen, `cmuxlayer-${cli}`, undefined, [], PRIMARY_SURFACE_UUID);
+      let payloadSent = false;
+      // The transport ACKs the bytes, but the TUI has not painted the payload.
+      // Install this behavior before server creation so every cached reader sees it.
+      exec = vi.fn(async (command, args) => {
+        if (args.includes("send") || args.includes("set-buffer") || args.includes("paste-buffer")) {
+          payloadSent = true; return { stdout: "{}", stderr: "" };
+        }
+        if (payloadSent && args.includes("read-screen")) return { stdout: JSON.stringify({ surface: "surface:new",
+          text: `${cli === "claude" ? "Claude Code" : "OpenAI Codex"}\nUnchanged tool output; composer outside captured viewport`, lines: 20, scrollback_used: false }), stderr: "" };
+        return baseExec(command, args);
+      });
+      server = createInboxServer(exec, inboxDir);
+      const engine = server._registeredTools.interact._engine;
+      engine.dispose();
+      const record = { ...hierarchyRecord({ agentId: `pending-${cli}`, surfaceId: "surface:new", surfaceUuid: PRIMARY_SURFACE_UUID, parentAgentId: null }),
+        cli, model: cli === "claude" ? "sonnet" : "gpt-5.5", surface_observer_id: TEST_SURFACE_OBSERVER_OWNER };
+      engine.stateMgr.writeState(record); engine.getRegistry().set(record.agent_id, record);
+      const invoke = async (name: string, args: Record<string, unknown>) => {
+        let settled = false;
+        const pending = server._registeredTools[name].handler(args, {}).then((value: any) => { settled = true; return value; });
+        for (let elapsed = 0; !settled && elapsed < 10_000; elapsed += 100) await vi.advanceTimersByTimeAsync(100);
+        expect(settled).toBe(true);
+        const result = await pending;
+        return result.structuredContent ?? JSON.parse(result.content[0].text);
+      };
+      const dispatched = await invoke("dispatch_to_agent", { agent_id: record.agent_id, task: "Read the pending handoff", from: "orc", nudge: "auto" });
+      expect(dispatched).toMatchObject({ ok: true, durable: true, monitor_alive: false, monitor_state: "never-armed",
+        delivery_status: "queued_monitor_never_armed", nudge: { attempted: true, sent: false, delivery: "pending_verify" } });
+      expect(dispatched.error_code).toBeUndefined();
+      expect(dispatched.nudge.reason).toContain("verification is in flight");
+      const id = dispatched.nudge.delivery_id;
+      const receipt = engine.getDeliveryReceipt(id);
+      const evidence = { delivery_id: id, agent_id: record.agent_id, source_event: "dispatch_nudge", delivery_state: "pending_verify",
+        terminal: false, typed: true, submit_dispatched: false, submit_verified: null, retry_count: 0 };
+      const disk = () => JSON.parse(readFileSync(join(STATE_DIR, "delivery-receipts.json"), "utf8"));
+      expect(receipt).toMatchObject(evidence); expect(disk()).toEqual([expect.objectContaining(evidence)]);
+      expect(readInbox(record.agent_id, { baseDir: inboxDir })).toEqual([expect.objectContaining({ id: dispatched.dispatched.id, task: "Read the pending handoff" })]);
+      expect(sendCalls(exec).map(args => args.at(-1))).toEqual([receipt.text]);
+      // Retrying the exact pointer uses the pending receipt; another dispatch
+      // would create a different inbox envelope and is not the same delivery.
+      const retry = await invoke("send_to", { mode: "agent", agent_id: record.agent_id, text: receipt.text, press_enter: true, verbose: true });
+      expect(retry).toMatchObject({ ok: true, accepted: true, duplicate_of: id, delivery_id: id, delivery_state: "pending_verify", submit_verified: null });
+      await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(id)).toMatchObject(evidence); expect(disk()).toEqual([expect.objectContaining(evidence)]);
+      expect(sendCalls(exec).map(args => args.at(-1))).toEqual([receipt.text]);
+      expect((exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send-key") && args.includes("return"))).toEqual([]);
+      const disabled = await invoke("dispatch_to_agent", { agent_id: record.agent_id, task: "Keep the never-armed gate", from: "orc", nudge: "never" });
+      expect(disabled).toMatchObject({ ok: false, durable: true, error_code: "inbox_monitor_never_armed", nudge: { attempted: false, sent: false } });
+      expect(readInbox(record.agent_id, { baseDir: inboxDir })).toHaveLength(2);
+      expect(sendCalls(exec)).toHaveLength(1);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
   it("returns verified success when never armed but the TERMINAL-agent nudge submits", async () => {
     const agentId = await spawnTestAgent(server);
 

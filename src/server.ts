@@ -13528,6 +13528,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   sender_agent_id: owner.agent_id,
                   background_verify: true,
                 });
+                // The Claude relay already persists its evidence. Legacy
+                // callers must accept their actual outcome before retrying the watch.
+                if (!engine.getDeliveryReceipt(deliveryId) &&
+                    (delivery.delivery === "queued" || delivery.delivery === "pending_verify")) {
+                  const pending = { delivery_id: deliveryId, agent_id: owner.agent_id, text,
+                    press_enter: true, source_event: "report_to_parent" as const,
+                    retry_count: delivery.retry_count, rpc_methods: delivery.rpc_methods,
+                    typed: delivery.typed, submit_dispatched: delivery.submit_dispatched };
+                  if (delivery.delivery === "queued") engine.acceptComposerQueue(pending);
+                  else engine.acceptPendingVerify(pending);
+                }
                 if (delivery.delivery === "pending_verify") {
                   await engine.verifyPendingDeliveries();
                   if (engine.getDeliveryReceipt(deliveryId)?.submit_verified === true) return true;
