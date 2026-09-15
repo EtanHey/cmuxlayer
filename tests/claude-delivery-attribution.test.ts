@@ -119,7 +119,7 @@ it("#636 D1 ownership does not retry a lost-ACK Return that clears asynchronousl
     setTimeout(() => { cleared = true; }, 100);
     throw new Error("ETIMEDOUT after dispatch");
   });
-  const io = { read: async () => frame(cleared ? { inTranscript: true, transcriptMatches: 1 } : { complete: true, pending: true, cleared: false }), save: vi.fn(), returnOnly: key };
+  const io = { read: async () => frame(cleared ? { inTranscript: true, transcriptMatches: 1 } : { hash: "owned-before-lost-ack", complete: true, pending: true, cleared: false }), save: vi.fn(), returnOnly: key };
   await expect(verifyClaudeDelivery(current, io)).rejects.toThrow("ETIMEDOUT");
   await vi.advanceTimersByTimeAsync(2_001);
   expect((await verifyClaudeDelivery(current, io)).outcome).toBe("delivered");

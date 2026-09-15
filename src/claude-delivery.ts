@@ -16,6 +16,11 @@ export interface ClaudeDeliveryEvidence {
   pasted: boolean;
   initial_paste_id: number;
   observed_paste_id?: number;
+  retry_revoked?: boolean;
+  attribution_revoked?: boolean;
+  weak_corroboration_revoked?: boolean;
+  composer_cleared?: boolean;
+  last_composer_observed_at?: number;
   payload_observed: boolean;
   observed_frame_hash?: string;
   last_frame_hash?: string;
@@ -45,9 +50,33 @@ export interface ClaudeDeliveryFrame extends ClaudeReturnBaseline {
   queued: boolean;
   inTranscript: boolean;
   pasteId?: number;
+  renderingPrefix?: boolean;
 }
 
-export function reserveClaudeReturn(receipt: AgentDeliveryReceipt, frame: ClaudeDeliveryFrame): void {
+type ClaudeReceipt = Pick<AgentDeliveryReceipt, "retry_count" | "submit_dispatched"> & { claude_submit?: ClaudeDeliveryEvidence };
+
+/** Reads from every MCP client update one persisted, monotonic generation. */
+export function observeClaudeComposer(evidence: ClaudeDeliveryEvidence, frame: Pick<ClaudeDeliveryFrame, "complete" | "cleared" | "pasteId" | "renderingPrefix" | "observed_at">): boolean {
+  if (frame.observed_at < (evidence.last_composer_observed_at ?? -Infinity)) return false;
+  if (evidence.return_at !== undefined && frame.observed_at < evidence.return_at) return false;
+  const ownership = () => [evidence.payload_observed, evidence.observed_paste_id, evidence.retry_revoked, evidence.attribution_revoked, evidence.composer_cleared, evidence.last_composer_observed_at];
+  const before = ownership();
+  evidence.last_composer_observed_at = frame.observed_at;
+  if (frame.complete) {
+    evidence.payload_observed = true;
+    if (frame.pasteId && evidence.observed_paste_id === undefined) evidence.observed_paste_id = frame.pasteId;
+  }
+  if (evidence.payload_observed && frame.cleared) {
+    evidence.retry_revoked = true;
+    evidence.composer_cleared = true;
+  } else if (!frame.cleared && ((!frame.complete && !frame.renderingPrefix) || evidence.composer_cleared || (evidence.payload_observed && !frame.complete))) {
+    evidence.retry_revoked = true;
+    evidence.attribution_revoked = true;
+  }
+  return ownership().some((value, index) => value !== before[index]);
+}
+
+export function reserveClaudeReturn(receipt: ClaudeReceipt, frame: ClaudeDeliveryFrame): void {
   const evidence = receipt.claude_submit!;
   const previousAttempts = evidence.return_attempts ?? (evidence.return_at !== undefined ? receipt.retry_count + 1 : 0);
   evidence.return_attempts = previousAttempts + 1;
@@ -63,7 +92,7 @@ const increased = (current: number | null, baseline: number | null): boolean =>
   typeof current === "number" && Number.isFinite(current) && typeof baseline === "number" && Number.isFinite(baseline) && current > baseline;
 
 export async function verifyClaudeDelivery(
-  receipt: AgentDeliveryReceipt,
+  receipt: ClaudeReceipt,
   io: {
     read: () => Promise<ClaudeDeliveryFrame | null>;
     save: () => void;
@@ -76,15 +105,17 @@ export async function verifyClaudeDelivery(
   const inspect = (frame: ClaudeDeliveryFrame | null): DeliveryVerifyObservation | null => {
     if (!current()) return { outcome: "pending", reason: "verification_cancelled" };
     if (!frame) return { outcome: "pending", reason: "surface_read_unavailable" };
+    if (frame.observed_at < (evidence.last_composer_observed_at ?? -Infinity)) return { outcome: "pending", reason: "stale_composer_observation" };
+    observeClaudeComposer(evidence, frame);
     evidence.last_frame_hash = frame.hash;
     const baseline = evidence.pre_return;
-    const attributable = evidence.payload_observed && evidence.return_at !== undefined && baseline &&
+    const attributable = !evidence.attribution_revoked && evidence.payload_observed && evidence.return_at !== undefined && baseline &&
       baseline.hash === evidence.observed_frame_hash && frame.observed_at > evidence.return_at &&
       frame.hash !== baseline.hash && !frame.pending && !frame.queued;
     if (attributable) {
       const kind = frame.inTranscript && frame.transcriptMatches > baseline.transcriptMatches ? "transcript_echo"
-        : frame.cleared && (increased(frame.tokenCount, baseline.tokenCount) || increased(frame.cost, baseline.cost)) ? "consumption_increase"
-        : frame.cleared && !baseline.active && frame.active ? "activity_transition" : null;
+        : !evidence.weak_corroboration_revoked && frame.cleared && (increased(frame.tokenCount, baseline.tokenCount) || increased(frame.cost, baseline.cost)) ? "consumption_increase"
+        : !evidence.weak_corroboration_revoked && frame.cleared && !baseline.active && frame.active ? "activity_transition" : null;
       if (kind) {
         evidence.corroboration = kind;
         evidence.submit_evidence = kind === "consumption_increase" ? "token_delta" : kind === "activity_transition" ? "cleared_composer" : "transcript_echo";
@@ -100,15 +131,15 @@ export async function verifyClaudeDelivery(
   if (observed) return observed;
   // A former busy state is not permanent. Once idle, the same owned composer
   // can receive Return; an explicit queued-input frame never gets a re-press.
-  if (!frame?.complete || frame.active || frame.queued) {
+  if (evidence.retry_revoked || !frame?.complete || frame.active || frame.queued) {
     io.save();
     return { outcome: "pending" };
   }
-  if (evidence.return_at !== undefined && Date.now() - evidence.return_at < 2_000) return { outcome: "pending" };
+  if (evidence.return_at !== undefined && (Date.now() - evidence.return_at < 2_000 || frame.observed_at <= evidence.return_at)) return { outcome: "pending" };
   frame = await io.read();
   const late = inspect(frame);
   if (late) return late;
-  if (!frame?.complete || frame.active || frame.queued || !current()) return { outcome: "pending" };
+  if (evidence.retry_revoked || !frame?.complete || frame.active || frame.queued || !current() || (evidence.return_at !== undefined && frame.observed_at <= evidence.return_at)) return { outcome: "pending" };
   const attempts = evidence.return_attempts ?? (evidence.return_at !== undefined ? receipt.retry_count + 1 : 0);
   if (attempts >= 4) return { outcome: "failed_confirmed", reason: "idle_composer_return_exhausted", evidence: { frame_hash: frame.hash } };
   reserveClaudeReturn(receipt, frame);

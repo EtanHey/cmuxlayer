@@ -311,7 +311,8 @@ export interface DeliveryTelemetryEvent {
     | "pending_verify"
     | "failed_confirmed";
   target_agent?: string;
-  submit_evidence?: "transcript_echo" | "cleared_composer" | "token_delta";
+  /** What the verifier observed; screen content itself is never logged here. */
+  submit_evidence?: string;
   frame_hash?: string;
 }
 

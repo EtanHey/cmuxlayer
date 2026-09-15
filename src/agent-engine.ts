@@ -294,6 +294,8 @@ export type AgentDeliveryState =
   | "failed_confirmed";
 
 export interface AgentDeliveryReceipt {
+  submit_evidence?: string;
+  frame_hash?: string;
   claude_submit?: ClaudeDeliveryEvidence;
   delivery_id: string;
   agent_id: string;
@@ -1237,7 +1239,7 @@ interface AgentEngineClient {
     surface: string,
     text: string,
     opts?: CmuxSendOptions & {
-      beforeMutation?: () => Promise<unknown>;
+      beforeMutation?: () => Promise<void>;
       stableSurfaceIdentity?: string | null;
     },
   ): Promise<unknown>;
@@ -7419,9 +7421,43 @@ export class AgentEngine {
   updateClaudeDeliveryEvidence(deliveryId: string, evidence: ClaudeDeliveryEvidence): void {
     const receipt = this.deliveryReceipts.get(deliveryId);
     if (!receipt) return;
-    receipt.claude_submit = evidence;
+    const current = receipt.claude_submit;
+    if (current && current !== evidence) {
+      // An awaited verifier may save an older snapshot after another client
+      // observed a generation change. Neither flags nor attempts go backwards.
+      for (const key of ["retry_revoked", "attribution_revoked", "weak_corroboration_revoked", "composer_cleared", "payload_observed"] as const) {
+        if (current[key]) evidence[key] = true;
+      }
+      evidence.observed_paste_id = current.observed_paste_id ?? evidence.observed_paste_id;
+      evidence.last_composer_observed_at = Math.max(current.last_composer_observed_at ?? 0, evidence.last_composer_observed_at ?? 0);
+      evidence.return_attempts = Math.max(current.return_attempts ?? 0, evidence.return_attempts ?? 0);
+      if ((current.return_at ?? -Infinity) > (evidence.return_at ?? -Infinity)) {
+        evidence.return_at = current.return_at;
+        evidence.pre_return = current.pre_return;
+        evidence.observed_frame_hash = current.observed_frame_hash;
+      }
+      Object.assign(current, evidence);
+    } else receipt.claude_submit = evidence;
     this.persistDeliveryReceipts();
     this.refreshClaudeVerifyTimer();
+  }
+
+  observeClaudeDeliveryEvidence(observe: (receipt: AgentDeliveryReceipt) => boolean): void {
+    let changed = false;
+    for (const receipt of this.deliveryReceipts.values()) {
+      if (receipt.claude_submit && !receipt.terminal) changed = observe(receipt) || changed;
+    }
+    if (changed) this.persistDeliveryReceipts();
+  }
+
+  noteClaudeSurfaceSubmit(surface: string, workspace: string | undefined, uuid: string | null, deliveryId?: string): void {
+    this.observeClaudeDeliveryEvidence(receipt => {
+      const evidence = receipt.claude_submit!;
+      const sameSurface = evidence.surface_uuid ? evidence.surface_uuid.toLowerCase() === uuid?.toLowerCase() : evidence.surface_id === surface;
+      if (receipt.delivery_id === deliveryId || !sameSurface || (evidence.workspace_id ?? null) !== (workspace ?? null) || evidence.return_at === undefined || evidence.weak_corroboration_revoked) return false;
+      evidence.weak_corroboration_revoked = true;
+      return true;
+    });
   }
 
   getDeliveryVerificationGeneration(): number {
@@ -7621,6 +7657,8 @@ export class AgentEngine {
           this.persistDeliveryReceipts();
         }
         if (observation.outcome === "delivered") {
+          if (typeof observation.evidence?.submit_evidence === "string") receipt.submit_evidence = observation.evidence.submit_evidence;
+          if (typeof observation.evidence?.frame_hash === "string") receipt.frame_hash = observation.evidence.frame_hash;
           receipt.delivery_state = "submitted";
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
@@ -8115,10 +8153,8 @@ export class AgentEngine {
       retry_count: receipt.retry_count,
       delivery_id: receipt.delivery_id,
       delivery_state: receipt.delivery_state,
-      ...(receipt.claude_submit ? {
-        submit_evidence: receipt.claude_submit.submit_evidence,
-        frame_hash: receipt.claude_submit.last_frame_hash,
-      } : {}),
+      ...(receipt.submit_evidence ? { submit_evidence: receipt.submit_evidence } : {}),
+      ...(receipt.frame_hash ? { frame_hash: receipt.frame_hash } : {}),
     });
   }
 

@@ -2506,7 +2506,20 @@ describe("agent lifecycle tool handlers", () => {
   it.each([{ requiredPromptReturns: 2, knownSender: false }, { requiredPromptReturns: 99, knownSender: false }, { requiredPromptReturns: 99, knownSender: true }])("#636 D1 boot pending recovers or exhausts ($requiredPromptReturns Returns, sender=$knownSender)", async ({ requiredPromptReturns, knownSender }) => {
     vi.useFakeTimers();
     try {
-      const exec = makeLifecycleExec({ requiredPromptReturns });
+      const baseExec = makeLifecycleExec({ requiredPromptReturns, ...(knownSender ? { surfaceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } : {}) });
+      const exec = vi.fn(async (command, args) => {
+        const result = await baseExec(command, args);
+        if (!knownSender) return result;
+        if (args.includes("list-panes")) {
+          const data = JSON.parse(result.stdout);
+          data.panes.push({ ref: "pane:caller", index: 1, focused: false, surface_count: 1, surface_refs: ["surface:caller"], selected_surface_ref: "surface:caller" });
+          return { ...result, stdout: JSON.stringify(data) };
+        }
+        if (args.includes("list-pane-surfaces") && args.includes("pane:caller")) {
+          return { stdout: JSON.stringify({ workspace_ref: "workspace:1", window_ref: "window:1", pane_ref: "pane:caller", surfaces: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ref: "surface:caller", title: "boot-caller", type: "terminal", index: 0, selected: true }] }), stderr: "" };
+        }
+        return result;
+      });
       const inboxBaseDir = join(TEST_DIR, "boot-failure-inbox");
       const server = createTrackedServer({ exec, stateDir: TEST_DIR, inboxBaseDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
       const engine = (server as any)._registeredTools.interact._engine;

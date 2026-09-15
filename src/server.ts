@@ -10,7 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
-import { claudePasteId, deliveryFrameHash, reserveClaudeReturn, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
+import { claudePasteId, deliveryFrameHash, observeClaudeComposer, reserveClaudeReturn, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -67,6 +67,7 @@ import {
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
   COORDINATION_CONTRACT_POINTER_NOT_VERIFIED,
+  COORDINATION_CONTRACT_POINTER_PENDING,
   COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
@@ -5854,6 +5855,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     workspace?: string,
     beforeMutation?: () => Promise<void>,
     maxAttempts = SEND_INPUT_RETRY_ATTEMPTS,
+    deliveryId?: string,
   ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
     let lastError: unknown;
@@ -5862,6 +5864,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         await beforeMutation?.();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
+        if (isSubmitKey(key)) context.lifecycleSweepEngine?.noteClaudeSurfaceSubmit(surface, workspace, observedSurfaceUuid(surface), deliveryId);
         await client.sendKey(surface, key, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
@@ -6027,7 +6030,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
   const observedSurfaceUuid = (surface: string): string | null =>
     context.capturedSurfaceUuidByRef.get(surface) ?? (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(surface) ? surface : null);
-  const observeDraftOwnership = (surface: string, workspace: string | undefined, text: string, uuid: string | null): void => {
+  const claudeComposerState = (screen: string, text: string, evidence: ClaudeDeliveryEvidence | undefined, observed_at: number) => {
+    const composer = extractComposerInputRegion(screen, text, "claude");
+    if (composer === null) return null;
+    const payload = normalizeTerminalText(text).trimEnd();
+    const visible = normalizeTerminalText(composer).trimEnd();
+    const tail = payload.slice(-80);
+    const pasteId = claudePasteId(composer);
+    const ownedPaste = evidence?.pasted === true && (evidence.observed_paste_id !== undefined
+      ? pasteId === evidence.observed_paste_id : pasteId > evidence.initial_paste_id);
+    return { composer, observed_at, pasteId, cleared: composer.trim() === "",
+      complete: ownedPaste || Boolean(tail && visible.endsWith(tail) && payload.endsWith(visible)),
+      renderingPrefix: payload.startsWith(visible) };
+  };
+  const observeDraftOwnership = (surface: string, workspace: string | undefined, text: string, uuid: string | null, observed_at: number): void => {
     for (const [key, token] of typedDraftOwners) {
       const matches = token.uuid ? uuid?.toLowerCase() === token.uuid.toLowerCase()
         : token.ref === surface && token.workspace === (workspace ?? null);
@@ -6041,20 +6057,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (draftTargetFingerprint(surface, uuid) !== token.fp || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
     }
+    context.lifecycleSweepEngine?.observeClaudeDeliveryEvidence(receipt => {
+      const evidence = receipt.claude_submit!;
+      const matches = evidence.surface_uuid ? uuid?.toLowerCase() === evidence.surface_uuid.toLowerCase() : evidence.surface_id === surface;
+      if (!matches || (evidence.workspace_id ?? null) !== (workspace ?? null)) return false;
+      const owner = resolveLatestSurfaceAgentRecord(stateMgr, surface, uuid);
+      if (owner?.agent_id !== receipt.agent_id || owner.cli !== "claude" || (owner.cli_session_id ?? null) !== (evidence.cli_session_id ?? null)) {
+        const changed = !evidence.retry_revoked || !evidence.attribution_revoked;
+        evidence.retry_revoked = evidence.attribution_revoked = true;
+        return changed;
+      }
+      const frame = claudeComposerState(text, receipt.text, evidence, observed_at);
+      return frame ? observeClaudeComposer(evidence, frame) : false;
+    });
   };
 
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
     opts?: { throwOnSurfaceGone?: boolean; agent?: AgentRecord },
-  ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
+  ): Promise<{ text: string; parsed: ParsedScreenResult; observed_at: number } | null> => {
     try {
+      const observed_at = Date.now();
       const screen = await client.readScreen(surface, {
         ...(workspace ? { workspace } : {}),
         lines: 30,
       });
       const text = typeof screen === "string" ? screen : (screen.text ?? "");
-      observeDraftOwnership(surface, workspace, text, observedSurfaceUuid(surface));
+      observeDraftOwnership(surface, workspace, text, observedSurfaceUuid(surface), observed_at);
       const parsed = applyHarnessState(
         enrichParsedScreen(
           parseScreen(text),
@@ -6063,7 +6093,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ),
         resolveHarnessStateForSurface(stateMgr, surface, opts?.agent),
       );
-      return { text, parsed };
+      return { text, parsed, observed_at };
     } catch (error) {
       if (
         opts?.throwOnSurfaceGone &&
@@ -6165,16 +6195,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return payload ? normalizeTerminalText(screen).split(payload).length - 1 : 0;
   };
   const readClaudeDeliveryFrame = async (surface: string, workspace: string | undefined, text: string, evidence?: ClaudeDeliveryEvidence): Promise<ClaudeDeliveryFrame | null> => {
-    const observed_at = Date.now(); // A read begun before Return cannot prove a later landing.
     const snapshot = await readParsedSurface(surface, workspace, { throwOnSurfaceGone: true });
     if (!snapshot?.text.trim()) return null;
-    const composer = extractComposerInputRegion(snapshot.text, text);
-    if (composer === null) return null;
+    const observed_at = snapshot.observed_at; // Read-start time, shared with the ownership observer.
+    const composerState = claudeComposerState(snapshot.text, text, evidence, observed_at);
+    if (!composerState) return null;
+    const { composer, pasteId } = composerState;
     const payload = normalizeTerminalText(text).trimEnd();
-    const visible = normalizeTerminalText(composer).trimEnd();
     const correlatedTail = payload.slice(-80);
-    const pasteId = claudePasteId(composer);
-    const ownedPaste = evidence?.pasted === true && pasteId > evidence.initial_paste_id;
     const lines = normalizeTerminalText(snapshot.text).split("\n");
     let promptIndex = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -6187,7 +6215,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const metrics = parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed);
     return {
       hash: deliveryFrameHash(snapshot.text), observed_at, ...metrics,
-      complete: ownedPaste || Boolean(correlatedTail && visible.endsWith(correlatedTail) && payload.endsWith(visible)),
+      complete: composerState.complete, renderingPrefix: composerState.renderingPrefix,
       pending: screenShowsPendingInput(snapshot.text, text) || pasteId > 0,
       cleared: composer.trim() === "",
       // Require current spinner chrome; a completed tool line is not activity.
@@ -6986,22 +7014,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         transport_queued: transportQueued,
       };
       engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: 0, typed: true, submit_dispatched: false, rpc_methods: [...rpcMethods] });
+      engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
       const generation = engine.getDeliveryVerificationGeneration();
       const assertInitialTarget = async () => {
         await opts.beforeMutation?.();
         const current = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
-        if (engine.getDeliveryVerificationGeneration() !== generation || current?.agent_id !== target.agent_id || current.cli_session_id !== target.cli_session_id || current.cli !== target.cli) throw new Error("Claude delivery target changed before Return");
+        if (evidence.retry_revoked || engine.getDeliveryVerificationGeneration() !== generation || current?.agent_id !== target.agent_id || current.cli_session_id !== target.cli_session_id || current.cli !== target.cli) throw new Error("Claude delivery ownership or target changed before Return");
       };
       const beforeReturn = await readClaudeDeliveryFrame(opts.surface, opts.workspace, submittedText, evidence);
       evidence.queued_behind_turn ||= beforeReturn?.active === true;
       const pending = engine.getDeliveryReceipt(opts.delivery_id)!;
       pending.claude_submit = evidence;
-      if (beforeReturn?.complete && !beforeReturn.queued && engine.getDeliveryVerificationGeneration() === generation) {
+      if (!evidence.retry_revoked && beforeReturn?.complete && !beforeReturn.queued && engine.getDeliveryVerificationGeneration() === generation) {
         reserveClaudeReturn(pending, beforeReturn);
         engine.acceptPendingVerify({ ...pending, source_event: pending.source_event });
         engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
         try {
-          const rpc = await sendKeyWithRetry(opts.surface, "return", opts.workspace, assertInitialTarget, 1);
+          const rpc = await sendKeyWithRetry(opts.surface, "return", opts.workspace, assertInitialTarget, 1, opts.delivery_id);
           submitDispatched = true;
           if (rpc) rpcMethods.add(rpc);
         } catch { /* Reserved ambiguous attempt stays in flight; never retype. */ }
@@ -9213,6 +9242,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     const snapshot = (async () => {
+      const observed_at = Date.now();
       const result = await client.readScreen(opts.surface, {
         workspace: opts.workspace,
         lines: opts.lines,
@@ -9220,7 +9250,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
       const topology = await collectSurfaceTopology(opts.workspace);
       observeDraftOwnership(opts.surface, opts.workspace ?? topology?.workspaceBySurface.get(opts.surface), typeof result === "string" ? result : result.text ?? "",
-        topology?.surfaceIdByRef.get(opts.surface) ?? observedSurfaceUuid(opts.surface));
+        topology?.surfaceIdByRef.get(opts.surface) ?? observedSurfaceUuid(opts.surface), observed_at);
       return { result, topology };
     })();
     context.readScreenInflight.set(key, snapshot);
@@ -14596,7 +14626,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               save: () => engine.updateClaudeDeliveryEvidence(receipt.delivery_id, receipt.claude_submit!),
               returnOnly: async () => {
                 await assertCurrent();
-                await sendKeyWithRetry(route.surface_id, "return", route.workspace_id ?? undefined, assertCurrent, 1);
+                if (receipt.claude_submit?.retry_revoked) throw new Error("Claude composer ownership was revoked before Return");
+                await sendKeyWithRetry(route.surface_id, "return", route.workspace_id ?? undefined, async () => { await assertCurrent(); if (receipt.claude_submit?.retry_revoked) throw new Error("Claude composer ownership was revoked before Return"); }, 1, receipt.delivery_id);
                 appendDeliveryEvent({ event_type: "press_enter", source_agent: receipt.agent_id, target_surface: route.surface_id, bytes: 0, press_enter: true, submit_verified: null, retry_count: receipt.retry_count, delivery_id: receipt.delivery_id });
               },
             });
@@ -14850,7 +14881,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
           .optional()
           .describe(
-            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
+            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns with boot_prompt_receipt.delivery_state pending_verify, follow that delivery_id with wait_for and do not relay or resend while verification is in flight. For other new-spawn outcomes, if false and contract_path is present, the pointer was not verified, so follow coordination_footer_note to relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
           ),
         force_new: z
           .boolean()
@@ -15633,7 +15664,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 result.coordination_footer_note =
                   result.coordination_footer_delivered
                     ? COORDINATION_CONTRACT_DELIVERED_NOTE
-                    : COORDINATION_CONTRACT_POINTER_NOT_VERIFIED;
+                    : bootPromptDelivery.delivery_state === "pending_verify"
+                      ? COORDINATION_CONTRACT_POINTER_PENDING
+                      : COORDINATION_CONTRACT_POINTER_NOT_VERIFIED;
               }
 
               await captureSpawnSessionBestEffort(result);

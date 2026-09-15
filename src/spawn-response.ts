@@ -58,7 +58,11 @@ function record(value: unknown): JsonObject | null {
     : null;
 }
 
-function bootUnsubmittedNextAction(surface: unknown): string {
+function bootUnsubmittedNextAction(surface: unknown, receipt: unknown): string {
+  const delivery = record(receipt);
+  if (delivery?.delivery_state === "pending_verify" && typeof delivery.delivery_id === "string" && delivery.delivery_id.length > 0) {
+    return `Boot delivery verification is pending. Follow wait_for({delivery_id:${JSON.stringify(delivery.delivery_id)},timeout_ms:10000}). Keep the existing brief intact; never resend, re-spawn, or send a manual Return.`;
+  }
   const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
   return `Boot prompt typed but not submitted. Read the pane with read_screen({surface:"${surfaceRef}"}); the spawning caller must report boot_unsubmitted with this agent ID to its lead using the collab path in its contract. Keep the existing brief intact; never re-spawn or send a manual Return.`;
 }
@@ -168,7 +172,7 @@ export function buildSpawnToolReturn(
   const stateFields = state
     ? { spawn_state: state,
         ...(state === "boot_unsubmitted"
-          ? { next_action: bootUnsubmittedNextAction(data.surface_id) }
+          ? { next_action: bootUnsubmittedNextAction(data.surface_id, data.boot_prompt_receipt) }
           : {}) }
     : {};
   const full = { ok: true, ...stateFields, ...data };
