@@ -6039,7 +6039,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const pasteId = claudePasteId(composer);
     const ownedPaste = evidence?.pasted === true && (evidence.observed_paste_id !== undefined
       ? pasteId === evidence.observed_paste_id : pasteId > evidence.initial_paste_id);
-    return { composer, observed_at, pasteId, cleared: composer.trim() === "",
+    return { composer, composer_present: true, observed_at, pasteId, cleared: composer.trim() === "",
       complete: ownedPaste || Boolean(tail && visible.endsWith(tail) && payload.endsWith(visible)),
       renderingPrefix: payload.startsWith(visible) };
   };
@@ -6215,7 +6215,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const metrics = parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed);
     return {
       hash: deliveryFrameHash(snapshot.text), observed_at, ...metrics,
-      complete: composerState.complete, renderingPrefix: composerState.renderingPrefix,
+      composer_present: true, complete: composerState.complete, renderingPrefix: composerState.renderingPrefix,
       pending: screenShowsPendingInput(snapshot.text, text) || pasteId > 0,
       cleared: composer.trim() === "",
       // Require current spinner chrome; a completed tool line is not activity.

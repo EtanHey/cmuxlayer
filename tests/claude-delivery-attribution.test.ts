@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { verifyClaudeDelivery, type ClaudeDeliveryFrame } from "../src/claude-delivery.js";
+import { reserveClaudeReturn, verifyClaudeDelivery, type ClaudeDeliveryFrame } from "../src/claude-delivery.js";
 import type { AgentDeliveryReceipt } from "../src/agent-engine.js";
 
 beforeEach(() => vi.useFakeTimers({ now: 10_000 }));
@@ -11,7 +11,7 @@ const receipt = (overrides: Record<string, unknown> = {}) => ({
     pre_return: { hash: "owned-before-return", observed_at: 7_000, transcriptMatches: 0, tokenCount: 100, cost: 1, active: false }, ...overrides },
 } as unknown as AgentDeliveryReceipt);
 const frame = (overrides: Record<string, unknown> = {}) => ({
-  hash: "later-empty", observed_at: Date.now(), complete: false, pending: false, cleared: true, active: false,
+  hash: "later-empty", observed_at: Date.now(), composer_present: true, complete: false, pending: false, cleared: true, active: false,
   queued: false, inTranscript: false, transcriptMatches: 0, tokenCount: 100, cost: 1, ...overrides,
 } as unknown as ClaudeDeliveryFrame);
 
@@ -124,4 +124,28 @@ it("#636 D1 ownership does not retry a lost-ACK Return that clears asynchronousl
   await vi.advanceTimersByTimeAsync(2_001);
   expect((await verifyClaudeDelivery(current, io)).outcome).toBe("delivered");
   expect(key).toHaveBeenCalledTimes(1);
+});
+
+it("#636 D1 ownership ignores a readable frame with no composer anchor", async () => {
+  const current = receipt(); const key = vi.fn(); const io = { save: vi.fn(), returnOnly: key };
+  await verifyClaudeDelivery(current, { ...io, read: async () => frame({ composer_present: false, complete: false, cleared: false, renderingPrefix: false, hash: "cropped-footer" }) });
+  expect(key).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(2_001);
+  await verifyClaudeDelivery(current, { ...io, read: async () => frame({ complete: true, pending: true, cleared: false, hash: "owned-restored-window" }) });
+  expect(key).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(2_001);
+  expect((await verifyClaudeDelivery(current, { ...io, read: async () => frame({ inTranscript: true, transcriptMatches: 1 }) })).outcome).toBe("delivered");
+});
+
+it("#636 D1 ownership never replaces a pinned paste ID when reserving Return", () => {
+  const current = receipt({ observed_paste_id: 3 });
+  reserveClaudeReturn(current, frame({ complete: true, pending: true, cleared: false, pasteId: 5 }));
+  expect(current.claude_submit?.observed_paste_id).toBe(3);
+});
+
+it("#636 D1 ownership rejects a later paste ID even if a reader claims completeness", async () => {
+  const current = receipt({ observed_paste_id: 3 }); const key = vi.fn();
+  await verifyClaudeDelivery(current, { read: async () => frame({ complete: true, pending: true, cleared: false, pasteId: 5 }), save: vi.fn(), returnOnly: key });
+  expect(key).not.toHaveBeenCalled();
+  expect(current.claude_submit?.observed_paste_id).toBe(3);
 });
