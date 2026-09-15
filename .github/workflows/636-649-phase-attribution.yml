@@ -1,0 +1,38 @@
+name: 636-649 phase attribution
+
+on:
+  push:
+    branches: [scratch/636-649-phase-attribution]
+
+permissions:
+  contents: read
+
+jobs:
+  phase-attribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - run: rm -f package-lock.json
+      - run: bun install
+      - name: Run full phase-attribution measurement
+        env:
+          CMUXLAYER_BENCH_ROUNDS: "12"
+        run: bun run bench:daemon:check
+      - name: Verify benchmark scratch cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          scratch=docs.local/scratch/perf-budget/scratch
+          if [ -d "$scratch" ] && find "$scratch" -mindepth 1 -print -quit | grep -q .; then
+            find "$scratch" -mindepth 1 -maxdepth 2 -print
+            exit 1
+          fi
+      - name: Upload phase-attribution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: 636-649-phase-attribution
+          path: docs.local/scratch/perf-budget/
