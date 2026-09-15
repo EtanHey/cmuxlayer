@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import {
   getEngine,
@@ -75,6 +76,7 @@ const CODEX_BUSY_AFTER_PERMISSION_SCREEN = [
 function makeExec(opts?: {
   screen?: () => string;
   onSendKey?: (key: string) => void;
+  onSendText?: () => void;
   closeSurfaceFails?: boolean;
   /** Model a cmux that accepts close-surface but keeps listing the pane. */
   closeLeavesSurfaceListed?: boolean;
@@ -229,6 +231,7 @@ function makeExec(opts?: {
         stderr: "",
       };
     }
+    if (args.includes("send")) opts?.onSendText?.();
     if (args.includes("send-key")) {
       opts?.onSendKey?.(String(args[args.length - 1] ?? ""));
       return { stdout: "{}", stderr: "" };
@@ -298,6 +301,25 @@ async function sendKey(server: unknown, key: string): Promise<ToolCallResult> {
   )) as ToolCallResult;
 }
 
+/** Preserve #484 verification coverage with a payload this caller actually wrote. */
+async function sendOwnedComposerKey(pending: string, afterReturn = pending) {
+  let typed = false;
+  let pressed = false;
+  const exec = makeExec({
+    screen: () => !typed ? IDLE_CLAUDE_SCREEN : pressed ? afterReturn : pending,
+    onSendText: () => { typed = true; },
+    onSendKey: () => { pressed = true; },
+  });
+  const server = makeServer(exec);
+  seedAgent(server, { agent_id: "key-sender", surface_id: WITNESS_SURFACE, surface_uuid: WITNESS_UUID, state: "ready", role: "lead" });
+  return runWithCallerContext({ surfaceId: WITNESS_UUID, workspaceId: "workspace:1" }, async () => {
+    const typedResult = await getTool(server, "send_to").handler({ mode: "surface", target: SURFACE, text: "lead: please pick up lane T4", press_enter: false }, {});
+    expect(payload(typedResult).ok).toBe(true);
+    expect(payload(typedResult).caller_agent_id).toBe("key-sender");
+    return sendKey(server, "return");
+  });
+}
+
 describe("#484 — send_to(mode:key) must not report success for an unattempted submit", () => {
   it.each(["return", "Return", "enter", "Enter", "KPEnter", "ctrl-m"])(
     "recognises %j as a submit key and states that it reached the pane",
@@ -329,16 +351,7 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
   });
 
   it("verifies the submit landed when the composer clears", async () => {
-    let pressed = false;
-    const exec = makeExec({
-      screen: () =>
-        pressed ? WORKING_AND_CLEARED_CLAUDE_SCREEN : POPULATED_CLAUDE_SCREEN,
-      onSendKey: () => {
-        pressed = true;
-      },
-    });
-
-    const result = await sendKey(makeServer(exec), "return");
+    const result = await sendOwnedComposerKey(POPULATED_CLAUDE_SCREEN, WORKING_AND_CLEARED_CLAUDE_SCREEN);
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
@@ -392,11 +405,9 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
   });
 
   it("does not infer key failure from a composer that remains populated", async () => {
-    // The exact #484 shape: a lead typed a message and it sat unsent. Key mode
-    // did not write that payload, so unchanged contents are absence of evidence.
-    const exec = makeExec({ screen: () => POPULATED_CLAUDE_SCREEN });
-
-    const result = await sendKey(makeServer(exec), "return");
+    // The caller first types its own payload; an unchanged composer after
+    // Return still provides no submission evidence.
+    const result = await sendOwnedComposerKey(POPULATED_CLAUDE_SCREEN);
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
@@ -413,11 +424,7 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     // submit_verified:true for a message still visible on screen — worse than
     // the null it replaced, because null admits ignorance and true asserts an
     // observation the pane contradicts.
-    const exec = makeExec({
-      screen: () => WORKING_AND_POPULATED_CLAUDE_SCREEN,
-    });
-
-    const result = await sendKey(makeServer(exec), "return");
+    const result = await sendOwnedComposerKey(WORKING_AND_POPULATED_CLAUDE_SCREEN);
 
     const data = payload(result);
     expect(result.isError).toBeUndefined();
