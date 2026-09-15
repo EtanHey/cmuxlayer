@@ -66,6 +66,7 @@ import {
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
   COORDINATION_CONTRACT_POINTER_NOT_VERIFIED,
+  COORDINATION_CONTRACT_POINTER_PENDING,
   COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
@@ -14704,7 +14705,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
           .optional()
           .describe(
-            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
+            'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns with boot_prompt_receipt.delivery_state pending_verify, follow that delivery_id with wait_for and do not relay or resend while verification is in flight. For other new-spawn outcomes, if false and contract_path is present, the pointer was not verified, so follow coordination_footer_note to relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
           ),
         force_new: z
           .boolean()
@@ -15493,7 +15494,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 result.coordination_footer_note =
                   result.coordination_footer_delivered
                     ? COORDINATION_CONTRACT_DELIVERED_NOTE
-                    : COORDINATION_CONTRACT_POINTER_NOT_VERIFIED;
+                    : bootPromptDelivery.delivery_state === "pending_verify"
+                      ? COORDINATION_CONTRACT_POINTER_PENDING
+                      : COORDINATION_CONTRACT_POINTER_NOT_VERIFIED;
               }
 
               await captureSpawnSessionBestEffort(result);

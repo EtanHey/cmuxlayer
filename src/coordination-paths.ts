@@ -348,6 +348,9 @@ export const COORDINATION_CONTRACT_DELIVERED_NOTE =
 export const COORDINATION_CONTRACT_POINTER_NOT_VERIFIED =
   "not_delivered: the contract file was written, but its pointer was folded into a boot prompt whose submission was not verified. The LEAD must relay contract_path, report_path, and done_marker to this worker.";
 
+export const COORDINATION_CONTRACT_POINTER_PENDING =
+  "pending_verify: the contract file was written and its boot pointer is awaiting submission verification. Follow boot_prompt_receipt.delivery_id with wait_for; do not relay or resend while verification is in flight. An agent that ignores the pointer never reads the contract. That is OBSERVABLE IN PRINCIPLE, but no health or closure path checks it today. coordination_footer_bytes measures the inline rendering, which is NOT what was sent: the wire carried the pointer and the contract lives in a separate file.";
+
 /**
  * Resume provenance (#462 item 2). The contract file is refreshed on resume --
  * idempotent, since both strings derive from agent_id alone -- but no pointer
