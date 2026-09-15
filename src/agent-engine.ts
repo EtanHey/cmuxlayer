@@ -354,7 +354,7 @@ function snapshotDeliveryReceipt(
   const { rpc_methods: rpcMethods, ...snapshot } = receipt;
   return {
     ...snapshot,
-    ...(receipt.claude_submit ? { claude_submit: { ...receipt.claude_submit } } : {}),
+    ...(receipt.claude_submit ? { claude_submit: { ...receipt.claude_submit, ...(receipt.claude_submit.pre_return ? { pre_return: { ...receipt.claude_submit.pre_return } } : {}) } } : {}),
     ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
@@ -7428,6 +7428,12 @@ export class AgentEngine {
     return this.deliveryVerifyGeneration;
   }
 
+  isClaudeVerifyCurrent(receipt: AgentDeliveryReceipt, generation: number, startedAt: number): boolean {
+    return this.deliveryReceipts.get(receipt.delivery_id) === receipt && !receipt.terminal &&
+      generation === this.deliveryVerifyGeneration && Date.now() - startedAt < this.deliveryVerifyTimeoutMs &&
+      (!receipt.verify_deadline_at || Date.now() < Date.parse(receipt.verify_deadline_at));
+  }
+
   private refreshClaudeVerifyTimer(): void {
     if (this.deliveryVerifyInFlight) return;
     const pending = this.deliveryVerifier &&
@@ -7575,7 +7581,7 @@ export class AgentEngine {
         const skipRead = this.shouldSkipVerifyRead(receipt, now);
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
         if (skipRead && !timedOut) continue;
-        if (!skipRead && this.deliveryVerifier) {
+        if (!skipRead && !timedOut && this.deliveryVerifier) {
           const agent = this.getAgentState(receipt.agent_id);
           const snapshotKey = agent?.surface_id ?? receipt.agent_id;
           let snapshot: DeliveryVerifySnapshot | null | undefined;
@@ -7610,6 +7616,7 @@ export class AgentEngine {
               reason: error instanceof Error ? error.message : String(error),
             };
           }
+          if (generation !== this.deliveryVerifyGeneration || this.deliveryReceipts.get(receipt.delivery_id) !== receipt || receipt.terminal) continue;
           receipt.verify_last_attempt_at = new Date().toISOString();
           this.persistDeliveryReceipts();
         }
@@ -7640,9 +7647,9 @@ export class AgentEngine {
           confirmedGone ||
           timedOut
         ) {
-          const reason =
-            observation.reason ??
-            (timedOut ? "verify_deadline_elapsed" : "failed_confirmed");
+          const reason = timedOut
+            ? receipt.claude_submit?.pending_reason ?? "verify_deadline_elapsed"
+            : observation.reason ?? "failed_confirmed";
           receipt.delivery_state = "failed_confirmed";
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
@@ -7739,7 +7746,7 @@ export class AgentEngine {
    * way, so the verdict keeps citing its evidence; only the escalation stops.
    */
   private deliveryFailureEscalationDecline(reason: string): string | null {
-    if (reason === "verify_deadline_elapsed") {
+    if (reason === "verify_deadline_elapsed" || reason === "cleared_unattributed") {
       return (
         "background verify ran out of deadline before observing an outcome; " +
         "no evidence the message was lost"

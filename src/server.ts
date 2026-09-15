@@ -10,7 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
-import { claudePasteId, deliveryFrameHash, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
+import { claudePasteId, deliveryFrameHash, reserveClaudeReturn, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -5800,11 +5800,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     key: string,
     workspace?: string,
     beforeMutation?: () => Promise<void>,
+    maxAttempts = SEND_INPUT_RETRY_ATTEMPTS,
   ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
     let lastError: unknown;
 
-    while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
+    while (attempt < maxAttempts) {
       try {
         await beforeMutation?.();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
@@ -5819,7 +5820,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         attempt += 1;
         if (
           !isRetryableDeliveryError(error) ||
-          attempt >= SEND_INPUT_RETRY_ATTEMPTS
+          attempt >= maxAttempts
         ) {
           throw error;
         }
@@ -6083,26 +6084,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return payload ? normalizeTerminalText(screen).split(payload).length - 1 : 0;
   };
   const readClaudeDeliveryFrame = async (surface: string, workspace: string | undefined, text: string, evidence?: ClaudeDeliveryEvidence): Promise<ClaudeDeliveryFrame | null> => {
+    const observed_at = Date.now(); // A read begun before Return cannot prove a later landing.
     const snapshot = await readParsedSurface(surface, workspace, { throwOnSurfaceGone: true });
     if (!snapshot?.text.trim()) return null;
-    const pending = screenShowsPendingInput(snapshot.text, text);
     const composer = extractComposerInputRegion(snapshot.text, text);
-    const payload = normalizeTerminalText(text).trim().replace(/\s+/g, " ");
-    const visible = normalizeTerminalText(composer ?? "").trim().replace(/\s+/g, " ");
-    // Long composers expose only a suffix. It must end at this payload's
-    // correlated tail; appended or prepended foreign text cancels recovery.
+    if (composer === null) return null;
+    const payload = normalizeTerminalText(text).trimEnd();
+    const visible = normalizeTerminalText(composer).trimEnd();
     const correlatedTail = payload.slice(-80);
     const pasteId = claudePasteId(composer);
     const ownedPaste = evidence?.pasted === true && pasteId > evidence.initial_paste_id;
+    const lines = normalizeTerminalText(snapshot.text).split("\n");
+    let promptIndex = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (matchComposerPromptLine(lines[i] ?? "") ?? matchLegacyClaudePromptLine("claude", lines[i] ?? "")) { promptIndex = i; break; }
+    }
+    const transcript = lines.slice(0, Math.max(0, promptIndex)).join("\n");
+    const payloadMatches = correlatedTail ? transcript.split(correlatedTail).length - 1 : 0;
+    const pasteMatches = evidence?.observed_paste_id
+      ? [...transcript.matchAll(/\[Pasted text #(\d+)(?: \+\d+ lines?)?\]/g)].filter(match => Number(match[1]) === evidence.observed_paste_id).length : 0;
+    const metrics = parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed);
     return {
-      hash: deliveryFrameHash(snapshot.text),
+      hash: deliveryFrameHash(snapshot.text), observed_at, ...metrics,
       complete: ownedPaste || Boolean(correlatedTail && visible.endsWith(correlatedTail) && payload.endsWith(visible)),
-      pending: pending || pasteId > 0,
-      cleared: composer !== null && composer.trim() === "",
-      active: isSubmitVerifiedStatus(snapshot.parsed.status),
+      pending: screenShowsPendingInput(snapshot.text, text) || pasteId > 0,
+      cleared: composer.trim() === "",
+      // Require current spinner chrome; a completed tool line is not activity.
+      active: lines.some(line => /^\s*[✻✢✳✶]\s+.*(?:working|thinking|esc to interrupt)/i.test(line) && !/\b(?:worked|thought|cogitated)\s+for\b/i.test(line)),
       queued: screenShowsQueuedAgentInput(snapshot.text, text),
-      inTranscript: !pending && normalizeTerminalText(snapshot.text).includes(normalizeTerminalText(text).trim()),
-      transcriptMatches: transcriptMatches(snapshot.text, text),
+      inTranscript: payloadMatches + pasteMatches > 0,
+      transcriptMatches: payloadMatches + pasteMatches, pasteId,
     };
   };
 
@@ -6765,6 +6776,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "report_to_parent" ||
       opts.source_event === "interact";
     const draftGuardText = opts.chunks.join("");
+    const targetBeforeTyping = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
       workspace: opts.workspace,
@@ -6828,9 +6840,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       | "rescued"
       | "pending_verify" = "submitted";
 
-    const target = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface);
+    const target = targetBeforeTyping;
     const claudeRelay = opts.press_enter && opts.verify_submit && target?.cli === "claude" &&
-      (opts.source_event === "send_to" || opts.source_event === "send_command" || opts.background_verify === true) && context.lifecycleSweepEngine;
+      (opts.source_event === "send_to" || opts.source_event === "send_command" || opts.source_event === "boot_prompt" || opts.background_verify === true) && context.lifecycleSweepEngine;
     if (claudeRelay && target) {
       const engine = context.lifecycleSweepEngine!;
       opts.delivery_id ??= randomUUID();
@@ -6841,23 +6853,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         pasted: shouldPaste,
         initial_paste_id: claudePasteId(extractComposerInputRegion(deliverySafetySnapshot?.text ?? "", submittedText)),
         payload_observed: false,
+        return_attempts: 0,
+        surface_id: opts.surface, surface_uuid: opts.stableSurfaceIdentity ?? target.surface_uuid ?? null,
+        workspace_id: opts.workspace ?? target.workspace_id ?? null, cli_session_id: target.cli_session_id ?? null,
         queued_behind_turn: isSubmitVerifiedStatus(deliverySafetySnapshot?.parsed.status),
         sender_agent_id: opts.sender_agent_id ?? resolveCurrentCallerAgent()?.agent_id ?? null,
         transport_queued: transportQueued,
       };
       engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: 0, typed: true, submit_dispatched: false, rpc_methods: [...rpcMethods] });
+      const generation = engine.getDeliveryVerificationGeneration();
+      const assertInitialTarget = async () => {
+        await opts.beforeMutation?.();
+        const current = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+        if (engine.getDeliveryVerificationGeneration() !== generation || current?.agent_id !== target.agent_id || current.cli_session_id !== target.cli_session_id || current.cli !== target.cli) throw new Error("Claude delivery target changed before Return");
+      };
       const beforeReturn = await readClaudeDeliveryFrame(opts.surface, opts.workspace, submittedText, evidence);
       evidence.queued_behind_turn ||= beforeReturn?.active === true;
-      if (beforeReturn?.complete) {
-        evidence.payload_observed = true;
-        evidence.observed_frame_hash = beforeReturn.hash;
-        evidence.return_at = Date.now();
+      const pending = engine.getDeliveryReceipt(opts.delivery_id)!;
+      pending.claude_submit = evidence;
+      if (beforeReturn?.complete && !beforeReturn.queued && engine.getDeliveryVerificationGeneration() === generation) {
+        reserveClaudeReturn(pending, beforeReturn);
+        engine.acceptPendingVerify({ ...pending, source_event: pending.source_event });
         engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
-        const rpc = await sendKeyWithRetry(opts.surface, "return", opts.workspace, opts.beforeMutation);
-        submitDispatched = true;
-        if (rpc) rpcMethods.add(rpc);
+        try {
+          const rpc = await sendKeyWithRetry(opts.surface, "return", opts.workspace, assertInitialTarget, 1);
+          submitDispatched = true;
+          if (rpc) rpcMethods.add(rpc);
+        } catch { /* Reserved ambiguous attempt stays in flight; never retype. */ }
       }
-      engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: 0, typed: true, submit_dispatched: submitDispatched, rpc_methods: [...rpcMethods] });
+      engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: pending.retry_count, typed: true, submit_dispatched: submitDispatched, rpc_methods: [...rpcMethods] });
       engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
     } else if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
@@ -14425,19 +14449,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (receipt.claude_submit) {
           const generation = engine.getDeliveryVerificationGeneration();
+          const startedAt = Date.now();
+          const evidence = receipt.claude_submit;
           const route = await engine.resolveAgentIoRoute(receipt.agent_id);
+          if ((evidence.cli_session_id ?? null) !== (agent.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) return { outcome: "pending", reason: "bound_target_changed" };
           return withSurfaceWrite(route.surface_id, async () => {
             const assertCurrent = async () => {
-              if (receipt.terminal || engine.getDeliveryVerificationGeneration() !== generation) throw new Error("Claude delivery verification ended");
+              if (!engine.isClaudeVerifyCurrent(receipt, generation, startedAt)) throw new Error("Claude delivery verification ended");
               const current = await engine.resolveAgentIoRoute(receipt.agent_id);
               if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id) throw new Error("Claude delivery route changed");
             };
             return verifyClaudeDelivery(receipt, {
-              read: async () => { await assertCurrent(); return readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text, receipt.claude_submit); },
+              read: async () => { await assertCurrent(); const frame = await readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text, receipt.claude_submit); await assertCurrent(); return frame; },
+              isCurrent: () => engine.isClaudeVerifyCurrent(receipt, generation, startedAt),
               save: () => engine.updateClaudeDeliveryEvidence(receipt.delivery_id, receipt.claude_submit!),
               returnOnly: async () => {
                 await assertCurrent();
-                await sendKeyWithRetry(route.surface_id, "return", route.workspace_id ?? undefined, assertCurrent);
+                await sendKeyWithRetry(route.surface_id, "return", route.workspace_id ?? undefined, assertCurrent, 1);
                 appendDeliveryEvent({ event_type: "press_enter", source_agent: receipt.agent_id, target_surface: route.surface_id, bytes: 0, press_enter: true, submit_verified: null, retry_count: receipt.retry_count, delivery_id: receipt.delivery_id });
               },
             });

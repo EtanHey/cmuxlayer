@@ -311,7 +311,7 @@ export interface DeliveryTelemetryEvent {
     | "pending_verify"
     | "failed_confirmed";
   target_agent?: string;
-  submit_evidence?: "transcript_echo" | "cleared_composer";
+  submit_evidence?: "transcript_echo" | "cleared_composer" | "token_delta";
   frame_hash?: string;
 }
 

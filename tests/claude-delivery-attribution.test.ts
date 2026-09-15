@@ -39,7 +39,7 @@ it.each([
 ])("#636 attributes clearance only with %s", async (kind, delta) => {
   const key = vi.fn();
   const result = await verifyClaudeDelivery(receipt(), { read: async () => frame(delta), save: vi.fn(), returnOnly: key });
-  expect(result).toMatchObject({ outcome: "delivered", submit_verified: true, evidence: { submit_evidence: kind } });
+  expect(result).toMatchObject({ outcome: "delivered", submit_verified: true, evidence: { corroboration: kind } });
   expect(key).not.toHaveBeenCalled();
 });
 

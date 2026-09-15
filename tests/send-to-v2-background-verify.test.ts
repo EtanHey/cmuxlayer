@@ -251,6 +251,8 @@ class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
   tailOnly = false;
   textWaitingToPaint = "";
   returnFrames: string[] = [];
+  readGate: Promise<void> | null = null;
+  onRead: (() => void) | null = null;
   async send(surface: string, text: string): Promise<any> {
     this.sendCalls.push(text);
     if (this.reorder) this.textWaitingToPaint += text;
@@ -271,6 +273,8 @@ class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
     if (this.collapsePastes && text.length > 500) this.composer = "[Pasted text #1 +3 lines]";
   }
   async readScreen(surface: string) {
+    this.onRead?.();
+    if (this.readGate) await this.readGate;
     return { surface, text: this.screenOverride ?? `Claude Code\n${this.transcript}\n${this.busy ? "✻ Working… (esc to interrupt)" : "⏺ Bash(previous tool completed)"}\n❯ ${this.tailOnly ? this.composer.slice(-160) : this.composer}\n`, lines: 30, scrollback_used: false };
   }
 }
@@ -351,8 +355,8 @@ describe("send_to v2 background verify", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  async function instantDelivery(client: ClaudeDeliverySurface, mode = "agent", text = "636 unique delivery") {
-    server = createVerifyServer(client);
+  async function instantDelivery(client: ClaudeDeliverySurface, mode = "agent", text = "636 unique delivery", extras?: Parameters<typeof createVerifyServer>[1]) {
+    server = createVerifyServer(client, extras);
     const target = registerAgent(server);
     let settled = false;
     const result = server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: target.agent_id } : { surface: client.surface }), text, press_enter: true }, {}).then((value: any) => { settled = true; return value; });
@@ -360,6 +364,54 @@ describe("send_to v2 background verify", () => {
     expect(settled, "delivery receipt must return without waiting for background retry").toBe(true);
     return parseResult(await result);
   }
+
+  it("#636 D1b bare clearance expires truthfully without another Return or GitHub escalation", async () => {
+    const client = new ClaudeDeliverySurface(); const filed: unknown[] = [];
+    const sent = await instantDelivery(client, "agent", "636 unique delivery", { deliveryVerifyDeadlineMs: 5_000, deliveryIssueFiler: async ticket => { filed.push(ticket); } });
+    client.composer = ""; client.transcript = "unrelated redraw chrome";
+    await vi.advanceTimersByTimeAsync(3_000);
+    const engine = server._registeredTools.interact._engine;
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ terminal: false, submit_verified: null });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "failed_confirmed", error: "cleared_unattributed", submit_verified: false });
+    expect(client.sendCalls).toHaveLength(1); expect(client.sendKeyCalls).toEqual(["return"]); expect(filed).toEqual([]);
+  });
+
+  it("#636 D1b mid-turn payload continues after idle without retyping", async () => {
+    const client = new ClaudeDeliverySurface(); client.busy = true; client.requiredReturns = 2;
+    const sent = await instantDelivery(client);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(client.sendKeyCalls).toHaveLength(1);
+    client.busy = false;
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "submitted", retry_count: 1 });
+    expect(client.sendCalls).toHaveLength(1); expect(client.sendKeyCalls).toHaveLength(2);
+  });
+
+  it.each(["workspace", "session"])("#636 D1b will not recover after bound target %s changes", async binding => {
+    const client = new ClaudeDeliverySurface(); const sent = await instantDelivery(client);
+    const engine = server._registeredTools.interact._engine;
+    const target = engine.getAgentState("agent-1");
+    const moved = { ...target, ...(binding === "workspace" ? { workspace_id: "workspace:other" } : { cli_session_id: "replacement-session" }) };
+    engine.stateMgr.writeState(moved); engine.getRegistry().set(moved.agent_id, moved);
+    if (binding === "workspace") (client as any).workspace = "workspace:other";
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    expect(engine.getDeliveryReceipt(sent.delivery_id).submitted).not.toBe(true);
+  });
+
+  it("#636 D1b a read resolving after dispose cannot send a late Return", async () => {
+    const client = new ClaudeDeliverySurface(); await instantDelivery(client);
+    const engine = server._registeredTools.interact._engine; engine.dispose();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(client.sendKeyCalls, "no retry before the gated verification").toEqual(["return"]);
+    let release!: () => void; client.readGate = new Promise<void>(resolve => { release = resolve; });
+    let reading = false; client.onRead = () => { reading = true; };
+    const verification = engine.verifyPendingDeliveries();
+    await vi.advanceTimersByTimeAsync(0); expect(reading).toBe(true);
+    engine.dispose(); release(); await verification;
+    expect(client.sendKeyCalls).toEqual(["return"]);
+  });
 
   it.each(["agent", "command"])("#636 D1 %s returns promptly then retries only Return on the exact idle composer", async mode => {
     const client = new ClaudeDeliverySurface();
