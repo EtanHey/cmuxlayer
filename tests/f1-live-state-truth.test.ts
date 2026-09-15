@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../src/server.js";
+import { createServer, createServerContext } from "../src/server.js";
+import type { CmuxServerContext } from "../src/server.js";
 import { runWithCallerContext } from "../src/caller-context.js";
 import type { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
@@ -133,13 +134,20 @@ class LiveSurfaceClient {
 }
 
 function createLiveServer(client: LiveSurfaceClient) {
-  return createServer({
+  const context = createServerContext({
     client: client as any,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
+  const server = createServer({
+    context,
+    // The cases exercise live reconciliation, not startup reconstitution.
+    // Keep lifecycle tools enabled while making fixture startup awaitable.
+    lifecycleInitializer: async () => {},
+  });
+  return { context, server };
 }
 
 function makeAgent(
@@ -183,24 +191,23 @@ function registerAgent(server: any, record: AgentRecord): AgentRecord {
   return record;
 }
 
-function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
-  if (engine && typeof engine.dispose === "function") engine.dispose();
-}
-
 describe("F1 — live state, not the stale registry record", () => {
   let server: any;
   let client: LiveSurfaceClient;
+  let context: CmuxServerContext;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     client = new LiveSurfaceClient();
-    server = createLiveServer(client);
+    ({ context, server } = createLiveServer(client));
+    await context.lifecycleStartPromise;
   });
 
-  afterEach(() => {
-    disposeServer(server);
+  afterEach(async () => {
+    await context.lifecycleStartPromise;
+    await server.close();
+    context.dispose();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
