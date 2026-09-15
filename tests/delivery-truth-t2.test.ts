@@ -351,6 +351,44 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   }, 15_000);
 
+  it.each(["claude", "cursor"].flatMap(cli => [false, true].flatMap(seen => ["Auto", "remaining composer line"].map(partial => ({ cli, seen, partial })))))
+    ("#636 partial screen reads are no ownership observation (%j)", async ({ cli, seen, partial }) => {
+      const { createServer, createServerContext } = await loadServerModule();
+      const { runWithCallerContext } = await import("../src/caller-context.js");
+      const render = (input: string) => cli === "cursor" ? `Cursor Agent\ncursor> ${input}\nAuto` : `Claude Code\n❯ ${input}`;
+      let screen = render(""); let partialRead = false;
+      const base = makeLifecycleExec(() => screen);
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (args.includes("send")) screen = render(String(args.at(-1)));
+        const result = await base(cmd, args);
+        if (partialRead && args.includes("read-screen")) {
+          expect(args[args.indexOf("--lines") + 1]).toBe("1");
+          return { ...result, stdout: JSON.stringify({ surface: "surface:new", text: partial, lines: 1, scrollback_used: false }) };
+        }
+        return result;
+      });
+      const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      try {
+        const server = createServer({ context }) as any; const peer = createServer({ context }) as any;
+        const id = await spawnReadyAgent(server); const engine = server._registeredTools.interact._engine;
+        const target = { ...engine.getRegistry().get(id), cli }; engine.stateMgr.writeState(target); engine.getRegistry().set(id, target);
+        const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const caller = { ...target, agent_id: "partial-reader", surface_id: "surface:caller", surface_uuid: callerUuid, role: "lead" };
+        engine.stateMgr.writeState(caller); engine.getRegistry().set(caller.agent_id, caller);
+        await runWithCallerContext({ surfaceId: callerUuid, workspaceId: "workspace:1" }, async () => {
+          screen = render("");
+          const typed = parseToolResult(await server._registeredTools.send_to.handler({ mode: "surface", surface: "surface:new", text: "owned partial-read message", press_enter: false }, {}));
+          expect(typed).toMatchObject({ ok: true, caller_agent_id: caller.agent_id });
+          if (seen) await peer._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+          partialRead = true; await peer._registeredTools.read_screen.handler({ surface: "surface:new", lines: 1 }, {}); partialRead = false;
+          exec.mockClear();
+          const result = parseToolResult(await server._registeredTools.send_to.handler({ mode: "key", surface: "surface:new", text: "return", verify_submit: false }, {}));
+          expect(result, JSON.stringify(result)).toMatchObject({ ok: true, caller_agent_id: caller.agent_id });
+          expect(mutatedPane(exec)).toBe(true);
+        });
+      } finally { context.dispose(); }
+    }, 15_000);
+
   it.each(["agent", "surface", "command", "key"])("#636 attributes even invalid send_to %s receipts", async (mode) => {
     const { createServer, createServerContext } = await loadServerModule();
     const context = createServerContext({ exec: makeLifecycleExec(() => "Claude Code\n❯ "), stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
