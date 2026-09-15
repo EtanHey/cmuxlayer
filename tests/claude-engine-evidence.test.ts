@@ -17,7 +17,7 @@ let engine: AgentEngine;
 function open(options: AgentEngineOptions = {}) {
   const state = new StateManager(dir);
   return new AgentEngine(state, new AgentRegistry(state, async () => []), {} as any,
-    { sessionIdentityResolver: () => null, deliveryVerifyDeadlineMs: 5_000, inboxOpts: { baseDir: join(dir, "inboxes") }, ...options });
+    { sessionIdentityResolver: () => null, deliveryVerifyDeadlineMs: 5_000, deliveryTicketDir: join(dir, "tickets"), inboxOpts: { baseDir: join(dir, "inboxes") }, ...options });
 }
 function agent(overrides: Partial<AgentRecord> = {}): AgentRecord {
   const record: AgentRecord = { agent_id: "engine-owner", surface_id: "surface:owner", surface_uuid: uuid,
@@ -102,20 +102,20 @@ it("discards an awaited verification result after disposal changes its generatio
   expect(disk()).toMatchObject({ terminal: false, submit_verified: null });
 });
 
-it("expires unattributed clearance without another verifier call and notifies its sender once", async () => {
-  const verifier = vi.fn(async () => ({ outcome: "pending" as const }));
+it("finalizes an unattributed failure and notifies its sender once", async () => {
+  const verifier = vi.fn(async () => ({ outcome: "failed_confirmed" as const, reason: "cleared_unattributed" }));
   const issue = vi.fn(async () => {}); const collab = join(dir, "sender.md"); writeFileSync(collab, "# Sender\n");
   engine.dispose(); engine = open({ deliveryVerifier: verifier, deliveryIssueFiler: issue });
   agent(); agent({ agent_id: "sender", surface_id: "surface:sender", collab_path: collab });
   seed("owned", { pending_reason: "cleared_unattributed", retry_revoked: true, composer_cleared: true, sender_agent_id: "sender" });
-  vi.setSystemTime(Date.parse(launch) + 6_000); await engine.verifyPendingDeliveries(); await engine.verifyPendingDeliveries();
+  await engine.verifyPendingDeliveries(); await engine.verifyPendingDeliveries();
   expect(disk()).toMatchObject({ delivery_state: "failed_confirmed", submit_verified: false, error: "cleared_unattributed" });
-  expect(verifier).not.toHaveBeenCalled(); expect(issue).not.toHaveBeenCalled();
+  expect(verifier).toHaveBeenCalledTimes(1); expect(issue).not.toHaveBeenCalled();
   expect(readInbox("sender", { baseDir: join(dir, "inboxes") }).filter(m => m.task.includes("owned"))).toHaveLength(1);
   expect(readFileSync(collab, "utf8").match(/Delivery owned /g)).toHaveLength(1);
 });
 
-it.each(["codex", "cursor"] as const)("ends %s verification at the deadline without a last read or a stale reason", async cli => {
+it.each(["codex", "cursor"] as const)("preserves %s final deadline verification and the observer's failure reason", async cli => {
   let outcome: DeliveryVerifyObservation = { outcome: "pending", reason: "transient_read_failure" };
   const verifier = vi.fn(async () => outcome);
   engine.dispose(); engine = open({ deliveryVerifier: verifier }); agent({ cli, state: "working" });
@@ -124,6 +124,11 @@ it.each(["codex", "cursor"] as const)("ends %s verification at the deadline with
   await engine.verifyPendingDeliveries(); expect(verifier).toHaveBeenCalledTimes(1);
   outcome = { outcome: "delivered", submit_verified: true };
   vi.setSystemTime(Date.parse(launch) + 5_000); await engine.verifyPendingDeliveries();
-  expect(verifier).toHaveBeenCalledTimes(1);
-  expect(disk("deadline")).toMatchObject({ terminal: true, submit_verified: false, delivery_state: "failed_confirmed", error: "verify_deadline_elapsed" });
+  expect(verifier).toHaveBeenCalledTimes(2);
+  expect(disk("deadline")).toMatchObject({ terminal: true, submit_verified: true, delivery_state: "submitted" });
+  engine.acceptPendingVerify({ delivery_id: "reason", agent_id: "engine-owner", text: "retain reason",
+    press_enter: true, source_event: "send_to", retry_count: 0 });
+  outcome = { outcome: "failed_confirmed", reason: "observer_refusal" };
+  vi.setSystemTime(Date.now() + 5_000); await engine.verifyPendingDeliveries();
+  expect(disk("reason")).toMatchObject({ delivery_state: "failed_confirmed", error: "observer_refusal" });
 });
