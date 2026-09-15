@@ -14,6 +14,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   hasRawShellPrompt,
+  withD4Cleanup,
   assertOwnedDaemonSocket,
   assertDoctorReport,
   assertLiveHealth,
@@ -50,6 +51,19 @@ afterEach(async () => {
 });
 
 describe("real cmux contract runner helpers", () => {
+  it("keeps the D4 proof error primary when cleanup fails, but fails on cleanup alone", async () => {
+    const primary = new Error("surface_not_realized");
+    const cleanup = async () => { throw new Error("tree mismatch"); };
+    const failure = withD4Cleanup(async () => { throw primary; }, cleanup);
+    await expect(failure).rejects.toBe(primary);
+    expect(primary.message).toContain("surface_not_realized");
+    expect(primary.message).toContain("tree mismatch");
+    await expect(withD4Cleanup(async () => {}, cleanup)).rejects.toThrow("tree mismatch");
+    const unchanged = new Error("original proof failure");
+    await expect(withD4Cleanup(async () => { throw unchanged; }, async () => {})).rejects.toBe(unchanged);
+    expect(unchanged.message).toBe("original proof failure");
+  });
+
   it("requires raw content for the D4 shell proof instead of silently timing out", () => {
     expect(() => hasRawShellPrompt({ screen_preview: "$ " })).toThrow("missing string content");
     expect(hasRawShellPrompt({ content: "login still starting" })).toBe(false);

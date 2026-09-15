@@ -4848,13 +4848,14 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
-  it.each([{ alreadyReady: false, socketMode: false }, { alreadyReady: true, socketMode: false }, { alreadyReady: false, socketMode: true }])("#636 D4 initializes only cold owned surfaces without selecting a workspace (case=%j)", async ({ alreadyReady, socketMode }) => {
+  it.each([{ alreadyReady: false, socketMode: false, missingFirst: false }, { alreadyReady: true, socketMode: false, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: true }])("#636 D4 initializes only cold owned surfaces without selecting a workspace (case=%j)", async ({ alreadyReady, socketMode, missingFirst }) => {
     vi.useFakeTimers();
     try {
       let ready = alreadyReady;
+      let metadataReads = 0;
       const lifecycleExec = makeLifecycleExec();
       const exec = vi.fn().mockImplementation(async (cmd, args) => {
-        if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }] }), stderr: "" };
+        if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: missingFirst && metadataReads++ === 0 ? [] : [{ surface_ref: "surface:new", runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }] }), stderr: "" };
         if (args.includes("send-key") && args.includes("ctrl-u")) ready = true;
         if (args.includes("read-screen") && !ready) throw new Error("internal_error: Failed to read terminal text");
         return lifecycleExec(cmd, args);
@@ -4870,6 +4871,32 @@ describe("agent lifecycle tool handlers", () => {
       expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady ? 0 : 1);
       expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(false);
       wrapped?.stop();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([{ type: "terminal", closeFails: true }, { type: "agent", closeFails: true }, { type: "terminal", closeFails: false }])("#636 D4 keeps the named failure through cleanup (case=%j)", async ({ type, closeFails }) => {
+    vi.useFakeTimers();
+    try {
+      const base = makeLifecycleExec();
+      const exec = vi.fn().mockImplementation(async (cmd, args) => {
+        if (args.includes("debug-terminals")) return { stdout: '{"terminals":[]}', stderr: "" };
+        if (closeFails && args.includes("close-surface")) throw new Error("cleanup close rejected");
+        return base(cmd, args);
+      });
+      // Bind the mocked transport explicitly; the pre-push hook unsets ambient sockets.
+      const client = new CmuxClient({ exec, env: { ...process.env, CMUX_SOCKET_PATH: "/tmp/636-cleanup-test.sock" } });
+      client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+      const server = createTrackedServer({ client, stateDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      const result = (server as any)._registeredTools.spawn_agent.handler({
+        ...(type === "terminal" ? { type } : { repo: "cmuxlayer", cli: "claude", role: "worker" }),
+        boot_prompt_timeout_ms: 20,
+      }, {});
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await result);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("surface_runtime_not_started (surface_not_realized)");
+      if (closeFails) expect(parsed.error).toContain("cleanup close rejected");
+      else expect(parsed.error).not.toContain("Failed to close");
     } finally { vi.useRealTimers(); }
   });
 
