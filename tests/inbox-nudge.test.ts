@@ -320,7 +320,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
 
   it.each(["claude", "codex"] as const)("#636 B accepts an unobserved %s inbox pointer durably without retyping its pending delivery", async cli => {
     await server.close();
-    vi.useFakeTimers({ now: new Date("2026-08-17T20:00:00.000Z") });
+    vi.useFakeTimers({ now: new Date("2026-08-23T00:00:00.000Z") });
     try {
       const screen = cli === "claude" ? "Claude Code\n❯ " : "codex>\n gpt-5.5 xhigh · 100% context left\n› ";
       const baseExec = makeExec(screen, `cmuxlayer-${cli}`, undefined, [], PRIMARY_SURFACE_UUID);
