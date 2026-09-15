@@ -206,7 +206,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   });
 
-  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other", "whitespace", "argument", "unchanged-space", "quoted-space", "indentation", "wrap", "unreadable", "blank", "unrecognized", "leading-blank", "spent", "auto-spent", "observed-clear", "prefix-read", "session-changed", "leading-blank-unknown", "shell-control", "unknown-cli-control", "spent-ambiguous", "recycled", "shared-owner", "shared-observed-clear"].flatMap(kind => (kind.startsWith("leading-blank") ? ["claude", "cursor", "codex"] : ["claude", "cursor"]).map(cli => ({ kind, cli }))))("#636 key Return draft ownership (%j)", async ({ kind, cli }) => {
+  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other", "whitespace", "argument", "unchanged-space", "quoted-space", "indentation", "wrap", "unreadable", "blank", "unrecognized", "leading-blank", "spent", "auto-spent", "observed-clear", "prefix-read", "session-changed", "leading-blank-unknown", "shell-control", "unknown-cli-control", "spent-ambiguous", "recycled", "shared-owner", "shared-observed-clear", "shared-changed", "shared-other", "shared-inflight"].flatMap(kind => (kind.startsWith("leading-blank") ? ["claude", "cursor", "codex"] : ["claude", "cursor"]).map(cli => ({ kind, cli }))))("#636 key Return draft ownership (%j)", async ({ kind, cli }) => {
     const { createServer, createServerContext } = await loadServerModule();
     const { runWithCallerContext } = await import("../src/caller-context.js");
     const edits: Record<string, [string, string]> = {
@@ -224,6 +224,9 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     let liveUuid = "11111111-1111-4111-8111-111111111111";
     let returnAttempts = 0;
     let failReturn = false;
+    let gateRead = false;
+    let releaseRead!: () => void;
+    const readBarrier = new Promise<void>(resolve => { releaseRead = resolve; });
     const base = makeLifecycleExec(() => screen);
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (kind === "recycled" && liveUuid.startsWith("2222") && args.includes("list-panes")) {
@@ -238,6 +241,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         return { ...result, stdout: JSON.stringify(data) };
       }
       if (args.includes("send-key") && args.includes("return") && kind === "spent-ambiguous" && failReturn) { returnAttempts++; throw new Error("connection_closed after dispatch"); }
+      if (args.includes("read-screen") && gateRead) await readBarrier;
       if (args.includes("read-screen") && readUnavailable) throw new Error("read unavailable");
       if (args.includes("send")) screen = render(String(args.at(-1)));
       if (args.includes("send-key") && args.includes("return") && !["spent", "auto-spent"].includes(kind)) screen = render("");
@@ -258,7 +262,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       engine.getRegistry().set(callerId, caller);
       let callerSurface = callerUuid;
       const call = (args: Record<string, unknown>, callingServer = server) => runWithCallerContext((kind === "unknown" || kind === "leading-blank-unknown") ? undefined : { surfaceId: callerSurface, workspaceId: "workspace:1" }, () => callingServer._registeredTools.send_to.handler(args, {}));
-      if (kind === "owned" || kind === "changed" || kind === "other" || ["spent", "spent-ambiguous", "auto-spent", "observed-clear", "prefix-read", "session-changed", "recycled", "shared-owner", "shared-observed-clear"].includes(kind) || edit) {
+      if (kind === "owned" || kind === "changed" || kind === "other" || ["spent", "spent-ambiguous", "auto-spent", "observed-clear", "prefix-read", "session-changed", "recycled", "shared-owner", "shared-observed-clear", "shared-changed", "shared-other", "shared-inflight"].includes(kind) || edit) {
         screen = render("");
         const typed = parseToolResult(await call({ mode: "surface", surface: "surface:new", text: edit?.[0] ?? "my undelivered message", press_enter: kind === "auto-spent" }));
         expect(typed.caller_agent_id).toBe(callerId);
@@ -272,11 +276,26 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
           await server._registeredTools.read_screen.handler({ surface: "surface:kept" }, {});
           screen = render("my undelivered message");
         }
-        if (kind === "observed-clear" || kind === "shared-observed-clear") {
-          const inspector = kind === "shared-observed-clear" ? peer : server;
+        if (kind === "shared-changed") {
+          screen = render("a different person's prefix");
+          await peer._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+          screen = render("my undelivered message");
+        }
+        if (kind === "observed-clear" || kind === "shared-observed-clear" || kind === "shared-inflight") {
+          const inspector = kind === "observed-clear" ? server : peer;
           await inspector._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
           screen = render("");
-          await inspector._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+          if (kind === "shared-inflight") {
+            const readCalls = () => (exec as any).mock.calls.filter(([, args]: [string, string[]]) => args.includes("read-screen")).length;
+            const beforeReads = readCalls(); gateRead = true;
+            const firstRead = inspector._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+            for (let i = 0; i < 100 && context.readScreenInflight.size === 0; i++) await Promise.resolve();
+            expect(context.readScreenInflight.size).toBe(1);
+            const joinedRead = server._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+            for (let i = 0; i < 100; i++) await Promise.resolve();
+            releaseRead(); await Promise.all([firstRead, joinedRead]); gateRead = false;
+            expect(readCalls() - beforeReads).toBe(1);
+          } else await inspector._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
           screen = render("my undelivered message");
         }
         if (kind === "prefix-read") {
@@ -290,7 +309,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         }
         if (edit) screen = render(edit[1]);
         if (kind === "changed") screen = render("my undelivered message and human words");
-        if (kind === "other") {
+        if (kind === "other" || kind === "shared-other") {
           callerSurface = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
           const other = { ...caller, agent_id: "other-sender", surface_id: "surface:other", surface_uuid: callerSurface };
           engine.stateMgr.writeState(other);
@@ -304,10 +323,15 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       if (kind === "unrecognized") screen = "Claude Code loading unknown layout";
       if (kind.startsWith("leading-blank")) screen = render("\nprivate human draft");
       exec.mockClear();
-      const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return", engineSubmitProof: "launcher_pending_command" }, kind === "shared-owner" ? peer : server));
+      const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return", engineSubmitProof: "launcher_pending_command" }, (kind === "shared-owner" || kind === "shared-other") ? peer : server));
       if (kind === "owned" || kind === "unchanged-space" || kind === "prefix-read" || kind === "shared-owner" || kind.endsWith("-control") || kind === "picker" || kind === "permission") {
         expect(result.ok).toBe(true);
         expect(mutatedPane(exec)).toBe(true);
+        if (kind === "shared-owner") {
+          screen = render("my undelivered message"); exec.mockClear();
+          const spent = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return" }));
+          expect(spent.error_code).toBe("blocked_by_foreign_draft"); expect(mutatedPane(exec)).toBe(false);
+        }
       } else if (kind === "recycled") {
         expect(result.ok).toBe(false);
         expect(result.error).toMatch(/stable.*UUID|binding|recycl/i);
@@ -321,9 +345,9 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         expect(result.error_code).toBe(unknown ? "draft_ownership_unverified" : "blocked_by_foreign_draft");
         if (!unknown) expect(result.error).toContain("try again in ~20 s or after your next turn");
         expect(mutatedPane(exec)).toBe(false);
-        if (!unknown) expect(screen).toContain(edit ? edit[1] : kind === "changed" ? "human words" : ["other", "spent", "spent-ambiguous", "auto-spent", "observed-clear", "shared-observed-clear", "session-changed"].includes(kind) ? "my undelivered message" : "private human draft");
+        if (!unknown) expect(screen).toContain(edit ? edit[1] : kind === "changed" ? "human words" : ["other", "spent", "spent-ambiguous", "auto-spent", "observed-clear", "shared-observed-clear", "shared-changed", "shared-other", "shared-inflight", "session-changed"].includes(kind) ? "my undelivered message" : "private human draft");
       }
-      expect(result.caller_agent_id).toBe((kind === "unknown" || kind === "leading-blank-unknown") ? null : kind === "other" ? "other-sender" : callerId);
+      expect(result.caller_agent_id).toBe((kind === "unknown" || kind === "leading-blank-unknown") ? null : (kind === "other" || kind === "shared-other") ? "other-sender" : callerId);
     } finally { context.dispose(); }
   }, 15_000);
 
