@@ -64,6 +64,7 @@ function makeExec(
   mutableScreen?: { text: string },
   additionalSurfaces: TestSurface[] = [],
   primarySurfaceUuid?: string,
+  createSurface?: () => TestSurface,
 ): ExecFn {
   let promptPending = false;
   let pendingPromptText = "";
@@ -151,6 +152,11 @@ function makeExec(
         }),
         stderr: "",
       };
+    }
+    if (createSurface && (args.includes("new-split") || args.includes("new-surface"))) {
+      const surface = createSurface();
+      surfaces.push(surface);
+      return { stdout: JSON.stringify({ workspace: "workspace:1", surface: surface.ref, surface_id: surface.id, pane: "pane:1", type: "terminal" }), stderr: "" };
     }
     if (args.includes("read-screen")) {
       const surface =
@@ -299,10 +305,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   async function spawn(
     extra: Record<string, unknown> = {},
     targetServer = server,
+    callerSurface?: string,
   ) {
     const tool = targetServer._registeredTools["spawn_agent"];
     const result = await runWithCallerContext(
-      { workspaceId: "workspace:1" },
+      { workspaceId: "workspace:1", ...(callerSurface ? { surfaceId: callerSurface } : {}) },
       () =>
         tool.handler(
           {
@@ -318,6 +325,111 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     return result.structuredContent ?? JSON.parse(result.content[0].text);
   }
+
+  it("#636 D2 inherits the collab channel in the receipt, first contract section, and list_agents", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid);
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "lead-collab.md") };
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id });
+    expect(child.ok, JSON.stringify(child)).toBe(true);
+    expect(child.collab_path).toBe(parent.collab_path);
+    const contract = readFileSync(child.contract_path, "utf8");
+    expect(contract.match(/^## .+$/m)?.[0]).toBe("## Channels");
+    expect(contract).toContain(`Your lead reaches you with \`send_to\`. You reach your lead by appending \`### ${child.agent_id} → ${parent.agent_id}\` entries to \`${parent.collab_path}\` (your lead monitors it). Do not \`send_to\`, \`report_to_parent\`, or \`wait_for\` your lead.`);
+    expect(contract).toContain("engine-internal");
+    const listed = await server._registeredTools.list_agents.handler({ detail: "summary", agent_ids: [child.agent_id] }, {});
+    const data = listed.structuredContent ?? JSON.parse(listed.content[0].text);
+    expect(data.agents.find((a: any) => a.agent_id === child.agent_id)?.collab_path).toBe(parent.collab_path);
+  });
+
+  it("#636 D2 warns when a lead spawns a worker without a collab path", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid);
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id });
+    expect(child.ok).toBe(true);
+    expect(child.warnings.join(" ")).toContain("collab_path");
+  });
+
+  it("#636 D2 accepts an explicit lead collab path and reminds it to monitor worker collabs", async () => {
+    const collab = join(inboxDir, "own-collab.md");
+    const lead = await spawn({ role: "orchestrator", collab_path: collab });
+    expect(lead.ok, JSON.stringify(lead)).toBe(true);
+    expect(lead.collab_path).toBe(collab);
+    expect(readFileSync(lead.contract_path, "utf8")).toContain("Monitor on each worker's collab_path");
+  });
+
+  it.each(["lead-child", "failed-worker"])("#636 D2 does not adopt a collab for %s", async scenario => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const baseExec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid, () => ({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", ref: "surface:child", title: "child", text: "Claude Code\nWhat can I help you with?\n❯ " }));
+    exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (scenario === "failed-worker" && (args.includes("new-split") || args.includes("new-surface"))) throw new Error("controlled creation failure");
+      return baseExec(cmd, args);
+    });
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "original.md") };
+    engine.stateMgr.writeState(parent); engine.getRegistry().set(parent.agent_id, parent);
+    const requested = join(inboxDir, "child-channel.md");
+    const child = await spawn({ collab_path: requested, role: scenario === "lead-child" ? "orchestrator" : "worker", boot_prompt_timeout_ms: 20 }, server, parentUuid);
+    expect(child.ok, JSON.stringify(child)).toBe(scenario === "lead-child");
+    if (scenario === "lead-child") expect(child.collab_path).toBe(requested);
+    expect(engine.stateMgr.readState(parent.agent_id)?.collab_path).toBe(parent.collab_path);
+  });
+
+  it("#636 D2 existing leads adopt their first explicit worker collab path and later workers inherit it", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let created = 0;
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid, () => {
+      const suffix = String(++created).padStart(12, "0");
+      return { id: `bbbbbbbb-bbbb-4bbb-8bbb-${suffix}`, ref: `surface:child-${created}`, title: "child", text: "Claude Code\nWhat can I help you with?\n❯ " };
+    });
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    let engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    engine.stateMgr.writeState(parent); engine.getRegistry().set(parent.agent_id, parent);
+    const collab = join(inboxDir, "adopted.md");
+    const first = await spawn({ collab_path: collab }, server, parentUuid);
+    expect(first.ok, JSON.stringify(first)).toBe(true);
+    expect(readFileSync(first.contract_path, "utf8")).toContain(collab);
+    expect(engine.getAgentState(parent.agent_id).collab_path).toBe(collab);
+    expect(engine.stateMgr.readState(parent.agent_id)?.collab_path).toBe(collab);
+    const second = await spawn({}, server, parentUuid);
+    expect(second.ok, JSON.stringify(second)).toBe(true);
+    expect(second.collab_path).toBe(collab);
+    expect(second.warnings?.join(" ") ?? "").not.toContain("collab_path missing");
+    const child = engine.getAgentState(second.agent_id);
+    const refused = await runWithCallerContext({ surfaceId: child.surface_uuid ?? child.surface_id }, () => server._registeredTools.send_to.handler({ agent_id: parent.agent_id, text: "upward" }, {}));
+    expect(refused.isError, JSON.stringify({ refused, child: engine.getAgentState(second.agent_id), parent: engine.getAgentState(parent.agent_id) })).toBe(true);
+    expect(JSON.stringify(refused)).toContain(collab);
+    const updatedPath = join(inboxDir, "updated.md");
+    expect((await spawn({ collab_path: updatedPath }, server, parentUuid)).ok).toBe(true);
+    expect(engine.stateMgr.readState(parent.agent_id)?.collab_path).toBe(updatedPath);
+    await server.close();
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    engine = server._registeredTools.interact._engine;
+    expect(engine.stateMgr.readState(parent.agent_id)?.collab_path).toBe(updatedPath);
+    const afterRestart = await spawn({}, server, parentUuid);
+    expect(afterRestart.ok, JSON.stringify(afterRestart)).toBe(true);
+    expect(afterRestart.collab_path).toBe(updatedPath);
+    expect(afterRestart.warnings?.join(" ") ?? "").not.toContain("collab_path missing");
+    const restartedChild = engine.getAgentState(afterRestart.agent_id);
+    const restartedRefusal = await runWithCallerContext({ surfaceId: restartedChild.surface_uuid }, () => server._registeredTools.send_to.handler({ agent_id: parent.agent_id, text: "upward" }, {}));
+    expect(restartedRefusal.isError).toBe(true);
+    expect(JSON.stringify(restartedRefusal)).toContain(updatedPath);
+  });
 
   it("returns report_path and done_marker in the LEAN receipt", async () => {
     const parsed = await spawn();
@@ -341,7 +453,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.done_marker).toBe(parsed.done_marker);
   });
 
-  it("warns once at the report deadline, then wakes once per distinct content after restart", async () => {
+  async function verifyReportWatchDelivery(withCollab: boolean) {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -390,12 +502,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     let engine = server._registeredTools.interact._engine;
-    const parent = parentRecord(parentUuid);
+    const parent = { ...parentRecord(parentUuid), collab_path: withCollab ? join(inboxDir, "collab.md") : undefined };
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
     const child = await spawn({ parent_agent_id: parent.agent_id });
 
     expect(child.ok, JSON.stringify(child)).toBe(true);
+    // Supply the channel explicitly on the RED baseline, before inheritance exists.
+    const worker = { ...engine.getAgentState(child.agent_id), collab_path: parent.collab_path };
+    engine.stateMgr.writeState(worker);
+    engine.getRegistry().set(child.agent_id, worker);
     expect(child.parent_agent_id).toBe(parent.agent_id);
     expect(existsSync(child.report_path)).toBe(true);
     expect(
@@ -414,7 +530,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     const beforeDeadline = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     watchNow = 3_000;
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const deadlineCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       beforeDeadline,
     );
@@ -446,7 +562,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const beforeRestartSweep = (exec as ReturnType<typeof vi.fn>).mock.calls
       .length;
     watchNow += 1;
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const restartCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       beforeRestartSweep,
     );
@@ -461,7 +577,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,
       "utf8",
     );
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       before,
     );
@@ -475,7 +591,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     watchNow = 2_000;
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const retryCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,
     );
@@ -492,7 +608,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,
       "utf8",
     );
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const secondWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,
     );
@@ -515,7 +631,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         notification_pending: false,
       }),
     ]);
-  });
+  }
+
+  it("warns once at the report deadline, then wakes once per distinct content after restart", () => verifyReportWatchDelivery(false));
+  it("#636 D3 engine watch pushes bypass worker collab routing through deadline and report changes", () => verifyReportWatchDelivery(true));
+
+
 
   it("recovers a report watch after a process crash before deadline settlement", async () => {
     await server.close();

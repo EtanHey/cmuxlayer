@@ -2518,6 +2518,20 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.auto_archive_on_done).toBe(false);
   });
 
+  it("#636 rejects collab_path on resume before resolving or mutating an agent", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const engine = (server as any)._registeredTools.interact._engine;
+    const resolve = vi.spyOn(engine, "resolveResumeAgent").mockImplementation(() => { throw new Error("resume resolution must not run"); });
+    const resume = vi.spyOn(engine, "resumeAgent");
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: "existing-agent", collab_path: join(TEST_DIR, "new-collab.md") }, {}));
+    expect(result).toMatchObject({ ok: false, error_code: "INVALID_RESUME_SPEC" });
+    expect(result.error).toContain("collab_path");
+    expect(resolve).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+    expect(exec.mock.calls.some(([, args]) => args.some((arg: string) => ["new-split", "new-surface", "send", "send-key"].includes(arg)))).toBe(false);
+  });
+
   it("spawn_agent resume_agent_id rebinds a captured session without minting a new public id", async () => {
     const agentId = "cmuxlayerCodex-stable-resume";
     const stateMgr = new StateManager(TEST_DIR);

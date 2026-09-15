@@ -4529,9 +4529,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
     try {
+      const agent = stateMgr.readState(agentId);
       const written = writeBootContractFile(
         {
           agentId,
+          role: agent?.role,
+          leadAgentId: agent?.parent_agent_id,
+          collabPath: agent?.collab_path,
           mailbox: {
             monitor_command: monitorBoot.monitor_command,
             // Contract-file only, deliberately NOT on the monitor_boot receipt: the
@@ -4726,6 +4730,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       null
     );
   };
+
+  // Channel discipline applies only to worker-invoked tools. Internal watch
+  // pushes call deliverAgentInput directly; halt escalation dispatches to inbox.
+  const assertWorkerUpwardChannel = (target: string): void => {
+    const caller = resolveCurrentCallerAgent();
+    if (!caller?.collab_path || inferRecordRoleOrNull(caller) !== "worker") {
+      return;
+    }
+    const visited = new Set<string>([caller.agent_id]);
+    let ancestorId = caller.parent_agent_id;
+    while (ancestorId && !visited.has(ancestorId)) {
+      visited.add(ancestorId);
+      const ancestor =
+        context.lifecycleRegistry?.get(ancestorId) ??
+        stateMgr.readState(ancestorId);
+      if (!ancestor) break;
+      if (
+        inferRecordRoleOrNull(ancestor) === "orchestrator" &&
+        [ancestor.agent_id, ancestor.surface_id, ancestor.surface_uuid].some(
+          identity => identity?.toLowerCase() === target.toLowerCase(),
+        )
+      ) {
+        throw new Error(`Worker ${caller.agent_id} must append to collab_path ${caller.collab_path} to reach lead ${ancestor.agent_id}; upward pane delivery is refused.`);
+      }
+      ancestorId = ancestor.parent_agent_id;
+    }
+  };
+
   const resolveModeWorkspace = async (
     surface: string,
     workspace?: string,
@@ -14142,7 +14174,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "report_to_parent",
-      "Raise a short blocker to this managed agent's registry parent. cmuxlayer chooses the parent; callers cannot address arbitrary agents. The blocker is durably appended to the parent's inbox and its pointer is actively delivered. If that wake fails, cmuxlayer alerts the nearest reachable ancestor and returns fallback provenance. A root agent has no parent and receives an error.",
+      "Raise a short blocker to this managed agent's registry parent. cmuxlayer chooses the parent; callers cannot address arbitrary agents. The blocker is durably appended to the parent's inbox and its pointer is actively delivered. If that wake fails, cmuxlayer alerts the nearest reachable ancestor and returns fallback provenance. A root agent has no parent and receives an error. Workers with collab_path must append there to reach their own parent lead; this tool refuses that upward route.",
       {
         blocker: z
           .string()
@@ -14171,6 +14203,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           const intendedParentId = child.parent_agent_id;
+          assertWorkerUpwardChannel(intendedParentId);
           const directMessage = dispatch(
             intendedParentId,
             {
@@ -14486,6 +14519,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "MCP profile hint for worktree launches. Defaults to inherit. Use sterile/skill_eval or include/exclude lists for narrower evals.",
           ),
+        collab_path: z
+          .string()
+          .trim()
+          .min(1)
+          .refine(isAbsolute, "collab_path must be absolute")
+          .optional()
+          .describe("Lead coordination file; workers inherit their parent lead collab_path unless explicitly supplied."),
         parent_agent_id: z
           .string()
           .optional()
@@ -14585,6 +14625,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
             );
           }
+          if (args.collab_path && !isAbsolute(args.collab_path.trim())) {
+            throw new Error("collab_path must be absolute");
+          }
           if (args.resume_agent_id) {
             const incompatible = [
               "repo",
@@ -14596,6 +14639,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "boot_prompt_path",
               "worktree",
               "mcp_profile",
+              "collab_path",
               "parent_agent_id",
               "role",
               "placement",
@@ -15121,6 +15165,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               mcp_profile_label: worktree.mcpProfileLabel,
               worktree_branch: worktree.prepared?.branch,
               parent_agent_id: effectiveParentAgentId,
+              collab_path: args.collab_path,
               role: effectiveRole,
               authority: callerIsWorker ? "worker" : normalizedRole.authority,
               function: normalizedRole.function,
@@ -15515,6 +15560,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 topology,
               )
             : undefined;
+
+          if (callerAgent && !callerIsWorker && effectiveRole === "worker" &&
+              result.parent_agent_id === callerAgent.agent_id && args.collab_path) {
+            const adopted = stateMgr.updateRecord(callerAgent.agent_id, { collab_path: args.collab_path.trim() });
+            registry.set(callerAgent.agent_id, adopted);
+          }
 
           const formattedData = {
             agent_id: result.agent_id,
@@ -16855,6 +16906,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     type ListAgentsObservedRow = ObservedPublicAgent & {
       cli: CliType;
       role: AgentRole | null;
+      collab_path?: string;
       surface_id: string;
       send_via: "send_to";
       closure: ClosureState;
@@ -16993,6 +17045,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   repo: agent.repo,
                   cli: agent.cli,
                   role: agent.role,
+                  ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                   state: agent.state.value,
                   surface_id: agent.surface_id,
                   model: agent.model.value,
@@ -17179,6 +17232,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     }),
                     cli: agent.cli,
                     role: inferRecordRoleOrNull(agent),
+                    ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
                     // #481: computed on every listMerged, read only by the
@@ -17680,7 +17734,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text or a key through the shared delivery engine. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
+      "Send text or a key through the shared delivery engine. Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -17746,6 +17800,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             assertCanonicalSurfaceRef(surface);
+            assertWorkerUpwardChannel(surface);
             const legacyHandler = (name: string) => {
               const handler = toolHandlersByName.get(name);
               if (!handler) {
@@ -17919,6 +17974,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 .map((entry) => entry.agent),
             );
             for (const agent of resolvedTargets) {
+              assertWorkerUpwardChannel(agent.agent_id);
               assertInteractiveMultilineInputAllowed({
                 tool: "send_to",
                 value: args.text,
@@ -18254,6 +18310,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!agentId) {
             throw new Error("send_to mode=agent requires agent_id or target");
           }
+          assertWorkerUpwardChannel(agentId);
           const timings = createDeliveryPhaseTimings();
           const targetAgent =
             engine.getAgentState(agentId) ?? registry.get(agentId);
