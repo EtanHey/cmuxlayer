@@ -7009,6 +7009,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return_attempts: 0,
         surface_id: opts.surface, surface_uuid: opts.stableSurfaceIdentity ?? target.surface_uuid ?? null,
         workspace_id: opts.workspace ?? target.workspace_id ?? null, cli_session_id: target.cli_session_id ?? null,
+        agent_created_at: target.created_at,
         queued_behind_turn: isSubmitVerifiedStatus(deliverySafetySnapshot?.parsed.status),
         sender_agent_id: opts.sender_agent_id ?? resolveCurrentCallerAgent()?.agent_id ?? null,
         transport_queued: transportQueued,
@@ -14610,15 +14611,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const generation = engine.getDeliveryVerificationGeneration();
           const startedAt = Date.now();
           const evidence = receipt.claude_submit;
+          const revokeBinding = () => {
+            evidence.retry_revoked = evidence.attribution_revoked = true;
+            engine.updateClaudeDeliveryEvidence(receipt.delivery_id, evidence);
+          };
           const route = await engine.resolveAgentIoRoute(receipt.agent_id);
-          if (agent.cli !== "claude" || (evidence.cli_session_id ?? null) !== (agent.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) return { outcome: "pending", reason: "bound_target_changed" };
+          if (agent.cli !== "claude" || (evidence.cli_session_id ?? null) !== (agent.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) {
+            revokeBinding();
+            return { outcome: "pending", reason: "bound_target_changed" };
+          }
           return withSurfaceWrite(route.surface_id, async () => {
             const assertCurrent = async () => {
               if (!engine.isClaudeVerifyCurrent(receipt, generation, startedAt)) throw new Error("Claude delivery verification ended");
               const current = await engine.resolveAgentIoRoute(receipt.agent_id);
-              if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id) throw new Error("Claude delivery route changed");
+              if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id) { revokeBinding(); throw new Error("Claude delivery route changed"); }
               const owner = engine.getAgentState(receipt.agent_id);
-              if (owner?.cli !== "claude" || (owner.cli_session_id ?? null) !== (evidence.cli_session_id ?? null)) throw new Error("Claude delivery harness changed");
+              if (owner?.cli !== "claude" || (owner.cli_session_id ?? null) !== (evidence.cli_session_id ?? null)) { revokeBinding(); throw new Error("Claude delivery harness changed"); }
             };
             return verifyClaudeDelivery(receipt, {
               read: async () => { await assertCurrent(); const frame = await readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text, receipt.claude_submit); await assertCurrent(); return frame; },

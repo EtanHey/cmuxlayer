@@ -3620,6 +3620,24 @@ export class AgentEngine {
           pid_registered_at: identity.pid_registered_at!,
         }
       : {};
+    // The boot receipt can predate first session registration. Adopt only an
+    // authoritative first capture from this exact launch; never a null wildcard.
+    if (hasCapturedProcessEvidence && agent.cli === "claude" && !agent.cli_session_id) {
+      const registeredAt = Date.parse(identity.pid_registered_at!);
+      const launchedAt = Date.parse(agent.created_at);
+      if (Number.isFinite(registeredAt) && Number.isFinite(launchedAt) && registeredAt >= launchedAt && registeredAt <= Date.now()) {
+        this.observeClaudeDeliveryEvidence(receipt => {
+          const evidence = receipt.claude_submit!;
+          if (receipt.agent_id !== agent.agent_id || evidence.cli_session_id != null ||
+              evidence.agent_created_at !== agent.created_at || !evidence.surface_uuid ||
+              evidence.surface_uuid.toLowerCase() !== agent.surface_uuid?.toLowerCase() ||
+              evidence.surface_id !== agent.surface_id || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) ||
+              evidence.retry_revoked || evidence.attribution_revoked) return false;
+          evidence.cli_session_id = identity.session_id;
+          return true;
+        });
+      }
+    }
     let updated = this.stateMgr.updateRecord(agent.agent_id, {
       cli_session_id: identity.session_id,
       cli_session_path: identity.path ?? agent.cli_session_path ?? null,
@@ -7429,6 +7447,8 @@ export class AgentEngine {
         if (current[key]) evidence[key] = true;
       }
       evidence.observed_paste_id = current.observed_paste_id ?? evidence.observed_paste_id;
+      evidence.cli_session_id = current.cli_session_id ?? evidence.cli_session_id;
+      evidence.agent_created_at = current.agent_created_at ?? evidence.agent_created_at;
       evidence.last_composer_observed_at = Math.max(current.last_composer_observed_at ?? 0, evidence.last_composer_observed_at ?? 0);
       evidence.return_attempts = Math.max(current.return_attempts ?? 0, evidence.return_attempts ?? 0);
       if ((current.return_at ?? -Infinity) > (evidence.return_at ?? -Infinity)) {

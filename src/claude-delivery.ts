@@ -32,6 +32,7 @@ export interface ClaudeDeliveryEvidence {
   surface_uuid?: string | null;
   workspace_id?: string | null;
   cli_session_id?: string | null;
+  agent_created_at?: string;
   queued_behind_turn: boolean;
   sender_agent_id: string | null;
   transport_queued: boolean;
