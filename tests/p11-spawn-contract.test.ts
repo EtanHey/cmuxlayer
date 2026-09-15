@@ -556,6 +556,24 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
 
     const beforeDeadline = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    const acknowledgeWatchDelivery = async (prefix: string) => {
+      await settlePendingDeliveries();
+      const deliveries = engine.listDeliveryReceipts().filter((receipt: any) =>
+        receipt.agent_id === parent.agent_id && receipt.text.startsWith(prefix) && receipt.text.includes(child.report_path),
+      );
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({ delivery_state: "submitted", submit_verified: true, submit_dispatched: true, submit_evidence: "transcript_echo" });
+      // An accepted transcript can be verified in the notification callback.
+      // These cases require one acknowledgement, not a mandatory retry delay.
+      expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]).toMatchObject({ state: "armed", notification_pending: false, notification_delivered_at_ms: watchNow,
+        // A deadline notice records one attempt; a content change resets its
+        // attempt counter when it rearms for the next distinct fingerprint.
+        notification_attempts: prefix.startsWith("[watch]") ? 1 : 0 });
+      await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
+      expect(engine.listDeliveryReceipts().filter((receipt: any) =>
+        receipt.agent_id === parent.agent_id && receipt.text.startsWith(prefix) && receipt.text.includes(child.report_path),
+      )).toEqual([expect.objectContaining({ delivery_id: deliveries[0].delivery_id, delivery_state: "submitted", submit_verified: true })]);
+    };
     watchNow = 3_000;
     await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const deadlineCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
@@ -571,6 +589,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toHaveLength(1);
 
+    await acknowledgeWatchDelivery("[watch] deadline elapsed");
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforeDeadline).filter(([, args]: [string, string[]]) =>
+      args.some(arg => arg.includes("[watch] deadline elapsed") && arg.includes(child.report_path)),
+    )).toHaveLength(1);
     await server.close();
     server = createServer(
       withTestSurfaceObserver({
@@ -616,6 +638,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toBe(true);
 
+    await acknowledgeWatchDelivery("[report]");
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.slice(before).filter(([, args]: [string, string[]]) =>
+      args.some(arg => arg.includes("[report]") && arg.includes(child.report_path)),
+    )).toHaveLength(1);
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     watchNow += 1;
     await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
@@ -3153,6 +3179,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
     writeFileSync(reportPath, "first distinct change\n", "utf8");
     await engine.sweepWatchesBestEffort();
+    await settlePendingDeliveries();
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
 
     await (
@@ -3163,6 +3190,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     writeFileSync(reportPath, "second distinct change\n", "utf8");
     await engine.sweepWatchesBestEffort();
 
+    await settlePendingDeliveries();
     const secondWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,
     );
