@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { initializeNewSurfaceRuntime } from "../src/surface-runtime.js";
+import { initializeNewSurfaceRuntime, SurfaceRuntimeNotStartedError } from "../src/surface-runtime.js";
 import { CmuxSelfHealingClient } from "../src/cmux-transport-self-heal.js";
 
 afterEach(() => vi.useRealTimers());
@@ -17,7 +17,7 @@ it.each(["empty", "reject", "hang"])("#636 D4 capable metadata %s is unknown the
   const client = { sendKey, listTerminalMetadata: vi.fn().mockImplementation(async () => mode === "hang" ? new Promise(() => {}) : mode === "reject" ? Promise.reject(new Error("read failed")) : { terminals: [] }) };
   const result = initializeNewSurfaceRuntime(client, "surface:1", undefined, 20).then(() => null, error => error);
   await vi.advanceTimersByTimeAsync(100);
-  expect((await result)?.message).toContain("surface_runtime_not_started");
+  expect(await result).toBeInstanceOf(SurfaceRuntimeNotStartedError);
   expect(sendKey).toHaveBeenCalledTimes(1);
 });
 
@@ -35,6 +35,17 @@ it("#636 D4 production socket wrapper reads explicit runtime metadata through it
   try {
     expect(await (client as any).listSurfaceRuntimeMetadata()).toEqual({ terminals });
     expect(cli.listTerminalMetadata).toHaveBeenCalledTimes(1);
+    expect(cli.setEnv).toHaveBeenCalledWith(expect.objectContaining({ CMUX_SOCKET_PATH: "/tmp/636-test.sock" }));
     expect(socket.listTerminalMetadata).not.toHaveBeenCalled();
   } finally { client.stop(); }
+});
+
+
+it.each(["nil", null, "0x0"])("#636 D4 ready=true with pointer %s still fails closed after input demand", async pointer => {
+  vi.useFakeTimers();
+  const client = { sendKey: vi.fn(), listTerminalMetadata: vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:1", runtime_surface_ready: true, ghostty_surface_ptr: pointer }] }) };
+  const result = initializeNewSurfaceRuntime(client, "surface:1", undefined, 20).then(() => null, error => error);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(await result).toBeInstanceOf(SurfaceRuntimeNotStartedError);
+  expect(client.sendKey).toHaveBeenCalledTimes(1);
 });

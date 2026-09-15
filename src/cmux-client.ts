@@ -397,6 +397,9 @@ export class CmuxClient {
     return this.parse(raw, "list-panes");
   }
 
+  /** Explicit spawn-only capability supplied by the production transport wrapper. */
+  declare listSurfaceRuntimeMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
+
   async listTerminalMetadata(): Promise<{
     terminals: CmuxTerminalMetadata[];
   }> {
@@ -478,6 +481,7 @@ export class CmuxClient {
 
   async newSurface(opts: {
     pane: string;
+    focus?: boolean;
     type?: "terminal" | "browser";
     workspace?: string;
     title?: string;
@@ -491,6 +495,7 @@ export class CmuxClient {
     // applied by the server/tool layer via renameTab after creation, matching
     // the existing new_split behavior.
     const args = ["new-surface", "--pane", opts.pane];
+    if (opts.focus !== undefined) args.push("--focus", String(opts.focus));
     if (opts.type) args.push("--type", opts.type);
     if (opts.workspace) args.push("--workspace", opts.workspace);
     if (opts.url) args.push("--url", opts.url);

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import {
   access,
@@ -1018,6 +1019,53 @@ async function runContractSteps(
       throw new Error(
         `control_health daemon pid ${initialDaemonPid} did not match recorded dist daemon ${initialDaemon.pid}`,
       );
+    }
+
+    const spawnWorkspace = process.env.CMUX_CONTRACT_SPAWN_WORKSPACE;
+    if (spawnWorkspace) {
+      setActiveStep("D4 hidden workspace terminal initialization");
+      const cli = async (args: string[]) => JSON.parse((await promisify(execFile)(
+        "cmux", ["--json", "--id-format", "both", ...args],
+        { env: { ...process.env, CMUX_SOCKET_PATH: cmuxSocket }, timeout: 10_000 },
+      )).stdout);
+      const surfaceIds = (tree: unknown): string[] => {
+        const refs = new Set<string>();
+        const visit = (value: unknown) => {
+          if (typeof value === "string" && /^surface:\d+$/.test(value)) refs.add(value);
+          else if (Array.isArray(value)) value.forEach(visit);
+          else if (isRecord(value)) Object.values(value).forEach(visit);
+        };
+        visit(tree); return [...refs].sort();
+      };
+      const before = surfaceIds(await cli(["tree"]));
+      let created: Record<string, unknown> | null = null;
+      try {
+        created = extractStructuredContent(await peer.callTool("spawn_agent", {
+          type: "terminal", workspace: spawnWorkspace, focus: false, title: "636-owned-runtime-proof",
+        }, 15_000));
+        if (created.ok !== true || typeof created.surface_id !== "string") {
+          throw new Error(`D4 spawn failed: ${JSON.stringify(created)}`);
+        }
+        console.log(`[contract] D4 spawn receipt ${JSON.stringify(created)}`);
+        const surface = created.surface_id;
+        await waitFor(async () => {
+          const screen = extractStructuredContent(await peer!.callTool("read_screen", { surface, workspace: spawnWorkspace, lines: 20, raw: true }, 5_000));
+          return screen.ok === true && /[%$#❯>]\s*$/m.test(String(screen.text ?? screen.raw ?? screen.content ?? screen.screen_preview ?? ""));
+        }, 5_000, "new terminal shell prompt");
+        const metadata = await cli(["debug-terminals"]);
+        const runtime = metadata.terminals.find((row: any) => row.surface_ref === surface || row.ref === surface);
+        if (runtime?.runtime_surface_ready !== true || !/^0x[0-9a-f]+$/i.test(runtime.ghostty_surface_ptr)) {
+          throw new Error(`D4 runtime not ready: ${JSON.stringify(runtime)}`);
+        }
+        console.log(`[contract] PASS D4 real-daemon spawn ${surface} ready=true ptr=${runtime.ghostty_surface_ptr} initialization=${created.runtime_initialization} workspace=${spawnWorkspace}`);
+      } finally {
+        if (typeof created?.surface_id === "string") {
+          await peer.callTool("close_surface", { surface: created.surface_id, workspace: spawnWorkspace }, 10_000);
+          const after = surfaceIds(await cli(["tree"]));
+          if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error(`D4 close changed foreign surfaces: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+          console.log(`[contract] PASS D4 close/tree verified only ${created.surface_id} removed`);
+        }
+      }
     }
 
     setActiveStep("list_surfaces/read_screen");

@@ -410,6 +410,7 @@ export interface SpawnAgentParams {
   repo: string;
   /** False initializes the new runtime by input demand without focusing it. */
   focus?: boolean;
+  runtime_metadata_supported?: boolean;
   model?: string;
   effort?: string;
   cli: CliType;
@@ -1191,6 +1192,7 @@ export function resolveSweepTiming(
 }
 
 interface AgentEngineClient {
+  supportsSurfaceRuntimeMetadata?: boolean;
   listTerminalMetadata?: () => Promise<{ terminals: import("./types.js").CmuxTerminalMetadata[] }>;
   getTransportHealth?(): TransportHealthSignal | null;
   /** Native and CLI clients accept a stable UUID as the read-screen target. */
@@ -1263,6 +1265,7 @@ interface AgentEngineClient {
   ): Promise<CmuxNewSplitResult>;
   newSurface(opts: {
     pane: string;
+    focus?: boolean;
     type?: "terminal" | "browser";
     workspace?: string;
     title?: string;
@@ -3069,6 +3072,7 @@ export class AgentEngine {
         surface =
           placement.kind === "surface"
             ? await this.client.newSurface({
+                focus: context?.focus,
                 pane: newSurfacePaneTarget ?? placement.pane,
                 type: "terminal",
                 workspace,
@@ -3077,6 +3081,7 @@ export class AgentEngine {
                 ...(placement.pane ? { pane: placement.pane } : {}),
                 workspace,
                 type: "terminal",
+                focus: context?.focus,
               });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -8978,12 +8983,13 @@ export class AgentEngine {
       },
     );
     try {
-      await initializeNewSurfaceRuntime(
+      if ((spawnParams.runtime_metadata_supported ?? this.client.supportsSurfaceRuntimeMetadata) === true) await initializeNewSurfaceRuntime(
         this.client,
         surface.surface,
         createdWorkspace,
         spawnParams.boot_prompt_timeout_ms,
         async () => this.assertSurfaceObserverEpochCurrent(surface.observerEpoch, "runtime initialization"),
+        surface.surface_id,
       );
       await this.client.renameTab(
         surface.surface,

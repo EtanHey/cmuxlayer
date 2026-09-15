@@ -34,17 +34,24 @@ export async function initializeNewSurfaceRuntime(
   workspace: string | undefined,
   timeoutMs = 2_000,
   beforeMutation?: () => Promise<void>,
-): Promise<void> {
-  if (!client.listTerminalMetadata) return;
+  surfaceUuid?: string,
+): Promise<"unsupported" | "already_ready" | "input_demand"> {
+  if (!client.listTerminalMetadata) return "unsupported";
   const read = async (remaining = Math.min(timeoutMs, 2_000)) => {
     const metadata = await readRuntimeMetadata(() => client.listTerminalMetadata!(), remaining);
     return metadata.terminals.find((item) =>
-      (item.surface_ref ?? item.ref ?? item.surface_id) === surface &&
+      (surfaceUuid ? item.surface_id === surfaceUuid ||
+        (!item.surface_id && (item.surface_ref ?? item.ref) === surface) :
+        [item.surface_ref, item.ref, item.surface_id].includes(surface)) &&
       (!workspace || !item.workspace_ref || item.workspace_ref === workspace));
   };
-  // Older backends lack runtime metadata; retain their normal readiness path.
+  const ready = (state: CmuxTerminalMetadata | undefined) =>
+    state?.runtime_surface_ready === true &&
+    typeof state.ghostty_surface_ptr === "string" &&
+    /^0x[0-9a-f]+$/i.test(state.ghostty_surface_ptr) &&
+    !/^0x0+$/i.test(state.ghostty_surface_ptr);
   let state = await read().catch(() => undefined);
-  if (state?.runtime_surface_ready !== false || state.ghostty_surface_ptr !== "nil") return;
+  if (ready(state)) return "already_ready";
   await beforeMutation?.();
   // Input demand creates cmux's hidden bootstrap window. Ctrl-U leaves no
   // shell text and submits nothing; never use it on an existing surface.
@@ -52,7 +59,7 @@ export async function initializeNewSurfaceRuntime(
   const deadline = Date.now() + Math.min(timeoutMs, 2_000);
   do {
     state = await read(Math.max(1, deadline - Date.now())).catch(() => undefined);
-    if (state?.runtime_surface_ready === true && state.ghostty_surface_ptr && state.ghostty_surface_ptr !== "nil") return;
+    if (ready(state)) return "input_demand";
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, remaining)));

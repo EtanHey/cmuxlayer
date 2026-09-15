@@ -26,7 +26,8 @@ import {
   type CmuxServerContext,
   type CreateServerOptions,
 } from "../src/server.js";
-import type { ExecFn } from "../src/cmux-client.js";
+import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
+import { CmuxSelfHealingClient } from "../src/cmux-transport-self-heal.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
 import type { SeatManifest } from "../src/seat-manifest.js";
@@ -4709,7 +4710,7 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
-  it.each([false, true])("#636 D4 initializes only cold owned surfaces without selecting a workspace (alreadyReady=%s)", async (alreadyReady) => {
+  it.each([{ alreadyReady: false, socketMode: false }, { alreadyReady: true, socketMode: false }, { alreadyReady: false, socketMode: true }])("#636 D4 initializes only cold owned surfaces without selecting a workspace (case=%j)", async ({ alreadyReady, socketMode }) => {
     vi.useFakeTimers();
     try {
       let ready = alreadyReady;
@@ -4720,12 +4721,17 @@ describe("agent lifecycle tool handlers", () => {
         if (args.includes("read-screen") && !ready) throw new Error("internal_error: Failed to read terminal text");
         return lifecycleExec(cmd, args);
       });
-      const server = createLifecycleServer(exec);
+      const cli = new CmuxClient({ exec });
+      const socket = new CmuxClient({ exec, env: { ...process.env, CMUX_SOCKET_PATH: "/tmp/636-test.sock" } });
+      socket.listTerminalMetadata = async () => ({ terminals: [] });
+      const wrapped = socketMode ? new CmuxSelfHealingClient({ cli, socket: socket as any, socketPath: "/tmp/636-test.sock" }) : null;
+      const server = wrapped ? createTrackedServer({ client: wrapped as any, stateDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null }) : createLifecycleServer(exec);
       const result = (server as any)._registeredTools.spawn_agent.handler({ repo: "cmuxlayer", cli: "claude", role: "worker", boot_prompt_timeout_ms: 500 }, {});
       await vi.advanceTimersByTimeAsync(3_000);
       expect(parseToolResult(await result).ok).toBe(true);
       expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady ? 0 : 1);
       expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(false);
+      wrapped?.stop();
     } finally { vi.useRealTimers(); }
   });
 
