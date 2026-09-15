@@ -311,6 +311,9 @@ export interface DeliveryTelemetryEvent {
     | "pending_verify"
     | "failed_confirmed";
   target_agent?: string;
+  /** What the verifier observed; screen content itself is never logged here. */
+  submit_evidence?: string;
+  frame_hash?: string;
 }
 
 export interface ControlHealthTelemetryEvent {
