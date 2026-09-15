@@ -57,7 +57,7 @@ async function spawnReadyAgent(
   return agentId;
 }
 
-function makeLifecycleExec(readScreenText: () => string): ExecFn {
+function makeLifecycleExec(readScreenText: () => string, surfaceUuid?: string): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("list-windows")) {
       return {
@@ -122,6 +122,7 @@ function makeLifecycleExec(readScreenText: () => string): ExecFn {
           surfaces: [
             {
               ref: "surface:new",
+              ...(surfaceUuid ? { id: surfaceUuid } : {}),
               title: "agent-pane",
               type: "terminal",
               index: 0,
@@ -136,6 +137,7 @@ function makeLifecycleExec(readScreenText: () => string): ExecFn {
       stdout: JSON.stringify({
         workspace: "workspace:1",
         surface: "surface:new",
+        ...(surfaceUuid ? { surface_id: surfaceUuid } : {}),
         pane: "pane:1",
         title: "",
         type: "terminal",
@@ -163,22 +165,28 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
   });
 
   it.each([
+    // Captured read-only from surface:1144, 2026-09-15; scrollback falsely infers Claude.
+    { cli: "codex", live: true, frame: "        cost: $114.92\n    ├─ Screen (12 lines)\n    │          },\n    │          {\n    │            \"c\": \"SUCCESS\",\n    │            \"n\": \"swift (macos-15)\"\n    │          }\n    │        ]\n    │      }\n    │\n    │   ⎿  Tip: Continue your session in Claude Code Desktop with /desktop\n    │                  current: 2.1.271 · latest: 2.1...\n\n• Ran tail -n0 -F /Users/etanheyman/.cmux/agents/brainlayerCodex-c172dd93/inbox.jsonl & echo\n  │ $! > '/Users/etanheyman/.cmux/agents/brainlayerCodex-c172dd93/inbox-tail.pid'\n  └ (no output)\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› continue #889 from d916a441; report in the collab, don't send_to your lead\n\n \nWorking (0s • esc to interrupt)\n \n \n› Ask Codex to do anything\n \n  gpt-5.6-sol medium · ~/Gits/brainlayer/.worktrees/ux-disclosure · Fix BrainBar focus ring…" },
     { cli: "codex", frame: "› Ask Codex to do anything" },
     { cli: "codex", frame: "› Ask Codex to do anything\n\n  esc again to edit previous message" },
     { cli: "claude", frame: "Claude Code\n❯ Press up to edit queued messages" },
-  ] as const)("#645 shares placeholder classification for text and Return ($cli, $frame)", async ({ cli, frame }) => {
+  ] as const)("#645 shares placeholder classification for text and Return ($cli, $frame)", async (specimen) => {
+    const { cli, frame } = specimen;
+    const live = "live" in specimen;
+    if (live) expect((await import("../src/screen-parser.js")).parseScreen(frame).agent_type).toBe("claude");
     const { createServer, createServerContext } = await loadServerModule();
-    let screen = "Claude Code\n❯ ";
-    const exec = makeLifecycleExec(() => screen);
+    let screen = cli === "codex" ? "› " : "Claude Code\n❯ ";
+    const surfaceUuid = live ? "D9793BD9-0509-4884-B3D4-5C27BD2D8F57" : undefined;
+    const exec = makeLifecycleExec(() => screen, surfaceUuid);
     const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     try {
       const server = createServer({ context }) as any;
-      const targetId = await spawnReadyAgent(server);
+      const targetId = await spawnReadyAgent(server, cli);
       const engine = server._registeredTools.interact._engine;
-      const target = { ...engine.getRegistry().get(targetId), cli, state: "ready" };
+      const target = { ...engine.getRegistry().get(targetId), cli, state: "ready", ...(surfaceUuid ? { surface_uuid: surfaceUuid } : {}) };
       engine.stateMgr.writeState(target);
       engine.getRegistry().set(targetId, target);
-      for (const mode of ["agent", "key"] as const) {
+      for (const mode of ["agent", "surface", "key"] as const) {
         screen = frame;
         exec.mockClear();
         const result = parseToolResult(await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {}));
@@ -189,12 +197,12 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
           expect(result.ok, JSON.stringify(result)).toBe(true);
           expect(mutatedPane(exec)).toBe(true);
         }
-        screen = frame + "\nmy actual second line";
+        screen = live ? frame.replace("› Ask Codex to do anything", "› Ask Codex to do anything\n  and also delete the branch") : frame + "\nmy actual second line";
         exec.mockClear();
         const multiline = parseToolResult(await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {}));
         expect(multiline.error_code).toBe("blocked_by_foreign_draft");
         expect(mutatedPane(exec)).toBe(false);
-        screen = frame.split("\n").slice(0, -1).concat(cli === "codex" ? "› Write tests for @server.ts" : "❯ Press up to edit queued messages that I wrote").join("\n");
+        screen = live ? frame.replace("› Ask Codex to do anything", "› please merge now") : frame.split("\n").slice(0, -1).concat(cli === "codex" ? "› Write tests for @server.ts" : "❯ Press up to edit queued messages that I wrote").join("\n");
         exec.mockClear();
         const refused = await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {});
         const data = parseToolResult(refused);
