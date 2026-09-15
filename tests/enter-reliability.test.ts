@@ -10,6 +10,7 @@ import {
   __submitEvidenceTestHooks,
 } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-enter-reliability-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-enter-reliability-test.sock";
@@ -682,6 +683,43 @@ describe("enter reliability", () => {
     vi.useRealTimers();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
+
+  it.each((["claude", "codex", "cursor"] as const).flatMap(cli => [false, true].map(busy => ({ cli, busy }))))(
+    "#636 modeled composer contract preserves typed text ($cli, busy=$busy)", async ({ cli, busy }) => {
+      // Generated contract controls, NOT a captured queued-placeholder specimen.
+      const client = new FakeClaudeSurfaceClient(); client.cli = cli;
+      const draft = "Keep my unfinished words exactly as typed";
+      const frame = cli === "claude" ? `Claude Code\n${busy ? "✻ Working… (esc to interrupt)\n" : ""}❯ ${draft}\n`
+        : cli === "codex" ? `OpenAI Codex\n${busy ? "Working (11s)\n" : ""}› ${draft}\n\n gpt-5.5 xhigh`
+          : `Cursor Agent\n${busy ? "Working\n" : "Auto\n"}~/Gits/cmuxlayer · main\n→ ${draft}\n${busy ? "ctrl+c to stop" : ""}`;
+      client.preReturnScreenText = frame;
+      server = createReliabilityServer(client, false);
+      const target = registerAgent(server, { cli, state: busy ? "working" : "ready" });
+      const caller = registerAgent(server, { agent_id: "composer-caller", surface_id: "surface:caller", role: "orchestrator" });
+      const engine = server._registeredTools.interact._engine;
+      const send = (text: string) => runWithCallerContext({ surfaceId: caller.surface_id }, async () => parseResult(await callToolInTimerSteps(server, "send_to", {
+        mode: "agent", agent_id: target.agent_id, text, press_enter: true,
+      })));
+      const first = await send("first distinct follow-up");
+      expect(first.caller_agent_id).toBe(caller.agent_id);
+      if (busy) {
+        expect(first).toMatchObject({ ok: true, delivery_state: "queued", submitted: false, delivery_id: expect.any(String) });
+        const second = await send("second distinct follow-up");
+        expect(second).toMatchObject({ ok: true, caller_agent_id: caller.agent_id, delivery_state: "queued", submitted: false });
+        expect(second.delivery_id).not.toBe(first.delivery_id);
+        for (const [result, text] of [[first, "first distinct follow-up"], [second, "second distinct follow-up"]] as const) {
+          expect(result.error_code).toBeUndefined();
+          expect(engine.getDeliveryReceipt(result.delivery_id)).toMatchObject({ text, terminal: false, delivery_state: "queued", submit_verified: null });
+        }
+        const disk = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"));
+        expect(disk.map((receipt: any) => receipt.delivery_id)).toEqual([first.delivery_id, second.delivery_id]);
+      } else {
+        expect(first).toMatchObject({ ok: false, error_code: "blocked_by_foreign_draft" });
+      }
+      expect(client.sendCalls).toEqual([]); expect(client.sendKeyCalls).toEqual([]);
+      expect((await client.readScreen(client.surface)).text).toBe(frame);
+    },
+  );
 
   it("rejects string booleans on raw send_to handler calls", async () => {
     const client = new FakeClaudeSurfaceClient();
