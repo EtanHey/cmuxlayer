@@ -329,6 +329,24 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     return result.structuredContent ?? JSON.parse(result.content[0].text);
   }
 
+  async function settlePendingDeliveries(targetServer = server) {
+    const engine = targetServer._registeredTools.interact._engine;
+    await new Promise(resolve => setTimeout(resolve, 2));
+    await engine.verifyPendingDeliveries();
+    await engine.sweepWatchesBestEffort();
+  }
+
+  async function verifyBootPointer(receipt: any, targetServer = server) {
+    expect(receipt.coordination_footer_delivered).toBe(false);
+    expect(receipt.boot_prompt_receipt).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
+    expect(receipt.coordination_footer_note).toMatch(/pending_verify/);
+    expect(receipt.coordination_footer_note).toMatch(/do not relay/i);
+    await settlePendingDeliveries(targetServer);
+    const engine = targetServer._registeredTools.interact._engine;
+    expect(engine.getDeliveryReceipt(receipt.boot_prompt_receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+    expect(engine.getAgentState(receipt.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true, submit_verified: true });
+  }
+
   it("#636 D2 inherits the collab channel in the receipt, first contract section, and list_agents", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -547,6 +565,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toHaveLength(1);
 
+    await settlePendingDeliveries();
     await server.close();
     server = createServer(
       withTestSurfaceObserver({
@@ -592,6 +611,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toBe(true);
 
+    await settlePendingDeliveries();
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     watchNow = 2_000;
     await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
@@ -3129,6 +3149,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
     writeFileSync(reportPath, "first distinct change\n", "utf8");
     await engine.sweepWatchesBestEffort();
+    await settlePendingDeliveries();
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
 
     await (
@@ -3139,6 +3160,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     writeFileSync(reportPath, "second distinct change\n", "utf8");
     await engine.sweepWatchesBestEffort();
 
+    await settlePendingDeliveries();
     const secondWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,
     );
@@ -4117,14 +4139,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           done_marker: raw.done_marker,
         }),
       );
-      // P11b: provenance travels on both doors, and both now actually DELIVER
-      // the contract -- the pointer file is written above launchMode, so a
-      // raw-CLI spawn cannot end up as the one door that tells its worker
-      // nothing.
+      // Both doors first report pending, then prove the pointer was submitted.
       for (const receipt of [registered, raw]) {
-        expect(receipt.coordination_footer_delivered).toBe(true);
+        expect(receipt.coordination_footer_delivered).toBe(false);
         expect(receipt.contract_path).toMatch(/^\/.+\/contract\.md$/);
       }
+      await verifyBootPointer(registered);
+      await verifyBootPointer(raw, rawServer);
+      await rawServer.close();
       // Same contract SHAPE on both doors: issued, absolute, marker present.
       for (const receipt of [registered, raw]) {
         expect(receipt.report_path).toMatch(/^\/.+\/report\.md$/);
@@ -4147,9 +4169,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     // P11b keeps the rule and flips the answer -- the note must now say the
     // contract went via the file, and must not oversell it.
     expect(parsed.coordination_footer_bytes).toBeGreaterThan(0);
-    expect(parsed.coordination_footer_delivered).toBe(true);
+    await verifyBootPointer(parsed);
     expect(parsed.coordination_footer_note).toMatch(
-      /delivered_via_contract_file/,
+      /pending_verify/,
     );
     expect(parsed.coordination_footer_note).not.toMatch(/not_wired/);
     // The honest cost is stated in the receipt, not just the PR body -- and

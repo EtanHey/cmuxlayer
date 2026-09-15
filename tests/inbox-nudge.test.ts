@@ -247,6 +247,13 @@ async function spawnTestAgent(server: any): Promise<string> {
   );
   const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
   expect(parsed.ok).toBe(true);
+  // These nudge tests start from an established agent, after its boot receipt settles.
+  expect(parsed.boot_prompt_receipt).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
+  const engine = server._registeredTools.interact._engine;
+  await new Promise(resolve => setTimeout(resolve, 2));
+  await engine.verifyPendingDeliveries();
+  expect(engine.getDeliveryReceipt(parsed.boot_prompt_receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+  expect(engine.getAgentState(parsed.agent_id).boot_prompt_pending).toBe(false);
   return parsed.agent_id as string;
 }
 
