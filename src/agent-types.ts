@@ -97,6 +97,8 @@ export interface AgentRecord {
   created_at: string;
   updated_at: string;
   error: string | null;
+  /** Durable upward coordination channel, inherited by workers at spawn. */
+  collab_path?: string | null;
   // Hierarchy fields (Task 18)
   parent_agent_id: string | null;
   spawn_depth: number;
