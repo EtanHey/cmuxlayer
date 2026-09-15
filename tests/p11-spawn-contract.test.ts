@@ -319,6 +319,41 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     return result.structuredContent ?? JSON.parse(result.content[0].text);
   }
 
+  it("#636 D2 inherits the collab channel in the receipt, first contract section, and list_agents", async () => {
+    const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(), collab_path: join(inboxDir, "lead-collab.md") };
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id });
+    expect(child.ok, JSON.stringify(child)).toBe(true);
+    expect(child.collab_path).toBe(parent.collab_path);
+    const contract = readFileSync(child.contract_path, "utf8");
+    expect(contract.match(/^## .+$/m)?.[0]).toBe("## Channels");
+    expect(contract).toContain(`Your lead reaches you with \`send_to\`. You reach your lead by appending \`### ${child.agent_id} → ${parent.agent_id}\` entries to \`${parent.collab_path}\` (your lead monitors it). Do not \`send_to\`, \`report_to_parent\`, or \`wait_for\` your lead.`);
+    expect(contract).toContain("engine-internal");
+    const listed = await server._registeredTools.list_agents.handler({ detail: "summary", agent_ids: [child.agent_id] }, {});
+    const data = listed.structuredContent ?? JSON.parse(listed.content[0].text);
+    expect(data.agents.find((a: any) => a.agent_id === child.agent_id)?.collab_path).toBe(parent.collab_path);
+  });
+
+  it("#636 D2 warns when a lead spawns a worker without a collab path", async () => {
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord();
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id });
+    expect(child.ok).toBe(true);
+    expect(child.warnings.join(" ")).toContain("collab_path");
+  });
+
+  it("#636 D2 accepts an explicit lead collab path and reminds it to monitor worker collabs", async () => {
+    const collab = join(inboxDir, "own-collab.md");
+    const lead = await spawn({ role: "orchestrator", collab_path: collab });
+    expect(lead.ok, JSON.stringify(lead)).toBe(true);
+    expect(lead.collab_path).toBe(collab);
+    expect(readFileSync(lead.contract_path, "utf8")).toContain("Monitor on each worker's collab_path");
+  });
+
   it("returns report_path and done_marker in the LEAN receipt", async () => {
     const parsed = await spawn();
     expect(parsed.ok).toBe(true);
