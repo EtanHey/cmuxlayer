@@ -299,10 +299,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   async function spawn(
     extra: Record<string, unknown> = {},
     targetServer = server,
+    callerSurface?: string,
   ) {
     const tool = targetServer._registeredTools["spawn_agent"];
     const result = await runWithCallerContext(
-      { workspaceId: "workspace:1" },
+      { workspaceId: "workspace:1", ...(callerSurface ? { surfaceId: callerSurface } : {}) },
       () =>
         tool.handler(
           {
@@ -360,6 +361,34 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(lead.ok, JSON.stringify(lead)).toBe(true);
     expect(lead.collab_path).toBe(collab);
     expect(readFileSync(lead.contract_path, "utf8")).toContain("Monitor on each worker's collab_path");
+  });
+
+  it("#636 D2 existing leads adopt their first explicit worker collab path and later workers inherit it", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid);
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    const engine = server._registeredTools.interact._engine;
+    const parent = parentRecord(parentUuid);
+    engine.stateMgr.writeState(parent); engine.getRegistry().set(parent.agent_id, parent);
+    const collab = join(inboxDir, "adopted.md");
+    const first = await spawn({ collab_path: collab }, server, parentUuid);
+    expect(first.ok, JSON.stringify(first)).toBe(true);
+    expect(readFileSync(first.contract_path, "utf8")).toContain(collab);
+    expect(engine.getAgentState(parent.agent_id).collab_path).toBe(collab);
+    // Give the parent its original live binding after the single-surface spawn fake.
+    engine.stateMgr.writeState({ ...parent, collab_path: collab });
+    engine.getRegistry().set(parent.agent_id, { ...parent, collab_path: collab });
+    const second = await spawn({}, server, parentUuid);
+    expect(second.ok, JSON.stringify(second)).toBe(true);
+    expect(second.collab_path).toBe(collab);
+    expect(second.warnings?.join(" ") ?? "").not.toContain("collab_path missing");
+    const child = engine.getAgentState(second.agent_id);
+    engine.stateMgr.writeState({ ...child, surface_uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+    engine.getRegistry().set(child.agent_id, { ...child, surface_uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+    const refused = await runWithCallerContext({ surfaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }, () => server._registeredTools.send_to.handler({ agent_id: parent.agent_id, text: "upward" }, {}));
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused)).toContain(collab);
   });
 
   it("returns report_path and done_marker in the LEAN receipt", async () => {
