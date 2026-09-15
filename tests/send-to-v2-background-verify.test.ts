@@ -631,11 +631,6 @@ describe("send_to v2 background verify", () => {
 
   it("#636 D1 ownership revocation survives an awaited read, stale save, and restart", async () => {
     const client = new ClaudeDeliverySurface();
-    let order = 0;
-    let activePhase = "initial-delivery";
-    let deliveryId: string | undefined;
-    const keyEvents: unknown[] = [];
-    const readEvents: unknown[] = [];
     let release!: () => void;
     let reading = false;
     let readGateArmed = false;
@@ -644,85 +639,42 @@ describe("send_to v2 background verify", () => {
     // Install before createServer's topology proxy caches the bound reader.
     // Initial delivery is ungated; only the explicit verifier read is held.
     client.readScreen = async surface => {
-      const caller = new Error().stack?.split("\n").slice(2, 7).join("\n");
       const snapshot = await read(surface);
       if (readGateArmed) {
         readGateArmed = false;
         reading = true;
-        readEvents.push({ order: order++, at: Date.now(), event: "verifier-read-held", caller, keys: [...client.sendKeyCalls], text: snapshot.text });
         await gate;
-        readEvents.push({ order: order++, at: Date.now(), event: "verifier-read-released", keys: [...client.sendKeyCalls] });
       }
       return snapshot;
     };
-    const sendKey = client.sendKey.bind(client);
-    const recordKey = (event: string, key: string, caller: string | undefined) => {
-      const evidence = deliveryId ? server?._registeredTools.interact._engine.getDeliveryReceipt(deliveryId)?.claude_submit : null;
-      keyEvents.push({ order: order++, at: Date.now(), phase: activePhase, event, key, caller, composer: client.composer,
-        retry_revoked: evidence?.retry_revoked ?? null, attribution_revoked: evidence?.attribution_revoked ?? null,
-        return_attempts: evidence?.return_attempts ?? null });
-    };
-    client.sendKey = async (surface, key) => {
-      const caller = new Error().stack?.split("\n").slice(2, 7).join("\n");
-      recordKey("key-start", key, caller);
-      try { await sendKey(surface, key); } finally { recordKey("key-resolved", key, caller); }
-    };
     const sent = await instantDelivery(client);
-    deliveryId = sent.delivery_id;
     const engine = server._registeredTools.interact._engine;
-    const phases: unknown[] = [];
-    const recordPhase = (phase: string, currentEngine = engine) => {
-      const current = currentEngine.getDeliveryReceipt(sent.delivery_id);
-      let persisted: any = null;
-      try {
-        persisted = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8")).find((receipt: any) => receipt.delivery_id === sent.delivery_id) ?? null;
-      } catch (error) { persisted = { read_error: String(error) }; }
-      activePhase = phase;
-      phases.push({ order: order++, at: Date.now(), phase, keys: [...client.sendKeyCalls],
-        old_engine_timer_active: engine.claudeVerifyTimer != null, old_engine_generation: engine.getDeliveryVerificationGeneration(),
-        current: current?.claude_submit ?? null, persisted: persisted?.claude_submit ?? persisted });
-    };
     const expectPersistedRevocation = (currentEngine = engine) => {
       const persisted = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8")).find((receipt: any) => receipt.delivery_id === sent.delivery_id);
       expect(currentEngine.getDeliveryReceipt(sent.delivery_id)?.claude_submit).toMatchObject({ retry_revoked: true, composer_cleared: true });
       expect(persisted?.claude_submit).toMatchObject({ retry_revoked: true, composer_cleared: true });
     };
-    recordPhase("initial-delivery-resolved");
     engine.dispose();
-    recordPhase("before-2001ms-advance");
     await vi.advanceTimersByTimeAsync(2_001);
-    recordPhase("after-2001ms-advance");
     const staleEvidence = engine.getDeliveryReceipt(sent.delivery_id).claude_submit;
     readGateArmed = true;
     const verification = engine.verifyPendingDeliveries();
     await vi.advanceTimersByTimeAsync(0); expect(reading).toBe(true);
-    recordPhase("held-read-started");
     expect(client.sendKeyCalls, "the held verifier read must precede any retry dispatch").toEqual(["return"]);
-    recordPhase("before-observer-create");
     const observer = createServer({ context: serverContexts.get(server)! }) as any;
-    recordPhase("after-observer-create");
     try {
       client.composer = "";
-      recordPhase("before-clear-read");
       expect(parseResult(await observer._registeredTools.read_screen.handler({ surface: client.surface }, {})).ok).toBe(true);
-      recordPhase("observed-clear");
       client.composer = "636 unique delivery";
       release(); await verification;
-      recordPhase("held-read-resolved");
       engine.updateClaudeDeliveryEvidence(sent.delivery_id, staleEvidence);
-      recordPhase("stale-save");
       expectPersistedRevocation();
     } finally { release(); await observer.close(); }
     await server.close();
     server = createVerifyServer(client);
-    recordPhase("restarted", server._registeredTools.interact._engine);
     expectPersistedRevocation(server._registeredTools.interact._engine);
     await vi.advanceTimersByTimeAsync(2_001);
     await server._registeredTools.interact._engine.verifyPendingDeliveries();
-    recordPhase("verified-after-restart", server._registeredTools.interact._engine);
-    console.info("D1_OWNERSHIP_READS", JSON.stringify(readEvents));
-    console.info("D1_OWNERSHIP_KEYS", JSON.stringify(keyEvents));
-    console.info("D1_OWNERSHIP_PHASES", JSON.stringify(phases));
     expect(client.sendKeyCalls).toEqual(["return"]);
     expect(client.sendCalls).toEqual(["636 unique delivery"]);
   });

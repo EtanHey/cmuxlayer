@@ -593,7 +593,6 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect((exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforeDeadline).filter(([, args]: [string, string[]]) =>
       args.some(arg => arg.includes("[watch] deadline elapsed") && arg.includes(child.report_path)),
     )).toHaveLength(1);
-    console.info("D1_WATCH_AFTER_DEADLINE", JSON.stringify({ watchNow, watches: readWatchRegistry({ registryPath: watchRegistryPath }).watches, deliveries: engine.listDeliveryReceipts() }));
     await server.close();
     server = createServer(
       withTestSurfaceObserver({
@@ -631,7 +630,6 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       before,
     );
-    console.info("D1_WATCH_AFTER_REPORT", JSON.stringify({ watchNow, watches: readWatchRegistry({ registryPath: watchRegistryPath }).watches, deliveries: engine.listDeliveryReceipts() }));
     expect(
       afterCalls.some(([, args]: [string, string[]]) =>
         args.some(
