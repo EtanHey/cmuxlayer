@@ -14625,6 +14625,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
             );
           }
+          if (args.collab_path && !isAbsolute(args.collab_path.trim())) {
+            throw new Error("collab_path must be absolute");
+          }
           if (args.resume_agent_id) {
             const incompatible = [
               "repo",
@@ -14980,12 +14983,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? inferRecordRoleOrNull(callerAgent)
             : null;
           const callerIsWorker = callerRole === "worker";
-          if (callerAgent && !callerIsWorker && args.collab_path) {
-            const collabPath = args.collab_path.trim();
-            if (!isAbsolute(collabPath)) throw new Error("collab_path must be absolute");
-            const adopted = stateMgr.updateRecord(callerAgent.agent_id, { collab_path: collabPath });
-            registry.set(callerAgent.agent_id, adopted);
-          }
           const effectiveParentAgentId = callerIsWorker
             ? callerAgent!.agent_id
             : (args.parent_agent_id ?? callerAgent?.agent_id);
@@ -15562,6 +15559,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 topology,
               )
             : undefined;
+
+          if (callerAgent && !callerIsWorker && effectiveRole === "worker" &&
+              result.parent_agent_id === callerAgent.agent_id && args.collab_path) {
+            const adopted = stateMgr.updateRecord(callerAgent.agent_id, { collab_path: args.collab_path.trim() });
+            registry.set(callerAgent.agent_id, adopted);
+          }
 
           const formattedData = {
             agent_id: result.agent_id,
