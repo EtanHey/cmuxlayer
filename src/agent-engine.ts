@@ -7627,6 +7627,7 @@ export class AgentEngine {
           receipt.submit_verified = observation.submit_verified ?? true;
           receipt.error = null;
           receipt.verify_miss_count = 0;
+          this.applyClaudeDeliveryAgentState(receipt, true);
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
           continue;
@@ -7655,6 +7656,7 @@ export class AgentEngine {
           receipt.resolved_at = new Date().toISOString();
           receipt.submit_verified = false;
           receipt.error = reason;
+          this.applyClaudeDeliveryAgentState(receipt, false);
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
           await this.fileConfirmedFailureTicket(receipt, reason, observation);
@@ -7677,6 +7679,27 @@ export class AgentEngine {
       this.deliveryVerifyInFlight = false;
       if (generation === this.deliveryVerifyGeneration) this.refreshClaudeVerifyTimer();
     }
+  }
+
+  private applyClaudeDeliveryAgentState(receipt: AgentDeliveryReceipt, submitted: boolean): void {
+    const evidence = receipt.claude_submit;
+    const current = this.getAgentState(receipt.agent_id);
+    if (!evidence || current?.cli !== "claude" ||
+        (current.cli_session_id ?? null) !== (evidence.cli_session_id ?? null) ||
+        current.surface_id !== evidence.surface_id ||
+        (current.surface_uuid ?? null) !== (evidence.surface_uuid ?? null) ||
+        (current.workspace_id ?? null) !== (evidence.workspace_id ?? null)) return;
+    if (receipt.source_event === "boot_prompt") {
+      const updated = this.stateMgr.updateRecord(receipt.agent_id, {
+        boot_prompt_pending: !submitted,
+        prompt_delivered: submitted,
+        submit_verified: submitted,
+      });
+      this.registry.set(receipt.agent_id, updated);
+      if (submitted && updated.state === "booting") {
+        this.registry.set(receipt.agent_id, this.stateMgr.transition(receipt.agent_id, "ready"));
+      }
+    } else if (submitted) this.markAgentWorking(receipt.agent_id);
   }
 
   /** Bound one delivery-verify side quest to the verify timeout. */

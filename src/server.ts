@@ -5702,7 +5702,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw pasteRequiredError("client does not support pasteText");
           }
           try {
-            await client.pasteText(surface, chunk, opts);
+            await client.pasteText(surface, chunk, { workspace: opts.workspace });
           } catch (error) {
             if (isMethodNotFoundError(error)) {
               const message =
@@ -5712,7 +5712,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw error;
           }
         } else {
-          const acknowledgement = await client.send(surface, chunk, opts);
+          const acknowledgement = await client.send(surface, chunk, { workspace: opts.workspace });
           opts.onAcknowledged?.(acknowledgement?.queued === true);
         }
         invalidateSurfaceTopologyCallScope(client as object);
@@ -14452,12 +14452,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const startedAt = Date.now();
           const evidence = receipt.claude_submit;
           const route = await engine.resolveAgentIoRoute(receipt.agent_id);
-          if ((evidence.cli_session_id ?? null) !== (agent.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) return { outcome: "pending", reason: "bound_target_changed" };
+          if (agent.cli !== "claude" || (evidence.cli_session_id ?? null) !== (agent.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) return { outcome: "pending", reason: "bound_target_changed" };
           return withSurfaceWrite(route.surface_id, async () => {
             const assertCurrent = async () => {
               if (!engine.isClaudeVerifyCurrent(receipt, generation, startedAt)) throw new Error("Claude delivery verification ended");
               const current = await engine.resolveAgentIoRoute(receipt.agent_id);
               if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id) throw new Error("Claude delivery route changed");
+              const owner = engine.getAgentState(receipt.agent_id);
+              if (owner?.cli !== "claude" || (owner.cli_session_id ?? null) !== (evidence.cli_session_id ?? null)) throw new Error("Claude delivery harness changed");
             };
             return verifyClaudeDelivery(receipt, {
               read: async () => { await assertCurrent(); const frame = await readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text, receipt.claude_submit); await assertCurrent(); return frame; },

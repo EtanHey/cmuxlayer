@@ -415,6 +415,18 @@ function createLifecycleServer(exec: ExecFn) {
   });
 }
 
+async function verifiedClaudeReceipt(server: any, result: any) {
+  const data = parseToolResult(result);
+  const initial = data.boot_prompt_receipt ?? data;
+  expect(initial).toMatchObject({ submit_verified: null });
+  const engine = server._registeredTools.interact._engine;
+  await new Promise(resolve => setTimeout(resolve, 2));
+  await engine.verifyPendingDeliveries();
+  const receipt = engine.getDeliveryReceipt(initial.delivery_id);
+  expect(receipt).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+  return receipt;
+}
+
 function createInMemoryStateManager(
   baseDir = "/in-memory/spawn-manifest",
 ): StateManager {
@@ -1158,7 +1170,8 @@ describe("lean spawn tool responses", () => {
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
     expect(context.stateDir).toBe(stateDir);
-    expect(existsSync(stateDir)).toBe(false);
+    // Agent records remain injected; pending deliveries are durably persisted.
+    expect(existsSync(join(stateDir, "delivery-receipts.json"))).toBe(true);
   });
 
   it("spawn_agent manifest uses the launcher name resolved by preflight", async () => {
@@ -1188,7 +1201,8 @@ describe("lean spawn tool responses", () => {
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
     expect(context.stateDir).toBe(stateDir);
-    expect(existsSync(stateDir)).toBe(false);
+    // Agent records remain injected; pending deliveries are durably persisted.
+    expect(existsSync(join(stateDir, "delivery-receipts.json"))).toBe(true);
   });
 
   it("spawn_agent defaults to the lean payload in text and structured content", async () => {
@@ -2536,7 +2550,9 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toMatch(/^brainlayerClaude-[0-9a-f]{8}$/);
     expect(parsed.surface_id).toBe("surface:new");
-    expect(parsed.state).toBe("ready");
+    expect(parsed.state).toBe("booting");
+    await verifiedClaudeReceipt(server, result);
+    expect((server as any)._registeredTools.interact._engine.getAgentState(parsed.agent_id).state).toBe("ready");
     expect(parsed.health).toBeUndefined();
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
@@ -5063,6 +5079,7 @@ describe("agent lifecycle tool handlers", () => {
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
+    await verifiedClaudeReceipt(server, spawnResult);
     manifests.length = 0;
 
     await interact.handler(
@@ -7770,7 +7787,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const list = (server as any)._registeredTools["list_agents"];
 
-    await spawn.handler(
+    const spawned = await spawn.handler(
       {
         repo: "brainlayer",
         model: "sonnet",
@@ -7780,6 +7797,7 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
 
+    await verifiedClaudeReceipt(server, spawned);
     const result = await list.handler(
       { state: "working", detail: "full" },
       {} as any,
@@ -11160,9 +11178,8 @@ codex>
     );
     const parsed = parseToolResult(result);
     expect(result.isError).toBeFalsy();
-    expect(parsed.terminal).toBe(true);
-    expect(parsed.delivery_state).toBe("submitted");
-    expect(parsed.submit_verified).toBe(true);
+    expect(parsed).toMatchObject({ terminal: false, delivery_state: "pending_verify", submit_verified: null });
+    await verifiedClaudeReceipt(server, result);
     expect(parsed.rpc_methods).toEqual(expect.any(Array));
   });
 
@@ -11181,7 +11198,7 @@ codex>
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to_agent"];
     const spawnResult = await spawn.handler(
-      { repo: "test", model: "sonnet", cli: "claude" },
+      { repo: "test", model: "gpt-5.5", cli: "codex" },
       {} as any,
     );
     const agentId = parseToolResult(spawnResult).agent_id as string;
@@ -11219,7 +11236,7 @@ codex>
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
     const spawnResult = await spawn.handler(
-      { repo: "test", model: "sonnet", cli: "claude" },
+      { repo: "test", model: "gpt-5.5", cli: "codex" },
       {} as any,
     );
     const agentId = parseToolResult(spawnResult).agent_id as string;
@@ -11357,6 +11374,7 @@ codex>
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
+    await verifiedClaudeReceipt(server, spawnResult);
     const working = engine.stateMgr.transition(agentId, "working");
     registry.set(agentId, working);
     mockExec.mockClear();
@@ -13225,15 +13243,16 @@ codex>
       ok: true,
       agent_id: agentId,
       delivery_id: expect.any(String),
-      delivery: "submitted",
-      delivery_state: "submitted",
-      terminal: true,
-      submit_verified: true,
+      delivery: "pending_verify",
+      delivery_state: "pending_verify",
+      terminal: false,
+      submit_verified: null,
       queued_behind_turn: true,
     });
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("send")),
     ).not.toHaveLength(0);
+    await verifiedClaudeReceipt(server, result);
     expect(engine.getDeliveryReceipt(delivered.delivery_id)).toMatchObject({
       delivery_id: delivered.delivery_id,
       delivery_state: "submitted",
@@ -13297,7 +13316,7 @@ codex>
     expect(parsed.agent_id).toBe(agentId);
   });
 
-  it("send_to reserves an idle agent as working before health evidence", async () => {
+  it("send_to marks an idle agent working only after attributable evidence", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
@@ -13333,15 +13352,10 @@ codex>
 
     expect(result.isError).toBeFalsy();
     expect(parsed.ok).toBe(true);
-    expect(parsed.registry_state).toBe("working");
-    expect(parsed.screen).toMatchObject({
-      agent_type: "claude",
-      status: "working",
-    });
-    expect(parsed.state_conflict).toBe(false);
-    expect(parsed.health.issue_codes).not.toContain(
-      "registry_screen_disagreement",
-    );
+    expect(parsed).toMatchObject({ registry_state: "idle", delivery_state: "pending_verify", submit_verified: null });
+    await verifiedClaudeReceipt(server, result);
+    expect(engine.getAgentState(agentId).state).toBe("working");
+
   });
 
   it("re-tasking a done worker through send_to still escalates a later approval halt", async () => {
@@ -14253,6 +14267,9 @@ codex>
       if (!collectReceiverInput) {
         return baseExec(cmd, args);
       }
+      if (args.includes("read-screen")) {
+        return { stdout: JSON.stringify({ surface: "surface:new", text: `Claude Code\n${submittedMessages.join("\n")}\n❯ ${composer}`, lines: 80 }), stderr: "" };
+      }
       if (args.includes("set-buffer")) {
         const nameIndex = args.indexOf("--name");
         const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
@@ -14320,6 +14337,7 @@ codex>
 
     expect(parsed.ok).toBe(true);
     expect(submittedMessages).toEqual([longText]);
+    await verifiedClaudeReceipt(server, result);
   });
 
   it("send_to returns an error for an unknown agent_id", async () => {
