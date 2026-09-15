@@ -1414,7 +1414,7 @@ async function measureParallelStress(
   return { ...summarizeTimedSamples(samples), stress: true };
 }
 
-export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, binDir, missingCmuxSocket, fakeCmuxState, surfaceCount }) {
+export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, benchmarkTmpDir, binDir, missingCmuxSocket, fakeCmuxState, surfaceCount }) {
   // Isolate defaults AND explicit inherited overrides. CMUXLAYER_STATE_DIR alone
   // does not select the server's registry, which defaults to os.homedir().
   const blocked = new Set(["NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS", "LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"]);
@@ -1433,9 +1433,9 @@ export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, binDir, missingCm
     XDG_STATE_HOME: join(home, ".local", "state"),
     XDG_DATA_HOME: join(home, ".local", "share"),
     XDG_CACHE_HOME: join(home, ".cache"),
-    TMPDIR: join(tempRoot, "tmp"),
-    TMP: join(tempRoot, "tmp"),
-    TEMP: join(tempRoot, "tmp"),
+    TMPDIR: benchmarkTmpDir,
+    TMP: benchmarkTmpDir,
+    TEMP: benchmarkTmpDir,
     CMUX_AGENT_ID: "",
     CMUX_SURFACE_ID: "",
     CMUX_WORKSPACE_ID: "",
@@ -1483,13 +1483,15 @@ async function main() {
     : join(repoRoot, "docs.local", "scratch", "run5r3");
   await mkdir(scratchRoot, { recursive: true });
   const tempRoot = await mkdtemp(join(scratchRoot, "b-"));
+  // Keep temp I/O on the OS temp volume while retaining a private directory
+  // that this benchmark owns and removes.
+  const benchmarkTmpDir = await mkdtemp(join(tmpdir(), "cml-bench-tmp-"));
   // Darwin socket paths are limited to 104 bytes. Use a private short root,
   // never the user's live state tree; mkdtemp owns this directory exclusively.
   const socketRoot = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "cml-bench-"));
   // Raw spawn preflight resolves repo metadata before the explicit cwd. Seed
   // its synthetic repo inside the private HOME instead of reading host launchers.
   await mkdir(join(tempRoot, "home", "Gits", "cmuxlayer"), { recursive: true });
-  await mkdir(join(tempRoot, "tmp"), { recursive: true });
   const binDir = join(tempRoot, "bin");
   await mkdir(binDir, { recursive: true });
   await writeFile(join(binDir, "package.json"), '{"type":"commonjs"}\n');
@@ -1514,7 +1516,7 @@ async function main() {
     });
   }
   const sweepHoldState = join(tempRoot, "sweep-hold-state.json");
-  const baseEnv = buildDaemonBenchmarkEnv(process.env, { tempRoot, binDir, missingCmuxSocket, fakeCmuxState, surfaceCount });
+  const baseEnv = buildDaemonBenchmarkEnv(process.env, { tempRoot, benchmarkTmpDir, binDir, missingCmuxSocket, fakeCmuxState, surfaceCount });
 
   let baselineClients = [];
   let daemonClients = [];
@@ -1905,6 +1907,7 @@ async function main() {
       fakeCmuxSocketServer.close(resolvePromise),
     );
     await rm(tempRoot, { recursive: true, force: true });
+    await rm(benchmarkTmpDir, { recursive: true, force: true });
     await rm(socketRoot, { recursive: true, force: true });
   }
 }
