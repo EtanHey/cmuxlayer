@@ -1,0 +1,289 @@
+name: 636-649 paired control
+
+on:
+  push:
+    branches: [scratch/636-649-paired-driver]
+
+permissions:
+  contents: read
+
+env:
+  CONTROL_SHA: 0159a7fef5c3b5ae4f0f6b0d292df6bee49abf4d
+  CONTROL_BASE_SHA: 7d7c6fb198ff008bbf1cf5bb953319b1d762008d
+  CANDIDATE_SHA: 2dfb616f3253d154c5a4f73c35f65e9f2a62d827
+  CANDIDATE_BASE_SHA: b201ee83e054a416d12cbe449b170ab9ffbc6956
+
+jobs:
+  paired-control:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact original-base control
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CONTROL_SHA }}
+          path: arms/control
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Check out exact delivery candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: arms/candidate
+          fetch-depth: 3
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Prove exact heads and diagnostic equivalence
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/source evidence/boundary
+          test "$(git -C arms/control rev-parse HEAD)" = "$CONTROL_SHA"
+          test "$(git -C arms/candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C arms/control rev-parse HEAD^)" = "$CONTROL_BASE_SHA"
+          test "$(git -C arms/candidate rev-parse "$CANDIDATE_BASE_SHA^{commit}")" = "$CANDIDATE_BASE_SHA"
+          test "$(git -C arms/control diff --name-only "$CONTROL_BASE_SHA" "$CONTROL_SHA")" = scripts/bench-daemon.mjs
+          git -C arms/control diff --quiet "$CONTROL_BASE_SHA" "$CONTROL_SHA" -- src
+          git -C arms/candidate diff --quiet "$CANDIDATE_BASE_SHA" "$CANDIDATE_SHA" -- src
+          git -C arms/control diff --unified=0 "$CONTROL_BASE_SHA" "$CONTROL_SHA" -- scripts/bench-daemon.mjs \
+            | sed '/^diff --git /d;/^index /d;/^--- /d;/^+++ /d;/^@@ /d' \
+            > evidence/source/control-instrumentation.payload
+          git -C arms/candidate diff --unified=0 "$CANDIDATE_BASE_SHA" "$CANDIDATE_SHA" -- scripts/bench-daemon.mjs \
+            | sed '/^diff --git /d;/^index /d;/^--- /d;/^+++ /d;/^@@ /d' \
+            > evidence/source/candidate-instrumentation.payload
+          cmp evidence/source/control-instrumentation.payload evidence/source/candidate-instrumentation.payload
+          sha256sum evidence/source/control-instrumentation.payload evidence/source/candidate-instrumentation.payload \
+            | tee evidence/source/instrumentation-sha256.txt
+          cmp arms/control/scripts/check-daemon-benchmark.mjs arms/candidate/scripts/check-daemon-benchmark.mjs
+          cmp arms/control/benchmarks/daemon-baseline.json arms/candidate/benchmarks/daemon-baseline.json
+          cmp arms/control/package.json arms/candidate/package.json
+          {
+            printf 'control=%s\n' "$CONTROL_SHA"
+            printf 'control_base=%s\n' "$CONTROL_BASE_SHA"
+            printf 'candidate=%s\n' "$CANDIDATE_SHA"
+            printf 'candidate_base=%s\n' "$CANDIDATE_BASE_SHA"
+            printf 'runner=%s\n' "$RUNNER_NAME"
+            printf 'image=%s\n' "${ImageOS:-unknown}-${ImageVersion:-unknown}"
+          } > evidence/source/heads-and-runner.txt
+
+      - name: Install control dependencies separately
+        working-directory: arms/control
+        run: |
+          set -euo pipefail
+          rm -f package-lock.json
+          bun install
+
+      - name: Snapshot shared runtime state before control
+        run: |
+          set -euo pipefail
+          runtime_manifest() {
+            for root in \
+              "$HOME/.local/state/cmuxlayer" \
+              "$HOME/.local/state/cmux-agents" \
+              "$HOME/.cmux" \
+              "$HOME/.cmuxlayer" \
+              "$HOME/.config/cmuxlayer"
+            do
+              if [ -e "$root" ]; then
+                find -P "$root" -xdev -printf '%y %p -> %l\n'
+                find -P "$root" -xdev -type f -exec sha256sum {} +
+              else
+                printf 'ABSENT %s\n' "$root"
+              fi
+            done | LC_ALL=C sort
+          }
+          runtime_manifest > evidence/boundary/before-control-runtime.txt
+
+      - name: Run original-base control 8x12 and preserve its real exit
+        working-directory: arms/control
+        env:
+          CMUXLAYER_BENCH_ROUNDS: "12"
+          CMUXLAYER_PERF_ARTIFACT_DIR: ${{ github.workspace }}/evidence/control
+        run: |
+          set -uo pipefail
+          set +e
+          bun run bench:daemon:check 2>&1 | tee "$GITHUB_WORKSPACE/evidence/control.log"
+          control_exit=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$control_exit" > "$GITHUB_WORKSPACE/evidence/control-exit.txt"
+          exit 0
+
+      - name: Prove control cannot contaminate candidate
+        run: |
+          set -uo pipefail
+          boundary_exit=0
+          runtime_manifest() {
+            for root in \
+              "$HOME/.local/state/cmuxlayer" \
+              "$HOME/.local/state/cmux-agents" \
+              "$HOME/.cmux" \
+              "$HOME/.cmuxlayer" \
+              "$HOME/.config/cmuxlayer"
+            do
+              if [ -e "$root" ]; then
+                find -P "$root" -xdev -printf '%y %p -> %l\n'
+                find -P "$root" -xdev -type f -exec sha256sum {} +
+              else
+                printf 'ABSENT %s\n' "$root"
+              fi
+            done | LC_ALL=C sort
+          }
+          runtime_manifest > evidence/boundary/after-control-runtime.txt
+          if ! cmp evidence/boundary/before-control-runtime.txt evidence/boundary/after-control-runtime.txt; then
+            diff -u evidence/boundary/before-control-runtime.txt evidence/boundary/after-control-runtime.txt \
+              > evidence/boundary/control-runtime.diff || true
+            boundary_exit=20
+          fi
+          control_scratch=evidence/control/scratch
+          if [ -d "$control_scratch" ] && find "$control_scratch" -mindepth 1 -print -quit | grep -q .; then
+            find "$control_scratch" -mindepth 1 -maxdepth 3 -print \
+              > evidence/boundary/control-scratch-residue.txt
+            boundary_exit=21
+          fi
+          CONTROL_DIR="$GITHUB_WORKSPACE/arms/control" python3 - \
+            > evidence/boundary/control-process-and-socket-residue.txt <<'PY'
+          import os
+          from pathlib import Path
+
+          root = os.environ["CONTROL_DIR"]
+          home_socket_root = str(Path.home() / ".local/state/cmuxlayer/bench/")
+          offenders = []
+          for proc in Path("/proc").glob("[0-9]*"):
+              try:
+                  if int(proc.name) == os.getpid():
+                      continue
+                  cwd = os.readlink(proc / "cwd")
+                  cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+              except (FileNotFoundError, PermissionError, ProcessLookupError):
+                  continue
+              if cwd == root or cwd.startswith(root + "/") or root in cmdline:
+                  offenders.append(f"process pid={proc.name} cwd={cwd} cmd={cmdline}")
+          try:
+              for line in Path("/proc/net/unix").read_text().splitlines()[1:]:
+                  path = line.split()[-1] if len(line.split()) >= 8 else ""
+                  if path.startswith(root + "/") or path.startswith(home_socket_root):
+                      offenders.append(f"unix_socket {line}")
+          except FileNotFoundError:
+              offenders.append("/proc/net/unix unavailable")
+          print("\n".join(offenders))
+          raise SystemExit(1 if offenders else 0)
+          PY
+          process_exit=$?
+          if [ "$process_exit" -ne 0 ]; then
+            boundary_exit=22
+          fi
+          printf '%s\n' "$boundary_exit" > evidence/boundary/control-boundary-exit.txt
+          exit "$boundary_exit"
+
+      - name: Install candidate dependencies separately
+        if: success()
+        working-directory: arms/candidate
+        run: |
+          set -euo pipefail
+          rm -f package-lock.json
+          bun install
+
+      - name: Run delivery candidate 8x12 and preserve its real exit
+        if: success()
+        working-directory: arms/candidate
+        env:
+          CMUXLAYER_BENCH_ROUNDS: "12"
+          CMUXLAYER_PERF_ARTIFACT_DIR: ${{ github.workspace }}/evidence/candidate
+        run: |
+          set -uo pipefail
+          set +e
+          bun run bench:daemon:check 2>&1 | tee "$GITHUB_WORKSPACE/evidence/candidate.log"
+          candidate_exit=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$candidate_exit" > "$GITHUB_WORKSPACE/evidence/candidate-exit.txt"
+          exit 0
+
+      - name: Prove candidate cleanup and shared-state isolation
+        if: success()
+        run: |
+          set -uo pipefail
+          boundary_exit=0
+          runtime_manifest() {
+            for root in \
+              "$HOME/.local/state/cmuxlayer" \
+              "$HOME/.local/state/cmux-agents" \
+              "$HOME/.cmux" \
+              "$HOME/.cmuxlayer" \
+              "$HOME/.config/cmuxlayer"
+            do
+              if [ -e "$root" ]; then
+                find -P "$root" -xdev -printf '%y %p -> %l\n'
+                find -P "$root" -xdev -type f -exec sha256sum {} +
+              else
+                printf 'ABSENT %s\n' "$root"
+              fi
+            done | LC_ALL=C sort
+          }
+          runtime_manifest > evidence/boundary/after-candidate-runtime.txt
+          if ! cmp evidence/boundary/after-control-runtime.txt evidence/boundary/after-candidate-runtime.txt; then
+            diff -u evidence/boundary/after-control-runtime.txt evidence/boundary/after-candidate-runtime.txt \
+              > evidence/boundary/candidate-runtime.diff || true
+            boundary_exit=30
+          fi
+          candidate_scratch=evidence/candidate/scratch
+          if [ -d "$candidate_scratch" ] && find "$candidate_scratch" -mindepth 1 -print -quit | grep -q .; then
+            find "$candidate_scratch" -mindepth 1 -maxdepth 3 -print \
+              > evidence/boundary/candidate-scratch-residue.txt
+            boundary_exit=31
+          fi
+          CANDIDATE_DIR="$GITHUB_WORKSPACE/arms/candidate" python3 - \
+            > evidence/boundary/candidate-process-and-socket-residue.txt <<'PY'
+          import os
+          from pathlib import Path
+
+          root = os.environ["CANDIDATE_DIR"]
+          offenders = []
+          for proc in Path("/proc").glob("[0-9]*"):
+              try:
+                  if int(proc.name) == os.getpid():
+                      continue
+                  cwd = os.readlink(proc / "cwd")
+                  cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+              except (FileNotFoundError, PermissionError, ProcessLookupError):
+                  continue
+              if cwd == root or cwd.startswith(root + "/") or root in cmdline:
+                  offenders.append(f"process pid={proc.name} cwd={cwd} cmd={cmdline}")
+          try:
+              for line in Path("/proc/net/unix").read_text().splitlines()[1:]:
+                  path = line.split()[-1] if len(line.split()) >= 8 else ""
+                  if path.startswith(root + "/") or path.startswith("/tmp/cml-bench-"):
+                      offenders.append(f"unix_socket {line}")
+          except FileNotFoundError:
+              offenders.append("/proc/net/unix unavailable")
+          print("\n".join(offenders))
+          raise SystemExit(1 if offenders else 0)
+          PY
+          process_exit=$?
+          if [ "$process_exit" -ne 0 ]; then
+            boundary_exit=32
+          fi
+          printf '%s\n' "$boundary_exit" > evidence/boundary/candidate-boundary-exit.txt
+          exit "$boundary_exit"
+
+      - name: Upload paired evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: 636-649-paired-control
+          path: evidence/
+
+      - name: Propagate boundary and benchmark exits
+        if: always()
+        run: |
+          set -euo pipefail
+          control_boundary=$(cat evidence/boundary/control-boundary-exit.txt 2>/dev/null || printf '90')
+          candidate_boundary=$(cat evidence/boundary/candidate-boundary-exit.txt 2>/dev/null || printf '91')
+          control_exit=$(cat evidence/control-exit.txt 2>/dev/null || printf '92')
+          candidate_exit=$(cat evidence/candidate-exit.txt 2>/dev/null || printf '93')
+          printf 'control_boundary=%s candidate_boundary=%s control=%s candidate=%s\n' \
+            "$control_boundary" "$candidate_boundary" "$control_exit" "$candidate_exit"
+          if [ "$control_boundary" -ne 0 ]; then exit "$control_boundary"; fi
+          if [ "$candidate_boundary" -ne 0 ]; then exit "$candidate_boundary"; fi
+          if [ "$control_exit" -ne 0 ]; then exit "$control_exit"; fi
+          exit "$candidate_exit"
