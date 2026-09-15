@@ -162,7 +162,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
-  it.each(["foreign", "picker", "owned", "changed", "unknown"])("#636 key Return draft ownership (%s)", async (kind) => {
+  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other"])("#636 key Return draft ownership (%s)", async (kind) => {
     const { createServer, createServerContext } = await loadServerModule();
     const { runWithCallerContext } = await import("../src/caller-context.js");
     let screen = "Claude Code\n❯ ";
@@ -175,26 +175,39 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     try {
       const server = createServer({ context }) as any;
-      const callerId = await spawnReadyAgent(server);
-      const call = (args: Record<string, unknown>) => runWithCallerContext(kind === "unknown" ? undefined : { surfaceId: "surface:new", workspaceId: "workspace:1" }, () => server._registeredTools.send_to.handler(args, {}));
-      if (kind === "owned" || kind === "changed") {
+      const targetId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const callerId = "draft-guard-sender";
+      const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const caller = { ...engine.getRegistry().get(targetId), agent_id: callerId, surface_id: "surface:caller", surface_uuid: callerUuid, role: "lead" };
+      engine.stateMgr.writeState(caller);
+      engine.getRegistry().set(callerId, caller);
+      let callerSurface = callerUuid;
+      const call = (args: Record<string, unknown>) => runWithCallerContext(kind === "unknown" ? undefined : { surfaceId: callerSurface, workspaceId: "workspace:1" }, () => server._registeredTools.send_to.handler(args, {}));
+      if (kind === "owned" || kind === "changed" || kind === "other") {
         screen = "Claude Code\n❯ ";
         const typed = parseToolResult(await call({ mode: "surface", surface: "surface:new", text: "my undelivered message", press_enter: false }));
         expect(typed.caller_agent_id).toBe(callerId);
         if (kind === "changed") screen += " and human words";
-      } else screen = kind === "picker" ? "Claude Code\nSelect model\n❯ 1. Sonnet\n  2. Opus\nEnter to confirm · Esc to cancel" : "Claude Code\n❯ private human draft";
+        if (kind === "other") {
+          callerSurface = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+          const other = { ...caller, agent_id: "other-sender", surface_id: "surface:other", surface_uuid: callerSurface };
+          engine.stateMgr.writeState(other);
+          engine.getRegistry().set(other.agent_id, other);
+        }
+      } else screen = kind === "permission" ? "Claude Code\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel" : kind === "picker" ? "Claude Code\nSelect model\n❯ 1. Sonnet\n  2. Opus\nEnter to confirm · Esc to cancel" : "Claude Code\n❯ private human draft";
       exec.mockClear();
       const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return" }));
-      expect(result.caller_agent_id).toBe(kind === "unknown" ? null : callerId);
-      if (kind === "owned" || kind === "picker") {
+      if (kind === "owned" || kind === "picker" || kind === "permission") {
         expect(result.ok).toBe(true);
         expect(mutatedPane(exec)).toBe(true);
       } else {
         expect(result.error_code).toBe("blocked_by_foreign_draft");
         expect(result.error).toContain("try again in ~20 s or after your next turn");
         expect(mutatedPane(exec)).toBe(false);
-        expect(screen).toContain(kind === "changed" ? "human words" : "private human draft");
+        expect(screen).toContain(kind === "changed" ? "human words" : kind === "other" ? "my undelivered message" : "private human draft");
       }
+      expect(result.caller_agent_id).toBe(kind === "unknown" ? null : kind === "other" ? "other-sender" : callerId);
     } finally { context.dispose(); }
   });
 

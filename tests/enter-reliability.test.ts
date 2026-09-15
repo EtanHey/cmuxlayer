@@ -989,6 +989,7 @@ describe("enter reliability", () => {
     expect(result.isError).not.toBe(true);
     expect(parsed).toEqual({
       ok: true,
+      caller_agent_id: null,
       retry_count: 0,
       agent_id: "agent-1",
       delivery_state: "submitted",

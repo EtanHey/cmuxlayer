@@ -6591,7 +6591,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   // Ownership is deliberately local to this daemon lifetime: after restart,
   // an old draft is unknown. A caller cannot assert ownership in tool arguments.
-  const typedDraftOwners = new Map<string, { caller: string; text: string }>();
+  const typedDraftOwners = new Map<string, { caller: string; text: string; at: number }>();
   const draftOwnerKey = (surface: string, workspace?: string, uuid?: string | null) =>
     JSON.stringify([workspace ?? null, uuid ?? surface]);
 
@@ -6647,7 +6647,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
         const owner = typedDraftOwners.get(ownerKey);
         const caller = resolveCurrentCallerAgent()?.agent_id;
-        if (draft && !(caller && owner?.caller === caller &&
+        if (draft && !(caller && owner?.caller === caller && Date.now() - owner.at < 300_000 &&
             draft.replace(/\s+/g, "") === owner.text.replace(/\s+/g, ""))) {
           typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, draft);
@@ -6676,6 +6676,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }),
             )
           : { submit_verified: null, submit_verification_reason: null };
+      if (verification.submit_verified === true) {
+        typedDraftOwners.delete(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+      }
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
         submit_attempted: submitAttempted,
@@ -6778,7 +6781,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const caller = resolveCurrentCallerAgent()?.agent_id;
     const beforeDraft = deliverySafetySnapshot ? extractComposerInputRegion(deliverySafetySnapshot.text)?.trim() : null;
     if (textDispatched && caller && beforeDraft === "") {
-      typedDraftOwners.set(ownerKey, { caller, text: submittedText });
+      typedDraftOwners.delete(ownerKey);
+      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
+      typedDraftOwners.set(ownerKey, { caller, text: submittedText, at: Date.now() });
     } else if (textDispatched) typedDraftOwners.delete(ownerKey);
     let submit_verified: boolean | null = null;
     let submit_evidence: SubmitEvidence | null = null;
