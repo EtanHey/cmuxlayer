@@ -581,6 +581,8 @@ describe("control health", () => {
       code: "EPIPE",
     });
     const client = {
+      // Return must reach the intended EPIPE write after a readable shell baseline.
+      readScreen: vi.fn(async () => ({ surface: "surface:untracked", text: "$ " })),
       sendKey: vi.fn(async () => {
         throw writeError;
       }),
