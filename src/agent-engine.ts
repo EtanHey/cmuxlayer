@@ -7637,7 +7637,7 @@ export class AgentEngine {
         const skipRead = this.shouldSkipVerifyRead(receipt, now);
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
         if (skipRead && !timedOut) continue;
-        if (!skipRead && this.deliveryVerifier) {
+        if (!skipRead && (!timedOut || !receipt.claude_submit) && this.deliveryVerifier) {
           const agent = this.getAgentState(receipt.agent_id);
           const snapshotKey = agent?.surface_id ?? receipt.agent_id;
           let snapshot: DeliveryVerifySnapshot | null | undefined;
@@ -7706,9 +7706,10 @@ export class AgentEngine {
           confirmedGone ||
           timedOut
         ) {
-          const reason =
-            observation.reason ??
-            (timedOut ? "verify_deadline_elapsed" : "failed_confirmed");
+          const reason = timedOut && receipt.claude_submit
+            ? receipt.claude_submit.pending_reason ?? "verify_deadline_elapsed"
+            : observation.reason ??
+              (timedOut ? "verify_deadline_elapsed" : "failed_confirmed");
           receipt.delivery_state = "failed_confirmed";
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();

@@ -4027,6 +4027,8 @@ export type LifecycleAgentInputDeliverer = (args: {
   allow_busy?: boolean;
   source_event: DeliveryEventType;
   delivery_id?: string;
+  sender_agent_id?: string;
+  background_verify?: boolean;
 }) => Promise<PublicDeliveryReceipt & { bytes: number }>;
 
 export const DEFAULT_LIFECYCLE_START_TIMEOUT_MS = 60_000;
@@ -5729,7 +5731,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const sendChunkWithRetry = async (
     surface: string,
     chunk: string,
-    opts: { workspace?: string },
+    opts: { workspace?: string; onAcknowledged?: (queued: boolean) => void },
     chunkNumber: number,
     totalChunks: number,
     shouldPaste: boolean,
@@ -5754,7 +5756,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw pasteRequiredError("client does not support pasteText");
           }
           try {
-            await client.pasteText(surface, chunk, opts);
+            await client.pasteText(surface, chunk, { workspace: opts.workspace });
           } catch (error) {
             if (isMethodNotFoundError(error)) {
               const message =
@@ -5764,7 +5766,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw error;
           }
         } else {
-          await client.send(surface, chunk, opts);
+          const acknowledgement = await client.send(surface, chunk, { workspace: opts.workspace });
+          opts.onAcknowledged?.(acknowledgement?.queued === true);
         }
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
@@ -6778,6 +6781,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     onChunkDelivered?: (sentChunks: number) => void;
     source_event?: DeliveryEventType;
     source_agent?: string | null;
+    sender_agent_id?: string;
+    background_verify?: boolean;
     delivery_id?: string;
     verify_submit?: boolean;
     allow_recovery_enter_retry?: boolean;
@@ -6796,6 +6801,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   > => {
     const rpcMethods = new Set<DeliveryRpcMethod>();
     let textDispatched = false;
+    let transportQueued = false;
     let submitDispatched = false;
     try {
       await opts.beforeMutation?.();
@@ -6911,7 +6917,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "report_to_parent" ||
       opts.source_event === "interact";
     const draftGuardText = opts.chunks.join("");
-    const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
+    const targetBeforeTyping = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+    const targetCli = targetBeforeTyping?.cli;
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
       workspace: opts.workspace,
@@ -6940,6 +6947,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           batch.text,
           {
             workspace: opts.workspace,
+            onAcknowledged: queued => { transportQueued ||= queued; },
           },
           batch.firstChunkNumber,
           opts.chunks.length,
@@ -6985,7 +6993,52 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       | "rescued"
       | "pending_verify" = "submitted";
 
-    if (opts.press_enter) {
+    const target = targetBeforeTyping;
+    const claudeRelay = opts.press_enter && opts.verify_submit && target?.cli === "claude" &&
+      (opts.source_event === "send_to" || opts.source_event === "send_command" || opts.background_verify === true) && context.lifecycleSweepEngine;
+    if (claudeRelay && target) {
+      const engine = context.lifecycleSweepEngine!;
+      opts.delivery_id ??= randomUUID();
+      deliveryOutcome = "pending_verify";
+      const evidence: ClaudeDeliveryEvidence = {
+        initial_frame_hash: deliveryFrameHash(deliverySafetySnapshot?.text ?? ""),
+        initial_transcript_matches: transcriptMatches(deliverySafetySnapshot?.text ?? "", submittedText),
+        pasted: shouldPaste,
+        initial_paste_id: claudePasteId(extractComposerInputRegion(deliverySafetySnapshot?.text ?? "", submittedText)),
+        payload_observed: false,
+        return_attempts: 0,
+        surface_id: opts.surface, surface_uuid: opts.stableSurfaceIdentity ?? target.surface_uuid ?? null,
+        workspace_id: opts.workspace ?? target.workspace_id ?? null, cli_session_id: target.cli_session_id ?? null,
+        agent_created_at: target.created_at,
+        queued_behind_turn: isSubmitVerifiedStatus(deliverySafetySnapshot?.parsed.status),
+        sender_agent_id: opts.sender_agent_id ?? resolveCurrentCallerAgent()?.agent_id ?? null,
+        transport_queued: transportQueued,
+      };
+      engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: 0, typed: true, submit_dispatched: false, rpc_methods: [...rpcMethods] });
+      engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
+      const generation = engine.getDeliveryVerificationGeneration();
+      const assertInitialTarget = async () => {
+        await opts.beforeMutation?.();
+        const current = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+        if (evidence.retry_revoked || engine.getDeliveryVerificationGeneration() !== generation || current?.agent_id !== target.agent_id || current.cli_session_id !== target.cli_session_id || current.cli !== target.cli) throw new Error("Claude delivery ownership or target changed before Return");
+      };
+      const beforeReturn = await readClaudeDeliveryFrame(opts.surface, opts.workspace, submittedText, evidence);
+      evidence.queued_behind_turn ||= beforeReturn?.active === true;
+      const pending = engine.getDeliveryReceipt(opts.delivery_id)!;
+      pending.claude_submit = evidence;
+      if (!evidence.retry_revoked && beforeReturn?.complete && !beforeReturn.queued && engine.getDeliveryVerificationGeneration() === generation) {
+        reserveClaudeReturn(pending, beforeReturn);
+        engine.acceptPendingVerify({ ...pending, source_event: pending.source_event });
+        engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
+        try {
+          const rpc = await sendKeyWithRetry(opts.surface, "return", opts.workspace, assertInitialTarget, 1, opts.delivery_id);
+          submitDispatched = true;
+          if (rpc) rpcMethods.add(rpc);
+        } catch { /* Reserved ambiguous attempt stays in flight; never retype. */ }
+      }
+      engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: pending.retry_count, typed: true, submit_dispatched: submitDispatched, rpc_methods: [...rpcMethods] });
+      engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
+    } else if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
         requireObservedPayloadBeforeEnter && (opts.verify_submit ?? false)
@@ -13772,6 +13825,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       allow_busy?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
+      sender_agent_id?: string;
+      background_verify?: boolean;
       timings?: DeliveryPhaseTimings;
     }) => {
       const routeStartedAt = Date.now();
@@ -14026,6 +14081,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: args.agent_id,
+            sender_agent_id: args.sender_agent_id,
+            background_verify: args.background_verify,
             delivery_id: args.delivery_id,
             // Verify every submitted agent relay — not just long ones. A short
             // relay (the common agent-to-agent case) to a frozen terminal must
