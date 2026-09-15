@@ -1571,8 +1571,8 @@ describe("tool handler integration", () => {
       agent_id: expect.any(String),
       surface_id: "surface:1",
       role: "orchestrator",
-      boot_prompt_delivered: true,
-      boot_prompt_submit_verified: true,
+      boot_prompt_delivered: false,
+      boot_prompt_submit_verified: null,
     });
     expect(parsed.agents[0]).toHaveProperty("health");
     expect(parsed.agents[0]).toHaveProperty("monitor_boot");
@@ -1582,6 +1582,13 @@ describe("tool handler integration", () => {
       boot_prompt_submit_verified: true,
       monitor_boot: expect.any(Object),
     });
+    const engine = (server as any)._registeredTools.interact._engine;
+    const initial = parsed.agents[0].boot_prompt_receipt;
+    expect(initial).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
+    await advanceTimers(2_001);
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(initial.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+    expect(engine.getAgentState(parsed.agents[0].agent_id)).toMatchObject({ prompt_delivered: true, boot_prompt_pending: false });
     expect(calls.slice(0, 4)).toEqual([
       "create:red-team",
       "select:workspace:grid",

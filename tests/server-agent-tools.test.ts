@@ -1170,7 +1170,8 @@ describe("lean spawn tool responses", () => {
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
     expect(context.stateDir).toBe(stateDir);
-    expect(existsSync(stateDir)).toBe(false);
+    // Agent records remain injected; pending deliveries are durably persisted.
+    expect(existsSync(join(stateDir, "delivery-receipts.json"))).toBe(true);
   });
 
   it("spawn_agent manifest uses the launcher name resolved by preflight", async () => {
@@ -1200,7 +1201,8 @@ describe("lean spawn tool responses", () => {
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
     expect(context.stateDir).toBe(stateDir);
-    expect(existsSync(stateDir)).toBe(false);
+    // Agent records remain injected; pending deliveries are durably persisted.
+    expect(existsSync(join(stateDir, "delivery-receipts.json"))).toBe(true);
   });
 
   it("spawn_agent defaults to the lean payload in text and structured content", async () => {
@@ -2501,6 +2503,111 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it.each([
+    { requiredPromptReturns: 2, knownSender: false, captureSession: false },
+    { requiredPromptReturns: 99, knownSender: false, captureSession: false },
+    { requiredPromptReturns: 99, knownSender: true, captureSession: false },
+    { requiredPromptReturns: 2, knownSender: false, captureSession: "first" },
+    { requiredPromptReturns: 2, knownSender: true, captureSession: "replacement" },
+    { requiredPromptReturns: 2, knownSender: true, captureSession: "pre-launch" },
+    { requiredPromptReturns: 2, knownSender: true, captureSession: "ambiguous" },
+    { requiredPromptReturns: 2, knownSender: true, captureSession: "unproven" },
+  ])("#636 D1 boot pending recovers or exhausts ($requiredPromptReturns Returns, sender=$knownSender, capture=$captureSession)", async ({ requiredPromptReturns, knownSender, captureSession }) => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec({ requiredPromptReturns, ...(knownSender || captureSession ? { surfaceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } : {}) });
+      const exec = vi.fn(async (command, args) => {
+        const result = await baseExec(command, args);
+        if (!knownSender) return result;
+        if (args.includes("list-panes")) {
+          const data = JSON.parse(result.stdout);
+          data.panes.push({ ref: "pane:caller", index: 1, focused: false, surface_count: 1, surface_refs: ["surface:caller"], selected_surface_ref: "surface:caller" });
+          return { ...result, stdout: JSON.stringify(data) };
+        }
+        if (args.includes("list-pane-surfaces") && args.includes("pane:caller")) {
+          return { stdout: JSON.stringify({ workspace_ref: "workspace:1", window_ref: "window:1", pane_ref: "pane:caller", surfaces: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ref: "surface:caller", title: "boot-caller", type: "terminal", index: 0, selected: true }] }), stderr: "" };
+        }
+        return result;
+      });
+      const inboxBaseDir = join(TEST_DIR, "boot-failure-inbox");
+      let allowCapture = captureSession !== "ambiguous";
+      const server = createTrackedServer({ exec, stateDir: TEST_DIR, inboxBaseDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+        ...(captureSession ? { selfRegistrationSessionResolver: (agent: AgentRecord) => allowCapture && engine.listDeliveryReceipts().some((receipt: any) => receipt.agent_id === agent.agent_id && receipt.source_event === "boot_prompt")
+          ? captureSession === "unproven" ? FIXTURE_SESSIONS[0]! : { session_id: FIXTURE_SESSIONS[0]!, pid: process.pid, pid_registered_at: captureSession === "pre-launch" ? new Date(Date.parse(agent.created_at) - 1).toISOString() : agent.created_at } : null } : {}) });
+      const engine = (server as any)._registeredTools.interact._engine;
+      const collab = join(TEST_DIR, "boot-caller-collab.md");
+      const sender = makeServerAgentRecord({ agent_id: "boot-caller", surface_id: "surface:caller", surface_uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", workspace_id: "workspace:1", state: "ready", role: "orchestrator", collab_path: collab });
+      if (knownSender) { writeFileSync(collab, "# caller\n"); engine.stateMgr.writeState(sender); engine.getRegistry().set(sender.agent_id, sender); }
+      let settled = false;
+      const invoke = () => (server as any)._registeredTools.spawn_agent.handler({ repo: "brainlayer", model: "sonnet", cli: "claude", role: "worker", prompt: "boot recovery specimen", verbose: true }, {});
+      const task = (knownSender ? runWithCallerContext({ surfaceId: sender.surface_uuid!, workspaceId: "workspace:1" }, invoke) : invoke()).then((value: any) => { settled = true; return value; });
+      for (let elapsed = 0; elapsed < 1_500 && !settled; elapsed += 50) await vi.advanceTimersByTimeAsync(50);
+      expect(settled).toBe(true);
+      const result = parseToolResult(await task);
+      expect(result).toMatchObject({ boot_prompt_submit_verified: null, boot_prompt_delivered: false });
+      if (captureSession && allowCapture) expect(engine.getAgentState(result.agent_id).cli_session_id).toBe(FIXTURE_SESSIONS[0]);
+      const id = result.boot_prompt_receipt.delivery_id;
+      expect(engine.getDeliveryReceipt(id)).toMatchObject({ delivery_state: "pending_verify", retry_count: 0 });
+      if (captureSession === "first") {
+        const stale = { ...engine.getDeliveryReceipt(id).claude_submit, cli_session_id: null };
+        engine.updateClaudeDeliveryEvidence(id, stale);
+        const persisted = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8")).find((receipt: any) => receipt.delivery_id === id);
+        expect(persisted.claude_submit.cli_session_id).toBe(FIXTURE_SESSIONS[0]);
+      }
+      const setSession = (session: string | null) => {
+        const changed = { ...engine.getAgentState(result.agent_id), cli_session_id: session };
+        engine.stateMgr.writeState(changed); engine.getRegistry().set(result.agent_id, changed);
+      };
+      if (captureSession === "ambiguous") {
+        for (const session of FIXTURE_SESSIONS.slice(0, 2)) {
+          setSession(session);
+          const observed = parseToolResult(await (server as any)._registeredTools.read_screen.handler({ surface: result.surface_id }, {}));
+          expect(observed.ok).toBe(true);
+        }
+        setSession(null); allowCapture = true;
+        await engine.captureBootSessionId(result.agent_id);
+        expect(engine.getAgentState(result.agent_id).cli_session_id).toBe(FIXTURE_SESSIONS[0]);
+        expect(engine.getDeliveryReceipt(id).claude_submit.cli_session_id).toBeNull();
+      }
+      if (captureSession === "replacement") {
+        expect(engine.getDeliveryReceipt(id).claude_submit.cli_session_id).toBe(FIXTURE_SESSIONS[0]);
+        setSession(FIXTURE_SESSIONS[1]!);
+        await engine.verifyPendingDeliveries();
+        setSession(FIXTURE_SESSIONS[0]!);
+      }
+      const textCalls = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send") || args.includes("set-buffer")).length;
+      const beforeText = textCalls();
+      const returnCalls = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send-key") && args.includes("return")).length;
+      const beforeReturns = returnCalls();
+      await vi.advanceTimersByTimeAsync(10_000);
+      let receipt = engine.getDeliveryReceipt(id);
+      if (captureSession === "replacement" || captureSession === "pre-launch" || captureSession === "ambiguous" || captureSession === "unproven") {
+        expect(receipt.submit_verified).not.toBe(true);
+        expect(returnCalls()).toBe(beforeReturns);
+        if (captureSession !== "replacement") expect(receipt.claude_submit.cli_session_id).toBeNull();
+        await vi.advanceTimersByTimeAsync(Math.max(0, Date.parse(receipt.verify_deadline_at) - Date.now()) + 2_000);
+        await engine.verifyPendingDeliveries();
+        receipt = engine.getDeliveryReceipt(id);
+        expect(receipt).toMatchObject({ delivery_state: "failed_confirmed", retry_count: 0, submit_verified: false });
+      } else if (requiredPromptReturns === 2) {
+        expect(receipt).toMatchObject({ delivery_state: "submitted", retry_count: 1 });
+        expect(engine.getAgentState(result.agent_id)).toMatchObject({ state: "ready", boot_prompt_pending: false, prompt_delivered: true, submit_verified: true });
+      } else {
+        expect(receipt).toMatchObject({ delivery_state: "failed_confirmed", retry_count: 3 });
+        expect(engine.getAgentState(result.agent_id)).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false, submit_verified: false });
+      }
+      if (knownSender) {
+        expect(receipt.claude_submit.sender_agent_id).toBe(sender.agent_id);
+        const tells = () => readInbox(sender.agent_id, { baseDir: inboxBaseDir }).filter(message => message.task.includes(id));
+        expect(tells()).toHaveLength(1);
+        expect(readFileSync(collab, "utf8")).toContain(`### cmuxlayer engine → ${sender.agent_id}`);
+        await vi.advanceTimersByTimeAsync(4_000); await engine.verifyPendingDeliveries();
+        expect(tells()).toHaveLength(1);
+      }
+      expect(textCalls()).toBe(beforeText);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("spawn_agent returns agent_id and surface_id", async () => {
     const server = createLifecycleServer(mockExec);
     const tool = (server as any)._registeredTools["spawn_agent"];
@@ -2520,7 +2627,9 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toMatch(/^brainlayerClaude-[0-9a-f]{8}$/);
     expect(parsed.surface_id).toBe("surface:new");
-    expect(parsed.state).toBe("ready");
+    expect(parsed.state).toBe("booting");
+    await verifiedClaudeReceipt(server, result);
+    expect((server as any)._registeredTools.interact._engine.getAgentState(parsed.agent_id).state).toBe("ready");
     expect(parsed.health).toBeUndefined();
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
@@ -5088,6 +5197,7 @@ describe("agent lifecycle tool handlers", () => {
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
+    await verifiedClaudeReceipt(server, spawnResult);
     manifests.length = 0;
 
     await interact.handler(
@@ -7796,7 +7906,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const list = (server as any)._registeredTools["list_agents"];
 
-    await spawn.handler(
+    const spawned = await spawn.handler(
       {
         repo: "brainlayer",
         model: "sonnet",
@@ -7806,6 +7916,7 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
 
+    await verifiedClaudeReceipt(server, spawned);
     const result = await list.handler(
       { state: "working", detail: "full" },
       {} as any,
@@ -11384,6 +11495,7 @@ codex>
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
+    await verifiedClaudeReceipt(server, spawnResult);
     const working = engine.stateMgr.transition(agentId, "working");
     registry.set(agentId, working);
     mockExec.mockClear();
