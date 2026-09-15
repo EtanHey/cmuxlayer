@@ -1414,6 +1414,25 @@ async function measureParallelStress(
   return { ...summarizeTimedSamples(samples), stress: true };
 }
 
+export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, binDir, missingCmuxSocket, fakeCmuxState, surfaceCount }) {
+  return {
+    ...parentEnv,
+    CMUX_AGENT_ID: "",
+    CMUX_SURFACE_ID: "",
+    CMUX_WORKSPACE_ID: "",
+    CMUX_TAB_ID: "",
+    PATH: `${binDir}:${parentEnv.PATH ?? ""}`,
+    CMUX_SOCKET_PATH: missingCmuxSocket,
+    CMUXLAYER_BENCH_SURFACES: String(surfaceCount),
+    CMUXLAYER_BENCH_STATE: fakeCmuxState,
+    CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
+    CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
+    CMUXLAYER_SWEEP_INTERVAL_MS: "1000",
+    CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "1000",
+    CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "1536",
+  };
+}
+
 async function main() {
   if (!existsSync(distIndex) || !existsSync(distDaemon)) {
     throw new Error(
@@ -1459,22 +1478,7 @@ async function main() {
     });
   }
   const sweepHoldState = join(tempRoot, "sweep-hold-state.json");
-  const baseEnv = {
-    ...process.env,
-    CMUX_AGENT_ID: "",
-    CMUX_SURFACE_ID: "",
-    CMUX_WORKSPACE_ID: "",
-    CMUX_TAB_ID: "",
-    PATH: `${binDir}:${process.env.PATH ?? ""}`,
-    CMUX_SOCKET_PATH: missingCmuxSocket,
-    CMUXLAYER_BENCH_SURFACES: String(surfaceCount),
-    CMUXLAYER_BENCH_STATE: fakeCmuxState,
-    CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
-    CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
-    CMUXLAYER_SWEEP_INTERVAL_MS: "1000",
-    CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "1000",
-    CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "1536",
-  };
+  const baseEnv = buildDaemonBenchmarkEnv(process.env, { tempRoot, binDir, missingCmuxSocket, fakeCmuxState, surfaceCount });
 
   let baselineClients = [];
   let daemonClients = [];
@@ -1869,7 +1873,7 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((error) => {
   console.error(error instanceof Error ? error.stack : String(error));
   process.exit(1);
 });
