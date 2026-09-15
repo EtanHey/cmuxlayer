@@ -4709,10 +4709,10 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
-  it("#636 D4 initializes a cold owned surface without selecting a workspace", async () => {
+  it.each([false, true])("#636 D4 initializes only cold owned surfaces without selecting a workspace (alreadyReady=%s)", async (alreadyReady) => {
     vi.useFakeTimers();
     try {
-      let ready = false;
+      let ready = alreadyReady;
       const lifecycleExec = makeLifecycleExec();
       const exec = vi.fn().mockImplementation(async (cmd, args) => {
         if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }] }), stderr: "" };
@@ -4724,7 +4724,7 @@ describe("agent lifecycle tool handlers", () => {
       const result = (server as any)._registeredTools.spawn_agent.handler({ repo: "cmuxlayer", cli: "claude", role: "worker", boot_prompt_timeout_ms: 500 }, {});
       await vi.advanceTimersByTimeAsync(3_000);
       expect(parseToolResult(await result).ok).toBe(true);
-      expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(1);
+      expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady ? 0 : 1);
       expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(false);
     } finally { vi.useRealTimers(); }
   });

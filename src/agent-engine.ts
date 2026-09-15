@@ -8794,8 +8794,8 @@ export class AgentEngine {
     const createdWorkspace = surface.actual_workspace ?? surface.workspace;
     let surfaceFocusError: unknown = null;
     try {
-      // A tab created in an unfocused pane does not initialize its terminal.
-      // Focus the exact returned surface before any shell/readiness I/O.
+      // Metadata-capable backends initialize cold runtimes by input demand
+      // below (cmux #9769). Focus here is for legacy backends or focus:true.
       if (spawnParams.focus !== false) await this.client.focusSurface(surface.surface, {
         workspace: createdWorkspace,
         beforeMutation: async () => {
