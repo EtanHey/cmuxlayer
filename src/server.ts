@@ -1620,15 +1620,21 @@ class DeliverySafetyGateError extends Error {
     readonly error_code:
       | "blocked_by_interactive_prompt"
       | "blocked_by_permission_prompt"
-      | "blocked_by_foreign_draft",
+      | "blocked_by_foreign_draft"
+      | "nothing_owned_to_submit"
+      | "draft_ownership_unverified",
     readonly screen: ParsedScreenResult,
     readonly draftText?: string,
   ) {
     super(
-      error_code === "blocked_by_permission_prompt"
+      error_code === "draft_ownership_unverified"
+        ? "Cannot verify composer ownership from the current frame. Return was not sent; read the pane and retry when its composer is observable."
+        : error_code === "nothing_owned_to_submit"
+        ? "No owned text to submit: this composer could be showing an empty-input hint. Return was not sent."
+        : error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
         : error_code === "blocked_by_foreign_draft"
-          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; refused before typing`
+          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -1872,6 +1878,7 @@ function shapeSuccessfulSendToResult(
   };
   const lean: Record<string, unknown> = {
     ...receiptFloor,
+    ...("caller_agent_id" in full ? { caller_agent_id: full.caller_agent_id } : {}),
     ...(args.mode === "key"
       ? {
           key: full.key ?? args.text,
@@ -1921,6 +1928,9 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           ...error.receipt,
           error_code: error.error_code,
           screen: error.screen,
+          ...(["nothing_owned_to_submit", "draft_ownership_unverified"].includes(error.error_code)
+            ? { key_dispatched: false, submit_dispatched: false }
+            : {}),
         }
       : {};
   const submitVerificationExtra =
@@ -2949,6 +2959,9 @@ function currentComposerRegionStart(
 ): number {
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (lineIsCurrentComposerRegionAnchor(cli, lines[index] ?? "")) {
+      // Cursor's empty prompt is itself an anchor, and must remain readable
+      // as the empty baseline before a caller can acquire draft ownership.
+      if (cli === "cursor" && /^cursor>\s*$/i.test((lines[index] ?? "").trim())) return index;
       return index + 1;
     }
   }
@@ -3029,9 +3042,13 @@ function normalizeKnownPlaceholderComposerInput(
     .filter((line) => !/^\s*[▄▀]{8,}\s*$/.test(line))
     .join("\n")
     .trim();
+  const [firstLine = "", ...followingLines] = withoutCursorBorders.split("\n");
+  const codexPlaceholder = cli === "codex" &&
+    CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE.test(firstLine) &&
+    followingLines.every((line) => !line.trim() || line.trim() === "esc again to edit previous message");
   if (
-    (cli === "codex" &&
-      CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE.test(withoutCursorBorders)) ||
+    codexPlaceholder ||
+    (cli === "claude" && withoutCursorBorders === "Press up to edit queued messages") ||
     (cli === "cursor" &&
       (withoutCursorBorders === "Plan, search, build anything" ||
         CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(withoutCursorBorders)))
@@ -3047,9 +3064,11 @@ function normalizeKnownPlaceholderComposerInput(
 function extractComposerInputRegion(
   screenText: string,
   submittedText?: string,
+  knownCli?: CliType,
+  preservePlaceholderText = false,
 ): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
-  const cli = inferComposerCli(screenText);
+  const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
@@ -3084,6 +3103,7 @@ function extractComposerInputRegion(
       inputLines.push(line);
     }
 
+    if (preservePlaceholderText) return inputLines.join("\n").trimEnd();
     return normalizeKnownPlaceholderComposerInput(
       cli,
       inputLines.join("\n").trimEnd(),
@@ -3119,6 +3139,7 @@ function extractComposerInputRegion(
       inputLines.push(line);
     }
 
+    if (preservePlaceholderText) return inputLines.join("\n").trimEnd();
     return normalizeKnownPlaceholderComposerInput(
       cli,
       inputLines.join("\n").trimEnd(),
@@ -3210,9 +3231,9 @@ function screenContainsCompleteSubmittedText(
  * and chrome never does. Widening the chrome whitelist instead is what put
  * this hole in the first place.
  */
-function composerPromptLineInput(screenText: string): string | null {
+function composerPromptLineInput(screenText: string, knownCli?: CliType, preservePlaceholderText = false): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
-  const cli = inferComposerCli(screenText);
+  const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
@@ -3224,7 +3245,7 @@ function composerPromptLineInput(screenText: string): string | null {
     const match =
       matchComposerPromptLine(line) ?? matchLegacyClaudePromptLine(cli, line);
     if (match) {
-      return normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
+      return preservePlaceholderText ? match.input : normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
     }
   }
   return null;
@@ -3242,24 +3263,33 @@ function composerPromptLineInput(screenText: string): string | null {
 function composerHoldsForeignDraft(
   screenText: string,
   submittedText: string,
+  options?: { cli?: CliType; exact?: boolean },
 ): boolean {
-  // AIDEV-NOTE (T2 #442): Cursor is deliberately exempt. Its composer RETAINS
+  // AIDEV-NOTE (T2 #442): Cursor text sends are exempt. Its composer RETAINS
   // the accepted text after a submit (the "retained composer" state #441/#449
   // built evidence rules around), so a non-empty Cursor composer is the normal
   // post-send screen, not an unsent draft -- and nothing on that screen
   // distinguishes the two. Guarding it would refuse every legitimate second
   // send to a Cursor pane. Claude and Codex clear on submit, so there a
   // non-empty composer really does mean somebody's text is sitting unsent.
-  if (inferComposerCli(screenText) === "cursor") {
+  if (!options?.exact && (options?.cli ?? inferComposerCli(screenText)) === "cursor") {
     return false;
   }
   // No recognisable composer prompt line (bare shell, unreadable frame). The
   // pre-existing gates own those cases; do not invent a refusal here.
-  const promptLine = composerPromptLineInput(screenText);
-  if (promptLine === null) {
-    return false;
+  const promptLine = composerPromptLineInput(screenText, options?.cli, true);
+  if (options?.exact) {
+    const region = extractComposerInputRegion(screenText, submittedText, options.cli);
+    return region !== null && region !== normalizeTerminalText(submittedText).trimEnd();
   }
-  const compactDraft = promptLine.replace(/\s+/g, "");
+  if (promptLine === null || !promptLine.trim()) return false;
+  // An empty first line may be a placeholder followed by real draft text.
+  // Only the whole-region normalizer can certify that shape as empty.
+  const placeholderLine = normalizeKnownPlaceholderComposerInput(options?.cli ?? inferComposerCli(screenText), promptLine) === "";
+  const draft = placeholderLine
+    ? extractComposerInputRegion(screenText, submittedText, options?.cli) ?? promptLine
+    : promptLine;
+  const compactDraft = draft.replace(/\s+/g, "");
   if (!compactDraft) {
     return false;
   }
@@ -4052,7 +4082,14 @@ export async function awaitBoundedLifecycleStart(
   }
 }
 
+interface TypedDraftOwner {
+  caller: string; text: string; at: number; ref: string; uuid: string | null;
+  workspace: string | null; fp: string; seen: boolean;
+}
+
 export interface CmuxServerContext {
+  /** Shared by every MCP peer using this daemon context. */
+  typedDraftOwners: Map<string, TypedDraftOwner>;
   client: CmuxLayerClient;
   /** Persisted stable socket-node owner identity. */
   surfaceObserverId: string | null;
@@ -4222,6 +4259,7 @@ export function createServerContext(
     stateMgr,
     roleSurfaceOverrides: new Map(),
     eventLog: stateMgr.getEventLog(),
+    typedDraftOwners: new Map(),
     deliveries: new Map(),
     latestDeliveryBySurface: new Map(),
     activeDeliveryBySurface: new Map(),
@@ -4297,6 +4335,7 @@ export function createServerContext(
       context.lifecycleStartError = null;
       context.lifecycleStartStartedAtMs = null;
       context.lifecycleStartSettledAtMs = null;
+      context.typedDraftOwners.clear();
       context.lifecycleStartTimeouts = 0;
       context.lifecycleStartLastTimeoutAt = null;
       context.lifecycleLockStateProvider = null;
@@ -5246,7 +5285,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? (handlerArgs[0] as Record<string, unknown>)
                 : {};
             const verbose = rawArgs.verbose === true;
-            const handled = (await handler(...handlerArgs)) as ToolReturn;
+            const callerAgentId = toolNameString === "send_to" ? resolveCurrentCallerAgent()?.agent_id ?? null : null;
+            let handled = (await handler(...handlerArgs)) as ToolReturn;
+            if (toolNameString === "send_to") {
+              const payload = { ...handled.structuredContent, caller_agent_id: callerAgentId };
+              handled = { ...handled, structuredContent: payload, content: handled.content.map((entry) => {
+                if (entry.type !== "text") return entry;
+                try {
+                  const value = JSON.parse(entry.text);
+                  if (value && typeof value === "object" && !Array.isArray(value)) {
+                    return { ...entry, text: JSON.stringify(payload) };
+                  }
+                } catch { /* Preserve human summaries alongside their structured receipt. */ }
+                return entry;
+              }) };
+            }
             const shaped =
               toolNameString === "send_to" && !verbose
                 ? shapeSuccessfulSendToResult(handled, rawArgs)
@@ -5796,11 +5849,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     key: string,
     workspace?: string,
     beforeMutation?: () => Promise<void>,
+    maxAttempts = SEND_INPUT_RETRY_ATTEMPTS,
   ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
     let lastError: unknown;
 
-    while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
+    while (attempt < maxAttempts) {
       try {
         await beforeMutation?.();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
@@ -5815,7 +5869,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         attempt += 1;
         if (
           !isRetryableDeliveryError(error) ||
-          attempt >= SEND_INPUT_RETRY_ATTEMPTS
+          attempt >= maxAttempts
         ) {
           throw error;
         }
@@ -5958,6 +6012,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     context.controlHealthTimer.unref?.();
   }
 
+  // Tokens authorize a single manual Return after an observed-empty text-only
+  // send. Identical clear/retype entirely between snapshots is unobservable.
+  const typedDraftOwners = context.typedDraftOwners;
+  const draftOwnerKey = (surface: string, workspace?: string, uuid?: string | null) =>
+    JSON.stringify([workspace ?? null, uuid ?? surface]);
+  const draftTargetFingerprint = (surface: string, uuid?: string | null) => {
+    const record = resolveLatestSurfaceAgentRecord(stateMgr, surface, uuid);
+    return JSON.stringify([record?.agent_id ?? null, record?.cli ?? null, record?.cli_session_id ?? null]);
+  };
+  const observedSurfaceUuid = (surface: string): string | null =>
+    context.capturedSurfaceUuidByRef.get(surface) ?? (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(surface) ? surface : null);
+  const observeDraftOwnership = (surface: string, workspace: string | undefined, text: string, uuid: string | null): void => {
+    for (const [key, token] of typedDraftOwners) {
+      const matches = token.uuid ? uuid?.toLowerCase() === token.uuid.toLowerCase()
+        : token.ref === surface && token.workspace === (workspace ?? null);
+      if (!matches) continue;
+      const record = resolveLatestSurfaceAgentRecord(stateMgr, surface, uuid);
+      const region = extractComposerInputRegion(text, token.text, record?.cli, true);
+      const unchanged = region === normalizeTerminalText(token.text).trimEnd();
+      const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
+      if (draftTargetFingerprint(surface, uuid) !== token.fp || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
+      else if (unchanged) token.seen = true;
+    }
+  };
+
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
@@ -5969,6 +6048,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lines: 30,
       });
       const text = typeof screen === "string" ? screen : (screen.text ?? "");
+      observeDraftOwnership(surface, workspace, text, observedSurfaceUuid(surface));
       const parsed = applyHarnessState(
         enrichParsedScreen(
           parseScreen(text),
@@ -6032,7 +6112,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // mutation, and can later submit text the caller never authorized.
     if (
       opts.draftGuardText !== undefined &&
-      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
+      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText, { cli })
     ) {
       throw new DeliverySafetyGateError(
         "blocked_by_foreign_draft",
@@ -6620,6 +6700,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     workspace?: string;
     chunks: string[];
     key?: string;
+    /** Engine-only proof; never mapped from tool arguments or exposed by schema. */
+    engineSubmitProof?: "launcher_pending_command";
     chunk_size: number;
     chunk_delay_ms: number;
     press_enter: boolean;
@@ -6655,11 +6737,37 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
+      const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
       const submitAttempted = isSubmitKey(key);
-      const submitBaseline =
-        submitAttempted && opts.verify_submit
-          ? await readParsedSurface(opts.surface, opts.workspace)
-          : null;
+      const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
+      const submitBaseline = submitAttempted && !opts.engineSubmitProof
+        ? await readParsedSurface(opts.surface, opts.workspace) : null;
+      const callerSubmit = submitAttempted && !opts.engineSubmitProof;
+      if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
+          (targetCli && ["claude", "codex", "cursor"].includes(targetCli) &&
+            submitBaseline.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(submitBaseline.text) &&
+            extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null))) {
+        typedDraftOwners.delete(ownerKey);
+        throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
+      }
+      if (callerSubmit && submitBaseline &&
+          submitBaseline.parsed.control_state !== "permission_prompt" &&
+          !isPickerOrMenuScreen(submitBaseline.text)) {
+        const owner = typedDraftOwners.get(ownerKey);
+        const caller = resolveCurrentCallerAgent()?.agent_id;
+        const ownedText = caller && owner?.caller === caller && owner.fp === draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000 ? owner.text : "";
+        if (composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
+          typedDraftOwners.delete(ownerKey);
+          throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
+        }
+        const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
+        if (rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
+          throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
+        }
+        if (!composerHoldsForeignDraft(submitBaseline.text, "", { cli: targetCli })) typedDraftOwners.delete(ownerKey);
+      }
+      // Spend before dispatch, including ambiguous ACKs and verification.
+      if (submitAttempted) typedDraftOwners.delete(ownerKey);
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
       const keyRpcMethod = await timeDeliveryPhase(opts.timings, "type", () =>
@@ -6668,6 +6776,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           key,
           opts.workspace,
           opts.beforeMutation,
+          submitAttempted ? 1 : SEND_INPUT_RETRY_ATTEMPTS,
         ),
       );
       submitDispatched = submitAttempted;
@@ -6682,6 +6791,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }),
             )
           : { submit_verified: null, submit_verification_reason: null };
+      if (verification.submit_verified === true) {
+        typedDraftOwners.delete(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+      }
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
         submit_attempted: submitAttempted,
@@ -6730,9 +6842,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "report_to_parent" ||
       opts.source_event === "interact";
     const draftGuardText = opts.chunks.join("");
+    const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
       workspace: opts.workspace,
+      cli: targetCli,
       ...(draftGuardedEvent && draftGuardText.trim().length > 0
         ? { draftGuardText }
         : {}),
@@ -6780,6 +6894,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       0,
     );
     const submittedText = opts.chunks.join("");
+    const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
+    const caller = resolveCurrentCallerAgent()?.agent_id;
+    const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
+    if (textDispatched && !opts.press_enter && caller && beforeDraft === "") {
+      typedDraftOwners.delete(ownerKey);
+      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
+      typedDraftOwners.set(ownerKey, { caller, text: submittedText, at: Date.now(),
+        ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
+        fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false });
+    } else if (textDispatched) typedDraftOwners.delete(ownerKey);
     let submit_verified: boolean | null = null;
     let submit_evidence: SubmitEvidence | null = null;
     let submit_verification_reason: SubmitVerificationFailureReason | null =
@@ -6938,6 +7062,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
     }
 
+    if (submit_verified === true) typedDraftOwners.delete(ownerKey);
     const receipt = buildPublicDeliveryReceipt({
       delivery_state: !opts.press_enter
         ? "typed"
@@ -7607,6 +7732,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               workspace: opts.workspace,
               chunks: [],
               key: "return",
+              engineSubmitProof: "launcher_pending_command",
               chunk_size: 0,
               chunk_delay_ms: 0,
               press_enter: false,
@@ -9001,6 +9127,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         scrollback: opts.scrollback,
       });
       const topology = await collectSurfaceTopology(opts.workspace);
+      observeDraftOwnership(opts.surface, opts.workspace ?? topology?.workspaceBySurface.get(opts.surface), typeof result === "string" ? result : result.text ?? "",
+        topology?.surfaceIdByRef.get(opts.surface) ?? observedSurfaceUuid(opts.surface));
       return { result, topology };
     })();
     context.readScreenInflight.set(key, snapshot);
@@ -17734,7 +17862,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text or a key through the shared delivery engine. Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
+      "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(

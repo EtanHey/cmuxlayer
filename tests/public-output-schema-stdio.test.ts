@@ -156,10 +156,11 @@ describe("public tool output schemas over stdio", () => {
         });
         if (toolName === "spawn_agent") {
           expect(result.structuredContent).toMatchObject({
-            spawn_state: "boot_unsubmitted", next_action: expect.stringContaining("send_to"),
+            spawn_state: "boot_unsubmitted", next_action: expect.stringContaining("read_screen"),
             agent_id: "cmuxlayerCodex-test", surface_id: "surface:test",
             workspace_id: "workspace:test", delivered_chars: 42,
             boot_prompt_receipt: { submit_verified: false } });
+          expect(String(result.structuredContent?.next_action)).not.toContain('send_to({mode:"key"');
         }
       }
     } finally {
