@@ -14616,7 +14616,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             engine.updateClaudeDeliveryEvidence(receipt.delivery_id, evidence);
           };
           const route = await engine.resolveAgentIoRoute(receipt.agent_id);
-          if (agent.cli !== "claude" || (evidence.cli_session_id ?? null) !== (agent.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) {
+          const boundOwner = engine.getAgentState(receipt.agent_id);
+          if (boundOwner?.cli !== "claude" || (evidence.cli_session_id ?? null) !== (boundOwner.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (boundOwner.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) {
             revokeBinding();
             return { outcome: "pending", reason: "bound_target_changed" };
           }
