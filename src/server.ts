@@ -10,6 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import { deliveryFrameHash, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -5674,7 +5675,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const sendChunkWithRetry = async (
     surface: string,
     chunk: string,
-    opts: { workspace?: string },
+    opts: { workspace?: string; onAcknowledged?: (queued: boolean) => void },
     chunkNumber: number,
     totalChunks: number,
     shouldPaste: boolean,
@@ -5709,7 +5710,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw error;
           }
         } else {
-          await client.send(surface, chunk, opts);
+          const acknowledgement = await client.send(surface, chunk, opts);
+          opts.onAcknowledged?.(acknowledgement?.queued === true);
         }
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
@@ -6072,6 +6074,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : {}),
       tabName: newTitle,
     });
+  };
+
+  const readClaudeDeliveryFrame = async (surface: string, workspace: string | undefined, text: string): Promise<ClaudeDeliveryFrame | null> => {
+    const snapshot = await readParsedSurface(surface, workspace, { throwOnSurfaceGone: true });
+    if (!snapshot?.text.trim()) return null;
+    const pending = screenShowsPendingInput(snapshot.text, text);
+    const composer = extractComposerInputRegion(snapshot.text, text);
+    return {
+      hash: deliveryFrameHash(snapshot.text),
+      complete: screenShowsCompletePendingInput(snapshot.text, text),
+      pending,
+      cleared: composer !== null && composer.trim() === "",
+      active: isSubmitVerifiedStatus(snapshot.parsed.status),
+      queued: screenShowsQueuedAgentInput(snapshot.text, text),
+      inTranscript: !pending && normalizeTerminalText(snapshot.text).includes(normalizeTerminalText(text).trim()),
+    };
   };
 
   const waitForCompletePayloadInComposer = async (opts: {
@@ -6645,6 +6663,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   > => {
     const rpcMethods = new Set<DeliveryRpcMethod>();
     let textDispatched = false;
+    let transportQueued = false;
     let submitDispatched = false;
     try {
       await opts.beforeMutation?.();
@@ -6757,6 +6776,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           batch.text,
           {
             workspace: opts.workspace,
+            onAcknowledged: queued => { transportQueued ||= queued; },
           },
           batch.firstChunkNumber,
           opts.chunks.length,
@@ -6792,7 +6812,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       | "rescued"
       | "pending_verify" = "submitted";
 
-    if (opts.press_enter) {
+    const target = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface);
+    const claudeRelay = opts.press_enter && opts.verify_submit && target?.cli === "claude" &&
+      opts.source_event !== "boot_prompt" && opts.source_event !== "spawn_agent" && context.lifecycleSweepEngine;
+    if (claudeRelay && target) {
+      const engine = context.lifecycleSweepEngine!;
+      opts.delivery_id ??= randomUUID();
+      deliveryOutcome = "pending_verify";
+      const evidence: ClaudeDeliveryEvidence = {
+        initial_frame_hash: deliveryFrameHash(deliverySafetySnapshot?.text ?? ""),
+        payload_observed: false,
+        queued_behind_turn: isSubmitVerifiedStatus(deliverySafetySnapshot?.parsed.status),
+        sender_agent_id: resolveCurrentCallerAgent()?.agent_id ?? null,
+        transport_queued: transportQueued,
+      };
+      engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: 0, typed: true, submit_dispatched: false, rpc_methods: [...rpcMethods] });
+      const beforeReturn = await readClaudeDeliveryFrame(opts.surface, opts.workspace, submittedText);
+      if (beforeReturn?.complete) {
+        evidence.payload_observed = true;
+        evidence.observed_frame_hash = beforeReturn.hash;
+        evidence.return_at = Date.now();
+        engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
+        const rpc = await sendKeyWithRetry(opts.surface, "return", opts.workspace, opts.beforeMutation);
+        submitDispatched = true;
+        if (rpc) rpcMethods.add(rpc);
+      }
+      engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: 0, typed: true, submit_dispatched: submitDispatched, rpc_methods: [...rpcMethods] });
+      engine.updateClaudeDeliveryEvidence(opts.delivery_id, evidence);
+    } else if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
         requireObservedPayloadBeforeEnter && (opts.verify_submit ?? false)
@@ -14325,6 +14372,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const agent = engine.getAgentState(receipt.agent_id);
         if (!agent) {
           return { outcome: "pending" as const, reason: "target_gone" };
+        }
+        if (receipt.claude_submit) {
+          const route = await engine.resolveAgentIoRoute(receipt.agent_id);
+          return withSurfaceWrite(route.surface_id, async () => {
+            const assertCurrent = async () => {
+              const current = await engine.resolveAgentIoRoute(receipt.agent_id);
+              if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid) throw new Error("Claude delivery route changed");
+            };
+            return verifyClaudeDelivery(receipt, {
+              read: async () => { await assertCurrent(); return readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text); },
+              save: () => engine.updateClaudeDeliveryEvidence(receipt.delivery_id, receipt.claude_submit!),
+              returnOnly: async () => {
+                await assertCurrent();
+                await sendKeyWithRetry(route.surface_id, "return", route.workspace_id ?? undefined, assertCurrent);
+                appendDeliveryEvent({ event_type: "press_enter", source_agent: receipt.agent_id, target_surface: route.surface_id, bytes: 0, press_enter: true, submit_verified: null, retry_count: receipt.retry_count, delivery_id: receipt.delivery_id });
+              },
+            });
+          }, { toolName: "claude-background-verify", workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid, observePtyWrite: true });
         }
         const resolvedSnapshot =
           snapshot === undefined

@@ -6,6 +6,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -22,6 +23,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
+import type { ClaudeDeliveryEvidence } from "./claude-delivery.js";
 import { initializeNewSurfaceRuntime } from "./surface-runtime.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import { buildTitle } from "./naming.js";
@@ -292,6 +294,7 @@ export type AgentDeliveryState =
   | "failed_confirmed";
 
 export interface AgentDeliveryReceipt {
+  claude_submit?: ClaudeDeliveryEvidence;
   delivery_id: string;
   agent_id: string;
   text: string;
@@ -1233,10 +1236,10 @@ interface AgentEngineClient {
     surface: string,
     text: string,
     opts?: CmuxSendOptions & {
-      beforeMutation?: () => Promise<void>;
+      beforeMutation?: () => Promise<unknown>;
       stableSurfaceIdentity?: string | null;
     },
-  ): Promise<void>;
+  ): Promise<unknown>;
   sendKey(
     surface: string,
     key: string,
@@ -1780,6 +1783,7 @@ export class AgentEngine {
   private deliverySnapshotReader: DeliverySnapshotReader | null = null;
   private deliveryDrainInFlight = false;
   private deliveryVerifyInFlight = false;
+  private claudeVerifyTimer: ReturnType<typeof setInterval> | null = null;
   private deliverySubmitTimeoutMs: number;
   private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
@@ -7409,6 +7413,19 @@ export class AgentEngine {
     return snapshotDeliveryReceipt(receipt);
   }
 
+  updateClaudeDeliveryEvidence(deliveryId: string, evidence: ClaudeDeliveryEvidence): void {
+    const receipt = this.deliveryReceipts.get(deliveryId);
+    if (!receipt) return;
+    receipt.claude_submit = evidence;
+    this.persistDeliveryReceipts();
+    if (!this.claudeVerifyTimer) {
+      this.claudeVerifyTimer = setInterval(() => {
+        void this.verifyPendingDeliveries();
+      }, 2_000);
+      this.claudeVerifyTimer.unref?.();
+    }
+  }
+
   getDeliveryReceipt(deliveryId: string): AgentDeliveryReceipt | null {
     const receipt = this.deliveryReceipts.get(deliveryId);
     return receipt ? snapshotDeliveryReceipt(receipt) : null;
@@ -7453,6 +7470,7 @@ export class AgentEngine {
     const now = new Date().toISOString();
     const existing = this.deliveryReceipts.get(input.delivery_id);
     const receipt: AgentDeliveryReceipt = {
+      ...existing,
       ...input,
       delivery_state: "pending_verify",
       terminal: false,
@@ -7613,6 +7631,19 @@ export class AgentEngine {
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
           await this.fileConfirmedFailureTicket(receipt, reason, observation);
+          const senderId = receipt.claude_submit?.sender_agent_id;
+          if (senderId) {
+            const task = `Delivery ${receipt.delivery_id} to ${receipt.agent_id} failed_confirmed: ${reason}. Return retries=${receipt.retry_count}; inspect the receipt before sending anything again.`;
+            try {
+              dispatchOnce(senderId, { id: `delivery-failed:${receipt.delivery_id}`, from: "cmuxlayer:engine", to: senderId, tag: "delivery_failed", task }, this.inboxOpts);
+              const sender = this.getAgentState(senderId);
+              if (sender?.collab_path) appendFileSync(sender.collab_path, `\n### cmuxlayer engine → ${senderId}\n${task}\n`);
+            } catch (error) {
+              receipt.needs_attention = true;
+              receipt.attention_reason = `sender_notification_failed: ${String(error)}`;
+              this.persistDeliveryReceipts();
+            }
+          }
         }
       }
     } finally {
@@ -7648,6 +7679,7 @@ export class AgentEngine {
     receipt: AgentDeliveryReceipt,
     now: number,
   ): number {
+    if (receipt.claude_submit) return 2_000;
     if (
       receipt.delivery_state === "queued_followup" ||
       !receipt.verify_deadline_at
@@ -8597,6 +8629,8 @@ export class AgentEngine {
    * Stop the reconciliation sweep.
    */
   dispose(): void {
+    if (this.claudeVerifyTimer) clearInterval(this.claudeVerifyTimer);
+    this.claudeVerifyTimer = null;
     if (this.sweepTimer) {
       clearTimeout(this.sweepTimer);
       this.sweepTimer = null;

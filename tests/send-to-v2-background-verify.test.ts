@@ -38,11 +38,12 @@ async function callTool(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
+  let settled = false;
   const resultPromise = tool.handler(
     name === "send_to" ? { mode: "agent", ...args } : args,
     {} as any,
-  );
-  for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+  ).then((result: any) => { settled = true; return result; });
+  for (let elapsed = 0; !settled && elapsed < 10_000; elapsed += 100) {
     await vi.advanceTimersByTimeAsync(100);
   }
   return resultPromise;
@@ -279,6 +280,7 @@ function createVerifyServer(
   const server = createServer({
     client: client as any,
     stateDir: TEST_DIR,
+    inboxBaseDir: join(TEST_DIR, "inboxes"),
     disableSpawnPreflight: true,
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
@@ -386,7 +388,7 @@ describe("send_to v2 background verify", () => {
     expect(client.sendKeyCalls).toHaveLength(4);
     expect(readFileSync(collab, "utf8")).toContain("### cmuxlayer engine → sender");
     expect(readFileSync(collab, "utf8")).toContain(receipt.delivery_id);
-    expect(readInbox("sender").some(message => message.task.includes(receipt.delivery_id))).toBe(true);
+    expect(readInbox("sender", { baseDir: join(TEST_DIR, "inboxes") }).some(message => message.task.includes(receipt.delivery_id))).toBe(true);
   });
 
   it("#636 D1 mid-turn is queued behind the turn without status-only certification or re-press", async () => {

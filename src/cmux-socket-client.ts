@@ -583,7 +583,7 @@ export class CmuxSocketClient {
     surface: string,
     text: string,
     opts?: CmuxSendOptions,
-  ): Promise<void> {
+  ): Promise<void | { queued?: boolean }> {
     this.assertSupportedSendOptions(opts);
     const workspace = await this.resolveWorkspace(surface, opts?.workspace);
     const params: Record<string, unknown> = {
@@ -591,7 +591,7 @@ export class CmuxSocketClient {
       text,
       workspace_id: workspace,
     };
-    await this.call("surface.send_text", params);
+    return this.call<{ queued?: boolean }>("surface.send_text", params);
   }
 
   async pasteText(
