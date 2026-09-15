@@ -182,8 +182,18 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         screen = frame;
         exec.mockClear();
         const result = parseToolResult(await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {}));
-        expect(result.ok, JSON.stringify(result)).toBe(true);
-        expect(mutatedPane(exec)).toBe(true);
+        if (mode === "key") {
+          expect(result).toMatchObject({ ok: false, error_code: "nothing_owned_to_submit", key_dispatched: false, submit_dispatched: false, submitted: false });
+          expect(mutatedPane(exec)).toBe(false);
+        } else {
+          expect(result.ok, JSON.stringify(result)).toBe(true);
+          expect(mutatedPane(exec)).toBe(true);
+        }
+        screen = frame + "\nmy actual second line";
+        exec.mockClear();
+        const multiline = parseToolResult(await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {}));
+        expect(multiline.error_code).toBe("blocked_by_foreign_draft");
+        expect(mutatedPane(exec)).toBe(false);
         screen = frame.split("\n").slice(0, -1).concat(cli === "codex" ? "› Write tests for @server.ts" : "❯ Press up to edit queued messages that I wrote").join("\n");
         exec.mockClear();
         const refused = await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: mode === "key" ? "return" : "new message", press_enter: false }, {});
@@ -196,14 +206,22 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   });
 
-  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other"])("#636 key Return draft ownership (%s)", async (kind) => {
+  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other", "whitespace", "quoted-space", "indentation", "wrap"].flatMap(kind => ["claude", "cursor"].map(cli => ({ kind, cli }))))("#636 key Return draft ownership (%j)", async ({ kind, cli }) => {
     const { createServer, createServerContext } = await loadServerModule();
     const { runWithCallerContext } = await import("../src/caller-context.js");
-    let screen = "Claude Code\n❯ ";
+    const edits: Record<string, [string, string]> = {
+      whitespace: ["foo bar", "foobar"],
+      "quoted-space": ['echo "a  b"', 'echo "a b"'],
+      indentation: ["  keep words", " keep words"],
+      wrap: ["foo bar", "foo\nbar"],
+    };
+    const edit = edits[kind];
+    const render = (input: string) => cli === "cursor" ? `Cursor Agent\ncursor> ${input}\nAuto` : `Claude Code\n❯ ${input}`;
+    let screen = render("");
     const base = makeLifecycleExec(() => screen);
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
-      if (args.includes("send")) screen = `Claude Code\n❯ ${args.at(-1)}`;
-      if (args.includes("send-key") && args.includes("return")) screen = "Claude Code\n❯ ";
+      if (args.includes("send")) screen = render(String(args.at(-1)));
+      if (args.includes("send-key") && args.includes("return")) screen = render("");
       return base(cmd, args);
     });
     const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
@@ -211,6 +229,8 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       const server = createServer({ context }) as any;
       const targetId = await spawnReadyAgent(server);
       const engine = server._registeredTools.interact._engine;
+      const target = { ...engine.getRegistry().get(targetId), cli };
+      engine.stateMgr.writeState(target); engine.getRegistry().set(targetId, target);
       const callerId = "draft-guard-sender";
       const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
       const caller = { ...engine.getRegistry().get(targetId), agent_id: callerId, surface_id: "surface:caller", surface_uuid: callerUuid, role: "lead" };
@@ -218,18 +238,19 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       engine.getRegistry().set(callerId, caller);
       let callerSurface = callerUuid;
       const call = (args: Record<string, unknown>) => runWithCallerContext(kind === "unknown" ? undefined : { surfaceId: callerSurface, workspaceId: "workspace:1" }, () => server._registeredTools.send_to.handler(args, {}));
-      if (kind === "owned" || kind === "changed" || kind === "other") {
-        screen = "Claude Code\n❯ ";
-        const typed = parseToolResult(await call({ mode: "surface", surface: "surface:new", text: "my undelivered message", press_enter: false }));
+      if (kind === "owned" || kind === "changed" || kind === "other" || edit) {
+        screen = render("");
+        const typed = parseToolResult(await call({ mode: "surface", surface: "surface:new", text: edit?.[0] ?? "my undelivered message", press_enter: false }));
         expect(typed.caller_agent_id).toBe(callerId);
-        if (kind === "changed") screen += " and human words";
+        if (edit) screen = render(edit[1]);
+        if (kind === "changed") screen = render("my undelivered message and human words");
         if (kind === "other") {
           callerSurface = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
           const other = { ...caller, agent_id: "other-sender", surface_id: "surface:other", surface_uuid: callerSurface };
           engine.stateMgr.writeState(other);
           engine.getRegistry().set(other.agent_id, other);
         }
-      } else screen = kind === "permission" ? "Claude Code\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel" : kind === "picker" ? "Claude Code\nSelect model\n❯ 1. Sonnet\n  2. Opus\nEnter to confirm · Esc to cancel" : "Claude Code\n❯ private human draft";
+      } else screen = kind === "permission" ? "Claude Code\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel" : kind === "picker" ? "Claude Code\nSelect model\n❯ 1. Sonnet\n  2. Opus\nEnter to confirm · Esc to cancel" : render("private human draft");
       exec.mockClear();
       const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return" }));
       if (kind === "owned" || kind === "picker" || kind === "permission") {
@@ -239,7 +260,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         expect(result.error_code).toBe("blocked_by_foreign_draft");
         expect(result.error).toContain("try again in ~20 s or after your next turn");
         expect(mutatedPane(exec)).toBe(false);
-        expect(screen).toContain(kind === "changed" ? "human words" : kind === "other" ? "my undelivered message" : "private human draft");
+        expect(screen).toContain(edit ? edit[1] : kind === "changed" ? "human words" : kind === "other" ? "my undelivered message" : "private human draft");
       }
       expect(result.caller_agent_id).toBe(kind === "unknown" ? null : kind === "other" ? "other-sender" : callerId);
     } finally { context.dispose(); }
