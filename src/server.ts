@@ -1628,7 +1628,7 @@ class DeliverySafetyGateError extends Error {
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
         : error_code === "blocked_by_foreign_draft"
-          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; refused before typing`
+          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -1872,6 +1872,7 @@ function shapeSuccessfulSendToResult(
   };
   const lean: Record<string, unknown> = {
     ...receiptFloor,
+    ...("caller_agent_id" in full ? { caller_agent_id: full.caller_agent_id } : {}),
     ...(args.mode === "key"
       ? {
           key: full.key ?? args.text,
@@ -5214,7 +5215,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? (handlerArgs[0] as Record<string, unknown>)
                 : {};
             const verbose = rawArgs.verbose === true;
-            const handled = (await handler(...handlerArgs)) as ToolReturn;
+            const callerAgentId = toolNameString === "send_to" ? resolveCurrentCallerAgent()?.agent_id ?? null : null;
+            let handled = (await handler(...handlerArgs)) as ToolReturn;
+            if (toolNameString === "send_to") {
+              const payload = { ...handled.structuredContent, caller_agent_id: callerAgentId };
+              handled = { ...handled, structuredContent: payload, content: [{ type: "text", text: JSON.stringify(payload) }] };
+            }
             const shaped =
               toolNameString === "send_to" && !verbose
                 ? shapeSuccessfulSendToResult(handled, rawArgs)
@@ -6583,6 +6589,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
   };
 
+  // Ownership is deliberately local to this daemon lifetime: after restart,
+  // an old draft is unknown. A caller cannot assert ownership in tool arguments.
+  const typedDraftOwners = new Map<string, { caller: string; text: string; at: number }>();
+  const draftOwnerKey = (surface: string, workspace?: string, uuid?: string | null) =>
+    JSON.stringify([workspace ?? null, uuid ?? surface]);
+
   const executeDeliveryEngine = async (opts: {
     surface: string;
     workspace?: string;
@@ -6628,6 +6640,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submitAttempted && opts.verify_submit
           ? await readParsedSurface(opts.surface, opts.workspace)
           : null;
+      if (submitAttempted && submitBaseline &&
+          submitBaseline.parsed.control_state !== "permission_prompt" &&
+          !isPickerOrMenuScreen(submitBaseline.text)) {
+        const draft = extractComposerInputRegion(submitBaseline.text)?.trim();
+        const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
+        const owner = typedDraftOwners.get(ownerKey);
+        const caller = resolveCurrentCallerAgent()?.agent_id;
+        if (draft && !(caller && owner?.caller === caller && Date.now() - owner.at < 300_000 &&
+            draft.replace(/\s+/g, "") === owner.text.replace(/\s+/g, ""))) {
+          typedDraftOwners.delete(ownerKey);
+          throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, draft);
+        }
+        if (!draft) typedDraftOwners.delete(ownerKey);
+      }
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
       const keyRpcMethod = await timeDeliveryPhase(opts.timings, "type", () =>
@@ -6650,6 +6676,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }),
             )
           : { submit_verified: null, submit_verification_reason: null };
+      if (verification.submit_verified === true) {
+        typedDraftOwners.delete(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+      }
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
         submit_attempted: submitAttempted,
@@ -6748,6 +6777,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       0,
     );
     const submittedText = opts.chunks.join("");
+    const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
+    const caller = resolveCurrentCallerAgent()?.agent_id;
+    const beforeDraft = deliverySafetySnapshot ? extractComposerInputRegion(deliverySafetySnapshot.text)?.trim() : null;
+    if (textDispatched && caller && beforeDraft === "") {
+      typedDraftOwners.delete(ownerKey);
+      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
+      typedDraftOwners.set(ownerKey, { caller, text: submittedText, at: Date.now() });
+    } else if (textDispatched) typedDraftOwners.delete(ownerKey);
     let submit_verified: boolean | null = null;
     let submit_evidence: SubmitEvidence | null = null;
     let submit_verification_reason: SubmitVerificationFailureReason | null =
@@ -6906,6 +6943,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
     }
 
+    if (submit_verified === true) typedDraftOwners.delete(ownerKey);
     const receipt = buildPublicDeliveryReceipt({
       delivery_state: !opts.press_enter
         ? "typed"
@@ -17680,7 +17718,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text or a key through the shared delivery engine. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
+      "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
