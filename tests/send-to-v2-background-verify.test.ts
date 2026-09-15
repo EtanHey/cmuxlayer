@@ -3,11 +3,15 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runWithCallerContext } from "../src/caller-context.js";
+import { readInbox } from "../src/inbox.js";
+import { parseScreen } from "../src/screen-parser.js";
 import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { AgentRegistry } from "../src/agent-registry.js";
@@ -236,6 +240,34 @@ class FakeAgentSurfaceClient {
   async renameTab(_surface: string, _title: string) {}
 }
 
+class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
+  composer = "";
+  transcript = "";
+  busy = false;
+  reorder = false;
+  queuedReply = false;
+  textWaitingToPaint = "";
+  returnFrames: string[] = [];
+  async send(surface: string, text: string): Promise<any> {
+    this.sendCalls.push(text);
+    if (this.reorder) this.textWaitingToPaint += text;
+    else this.composer += text;
+    return { queued: this.queuedReply };
+  }
+  async sendKey(surface: string, key: string) {
+    this.sendKeyCalls.push(key);
+    if (key !== "return") return;
+    this.returnFrames.push((await this.readScreen(surface)).text);
+    if (this.sendKeyCalls.length >= this.requiredReturns && this.composer) {
+      this.transcript += `\n⏺ User: ${this.composer}`;
+      this.composer = "";
+    }
+  }
+  async readScreen(surface: string) {
+    return { surface, text: this.screenOverride ?? `Claude Code\n${this.transcript}\n${this.busy ? "✻ Working… (esc to interrupt)" : "⏺ Bash(previous tool completed)"}\n❯ ${this.composer}\n`, lines: 30, scrollback_used: false };
+  }
+}
+
 function createVerifyServer(
   client: FakeAgentSurfaceClient,
   extras?: {
@@ -309,6 +341,90 @@ describe("send_to v2 background verify", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  async function instantDelivery(client: ClaudeDeliverySurface, mode = "agent") {
+    server = createVerifyServer(client);
+    const target = registerAgent(server);
+    let settled = false;
+    const result = server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: target.agent_id } : { surface: client.surface }), text: "636 unique delivery", press_enter: true }, {}).then((value: any) => { settled = true; return value; });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled, "delivery receipt must return without waiting for background retry").toBe(true);
+    return parseResult(await result);
+  }
+
+  it.each(["agent", "command"])("#636 D1 %s returns promptly then retries only Return on the exact idle composer", async mode => {
+    const client = new ClaudeDeliverySurface();
+    client.requiredReturns = 2;
+    const receipt = await instantDelivery(client, mode);
+    expect(receipt.delivery_state).toBe("pending_verify");
+    const engine = server._registeredTools.interact._engine;
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(2_000);
+      await engine.verifyPendingDeliveries();
+    }
+    expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", retry_count: 1, submit_verified: true });
+    expect(client.sendCalls).toEqual(["636 unique delivery"]);
+    expect(client.sendKeyCalls).toEqual(["return", "return"]);
+  });
+
+  it("#636 D1 bounds idle recovery and tells the sender through inbox and collab", async () => {
+    const client = new ClaudeDeliverySurface();
+    const collab = join(TEST_DIR, "sender-collab.md");
+    writeFileSync(collab, "# sender\n");
+    server = createVerifyServer(client);
+    registerAgent(server);
+    const engine = server._registeredTools.interact._engine;
+    const sender = { ...engine.getAgentState("agent-1"), agent_id: "sender", surface_id: "surface:sender", collab_path: collab };
+    engine.stateMgr.writeState(sender); engine.getRegistry().set(sender.agent_id, sender);
+    const result = runWithCallerContext({ surfaceId: sender.surface_id }, () => server._registeredTools.send_to.handler({ mode: "agent", agent_id: "agent-1", text: "636 unique delivery", press_enter: true }, {}));
+    await vi.advanceTimersByTimeAsync(500);
+    const receipt = parseResult(await result);
+    for (let i = 0; i < 6; i++) { await vi.advanceTimersByTimeAsync(2_000); await engine.verifyPendingDeliveries(); }
+    expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "failed_confirmed", retry_count: 3 });
+    expect(client.sendCalls).toHaveLength(1);
+    expect(client.sendKeyCalls).toHaveLength(4);
+    expect(readFileSync(collab, "utf8")).toContain("### cmuxlayer engine → sender");
+    expect(readFileSync(collab, "utf8")).toContain(receipt.delivery_id);
+    expect(readInbox("sender").some(message => message.task.includes(receipt.delivery_id))).toBe(true);
+  });
+
+  it("#636 D1 mid-turn is queued behind the turn without status-only certification or re-press", async () => {
+    const client = new ClaudeDeliverySurface(); client.busy = true;
+    const receipt = await instantDelivery(client);
+    expect(receipt.queued_behind_turn).toBe(true);
+    expect(receipt.submitted).not.toBe(true);
+    for (let i = 0; i < 6; i++) { await vi.advanceTimersByTimeAsync(2_000); await server._registeredTools.interact._engine.verifyPendingDeliveries(); }
+    expect(client.sendKeyCalls).toHaveLength(1);
+  });
+
+  it("#636 D1 a late-landing submit clears before retry and gets no second Return", async () => {
+    const client = new ClaudeDeliverySurface();
+    const receipt = await instantDelivery(client);
+    await vi.advanceTimersByTimeAsync(750);
+    client.transcript = "⏺ User: 636 unique delivery"; client.composer = "";
+    await vi.advanceTimersByTimeAsync(2_000);
+    await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id).delivery_state).toBe("submitted");
+  });
+
+  it.each([false, true])("#636 D1 late text and queued=%s never certify an old empty frame", async queued => {
+    const client = new ClaudeDeliverySurface(); client.reorder = true; client.queuedReply = queued; client.requiredReturns = 1;
+    const receipt = await instantDelivery(client);
+    expect(receipt.submitted).not.toBe(true);
+    expect(client.sendKeyCalls).toHaveLength(0);
+    await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id).terminal).toBe(false);
+    client.composer = client.textWaitingToPaint; client.textWaitingToPaint = "";
+    for (let i = 0; i < 3; i++) { await vi.advanceTimersByTimeAsync(2_000); await server._registeredTools.interact._engine.verifyPendingDeliveries(); }
+    expect(client.returnFrames.every(frame => frame.includes("❯ 636 unique delivery"))).toBe(true);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id).delivery_state).toBe("submitted");
+    expect(client.sendCalls).toHaveLength(1);
+  });
+
+  it("#636 D1 a completed tool above a nonempty Claude composer is idle", () => {
+    expect(parseScreen("Claude Code\n⏺ Bash(previous tool completed)\n❯ 636 unique delivery\n").status).toBe("idle");
   });
 
   it("returns pending_verify instead of terminal failed when the sync window expires without submit evidence", async () => {
