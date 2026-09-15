@@ -10,7 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
-import { deliveryFrameHash, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
+import { claudePasteId, deliveryFrameHash, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -3996,6 +3996,8 @@ export type LifecycleAgentInputDeliverer = (args: {
   allow_busy?: boolean;
   source_event: DeliveryEventType;
   delivery_id?: string;
+  sender_agent_id?: string;
+  background_verify?: boolean;
 }) => Promise<PublicDeliveryReceipt & { bytes: number }>;
 
 export const DEFAULT_LIFECYCLE_START_TIMEOUT_MS = 60_000;
@@ -6076,19 +6078,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   };
 
-  const readClaudeDeliveryFrame = async (surface: string, workspace: string | undefined, text: string): Promise<ClaudeDeliveryFrame | null> => {
+  const transcriptMatches = (screen: string, text: string): number => {
+    const payload = normalizeTerminalText(text).trim();
+    return payload ? normalizeTerminalText(screen).split(payload).length - 1 : 0;
+  };
+  const readClaudeDeliveryFrame = async (surface: string, workspace: string | undefined, text: string, evidence?: ClaudeDeliveryEvidence): Promise<ClaudeDeliveryFrame | null> => {
     const snapshot = await readParsedSurface(surface, workspace, { throwOnSurfaceGone: true });
     if (!snapshot?.text.trim()) return null;
     const pending = screenShowsPendingInput(snapshot.text, text);
     const composer = extractComposerInputRegion(snapshot.text, text);
+    const payload = normalizeTerminalText(text).trim().replace(/\s+/g, " ");
+    const visible = normalizeTerminalText(composer ?? "").trim().replace(/\s+/g, " ");
+    // Long composers expose only a suffix. It must end at this payload's
+    // correlated tail; appended or prepended foreign text cancels recovery.
+    const correlatedTail = payload.slice(-80);
+    const pasteId = claudePasteId(composer);
+    const ownedPaste = evidence?.pasted === true && pasteId > evidence.initial_paste_id;
     return {
       hash: deliveryFrameHash(snapshot.text),
-      complete: screenShowsCompletePendingInput(snapshot.text, text),
-      pending,
+      complete: ownedPaste || Boolean(correlatedTail && visible.endsWith(correlatedTail) && payload.endsWith(visible)),
+      pending: pending || pasteId > 0,
       cleared: composer !== null && composer.trim() === "",
       active: isSubmitVerifiedStatus(snapshot.parsed.status),
       queued: screenShowsQueuedAgentInput(snapshot.text, text),
       inTranscript: !pending && normalizeTerminalText(snapshot.text).includes(normalizeTerminalText(text).trim()),
+      transcriptMatches: transcriptMatches(snapshot.text, text),
     };
   };
 
@@ -6645,6 +6659,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     onChunkDelivered?: (sentChunks: number) => void;
     source_event?: DeliveryEventType;
     source_agent?: string | null;
+    sender_agent_id?: string;
+    background_verify?: boolean;
     delivery_id?: string;
     verify_submit?: boolean;
     allow_recovery_enter_retry?: boolean;
@@ -6814,20 +6830,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const target = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface);
     const claudeRelay = opts.press_enter && opts.verify_submit && target?.cli === "claude" &&
-      opts.source_event !== "boot_prompt" && opts.source_event !== "spawn_agent" && context.lifecycleSweepEngine;
+      (opts.source_event === "send_to" || opts.source_event === "send_command" || opts.background_verify === true) && context.lifecycleSweepEngine;
     if (claudeRelay && target) {
       const engine = context.lifecycleSweepEngine!;
       opts.delivery_id ??= randomUUID();
       deliveryOutcome = "pending_verify";
       const evidence: ClaudeDeliveryEvidence = {
         initial_frame_hash: deliveryFrameHash(deliverySafetySnapshot?.text ?? ""),
+        initial_transcript_matches: transcriptMatches(deliverySafetySnapshot?.text ?? "", submittedText),
+        pasted: shouldPaste,
+        initial_paste_id: claudePasteId(extractComposerInputRegion(deliverySafetySnapshot?.text ?? "", submittedText)),
         payload_observed: false,
         queued_behind_turn: isSubmitVerifiedStatus(deliverySafetySnapshot?.parsed.status),
-        sender_agent_id: resolveCurrentCallerAgent()?.agent_id ?? null,
+        sender_agent_id: opts.sender_agent_id ?? resolveCurrentCallerAgent()?.agent_id ?? null,
         transport_queued: transportQueued,
       };
       engine.acceptPendingVerify({ delivery_id: opts.delivery_id, agent_id: target.agent_id, text: submittedText, press_enter: true, source_event: opts.source_event ?? "send_command", retry_count: 0, typed: true, submit_dispatched: false, rpc_methods: [...rpcMethods] });
-      const beforeReturn = await readClaudeDeliveryFrame(opts.surface, opts.workspace, submittedText);
+      const beforeReturn = await readClaudeDeliveryFrame(opts.surface, opts.workspace, submittedText, evidence);
+      evidence.queued_behind_turn ||= beforeReturn?.active === true;
       if (beforeReturn?.complete) {
         evidence.payload_observed = true;
         evidence.observed_frame_hash = beforeReturn.hash;
@@ -12457,7 +12477,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sent: boolean;
           reason: string;
           error_code?: string;
-          delivery?: "submitted" | "queued";
+          delivery?: "submitted" | "queued" | "pending_verify";
           delivery_id?: string;
         } = { attempted: false, sent: false, reason: "" };
         const acceptedRecord =
@@ -12517,7 +12537,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
                 if (
                   delivered.delivery !== "submitted" &&
-                  delivered.delivery !== "queued"
+                  delivered.delivery !== "queued" &&
+                  delivered.delivery !== "pending_verify"
                 ) {
                   throw new Error(
                     "inbox nudge produced no evidence-backed delivery state",
@@ -12526,7 +12547,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 nudge.delivery = delivered.delivery;
                 if (context.lifecycleSweepEngine && deliveryId) {
                   const receipt =
-                    delivered.delivery === "queued"
+                    delivered.delivery === "pending_verify"
+                      ? context.lifecycleSweepEngine.acceptPendingVerify({
+                          delivery_id: deliveryId, agent_id: args.agent_id,
+                          text: pointer, press_enter: true, source_event: "dispatch_nudge",
+                          retry_count: delivered.retry_count, rpc_methods: delivered.rpc_methods,
+                          typed: delivered.typed, submit_dispatched: delivered.submit_dispatched,
+                        })
+                      : delivered.delivery === "queued"
                       ? context.lifecycleSweepEngine.acceptComposerQueue({
                           delivery_id: deliveryId,
                           agent_id: args.agent_id,
@@ -12556,8 +12584,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   nudge.delivery_id = receipt.delivery_id;
                 }
               }
-              nudge.sent = true;
-              nudge.reason = wakeIdleAgent
+              nudge.sent = nudge.delivery !== "pending_verify";
+              nudge.reason = nudge.delivery === "pending_verify"
+                ? "inbox pointer typed once; verification is in flight"
+                : wakeIdleAgent
                 ? `idle live agent — typed inbox pointer into ${record.surface_id}`
                 : record.state === "working"
                   ? `busy agent — queued inbox pointer for verified lifecycle delivery to ${record.surface_id}`
@@ -12597,8 +12627,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           nudge,
         };
         const nudgeAccepted =
-          nudge.sent &&
-          (nudge.delivery === "submitted" || nudge.delivery === "queued");
+          nudge.delivery === "pending_verify" || (nudge.sent &&
+          (nudge.delivery === "submitted" || nudge.delivery === "queued"));
         if (monitor_state === "never-armed" && !nudgeAccepted) {
           return err(
             "inbox message was queued, but the recipient has never proved that its inbox monitor is armed",
@@ -12934,7 +12964,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json");
     const testProcess =
       process.env.VITEST === "true" || process.env.NODE_ENV === "test";
-    const engine =
+    const engine: AgentEngine =
       context.lifecycleSweepEngine ??
       new AgentEngine(
         stateMgr,
@@ -13295,17 +13325,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 return `[watch] target agent ended before predicate — inspect ${event.target}`;
               })();
               try {
+                // The watch keeps observed_at_ms fixed across retries/restart.
+                // Reuse its durable receipt; a pending notification never retypes.
+                const deliveryId = `watch:${deliveryFrameHash(JSON.stringify([event.watch_id, event.observed_at_ms, event.reason]))}`;
+                const existing = engine.getDeliveryReceipt(deliveryId);
+                if (existing) {
+                  if (!existing.terminal) return { delivered: false, pending: true };
+                  return existing.submit_verified === true
+                    ? true : externalFallbackAfterLocalFailure();
+                }
                 const delivery = await lifecycleAgentInputDeliverer({
                   agent_id: owner.agent_id,
                   text,
                   press_enter: true,
                   allow_busy: true,
                   source_event: "report_to_parent",
-                  delivery_id: randomUUID(),
+                  delivery_id: deliveryId,
+                  sender_agent_id: owner.agent_id,
+                  background_verify: true,
                 });
+                if (delivery.delivery === "pending_verify") {
+                  await engine.verifyPendingDeliveries();
+                  if (engine.getDeliveryReceipt(deliveryId)?.submit_verified === true) return true;
+                  return { delivered: false, pending: true };
+                }
                 const ownerDelivered =
-                  delivery.delivery === "submitted" ||
-                  delivery.delivery === "queued";
+                  delivery.delivery === "submitted" && delivery.submit_verified === true;
+                if (delivery.delivery === "queued") return { delivered: false, pending: true };
                 return ownerDelivered
                   ? true
                   : externalFallbackAfterLocalFailure();
@@ -13621,6 +13667,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       allow_busy?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
+      sender_agent_id?: string;
+      background_verify?: boolean;
       timings?: DeliveryPhaseTimings;
     }) => {
       const routeStartedAt = Date.now();
@@ -13875,6 +13923,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: args.agent_id,
+            sender_agent_id: args.sender_agent_id,
+            background_verify: args.background_verify,
             delivery_id: args.delivery_id,
             // Verify every submitted agent relay — not just long ones. A short
             // relay (the common agent-to-agent case) to a frozen terminal must
@@ -14374,14 +14424,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return { outcome: "pending" as const, reason: "target_gone" };
         }
         if (receipt.claude_submit) {
+          const generation = engine.getDeliveryVerificationGeneration();
           const route = await engine.resolveAgentIoRoute(receipt.agent_id);
           return withSurfaceWrite(route.surface_id, async () => {
             const assertCurrent = async () => {
+              if (receipt.terminal || engine.getDeliveryVerificationGeneration() !== generation) throw new Error("Claude delivery verification ended");
               const current = await engine.resolveAgentIoRoute(receipt.agent_id);
-              if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid) throw new Error("Claude delivery route changed");
+              if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id) throw new Error("Claude delivery route changed");
             };
             return verifyClaudeDelivery(receipt, {
-              read: async () => { await assertCurrent(); return readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text); },
+              read: async () => { await assertCurrent(); return readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text, receipt.claude_submit); },
               save: () => engine.updateClaudeDeliveryEvidence(receipt.delivery_id, receipt.claude_submit!),
               returnOnly: async () => {
                 await assertCurrent();

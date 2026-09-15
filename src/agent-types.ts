@@ -311,6 +311,8 @@ export interface DeliveryTelemetryEvent {
     | "pending_verify"
     | "failed_confirmed";
   target_agent?: string;
+  submit_evidence?: "transcript_echo" | "cleared_composer";
+  frame_hash?: string;
 }
 
 export interface ControlHealthTelemetryEvent {

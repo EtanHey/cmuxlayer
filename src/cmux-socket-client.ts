@@ -591,7 +591,8 @@ export class CmuxSocketClient {
       text,
       workspace_id: workspace,
     };
-    return this.call<{ queued?: boolean }>("surface.send_text", params);
+    const acknowledgement = await this.call<{ queued?: boolean }>("surface.send_text", params);
+    if (typeof acknowledgement?.queued === "boolean") return acknowledgement;
   }
 
   async pasteText(

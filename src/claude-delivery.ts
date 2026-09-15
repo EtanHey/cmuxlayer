@@ -4,6 +4,9 @@ import type { AgentDeliveryReceipt, DeliveryVerifyObservation } from "./agent-en
 /** Persisted attribution and retry facts; screen bodies stay out of the registry. */
 export interface ClaudeDeliveryEvidence {
   initial_frame_hash: string;
+  initial_transcript_matches: number;
+  pasted: boolean;
+  initial_paste_id: number;
   payload_observed: boolean;
   observed_frame_hash?: string;
   last_frame_hash?: string;
@@ -14,6 +17,10 @@ export interface ClaudeDeliveryEvidence {
   submit_evidence?: "transcript_echo" | "cleared_composer";
 }
 export const deliveryFrameHash = (text: string) => createHash("sha256").update(text).digest("hex");
+export function claudePasteId(composer: string | null): number {
+  const match = composer?.replace(/\s+/g, " ").trim().match(/\[Pasted text #(\d+)(?: \+\d+ lines?)?\]$/);
+  return match ? Number(match[1]) : 0;
+}
 export interface ClaudeDeliveryFrame {
   hash: string;
   complete: boolean;
@@ -22,6 +29,7 @@ export interface ClaudeDeliveryFrame {
   active: boolean;
   queued: boolean;
   inTranscript: boolean;
+  transcriptMatches: number;
 }
 
 export async function verifyClaudeDelivery(
@@ -38,8 +46,11 @@ export async function verifyClaudeDelivery(
     evidence.last_frame_hash = frame.hash;
     const attributable = evidence.payload_observed && receipt.submit_dispatched &&
       frame.hash !== evidence.initial_frame_hash && !frame.pending && !frame.queued;
-    if (attributable && (frame.inTranscript || (frame.cleared && !evidence.queued_behind_turn))) {
-      evidence.submit_evidence = frame.inTranscript ? "transcript_echo" : "cleared_composer";
+    const freshTranscript = frame.inTranscript && frame.transcriptMatches > evidence.initial_transcript_matches;
+    const laterCleared = frame.cleared && !evidence.queued_behind_turn &&
+      evidence.return_at !== undefined && Date.now() - evidence.return_at >= 2_000;
+    if (attributable && (freshTranscript || laterCleared)) {
+      evidence.submit_evidence = freshTranscript ? "transcript_echo" : "cleared_composer";
       io.save();
       return { outcome: "delivered", submit_verified: true, evidence: { submit_evidence: evidence.submit_evidence, frame_hash: frame.hash } };
     }
@@ -69,5 +80,7 @@ export async function verifyClaudeDelivery(
   receipt.submit_dispatched = true;
   io.save(); // Reserve this Return before I/O; a timeout must never replay text.
   await io.returnOnly();
-  return inspect(await io.read()) ?? { outcome: "pending" };
+  // Give the terminal a later observation cycle; an immediate old frame is
+  // not evidence that the Return just dispatched was processed.
+  return { outcome: "pending" };
 }

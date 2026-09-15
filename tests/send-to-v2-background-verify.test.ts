@@ -229,7 +229,7 @@ class FakeAgentSurfaceClient {
           ]
             .filter((line) => line !== "")
             .join("\n")
-        : `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`);
+        : `Claude Code\n${this.transcriptTail ? `⏺ User: ${this.transcriptTail}\n` : ""}> ${tail}\nCLAUDE_COUNTER:1\n`);
     return {
       surface,
       text,
@@ -247,6 +247,8 @@ class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
   busy = false;
   reorder = false;
   queuedReply = false;
+  collapsePastes = false;
+  tailOnly = false;
   textWaitingToPaint = "";
   returnFrames: string[] = [];
   async send(surface: string, text: string): Promise<any> {
@@ -264,8 +266,12 @@ class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
       this.composer = "";
     }
   }
+  async pasteText(surface: string, text: string) {
+    await this.send(surface, text);
+    if (this.collapsePastes && text.length > 500) this.composer = "[Pasted text #1 +3 lines]";
+  }
   async readScreen(surface: string) {
-    return { surface, text: this.screenOverride ?? `Claude Code\n${this.transcript}\n${this.busy ? "✻ Working… (esc to interrupt)" : "⏺ Bash(previous tool completed)"}\n❯ ${this.composer}\n`, lines: 30, scrollback_used: false };
+    return { surface, text: this.screenOverride ?? `Claude Code\n${this.transcript}\n${this.busy ? "✻ Working… (esc to interrupt)" : "⏺ Bash(previous tool completed)"}\n❯ ${this.tailOnly ? this.composer.slice(-160) : this.composer}\n`, lines: 30, scrollback_used: false };
   }
 }
 
@@ -345,11 +351,11 @@ describe("send_to v2 background verify", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  async function instantDelivery(client: ClaudeDeliverySurface, mode = "agent") {
+  async function instantDelivery(client: ClaudeDeliverySurface, mode = "agent", text = "636 unique delivery") {
     server = createVerifyServer(client);
     const target = registerAgent(server);
     let settled = false;
-    const result = server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: target.agent_id } : { surface: client.surface }), text: "636 unique delivery", press_enter: true }, {}).then((value: any) => { settled = true; return value; });
+    const result = server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: target.agent_id } : { surface: client.surface }), text, press_enter: true }, {}).then((value: any) => { settled = true; return value; });
     await vi.advanceTimersByTimeAsync(500);
     expect(settled, "delivery receipt must return without waiting for background retry").toBe(true);
     return parseResult(await result);
@@ -367,6 +373,39 @@ describe("send_to v2 background verify", () => {
     }
     expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", retry_count: 1, submit_verified: true });
     expect(client.sendCalls).toEqual(["636 unique delivery"]);
+    expect(client.sendKeyCalls).toEqual(["return", "return"]);
+    const event = readFileSync(join(TEST_DIR, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line))
+      .find(event => event.delivery_id === receipt.delivery_id && event.delivery_state === "submitted");
+    expect(event).toMatchObject({ submit_evidence: "transcript_echo", frame_hash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  });
+
+  it("#636 D1 restarts background recovery from the persisted receipt without retyping", async () => {
+    const client = new ClaudeDeliverySurface(); client.requiredReturns = 2;
+    const receipt = await instantDelivery(client);
+    await server.close();
+    server = createServer({ client: client as any, stateDir: TEST_DIR, inboxBaseDir: join(TEST_DIR, "inboxes"), disableSpawnPreflight: true,
+      surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER, surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test` });
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", retry_count: 1 });
+    expect(client.sendCalls).toEqual(["636 unique delivery"]);
+    expect(client.sendKeyCalls).toEqual(["return", "return"]);
+  });
+
+  it("#636 D1 a report watch keeps one pending receipt across notification retries", async () => {
+    const client = new ClaudeDeliverySurface(); client.requiredReturns = 2;
+    server = createVerifyServer(client);
+    registerAgent(server, { role: "orchestrator" });
+    const engine = server._registeredTools.interact._engine;
+    const report = join(TEST_DIR, "report.md"); writeFileSync(report, "");
+    const watch = await engine.armWatch({ owner: "agent-1", target_kind: "file", target: report, marker: "DONE", deadline: Date.now() + 60_000 });
+    writeFileSync(report, "DONE");
+    const first = engine.runSweep(); await vi.advanceTimersByTimeAsync(500); await first;
+    expect(engine.listDeliveryReceipts()).toEqual([expect.objectContaining({ delivery_id: expect.stringMatching(/^watch:/), delivery_state: "pending_verify" })]);
+    expect(JSON.parse(readFileSync(join(TEST_DIR, "watch-specs.json"), "utf8")).watches.find((item: any) => item.watch_id === watch.watch_id).notification_delivered_at_ms).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(8_000); await engine.runSweep();
+    expect(engine.listDeliveryReceipts()).toHaveLength(1);
+    expect(engine.listDeliveryReceipts()[0].delivery_state).toBe("submitted");
+    expect(client.sendCalls).toHaveLength(1);
     expect(client.sendKeyCalls).toEqual(["return", "return"]);
   });
 
@@ -415,6 +454,7 @@ describe("send_to v2 background verify", () => {
     const client = new ClaudeDeliverySurface(); client.reorder = true; client.queuedReply = queued; client.requiredReturns = 1;
     const receipt = await instantDelivery(client);
     expect(receipt.submitted).not.toBe(true);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id).claude_submit.transport_queued).toBe(queued);
     expect(client.sendKeyCalls).toHaveLength(0);
     await server._registeredTools.interact._engine.verifyPendingDeliveries();
     expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id).terminal).toBe(false);
@@ -427,6 +467,40 @@ describe("send_to v2 background verify", () => {
 
   it("#636 D1 a completed tool above a nonempty Claude composer is idle", () => {
     expect(parseScreen("Claude Code\n⏺ Bash(previous tool completed)\n❯ 636 unique delivery\n").status).toBe("idle");
+  });
+
+  it("#636 D1 never retries a composer that gained someone else's text", async () => {
+    const client = new ClaudeDeliverySurface();
+    await instantDelivery(client);
+    client.composer += " plus the user's new draft";
+    await vi.advanceTimersByTimeAsync(8_000);
+    await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    expect(client.composer).toBe("636 unique delivery plus the user's new draft");
+  });
+
+  it.each([1, 2])("#636 D1 attributes a new paste placeholder with %s Return attempts", async returns => {
+    const client = new ClaudeDeliverySurface(); client.collapsePastes = true; client.requiredReturns = returns;
+    const receipt = await instantDelivery(client, "agent", "636 paste payload ".repeat(40));
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", retry_count: returns - 1 });
+    expect(client.sendCalls).toHaveLength(1); expect(client.sendKeyCalls).toHaveLength(returns);
+  });
+
+  it("#636 D1 does not attribute a pre-existing paste placeholder", async () => {
+    const client = new ClaudeDeliverySurface(); client.composer = "[Pasted text #1 +3 lines]"; client.collapsePastes = true;
+    server = createVerifyServer(client); registerAgent(server);
+    const result = await callTool(server, "send_to", { agent_id: "agent-1", text: "636 new paste ".repeat(40), press_enter: true });
+    expect(result.isError).toBe(true); expect(client.sendCalls).toEqual([]); expect(client.sendKeyCalls).toEqual([]);
+  });
+
+  it("#636 D1 recognizes the correlated tail in a truncated composer", async () => {
+    const client = new ClaudeDeliverySurface(); client.tailOnly = true; client.requiredReturns = 1;
+    const receipt = await instantDelivery(client, "agent", "636 long payload ".repeat(40));
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(receipt.delivery_id).delivery_state).toBe("submitted");
   });
 
   it("returns pending_verify instead of terminal failed when the sync window expires without submit evidence", async () => {
@@ -464,6 +538,7 @@ describe("send_to v2 background verify", () => {
     server = createVerifyServer(client);
     registerAgent(server);
 
+    let settled = false;
     const resultPromise = server._registeredTools.send_to.handler(
       {
         mode: "surface",
@@ -472,8 +547,8 @@ describe("send_to v2 background verify", () => {
         press_enter: true,
       },
       {},
-    );
-    for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+    ).then((result: any) => { settled = true; return result; });
+    for (let elapsed = 0; !settled && elapsed < 10_000; elapsed += 100) {
       await vi.advanceTimersByTimeAsync(100);
     }
     const parsed = parseResult(await resultPromise);

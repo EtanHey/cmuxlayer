@@ -354,6 +354,7 @@ function snapshotDeliveryReceipt(
   const { rpc_methods: rpcMethods, ...snapshot } = receipt;
   return {
     ...snapshot,
+    ...(receipt.claude_submit ? { claude_submit: { ...receipt.claude_submit } } : {}),
     ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
@@ -1784,6 +1785,7 @@ export class AgentEngine {
   private deliveryDrainInFlight = false;
   private deliveryVerifyInFlight = false;
   private claudeVerifyTimer: ReturnType<typeof setInterval> | null = null;
+  private deliveryVerifyGeneration = 0;
   private deliverySubmitTimeoutMs: number;
   private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
@@ -7173,6 +7175,7 @@ export class AgentEngine {
 
   setDeliveryVerifier(verifier: DeliveryVerifier | null): void {
     this.deliveryVerifier = verifier;
+    this.refreshClaudeVerifyTimer();
   }
 
   setDeliverySnapshotReader(reader: DeliverySnapshotReader | null): void {
@@ -7418,9 +7421,25 @@ export class AgentEngine {
     if (!receipt) return;
     receipt.claude_submit = evidence;
     this.persistDeliveryReceipts();
-    if (!this.claudeVerifyTimer) {
+    this.refreshClaudeVerifyTimer();
+  }
+
+  getDeliveryVerificationGeneration(): number {
+    return this.deliveryVerifyGeneration;
+  }
+
+  private refreshClaudeVerifyTimer(): void {
+    if (this.deliveryVerifyInFlight) return;
+    const pending = this.deliveryVerifier &&
+      [...this.deliveryReceipts.values()].some(receipt => receipt.claude_submit && !receipt.terminal);
+    if (!pending) {
+      if (this.claudeVerifyTimer) clearInterval(this.claudeVerifyTimer);
+      this.claudeVerifyTimer = null;
+    } else if (!this.claudeVerifyTimer) {
       this.claudeVerifyTimer = setInterval(() => {
-        void this.verifyPendingDeliveries();
+        void this.verifyPendingDeliveries().catch(error => {
+          console.error("[cmuxlayer] Claude delivery verification failed:", error);
+        });
       }, 2_000);
       this.claudeVerifyTimer.unref?.();
     }
@@ -7536,6 +7555,7 @@ export class AgentEngine {
 
   async verifyPendingDeliveries(): Promise<void> {
     if (this.deliveryVerifyInFlight || !this.deliveryVerifier) return;
+    const generation = this.deliveryVerifyGeneration;
     this.deliveryVerifyInFlight = true;
     try {
       const snapshots = new Map<string, DeliveryVerifySnapshot | null>();
@@ -7559,7 +7579,7 @@ export class AgentEngine {
           const agent = this.getAgentState(receipt.agent_id);
           const snapshotKey = agent?.surface_id ?? receipt.agent_id;
           let snapshot: DeliveryVerifySnapshot | null | undefined;
-          if (this.deliverySnapshotReader) {
+          if (this.deliverySnapshotReader && !receipt.claude_submit) {
             if (!snapshots.has(snapshotKey)) {
               // AIDEV-NOTE (T2 #450): the snapshot read must be inside the
               // hang guard, not before it. SF8 hoisted the surface read out of
@@ -7648,6 +7668,7 @@ export class AgentEngine {
       }
     } finally {
       this.deliveryVerifyInFlight = false;
+      if (generation === this.deliveryVerifyGeneration) this.refreshClaudeVerifyTimer();
     }
   }
 
@@ -8064,6 +8085,10 @@ export class AgentEngine {
       retry_count: receipt.retry_count,
       delivery_id: receipt.delivery_id,
       delivery_state: receipt.delivery_state,
+      ...(receipt.claude_submit ? {
+        submit_evidence: receipt.claude_submit.submit_evidence,
+        frame_hash: receipt.claude_submit.last_frame_hash,
+      } : {}),
     });
   }
 
@@ -8629,6 +8654,7 @@ export class AgentEngine {
    * Stop the reconciliation sweep.
    */
   dispose(): void {
+    this.deliveryVerifyGeneration++;
     if (this.claudeVerifyTimer) clearInterval(this.claudeVerifyTimer);
     this.claudeVerifyTimer = null;
     if (this.sweepTimer) {
