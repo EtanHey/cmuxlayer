@@ -690,6 +690,15 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     }
   });
 
+  it("#636 preserves a queued send_text acknowledgement", async () => {
+    const saved = MOCK_RESPONSES["surface.send_text"];
+    MOCK_RESPONSES["surface.send_text"] = { queued: true };
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+      await expect(client.send("surface:1", "late text", { workspace: "workspace:1" })).resolves.toEqual({ queued: true });
+    } finally { MOCK_RESPONSES["surface.send_text"] = saved; }
+  });
+
   it("newSplit creates a surface and returns refs", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
     const result = await client.newSplit("right", { workspace: "workspace:1" });
