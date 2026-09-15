@@ -174,6 +174,18 @@ describe("spawn response shaping", () => {
     });
   });
 
+  it.each([false, true])("#636 pending boot guidance follows its receipt without duplicate delivery (verbose=%s)", verbose => {
+    const result = buildSpawnToolReturn({ ...base, spawn_state: "boot_unsubmitted",
+      boot_prompt_receipt: { delivery_id: "pending-boot-636", delivery_state: "pending_verify", submit_verified: null } }, verbose, "legacy");
+    const action = String(result.structuredContent.next_action);
+    expect(action).toMatch(/verification is pending/i);
+    expect(action).toContain('wait_for({delivery_id:"pending-boot-636",timeout_ms:10000})');
+    expect(action).toMatch(/never resend/i);
+    expect(action).not.toMatch(/typed but not submitted|report boot_unsubmitted|send_to\(/i);
+    expect(result.structuredContent.boot_prompt_receipt).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
+    expect(JSON.parse(result.content[0]!.text.split("\n")[0]!).next_action).toBe(action);
+  });
+
   it("names false/null boot submission as partial in lean and verbose receipts", () => {
     for (const submit_verified of [false, null]) {
       for (const verbose of [false, true]) {
