@@ -384,7 +384,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.done_marker).toBe(parsed.done_marker);
   });
 
-  it("warns once at the report deadline, then wakes once per distinct content after restart", async () => {
+  it("#636 D3 engine watch pushes bypass worker collab routing through deadline and report changes", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -433,12 +433,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     let engine = server._registeredTools.interact._engine;
-    const parent = parentRecord(parentUuid);
+    const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "collab.md") };
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
     const child = await spawn({ parent_agent_id: parent.agent_id });
 
     expect(child.ok, JSON.stringify(child)).toBe(true);
+    // Supply the channel explicitly on the RED baseline, before inheritance exists.
+    const worker = { ...engine.getAgentState(child.agent_id), collab_path: parent.collab_path };
+    engine.stateMgr.writeState(worker);
+    engine.getRegistry().set(child.agent_id, worker);
     expect(child.parent_agent_id).toBe(parent.agent_id);
     expect(existsSync(child.report_path)).toBe(true);
     expect(
@@ -457,7 +461,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     const beforeDeadline = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     watchNow = 3_000;
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ surfaceId: childUuid }, () => engine.sweepWatchesBestEffort());
     const deadlineCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       beforeDeadline,
     );
@@ -489,7 +493,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const beforeRestartSweep = (exec as ReturnType<typeof vi.fn>).mock.calls
       .length;
     watchNow += 1;
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ surfaceId: childUuid }, () => engine.sweepWatchesBestEffort());
     const restartCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       beforeRestartSweep,
     );
@@ -504,7 +508,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,
       "utf8",
     );
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ surfaceId: childUuid }, () => engine.sweepWatchesBestEffort());
     const afterCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       before,
     );
@@ -518,7 +522,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     watchNow = 2_000;
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ surfaceId: childUuid }, () => engine.sweepWatchesBestEffort());
     const retryCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,
     );
@@ -535,7 +539,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       `STATUS: DONE\nfirst stop\n${child.done_marker}\n`,
       "utf8",
     );
-    await engine.sweepWatchesBestEffort();
+    await runWithCallerContext({ surfaceId: childUuid }, () => engine.sweepWatchesBestEffort());
     const secondWakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,
     );
