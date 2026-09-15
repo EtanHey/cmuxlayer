@@ -162,6 +162,51 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
+  it.each(["foreign", "picker", "owned", "changed", "unknown"])("#636 key Return draft ownership (%s)", async (kind) => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const { runWithCallerContext } = await import("../src/caller-context.js");
+    let screen = "Claude Code\n❯ ";
+    const base = makeLifecycleExec(() => screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("send")) screen = `Claude Code\n❯ ${args.at(-1)}`;
+      if (args.includes("send-key") && args.includes("return")) screen = "Claude Code\n❯ ";
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context }) as any;
+      const callerId = await spawnReadyAgent(server);
+      const call = (args: Record<string, unknown>) => runWithCallerContext(kind === "unknown" ? undefined : { surfaceId: "surface:new", workspaceId: "workspace:1" }, () => server._registeredTools.send_to.handler(args, {}));
+      if (kind === "owned" || kind === "changed") {
+        screen = "Claude Code\n❯ ";
+        const typed = parseToolResult(await call({ mode: "surface", surface: "surface:new", text: "my undelivered message", press_enter: false }));
+        expect(typed.caller_agent_id).toBe(callerId);
+        if (kind === "changed") screen += " and human words";
+      } else screen = kind === "picker" ? "Claude Code\nSelect model\n❯ 1. Sonnet\n  2. Opus\nEnter to confirm · Esc to cancel" : "Claude Code\n❯ private human draft";
+      exec.mockClear();
+      const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return" }));
+      expect(result.caller_agent_id).toBe(kind === "unknown" ? null : callerId);
+      if (kind === "owned" || kind === "picker") {
+        expect(result.ok).toBe(true);
+        expect(mutatedPane(exec)).toBe(true);
+      } else {
+        expect(result.error_code).toBe("blocked_by_foreign_draft");
+        expect(result.error).toContain("try again in ~20 s or after your next turn");
+        expect(mutatedPane(exec)).toBe(false);
+        expect(screen).toContain(kind === "changed" ? "human words" : "private human draft");
+      }
+    } finally { context.dispose(); }
+  });
+
+  it.each(["agent", "surface", "command", "key"])("#636 attributes even invalid send_to %s receipts", async (mode) => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const context = createServerContext({ exec: makeLifecycleExec(() => "Claude Code\n❯ "), stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const result = await (createServer({ context }) as any)._registeredTools.send_to.handler({ mode }, {});
+      expect(parseToolResult(result)).toMatchObject({ ok: false, caller_agent_id: null });
+    } finally { context.dispose(); }
+  });
+
   it("send_to refuses a composer holding human-typed draft text, before typing anything", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";
@@ -195,6 +240,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     });
     expect(parsed.WARNING).toMatch(/terminal failure/i);
     expect(parsed.error).toMatch(/composer already holds text/i);
+    expect(parsed.error).toContain("try again in ~20 s or after your next turn");
     expect(mutatedPane(mockExec)).toBe(false);
     context.dispose();
   }, 20_000);
