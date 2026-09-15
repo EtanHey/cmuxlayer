@@ -1419,11 +1419,14 @@ export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, binDir, missingCm
   // does not select the server's registry, which defaults to os.homedir().
   const blocked = new Set(["NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS", "LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"]);
   const cleanEnv = Object.fromEntries(Object.entries(parentEnv).filter(([name]) =>
-    !name.startsWith("CMUX_") && !name.startsWith("CMUXLAYER_") && !blocked.has(name)));
+    !name.startsWith("CMUX_") && !name.startsWith("CMUXLAYER_") && !name.startsWith("GH_") && !name.startsWith("GITHUB_") && !blocked.has(name)));
   const home = join(tempRoot, "home");
   return {
     ...cleanEnv,
     HOME: home,
+    GH_CONFIG_DIR: join(tempRoot, "gh-config"),
+    GH_PROMPT_DISABLED: "1",
+    CMUXLAYER_BENCH_GH_RECEIPT: join(tempRoot, "blocked-gh.jsonl"),
     CODEX_HOME: join(home, ".codex"),
     CLAUDE_CONFIG_DIR: join(home, ".claude"),
     XDG_CONFIG_HOME: join(home, ".config"),
@@ -1456,6 +1459,17 @@ export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, binDir, missingCm
   };
 }
 
+export async function writeBenchmarkCommandStubs(binDir) {
+  // A delivery failure may reach the production ticket filer. Contain its
+  // command sink even if the host has credentials or a real gh on PATH.
+  await writeFile(join(binDir, "gh"), `#!${process.execPath}
+const fs = require("node:fs");
+if (process.env.CMUXLAYER_BENCH_GH_RECEIPT) fs.appendFileSync(process.env.CMUXLAYER_BENCH_GH_RECEIPT, JSON.stringify({ blocked: true, args: process.argv.slice(2) }) + "\\n");
+process.stderr.write("GitHub writes disabled in isolated benchmark\\n");
+process.exitCode = 1;
+`, { mode: 0o755 });
+}
+
 async function main() {
   if (!existsSync(distIndex) || !existsSync(distDaemon)) {
     throw new Error(
@@ -1478,6 +1492,7 @@ async function main() {
   await mkdir(binDir, { recursive: true });
   await writeFile(join(binDir, "package.json"), '{"type":"commonjs"}\n');
   await writeFakeCmux(binDir);
+  await writeBenchmarkCommandStubs(binDir);
   const daemonSocket = join(socketRoot, "d.sock");
   const missingCmuxSocket = join(socketRoot, "m.sock");
   const fakeCmuxState = join(tempRoot, "fake-cmux-state.json");
