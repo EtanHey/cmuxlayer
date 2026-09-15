@@ -4745,7 +4745,8 @@ describe("agent lifecycle tool handlers", () => {
         if (closeFails && args.includes("close-surface")) throw new Error("cleanup close rejected");
         return base(cmd, args);
       });
-      const client = new CmuxClient({ exec });
+      // Bind the mocked transport explicitly; the pre-push hook unsets ambient sockets.
+      const client = new CmuxClient({ exec, env: { ...process.env, CMUX_SOCKET_PATH: "/tmp/636-cleanup-test.sock" } });
       client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
       const server = createTrackedServer({ client, stateDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
       const result = (server as any)._registeredTools.spawn_agent.handler({
