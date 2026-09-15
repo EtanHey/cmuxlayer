@@ -138,6 +138,20 @@ describe("AgentRegistry", () => {
   });
 
   describe("reconstitute", () => {
+    it("#641 retains the active benchmark's explicitly isolated synthetic fixture", async () => {
+      vi.stubEnv("CMUXLAYER_BENCH_STATE", join(TEST_DIR, "fake-state.json"));
+      try {
+        const ghost = makeRecord({ agent_id: "active-benchmark", repo: "cmuxlayer", cli: "codex", pid: null,
+          surface_id: "surface:bench-spawn", surface_uuid: "00000000-0000-4000-8000-999999999999", workspace_id: "workspace:bench" });
+        stateMgr.writeState(ghost);
+        const surface = { ...makeSurface(ghost.surface_id), id: ghost.surface_uuid! };
+        const registry = new AgentRegistry(stateMgr, async () => [surface]);
+        await registry.reconstitute({ surfaces: [surface] });
+        expect(registry.get(ghost.agent_id)).not.toBeNull();
+        expect(stateMgr.readState(ghost.agent_id)).not.toBeNull();
+      } finally { vi.unstubAllEnvs(); }
+    });
+
     it.each(["startup", "reconcile"])("#641 purges exact benchmark ghosts from disk and memory during %s", async (operation) => {
       const ghost = makeRecord({ agent_id: "bench-disk", repo: "cmuxlayer", cli: "codex", state: "booting", pid: null,
         surface_id: "surface:bench-spawn", surface_uuid: "00000000-0000-4000-8000-999999999999", workspace_id: "workspace:bench" });

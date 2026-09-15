@@ -11670,7 +11670,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? rawStopContent.error
                 : "Agent stop could not establish a safe terminal I/O route";
             const remedy =
-              "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
+              "Refresh live topology with list_agents and verify the current surface binding before retrying. force:true does not bypass stable surface identity checks.";
             return err(
               new Error(`close_surface scope=agent refused: ${reason}`),
               {
