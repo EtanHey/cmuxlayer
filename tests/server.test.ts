@@ -1580,7 +1580,7 @@ describe("tool handler integration", () => {
     expect(initial).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
     await advanceTimers(2);
     await engine.verifyPendingDeliveries();
-    console.info("D1_WORKSPACE_SPAWN", JSON.stringify({ now: Date.now(), receipt: engine.getDeliveryReceipt(initial.delivery_id), agent: engine.getAgentState(parsed.agents[0].agent_id), panes: await mockClient.listPanes() }));
+    console.info("D1_WORKSPACE_SPAWN", JSON.stringify({ now: Date.now(), receipt: engine.getDeliveryReceipt(initial.delivery_id), agent: engine.getAgentState(parsed.agents[0].agent_id), panes: await mockClient.listPanes(), route: await engine.resolveAgentIoRoute(parsed.agents[0].agent_id).catch((error: Error) => error.message) }));
     expect(engine.getDeliveryReceipt(initial.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
     expect(engine.getAgentState(parsed.agents[0].agent_id)).toMatchObject({ prompt_delivered: true, boot_prompt_pending: false });
     expect(calls.slice(0, 4)).toEqual([
