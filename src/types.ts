@@ -85,6 +85,8 @@ export interface CmuxPaneSurfaces {
 }
 
 export interface CmuxTerminalMetadata {
+  runtime_surface_ready?: boolean;
+  ghostty_surface_ptr?: string | null;
   surface_ref?: string | null;
   surface_id?: string | null;
   ref?: string | null;
