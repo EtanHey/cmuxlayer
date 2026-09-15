@@ -320,8 +320,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   }
 
   it("#636 D2 inherits the collab channel in the receipt, first contract section, and list_agents", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid);
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
     const engine = server._registeredTools.interact._engine;
-    const parent = { ...parentRecord(), collab_path: join(inboxDir, "lead-collab.md") };
+    const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "lead-collab.md") };
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
     const child = await spawn({ parent_agent_id: parent.agent_id });
@@ -337,8 +341,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   });
 
   it("#636 D2 warns when a lead spawns a worker without a collab path", async () => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid);
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
     const engine = server._registeredTools.interact._engine;
-    const parent = parentRecord();
+    const parent = parentRecord(parentUuid);
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
     const child = await spawn({ parent_agent_id: parent.agent_id });
