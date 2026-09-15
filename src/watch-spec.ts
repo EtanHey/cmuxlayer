@@ -1379,9 +1379,11 @@ export async function sweepWatches(
 
   for (const notification of notifications) {
     let delivered = false;
+    let inFlight = false;
     let terminalFailureReason: string | null = null;
     try {
       const outcome = await opts.notify?.(notification);
+      inFlight = isRecord(outcome) && outcome.delivered === false && outcome.pending === true;
       if (
         isRecord(outcome) &&
         outcome.delivered === false &&
@@ -1390,7 +1392,7 @@ export async function sweepWatches(
       ) {
         terminalFailureReason = cleanString(outcome.reason);
       } else {
-        delivered = outcome !== false;
+        delivered = !inFlight && outcome !== false;
       }
     } catch {
       delivered = false;
@@ -1403,6 +1405,16 @@ export async function sweepWatches(
         const record = row;
         if (record.watch_id !== notification.watch_id) {
           return record;
+        }
+        if (inFlight) {
+          return {
+            ...record,
+            notification_pending: true,
+            notification_attempts: Math.max(0, (record.notification_attempts ?? 0) - (claimedFailedWatchIds.has(record.watch_id) ? 1 : 0)),
+            notification_next_attempt_at_ms: observedAt + 1_000,
+            notification_exhausted_at_ms: undefined,
+            notification_exhausted_reason: undefined,
+          };
         }
         if (
           record.state === "failed" &&
