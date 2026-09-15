@@ -355,6 +355,16 @@ class FakeClaudeSurfaceClient {
     this.renameTabCalls.push(title);
   }
 
+  consumeCodexQueue() {
+    if (this.pendingText) {
+      this.acceptedTranscript.push(this.pendingText);
+    }
+    this.pendingText = "";
+    this.queuedCodexReadsRemaining = 0;
+    this.queuedCodexVisibleText = null;
+    this.mode = "working";
+  }
+
   consumeCursorFollowUps() {
     this.acceptedTranscript.push(...this.cursorFollowUps);
     this.cursorFollowUps.length = 0;
@@ -842,10 +852,25 @@ describe("enter reliability", () => {
           expect(receipt?.composer_accepted).not.toBe(true);
         }
         const diskAfterIdle = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"));
-        for (const [result] of queued) expect(diskAfterIdle.find((receipt: any) => receipt.delivery_id === result.delivery_id)).toMatchObject({ delivery_state: "queued", terminal: false, submit_verified: null });
+        const nextAttemptTimes = deferredAfterIdle.map((receipt, index) => {
+          expect(receipt?.next_attempt_at).toEqual(expect.any(String));
+          const nextAttemptTime = Date.parse(receipt!.next_attempt_at!);
+          expect(Number.isFinite(nextAttemptTime)).toBe(true);
+          const persisted = diskAfterIdle.find(
+            (candidate: any) => candidate.delivery_id === queued[index]![0].delivery_id,
+          );
+          expect(persisted).toMatchObject({
+            delivery_state: "queued",
+            terminal: false,
+            submit_verified: null,
+            next_attempt_at: receipt!.next_attempt_at,
+          });
+          expect(persisted?.composer_accepted).not.toBe(true);
+          return nextAttemptTime;
+        });
         expect(client.sendCalls).toEqual([]); expect(client.sendKeyCalls).toEqual([]);
         expect((await client.readScreen(client.surface)).text).toBe(idleDraftFrame);
-        vi.setSystemTime(Math.max(...deferredAfterIdle.map(receipt => Date.parse(receipt!.next_attempt_at!))));
+        vi.setSystemTime(Math.max(...nextAttemptTimes));
         const readyFrame = cli === "claude" ? "Claude Code\n❯ \n"
           : cli === "codex" ? "OpenAI Codex\n\n› Implement {feature}\n\n  gpt-5.6-sol xhigh"
             : "Cursor Agent\nAuto\n~/Gits/cmuxlayer · main\n→ Plan, search, build anything";
@@ -902,10 +927,7 @@ describe("enter reliability", () => {
     // Model the harness consuming its own accepted queue, without another
     // cmuxlayer text write, then let the real verifier observe delivery.
     if (cli === "codex") {
-      client.requiredReturns = 1;
-      client.queuedCodexReadsAfterReturn = 0;
-      client.queuedCodexVisibleText = null;
-      await client.sendKey(client.surface, "return");
+      client.consumeCodexQueue();
     } else if (cli === "cursor") {
       client.consumeCursorFollowUps();
     }
@@ -915,6 +937,7 @@ describe("enter reliability", () => {
     }
     expect(engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
     expect(client.sendCalls).toEqual([payload]);
+    expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(returns);
   });
 
   it("rejects string booleans on raw send_to handler calls", async () => {
