@@ -14639,6 +14639,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "boot_prompt_path",
               "worktree",
               "mcp_profile",
+              "collab_path",
               "parent_agent_id",
               "role",
               "placement",
