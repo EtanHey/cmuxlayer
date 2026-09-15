@@ -444,6 +444,7 @@ export interface SpawnAgentParams {
 }
 
 export interface SpawnAgentResult {
+  runtime_initialization?: "unsupported" | "already_ready" | "input_demand";
   agent_id: string;
   parent_agent_id: string | null;
   surface_id: string;
@@ -8982,8 +8983,9 @@ export class AgentEngine {
         authority,
       },
     );
+    let runtimeInitialization: "unsupported" | "already_ready" | "input_demand" = "unsupported";
     try {
-      if ((spawnParams.runtime_metadata_supported ?? this.client.supportsSurfaceRuntimeMetadata) === true) await initializeNewSurfaceRuntime(
+      if ((spawnParams.runtime_metadata_supported ?? this.client.supportsSurfaceRuntimeMetadata) === true) runtimeInitialization = await initializeNewSurfaceRuntime(
         this.client,
         surface.surface,
         createdWorkspace,
@@ -9054,6 +9056,7 @@ export class AgentEngine {
     }
     this.schedulePostSpawnLivenessAssertion(agentId);
     return {
+      runtime_initialization: runtimeInitialization,
       agent_id: agentId,
       parent_agent_id: parentAgentId,
       surface_id: surface.surface,

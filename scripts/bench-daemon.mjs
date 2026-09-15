@@ -393,13 +393,13 @@ if (command === "list-workspaces") {
 } else if (command === "list-pane-surfaces") {
   write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: "pane:bench", surfaces });
 } else if (command === "new-split") {
-  patchState({ closed: false });
+  patchState({ closed: false, runtimeReady: false });
   write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: "surface:bench-spawn", surface_id: "00000000-0000-4000-8000-999999999999", title: state.title, type: "terminal" });
 } else if (command === "close-surface") {
   patchState({ closed: true });
   write({ ok: true });
 } else if (command === "debug-terminals") {
-  write({ terminals: surfaces.map((surface) => ({ surface_ref: surface.ref, current_directory: cwd })) });
+  write({ terminals: surfaces.map((surface) => ({ surface_ref: surface.ref, surface_id: surface.id, current_directory: cwd, runtime_surface_ready: surface.ref !== "surface:bench-spawn" || state.runtimeReady === true, ghostty_surface_ptr: surface.ref !== "surface:bench-spawn" || state.runtimeReady === true ? "0x1234" : "nil" })) });
 } else if (command === "read-screen") {
   const surface = args[args.indexOf("--surface") + 1] || surfaces[0].ref;
   const surfaceState = readSurfaceState(surface);
@@ -427,6 +427,7 @@ if (command === "list-workspaces") {
   write({ ok: true });
 } else if (command === "send-key") {
   const surface = optionValue("--surface", surfaces[0].ref);
+  if (["surface:bench-spawn", spawnedSurface.id].includes(surface) && (args.at(-1) || "").toLowerCase() === "ctrl-u") patchState({ runtimeReady: true });
   const surfaceState = readSurfaceState(surface);
   if ((args.at(-1) || "").toLowerCase() === "return") {
     surfaceState.transcript = surfaceState.composer;
@@ -636,7 +637,7 @@ async function handleFakeCmuxSocketLine(
       break;
     }
     case "surface.split":
-      await writeFakeState(statePath, { ...state, closed: false });
+      await writeFakeState(statePath, { ...state, closed: false, runtimeReady: false });
       result = {
         ...layout,
         surface_ref: spawned.ref,
@@ -661,6 +662,9 @@ async function handleFakeCmuxSocketLine(
     }
     case "surface.send_key": {
       const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
+      if ([spawned.ref, spawned.id].includes(params.surface_id) && String(params.key).toLowerCase() === "ctrl-u") {
+        await writeFakeState(statePath, { ...state, runtimeReady: true });
+      }
       await mutateFakeSurfaceState(
         surfaceKey,
         surfaceStates,
@@ -1002,6 +1006,9 @@ async function measureSpawnLifecycleOnce(
     ),
     "spawn_agent",
   );
+  if (spawnResult.runtime_initialization !== "input_demand") {
+    throw new Error(`benchmark cold spawn did not exercise D4: ${compact(spawnResult)}`);
+  }
   if (!spawnResult.agent_id || !spawnResult.surface_id) {
     throw new Error(`spawn_agent omitted identity: ${compact(spawnResult)}`);
   }
@@ -1221,6 +1228,9 @@ async function measureLiveListAgentsAcrossClients(clients) {
     ),
     "spawn_agent(list_agents fixture)",
   );
+  if (spawnResult.runtime_initialization !== "input_demand") {
+    throw new Error(`benchmark cold spawn did not exercise D4: ${compact(spawnResult)}`);
+  }
   if (!spawnResult.agent_id || !spawnResult.surface_id) {
     throw new Error("list_agents fixture spawn omitted identity");
   }
