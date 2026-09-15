@@ -13148,7 +13148,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json");
     const testProcess =
       process.env.VITEST === "true" || process.env.NODE_ENV === "test";
-    const engine =
+    const engine: AgentEngine =
       context.lifecycleSweepEngine ??
       new AgentEngine(
         stateMgr,
@@ -13509,17 +13509,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 return `[watch] target agent ended before predicate — inspect ${event.target}`;
               })();
               try {
+                // The watch keeps observed_at_ms fixed across retries/restart.
+                // Reuse its durable receipt; a pending notification never retypes.
+                const deliveryId = `watch:${deliveryFrameHash(JSON.stringify([event.watch_id, event.observed_at_ms, event.reason]))}`;
+                const existing = engine.getDeliveryReceipt(deliveryId);
+                if (existing) {
+                  if (!existing.terminal) return { delivered: false, pending: true };
+                  return existing.submit_verified === true
+                    ? true : externalFallbackAfterLocalFailure();
+                }
                 const delivery = await lifecycleAgentInputDeliverer({
                   agent_id: owner.agent_id,
                   text,
                   press_enter: true,
                   allow_busy: true,
                   source_event: "report_to_parent",
-                  delivery_id: randomUUID(),
+                  delivery_id: deliveryId,
+                  sender_agent_id: owner.agent_id,
+                  background_verify: true,
                 });
+                if (delivery.delivery === "pending_verify") {
+                  await engine.verifyPendingDeliveries();
+                  if (engine.getDeliveryReceipt(deliveryId)?.submit_verified === true) return true;
+                  return { delivered: false, pending: true };
+                }
                 const ownerDelivered =
-                  delivery.delivery === "submitted" ||
-                  delivery.delivery === "queued";
+                  delivery.delivery === "submitted" && delivery.submit_verified === true;
+                if (delivery.delivery === "queued") return { delivered: false, pending: true };
                 return ownerDelivered
                   ? true
                   : externalFallbackAfterLocalFailure();
