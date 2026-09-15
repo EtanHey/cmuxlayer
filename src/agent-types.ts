@@ -187,6 +187,7 @@ export interface PublicAgent {
   session_id: string | null;
   resumable: boolean;
   resume_command?: string;
+  collab_path?: string;
   submit_verified?: boolean | null;
   model_mismatch?: boolean | null;
 }

@@ -141,6 +141,7 @@ export function toPublicAgent(record: AgentRecord): PublicAgent {
     resumable: !!resumeCommand,
     submit_verified: record.submit_verified ?? null,
     model_mismatch: record.model_mismatch ?? null,
+    ...(record.collab_path ? { collab_path: record.collab_path } : {}),
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),
   };
 }
