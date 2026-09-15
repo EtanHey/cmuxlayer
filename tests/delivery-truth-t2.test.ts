@@ -206,7 +206,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   });
 
-  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other", "whitespace", "argument", "unchanged-space", "quoted-space", "indentation", "wrap"].flatMap(kind => ["claude", "cursor"].map(cli => ({ kind, cli }))))("#636 key Return draft ownership (%j)", async ({ kind, cli }) => {
+  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other", "whitespace", "argument", "unchanged-space", "quoted-space", "indentation", "wrap", "unreadable", "blank", "unrecognized", "leading-blank", "spent", "auto-spent", "observed-clear", "prefix-read", "session-changed", "leading-blank-unknown", "shell-control", "unknown-cli-control", "spent-ambiguous", "recycled"].flatMap(kind => (kind.startsWith("leading-blank") ? ["claude", "cursor", "codex"] : ["claude", "cursor"]).map(cli => ({ kind, cli }))))("#636 key Return draft ownership (%j)", async ({ kind, cli }) => {
     const { createServer, createServerContext } = await loadServerModule();
     const { runWithCallerContext } = await import("../src/caller-context.js");
     const edits: Record<string, [string, string]> = {
@@ -218,12 +218,29 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       wrap: ["foo bar", "foo\nbar"],
     };
     const edit = edits[kind];
-    const render = (input: string) => cli === "cursor" ? `Cursor Agent\ncursor> ${input}\nAuto` : `Claude Code\n❯ ${input}`;
+    const render = (input: string) => cli === "cursor" ? `Cursor Agent\ncursor> ${input}\nAuto` : cli === "codex" ? `OpenAI Codex\n› ${input}` : `Claude Code\n❯ ${input}`;
     let screen = render("");
+    let readUnavailable = false;
+    let liveUuid = "11111111-1111-4111-8111-111111111111";
+    let returnAttempts = 0;
+    let failReturn = false;
     const base = makeLifecycleExec(() => screen);
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (kind === "recycled" && liveUuid.startsWith("2222") && args.includes("list-panes")) {
+        const result = await base(cmd, args); const data = JSON.parse(result.stdout);
+        data.panes[0].surface_refs.push("surface:kept"); data.panes[0].surface_count = 2;
+        return { ...result, stdout: JSON.stringify(data) };
+      }
+      if (kind === "recycled" && args.includes("list-pane-surfaces")) {
+        const result = await base(cmd, args); const data = JSON.parse(result.stdout);
+        data.surfaces[0].id = liveUuid;
+        if (liveUuid.startsWith("2222")) data.surfaces.push({ ...data.surfaces[0], ref: "surface:kept", id: "11111111-1111-4111-8111-111111111111" });
+        return { ...result, stdout: JSON.stringify(data) };
+      }
+      if (args.includes("send-key") && args.includes("return") && kind === "spent-ambiguous" && failReturn) { returnAttempts++; throw new Error("connection_closed after dispatch"); }
+      if (args.includes("read-screen") && readUnavailable) throw new Error("read unavailable");
       if (args.includes("send")) screen = render(String(args.at(-1)));
-      if (args.includes("send-key") && args.includes("return")) screen = render("");
+      if (args.includes("send-key") && args.includes("return") && !["spent", "auto-spent"].includes(kind)) screen = render("");
       return base(cmd, args);
     });
     const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
@@ -231,7 +248,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       const server = createServer({ context }) as any;
       const targetId = await spawnReadyAgent(server);
       const engine = server._registeredTools.interact._engine;
-      const target = { ...engine.getRegistry().get(targetId), cli };
+      const target = { ...engine.getRegistry().get(targetId), cli: kind.endsWith("-control") ? undefined : cli };
       engine.stateMgr.writeState(target); engine.getRegistry().set(targetId, target);
       const callerId = "draft-guard-sender";
       const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -239,11 +256,36 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       engine.stateMgr.writeState(caller);
       engine.getRegistry().set(callerId, caller);
       let callerSurface = callerUuid;
-      const call = (args: Record<string, unknown>) => runWithCallerContext(kind === "unknown" ? undefined : { surfaceId: callerSurface, workspaceId: "workspace:1" }, () => server._registeredTools.send_to.handler(args, {}));
-      if (kind === "owned" || kind === "changed" || kind === "other" || edit) {
+      const call = (args: Record<string, unknown>) => runWithCallerContext((kind === "unknown" || kind === "leading-blank-unknown") ? undefined : { surfaceId: callerSurface, workspaceId: "workspace:1" }, () => server._registeredTools.send_to.handler(args, {}));
+      if (kind === "owned" || kind === "changed" || kind === "other" || ["spent", "spent-ambiguous", "auto-spent", "observed-clear", "prefix-read", "session-changed", "recycled"].includes(kind) || edit) {
         screen = render("");
-        const typed = parseToolResult(await call({ mode: "surface", surface: "surface:new", text: edit?.[0] ?? "my undelivered message", press_enter: false }));
+        const typed = parseToolResult(await call({ mode: "surface", surface: "surface:new", text: edit?.[0] ?? "my undelivered message", press_enter: kind === "auto-spent" }));
         expect(typed.caller_agent_id).toBe(callerId);
+        if (kind === "spent-ambiguous") failReturn = true;
+        if (kind === "spent" || kind === "spent-ambiguous") await call({ mode: "key", surface: "surface:new", text: "return" });
+        if (kind === "spent-ambiguous") expect(returnAttempts).toBe(1);
+        if (kind === "recycled") {
+          liveUuid = "22222222-2222-4222-8222-222222222222";
+          await server._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+          screen = render("");
+          await server._registeredTools.read_screen.handler({ surface: "surface:kept" }, {});
+          screen = render("my undelivered message");
+        }
+        if (kind === "observed-clear") {
+          await server._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+          screen = render("");
+          await server._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+          screen = render("my undelivered message");
+        }
+        if (kind === "prefix-read") {
+          screen = render("my undeliv");
+          await server._registeredTools.read_screen.handler({ surface: "surface:new" }, {});
+          screen = render("my undelivered message");
+        }
+        if (kind === "session-changed") {
+          const changed = { ...target, cli_session_id: "new-harness-session" };
+          engine.stateMgr.writeState(changed); engine.getRegistry().set(targetId, changed);
+        }
         if (edit) screen = render(edit[1]);
         if (kind === "changed") screen = render("my undelivered message and human words");
         if (kind === "other") {
@@ -253,20 +295,35 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
           engine.getRegistry().set(other.agent_id, other);
         }
       } else screen = kind === "permission" ? "Claude Code\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel" : kind === "picker" ? "Claude Code\nSelect model\n❯ 1. Sonnet\n  2. Opus\nEnter to confirm · Esc to cancel" : render("private human draft");
+      if (kind === "shell-control") screen = "$ ";
+      if (kind === "unknown-cli-control") screen = "Unrecognized terminal";
+      if (kind === "unreadable") readUnavailable = true;
+      if (kind === "blank") screen = "";
+      if (kind === "unrecognized") screen = "Claude Code loading unknown layout";
+      if (kind.startsWith("leading-blank")) screen = render("\nprivate human draft");
       exec.mockClear();
-      const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return" }));
-      if (kind === "owned" || kind === "unchanged-space" || kind === "picker" || kind === "permission") {
+      const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return", engineSubmitProof: "launcher_pending_command" }));
+      if (kind === "owned" || kind === "unchanged-space" || kind === "prefix-read" || kind.endsWith("-control") || kind === "picker" || kind === "permission") {
         expect(result.ok).toBe(true);
         expect(mutatedPane(exec)).toBe(true);
-      } else {
-        expect(result.error_code).toBe("blocked_by_foreign_draft");
-        expect(result.error).toContain("try again in ~20 s or after your next turn");
+      } else if (kind === "recycled") {
+        expect(result.ok).toBe(false);
+        expect(result.error).toMatch(/stable.*UUID|binding|recycl/i);
         expect(mutatedPane(exec)).toBe(false);
-        expect(screen).toContain(edit ? edit[1] : kind === "changed" ? "human words" : kind === "other" ? "my undelivered message" : "private human draft");
+        // Observing B's identical text neither marked A seen nor invalidated A:
+        // the pre-seen empty frame on A above must still allow its later text.
+        const retained = parseToolResult(await call({ mode: "key", surface: "11111111-1111-4111-8111-111111111111", text: "return" }));
+        expect(retained.ok, JSON.stringify(retained)).toBe(true);
+      } else {
+        const unknown = ["unreadable", "blank", "unrecognized"].includes(kind);
+        expect(result.error_code).toBe(unknown ? "draft_ownership_unverified" : "blocked_by_foreign_draft");
+        if (!unknown) expect(result.error).toContain("try again in ~20 s or after your next turn");
+        expect(mutatedPane(exec)).toBe(false);
+        if (!unknown) expect(screen).toContain(edit ? edit[1] : kind === "changed" ? "human words" : ["other", "spent", "spent-ambiguous", "auto-spent", "observed-clear", "session-changed"].includes(kind) ? "my undelivered message" : "private human draft");
       }
-      expect(result.caller_agent_id).toBe(kind === "unknown" ? null : kind === "other" ? "other-sender" : callerId);
+      expect(result.caller_agent_id).toBe((kind === "unknown" || kind === "leading-blank-unknown") ? null : kind === "other" ? "other-sender" : callerId);
     } finally { context.dispose(); }
-  });
+  }, 15_000);
 
   it.each(["agent", "surface", "command", "key"])("#636 attributes even invalid send_to %s receipts", async (mode) => {
     const { createServer, createServerContext } = await loadServerModule();
