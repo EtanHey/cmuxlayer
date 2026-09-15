@@ -17,10 +17,9 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: rm -f package-lock.json
       - run: bun install
-      - name: Run reduced-round OS-temp candidate
+      - name: Run full-round OS-temp candidate
         env:
-          CMUXLAYER_BENCH_ROUNDS: "3"
-          CMUXLAYER_BENCH_LOCAL_GATE: "1"
+          CMUXLAYER_BENCH_ROUNDS: "12"
         run: bun run bench:daemon:check
       - name: Verify benchmark scratch cleanup
         if: always()
