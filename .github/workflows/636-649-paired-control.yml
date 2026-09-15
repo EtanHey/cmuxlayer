@@ -177,7 +177,7 @@ jobs:
           raise SystemExit(1 if new_rows else 0)
           PY
           candidate_new_process_exit=$?
-          comm -13 \
+          LC_ALL=C comm -13 \
             "$GITHUB_WORKSPACE/evidence/boundary/candidate-sockets-before.txt" \
             "$GITHUB_WORKSPACE/evidence/boundary/candidate-sockets-after.txt" \
             > "$GITHUB_WORKSPACE/evidence/boundary/candidate-new-sockets.txt"
@@ -353,7 +353,7 @@ jobs:
           raise SystemExit(1 if new_rows else 0)
           PY
           control_new_process_exit=$?
-          comm -13 \
+          LC_ALL=C comm -13 \
             "$GITHUB_WORKSPACE/evidence/boundary/control-sockets-before.txt" \
             "$GITHUB_WORKSPACE/evidence/boundary/control-sockets-after.txt" \
             > "$GITHUB_WORKSPACE/evidence/boundary/control-new-sockets.txt"
