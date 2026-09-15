@@ -292,6 +292,8 @@ export type AgentDeliveryState =
   | "failed_confirmed";
 
 export interface AgentDeliveryReceipt {
+  submit_evidence?: string;
+  frame_hash?: string;
   delivery_id: string;
   agent_id: string;
   text: string;
@@ -1236,7 +1238,7 @@ interface AgentEngineClient {
       beforeMutation?: () => Promise<void>;
       stableSurfaceIdentity?: string | null;
     },
-  ): Promise<void>;
+  ): Promise<unknown>;
   sendKey(
     surface: string,
     key: string,
@@ -7576,6 +7578,8 @@ export class AgentEngine {
           this.persistDeliveryReceipts();
         }
         if (observation.outcome === "delivered") {
+          if (typeof observation.evidence?.submit_evidence === "string") receipt.submit_evidence = observation.evidence.submit_evidence;
+          if (typeof observation.evidence?.frame_hash === "string") receipt.frame_hash = observation.evidence.frame_hash;
           receipt.delivery_state = "submitted";
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
@@ -8032,6 +8036,8 @@ export class AgentEngine {
       retry_count: receipt.retry_count,
       delivery_id: receipt.delivery_id,
       delivery_state: receipt.delivery_state,
+      ...(receipt.submit_evidence ? { submit_evidence: receipt.submit_evidence } : {}),
+      ...(receipt.frame_hash ? { frame_hash: receipt.frame_hash } : {}),
     });
   }
 
