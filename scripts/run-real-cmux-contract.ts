@@ -35,6 +35,23 @@ export interface OrphanProbeReceipt extends SocketProbeReceipt {
   ppid: number;
 }
 
+/** Keep a failed proof primary; cleanup still fails an otherwise successful proof. */
+export async function withD4Cleanup(proof: () => Promise<void>, cleanup: () => Promise<void>): Promise<void> {
+  let primary: Error | undefined;
+  try {
+    await proof();
+  } catch (error) {
+    primary = error instanceof Error ? error : new Error(String(error));
+    throw primary;
+  } finally {
+    try { await cleanup(); }
+    catch (error) {
+      if (!primary) throw error;
+      primary.message += `. D4 cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+}
+
 export function hasRawShellPrompt(screen: Record<string, unknown>): boolean {
   if (typeof screen.content !== "string") {
     throw new Error("D4 read_screen raw:true response is missing string content");
@@ -1046,7 +1063,7 @@ async function runContractSteps(
       };
       const before = surfaceIds(await cli(["tree"]));
       let created: Record<string, unknown> | null = null;
-      try {
+      await withD4Cleanup(async () => {
         created = extractStructuredContent(await peer.callTool("spawn_agent", {
           type: "terminal", workspace: spawnWorkspace, focus: false, verbose: true, title: "636-owned-runtime-proof",
         }, 15_000));
@@ -1068,14 +1085,14 @@ async function runContractSteps(
           throw new Error(`D4 runtime not ready: ${JSON.stringify(runtime)}`);
         }
         console.log(`[contract] PASS D4 real-daemon spawn ${surface} ready=true ptr=${runtime.ghostty_surface_ptr} initialization=${created.runtime_initialization} workspace=${spawnWorkspace}`);
-      } finally {
+      }, async () => {
         if (typeof created?.surface_id === "string") {
           await peer.callTool("close_surface", { surface: created.surface_id, workspace: spawnWorkspace }, 10_000);
           const after = surfaceIds(await cli(["tree"]));
           if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error(`D4 close changed foreign surfaces: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
           console.log(`[contract] PASS D4 close/tree verified only ${created.surface_id} removed`);
         }
-      }
+      });
     }
 
     setActiveStep("list_surfaces/read_screen");

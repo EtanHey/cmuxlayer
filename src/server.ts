@@ -14810,7 +14810,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 created.surface_id,
               );
             } catch (error) {
-              await client.closeSurface(created.surface, { workspace: created.workspace ?? workspace });
+              try {
+                await client.closeSurface(created.surface, { workspace: created.workspace ?? workspace });
+              } catch (cleanupError) {
+                const primary = error instanceof Error ? error : new Error(String(error));
+                primary.message += `. Failed to close launcher surface ${created.surface}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
+                throw primary;
+              }
               throw error;
             }
             if (args.title) {
