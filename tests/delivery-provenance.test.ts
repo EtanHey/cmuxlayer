@@ -27,3 +27,7 @@ it("#636 keeps verifier attribution in the durable receipt and event", async () 
 it("#636 a completed tool above a nonempty Claude composer is idle", () => {
   expect(parseScreen("Claude Code\n⏺ Bash(previous tool completed)\n❯ 636 unique delivery\n").status).toBe("idle");
 });
+
+it("#636 indented shell output does not end a running Claude tool", () => {
+  expect(parseScreen("Claude Code\n⏺ Bash(npm run release)\n     $ npm run build\n     > tsc --build\n").status).toBe("working");
+});
