@@ -44,6 +44,7 @@ export function claudePasteId(composer: string | null): number {
   return match ? Number(match[1]) : 0;
 }
 export interface ClaudeDeliveryFrame extends ClaudeReturnBaseline {
+  composer_present: boolean;
   complete: boolean;
   pending: boolean;
   cleared: boolean;
@@ -56,20 +57,23 @@ export interface ClaudeDeliveryFrame extends ClaudeReturnBaseline {
 type ClaudeReceipt = Pick<AgentDeliveryReceipt, "retry_count" | "submit_dispatched"> & { claude_submit?: ClaudeDeliveryEvidence };
 
 /** Reads from every MCP client update one persisted, monotonic generation. */
-export function observeClaudeComposer(evidence: ClaudeDeliveryEvidence, frame: Pick<ClaudeDeliveryFrame, "complete" | "cleared" | "pasteId" | "renderingPrefix" | "observed_at">): boolean {
+export function observeClaudeComposer(evidence: ClaudeDeliveryEvidence, frame: Pick<ClaudeDeliveryFrame, "composer_present" | "complete" | "cleared" | "pasteId" | "renderingPrefix" | "observed_at">): boolean {
+  if (!frame.composer_present) return false;
   if (frame.observed_at < (evidence.last_composer_observed_at ?? -Infinity)) return false;
   if (evidence.return_at !== undefined && frame.observed_at < evidence.return_at) return false;
   const ownership = () => [evidence.payload_observed, evidence.observed_paste_id, evidence.retry_revoked, evidence.attribution_revoked, evidence.composer_cleared, evidence.last_composer_observed_at];
   const before = ownership();
   evidence.last_composer_observed_at = frame.observed_at;
-  if (frame.complete) {
+  const differentPaste = Boolean(frame.pasteId && evidence.observed_paste_id !== undefined && frame.pasteId !== evidence.observed_paste_id);
+  const complete = frame.complete && !differentPaste;
+  if (complete) {
     evidence.payload_observed = true;
     if (frame.pasteId && evidence.observed_paste_id === undefined) evidence.observed_paste_id = frame.pasteId;
   }
   if (evidence.payload_observed && frame.cleared) {
     evidence.retry_revoked = true;
     evidence.composer_cleared = true;
-  } else if (!frame.cleared && ((!frame.complete && !frame.renderingPrefix) || evidence.composer_cleared || (evidence.payload_observed && !frame.complete))) {
+  } else if (!frame.cleared && (differentPaste || (!complete && !frame.renderingPrefix) || evidence.composer_cleared || (evidence.payload_observed && !complete))) {
     evidence.retry_revoked = true;
     evidence.attribution_revoked = true;
   }
@@ -83,7 +87,7 @@ export function reserveClaudeReturn(receipt: ClaudeReceipt, frame: ClaudeDeliver
   receipt.retry_count = previousAttempts;
   evidence.payload_observed = true;
   evidence.observed_frame_hash = frame.hash;
-  evidence.observed_paste_id = frame.pasteId || evidence.observed_paste_id;
+  evidence.observed_paste_id ??= frame.pasteId || undefined;
   evidence.pre_return = { hash: frame.hash, observed_at: frame.observed_at, transcriptMatches: frame.transcriptMatches,
     tokenCount: frame.tokenCount, cost: frame.cost, active: frame.active };
   evidence.return_at = Date.now();
@@ -105,6 +109,7 @@ export async function verifyClaudeDelivery(
   const inspect = (frame: ClaudeDeliveryFrame | null): DeliveryVerifyObservation | null => {
     if (!current()) return { outcome: "pending", reason: "verification_cancelled" };
     if (!frame) return { outcome: "pending", reason: "surface_read_unavailable" };
+    if (!frame.composer_present) return { outcome: "pending", reason: "composer_anchor_unavailable" };
     if (frame.observed_at < (evidence.last_composer_observed_at ?? -Infinity)) return { outcome: "pending", reason: "stale_composer_observation" };
     observeClaudeComposer(evidence, frame);
     evidence.last_frame_hash = frame.hash;
