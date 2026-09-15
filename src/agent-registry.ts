@@ -707,6 +707,7 @@ export class AgentRegistry {
     for (const record of stateFiles) {
       this.agents.set(record.agent_id, record);
     }
+    this.purgeLegacyBenchmarkAgents();
     this.pruneResumableTombstones();
 
     return this.reconcileSurfaces(opts);
@@ -725,9 +726,30 @@ export class AgentRegistry {
         this.agents.set(record.agent_id, record);
       }
     }
+    this.purgeLegacyBenchmarkAgents();
     this.pruneResumableTombstones();
 
     return this.reconcileSurfaces(opts);
+  }
+
+  /** Idempotent #641 migration. Retire only the exact old synthetic namespace;
+   * no surface I/O, process signals, event-history deletion, or inbox guessing.
+   * Active benchmark children use this namespace inside their isolated HOME.
+   */
+  private purgeLegacyBenchmarkAgents(): void {
+    if (process.env.CMUXLAYER_BENCH_STATE) return;
+    const isArtifact = (record: AgentRecord): boolean =>
+      record.repo === "cmuxlayer" && record.cli === "codex" &&
+      record.surface_id === "surface:bench-spawn" &&
+      record.surface_uuid === "00000000-0000-4000-8000-999999999999" &&
+      record.workspace_id === "workspace:bench" &&
+      record.pid == null && !record.cli_session_id;
+    for (const record of this.agents.values()) {
+      if (!isArtifact(record)) continue;
+      const persisted = this.stateMgr.readState(record.agent_id);
+      if (persisted && !isArtifact(persisted)) continue;
+      this.evictExplicit(record.agent_id);
+    }
   }
 
   private liveSurfaceKeys(surfaces: readonly CmuxSurface[]): Set<string> {

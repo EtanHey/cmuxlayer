@@ -138,6 +138,44 @@ describe("AgentRegistry", () => {
   });
 
   describe("reconstitute", () => {
+    it("#641 retains the active benchmark's explicitly isolated synthetic fixture", async () => {
+      vi.stubEnv("CMUXLAYER_BENCH_STATE", join(TEST_DIR, "fake-state.json"));
+      try {
+        const ghost = makeRecord({ agent_id: "active-benchmark", repo: "cmuxlayer", cli: "codex", pid: null,
+          surface_id: "surface:bench-spawn", surface_uuid: "00000000-0000-4000-8000-999999999999", workspace_id: "workspace:bench" });
+        stateMgr.writeState(ghost);
+        const surface = { ...makeSurface(ghost.surface_id), id: ghost.surface_uuid! };
+        const registry = new AgentRegistry(stateMgr, async () => [surface]);
+        await registry.reconstitute({ surfaces: [surface] });
+        expect(registry.get(ghost.agent_id)).not.toBeNull();
+        expect(stateMgr.readState(ghost.agent_id)).not.toBeNull();
+      } finally { vi.unstubAllEnvs(); }
+    });
+
+    it.each(["startup", "reconcile"])("#641 purges exact benchmark ghosts from disk and memory during %s", async (operation) => {
+      const ghost = makeRecord({ agent_id: "bench-disk", repo: "cmuxlayer", cli: "codex", state: "booting", pid: null,
+        surface_id: "surface:bench-spawn", surface_uuid: "00000000-0000-4000-8000-999999999999", workspace_id: "workspace:bench" });
+      stateMgr.writeState(ghost);
+      const controls = [
+        makeRecord({ agent_id: "real-agent" }),
+        { ...ghost, agent_id: "has-process", pid: process.pid },
+        { ...ghost, agent_id: "has-session", cli_session_id: "real-session" },
+        { ...ghost, agent_id: "different-uuid", surface_uuid: "00000000-0000-4000-8000-999999999998" },
+        { ...ghost, agent_id: "different-workspace", workspace_id: "workspace:1" },
+      ];
+      for (const record of controls) stateMgr.writeState(record);
+      const registry = new AgentRegistry(stateMgr, async () => [makeSurface("surface:42")]);
+      if (operation === "reconcile") registry.set("bench-memory", { ...ghost, agent_id: "bench-memory" });
+      await registry[operation === "startup" ? "reconstitute" : "reconcile"]({ surfaces: [makeSurface("surface:42")] });
+      expect(registry.get("bench-disk")).toBeNull();
+      expect(registry.get("bench-memory")).toBeNull();
+      expect(stateMgr.readState("bench-disk")).toBeNull();
+      for (const record of controls) expect(registry.get(record.agent_id), record.agent_id).not.toBeNull();
+      // Repeating the migration neither resurrects ghosts nor drops controls.
+      await registry.reconcile({ surfaces: [makeSurface("surface:42")] });
+      expect(registry.list().map(record => record.agent_id).sort()).toEqual(controls.map(record => record.agent_id).sort());
+    });
+
     it("loads agents from state files", async () => {
       stateMgr.writeState(makeRecord({ agent_id: "agent-a" }));
       stateMgr.writeState(makeRecord({ agent_id: "agent-b" }));
