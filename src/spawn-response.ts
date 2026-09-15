@@ -20,6 +20,7 @@ const ESSENTIAL_FIELDS = [
   "authority",
   "placement",
   "parent_agent_id",
+  "collab_path",
   "version",
   "type",
   "runtime_initialization",

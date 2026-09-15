@@ -1620,12 +1620,15 @@ class DeliverySafetyGateError extends Error {
     readonly error_code:
       | "blocked_by_interactive_prompt"
       | "blocked_by_permission_prompt"
-      | "blocked_by_foreign_draft",
+      | "blocked_by_foreign_draft"
+      | "nothing_owned_to_submit",
     readonly screen: ParsedScreenResult,
     readonly draftText?: string,
   ) {
     super(
-      error_code === "blocked_by_permission_prompt"
+      error_code === "nothing_owned_to_submit"
+        ? "No owned text to submit: this composer could be showing an empty-input hint. Return was not sent."
+        : error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
         : error_code === "blocked_by_foreign_draft"
           ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
@@ -1922,6 +1925,9 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           ...error.receipt,
           error_code: error.error_code,
           screen: error.screen,
+          ...(error.error_code === "nothing_owned_to_submit"
+            ? { key_dispatched: false, submit_dispatched: false }
+            : {}),
         }
       : {};
   const submitVerificationExtra =
@@ -2950,6 +2956,9 @@ function currentComposerRegionStart(
 ): number {
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (lineIsCurrentComposerRegionAnchor(cli, lines[index] ?? "")) {
+      // Cursor's empty prompt is itself an anchor, and must remain readable
+      // as the empty baseline before a caller can acquire draft ownership.
+      if (cli === "cursor" && /^cursor>\s*$/i.test((lines[index] ?? "").trim())) return index;
       return index + 1;
     }
   }
@@ -3053,6 +3062,7 @@ function extractComposerInputRegion(
   screenText: string,
   submittedText?: string,
   knownCli?: CliType,
+  preservePlaceholderText = false,
 ): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
   const cli = knownCli ?? inferComposerCli(screenText);
@@ -3090,6 +3100,7 @@ function extractComposerInputRegion(
       inputLines.push(line);
     }
 
+    if (preservePlaceholderText) return inputLines.join("\n").trimEnd();
     return normalizeKnownPlaceholderComposerInput(
       cli,
       inputLines.join("\n").trimEnd(),
@@ -3125,6 +3136,7 @@ function extractComposerInputRegion(
       inputLines.push(line);
     }
 
+    if (preservePlaceholderText) return inputLines.join("\n").trimEnd();
     return normalizeKnownPlaceholderComposerInput(
       cli,
       inputLines.join("\n").trimEnd(),
@@ -3216,7 +3228,7 @@ function screenContainsCompleteSubmittedText(
  * and chrome never does. Widening the chrome whitelist instead is what put
  * this hole in the first place.
  */
-function composerPromptLineInput(screenText: string, knownCli?: CliType): string | null {
+function composerPromptLineInput(screenText: string, knownCli?: CliType, preservePlaceholderText = false): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
   const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
@@ -3230,7 +3242,7 @@ function composerPromptLineInput(screenText: string, knownCli?: CliType): string
     const match =
       matchComposerPromptLine(line) ?? matchLegacyClaudePromptLine(cli, line);
     if (match) {
-      return normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
+      return preservePlaceholderText ? match.input : normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
     }
   }
   return null;
@@ -3250,25 +3262,31 @@ function composerHoldsForeignDraft(
   submittedText: string,
   options?: { cli?: CliType; exact?: boolean },
 ): boolean {
-  // AIDEV-NOTE (T2 #442): Cursor is deliberately exempt. Its composer RETAINS
+  // AIDEV-NOTE (T2 #442): Cursor text sends are exempt. Its composer RETAINS
   // the accepted text after a submit (the "retained composer" state #441/#449
   // built evidence rules around), so a non-empty Cursor composer is the normal
   // post-send screen, not an unsent draft -- and nothing on that screen
   // distinguishes the two. Guarding it would refuse every legitimate second
   // send to a Cursor pane. Claude and Codex clear on submit, so there a
   // non-empty composer really does mean somebody's text is sitting unsent.
-  if ((options?.cli ?? inferComposerCli(screenText)) === "cursor") {
+  if (!options?.exact && (options?.cli ?? inferComposerCli(screenText)) === "cursor") {
     return false;
   }
   // No recognisable composer prompt line (bare shell, unreadable frame). The
   // pre-existing gates own those cases; do not invent a refusal here.
-  const promptLine = composerPromptLineInput(screenText, options?.cli);
+  const promptLine = composerPromptLineInput(screenText, options?.cli, true);
   if (promptLine === null || !promptLine.trim()) {
     return false;
   }
-  const draft = options?.exact
-    ? extractComposerInputRegion(screenText, submittedText, options.cli) ?? promptLine
+  // An empty first line may be a placeholder followed by real draft text.
+  // Only the whole-region normalizer can certify that shape as empty.
+  const placeholderLine = normalizeKnownPlaceholderComposerInput(options?.cli ?? inferComposerCli(screenText), promptLine) === "";
+  const draft = options?.exact || placeholderLine
+    ? extractComposerInputRegion(screenText, submittedText, options?.cli) ?? promptLine
     : promptLine;
+  // Return ownership cannot erase semantic edits such as "foo bar" -> "foobar"
+  // or changes inside quoted strings. An uncertain wrapped rendering refuses.
+  if (options?.exact) return draft !== normalizeTerminalText(submittedText).trimEnd();
   const compactDraft = draft.replace(/\s+/g, "");
   if (!compactDraft) {
     return false;
@@ -3277,7 +3295,7 @@ function composerHoldsForeignDraft(
   if (compactPayload.length === 0) {
     return true;
   }
-  return options?.exact ? compactPayload !== compactDraft : !compactPayload.includes(compactDraft);
+  return !compactPayload.includes(compactDraft);
 }
 
 function stripCodexQueueGutter(line: string): string {
@@ -4539,9 +4557,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
     try {
+      const agent = stateMgr.readState(agentId);
       const written = writeBootContractFile(
         {
           agentId,
+          role: agent?.role,
+          leadAgentId: agent?.parent_agent_id,
+          collabPath: agent?.collab_path,
           mailbox: {
             monitor_command: monitorBoot.monitor_command,
             // Contract-file only, deliberately NOT on the monitor_boot receipt: the
@@ -4736,6 +4758,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       null
     );
   };
+
+  // Channel discipline applies only to worker-invoked tools. Internal watch
+  // pushes call deliverAgentInput directly; halt escalation dispatches to inbox.
+  const assertWorkerUpwardChannel = (target: string): void => {
+    const caller = resolveCurrentCallerAgent();
+    if (!caller?.collab_path || inferRecordRoleOrNull(caller) !== "worker") {
+      return;
+    }
+    const visited = new Set<string>([caller.agent_id]);
+    let ancestorId = caller.parent_agent_id;
+    while (ancestorId && !visited.has(ancestorId)) {
+      visited.add(ancestorId);
+      const ancestor =
+        context.lifecycleRegistry?.get(ancestorId) ??
+        stateMgr.readState(ancestorId);
+      if (!ancestor) break;
+      if (
+        inferRecordRoleOrNull(ancestor) === "orchestrator" &&
+        [ancestor.agent_id, ancestor.surface_id, ancestor.surface_uuid].some(
+          identity => identity?.toLowerCase() === target.toLowerCase(),
+        )
+      ) {
+        throw new Error(`Worker ${caller.agent_id} must append to collab_path ${caller.collab_path} to reach lead ${ancestor.agent_id}; upward pane delivery is refused.`);
+      }
+      ancestorId = ancestor.parent_agent_id;
+    }
+  };
+
   const resolveModeWorkspace = async (
     surface: string,
     workspace?: string,
@@ -6669,6 +6719,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
           typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
+        }
+        const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
+        if (rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
+          throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
         if (!composerHoldsForeignDraft(submitBaseline.text, "", { cli: targetCli })) typedDraftOwners.delete(ownerKey);
       }
@@ -14200,7 +14254,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "report_to_parent",
-      "Raise a short blocker to this managed agent's registry parent. cmuxlayer chooses the parent; callers cannot address arbitrary agents. The blocker is durably appended to the parent's inbox and its pointer is actively delivered. If that wake fails, cmuxlayer alerts the nearest reachable ancestor and returns fallback provenance. A root agent has no parent and receives an error.",
+      "Raise a short blocker to this managed agent's registry parent. cmuxlayer chooses the parent; callers cannot address arbitrary agents. The blocker is durably appended to the parent's inbox and its pointer is actively delivered. If that wake fails, cmuxlayer alerts the nearest reachable ancestor and returns fallback provenance. A root agent has no parent and receives an error. Workers with collab_path must append there to reach their own parent lead; this tool refuses that upward route.",
       {
         blocker: z
           .string()
@@ -14229,6 +14283,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           const intendedParentId = child.parent_agent_id;
+          assertWorkerUpwardChannel(intendedParentId);
           const directMessage = dispatch(
             intendedParentId,
             {
@@ -14544,6 +14599,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "MCP profile hint for worktree launches. Defaults to inherit. Use sterile/skill_eval or include/exclude lists for narrower evals.",
           ),
+        collab_path: z
+          .string()
+          .trim()
+          .min(1)
+          .refine(isAbsolute, "collab_path must be absolute")
+          .optional()
+          .describe("Lead coordination file; workers inherit their parent lead collab_path unless explicitly supplied."),
         parent_agent_id: z
           .string()
           .optional()
@@ -14643,6 +14705,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
             );
           }
+          if (args.collab_path && !isAbsolute(args.collab_path.trim())) {
+            throw new Error("collab_path must be absolute");
+          }
           if (args.resume_agent_id) {
             const incompatible = [
               "repo",
@@ -14654,6 +14719,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "boot_prompt_path",
               "worktree",
               "mcp_profile",
+              "collab_path",
               "parent_agent_id",
               "role",
               "placement",
@@ -15179,6 +15245,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               mcp_profile_label: worktree.mcpProfileLabel,
               worktree_branch: worktree.prepared?.branch,
               parent_agent_id: effectiveParentAgentId,
+              collab_path: args.collab_path,
               role: effectiveRole,
               authority: callerIsWorker ? "worker" : normalizedRole.authority,
               function: normalizedRole.function,
@@ -15573,6 +15640,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 topology,
               )
             : undefined;
+
+          if (callerAgent && !callerIsWorker && effectiveRole === "worker" &&
+              result.parent_agent_id === callerAgent.agent_id && args.collab_path) {
+            const adopted = stateMgr.updateRecord(callerAgent.agent_id, { collab_path: args.collab_path.trim() });
+            registry.set(callerAgent.agent_id, adopted);
+          }
 
           const formattedData = {
             agent_id: result.agent_id,
@@ -16913,6 +16986,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     type ListAgentsObservedRow = ObservedPublicAgent & {
       cli: CliType;
       role: AgentRole | null;
+      collab_path?: string;
       surface_id: string;
       send_via: "send_to";
       closure: ClosureState;
@@ -17051,6 +17125,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   repo: agent.repo,
                   cli: agent.cli,
                   role: agent.role,
+                  ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                   state: agent.state.value,
                   surface_id: agent.surface_id,
                   model: agent.model.value,
@@ -17237,6 +17312,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     }),
                     cli: agent.cli,
                     role: inferRecordRoleOrNull(agent),
+                    ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
                     // #481: computed on every listMerged, read only by the
@@ -17738,7 +17814,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
+      "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -17804,6 +17880,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             assertCanonicalSurfaceRef(surface);
+            assertWorkerUpwardChannel(surface);
             const legacyHandler = (name: string) => {
               const handler = toolHandlersByName.get(name);
               if (!handler) {
@@ -17977,6 +18054,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 .map((entry) => entry.agent),
             );
             for (const agent of resolvedTargets) {
+              assertWorkerUpwardChannel(agent.agent_id);
               assertInteractiveMultilineInputAllowed({
                 tool: "send_to",
                 value: args.text,
@@ -18312,6 +18390,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!agentId) {
             throw new Error("send_to mode=agent requires agent_id or target");
           }
+          assertWorkerUpwardChannel(agentId);
           const timings = createDeliveryPhaseTimings();
           const targetAgent =
             engine.getAgentState(agentId) ?? registry.get(agentId);

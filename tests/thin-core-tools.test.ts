@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { createServer, PUBLIC_TOOL_NAMES } from "../src/server.js";
+import { createServer, createServerContext, PUBLIC_TOOL_NAMES } from "../src/server.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
 const CORE_TOOL_NAMES = [
@@ -176,6 +177,29 @@ describe("thin-core tool palette", () => {
 });
 
 describe("send_to consolidated modes", () => {
+  it("#636 raw sends from an unknown caller preserve legacy RPCs despite lifecycle failure", async () => {
+    const exec = makeExec();
+    const context = createServerContext({ exec, controlHealthIntervalMs: 0 });
+    const server = createServer({ context, exec, controlHealthIntervalMs: 0, exposeInternalToolsForTests: true }) as any;
+    await context.lifecycleStartPromise;
+    context.lifecycleStartError = new Error("lifecycle unavailable");
+    const args = { surface: "surface:1", text: "raw compatibility", press_enter: false };
+    try {
+      vi.mocked(exec).mockClear();
+      const legacy = await server._registeredTools.send_input.handler(args, {});
+      expect(legacy.isError).toBeUndefined();
+      const legacyCalls = vi.mocked(exec).mock.calls.map(call => [...call[1]]);
+      vi.mocked(exec).mockClear();
+      const result = await runWithCallerContext({ surfaceId: "surface:unknown" }, () =>
+        server._registeredTools.send_to.handler({ mode: "surface", ...args }, {}));
+      expect(result.isError).toBeUndefined();
+      expect(vi.mocked(exec).mock.calls.map(call => [...call[1]])).toEqual(legacyCalls);
+    } finally {
+      context.dispose();
+      await server.close();
+    }
+  });
+
   it("keeps raw modes callable when an env palette defers their legacy handlers", async () => {
     const exec = makeExec();
     const server = createServer({

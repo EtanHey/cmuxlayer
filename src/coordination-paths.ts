@@ -204,6 +204,9 @@ export interface MailboxContractFields {
 
 export interface BootContractFileInput {
   agentId: string;
+  role?: string | null;
+  leadAgentId?: string | null;
+  collabPath?: string | null;
   mailbox: MailboxContractFields;
   /** #454's issued contract. Omitted only where the spawn path issues none. */
   coordination?: CoordinationContract | null;
@@ -224,7 +227,15 @@ export function renderBootContractFile(input: BootContractFileInput): string {
     "",
     "Engine-issued at spawn. Do not re-derive these strings; use them verbatim.",
     "",
-    "## Mailbox",
+    "## Channels",
+    "",
+    ...(input.role === "worker" && input.leadAgentId && input.collabPath
+      ? [`Your lead reaches you with \`send_to\`. You reach your lead by appending \`### ${input.agentId} → ${input.leadAgentId}\` entries to \`${input.collabPath}\` (your lead monitors it). Do not \`send_to\`, \`report_to_parent\`, or \`wait_for\` your lead.`]
+      : input.role === "orchestrator"
+        ? ["Keep a Monitor on each worker's collab_path. Reach workers with `send_to`."]
+        : ["No parent collab_path is configured. Ask your lead to declare its upward coordination channel."]),
+    "",
+    "## Mailbox (engine-internal health pushes)",
     "",
     // AIDEV-NOTE (F5 / ledger #24): `tail -n0 -F` BLOCKS. Run in the
     // foreground it is a self-deadlock -- the ledger recorded it happening

@@ -424,6 +424,7 @@ export interface SpawnAgentParams {
   mcp_profile_label?: string;
   worktree_branch?: string;
   parent_agent_id?: string;
+  collab_path?: string;
   role?: AgentRole;
   authority?: AgentAuthority;
   function?: AgentFunction;
@@ -446,6 +447,7 @@ export interface SpawnAgentParams {
 export interface SpawnAgentResult {
   runtime_initialization?: "unsupported" | "already_ready" | "input_demand";
   agent_id: string;
+  collab_path?: string | null;
   parent_agent_id: string | null;
   surface_id: string;
   workspace_id?: string;
@@ -8755,8 +8757,15 @@ export class AgentEngine {
       ),
       modelPolicy.effective_model,
     );
+    const collabPath =
+      spawnParams.collab_path ??
+      (role === "worker" ? parentAgent?.collab_path : null) ??
+      null;
     const launchWarnings = [
       ...modelPolicy.warnings,
+      ...(role === "worker" && parentAgentId && !collabPath
+        ? ["collab_path missing: declare the parent lead channel before coordinating workers"]
+        : []),
       ...(launchMode === "raw" && preflight?.launchModeReason
         ? [
             `RAW LAUNCH: ${preflight.launchModeReason} Started \`${spawnParams.cli}\` ` +
@@ -8876,6 +8885,7 @@ export class AgentEngine {
       updated_at: now,
       error: null,
       parent_agent_id: parentAgentId,
+      collab_path: collabPath,
       spawn_depth: spawnDepth,
       role,
       authority,
@@ -9059,6 +9069,7 @@ export class AgentEngine {
       runtime_initialization: runtimeInitialization,
       agent_id: agentId,
       parent_agent_id: parentAgentId,
+      collab_path: collabPath,
       surface_id: surface.surface,
       workspace_id: surface.workspace,
       state: "booting",
