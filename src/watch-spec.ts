@@ -13,6 +13,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { httpDeliver } from "./outbox-drainer.js";
+import { formatBoundedReportNotification } from "./report-notification-format.js";
 import {
   advanceReportChangeBatch,
   createReportChangeBatchState,
@@ -1728,17 +1729,45 @@ export async function httpNotifyWatch(
   deliver: typeof httpDeliver = httpDeliver,
 ): Promise<boolean> {
   if (event.notify !== true) return true;
+  const reportHeaders = event.report_headers ?? [];
+  const hasReportBatch = reportHeaders.length > 0;
+  const hasLostReportEntries = event.report_lost_header_count !== undefined;
+  const body = hasLostReportEntries
+    ? formatBoundedReportNotification({
+        firstLine: `Watch ${event.watch_id} for ${event.owner}: report entries disappeared (${event.report_lost_header_count}); target=${event.target}`,
+        truncatedFirstLine: `Report entries disappeared (${event.report_lost_header_count}); watch metadata and target truncated`,
+        label: "Missing entries:",
+        headers: event.report_lost_headers ?? [],
+        totalCount: event.report_lost_header_count!,
+      })
+    : hasReportBatch
+      ? formatBoundedReportNotification({
+          firstLine: `Watch ${event.watch_id} for ${event.owner}: report changed (${reportHeaders.length}); target=${event.target}`,
+          truncatedFirstLine: `Report changed (${reportHeaders.length}); watch metadata and target truncated`,
+          label: "New entries:",
+          headers: reportHeaders,
+          totalCount: reportHeaders.length,
+        })
+      : `Watch ${event.watch_id} for ${event.owner}: ${event.reason}; target=${event.target}`;
+  const dedupeEvidence =
+    hasReportBatch || hasLostReportEntries
+      // On retries this is restored from the record's terminal_at_ms, so one
+      // batch keeps its key while a later batch gets a distinct durable key.
+      ? `report:${event.observed_at_ms}:${event.observed_value ?? ""}`
+      : (event.observed_value ?? "");
   return deliver(
     {
       title: "Declared watch changed",
-      body: `Watch ${event.watch_id} for ${event.owner}: ${event.reason}; target=${event.target}`,
+      body,
       source: "cmuxlayer-watch-spec",
       priority:
-        event.reason === "predicate_matched" ||
-        event.reason === "target_changed"
-          ? "normal"
-          : "high",
-      dedupe_key: `${event.watch_id}:${event.reason}:${event.observed_value ?? ""}`,
+        hasLostReportEntries
+          ? "high"
+          : event.reason === "predicate_matched" ||
+              event.reason === "target_changed"
+            ? "normal"
+            : "high",
+      dedupe_key: `${event.watch_id}:${event.reason}:${dedupeEvidence}`,
     },
     notifyUrl,
   );
