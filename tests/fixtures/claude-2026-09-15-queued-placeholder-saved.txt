@@ -1,0 +1,8 @@
+    ONE line "<verdict/status> → <artifact>".                                             
+                                                                             662953 tokens
+────────────────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ detached | +207,-53 | 🔧 13
+  🤖 Opus 5 (1M context) | 💰 $280.85 | ⏱️  8hr 48m | 📦 4hr 59m | 🧠 66.3%
+  ⏵⏵ bypass permissions on · 1 monitor · ← for agents

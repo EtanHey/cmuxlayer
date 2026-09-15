@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -52,6 +53,15 @@ const CODEX_PLACEHOLDER_SCREEN = readFileSync(
   ),
   "utf8",
 ).replace(/\nWorking \([^\n]*\)\n/, "\n");
+const CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN = readFileSync(
+  new URL(
+    "./fixtures/claude-2026-09-15-queued-placeholder-saved.txt",
+    import.meta.url,
+  ),
+  "utf8",
+).replace(/\n$/, "");
+const CLAUDE_QUEUED_PLACEHOLDER_SAVED_SHA256 =
+  "d50fc9f0453a524711100302d717f8400495e0fd7b3ef2bfa80d0cfe3beaf276";
 const CODEX_PR343_LIVE_QUEUED_FOLLOWUP_SCREEN = readFileSync(
   new URL(
     "./fixtures/painpoints/codex-pr343-live-queued-followup.txt",
@@ -98,6 +108,17 @@ async function callToolInTimerSteps(
   let settled = false;
   const resultPromise = tool.handler(args, {} as any).finally(() => { settled = true; });
   for (let elapsed = 0; elapsed < 10_000 && !settled; elapsed += 100) {
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  return resultPromise;
+}
+
+async function drainQueueInTimerSteps(engine: any) {
+  let settled = false;
+  const resultPromise = engine.drainDeliveryQueue().finally(() => {
+    settled = true;
+  });
+  for (let elapsed = 0; elapsed < 30_000 && !settled; elapsed += 100) {
     await vi.advanceTimersByTimeAsync(100);
   }
   return resultPromise;
@@ -162,6 +183,7 @@ class FakeClaudeSurfaceClient {
   preReturnScreenText: string | null = null;
   postReturnScreenText: string | null = null;
   postReturnPendingScreenText: string | null = null;
+  clearPreReturnScreenOnSend = false;
   private pendingText = "";
   private readonly acceptedTranscript: string[] = [];
   private returnCount = 0;
@@ -240,6 +262,9 @@ class FakeClaudeSurfaceClient {
 
     this.sendCalls.push(text);
     this.pendingText += text;
+    if (this.clearPreReturnScreenOnSend) {
+      this.preReturnScreenText = null;
+    }
   }
 
   async pasteText(surface: string, text: string) {
@@ -356,7 +381,27 @@ class FakeClaudeSurfaceClient {
       if (!this.pendingText && this.staleCodexQueueTranscriptAfterReturn) {
         return `OpenAI Codex\n\n› Quote this historical UI exactly:\n  Messages to be submitted after next tool call\n    ↳ already submitted transcript text\n\n• The quoted lines above are transcript prose, not live queue chrome.\n\n${status}\n\n› \n\n  gpt-5.6-sol xhigh`;
       }
-      return `OpenAI Codex\n${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
+      const transcript = this.acceptedTranscript
+        .map((text) => `• ${text}`)
+        .join("\n");
+      return `OpenAI Codex\n${transcript}\n${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
+    }
+
+    if (this.cli === "cursor") {
+      const status = this.mode === "working" ? "Working" : "Auto";
+      const transcript = this.acceptedTranscript
+        .map((text) => `  ${text}`)
+        .join("\n");
+      return [
+        "Cursor Agent",
+        status,
+        "~/Gits/cmuxlayer · main",
+        transcript,
+        `→ ${tail}`,
+        this.mode === "working" ? "ctrl+c to stop" : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
     }
 
     const transcript = this.acceptedTranscript.map(text => `> ${text}`).join("\n");
@@ -667,6 +712,25 @@ function disposeServer(server: any) {
   }
 }
 
+async function settleDeferredReliabilityDeliveries(
+  server: any,
+  client: FakeClaudeSurfaceClient,
+  target: AgentRecord,
+  cli: "claude" | "codex" | "cursor",
+  readyFrame: string,
+) {
+  client.requiredReturns = 1;
+  client.clearPreReturnScreenOnSend = true;
+  client.preReturnScreenText = readyFrame;
+  registerAgent(server, { agent_id: target.agent_id, cli, state: "ready" });
+  const engine = server._registeredTools.interact._engine;
+  await drainQueueInTimerSteps(engine);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await vi.advanceTimersByTimeAsync(2_000);
+    await engine.verifyPendingDeliveries();
+  }
+}
+
 describe("enter reliability", () => {
   let server: any;
 
@@ -684,9 +748,20 @@ describe("enter reliability", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
+  it("#636 preserves the recovered Claude queued-placeholder capture byte for byte", () => {
+    // CAPTURED: cmuxlayerClaude-aaa55379/surface:1129 at 2026-09-15T17:20:43.829Z.
+    const sha = createHash("sha256").update(CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN).digest("hex");
+    expect([Buffer.byteLength(CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN), sha]).toEqual([961, CLAUDE_QUEUED_PLACEHOLDER_SAVED_SHA256]);
+    expect(CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN.split("\n")).toHaveLength(8);
+    expect(CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN.split("\n")[3]).toBe("❯ Press up to edit queued messages");
+    expect(CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN).not.toMatch(/Working|queued message block/i);
+    expect(__submitEvidenceTestHooks.extractComposerInputRegion(CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN)).toBe("");
+    expect(__submitEvidenceTestHooks.extractComposerInputRegion(CLAUDE_QUEUED_PLACEHOLDER_SAVED_SCREEN, "Press up to edit queued messages")).toBe("Press up to edit queued messages");
+  });
+
   it.each((["claude", "codex", "cursor"] as const).flatMap(cli => [false, true].map(busy => ({ cli, busy }))))(
     "#636 modeled composer contract preserves typed text ($cli, busy=$busy)", async ({ cli, busy }) => {
-      // Generated contract controls, NOT a captured queued-placeholder specimen.
+      // Generated contract controls, NOT captured queued-placeholder specimens.
       const client = new FakeClaudeSurfaceClient(); client.cli = cli;
       const draft = "Keep my unfinished words exactly as typed";
       const frame = cli === "claude" ? `Claude Code\n${busy ? "✻ Working… (esc to interrupt)\n" : ""}❯ ${draft}\n`
@@ -702,24 +777,65 @@ describe("enter reliability", () => {
       })));
       const first = await send("first distinct follow-up");
       expect(first.caller_agent_id).toBe(caller.agent_id);
-      if (busy) {
-        expect(first).toMatchObject({ ok: true, delivery_state: "queued", submitted: false, delivery_id: expect.any(String) });
+      if (!busy) {
+        expect(first).toMatchObject({ ok: false, error_code: "blocked_by_foreign_draft" });
+      } else {
         const second = await send("second distinct follow-up");
+        expect(first).toMatchObject({ ok: true, delivery_state: "queued", submitted: false, delivery_id: expect.any(String) });
         expect(second).toMatchObject({ ok: true, caller_agent_id: caller.agent_id, delivery_state: "queued", submitted: false });
         expect(second.delivery_id).not.toBe(first.delivery_id);
-        for (const [result, text] of [[first, "first distinct follow-up"], [second, "second distinct follow-up"]] as const) {
-          expect(result.error_code).toBeUndefined();
-          expect(engine.getDeliveryReceipt(result.delivery_id)).toMatchObject({ text, terminal: false, delivery_state: "queued", submit_verified: null });
+        const queued = [[first, "first distinct follow-up"], [second, "second distinct follow-up"]] as const;
+        for (const [result, text] of queued) {
+          const receipt = engine.getDeliveryReceipt(result.delivery_id);
+          expect(receipt).toMatchObject({ text, terminal: false, delivery_state: "queued", submit_verified: null });
+          expect(receipt?.composer_accepted).not.toBe(true);
         }
         const disk = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"));
         expect(disk.map((receipt: any) => receipt.delivery_id)).toEqual([first.delivery_id, second.delivery_id]);
-      } else {
-        expect(first).toMatchObject({ ok: false, error_code: "blocked_by_foreign_draft" });
+        expect(disk.every((receipt: any) => receipt.composer_accepted !== true)).toBe(true);
+        await engine.verifyPendingDeliveries();
+        for (const [result] of queued) expect(engine.getDeliveryReceipt(result.delivery_id)).toMatchObject({ delivery_state: "queued", terminal: false, submit_verified: null });
+        expect(client.sendCalls).toEqual([]); expect(client.sendKeyCalls).toEqual([]);
+        expect((await client.readScreen(client.surface)).text).toBe(frame);
+        const readyFrame = cli === "claude" ? "Claude Code\n❯ \n"
+          : cli === "codex" ? "OpenAI Codex\n\n› Implement {feature}\n\n  gpt-5.6-sol xhigh"
+            : "Cursor Agent\nAuto\n~/Gits/cmuxlayer · main\n→ Plan, search, build anything";
+        await settleDeferredReliabilityDeliveries(server, client, target, cli, readyFrame);
+        for (const [result] of queued) expect(engine.getDeliveryReceipt(result.delivery_id)).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
+        expect(client.sendCalls).toEqual(["first distinct follow-up", "second distinct follow-up"]);
+        expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(2);
+        return;
       }
       expect(client.sendCalls).toEqual([]); expect(client.sendKeyCalls).toEqual([]);
       expect((await client.readScreen(client.surface)).text).toBe(frame);
     },
   );
+
+  it.each([
+    ["claude", "Claude Code\n✻ Working… (esc to interrupt)\n❯ Press up to edit queued messages\n", "Claude Code\n❯ \n"],
+    ["codex", "OpenAI Codex\nWorking (11s)\n\n› Implement {feature}\n\n  gpt-5.6-sol xhigh", "OpenAI Codex\n\n› Implement {feature}\n\n  gpt-5.6-sol xhigh"],
+    ["cursor", "Cursor Agent\nWorking\n~/Gits/cmuxlayer · main\n→ Plan, search, build anything\nctrl+c to stop", "Cursor Agent\nAuto\n~/Gits/cmuxlayer · main\n→ Plan, search, build anything"],
+  ] as const)("#636 modeled busy %s exact placeholder queues before verified delivery", async (cli, busyFrame, readyFrame) => {
+    // Modeled known literals only; no capture decorations were invented.
+    const client = new FakeClaudeSurfaceClient(); client.cli = cli; client.preReturnScreenText = busyFrame;
+    server = createReliabilityServer(client, false);
+    const target = registerAgent(server, { cli, state: "working" });
+    const caller = registerAgent(server, { agent_id: "placeholder-caller", surface_id: "surface:caller", role: "orchestrator" });
+    const payload = `modeled ${cli} busy-placeholder delivery`;
+    const accepted = await runWithCallerContext({ surfaceId: caller.surface_id }, async () => parseResult(await callToolInTimerSteps(server, "send_to", {
+      mode: "agent", agent_id: target.agent_id, text: payload, press_enter: true,
+    })));
+    expect(accepted).toMatchObject({ ok: true, caller_agent_id: caller.agent_id, delivery_state: "queued", terminal: false, submitted: false });
+    expect(accepted.error_code).toBeUndefined();
+    const engine = server._registeredTools.interact._engine;
+    expect(engine.getDeliveryReceipt(accepted.delivery_id)?.composer_accepted).not.toBe(true);
+    expect(client.sendCalls).toEqual([]); expect(client.sendKeyCalls).toEqual([]);
+    expect((await client.readScreen(client.surface)).text).toBe(busyFrame);
+    await settleDeferredReliabilityDeliveries(server, client, target, cli, readyFrame);
+    expect(engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
+    expect(client.sendCalls).toEqual([payload]);
+    expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(1);
+  });
 
   it("rejects string booleans on raw send_to handler calls", async () => {
     const client = new FakeClaudeSurfaceClient();
