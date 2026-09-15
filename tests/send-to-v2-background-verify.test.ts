@@ -604,6 +604,55 @@ describe("send_to v2 background verify", () => {
     expect(client.sendCalls).toHaveLength(1); expect(client.sendKeyCalls).toHaveLength(returns);
   });
 
+  it("#636 D1 ownership cannot borrow a second client's submission activity", async () => {
+    const client = new ClaudeDeliverySurface(); client.requiredReturns = 2;
+    const first = await instantDelivery(client);
+    const engine = server._registeredTools.interact._engine;
+    const secondClient = createServer({ context: serverContexts.get(server)! }) as any;
+    try {
+      client.composer = "";
+      const second = parseResult(await callTool(secondClient, "send_to", { agent_id: "agent-1", text: "636 other caller payload", press_enter: true }));
+      expect(client.sendKeyCalls).toEqual(["return", "return"]);
+      client.busy = true;
+      await vi.advanceTimersByTimeAsync(3_000);
+      await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(first.delivery_id).submit_verified).not.toBe(true);
+      expect(engine.getDeliveryReceipt(second.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+      expect(client.sendCalls).toEqual(["636 unique delivery", "636 other caller payload"]);
+    } finally { await secondClient.close(); }
+  });
+
+  it("#636 D1 ownership revocation survives an awaited read, stale save, and restart", async () => {
+    const client = new ClaudeDeliverySurface(); const sent = await instantDelivery(client);
+    const engine = server._registeredTools.interact._engine; engine.dispose();
+    await vi.advanceTimersByTimeAsync(2_001);
+    const staleEvidence = engine.getDeliveryReceipt(sent.delivery_id).claude_submit;
+    let release!: () => void; let reading = false; let firstRead = true;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const read = client.readScreen.bind(client);
+    client.readScreen = async surface => {
+      const snapshot = await read(surface);
+      if (firstRead) { firstRead = false; reading = true; await gate; }
+      return snapshot;
+    };
+    const verification = engine.verifyPendingDeliveries();
+    await vi.advanceTimersByTimeAsync(0); expect(reading).toBe(true);
+    const observer = createServer({ context: serverContexts.get(server)! }) as any;
+    try {
+      client.composer = "";
+      expect(parseResult(await observer._registeredTools.read_screen.handler({ surface: client.surface }, {})).ok).toBe(true);
+      client.composer = "636 unique delivery";
+      release(); await verification;
+      engine.updateClaudeDeliveryEvidence(sent.delivery_id, staleEvidence);
+    } finally { release(); await observer.close(); }
+    await server.close();
+    server = createVerifyServer(client);
+    await vi.advanceTimersByTimeAsync(2_001);
+    await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    expect(client.sendCalls).toEqual(["636 unique delivery"]);
+  });
+
   it("#636 D1 does not attribute a pre-existing paste placeholder", async () => {
     const client = new ClaudeDeliverySurface(); client.composer = "[Pasted text #1 +3 lines]"; client.collapsePastes = true;
     server = createVerifyServer(client); registerAgent(server);
