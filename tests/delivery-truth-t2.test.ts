@@ -206,11 +206,13 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   });
 
-  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other", "whitespace", "quoted-space", "indentation", "wrap"].flatMap(kind => ["claude", "cursor"].map(cli => ({ kind, cli }))))("#636 key Return draft ownership (%j)", async ({ kind, cli }) => {
+  it.each(["foreign", "picker", "permission", "owned", "changed", "unknown", "other", "whitespace", "argument", "unchanged-space", "quoted-space", "indentation", "wrap"].flatMap(kind => ["claude", "cursor"].map(cli => ({ kind, cli }))))("#636 key Return draft ownership (%j)", async ({ kind, cli }) => {
     const { createServer, createServerContext } = await loadServerModule();
     const { runWithCallerContext } = await import("../src/caller-context.js");
     const edits: Record<string, [string, string]> = {
       whitespace: ["foo bar", "foobar"],
+      argument: ['echo "a b"', 'echo "ab"'],
+      "unchanged-space": ["foo bar", "foo bar"],
       "quoted-space": ['echo "a  b"', 'echo "a b"'],
       indentation: ["  keep words", " keep words"],
       wrap: ["foo bar", "foo\nbar"],
@@ -253,7 +255,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       } else screen = kind === "permission" ? "Claude Code\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel" : kind === "picker" ? "Claude Code\nSelect model\n❯ 1. Sonnet\n  2. Opus\nEnter to confirm · Esc to cancel" : render("private human draft");
       exec.mockClear();
       const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return" }));
-      if (kind === "owned" || kind === "picker" || kind === "permission") {
+      if (kind === "owned" || kind === "unchanged-space" || kind === "picker" || kind === "permission") {
         expect(result.ok).toBe(true);
         expect(mutatedPane(exec)).toBe(true);
       } else {
