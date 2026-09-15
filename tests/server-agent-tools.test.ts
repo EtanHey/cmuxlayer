@@ -9695,6 +9695,8 @@ describe("agent lifecycle tool handlers", () => {
       ],
     });
     expect(result.content[0].text).toContain("1 failed");
+    expect(result.structuredContent).toHaveProperty("caller_agent_id", null);
+    expect(result.content[0].text).toBe("send_to targeting: 0 submitted, 0 queued, 1 failed, 0 skipped");
   }, 20_000);
 
   it("send_to rejects targeting combined with a singular agent id", async () => {

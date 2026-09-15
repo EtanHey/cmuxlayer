@@ -5228,7 +5228,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             let handled = (await handler(...handlerArgs)) as ToolReturn;
             if (toolNameString === "send_to") {
               const payload = { ...handled.structuredContent, caller_agent_id: callerAgentId };
-              handled = { ...handled, structuredContent: payload, content: [{ type: "text", text: JSON.stringify(payload) }] };
+              handled = { ...handled, structuredContent: payload, content: handled.content.map((entry) => {
+                if (entry.type !== "text") return entry;
+                try {
+                  const value = JSON.parse(entry.text);
+                  if (value && typeof value === "object" && !Array.isArray(value)) {
+                    return { ...entry, text: JSON.stringify(payload) };
+                  }
+                } catch { /* Preserve human summaries alongside their structured receipt. */ }
+                return entry;
+              }) };
             }
             const shaped =
               toolNameString === "send_to" && !verbose
