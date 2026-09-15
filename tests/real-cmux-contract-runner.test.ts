@@ -53,6 +53,7 @@ describe("real cmux contract runner helpers", () => {
   it("requires raw content for the D4 shell proof instead of silently timing out", () => {
     expect(() => hasRawShellPrompt({ screen_preview: "$ " })).toThrow("missing string content");
     expect(hasRawShellPrompt({ content: "login still starting" })).toBe(false);
+    expect(hasRawShellPrompt({ content: "earlier $\nlogin still starting" })).toBe(false);
     expect(hasRawShellPrompt({ content: "owner ~ $ " })).toBe(true);
   });
 

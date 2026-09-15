@@ -39,7 +39,7 @@ export function hasRawShellPrompt(screen: Record<string, unknown>): boolean {
   if (typeof screen.content !== "string") {
     throw new Error("D4 read_screen raw:true response is missing string content");
   }
-  return /[%$#❯>]\s*$/m.test(screen.content);
+  return /[%$#❯>]\s*$/.test(screen.content);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
