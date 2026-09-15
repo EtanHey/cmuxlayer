@@ -10,6 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import { claudePasteId, deliveryFrameHash, observeClaudeComposer, reserveClaudeReturn, verifyClaudeDelivery, type ClaudeDeliveryEvidence, type ClaudeDeliveryFrame } from "./claude-delivery.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -5851,6 +5852,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     workspace?: string,
     beforeMutation?: () => Promise<void>,
     maxAttempts = SEND_INPUT_RETRY_ATTEMPTS,
+    deliveryId?: string,
   ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
     let lastError: unknown;
@@ -5859,6 +5861,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         await beforeMutation?.();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
+        if (isSubmitKey(key)) context.lifecycleSweepEngine?.noteClaudeSurfaceSubmit(surface, workspace, observedSurfaceUuid(surface), deliveryId);
         await client.sendKey(surface, key, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
@@ -6024,7 +6027,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
   const observedSurfaceUuid = (surface: string): string | null =>
     context.capturedSurfaceUuidByRef.get(surface) ?? (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(surface) ? surface : null);
-  const observeDraftOwnership = (surface: string, workspace: string | undefined, text: string, uuid: string | null): void => {
+  const claudeComposerState = (screen: string, text: string, evidence: ClaudeDeliveryEvidence | undefined, observed_at: number) => {
+    const composer = extractComposerInputRegion(screen, text, "claude");
+    if (composer === null) return null;
+    const payload = normalizeTerminalText(text).trimEnd();
+    const visible = normalizeTerminalText(composer).trimEnd();
+    const tail = payload.slice(-80);
+    const pasteId = claudePasteId(composer);
+    const ownedPaste = evidence?.pasted === true && (evidence.observed_paste_id !== undefined
+      ? pasteId === evidence.observed_paste_id : pasteId > evidence.initial_paste_id);
+    return { composer, composer_present: true, observed_at, pasteId, cleared: composer.trim() === "",
+      complete: ownedPaste || Boolean(tail && visible.endsWith(tail) && payload.endsWith(visible)),
+      renderingPrefix: payload.startsWith(visible) };
+  };
+  const observeDraftOwnership = (surface: string, workspace: string | undefined, text: string, uuid: string | null, observed_at: number): void => {
     for (const [key, token] of typedDraftOwners) {
       const matches = token.uuid ? uuid?.toLowerCase() === token.uuid.toLowerCase()
         : token.ref === surface && token.workspace === (workspace ?? null);
@@ -6038,20 +6054,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (draftTargetFingerprint(surface, uuid) !== token.fp || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
     }
+    context.lifecycleSweepEngine?.observeClaudeDeliveryEvidence(receipt => {
+      const evidence = receipt.claude_submit!;
+      const matches = evidence.surface_uuid ? uuid?.toLowerCase() === evidence.surface_uuid.toLowerCase() : evidence.surface_id === surface;
+      if (!matches || (evidence.workspace_id ?? null) !== (workspace ?? null)) return false;
+      const owner = resolveLatestSurfaceAgentRecord(stateMgr, surface, uuid);
+      if (owner?.agent_id !== receipt.agent_id || owner.cli !== "claude" || (owner.cli_session_id ?? null) !== (evidence.cli_session_id ?? null)) {
+        const changed = !evidence.retry_revoked || !evidence.attribution_revoked;
+        evidence.retry_revoked = evidence.attribution_revoked = true;
+        return changed;
+      }
+      const frame = claudeComposerState(text, receipt.text, evidence, observed_at);
+      return frame ? observeClaudeComposer(evidence, frame) : false;
+    });
   };
 
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
     opts?: { throwOnSurfaceGone?: boolean; agent?: AgentRecord },
-  ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
+  ): Promise<{ text: string; parsed: ParsedScreenResult; observed_at: number } | null> => {
     try {
+      const observed_at = Date.now();
       const screen = await client.readScreen(surface, {
         ...(workspace ? { workspace } : {}),
         lines: 30,
       });
       const text = typeof screen === "string" ? screen : (screen.text ?? "");
-      observeDraftOwnership(surface, workspace, text, observedSurfaceUuid(surface));
+      observeDraftOwnership(surface, workspace, text, observedSurfaceUuid(surface), observed_at);
       const parsed = applyHarnessState(
         enrichParsedScreen(
           parseScreen(text),
@@ -6060,7 +6090,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ),
         resolveHarnessStateForSurface(stateMgr, surface, opts?.agent),
       );
-      return { text, parsed };
+      return { text, parsed, observed_at };
     } catch (error) {
       if (
         opts?.throwOnSurfaceGone &&
@@ -6155,6 +6185,42 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : {}),
       tabName: newTitle,
     });
+  };
+
+  const transcriptMatches = (screen: string, text: string): number => {
+    const payload = normalizeTerminalText(text).trim();
+    return payload ? normalizeTerminalText(screen).split(payload).length - 1 : 0;
+  };
+  const readClaudeDeliveryFrame = async (surface: string, workspace: string | undefined, text: string, evidence?: ClaudeDeliveryEvidence): Promise<ClaudeDeliveryFrame | null> => {
+    const snapshot = await readParsedSurface(surface, workspace, { throwOnSurfaceGone: true });
+    if (!snapshot?.text.trim()) return null;
+    const observed_at = snapshot.observed_at; // Read-start time, shared with the ownership observer.
+    const composerState = claudeComposerState(snapshot.text, text, evidence, observed_at);
+    if (!composerState) return null;
+    const { composer, pasteId } = composerState;
+    const payload = normalizeTerminalText(text).trimEnd();
+    const correlatedTail = payload.slice(-80);
+    const lines = normalizeTerminalText(snapshot.text).split("\n");
+    let promptIndex = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (matchComposerPromptLine(lines[i] ?? "") ?? matchLegacyClaudePromptLine("claude", lines[i] ?? "")) { promptIndex = i; break; }
+    }
+    const transcript = lines.slice(0, Math.max(0, promptIndex)).join("\n");
+    const payloadMatches = correlatedTail ? transcript.split(correlatedTail).length - 1 : 0;
+    const pasteMatches = evidence?.observed_paste_id
+      ? [...transcript.matchAll(/\[Pasted text #(\d+)(?: \+\d+ lines?)?\]/g)].filter(match => Number(match[1]) === evidence.observed_paste_id).length : 0;
+    const metrics = parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed);
+    return {
+      hash: deliveryFrameHash(snapshot.text), observed_at, ...metrics,
+      composer_present: true, complete: composerState.complete, renderingPrefix: composerState.renderingPrefix,
+      pending: screenShowsPendingInput(snapshot.text, text) || pasteId > 0,
+      cleared: composer.trim() === "",
+      // Require current spinner chrome; a completed tool line is not activity.
+      active: lines.some(line => /^\s*[✻✢✳✶]\s+.*(?:working|thinking|esc to interrupt)/i.test(line) && !/\b(?:worked|thought|cogitated)\s+for\b/i.test(line)),
+      queued: screenShowsQueuedAgentInput(snapshot.text, text),
+      inTranscript: payloadMatches + pasteMatches > 0,
+      transcriptMatches: payloadMatches + pasteMatches, pasteId,
+    };
   };
 
   const waitForCompletePayloadInComposer = async (opts: {
@@ -9124,6 +9190,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     const snapshot = (async () => {
+      const observed_at = Date.now();
       const result = await client.readScreen(opts.surface, {
         workspace: opts.workspace,
         lines: opts.lines,
@@ -9131,7 +9198,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
       const topology = await collectSurfaceTopology(opts.workspace);
       observeDraftOwnership(opts.surface, opts.workspace ?? topology?.workspaceBySurface.get(opts.surface), typeof result === "string" ? result : result.text ?? "",
-        topology?.surfaceIdByRef.get(opts.surface) ?? observedSurfaceUuid(opts.surface));
+        topology?.surfaceIdByRef.get(opts.surface) ?? observedSurfaceUuid(opts.surface), observed_at);
       return { result, topology };
     })();
     context.readScreenInflight.set(key, snapshot);
@@ -14456,6 +14523,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const agent = engine.getAgentState(receipt.agent_id);
         if (!agent) {
           return { outcome: "pending" as const, reason: "target_gone" };
+        }
+        if (receipt.claude_submit) {
+          const generation = engine.getDeliveryVerificationGeneration();
+          const startedAt = Date.now();
+          const evidence = receipt.claude_submit;
+          const revokeBinding = () => {
+            evidence.retry_revoked = evidence.attribution_revoked = true;
+            engine.updateClaudeDeliveryEvidence(receipt.delivery_id, evidence);
+          };
+          const route = await engine.resolveAgentIoRoute(receipt.agent_id);
+          const boundOwner = engine.getAgentState(receipt.agent_id);
+          if (boundOwner?.cli !== "claude" || (evidence.cli_session_id ?? null) !== (boundOwner.cli_session_id ?? null) || (evidence.workspace_id ?? null) !== (boundOwner.workspace_id ?? null) || evidence.surface_id !== route.surface_id || (evidence.surface_uuid ?? null) !== (route.surface_uuid ?? null) || (evidence.workspace_id ?? null) !== (route.workspace_id ?? null)) {
+            revokeBinding();
+            return { outcome: "pending", reason: "bound_target_changed" };
+          }
+          return withSurfaceWrite(route.surface_id, async () => {
+            const assertCurrent = async () => {
+              if (!engine.isClaudeVerifyCurrent(receipt, generation, startedAt)) throw new Error("Claude delivery verification ended");
+              const current = await engine.resolveAgentIoRoute(receipt.agent_id);
+              if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id) { revokeBinding(); throw new Error("Claude delivery route changed"); }
+              const owner = engine.getAgentState(receipt.agent_id);
+              if (owner?.cli !== "claude" || (owner.cli_session_id ?? null) !== (evidence.cli_session_id ?? null)) { revokeBinding(); throw new Error("Claude delivery harness changed"); }
+            };
+            return verifyClaudeDelivery(receipt, {
+              read: async () => { await assertCurrent(); const frame = await readClaudeDeliveryFrame(route.surface_id, route.workspace_id ?? undefined, receipt.text, receipt.claude_submit); await assertCurrent(); return frame; },
+              isCurrent: () => engine.isClaudeVerifyCurrent(receipt, generation, startedAt),
+              save: () => engine.updateClaudeDeliveryEvidence(receipt.delivery_id, receipt.claude_submit!),
+              returnOnly: async () => {
+                await assertCurrent();
+                if (receipt.claude_submit?.retry_revoked) throw new Error("Claude composer ownership was revoked before Return");
+                await sendKeyWithRetry(route.surface_id, "return", route.workspace_id ?? undefined, async () => { await assertCurrent(); if (receipt.claude_submit?.retry_revoked) throw new Error("Claude composer ownership was revoked before Return"); }, 1, receipt.delivery_id);
+                appendDeliveryEvent({ event_type: "press_enter", source_agent: receipt.agent_id, target_surface: route.surface_id, bytes: 0, press_enter: true, submit_verified: null, retry_count: receipt.retry_count, delivery_id: receipt.delivery_id });
+              },
+            });
+          }, { toolName: "claude-background-verify", workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid, observePtyWrite: true });
         }
         const resolvedSnapshot =
           snapshot === undefined
