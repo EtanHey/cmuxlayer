@@ -4,6 +4,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
 import { access, appendFile, mkdir, readFile } from "node:fs/promises";
@@ -4744,7 +4745,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   // Channel discipline applies only to worker-invoked tools. Internal watch
   // pushes call deliverAgentInput directly; halt escalation dispatches to inbox.
-  const assertWorkerUpwardChannel = (target: string): void => {
+  const rawChannelScope = new AsyncLocalStorage<boolean>();
+  const assertWorkerUpwardChannel = (target: string, stableUuid?: string | null): void => {
     const caller = resolveCurrentCallerAgent();
     if (!caller?.collab_path || inferRecordRoleOrNull(caller) !== "worker") {
       return;
@@ -4759,9 +4761,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (!ancestor) break;
       if (
         inferRecordRoleOrNull(ancestor) === "orchestrator" &&
-        [ancestor.agent_id, ancestor.surface_id, ancestor.surface_uuid].some(
-          identity => identity?.toLowerCase() === target.toLowerCase(),
-        )
+        (stableUuid && ancestor.surface_uuid
+          ? ancestor.surface_uuid.toLowerCase() === stableUuid.toLowerCase()
+          : [ancestor.agent_id, ancestor.surface_id, ancestor.surface_uuid].some(
+              identity => identity?.toLowerCase() === target.toLowerCase(),
+            ))
       ) {
         throw new Error(`Worker ${caller.agent_id} must append to collab_path ${caller.collab_path} to reach lead ${ancestor.agent_id}; upward pane delivery is refused.`);
       }
@@ -8802,7 +8806,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
    * Old/ref-only cmux clients retain compatibility, but once UUID evidence has
    * been captured the route always fails closed if that UUID is absent.
    */
-  const resolveRawSurfaceMutationRoute = async (
+  const resolveRawSurfaceMutationRouteUnchecked = async (
     requestedSurface: string,
     requestedWorkspace: string | undefined,
     operation: string,
@@ -8994,6 +8998,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       stableSurfaceIdentity: null,
       assertCurrent: async () => {},
     };
+  };
+
+  // Run channel policy on the route already resolved for this mutation. Never
+  // reinterpret a recycled ref or add topology I/O to unknown-caller sends.
+  const resolveRawSurfaceMutationRoute = async (
+    requestedSurface: string,
+    requestedWorkspace: string | undefined,
+    operation: string,
+  ): Promise<RawSurfaceMutationRoute> => {
+    const route = await resolveRawSurfaceMutationRouteUnchecked(requestedSurface, requestedWorkspace, operation);
+    if (rawChannelScope.getStore()) assertWorkerUpwardChannel(route.surface, route.stableSurfaceIdentity);
+    return route;
   };
 
   const readScreenSnapshotKey = (opts: {
@@ -17827,13 +17843,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             assertCanonicalSurfaceRef(surface);
-            assertWorkerUpwardChannel(surface);
             const legacyHandler = (name: string) => {
               const handler = toolHandlersByName.get(name);
               if (!handler) {
                 throw new Error(`Internal tool handler unavailable: ${name}`);
               }
-              return handler;
+              return (...args: Parameters<typeof handler>) => rawChannelScope.run(true, () => handler(...args));
             };
             if (mode === "surface") {
               if (args.text === undefined) {
