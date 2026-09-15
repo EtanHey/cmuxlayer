@@ -1251,6 +1251,34 @@ describe("report_to_parent hierarchy-bound escalation", () => {
     expect(JSON.stringify(result)).toContain(child.collab_path);
   });
 
+  it.each(["surface", "command", "key"].flatMap(mode => [true, false].map(worker => ({ mode, worker }))))("#636 D3 allows a recycled ancestor ref with a different live UUID (%j)", async ({ mode, worker }) => {
+    // The connector's current surface:new is parentUuid. This old lead record
+    // retains the same mutable ref but belongs to a different stable surface.
+    const parent = hierarchyRecord({ agentId: "old-lead", surfaceId: "surface:new", surfaceUuid: "00000000-0000-4000-8000-999999999998", parentAgentId: null });
+    const child = { ...hierarchyRecord({ agentId: "worker", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id }), collab_path: join(inboxDir, "collab.md"), role: worker ? "worker" as const : "orchestrator" as const };
+    const occupant = hierarchyRecord({ agentId: "new-occupant", surfaceId: "surface:new", surfaceUuid: parentUuid, parentAgentId: null });
+    register(parent, child, occupant);
+    const mutations = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send") || args.includes("send-key")).length;
+    const before = mutations();
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () => server._registeredTools.send_to.handler({ mode, surface: parent.surface_id, text: mode === "key" ? "return" : "hello", press_enter: mode === "command" }, {}));
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    expect(mutations()).toBeGreaterThan(before);
+  });
+
+  it.each(["surface", "command", "key"].flatMap(mode => ["done-owner", "legacy-owner", "stale-conflict"].map(binding => ({ mode, binding }))))("#646 preserves raw identity refusal (%j)", async ({ mode, binding }) => {
+    const parent = { ...hierarchyRecord({ agentId: "lead-parent", surfaceId: "surface:new", surfaceUuid: binding === "stale-conflict" ? "00000000-0000-4000-8000-999999999998" : parentUuid, parentAgentId: null }),
+      ...(binding === "done-owner" ? { state: "done" as const } : {}),
+      ...(binding === "legacy-owner" ? { surface_uuid: null } : {}) };
+    const child = { ...hierarchyRecord({ agentId: "worker-child", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id }), collab_path: join(inboxDir, "collab.md") };
+    register(parent, child);
+    const mutations = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send") || args.includes("send-key")).length;
+    const before = mutations();
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () => server._registeredTools.send_to.handler({ mode, surface: parent.surface_id, text: mode === "key" ? "return" : "hello", press_enter: mode === "command" }, {}));
+    expect(result.isError, JSON.stringify(result)).toBe(true);
+    expect(JSON.stringify(result)).toContain(binding === "stale-conflict" ? "multiple stable UUIDs" : child.collab_path);
+    expect(mutations()).toBe(before);
+  });
+
   it.each(["lead-to-worker", "orc-to-lead", "peer-leads", "lead-to-parent", "unknown-caller"])("#636 D3 preserves %s delivery with collab paths", async (direction) => {
     const parent = { ...hierarchyRecord({ agentId: "parent", surfaceId: "surface:new", surfaceUuid: parentUuid, parentAgentId: null }), collab_path: join(inboxDir, "collab.md") };
     const child = { ...hierarchyRecord({ agentId: "child", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id }), role: direction === "lead-to-worker" ? "worker" as const : "orchestrator" as const, collab_path: parent.collab_path };

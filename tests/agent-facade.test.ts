@@ -44,6 +44,12 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("agent facade projections", () => {
+  it.each(["/tmp/lead-collab.md", null, undefined])("#636 preserves optional collab_path in public projections (%s)", (collab_path) => {
+    const projected = toPublicAgent(makeRecord({ collab_path }));
+    if (collab_path) expect(projected).toHaveProperty("collab_path", collab_path);
+    else expect(projected).not.toHaveProperty("collab_path");
+  });
+
   it("timestamps a registry model fallback as a registry observation", () => {
     const projected = toObservedPublicAgent(makeRecord(), {
       derivedAtMs: 2_000,
