@@ -288,7 +288,7 @@ function createVerifyServer(
     deliveryIssueFiler?: (ticket: unknown) => Promise<void>;
   },
 ) {
-  const context = createServerContext({
+  const options = {
     client: client as any,
     stateDir: TEST_DIR,
     inboxBaseDir: join(TEST_DIR, "inboxes"),
@@ -296,8 +296,15 @@ function createVerifyServer(
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
     ...extras,
-  });
-  const server = createServer({ context });
+  };
+  const context = createServerContext(options);
+  const server = createServer({ ...options, context });
+  // This fixture owns the shared context. Closing another MCP client must not
+  // dispose it, but closing this owner must stop its engine before a restart.
+  const close = server.close.bind(server);
+  server.close = async () => {
+    try { await close(); } finally { context.dispose(); }
+  };
   serverContexts.set(server, context);
   const engine = (server as any)._registeredTools.interact._engine;
   engine.dispose();
