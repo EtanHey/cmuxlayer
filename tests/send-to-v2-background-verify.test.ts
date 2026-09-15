@@ -635,8 +635,11 @@ describe("send_to v2 background verify", () => {
     const phases: unknown[] = [];
     const recordPhase = (phase: string, currentEngine = engine) => {
       const current = currentEngine.getDeliveryReceipt(sent.delivery_id);
-      const persisted = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8")).find((receipt: any) => receipt.delivery_id === sent.delivery_id);
-      phases.push({ phase, keys: [...client.sendKeyCalls], current: current.claude_submit, persisted: persisted.claude_submit });
+      let persisted: any = null;
+      try {
+        persisted = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8")).find((receipt: any) => receipt.delivery_id === sent.delivery_id) ?? null;
+      } catch (error) { persisted = { read_error: String(error) }; }
+      phases.push({ phase, keys: [...client.sendKeyCalls], current: current?.claude_submit ?? null, persisted: persisted?.claude_submit ?? persisted });
     };
     await vi.advanceTimersByTimeAsync(2_001);
     const staleEvidence = engine.getDeliveryReceipt(sent.delivery_id).claude_submit;
