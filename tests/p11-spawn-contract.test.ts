@@ -563,22 +563,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       );
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0]).toMatchObject({ delivery_state: "submitted", submit_verified: true, submit_dispatched: true, submit_evidence: "transcript_echo" });
-      const pendingWatch = readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]!;
-      expect(pendingWatch).toMatchObject({ notification_pending: true, notification_attempts: 0 });
-      expect(pendingWatch.notification_next_attempt_at_ms).toEqual(expect.any(Number));
-      const retryAt = pendingWatch.notification_next_attempt_at_ms!;
-      expect(retryAt).toBeGreaterThan(watchNow);
-      // The watch clock is injected separately from real delivery timestamps.
-      // Acknowledge the already-submitted receipt at its persisted retry time.
-      watchNow = retryAt - 1;
-      await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
-      expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]).toMatchObject({ notification_pending: true, notification_attempts: 0, notification_next_attempt_at_ms: retryAt });
-      watchNow = retryAt;
-      await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
-      expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]).toMatchObject({ state: "armed", notification_pending: false, notification_delivered_at_ms: retryAt,
+      // An accepted transcript can be verified in the notification callback.
+      // These cases require one acknowledgement, not a mandatory retry delay.
+      expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]).toMatchObject({ state: "armed", notification_pending: false, notification_delivered_at_ms: watchNow,
         // A deadline notice records one attempt; a content change resets its
         // attempt counter when it rearms for the next distinct fingerprint.
         notification_attempts: prefix.startsWith("[watch]") ? 1 : 0 });
+      await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
       expect(engine.listDeliveryReceipts().filter((receipt: any) =>
         receipt.agent_id === parent.agent_id && receipt.text.startsWith(prefix) && receipt.text.includes(child.report_path),
       )).toEqual([expect.objectContaining({ delivery_id: deliveries[0].delivery_id, delivery_state: "submitted", submit_verified: true })]);
