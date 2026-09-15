@@ -11,7 +11,7 @@ const receipt = (overrides: Record<string, unknown> = {}) => ({
     pre_return: { hash: "owned-before-return", observed_at: 7_000, transcriptMatches: 0, tokenCount: 100, cost: 1, active: false }, ...overrides },
 } as unknown as AgentDeliveryReceipt);
 const frame = (overrides: Record<string, unknown> = {}) => ({
-  hash: "later-empty", observed_at: 10_000, complete: false, pending: false, cleared: true, active: false,
+  hash: "later-empty", observed_at: Date.now(), complete: false, pending: false, cleared: true, active: false,
   queued: false, inTranscript: false, transcriptMatches: 0, tokenCount: 100, cost: 1, ...overrides,
 } as unknown as ClaudeDeliveryFrame);
 
@@ -101,4 +101,27 @@ it("#636 D1 ownership cannot attribute a replacement generation that later clear
   await vi.advanceTimersByTimeAsync(2_001);
   expect((await verifyClaudeDelivery(current, { ...io, read: async () => frame({ inTranscript: true, transcriptMatches: 1 }) })).outcome).toBe("pending");
   expect(key).not.toHaveBeenCalled();
+});
+
+it("#636 D1 ownership requires a fresh post-attempt read before another Return", async () => {
+  const key = vi.fn();
+  const result = await verifyClaudeDelivery(receipt(), {
+    read: async () => frame({ observed_at: 6_999, complete: true, pending: true, cleared: false }), save: vi.fn(), returnOnly: key,
+  });
+  expect(result.outcome).toBe("pending");
+  expect(key).not.toHaveBeenCalled();
+});
+
+it("#636 D1 ownership does not retry a lost-ACK Return that clears asynchronously", async () => {
+  const current = receipt({ return_at: undefined, return_attempts: 0, payload_observed: false });
+  let cleared = false;
+  const key = vi.fn(async () => {
+    setTimeout(() => { cleared = true; }, 100);
+    throw new Error("ETIMEDOUT after dispatch");
+  });
+  const io = { read: async () => frame(cleared ? { inTranscript: true, transcriptMatches: 1 } : { hash: "owned-before-lost-ack", complete: true, pending: true, cleared: false }), save: vi.fn(), returnOnly: key };
+  await expect(verifyClaudeDelivery(current, io)).rejects.toThrow("ETIMEDOUT");
+  await vi.advanceTimersByTimeAsync(2_001);
+  expect((await verifyClaudeDelivery(current, io)).outcome).toBe("delivered");
+  expect(key).toHaveBeenCalledTimes(1);
 });
