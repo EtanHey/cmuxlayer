@@ -47,7 +47,7 @@ import {
   type LiveAgentState,
 } from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
-import { isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
+import { buildLaunchCommand, isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -65,6 +65,7 @@ function makeExec(
   additionalSurfaces: TestSurface[] = [],
   primarySurfaceUuid?: string,
   createSurface?: () => TestSurface,
+  launcherCommands?: readonly string[],
 ): ExecFn {
   let promptPending = false;
   let pendingPromptText = "";
@@ -206,11 +207,12 @@ function makeExec(
     }
     if (args.includes("send")) {
       const text = String(args.at(-1) ?? "");
-      if (
-        text.trim() &&
-        (text.includes("cmuxlayer contract for") ||
-          !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
-      ) {
+      // Match the command position, including launcher env assignments. A
+      // report path containing brainlayerClaude is ordinary composer text.
+      const isLauncherCommand = launcherCommands
+        ? launcherCommands.includes(text.trim())
+        : /^(?:[A-Z_][A-Z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)(?:\s|$)/.test(text.trim());
+      if (text.trim() && !isLauncherCommand) {
         promptPending = true;
         pendingPromptText = text;
         promptSurface =
@@ -478,6 +480,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const childLaunchCommand = buildLaunchCommand("claude", "brainlayer", "sonnet", undefined, { authority: "worker" });
     const baseExec = makeExec(
       "Claude Code\nWhat can I help you with?\n❯ ",
       "parent-pane",
@@ -491,6 +494,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         },
       ],
       parentUuid,
+      undefined,
+      [childLaunchCommand],
     );
     exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (args.includes("new-split")) {
@@ -529,6 +534,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const child = await spawn({ parent_agent_id: parent.agent_id });
 
     expect(child.ok, JSON.stringify(child)).toBe(true);
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.some(([, args]: [string, string[]]) => args.includes("send") && String(args.at(-1)).trim() === childLaunchCommand)).toBe(true);
     // Supply the channel explicitly on the RED baseline, before inheritance exists.
     const worker = { ...engine.getAgentState(child.agent_id), collab_path: parent.collab_path };
     engine.stateMgr.writeState(worker);
@@ -550,6 +556,33 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
 
     const beforeDeadline = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    const acknowledgeWatchDelivery = async (prefix: string) => {
+      await settlePendingDeliveries();
+      const deliveries = engine.listDeliveryReceipts().filter((receipt: any) =>
+        receipt.agent_id === parent.agent_id && receipt.text.startsWith(prefix) && receipt.text.includes(child.report_path),
+      );
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({ delivery_state: "submitted", submit_verified: true, submit_dispatched: true, submit_evidence: "transcript_echo" });
+      const pendingWatch = readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]!;
+      expect(pendingWatch).toMatchObject({ notification_pending: true, notification_attempts: 0 });
+      expect(pendingWatch.notification_next_attempt_at_ms).toEqual(expect.any(Number));
+      const retryAt = pendingWatch.notification_next_attempt_at_ms!;
+      expect(retryAt).toBeGreaterThan(watchNow);
+      // The watch clock is injected separately from real delivery timestamps.
+      // Acknowledge the already-submitted receipt at its persisted retry time.
+      watchNow = retryAt - 1;
+      await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
+      expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]).toMatchObject({ notification_pending: true, notification_attempts: 0, notification_next_attempt_at_ms: retryAt });
+      watchNow = retryAt;
+      await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
+      expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]).toMatchObject({ state: "armed", notification_pending: false, notification_delivered_at_ms: retryAt,
+        // A deadline notice records one attempt; a content change resets its
+        // attempt counter when it rearms for the next distinct fingerprint.
+        notification_attempts: prefix.startsWith("[watch]") ? 1 : 0 });
+      expect(engine.listDeliveryReceipts().filter((receipt: any) =>
+        receipt.agent_id === parent.agent_id && receipt.text.startsWith(prefix) && receipt.text.includes(child.report_path),
+      )).toEqual([expect.objectContaining({ delivery_id: deliveries[0].delivery_id, delivery_state: "submitted", submit_verified: true })]);
+    };
     watchNow = 3_000;
     await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const deadlineCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
@@ -565,7 +598,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toHaveLength(1);
 
-    await settlePendingDeliveries();
+    await acknowledgeWatchDelivery("[watch] deadline elapsed");
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforeDeadline).filter(([, args]: [string, string[]]) =>
+      args.some(arg => arg.includes("[watch] deadline elapsed") && arg.includes(child.report_path)),
+    )).toHaveLength(1);
     console.info("D1_WATCH_AFTER_DEADLINE", JSON.stringify({ watchNow, watches: readWatchRegistry({ registryPath: watchRegistryPath }).watches, deliveries: engine.listDeliveryReceipts() }));
     await server.close();
     server = createServer(
@@ -613,9 +649,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ),
     ).toBe(true);
 
-    await settlePendingDeliveries();
+    await acknowledgeWatchDelivery("[report]");
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.slice(before).filter(([, args]: [string, string[]]) =>
+      args.some(arg => arg.includes("[report]") && arg.includes(child.report_path)),
+    )).toHaveLength(1);
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
-    watchNow = 2_000;
+    watchNow += 1;
     await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const retryCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,

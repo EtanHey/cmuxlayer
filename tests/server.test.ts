@@ -1432,6 +1432,7 @@ describe("tool handler integration", () => {
   it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
     const calls: string[] = [];
     let surfaceIndex = 0;
+    const createdSurfaces: Array<{ ref: string; pane: string; workspace: string }> = [];
     const pendingBootContracts = new Map<string, string>();
     const submittedBootContracts = new Map<string, string>();
     const launchedSurfaces = new Set<string>();
@@ -1446,20 +1447,26 @@ describe("tool handler integration", () => {
       listWorkspaces: vi.fn().mockResolvedValue({
         workspaces: [{ ref: "workspace:grid", title: "grid" }],
       }),
-      listPanes: vi.fn().mockResolvedValue({
+      listPanes: vi.fn().mockImplementation(async () => ({
         workspace_ref: "workspace:grid",
         window_ref: "window:1",
-        panes: [],
-      }),
-      listPaneSurfaces: vi.fn().mockResolvedValue({
+        panes: createdSurfaces.map((surface, index) => ({
+          ref: surface.pane, index, focused: index === 0,
+          surface_count: 1, surface_refs: [surface.ref], selected_surface_ref: surface.ref,
+        })),
+      })),
+      listPaneSurfaces: vi.fn().mockImplementation(async (opts?: { pane?: string; workspace?: string }) => ({
         workspace_ref: "workspace:grid",
         window_ref: "window:1",
-        pane_ref: "pane:1",
-        surfaces: [],
-      }),
+        pane_ref: opts?.pane,
+        surfaces: createdSurfaces.filter(surface => (!opts?.pane || surface.pane === opts.pane) && (!opts?.workspace || surface.workspace === opts.workspace)).map(surface => ({
+          ref: surface.ref, title: "", type: "terminal", index: 0, selected: true,
+        })),
+      })),
       newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
         surfaceIndex += 1;
         calls.push(`spawn:${opts.workspace}:surface:${surfaceIndex}`);
+        createdSurfaces.push({ ref: `surface:${surfaceIndex}`, pane: `pane:${surfaceIndex}`, workspace: opts.workspace });
         return {
           workspace: opts.workspace,
           surface: `surface:${surfaceIndex}`,
@@ -1578,7 +1585,7 @@ describe("tool handler integration", () => {
     const engine = (server as any)._registeredTools.interact._engine;
     const initial = parsed.agents[0].boot_prompt_receipt;
     expect(initial).toMatchObject({ delivery_state: "pending_verify", submit_verified: null });
-    await advanceTimers(2);
+    await advanceTimers(2_001);
     await engine.verifyPendingDeliveries();
     console.info("D1_WORKSPACE_SPAWN", JSON.stringify({ now: Date.now(), receipt: engine.getDeliveryReceipt(initial.delivery_id), agent: engine.getAgentState(parsed.agents[0].agent_id), panes: await mockClient.listPanes(), route: await engine.resolveAgentIoRoute(parsed.agents[0].agent_id).catch((error: Error) => error.message) }));
     expect(engine.getDeliveryReceipt(initial.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });

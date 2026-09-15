@@ -630,8 +630,26 @@ describe("send_to v2 background verify", () => {
   });
 
   it("#636 D1 ownership revocation survives an awaited read, stale save, and restart", async () => {
-    const client = new ClaudeDeliverySurface(); const sent = await instantDelivery(client);
-    const engine = server._registeredTools.interact._engine; engine.dispose();
+    const client = new ClaudeDeliverySurface();
+    let order = 0;
+    let activePhase = "initial-delivery";
+    let deliveryId: string | undefined;
+    const keyEvents: unknown[] = [];
+    const sendKey = client.sendKey.bind(client);
+    const recordKey = (event: string, key: string, caller: string | undefined) => {
+      const evidence = deliveryId ? server?._registeredTools.interact._engine.getDeliveryReceipt(deliveryId)?.claude_submit : null;
+      keyEvents.push({ order: order++, at: Date.now(), phase: activePhase, event, key, caller, composer: client.composer,
+        retry_revoked: evidence?.retry_revoked ?? null, attribution_revoked: evidence?.attribution_revoked ?? null,
+        return_attempts: evidence?.return_attempts ?? null });
+    };
+    client.sendKey = async (surface, key) => {
+      const caller = new Error().stack?.split("\n").slice(2, 7).join("\n");
+      recordKey("key-start", key, caller);
+      try { await sendKey(surface, key); } finally { recordKey("key-resolved", key, caller); }
+    };
+    const sent = await instantDelivery(client);
+    deliveryId = sent.delivery_id;
+    const engine = server._registeredTools.interact._engine;
     const phases: unknown[] = [];
     const recordPhase = (phase: string, currentEngine = engine) => {
       const current = currentEngine.getDeliveryReceipt(sent.delivery_id);
@@ -639,9 +657,16 @@ describe("send_to v2 background verify", () => {
       try {
         persisted = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8")).find((receipt: any) => receipt.delivery_id === sent.delivery_id) ?? null;
       } catch (error) { persisted = { read_error: String(error) }; }
-      phases.push({ phase, keys: [...client.sendKeyCalls], current: current?.claude_submit ?? null, persisted: persisted?.claude_submit ?? persisted });
+      activePhase = phase;
+      phases.push({ order: order++, at: Date.now(), phase, keys: [...client.sendKeyCalls],
+        old_engine_timer_active: engine.claudeVerifyTimer != null, old_engine_generation: engine.getDeliveryVerificationGeneration(),
+        current: current?.claude_submit ?? null, persisted: persisted?.claude_submit ?? persisted });
     };
+    recordPhase("initial-delivery-resolved");
+    engine.dispose();
+    recordPhase("before-2001ms-advance");
     await vi.advanceTimersByTimeAsync(2_001);
+    recordPhase("after-2001ms-advance");
     const staleEvidence = engine.getDeliveryReceipt(sent.delivery_id).claude_submit;
     let release!: () => void; let reading = false; let firstRead = true;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -653,9 +678,13 @@ describe("send_to v2 background verify", () => {
     };
     const verification = engine.verifyPendingDeliveries();
     await vi.advanceTimersByTimeAsync(0); expect(reading).toBe(true);
+    recordPhase("held-read-started");
+    recordPhase("before-observer-create");
     const observer = createServer({ context: serverContexts.get(server)! }) as any;
+    recordPhase("after-observer-create");
     try {
       client.composer = "";
+      recordPhase("before-clear-read");
       expect(parseResult(await observer._registeredTools.read_screen.handler({ surface: client.surface }, {})).ok).toBe(true);
       recordPhase("observed-clear");
       client.composer = "636 unique delivery";
@@ -670,6 +699,7 @@ describe("send_to v2 background verify", () => {
     await vi.advanceTimersByTimeAsync(2_001);
     await server._registeredTools.interact._engine.verifyPendingDeliveries();
     recordPhase("verified-after-restart", server._registeredTools.interact._engine);
+    console.info("D1_OWNERSHIP_KEYS", JSON.stringify(keyEvents));
     console.info("D1_OWNERSHIP_PHASES", JSON.stringify(phases));
     expect(client.sendKeyCalls).toEqual(["return"]);
     expect(client.sendCalls).toEqual(["636 unique delivery"]);
