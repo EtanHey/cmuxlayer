@@ -20,6 +20,7 @@ const ESSENTIAL_FIELDS = [
   "authority",
   "placement",
   "parent_agent_id",
+  "collab_path",
   "version",
   "type",
   "runtime_initialization",
@@ -59,7 +60,7 @@ function record(value: unknown): JsonObject | null {
 
 function bootUnsubmittedNextAction(surface: unknown): string {
   const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
-  return `Read the pane with read_screen({surface:"${surfaceRef}"}); if the brief is still in the composer, submit it with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}); never re-spawn.`;
+  return `Boot prompt typed but not submitted. Read the pane with read_screen({surface:"${surfaceRef}"}); the spawning caller must report boot_unsubmitted with this agent ID to its lead using the collab path in its contract. Keep the existing brief intact; never re-spawn or send a manual Return.`;
 }
 
 function leanHealth(value: unknown): JsonObject | undefined {

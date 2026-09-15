@@ -1226,6 +1226,55 @@ describe("report_to_parent hierarchy-bound escalation", () => {
     }
   }
 
+  it.each(["agent", "surface", "command", "key", "report"])("#636 D3 refuses worker-to-parent %s with its collab path", async (mode) => {
+    const parent = hierarchyRecord({ agentId: "lead-parent", surfaceId: "surface:new", surfaceUuid: parentUuid, parentAgentId: null });
+    const child = { ...hierarchyRecord({ agentId: "worker-child", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id }), collab_path: join(inboxDir, "collab.md") };
+    register(parent, child);
+    const before = sendCalls(exec).length;
+    const tool = mode === "report" ? "report_to_parent" : "send_to";
+    const args = mode === "report" ? { blocker: "blocked" } : { mode, ...(mode === "agent" ? { agent_id: parent.agent_id } : { surface: parent.surface_id }), text: mode === "key" ? "return" : "blocked" };
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () => server._registeredTools[tool].handler(args, {}));
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(data.error).toContain(child.collab_path);
+    expect(sendCalls(exec)).toHaveLength(before);
+    expect(readInbox(parent.agent_id, { baseDir: inboxDir })).toHaveLength(0);
+  });
+
+  it("#636 D3 also refuses a worker addressing an ancestor lead", async () => {
+    const root = hierarchyRecord({ agentId: "root", surfaceId: "surface:new", surfaceUuid: parentUuid, parentAgentId: null });
+    const parent = { ...hierarchyRecord({ agentId: "lead", surfaceId: "surface:child-two", surfaceUuid: childTwoUuid, parentAgentId: root.agent_id }), role: "orchestrator" as const };
+    const child = { ...hierarchyRecord({ agentId: "worker", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id }), collab_path: join(inboxDir, "collab.md") };
+    register(root, parent, child);
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () => server._registeredTools.send_to.handler({ mode: "agent", agent_id: root.agent_id, text: "blocked" }, {}));
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain(child.collab_path);
+  });
+
+  it.each(["lead-to-worker", "orc-to-lead", "peer-leads", "lead-to-parent", "unknown-caller"])("#636 D3 preserves %s delivery with collab paths", async (direction) => {
+    const parent = { ...hierarchyRecord({ agentId: "parent", surfaceId: "surface:new", surfaceUuid: parentUuid, parentAgentId: null }), collab_path: join(inboxDir, "collab.md") };
+    const child = { ...hierarchyRecord({ agentId: "child", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id }), role: direction === "lead-to-worker" ? "worker" as const : "orchestrator" as const, collab_path: parent.collab_path };
+    if (direction === "peer-leads") child.parent_agent_id = null;
+    const caller = direction === "lead-to-parent" ? childUuid : direction === "unknown-caller" ? undefined : parentUuid;
+    const target = direction === "lead-to-parent" ? parent.agent_id : child.agent_id;
+    register(parent, child);
+    const result = await runWithCallerContext({ surfaceId: caller }, () => server._registeredTools.send_to.handler({ mode: "agent", agent_id: target, text: "hello" }, {}));
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    expect(sendCalls(exec).length).toBeGreaterThan(0);
+  });
+
+  it("#636 D3 preserves engine halt escalation with a worker collab channel", async () => {
+    const parent = hierarchyRecord({ agentId: "parent", surfaceId: "surface:new", surfaceUuid: parentUuid, parentAgentId: null });
+    const child = { ...hierarchyRecord({ agentId: "worker", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id, state: "working" }), collab_path: join(inboxDir, "collab.md"), halt_escalation: true };
+    register(parent, child);
+    const engine = server._registeredTools.interact._engine;
+    await server._registeredTools.list_agents.handler({}, {});
+    const episode = await runWithCallerContext({ surfaceId: childUuid }, () => engine.maybeEscalateLiveHalt(child, 'Claude Code\nAPI Error: 500 {"request_id":"req_636halt"}\n❯'));
+    expect(readInbox(parent.agent_id, { baseDir: inboxDir }).some(message => message.tag === "agent_halt_harness_api_error"), JSON.stringify(episode)).toBe(true);
+    expect(episode.halt_notified_ancestor_id).toBe(parent.agent_id);
+    expect(episode.halt_last_delivery_error).toBeNull();
+  });
+
   it("routes only to the caller's registry parent and actively wakes it", async () => {
     const parent = hierarchyRecord({
       agentId: "lead-parent",
