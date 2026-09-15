@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -1415,8 +1415,24 @@ async function measureParallelStress(
 }
 
 export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, binDir, missingCmuxSocket, fakeCmuxState, surfaceCount }) {
+  // Isolate defaults AND explicit inherited overrides. CMUXLAYER_STATE_DIR alone
+  // does not select the server's registry, which defaults to os.homedir().
+  const blocked = new Set(["NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS", "LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"]);
+  const cleanEnv = Object.fromEntries(Object.entries(parentEnv).filter(([name]) =>
+    !name.startsWith("CMUX_") && !name.startsWith("CMUXLAYER_") && !blocked.has(name)));
+  const home = join(tempRoot, "home");
   return {
-    ...parentEnv,
+    ...cleanEnv,
+    HOME: home,
+    CODEX_HOME: join(home, ".codex"),
+    CLAUDE_CONFIG_DIR: join(home, ".claude"),
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_STATE_HOME: join(home, ".local", "state"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    TMPDIR: join(tempRoot, "tmp"),
+    TMP: join(tempRoot, "tmp"),
+    TEMP: join(tempRoot, "tmp"),
     CMUX_AGENT_ID: "",
     CMUX_SURFACE_ID: "",
     CMUX_WORKSPACE_ID: "",
@@ -1425,7 +1441,14 @@ export function buildDaemonBenchmarkEnv(parentEnv, { tempRoot, binDir, missingCm
     CMUX_SOCKET_PATH: missingCmuxSocket,
     CMUXLAYER_BENCH_SURFACES: String(surfaceCount),
     CMUXLAYER_BENCH_STATE: fakeCmuxState,
-    CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
+    CMUXLAYER_STATE_DIR: join(home, ".local", "state", "cmux-agents"),
+    CMUXLAYER_INBOX_BASE_DIR: join(home, ".cmux", "agents"),
+    CMUXLAYER_HARNESS_HOME: home,
+    CMUXLAYER_SESSION_REGISTRY: join(tempRoot, "session-registry.jsonl"),
+    CMUXLAYER_SEAT_REGISTRY_PATH: join(tempRoot, "seat-registry.json"),
+    CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(tempRoot, "launcher-registry.json"),
+    CMUXLAYER_DAEMON_PID_RECEIPT: join(tempRoot, "daemon-pids.txt"),
+    CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH: join(tempRoot, "fleet-sidebar.swift"),
     CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
     CMUXLAYER_SWEEP_INTERVAL_MS: "1000",
     CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "1000",
@@ -1446,15 +1469,11 @@ async function main() {
     : join(repoRoot, "docs.local", "scratch", "run5r3");
   await mkdir(scratchRoot, { recursive: true });
   const tempRoot = await mkdtemp(join(scratchRoot, "b-"));
-  const socketScratchRoot = join(
-    homedir(),
-    ".local",
-    "state",
-    "cmuxlayer",
-    "bench",
-  );
-  await mkdir(socketScratchRoot, { recursive: true });
-  const socketRoot = await mkdtemp(join(socketScratchRoot, "b-"));
+  // Darwin socket paths are limited to 104 bytes. Use a private short root,
+  // never the user's live state tree; mkdtemp owns this directory exclusively.
+  const socketRoot = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "cml-bench-"));
+  await mkdir(join(tempRoot, "home"), { recursive: true });
+  await mkdir(join(tempRoot, "tmp"), { recursive: true });
   const binDir = join(tempRoot, "bin");
   await mkdir(binDir, { recursive: true });
   await writeFile(join(binDir, "package.json"), '{"type":"commonjs"}\n');
