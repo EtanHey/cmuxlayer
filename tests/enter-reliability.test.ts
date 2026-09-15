@@ -76,8 +76,12 @@ async function callTool(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
-  const resultPromise = tool.handler(args, {} as any);
-  await vi.advanceTimersByTimeAsync(10_000);
+  let settled = false;
+  const resultPromise = tool.handler(args, {} as any).finally(() => { settled = true; });
+  // Observe the immediate receipt. Background outcomes are asserted separately.
+  for (let elapsed = 0; elapsed < 10_000 && !settled; elapsed += 50) {
+    await vi.advanceTimersByTimeAsync(50);
+  }
   return resultPromise;
 }
 
@@ -90,8 +94,9 @@ async function callToolInTimerSteps(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
-  const resultPromise = tool.handler(args, {} as any);
-  for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+  let settled = false;
+  const resultPromise = tool.handler(args, {} as any).finally(() => { settled = true; });
+  for (let elapsed = 0; elapsed < 10_000 && !settled; elapsed += 100) {
     await vi.advanceTimersByTimeAsync(100);
   }
   return resultPromise;
@@ -141,6 +146,7 @@ class FakeClaudeSurfaceClient {
   postReturnScreenText: string | null = null;
   postReturnPendingScreenText: string | null = null;
   private pendingText = "";
+  private readonly acceptedTranscript: string[] = [];
   private returnCount = 0;
   private queuedCodexReadsRemaining = 0;
   private mode: "idle" | "working" = "idle";
@@ -240,6 +246,7 @@ class FakeClaudeSurfaceClient {
     this.returnCount += 1;
     this.queuedCodexReadsRemaining = this.queuedCodexReadsAfterReturn;
     if (this.returnCount >= this.requiredReturns) {
+      this.acceptedTranscript.push(this.pendingText);
       this.pendingText = "";
       this.mode = this.completionMode;
       return;
@@ -335,11 +342,9 @@ class FakeClaudeSurfaceClient {
       return `OpenAI Codex\n${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
     }
 
-    if (this.mode === "working") {
-      return "Claude Code\n✻ Working\n";
-    }
-
-    return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
+    const transcript = this.acceptedTranscript.map(text => `> ${text}`).join("\n");
+    const active = this.mode === "working" ? "✻ Working\n" : "";
+    return `Claude Code\n${transcript}\n${active}❯ ${tail}\nCLAUDE_COUNTER:1\n`;
   }
 }
 
@@ -513,9 +518,12 @@ class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
       return `Cursor Agent\ncursor> ${tail}\nAuto\n`;
     }
     if (!tail && this.submittedText !== null) {
-      return "Claude Code\n✻ Working\n";
+      return `Claude Code\n> ${this.submittedText}\n✻ Working\n❯ \n`;
     }
-    return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
+    // Accepted input can remain painted while the turn is active. It is not
+    // safe to press Return again merely because this slow frame still has text.
+    const active = this.submittedText === null ? "" : "✻ Working\n";
+    return `Claude Code\n${active}❯ ${tail}\nCLAUDE_COUNTER:1\n`;
   }
 }
 
@@ -957,6 +965,7 @@ describe("enter reliability", () => {
     vi.useRealTimers();
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
+    client.cli = "codex";
     client.completionMode = "idle";
     client.transportHealth = {
       mode: "socket",
@@ -964,7 +973,7 @@ describe("enter reliability", () => {
       current_socket_path: "/tmp/cmuxlayer-test.sock",
     };
     server = createReliabilityServer(client, false);
-    registerAgent(server, { state: "idle" });
+    registerAgent(server, { state: "idle", cli: "codex" });
     const mcpClient = new Client({
       name: "lean-receipt-test",
       version: "0.1.0",

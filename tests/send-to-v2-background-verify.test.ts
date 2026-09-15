@@ -8,7 +8,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../src/server.js";
+import { runWithCallerContext } from "../src/caller-context.js";
+import { readInbox } from "../src/inbox.js";
+import { parseScreen } from "../src/screen-parser.js";
+import { createServer, createServerContext } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
@@ -34,11 +37,12 @@ async function callTool(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
+  let settled = false;
   const resultPromise = tool.handler(
     name === "send_to" ? { mode: "agent", ...args } : args,
     {} as any,
-  );
-  for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+  ).then((result: any) => { settled = true; return result; });
+  for (let elapsed = 0; !settled && elapsed < 10_000; elapsed += 100) {
     await vi.advanceTimersByTimeAsync(100);
   }
   return resultPromise;
@@ -224,7 +228,7 @@ class FakeAgentSurfaceClient {
           ]
             .filter((line) => line !== "")
             .join("\n")
-        : `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`);
+        : `Claude Code\n${this.transcriptTail ? `⏺ User: ${this.transcriptTail}\n` : ""}> ${tail}\nCLAUDE_COUNTER:1\n`);
     return {
       surface,
       text,
@@ -236,6 +240,45 @@ class FakeAgentSurfaceClient {
   async renameTab(_surface: string, _title: string) {}
 }
 
+class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
+  composer = "";
+  transcript = "";
+  busy = false;
+  reorder = false;
+  queuedReply = false;
+  collapsePastes = false;
+  tailOnly = false;
+  textWaitingToPaint = "";
+  returnFrames: string[] = [];
+  readGate: Promise<void> | null = null;
+  onRead: (() => void) | null = null;
+  async send(surface: string, text: string): Promise<any> {
+    this.sendCalls.push(text);
+    if (this.reorder) this.textWaitingToPaint += text;
+    else this.composer += text;
+    return { queued: this.queuedReply };
+  }
+  async sendKey(surface: string, key: string) {
+    this.sendKeyCalls.push(key);
+    if (key !== "return") return;
+    this.returnFrames.push((await this.readScreen(surface)).text);
+    if (this.sendKeyCalls.length >= this.requiredReturns && this.composer) {
+      this.transcript += `\n⏺ User: ${this.composer}`;
+      this.composer = "";
+    }
+  }
+  async pasteText(surface: string, text: string) {
+    await this.send(surface, text);
+    if (this.collapsePastes && text.length > 500) this.composer = "[Pasted text #1 +3 lines]";
+  }
+  async readScreen(surface: string) {
+    this.onRead?.();
+    if (this.readGate) await this.readGate;
+    return { surface, text: this.screenOverride ?? `Claude Code\n${this.transcript}\n${this.busy ? "✻ Working… (esc to interrupt)" : "⏺ Bash(previous tool completed)"}\n❯ ${this.tailOnly ? this.composer.slice(-160) : this.composer}\n`, lines: 30, scrollback_used: false };
+  }
+}
+
+const serverContexts = new WeakMap<object, ReturnType<typeof createServerContext>>();
 function createVerifyServer(
   client: FakeAgentSurfaceClient,
   extras?: {
@@ -244,14 +287,24 @@ function createVerifyServer(
     deliveryIssueFiler?: (ticket: unknown) => Promise<void>;
   },
 ) {
-  const server = createServer({
+  const options = {
     client: client as any,
     stateDir: TEST_DIR,
+    inboxBaseDir: join(TEST_DIR, "inboxes"),
     disableSpawnPreflight: true,
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
     ...extras,
-  });
+  };
+  const context = createServerContext(options);
+  const server = createServer({ ...options, context });
+  // This fixture owns the shared context. Closing another MCP client must not
+  // dispose it, but closing this owner must stop its engine before a restart.
+  const close = server.close.bind(server);
+  server.close = async () => {
+    try { await close(); } finally { context.dispose(); }
+  };
+  serverContexts.set(server, context);
   const engine = (server as any)._registeredTools.interact._engine;
   engine.dispose();
   return server;
@@ -346,6 +399,7 @@ describe("send_to v2 background verify", () => {
     server = createVerifyServer(client);
     registerAgent(server);
 
+    let settled = false;
     const resultPromise = server._registeredTools.send_to.handler(
       {
         mode: "surface",
@@ -354,8 +408,8 @@ describe("send_to v2 background verify", () => {
         press_enter: true,
       },
       {},
-    );
-    for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+    ).then((result: any) => { settled = true; return result; });
+    for (let elapsed = 0; !settled && elapsed < 10_000; elapsed += 100) {
       await vi.advanceTimersByTimeAsync(100);
     }
     const parsed = parseResult(await resultPromise);

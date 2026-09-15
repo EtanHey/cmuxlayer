@@ -128,6 +128,7 @@ function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
   bootPromptFailure?: "return" | "surface-gone";
+  requiredPromptReturns?: number;
   shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
@@ -139,6 +140,7 @@ function makeLifecycleExec(opts?: {
   let activeCli: "claude" | "codex" | "cursor" = "claude";
   let createdSurfaceCount = 0;
   let bootPromptReturnFailures = 0;
+  let promptReturns = 0;
   let currentSurface = "surface:new";
   const listedSurface = () =>
     surfaceLive
@@ -178,6 +180,7 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
+        if (++promptReturns < (opts?.requiredPromptReturns ?? 1)) return { stdout: "{}", stderr: "" };
         if (
           opts?.bootPromptFailure === "return" &&
           bootPromptReturnFailures++ === 0
@@ -11194,7 +11197,7 @@ codex>
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to_agent"];
     const spawnResult = await spawn.handler(
-      { repo: "test", model: "sonnet", cli: "claude" },
+      { repo: "test", model: "gpt-5.5", cli: "codex" },
       {} as any,
     );
     const agentId = parseToolResult(spawnResult).agent_id as string;
@@ -11232,7 +11235,7 @@ codex>
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
     const spawnResult = await spawn.handler(
-      { repo: "test", model: "sonnet", cli: "claude" },
+      { repo: "test", model: "gpt-5.5", cli: "codex" },
       {} as any,
     );
     const agentId = parseToolResult(spawnResult).agent_id as string;
@@ -14265,6 +14268,9 @@ codex>
     mockExec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (!collectReceiverInput) {
         return baseExec(cmd, args);
+      }
+      if (args.includes("read-screen")) {
+        return { stdout: JSON.stringify({ surface: "surface:new", text: `Claude Code\n${submittedMessages.join("\n")}\n❯ ${composer}`, lines: 80 }), stderr: "" };
       }
       if (args.includes("set-buffer")) {
         const nameIndex = args.indexOf("--name");

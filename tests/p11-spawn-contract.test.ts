@@ -47,7 +47,7 @@ import {
   type LiveAgentState,
 } from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
-import { isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
+import { buildLaunchCommand, isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -65,9 +65,11 @@ function makeExec(
   additionalSurfaces: TestSurface[] = [],
   primarySurfaceUuid?: string,
   createSurface?: () => TestSurface,
+  launcherCommands?: readonly string[],
 ): ExecFn {
   let promptPending = false;
   let pendingPromptText = "";
+  const acceptedTranscript = new Map<string, string[]>();
   let promptSurface = "surface:new";
   let pastePending = "";
   let currentScreenText = screenText;
@@ -182,7 +184,9 @@ function makeExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        setScreenText(`Claude Code\n${pendingPromptText}\n✻ Working\n`, promptSurface);
+        const history = acceptedTranscript.get(promptSurface) ?? [];
+        history.push(pendingPromptText); acceptedTranscript.set(promptSurface, history);
+        setScreenText(`Claude Code\n${history.join("\n")}\n✻ Working\n❯ `, promptSurface);
         promptPending = false;
       }
       return { stdout: "{}", stderr: "" };
@@ -196,23 +200,24 @@ function makeExec(
         promptPending = true;
         pendingPromptText = pastePending;
         promptSurface = surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
-        setScreenText(`Claude Code\n❯ ${pastePending}`, promptSurface);
+        setScreenText(`Claude Code\n${(acceptedTranscript.get(promptSurface) ?? []).join("\n")}\n❯ ${pastePending}`, promptSurface);
       }
       pastePending = "";
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("send")) {
       const text = String(args.at(-1) ?? "");
-      if (
-        text.trim() &&
-        (text.includes("cmuxlayer contract for") ||
-          !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
-      ) {
+      // Match the command position, including launcher env assignments. A
+      // report path containing brainlayerClaude is ordinary composer text.
+      const isLauncherCommand = launcherCommands
+        ? launcherCommands.includes(text.trim())
+        : /^(?:[A-Z_][A-Z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)(?:\s|$)/.test(text.trim());
+      if (text.trim() && !isLauncherCommand) {
         promptPending = true;
         pendingPromptText = text;
         promptSurface =
           surfaces.find(({ ref }) => args.includes(ref))?.ref ?? "surface:new";
-        setScreenText(`Claude Code\n❯ ${text}`, promptSurface);
+        setScreenText(`Claude Code\n${(acceptedTranscript.get(promptSurface) ?? []).join("\n")}\n❯ ${text}`, promptSurface);
       }
     }
     return {
@@ -457,6 +462,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const childLaunchCommand = buildLaunchCommand("claude", "brainlayer", "sonnet", undefined, { authority: "worker" });
     const baseExec = makeExec(
       "Claude Code\nWhat can I help you with?\n❯ ",
       "parent-pane",
@@ -470,6 +476,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         },
       ],
       parentUuid,
+      undefined,
+      [childLaunchCommand],
     );
     exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (args.includes("new-split")) {
@@ -508,6 +516,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const child = await spawn({ parent_agent_id: parent.agent_id });
 
     expect(child.ok, JSON.stringify(child)).toBe(true);
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.some(([, args]: [string, string[]]) => args.includes("send") && String(args.at(-1)).trim() === childLaunchCommand)).toBe(true);
     // Supply the channel explicitly on the RED baseline, before inheritance exists.
     const worker = { ...engine.getAgentState(child.agent_id), collab_path: parent.collab_path };
     engine.stateMgr.writeState(worker);
@@ -590,7 +599,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ).toBe(true);
 
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
-    watchNow = 2_000;
+    watchNow += 1;
     await runWithCallerContext({ ...(withCollab ? { surfaceId: childUuid } : {}) }, () => engine.sweepWatchesBestEffort());
     const retryCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(
       afterFirstWake,

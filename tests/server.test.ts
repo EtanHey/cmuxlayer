@@ -1432,6 +1432,7 @@ describe("tool handler integration", () => {
   it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
     const calls: string[] = [];
     let surfaceIndex = 0;
+    const createdSurfaces: Array<{ ref: string; pane: string; workspace: string }> = [];
     const pendingBootContracts = new Map<string, string>();
     const submittedBootContracts = new Map<string, string>();
     const launchedSurfaces = new Set<string>();
@@ -1446,20 +1447,26 @@ describe("tool handler integration", () => {
       listWorkspaces: vi.fn().mockResolvedValue({
         workspaces: [{ ref: "workspace:grid", title: "grid" }],
       }),
-      listPanes: vi.fn().mockResolvedValue({
+      listPanes: vi.fn().mockImplementation(async () => ({
         workspace_ref: "workspace:grid",
         window_ref: "window:1",
-        panes: [],
-      }),
-      listPaneSurfaces: vi.fn().mockResolvedValue({
+        panes: createdSurfaces.map((surface, index) => ({
+          ref: surface.pane, index, focused: index === 0,
+          surface_count: 1, surface_refs: [surface.ref], selected_surface_ref: surface.ref,
+        })),
+      })),
+      listPaneSurfaces: vi.fn().mockImplementation(async (opts?: { pane?: string; workspace?: string }) => ({
         workspace_ref: "workspace:grid",
         window_ref: "window:1",
-        pane_ref: "pane:1",
-        surfaces: [],
-      }),
+        pane_ref: opts?.pane,
+        surfaces: createdSurfaces.filter(surface => (!opts?.pane || surface.pane === opts.pane) && (!opts?.workspace || surface.workspace === opts.workspace)).map(surface => ({
+          ref: surface.ref, title: "", type: "terminal", index: 0, selected: true,
+        })),
+      })),
       newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
         surfaceIndex += 1;
         calls.push(`spawn:${opts.workspace}:surface:${surfaceIndex}`);
+        createdSurfaces.push({ ref: `surface:${surfaceIndex}`, pane: `pane:${surfaceIndex}`, workspace: opts.workspace });
         return {
           workspace: opts.workspace,
           surface: `surface:${surfaceIndex}`,
@@ -1496,7 +1503,7 @@ describe("tool handler integration", () => {
         return {
           surface,
           text: submittedBootContracts.has(surface)
-            ? `• ${submittedBootContracts.get(surface)}\nWorking (1s - esc to interrupt)`
+            ? `• ${submittedBootContracts.get(surface)}\n${surface === "surface:2" ? "Working (1s - esc to interrupt)" : "✻ Working\n❯ "}`
             : pending
               ? surface === "surface:2"
                 ? `OpenAI Codex\n» ${pending}\ngpt-5.4 high · ~/Gits/cmuxlayer`
