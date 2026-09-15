@@ -480,6 +480,24 @@ describe("send_to v2 background verify", () => {
     expect(client.sendKeyCalls).toEqual(["return", "return"]);
   });
 
+  it("#636 D1 a report watch keeps one pending receipt across notification retries", async () => {
+    const client = new ClaudeDeliverySurface(); client.requiredReturns = 2;
+    server = createVerifyServer(client);
+    registerAgent(server, { role: "orchestrator" });
+    const engine = server._registeredTools.interact._engine;
+    const report = join(TEST_DIR, "report.md"); writeFileSync(report, "");
+    const watch = await engine.armWatch({ owner: "agent-1", target_kind: "file", target: report, marker: "DONE", deadline: Date.now() + 60_000 });
+    writeFileSync(report, "DONE");
+    const first = engine.runSweep(); await vi.advanceTimersByTimeAsync(500); await first;
+    expect(engine.listDeliveryReceipts()).toEqual([expect.objectContaining({ delivery_id: expect.stringMatching(/^watch:/), delivery_state: "pending_verify" })]);
+    expect(JSON.parse(readFileSync(join(TEST_DIR, "watch-specs.json"), "utf8")).watches.find((item: any) => item.watch_id === watch.watch_id).notification_delivered_at_ms).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(8_000); await engine.runSweep();
+    expect(engine.listDeliveryReceipts()).toHaveLength(1);
+    expect(engine.listDeliveryReceipts()[0].delivery_state).toBe("submitted");
+    expect(client.sendCalls).toHaveLength(1);
+    expect(client.sendKeyCalls).toEqual(["return", "return"]);
+  });
+
   it("#636 D1 bounds idle recovery and tells the sender through inbox and collab", async () => {
     const client = new ClaudeDeliverySurface();
     const collab = join(TEST_DIR, "sender-collab.md");
