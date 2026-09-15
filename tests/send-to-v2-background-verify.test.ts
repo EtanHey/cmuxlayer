@@ -251,6 +251,8 @@ class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
   tailOnly = false;
   textWaitingToPaint = "";
   returnFrames: string[] = [];
+  readGate: Promise<void> | null = null;
+  onRead: (() => void) | null = null;
   async send(surface: string, text: string): Promise<any> {
     this.sendCalls.push(text);
     if (this.reorder) this.textWaitingToPaint += text;
@@ -271,6 +273,8 @@ class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
     if (this.collapsePastes && text.length > 500) this.composer = "[Pasted text #1 +3 lines]";
   }
   async readScreen(surface: string) {
+    this.onRead?.();
+    if (this.readGate) await this.readGate;
     return { surface, text: this.screenOverride ?? `Claude Code\n${this.transcript}\n${this.busy ? "✻ Working… (esc to interrupt)" : "⏺ Bash(previous tool completed)"}\n❯ ${this.tailOnly ? this.composer.slice(-160) : this.composer}\n`, lines: 30, scrollback_used: false };
   }
 }
@@ -390,6 +394,7 @@ describe("send_to v2 background verify", () => {
     const target = engine.getAgentState("agent-1");
     const moved = { ...target, ...(binding === "workspace" ? { workspace_id: "workspace:other" } : { cli_session_id: "replacement-session" }) };
     engine.stateMgr.writeState(moved); engine.getRegistry().set(moved.agent_id, moved);
+    if (binding === "workspace") (client as any).workspace = "workspace:other";
     await vi.advanceTimersByTimeAsync(8_000);
     expect(client.sendKeyCalls).toEqual(["return"]);
     expect(engine.getDeliveryReceipt(sent.delivery_id).submitted).not.toBe(true);
@@ -399,10 +404,9 @@ describe("send_to v2 background verify", () => {
     const client = new ClaudeDeliverySurface(); await instantDelivery(client);
     const engine = server._registeredTools.interact._engine; engine.dispose();
     await vi.advanceTimersByTimeAsync(2_000);
-    const originalRead = client.readScreen.bind(client);
-    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
-    let reading = false;
-    client.readScreen = async surface => { reading = true; await gate; return originalRead(surface); };
+    expect(client.sendKeyCalls, "no retry before the gated verification").toEqual(["return"]);
+    let release!: () => void; client.readGate = new Promise<void>(resolve => { release = resolve; });
+    let reading = false; client.onRead = () => { reading = true; };
     const verification = engine.verifyPendingDeliveries();
     await vi.advanceTimersByTimeAsync(0); expect(reading).toBe(true);
     engine.dispose(); release(); await verification;
