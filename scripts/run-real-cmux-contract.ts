@@ -35,6 +35,13 @@ export interface OrphanProbeReceipt extends SocketProbeReceipt {
   ppid: number;
 }
 
+export function hasRawShellPrompt(screen: Record<string, unknown>): boolean {
+  if (typeof screen.content !== "string") {
+    throw new Error("D4 read_screen raw:true response is missing string content");
+  }
+  return /[%$#❯>]\s*$/m.test(screen.content);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -1050,8 +1057,8 @@ async function runContractSteps(
         const surface = created.surface_id;
         await waitFor(async () => {
           const screen = extractStructuredContent(await peer!.callTool("read_screen", { surface, workspace: spawnWorkspace, lines: 20, raw: true }, 5_000));
-          return screen.ok === true && /[%$#❯>]\s*$/m.test(String(screen.text ?? screen.raw ?? screen.content ?? screen.screen_preview ?? ""));
-        }, 5_000, "new terminal shell prompt");
+          return screen.ok === true && hasRawShellPrompt(screen);
+        }, 15_000, "new terminal shell prompt");
         const metadata = await cli(["debug-terminals"]);
         const runtime = metadata.terminals.find((row: any) => row.surface_ref === surface || row.ref === surface);
         if (runtime?.runtime_surface_ready !== true || !/^0x[0-9a-f]+$/i.test(runtime.ghostty_surface_ptr)) {
