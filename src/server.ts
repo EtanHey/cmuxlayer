@@ -3030,9 +3030,13 @@ function normalizeKnownPlaceholderComposerInput(
     .filter((line) => !/^\s*[▄▀]{8,}\s*$/.test(line))
     .join("\n")
     .trim();
+  const [firstLine = "", ...followingLines] = withoutCursorBorders.split("\n");
+  const codexPlaceholder = cli === "codex" &&
+    CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE.test(firstLine) &&
+    followingLines.every((line) => !line.trim() || line.trim() === "esc again to edit previous message");
   if (
-    (cli === "codex" &&
-      CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE.test(withoutCursorBorders)) ||
+    codexPlaceholder ||
+    (cli === "claude" && withoutCursorBorders === "Press up to edit queued messages") ||
     (cli === "cursor" &&
       (withoutCursorBorders === "Plan, search, build anything" ||
         CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(withoutCursorBorders)))
@@ -3048,9 +3052,10 @@ function normalizeKnownPlaceholderComposerInput(
 function extractComposerInputRegion(
   screenText: string,
   submittedText?: string,
+  knownCli?: CliType,
 ): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
-  const cli = inferComposerCli(screenText);
+  const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
@@ -3211,9 +3216,9 @@ function screenContainsCompleteSubmittedText(
  * and chrome never does. Widening the chrome whitelist instead is what put
  * this hole in the first place.
  */
-function composerPromptLineInput(screenText: string): string | null {
+function composerPromptLineInput(screenText: string, knownCli?: CliType): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
-  const cli = inferComposerCli(screenText);
+  const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
@@ -3243,6 +3248,7 @@ function composerPromptLineInput(screenText: string): string | null {
 function composerHoldsForeignDraft(
   screenText: string,
   submittedText: string,
+  options?: { cli?: CliType; exact?: boolean },
 ): boolean {
   // AIDEV-NOTE (T2 #442): Cursor is deliberately exempt. Its composer RETAINS
   // the accepted text after a submit (the "retained composer" state #441/#449
@@ -3251,16 +3257,19 @@ function composerHoldsForeignDraft(
   // distinguishes the two. Guarding it would refuse every legitimate second
   // send to a Cursor pane. Claude and Codex clear on submit, so there a
   // non-empty composer really does mean somebody's text is sitting unsent.
-  if (inferComposerCli(screenText) === "cursor") {
+  if ((options?.cli ?? inferComposerCli(screenText)) === "cursor") {
     return false;
   }
   // No recognisable composer prompt line (bare shell, unreadable frame). The
   // pre-existing gates own those cases; do not invent a refusal here.
-  const promptLine = composerPromptLineInput(screenText);
-  if (promptLine === null) {
+  const promptLine = composerPromptLineInput(screenText, options?.cli);
+  if (promptLine === null || !promptLine.trim()) {
     return false;
   }
-  const compactDraft = promptLine.replace(/\s+/g, "");
+  const draft = options?.exact
+    ? extractComposerInputRegion(screenText, submittedText, options.cli) ?? promptLine
+    : promptLine;
+  const compactDraft = draft.replace(/\s+/g, "");
   if (!compactDraft) {
     return false;
   }
@@ -3268,7 +3277,7 @@ function composerHoldsForeignDraft(
   if (compactPayload.length === 0) {
     return true;
   }
-  return !compactPayload.includes(compactDraft);
+  return options?.exact ? compactPayload !== compactDraft : !compactPayload.includes(compactDraft);
 }
 
 function stripCodexQueueGutter(line: string): string {
@@ -5219,7 +5228,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             let handled = (await handler(...handlerArgs)) as ToolReturn;
             if (toolNameString === "send_to") {
               const payload = { ...handled.structuredContent, caller_agent_id: callerAgentId };
-              handled = { ...handled, structuredContent: payload, content: [{ type: "text", text: JSON.stringify(payload) }] };
+              handled = { ...handled, structuredContent: payload, content: handled.content.map((entry) => {
+                if (entry.type !== "text") return entry;
+                try {
+                  const value = JSON.parse(entry.text);
+                  if (value && typeof value === "object" && !Array.isArray(value)) {
+                    return { ...entry, text: JSON.stringify(payload) };
+                  }
+                } catch { /* Preserve human summaries alongside their structured receipt. */ }
+                return entry;
+              }) };
             }
             const shaped =
               toolNameString === "send_to" && !verbose
@@ -6006,7 +6024,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // mutation, and can later submit text the caller never authorized.
     if (
       opts.draftGuardText !== undefined &&
-      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
+      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText, { cli })
     ) {
       throw new DeliverySafetyGateError(
         "blocked_by_foreign_draft",
@@ -6635,6 +6653,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
+      const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
       const submitAttempted = isSubmitKey(key);
       const submitBaseline =
         submitAttempted && opts.verify_submit
@@ -6643,16 +6662,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (submitAttempted && submitBaseline &&
           submitBaseline.parsed.control_state !== "permission_prompt" &&
           !isPickerOrMenuScreen(submitBaseline.text)) {
-        const draft = extractComposerInputRegion(submitBaseline.text)?.trim();
         const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
         const owner = typedDraftOwners.get(ownerKey);
         const caller = resolveCurrentCallerAgent()?.agent_id;
-        if (draft && !(caller && owner?.caller === caller && Date.now() - owner.at < 300_000 &&
-            draft.replace(/\s+/g, "") === owner.text.replace(/\s+/g, ""))) {
+        const ownedText = caller && owner?.caller === caller && Date.now() - owner.at < 300_000 ? owner.text : "";
+        if (composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
           typedDraftOwners.delete(ownerKey);
-          throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, draft);
+          throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
-        if (!draft) typedDraftOwners.delete(ownerKey);
+        if (!composerHoldsForeignDraft(submitBaseline.text, "", { cli: targetCli })) typedDraftOwners.delete(ownerKey);
       }
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
@@ -6727,9 +6745,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "report_to_parent" ||
       opts.source_event === "interact";
     const draftGuardText = opts.chunks.join("");
+    const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
       workspace: opts.workspace,
+      cli: targetCli,
       ...(draftGuardedEvent && draftGuardText.trim().length > 0
         ? { draftGuardText }
         : {}),
@@ -6779,7 +6799,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const submittedText = opts.chunks.join("");
     const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
     const caller = resolveCurrentCallerAgent()?.agent_id;
-    const beforeDraft = deliverySafetySnapshot ? extractComposerInputRegion(deliverySafetySnapshot.text)?.trim() : null;
+    const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
     if (textDispatched && caller && beforeDraft === "") {
       typedDraftOwners.delete(ownerKey);
       if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);

@@ -996,7 +996,8 @@ describe("enter reliability", () => {
       submitted: true,
       delivery_id: expect.any(String),
     });
-    expect(Buffer.byteLength(JSON.stringify(parsed))).toBe(147);
+    // #636 adds the required caller_agent_id:null scalar to this receipt.
+    expect(Buffer.byteLength(JSON.stringify(parsed))).toBe(170);
     for (const field of ["rpc_methods", "timings_ms", "transport", "WARNING"])
       expect(parsed).not.toHaveProperty(field);
     expect(result.content).toEqual([
