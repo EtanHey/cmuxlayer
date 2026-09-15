@@ -2503,7 +2503,14 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
-  it.each([{ requiredPromptReturns: 2, knownSender: false, captureSession: false }, { requiredPromptReturns: 99, knownSender: false, captureSession: false }, { requiredPromptReturns: 99, knownSender: true, captureSession: false }, { requiredPromptReturns: 2, knownSender: false, captureSession: true }])("#636 D1 boot pending recovers or exhausts ($requiredPromptReturns Returns, sender=$knownSender, capture=$captureSession)", async ({ requiredPromptReturns, knownSender, captureSession }) => {
+  it.each([
+    { requiredPromptReturns: 2, knownSender: false, captureSession: false },
+    { requiredPromptReturns: 99, knownSender: false, captureSession: false },
+    { requiredPromptReturns: 99, knownSender: true, captureSession: false },
+    { requiredPromptReturns: 2, knownSender: false, captureSession: "first" },
+    { requiredPromptReturns: 2, knownSender: true, captureSession: "replacement" },
+    { requiredPromptReturns: 2, knownSender: true, captureSession: "pre-launch" },
+  ])("#636 D1 boot pending recovers or exhausts ($requiredPromptReturns Returns, sender=$knownSender, capture=$captureSession)", async ({ requiredPromptReturns, knownSender, captureSession }) => {
     vi.useFakeTimers();
     try {
       const baseExec = makeLifecycleExec({ requiredPromptReturns, ...(knownSender || captureSession ? { surfaceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } : {}) });
@@ -2523,7 +2530,7 @@ describe("agent lifecycle tool handlers", () => {
       const inboxBaseDir = join(TEST_DIR, "boot-failure-inbox");
       const server = createTrackedServer({ exec, stateDir: TEST_DIR, inboxBaseDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
         ...(captureSession ? { selfRegistrationSessionResolver: (agent: AgentRecord) => engine.listDeliveryReceipts().some((receipt: any) => receipt.agent_id === agent.agent_id && receipt.source_event === "boot_prompt")
-          ? { session_id: FIXTURE_SESSIONS[0]!, pid: process.pid, pid_registered_at: agent.created_at } : null } : {}) });
+          ? { session_id: FIXTURE_SESSIONS[0]!, pid: process.pid, pid_registered_at: captureSession === "pre-launch" ? new Date(Date.parse(agent.created_at) - 1).toISOString() : agent.created_at } : null } : {}) });
       const engine = (server as any)._registeredTools.interact._engine;
       const collab = join(TEST_DIR, "boot-caller-collab.md");
       const sender = makeServerAgentRecord({ agent_id: "boot-caller", surface_id: "surface:caller", surface_uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", workspace_id: "workspace:1", state: "ready", role: "lead", collab_path: collab });
@@ -2538,11 +2545,26 @@ describe("agent lifecycle tool handlers", () => {
       if (captureSession) expect(engine.getAgentState(result.agent_id).cli_session_id).toBe(FIXTURE_SESSIONS[0]);
       const id = result.boot_prompt_receipt.delivery_id;
       expect(engine.getDeliveryReceipt(id)).toMatchObject({ delivery_state: "pending_verify", retry_count: 0 });
+      if (captureSession === "replacement") {
+        expect(engine.getDeliveryReceipt(id).claude_submit.cli_session_id).toBe(FIXTURE_SESSIONS[0]);
+        const replacement = { ...engine.getAgentState(result.agent_id), cli_session_id: FIXTURE_SESSIONS[1] };
+        engine.stateMgr.writeState(replacement); engine.getRegistry().set(result.agent_id, replacement);
+      }
       const textCalls = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send") || args.includes("set-buffer")).length;
       const beforeText = textCalls();
+      const returnCalls = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => args.includes("send-key") && args.includes("return")).length;
+      const beforeReturns = returnCalls();
       await vi.advanceTimersByTimeAsync(10_000);
-      const receipt = engine.getDeliveryReceipt(id);
-      if (requiredPromptReturns === 2) {
+      let receipt = engine.getDeliveryReceipt(id);
+      if (captureSession === "replacement" || captureSession === "pre-launch") {
+        expect(receipt.submit_verified).not.toBe(true);
+        expect(returnCalls()).toBe(beforeReturns);
+        if (captureSession === "pre-launch") expect(receipt.claude_submit.cli_session_id).toBeNull();
+        await vi.advanceTimersByTimeAsync(Math.max(0, Date.parse(receipt.verify_deadline_at) - Date.now()) + 2_000);
+        await engine.verifyPendingDeliveries();
+        receipt = engine.getDeliveryReceipt(id);
+        expect(receipt).toMatchObject({ delivery_state: "failed_confirmed", retry_count: 0, submit_verified: false });
+      } else if (requiredPromptReturns === 2) {
         expect(receipt).toMatchObject({ delivery_state: "submitted", retry_count: 1 });
         expect(engine.getAgentState(result.agent_id)).toMatchObject({ state: "ready", boot_prompt_pending: false, prompt_delivered: true, submit_verified: true });
       } else {
