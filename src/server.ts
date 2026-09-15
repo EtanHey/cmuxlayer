@@ -17799,7 +17799,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             assertCanonicalSurfaceRef(surface);
-            await awaitLifecycleStart();
             assertWorkerUpwardChannel(surface);
             const legacyHandler = (name: string) => {
               const handler = toolHandlersByName.get(name);
