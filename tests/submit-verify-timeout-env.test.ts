@@ -149,10 +149,12 @@ async function runSubmitFailureWithEnv(value: string): Promise<any> {
     disableSpawnPreflight: true,
   });
   registerReadyAgent(server, client);
-  const tool = (server as any)._registeredTools["send_command"];
+  // Raw send_input retains the synchronous verification timeout; Claude
+  // send_command now returns pending immediately and verifies in the background.
+  const tool = (server as any)._registeredTools["send_input"];
 
   const resultPromise = tool.handler(
-    { surface: client.surface, command: "ping" },
+    { surface: client.surface, text: "ping", press_enter: true },
     {} as any,
   );
   await vi.advanceTimersByTimeAsync(6000);

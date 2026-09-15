@@ -132,3 +132,20 @@ it.each(["codex", "cursor"] as const)("preserves %s final deadline verification 
   vi.setSystemTime(Date.now() + 5_000); await engine.verifyPendingDeliveries();
   expect(disk("reason")).toMatchObject({ delivery_state: "failed_confirmed", error: "observer_refusal" });
 });
+
+it.each((["claude", "codex", "cursor"] as const).flatMap(cli => ["delivered", "failed_confirmed"].map(outcome => ({ cli, outcome }))))(
+  "scopes deadline suppression to Claude evidence ($cli, late $outcome)", async ({ cli, outcome }) => {
+    const observation: DeliveryVerifyObservation = outcome === "delivered"
+      ? { outcome: "delivered", submit_verified: true } : { outcome: "failed_confirmed", reason: "observer_refusal" };
+    const verifier = vi.fn(async () => observation);
+    engine.dispose(); engine = open({ deliveryVerifier: verifier }); agent({ cli, state: "working" });
+    if (cli === "claude") seed("boundary", { pending_reason: "cleared_unattributed" });
+    else engine.acceptPendingVerify({ delivery_id: "boundary", agent_id: "engine-owner", text: "deadline boundary",
+      press_enter: true, source_event: "send_to", retry_count: 0 });
+    vi.setSystemTime(Date.now() + 5_000); await engine.verifyPendingDeliveries();
+    expect(verifier).toHaveBeenCalledTimes(cli === "claude" ? 0 : 1);
+    expect(disk("boundary")).toMatchObject(cli === "claude"
+      ? { delivery_state: "failed_confirmed", submit_verified: false, error: "cleared_unattributed" }
+      : outcome === "delivered" ? { delivery_state: "submitted", submit_verified: true }
+        : { delivery_state: "failed_confirmed", error: "observer_refusal" });
+  });
