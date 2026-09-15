@@ -369,6 +369,25 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(readFileSync(lead.contract_path, "utf8")).toContain("Monitor on each worker's collab_path");
   });
 
+  it.each(["lead-child", "failed-worker"])("#636 D2 does not adopt a collab for %s", async scenario => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const baseExec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid, () => ({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", ref: "surface:child", title: "child", text: "Claude Code\nWhat can I help you with?\n❯ " }));
+    exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (scenario === "failed-worker" && (args.includes("new-split") || args.includes("new-surface"))) throw new Error("controlled creation failure");
+      return baseExec(cmd, args);
+    });
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "original.md") };
+    engine.stateMgr.writeState(parent); engine.getRegistry().set(parent.agent_id, parent);
+    const requested = join(inboxDir, "child-channel.md");
+    const child = await spawn({ collab_path: requested, role: scenario === "lead-child" ? "orchestrator" : "worker", boot_prompt_timeout_ms: 20 }, server, parentUuid);
+    expect(child.ok, JSON.stringify(child)).toBe(scenario === "lead-child");
+    if (scenario === "lead-child") expect(child.collab_path).toBe(requested);
+    expect(engine.stateMgr.readState(parent.agent_id)?.collab_path).toBe(parent.collab_path);
+  });
+
   it("#636 D2 existing leads adopt their first explicit worker collab path and later workers inherit it", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
