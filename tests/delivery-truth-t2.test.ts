@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   chmodSync,
+  readFileSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -166,7 +167,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
 
   it.each([
     // Captured read-only from surface:1144, 2026-09-15; scrollback falsely infers Claude.
-    { cli: "codex", live: true, frame: "        cost: $114.92\n    ├─ Screen (12 lines)\n    │          },\n    │          {\n    │            \"c\": \"SUCCESS\",\n    │            \"n\": \"swift (macos-15)\"\n    │          }\n    │        ]\n    │      }\n    │\n    │   ⎿  Tip: Continue your session in Claude Code Desktop with /desktop\n    │                  current: 2.1.271 · latest: 2.1...\n\n• Ran tail -n0 -F /Users/etanheyman/.cmux/agents/brainlayerCodex-c172dd93/inbox.jsonl & echo\n  │ $! > '/Users/etanheyman/.cmux/agents/brainlayerCodex-c172dd93/inbox-tail.pid'\n  └ (no output)\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› continue #889 from d916a441; report in the collab, don't send_to your lead\n\n \nWorking (0s • esc to interrupt)\n \n \n› Ask Codex to do anything\n \n  gpt-5.6-sol medium · ~/Gits/brainlayer/.worktrees/ux-disclosure · Fix BrainBar focus ring…" },
+    { cli: "codex", live: true, frame: readFileSync(new URL("../docs/fixtures/issue-645-codex-frame.txt", import.meta.url), "utf8") },
     { cli: "codex", frame: "› Ask Codex to do anything" },
     { cli: "codex", frame: "› Ask Codex to do anything\n\n  esc again to edit previous message" },
     { cli: "claude", frame: "Claude Code\n❯ Press up to edit queued messages" },
