@@ -14,6 +14,7 @@ it("#641 confines actual child state writes to the benchmark root despite inheri
   const parentHome = join(root, "parent-home"); mkdirSync(parentHome);
   writeFileSync(join(parentHome, "existing-data"), "preserve seeded parent");
   const tempRoot = join(root, "run"); mkdirSync(tempRoot);
+  const benchmarkTmpDir = join(root, "os-temp", "owned"); mkdirSync(benchmarkTmpDir, { recursive: true });
   const env = buildDaemonBenchmarkEnv({
     ...process.env, VITEST: undefined, HOME: parentHome,
     CODEX_HOME: join(parentHome, ".codex"),
@@ -25,7 +26,7 @@ it("#641 confines actual child state writes to the benchmark root despite inheri
     CMUXLAYER_DAEMON_PID_RECEIPT: join(parentHome, "pids.txt"),
     GH_TOKEN: "seeded-fake-token", GITHUB_TOKEN: "seeded-fake-token", GH_CONFIG_DIR: join(parentHome, "gh"),
     CMUX_BUNDLED_CLI_PATH: "/production/cmux", NODE_OPTIONS: "--stack-trace-limit=50",
-  }, { tempRoot, binDir: join(tempRoot, "bin"), missingCmuxSocket: join(root, "fake.sock"), fakeCmuxState: join(tempRoot, "fake.json"), surfaceCount: 10 });
+  }, { tempRoot, benchmarkTmpDir, binDir: join(tempRoot, "bin"), missingCmuxSocket: join(root, "fake.sock"), fakeCmuxState: join(tempRoot, "fake.json"), surfaceCount: 10 });
   expect(env.GH_TOKEN).toBeUndefined();
   expect(env.GITHUB_TOKEN).toBeUndefined();
   expect(env.GH_CONFIG_DIR.startsWith(tempRoot + "/")).toBe(true);
@@ -61,6 +62,9 @@ it("#641 confines actual child state writes to the benchmark root despite inheri
   for (const name of ["CMUXLAYER_SEAT_REGISTRY_PATH", "CMUXLAYER_SESSION_REGISTRY", "CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH", "CMUXLAYER_DAEMON_PID_RECEIPT"])
     expect(env[name].startsWith(tempRoot + "/"), name).toBe(true);
   expect(env.HOME).toBe(join(tempRoot, "home"));
+  expect(env.TMPDIR).toBe(benchmarkTmpDir);
+  expect(env.TMP).toBe(benchmarkTmpDir);
+  expect(env.TEMP).toBe(benchmarkTmpDir);
   expect(env.CMUX_BUNDLED_CLI_PATH).toBeUndefined();
   expect(env.NODE_OPTIONS).toBeUndefined();
   expect(readdirSync(parentHome)).toEqual(["existing-data"]);
