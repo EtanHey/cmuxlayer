@@ -141,12 +141,7 @@ function createLiveServer(client: LiveSurfaceClient) {
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
-  const server = createServer({
-    context,
-    // The cases exercise live reconciliation, not startup reconstitution.
-    // Keep lifecycle tools enabled while making fixture startup awaitable.
-    lifecycleInitializer: async () => {},
-  });
+  const server = createServer({ context });
   return { context, server };
 }
 
@@ -196,12 +191,11 @@ describe("F1 — live state, not the stale registry record", () => {
   let client: LiveSurfaceClient;
   let context: CmuxServerContext;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     client = new LiveSurfaceClient();
     ({ context, server } = createLiveServer(client));
-    await context.lifecycleStartPromise;
   });
 
   afterEach(async () => {
