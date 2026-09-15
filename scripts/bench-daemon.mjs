@@ -980,10 +980,32 @@ function summarizeTimedSamples(samples) {
   };
 }
 
+function slowestSendSamples(samples, selectSend) {
+  return samples
+    .map((sample) => {
+      const send = selectSend(sample);
+      return {
+        elapsed_ms: send.elapsed_ms,
+        client_index: sample.client_index,
+        round: sample.round,
+        timings_ms: send.receipt.timings_ms,
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.elapsed_ms - left.elapsed_ms ||
+        left.round - right.round ||
+        left.client_index - right.client_index,
+    )
+    .slice(0, 5);
+}
+
 async function measureSpawnLifecycleOnce(
   client,
   sweepHoldState,
   sampleIndex,
+  clientIndex,
+  roundNumber,
 ) {
   const spawnResult = toolData(
     await client.callTool(
@@ -1162,6 +1184,8 @@ async function measureSpawnLifecycleOnce(
   };
 
   return {
+    client_index: clientIndex,
+    round: roundNumber,
     agent_id: spawnResult.agent_id,
     surface_id: spawnResult.surface_id,
     first,
@@ -1295,7 +1319,13 @@ async function measureSpawnLifecycleAcrossClients(
     for (const [clientIndex, client] of clients.entries()) {
       const sampleIndex = roundIndex * clients.length + clientIndex;
       samples.push(
-        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex),
+        await measureSpawnLifecycleOnce(
+          client,
+          sweepHoldState,
+          sampleIndex,
+          clientIndex,
+          roundIndex + 1,
+        ),
       );
     }
   }
@@ -1304,13 +1334,18 @@ async function measureSpawnLifecycleAcrossClients(
     second: samples[0].second,
     surface: samples[0].surface,
     spawn_close_sample: samples[0].spawn_close_during_sweep,
-    sampled: summarizeTimedSamples(samples.map((sample) => sample.first)),
-    send_to_agent_warm: summarizeTimedSamples(
-      samples.map((sample) => sample.second),
-    ),
-    send_to_surface_warm: summarizeTimedSamples(
-      samples.map((sample) => sample.surface),
-    ),
+    sampled: {
+      ...summarizeTimedSamples(samples.map((sample) => sample.first)),
+      slowest_samples: slowestSendSamples(samples, (sample) => sample.first),
+    },
+    send_to_agent_warm: {
+      ...summarizeTimedSamples(samples.map((sample) => sample.second)),
+      slowest_samples: slowestSendSamples(samples, (sample) => sample.second),
+    },
+    send_to_surface_warm: {
+      ...summarizeTimedSamples(samples.map((sample) => sample.surface)),
+      slowest_samples: slowestSendSamples(samples, (sample) => sample.surface),
+    },
     spawn_close_during_sweep: summarizeTimedSamples(
       samples.map((sample) => sample.spawn_close_during_sweep),
     ),
