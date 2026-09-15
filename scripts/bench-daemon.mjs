@@ -1005,7 +1005,7 @@ async function measureSpawnLifecycleOnce(
   sweepHoldState,
   sampleIndex,
   clientIndex,
-  round,
+  roundNumber,
 ) {
   const spawnResult = toolData(
     await client.callTool(
@@ -1185,7 +1185,7 @@ async function measureSpawnLifecycleOnce(
 
   return {
     client_index: clientIndex,
-    round,
+    round: roundNumber,
     agent_id: spawnResult.agent_id,
     surface_id: spawnResult.surface_id,
     first,
