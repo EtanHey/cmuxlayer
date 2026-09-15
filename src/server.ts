@@ -14780,7 +14780,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const created =
               placement.kind === "surface"
                 ? await client.newSurface({
-                    focus: args.focus ?? false,
+                    focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
                     pane: placement.pane,
                     ...(workspace ? { workspace } : {}),
                     type: "terminal",
@@ -14788,7 +14788,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 : await client.newSplit(placement.direction, {
                     ...(workspace ? { workspace } : {}),
                     ...(placement.pane ? { pane: placement.pane } : {}),
-                    focus: args.focus ?? false,
+                    focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
                   });
             creation.record({
               surface_id: created.surface,

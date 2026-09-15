@@ -1048,10 +1048,13 @@ async function runContractSteps(
       let created: Record<string, unknown> | null = null;
       try {
         created = extractStructuredContent(await peer.callTool("spawn_agent", {
-          type: "terminal", workspace: spawnWorkspace, focus: false, title: "636-owned-runtime-proof",
+          type: "terminal", workspace: spawnWorkspace, focus: false, verbose: true, title: "636-owned-runtime-proof",
         }, 15_000));
         if (created.ok !== true || typeof created.surface_id !== "string") {
           throw new Error(`D4 spawn failed: ${JSON.stringify(created)}`);
+        }
+        if (!["input_demand", "already_ready"].includes(String(created.runtime_initialization))) {
+          throw new Error(`D4 initializer did not run: ${JSON.stringify(created)}`);
         }
         console.log(`[contract] D4 spawn receipt ${JSON.stringify(created)}`);
         const surface = created.surface_id;
