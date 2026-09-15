@@ -286,6 +286,8 @@ function createVerifyServer(
     deliveryVerifyDeadlineMs?: number;
     deliveryTicketDir?: string;
     deliveryIssueFiler?: (ticket: unknown) => Promise<void>;
+    watchRegistryNow?: () => number;
+    watchNotify?: import("../src/watch-spec.js").WatchNotify;
   },
 ) {
   const options = {
@@ -480,6 +482,89 @@ describe("send_to v2 background verify", () => {
     expect(client.sendKeyCalls).toEqual(["return", "return"]);
   });
 
+  it.each(["verified", "deadline", "unverified", "unobserved"] as const)("#636 W persists a Codex watch receipt without retyping (%s)", async disposition => {
+    class CodexWatchSurface extends FakeAgentSurfaceClient {
+      title = "cmuxlayerCodex";
+      payload = "";
+      queued = false;
+      consumed = false;
+      frames: string[] = [];
+      async send(_surface: string, text: string) { this.sendCalls.push(text); this.payload += text; }
+      async sendKey(_surface: string, key: string) { this.sendKeyCalls.push(key); if (key === "return") this.queued = true; }
+      async readScreen(surface: string) {
+        const text = this.payload && disposition === "unobserved"
+          ? "OpenAI Codex\nTool output; composer outside captured viewport"
+          : this.consumed ? `OpenAI Codex\n• ${this.payload}\n\n› \n\n gpt-5.5 xhigh`
+            : this.queued ? `OpenAI Codex\nWorking (11s)\n\nMessages to be submitted after next tool call\n  ↳ ${this.payload}\n\n› \n\n gpt-5.5 xhigh`
+              : `OpenAI Codex\n\n› ${this.payload}\n\n gpt-5.5 xhigh`;
+        this.frames.push(text); return { surface, text, lines: 30, scrollback_used: false };
+      }
+    }
+    const client = new CodexWatchSurface();
+    let watchNow = Date.now();
+    const external = vi.fn(async () => true);
+    server = createVerifyServer(client, { watchRegistryNow: () => watchNow, watchNotify: external,
+      deliveryTicketDir: join(TEST_DIR, "tickets"), deliveryIssueFiler: async () => {} });
+    const owner = registerAgent(server, { cli: "codex", model: "gpt-5.5", role: "orchestrator" });
+    const engine = server._registeredTools.interact._engine;
+    const report = join(TEST_DIR, "codex-watch.md"); writeFileSync(report, "");
+    const watch = await engine.armWatch({ owner: owner.agent_id, target_kind: "file", target: report, marker: "DONE", notify: true, deadline: watchNow + 60_000 });
+    const watchRow = () => JSON.parse(readFileSync(join(TEST_DIR, "watch-specs.json"), "utf8")).watches.find((row: any) => row.watch_id === watch.watch_id);
+    const disk = () => JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"));
+    const sweep = async () => {
+      let settled = false;
+      const task = engine.sweepWatchesBestEffort().then(() => { settled = true; });
+      for (let elapsed = 0; !settled && elapsed < 10_000; elapsed += 100) await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(true); await task;
+    };
+    writeFileSync(report, "DONE"); await sweep();
+    expect(watchRow()).toMatchObject({ notification_pending: true });
+    expect(watchRow().notification_delivered_at_ms).toBeUndefined();
+    const receipt = engine.listDeliveryReceipts()[0];
+    expect(receipt).toMatchObject({ delivery_id: expect.stringMatching(/^watch:/), agent_id: owner.agent_id,
+      delivery_state: disposition === "unobserved" ? "pending_verify" : "queued", source_event: "report_to_parent",
+      terminal: false, typed: true, submit_dispatched: disposition !== "unobserved", submit_verified: null, retry_count: 0 });
+    expect(receipt.claude_submit).toBeUndefined();
+    if (disposition !== "unobserved") {
+      expect(receipt.composer_accepted).toBe(true);
+      expect(receipt.verify_deadline_at).toEqual(expect.any(String));
+      expect(client.frames.some(frame => frame.includes("Messages to be submitted after next tool call"))).toBe(true);
+    }
+    expect(disk()).toEqual([receipt]); expect(external).not.toHaveBeenCalled();
+    watchNow += 1_000; await sweep();
+    expect(engine.listDeliveryReceipts()).toEqual([receipt]);
+    expect(watchRow().notification_pending).toBe(true);
+    expect(client.sendCalls).toEqual([receipt.text]);
+    expect(client.sendKeyCalls).toEqual(disposition === "unobserved" ? [] : ["return"]);
+    if (disposition === "unobserved") {
+      await engine.verifyPendingDeliveries();
+      expect(engine.listDeliveryReceipts()).toEqual([expect.objectContaining({ delivery_id: receipt.delivery_id, terminal: false, submit_verified: null })]);
+      expect(client.sendCalls).toEqual([receipt.text]); expect(client.sendKeyCalls).toEqual([]);
+      expect(external).not.toHaveBeenCalled(); return;
+    }
+    if (disposition === "verified") {
+      client.consumed = true; await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
+    } else if (disposition === "deadline") {
+      vi.setSystemTime(Date.parse(receipt.verify_deadline_at)); await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "failed_confirmed", terminal: true, submit_verified: false });
+    } else {
+      // Deliberate legacy terminal receipt: a submitted label is not proof of
+      // verification. Persist it through the real engine API; do not fake a pass.
+      engine.resolveDelivery({ ...receipt, delivery_state: "submitted", terminal: true, submit_verified: false, error: null });
+    }
+    const terminal = engine.getDeliveryReceipt(receipt.delivery_id);
+    watchNow += 1_000; await sweep();
+    const acknowledgedAt = watchNow;
+    expect(watchRow()).toMatchObject({ notification_pending: false, notification_delivered_at_ms: acknowledgedAt });
+    expect(external).toHaveBeenCalledTimes(disposition === "verified" ? 0 : 1);
+    watchNow += 1_000; await sweep();
+    expect(watchRow()).toMatchObject({ notification_pending: false, notification_delivered_at_ms: acknowledgedAt });
+    expect(external).toHaveBeenCalledTimes(disposition === "verified" ? 0 : 1);
+    expect(engine.getDeliveryReceipt(receipt.delivery_id)).toEqual(terminal); expect(disk()).toEqual([terminal]);
+    expect(client.sendCalls).toEqual([receipt.text]); expect(client.sendKeyCalls).toEqual(["return"]);
+  });
+
   it("#636 D1 a report watch keeps one pending receipt across notification retries", async () => {
     const client = new ClaudeDeliverySurface(); client.requiredReturns = 2;
     server = createVerifyServer(client);
@@ -490,6 +575,7 @@ describe("send_to v2 background verify", () => {
     writeFileSync(report, "DONE");
     const first = engine.runSweep(); await vi.advanceTimersByTimeAsync(500); await first;
     expect(engine.listDeliveryReceipts()).toEqual([expect.objectContaining({ delivery_id: expect.stringMatching(/^watch:/), delivery_state: "pending_verify" })]);
+    expect(engine.listDeliveryReceipts()[0].claude_submit).toMatchObject({ payload_observed: true, return_attempts: 1, surface_id: client.surface });
     expect(JSON.parse(readFileSync(join(TEST_DIR, "watch-specs.json"), "utf8")).watches.find((item: any) => item.watch_id === watch.watch_id).notification_delivered_at_ms).toBeUndefined();
     await vi.advanceTimersByTimeAsync(8_000); await engine.runSweep();
     expect(engine.listDeliveryReceipts()).toHaveLength(1);
