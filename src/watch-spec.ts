@@ -13,6 +13,14 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { httpDeliver } from "./outbox-drainer.js";
+import {
+  advanceReportChangeBatch,
+  createReportChangeBatchState,
+  isReportChangeBatchState,
+  settleReportChangeBatch,
+  type ReportChangeBatchAction,
+  type ReportChangeBatchState,
+} from "./report-change-batch.js";
 
 export type WatchState = "armed" | "firing" | "fired" | "failed";
 export type WatchObservedSource = "process" | "screen";
@@ -71,6 +79,10 @@ export interface WatchRecord extends WatchSpec {
   notification_exhausted_at_ms?: number;
   notification_exhausted_reason?: string;
   waiter_expires_at_ms?: number;
+  report_change_batch?: ReportChangeBatchState;
+  report_headers?: string[];
+  report_lost_header_count?: number;
+  report_lost_headers?: string[];
 }
 
 export interface WatchRegistryFile {
@@ -114,6 +126,9 @@ export interface WatchNotification {
   observed_at_ms: number;
   watermark?: number;
   observed_value?: number | string;
+  report_headers?: string[];
+  report_lost_header_count?: number;
+  report_lost_headers?: string[];
 }
 
 export type WatchNotify = (
@@ -365,6 +380,33 @@ function isWatchRecord(value: unknown): value is WatchRecord {
   ) {
     return false;
   }
+  if (
+    value.report_change_batch !== undefined &&
+    !isReportChangeBatchState(value.report_change_batch)
+  ) {
+    return false;
+  }
+  if (
+    value.report_headers !== undefined &&
+    (!Array.isArray(value.report_headers) ||
+      !value.report_headers.every((entry) => typeof entry === "string"))
+  ) {
+    return false;
+  }
+  if (
+    value.report_lost_header_count !== undefined &&
+    (!Number.isInteger(value.report_lost_header_count) ||
+      (value.report_lost_header_count as number) < 1)
+  ) {
+    return false;
+  }
+  if (
+    value.report_lost_headers !== undefined &&
+    (!Array.isArray(value.report_lost_headers) ||
+      !value.report_lost_headers.every((entry) => typeof entry === "string"))
+  ) {
+    return false;
+  }
   if (!hasValidTerminalMetadata(value)) return false;
   if (!hasValidNotificationMetadata(value)) return false;
   if (value.target_kind === "file") {
@@ -596,22 +638,25 @@ function countMarker(path: string, marker: string): number {
   return count;
 }
 
-function contentFingerprint(
+function stableContent(
   path: string,
   io: WatchContentFingerprintIo = {
     stat: (target) => statSync(target, { bigint: true }),
     read: (target) => readFileSync(target),
   },
-): string {
+): Buffer {
   const revision = (stat: ReturnType<WatchContentFingerprintIo["stat"]>) =>
     [stat.mtimeNs, stat.ctimeNs, stat.ino, stat.size].join(":");
-  const before = io.stat(path);
-  let content = io.read(path);
-  let after = io.stat(path);
-  if (revision(before) !== revision(after)) {
-    content = io.read(path);
-    after = io.stat(path);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const before = io.stat(path);
+    const content = io.read(path);
+    const after = io.stat(path);
+    if (revision(before) === revision(after)) return content;
   }
+  throw new Error(`Content changed during both snapshot attempts: ${path}`);
+}
+
+function contentFingerprint(content: Buffer): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
@@ -940,8 +985,11 @@ export async function armWatch(
   const watermark = checked.marker
     ? (spec.watermark ?? countMarker(target, checked.marker))
     : spec.watermark;
-  const fingerprint = checked.change
-    ? contentFingerprint(target, opts.contentFingerprintIo)
+  const initialContent = checked.change
+    ? stableContent(target, opts.contentFingerprintIo)
+    : undefined;
+  const fingerprint = initialContent
+    ? contentFingerprint(initialContent)
     : undefined;
   const agentObservation =
     checked.targetKind === "agent"
@@ -975,6 +1023,9 @@ export async function armWatch(
     ...(checked.change ? { change: checked.change } : {}),
     ...(watermark !== undefined ? { watermark } : {}),
     ...(fingerprint !== undefined ? { fingerprint } : {}),
+    ...(initialContent
+      ? { report_change_batch: createReportChangeBatchState(initialContent) }
+      : {}),
     deadline: spec.deadline,
     target_kind: checked.targetKind,
     armed_at_ms: observedAt,
@@ -1093,7 +1144,24 @@ function notificationFor(
     observed_at_ms: observedAt,
     ...(record.watermark !== undefined ? { watermark: record.watermark } : {}),
     ...(observedValue !== undefined ? { observed_value: observedValue } : {}),
+    ...(record.report_headers ? { report_headers: record.report_headers } : {}),
+    ...(record.report_lost_header_count
+      ? { report_lost_header_count: record.report_lost_header_count }
+      : {}),
+    ...(record.report_lost_headers
+      ? { report_lost_headers: record.report_lost_headers }
+      : {}),
   };
+}
+
+function withoutReportNotificationMetadata(record: WatchRecord): WatchRecord {
+  const {
+    report_headers: _reportHeaders,
+    report_lost_header_count: _lostCount,
+    report_lost_headers: _lostHeaders,
+    ...persistent
+  } = record;
+  return persistent;
 }
 
 export async function sweepWatches(
@@ -1267,25 +1335,80 @@ export async function sweepWatches(
         );
       }
 
+      const observedContent =
+        record.target_kind === "file" && record.change === "content"
+          ? stableContent(record.target, opts.contentFingerprintIo)
+          : null;
       const observedValue =
         record.target_kind === "file"
           ? record.change === "content"
-            ? contentFingerprint(record.target, opts.contentFingerprintIo)
+            ? contentFingerprint(observedContent!)
             : countMarker(record.target, record.marker!)
           : (agentObservation?.state ?? "unknown");
+      const contentChanged =
+        record.change === "content" &&
+        typeof observedValue === "string" &&
+        observedValue !== storedContentDigest(record.fingerprint);
+      const reportBatch = observedContent
+        ? record.report_change_batch
+          ? advanceReportChangeBatch(record.report_change_batch, {
+              content: observedContent,
+              owner: record.owner,
+              observedAtMs: observedAt,
+            })
+          : {
+              state: createReportChangeBatchState(observedContent),
+              action: contentChanged
+                ? ({ kind: "passthrough" } satisfies ReportChangeBatchAction)
+                : ({ kind: "none" } satisfies ReportChangeBatchAction),
+            }
+        : null;
+      const reportAction = reportBatch?.action;
       const matched =
         record.target_kind === "file"
           ? record.change === "content"
-            ? typeof observedValue === "string" &&
-              observedValue !== storedContentDigest(record.fingerprint)
+            ? reportAction?.kind === "passthrough" ||
+              reportAction?.kind === "deliver" ||
+              reportAction?.kind === "lost"
             : typeof observedValue === "number" &&
               observedValue > (record.watermark ?? 0)
           : observedValue === record.predicate;
+      if (
+        reportBatch &&
+        contentChanged &&
+        (reportAction?.kind === "none" || reportAction?.kind === "defer")
+      ) {
+        result.armed.push(record.watch_id);
+        return {
+          ...record,
+          ...heartbeat,
+          ...rolledEngineContentDeadline(record, "target_changed", observedAt),
+          fingerprint: observedValue as string,
+          observed_value: observedValue,
+          report_change_batch: reportBatch.state,
+          missing_since_at_ms: undefined,
+        };
+      }
       if (matched) {
         const reason: WatchNotificationReason =
           record.change === "content" ? "target_changed" : "predicate_matched";
+        const matchedRecord: WatchRecord = {
+          ...withoutReportNotificationMetadata(record),
+          ...(reportBatch ? { report_change_batch: reportBatch.state } : {}),
+          ...(reportAction?.kind === "deliver"
+            ? { report_headers: reportAction.headers }
+            : {}),
+          ...(reportAction?.kind === "lost"
+            ? {
+                report_lost_header_count: reportAction.count,
+                ...(reportAction.headers.length > 0
+                  ? { report_lost_headers: reportAction.headers }
+                  : {}),
+              }
+            : {}),
+        };
         const notification = notificationFor(
-          record,
+          matchedRecord,
           reason,
           observedAt,
           observedValue,
@@ -1293,7 +1416,7 @@ export async function sweepWatches(
         notifications.push(notification);
         result.fired.push(record.watch_id);
         return {
-          ...record,
+          ...matchedRecord,
           ...heartbeat,
           state: "fired" as const,
           terminal_reason: reason,
@@ -1367,6 +1490,7 @@ export async function sweepWatches(
         ...heartbeat,
         missing_since_at_ms: undefined,
         observed_value: observedValue,
+        ...(reportBatch ? { report_change_batch: reportBatch.state } : {}),
         ...(record.change === "content" && typeof observedValue === "string"
           ? { fingerprint: observedValue }
           : {}),
@@ -1497,8 +1621,18 @@ export async function sweepWatches(
               terminal_at_ms: _terminalAt,
               notification_next_attempt_at_ms: _nextAttempt,
               notification_delivered_at_ms: _previousDelivery,
+              report_headers: _reportHeaders,
+              report_lost_header_count: _lostCount,
+              report_lost_headers: _lostHeaders,
               ...persistent
             } = record;
+            const settledBatch =
+              record.report_change_batch && notification.report_headers?.length
+                ? settleReportChangeBatch(
+                    record.report_change_batch,
+                    observedAt,
+                  )
+                : record.report_change_batch;
             return {
               ...persistent,
               ...rolledEngineContentDeadline(
@@ -1509,6 +1643,9 @@ export async function sweepWatches(
               state: "armed" as const,
               fingerprint: notification.observed_value,
               observed_value: notification.observed_value,
+              ...(settledBatch
+                ? { report_change_batch: settledBatch }
+                : {}),
               notification_pending: false,
               notification_attempts: 0,
               notification_delivered_at_ms: observedAt,
@@ -1591,17 +1728,43 @@ export async function httpNotifyWatch(
   deliver: typeof httpDeliver = httpDeliver,
 ): Promise<boolean> {
   if (event.notify !== true) return true;
+  const reportHeaders = event.report_headers ?? [];
+  const hasReportBatch = reportHeaders.length > 0;
+  const hasLostReportEntries = event.report_lost_header_count !== undefined;
+  const body = hasLostReportEntries
+    ? [
+        `Watch ${event.watch_id} for ${event.owner}: report entries disappeared (${event.report_lost_header_count}); target=${event.target}`,
+        ...(event.report_lost_headers?.length
+          ? [
+              "Missing entries:",
+              ...event.report_lost_headers.map((header) => `- ${header}`),
+            ]
+          : []),
+      ].join("\n")
+    : hasReportBatch
+      ? [
+          `Watch ${event.watch_id} for ${event.owner}: report changed; target=${event.target}`,
+          "New entries:",
+          ...reportHeaders.map((header) => `- ${header}`),
+        ].join("\n")
+      : `Watch ${event.watch_id} for ${event.owner}: ${event.reason}; target=${event.target}`;
+  const dedupeEvidence =
+    hasReportBatch || hasLostReportEntries
+      // On retries this is restored from the record's terminal_at_ms, so one
+      // batch keeps its key while a later batch gets a distinct durable key.
+      ? `report:${event.observed_at_ms}:${event.observed_value ?? ""}`
+      : (event.observed_value ?? "");
   return deliver(
     {
       title: "Declared watch changed",
-      body: `Watch ${event.watch_id} for ${event.owner}: ${event.reason}; target=${event.target}`,
+      body,
       source: "cmuxlayer-watch-spec",
       priority:
         event.reason === "predicate_matched" ||
         event.reason === "target_changed"
           ? "normal"
           : "high",
-      dedupe_key: `${event.watch_id}:${event.reason}:${event.observed_value ?? ""}`,
+      dedupe_key: `${event.watch_id}:${event.reason}:${dedupeEvidence}`,
     },
     notifyUrl,
   );
