@@ -231,6 +231,13 @@ export class CmuxSelfHealingClient {
     this.startReprobe();
   }
 
+  /** debug-terminals has no socket RPC. This explicit spawn-only observation
+   * uses the CLI already pinned to the selected socket; normal topology reads
+   * remain socket-only and do not hide a subprocess. */
+  async listSurfaceRuntimeMetadata() {
+    return this.opts.cli.listTerminalMetadata();
+  }
+
   getTransportHealth(): TransportHealthSignal {
     if (this.socketClient) {
       return {

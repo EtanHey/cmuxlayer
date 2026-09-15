@@ -22,6 +22,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
+import { initializeNewSurfaceRuntime } from "./surface-runtime.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import { buildTitle } from "./naming.js";
 import {
@@ -407,6 +408,9 @@ type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
 
 export interface SpawnAgentParams {
   repo: string;
+  /** False initializes the new runtime by input demand without focusing it. */
+  focus?: boolean;
+  runtime_metadata_supported?: boolean;
   model?: string;
   effort?: string;
   cli: CliType;
@@ -440,6 +444,7 @@ export interface SpawnAgentParams {
 }
 
 export interface SpawnAgentResult {
+  runtime_initialization?: "unsupported" | "already_ready" | "input_demand";
   agent_id: string;
   parent_agent_id: string | null;
   surface_id: string;
@@ -1188,6 +1193,8 @@ export function resolveSweepTiming(
 }
 
 interface AgentEngineClient {
+  supportsSurfaceRuntimeMetadata?: boolean;
+  listTerminalMetadata?: () => Promise<{ terminals: import("./types.js").CmuxTerminalMetadata[] }>;
   getTransportHealth?(): TransportHealthSignal | null;
   /** Native and CLI clients accept a stable UUID as the read-screen target. */
   supportsStableSurfaceReads?: boolean;
@@ -1259,6 +1266,7 @@ interface AgentEngineClient {
   ): Promise<CmuxNewSplitResult>;
   newSurface(opts: {
     pane: string;
+    focus?: boolean;
     type?: "terminal" | "browser";
     workspace?: string;
     title?: string;
@@ -2884,6 +2892,7 @@ export class AgentEngine {
       parentAgent?: AgentRecord | null;
       repo?: string;
       worktree?: boolean;
+      focus?: boolean;
     },
   ): Promise<CreatedAgentSurface> {
     const observerEpoch = this.captureSurfaceObserverEpoch();
@@ -2911,7 +2920,7 @@ export class AgentEngine {
       context?.repo,
     );
     this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
-    if (workspace) {
+    if (workspace && context?.focus !== false) {
       this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
       try {
         await this.client.selectWorkspace(workspace);
@@ -3064,6 +3073,7 @@ export class AgentEngine {
         surface =
           placement.kind === "surface"
             ? await this.client.newSurface({
+                focus: context?.focus,
                 pane: newSurfacePaneTarget ?? placement.pane,
                 type: "terminal",
                 workspace,
@@ -3072,6 +3082,7 @@ export class AgentEngine {
                 ...(placement.pane ? { pane: placement.pane } : {}),
                 workspace,
                 type: "terminal",
+                focus: context?.focus,
               });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -8772,6 +8783,7 @@ export class AgentEngine {
     // 1. Create cmux surface using the deterministic worker layout policy.
     const surface = await this.createAgentSurface(spawnParams.workspace, {
       role,
+      focus: spawnParams.focus,
       parentAgent,
       repo: spawnParams.repo,
       worktree: isWorktreeLaunch(spawnParams),
@@ -8788,9 +8800,9 @@ export class AgentEngine {
     const createdWorkspace = surface.actual_workspace ?? surface.workspace;
     let surfaceFocusError: unknown = null;
     try {
-      // A tab created in an unfocused pane does not initialize its terminal.
-      // Focus the exact returned surface before any shell/readiness I/O.
-      await this.client.focusSurface(surface.surface, {
+      // Metadata-capable backends initialize cold runtimes by input demand
+      // below (cmux #9769). Focus here is for legacy backends or focus:true.
+      if (spawnParams.focus !== false) await this.client.focusSurface(surface.surface, {
         workspace: createdWorkspace,
         beforeMutation: async () => {
           this.assertSurfaceObserverEpochCurrent(
@@ -8971,7 +8983,16 @@ export class AgentEngine {
         authority,
       },
     );
+    let runtimeInitialization: "unsupported" | "already_ready" | "input_demand" = "unsupported";
     try {
+      if ((spawnParams.runtime_metadata_supported ?? this.client.supportsSurfaceRuntimeMetadata) === true) runtimeInitialization = await initializeNewSurfaceRuntime(
+        this.client,
+        surface.surface,
+        createdWorkspace,
+        spawnParams.boot_prompt_timeout_ms,
+        async () => this.assertSurfaceObserverEpochCurrent(surface.observerEpoch, "runtime initialization"),
+        surface.surface_id,
+      );
       await this.client.renameTab(
         surface.surface,
         managedPaneTitle(agentId, surface.surface, spawnParams.title),
@@ -9035,6 +9056,7 @@ export class AgentEngine {
     }
     this.schedulePostSpawnLivenessAssertion(agentId);
     return {
+      runtime_initialization: runtimeInitialization,
       agent_id: agentId,
       parent_agent_id: parentAgentId,
       surface_id: surface.surface,

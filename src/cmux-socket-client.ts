@@ -387,6 +387,8 @@ export class CmuxSocketClient {
     return this.call("pane.list", params);
   }
 
+  declare listSurfaceRuntimeMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
+
   async listTerminalMetadata(): Promise<{
     terminals: CmuxTerminalMetadata[];
   }> {
@@ -532,6 +534,7 @@ export class CmuxSocketClient {
 
   async newSurface(opts: {
     pane: string;
+    focus?: boolean;
     type?: "terminal" | "browser";
     workspace?: string;
     title?: string;

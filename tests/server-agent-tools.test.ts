@@ -26,7 +26,8 @@ import {
   type CmuxServerContext,
   type CreateServerOptions,
 } from "../src/server.js";
-import type { ExecFn } from "../src/cmux-client.js";
+import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
+import { CmuxSelfHealingClient } from "../src/cmux-transport-self-heal.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
 import type { SeatManifest } from "../src/seat-manifest.js";
@@ -4704,6 +4705,73 @@ describe("agent lifecycle tool handlers", () => {
         expect.arrayContaining(["worktree", "remove"]),
       );
       expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([{ alreadyReady: false, socketMode: false }, { alreadyReady: true, socketMode: false }, { alreadyReady: false, socketMode: true }])("#636 D4 initializes only cold owned surfaces without selecting a workspace (case=%j)", async ({ alreadyReady, socketMode }) => {
+    vi.useFakeTimers();
+    try {
+      let ready = alreadyReady;
+      const lifecycleExec = makeLifecycleExec();
+      const exec = vi.fn().mockImplementation(async (cmd, args) => {
+        if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }] }), stderr: "" };
+        if (args.includes("send-key") && args.includes("ctrl-u")) ready = true;
+        if (args.includes("read-screen") && !ready) throw new Error("internal_error: Failed to read terminal text");
+        return lifecycleExec(cmd, args);
+      });
+      const cli = new CmuxClient({ exec });
+      const socket = new CmuxClient({ exec, env: { ...process.env, CMUX_SOCKET_PATH: "/tmp/636-test.sock" } });
+      socket.listTerminalMetadata = async () => ({ terminals: [] });
+      const wrapped = socketMode ? new CmuxSelfHealingClient({ cli, socket: socket as any, socketPath: "/tmp/636-test.sock" }) : null;
+      const server = wrapped ? createTrackedServer({ client: wrapped as any, stateDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null }) : createLifecycleServer(exec);
+      const result = (server as any)._registeredTools.spawn_agent.handler({ repo: "cmuxlayer", cli: "claude", role: "worker", boot_prompt_timeout_ms: 500 }, {});
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(parseToolResult(await result).ok).toBe(true);
+      expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady ? 0 : 1);
+      expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(false);
+      wrapped?.stop();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([false, true])("#636 D4 names an unreadable new surface and rolls back only owned worktrees (reuse=%s)", async (reuse) => {
+    vi.useFakeTimers();
+    try {
+      const repoRoot = join(TEST_DIR, "unrealized-repo");
+      const registryPath = join(TEST_DIR, "unrealized-launchers.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "unrealized");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      if (reuse) mkdirSync(worktreePath, { recursive: true });
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) mkdirSync(worktreePath, { recursive: true });
+        if (args.includes("worktree") && args.includes("remove")) rmSync(worktreePath, { recursive: true, force: true });
+        if (args.includes("--is-inside-work-tree")) return { stdout: "true", stderr: "" };
+        if (args.includes("--porcelain")) return { stdout: `worktree ${worktreePath}\nbranch refs/heads/wt/unrealized\n`, stderr: "" };
+        return { stdout: "", stderr: "" };
+      });
+      const lifecycleExec = makeLifecycleExec();
+      const exec = vi.fn().mockImplementation(async (cmd, args) => {
+        if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: false, ghostty_surface_ptr: "nil" }] }), stderr: "" };
+        if (args.includes("read-screen")) throw new Error("internal_error: Failed to read terminal text");
+        return lifecycleExec(cmd, args);
+      });
+      const server = createTrackedServer({ exec, stateDir: TEST_DIR, sessionIdentityResolver: () => null, worktreeExec });
+      const result = (server as any)._registeredTools.spawn_agent.handler({
+        repo: "ralph", cli: "codex", role: "worker",
+        worktree: { name: "unrealized", branch: "wt/unrealized", ...(reuse ? { reuse: true } : {}) },
+        boot_prompt_timeout_ms: 20,
+      }, {});
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await result);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("surface_not_realized");
+      expect(exec.mock.calls.some(([, args]) => args.includes("close-surface"))).toBe(true);
+      expect(worktreeExec.mock.calls.some(([, args]) => args.includes("remove"))).toBe(!reuse);
+      expect(worktreeExec.mock.calls.some(([, args]) => args.includes("branch") && args.includes("-D"))).toBe(!reuse);
+      expect(existsSync(worktreePath)).toBe(reuse);
     } finally {
       vi.useRealTimers();
     }

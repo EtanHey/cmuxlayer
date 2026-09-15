@@ -10,6 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
   createDefaultToolPalette,
@@ -12867,6 +12868,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? { listWindows: () => client.listWindows() }
             : {}),
           listAllWorkspaces,
+          supportsSurfaceRuntimeMetadata: typeof client.listSurfaceRuntimeMetadata === "function",
+          listTerminalMetadata: client.listSurfaceRuntimeMetadata
+            ? () => client.listSurfaceRuntimeMetadata!()
+            : typeof client.listTerminalMetadata === "function"
+              ? () => client.listTerminalMetadata()
+              : undefined,
           listWorkspaces: (workspaceOpts) =>
             client.listWorkspaces(workspaceOpts),
           setStatus: (key, value, statusOpts) =>
@@ -14773,6 +14780,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const created =
               placement.kind === "surface"
                 ? await client.newSurface({
+                    focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
                     pane: placement.pane,
                     ...(workspace ? { workspace } : {}),
                     type: "terminal",
@@ -14780,12 +14788,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 : await client.newSplit(placement.direction, {
                     ...(workspace ? { workspace } : {}),
                     ...(placement.pane ? { pane: placement.pane } : {}),
-                    focus: args.focus,
+                    focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
                   });
             creation.record({
               surface_id: created.surface,
               workspace_id: created.workspace ?? workspace ?? null,
             });
+            let runtimeInitialization: string;
+            try {
+              runtimeInitialization = await initializeNewSurfaceRuntime(
+                {
+                  listTerminalMetadata: client.listSurfaceRuntimeMetadata
+                    ? () => client.listSurfaceRuntimeMetadata!()
+                    : undefined,
+                  sendKey: (surface, key, options) => client.sendKey(surface, key, options),
+                },
+                created.surface,
+                created.workspace ?? workspace,
+                args.boot_prompt_timeout_ms,
+                undefined,
+                created.surface_id,
+              );
+            } catch (error) {
+              await client.closeSurface(created.surface, { workspace: created.workspace ?? workspace });
+              throw error;
+            }
             if (args.title) {
               await client.renameTab(created.surface, args.title, {
                 workspace: created.workspace ?? workspace,
@@ -14815,6 +14842,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return ok({
               version: 1,
               type: "terminal",
+              runtime_initialization: runtimeInitialization,
               surface_id: created.surface,
               workspace_id: created.workspace ?? workspace ?? null,
               cwd: args.cwd ?? null,
@@ -15065,15 +15093,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
             return true;
           };
-          let focusRestoreLease = await focusTargetBeforeSplit(
-            spawnWorkspace,
-            args.focus !== true,
-          );
+          const runtimeMetadataSupported = typeof client.listSurfaceRuntimeMetadata === "function" ||
+            (typeof client.listTerminalMetadata === "function" &&
+            await readRuntimeMetadata(() => client.listTerminalMetadata())
+              .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
+              .catch(() => false));
+          const focusForLaunch = args.focus === true || !runtimeMetadataSupported;
+          let focusRestoreLease = focusForLaunch
+            ? await focusTargetBeforeSplit(spawnWorkspace, args.focus !== true)
+            : null;
           let surfaceCreated = false;
           let result: Awaited<ReturnType<typeof engine.spawnAgent>>;
           try {
             result = await engine.spawnAgent({
               repo: args.repo,
+              focus: focusForLaunch,
+              runtime_metadata_supported: runtimeMetadataSupported,
               model: args.model,
               effort: args.effort,
               cli: args.cli,
@@ -15112,7 +15147,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (
               e instanceof AgentLaunchError &&
               e.launch_phase === "launch" &&
-              (e.launch_cause instanceof LauncherReadinessError ||
+              (e.launch_cause instanceof SurfaceRuntimeNotStartedError ||
+                e.launch_cause instanceof LauncherReadinessError ||
                 (e.launch_cause instanceof BootPromptTimeoutError &&
                   e.launch_cause.pending_input_observed))
             ) {

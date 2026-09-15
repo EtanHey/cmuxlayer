@@ -13,6 +13,7 @@ import net from "node:net";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  hasRawShellPrompt,
   assertOwnedDaemonSocket,
   assertDoctorReport,
   assertLiveHealth,
@@ -49,6 +50,13 @@ afterEach(async () => {
 });
 
 describe("real cmux contract runner helpers", () => {
+  it("requires raw content for the D4 shell proof instead of silently timing out", () => {
+    expect(() => hasRawShellPrompt({ screen_preview: "$ " })).toThrow("missing string content");
+    expect(hasRawShellPrompt({ content: "login still starting" })).toBe(false);
+    expect(hasRawShellPrompt({ content: "earlier $\nlogin still starting" })).toBe(false);
+    expect(hasRawShellPrompt({ content: "owner ~ $ " })).toBe(true);
+  });
+
   it("skips clearly and successfully when no live cmux pin is provided", () => {
     const result = spawnSync(
       process.execPath,

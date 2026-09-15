@@ -22,6 +22,7 @@ const ESSENTIAL_FIELDS = [
   "parent_agent_id",
   "version",
   "type",
+  "runtime_initialization",
   "resumed",
   "cwd",
   "boot_prompt_delivered",
