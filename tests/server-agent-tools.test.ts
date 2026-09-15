@@ -2503,13 +2503,19 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
-  it.each([2, 99])("#636 D1 boot pending recovers or exhausts with %i required Returns", async requiredPromptReturns => {
+  it.each([{ requiredPromptReturns: 2, knownSender: false }, { requiredPromptReturns: 99, knownSender: false }, { requiredPromptReturns: 99, knownSender: true }])("#636 D1 boot pending recovers or exhausts ($requiredPromptReturns Returns, sender=$knownSender)", async ({ requiredPromptReturns, knownSender }) => {
     vi.useFakeTimers();
     try {
       const exec = makeLifecycleExec({ requiredPromptReturns });
-      const server = createLifecycleServer(exec); const engine = (server as any)._registeredTools.interact._engine;
+      const inboxBaseDir = join(TEST_DIR, "boot-failure-inbox");
+      const server = createTrackedServer({ exec, stateDir: TEST_DIR, inboxBaseDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      const engine = (server as any)._registeredTools.interact._engine;
+      const collab = join(TEST_DIR, "boot-caller-collab.md");
+      const sender = makeServerAgentRecord({ agent_id: "boot-caller", surface_id: "surface:caller", surface_uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", workspace_id: "workspace:1", state: "ready", role: "lead", collab_path: collab });
+      if (knownSender) { writeFileSync(collab, "# caller\n"); engine.stateMgr.writeState(sender); engine.getRegistry().set(sender.agent_id, sender); }
       let settled = false;
-      const task = (server as any)._registeredTools.spawn_agent.handler({ repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "boot recovery specimen", verbose: true }, {}).then((value: any) => { settled = true; return value; });
+      const invoke = () => (server as any)._registeredTools.spawn_agent.handler({ repo: "brainlayer", model: "sonnet", cli: "claude", role: "worker", prompt: "boot recovery specimen", verbose: true }, {});
+      const task = (knownSender ? runWithCallerContext({ surfaceId: sender.surface_uuid!, workspaceId: "workspace:1" }, invoke) : invoke()).then((value: any) => { settled = true; return value; });
       for (let elapsed = 0; elapsed < 1_500 && !settled; elapsed += 50) await vi.advanceTimersByTimeAsync(50);
       expect(settled).toBe(true);
       const result = parseToolResult(await task);
@@ -2526,6 +2532,14 @@ describe("agent lifecycle tool handlers", () => {
       } else {
         expect(receipt).toMatchObject({ delivery_state: "failed_confirmed", retry_count: 3 });
         expect(engine.getAgentState(result.agent_id)).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false, submit_verified: false });
+      }
+      if (knownSender) {
+        expect(receipt.claude_submit.sender_agent_id).toBe(sender.agent_id);
+        const tells = () => readInbox(sender.agent_id, { baseDir: inboxBaseDir }).filter(message => message.task.includes(id));
+        expect(tells()).toHaveLength(1);
+        expect(readFileSync(collab, "utf8")).toContain(`### cmuxlayer engine → ${sender.agent_id}`);
+        await vi.advanceTimersByTimeAsync(4_000); await engine.verifyPendingDeliveries();
+        expect(tells()).toHaveLength(1);
       }
       expect(textCalls()).toBe(beforeText);
     } finally { vi.useRealTimers(); }
