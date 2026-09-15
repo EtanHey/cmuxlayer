@@ -6995,7 +6995,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const target = targetBeforeTyping;
     const claudeRelay = opts.press_enter && opts.verify_submit && target?.cli === "claude" &&
-      (opts.source_event === "send_to" || opts.source_event === "send_command" || opts.background_verify === true) && context.lifecycleSweepEngine;
+      (opts.source_event === "send_to" || opts.source_event === "send_command" || opts.source_event === "boot_prompt" || opts.background_verify === true) && context.lifecycleSweepEngine;
     if (claudeRelay && target) {
       const engine = context.lifecycleSweepEngine!;
       opts.delivery_id ??= randomUUID();
@@ -12661,7 +12661,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sent: boolean;
           reason: string;
           error_code?: string;
-          delivery?: "submitted" | "queued";
+          delivery?: "submitted" | "queued" | "pending_verify";
           delivery_id?: string;
         } = { attempted: false, sent: false, reason: "" };
         const acceptedRecord =
@@ -12721,7 +12721,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
                 if (
                   delivered.delivery !== "submitted" &&
-                  delivered.delivery !== "queued"
+                  delivered.delivery !== "queued" &&
+                  delivered.delivery !== "pending_verify"
                 ) {
                   throw new Error(
                     "inbox nudge produced no evidence-backed delivery state",
@@ -12730,7 +12731,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 nudge.delivery = delivered.delivery;
                 if (context.lifecycleSweepEngine && deliveryId) {
                   const receipt =
-                    delivered.delivery === "queued"
+                    delivered.delivery === "pending_verify"
+                      ? context.lifecycleSweepEngine.acceptPendingVerify({
+                          delivery_id: deliveryId, agent_id: args.agent_id,
+                          text: pointer, press_enter: true, source_event: "dispatch_nudge",
+                          retry_count: delivered.retry_count, rpc_methods: delivered.rpc_methods,
+                          typed: delivered.typed, submit_dispatched: delivered.submit_dispatched,
+                        })
+                      : delivered.delivery === "queued"
                       ? context.lifecycleSweepEngine.acceptComposerQueue({
                           delivery_id: deliveryId,
                           agent_id: args.agent_id,
@@ -12760,8 +12768,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   nudge.delivery_id = receipt.delivery_id;
                 }
               }
-              nudge.sent = true;
-              nudge.reason = wakeIdleAgent
+              nudge.sent = nudge.delivery !== "pending_verify";
+              nudge.reason = nudge.delivery === "pending_verify"
+                ? "inbox pointer typed once; verification is in flight"
+                : wakeIdleAgent
                 ? `idle live agent — typed inbox pointer into ${record.surface_id}`
                 : record.state === "working"
                   ? `busy agent — queued inbox pointer for verified lifecycle delivery to ${record.surface_id}`
@@ -12801,8 +12811,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           nudge,
         };
         const nudgeAccepted =
-          nudge.sent &&
-          (nudge.delivery === "submitted" || nudge.delivery === "queued");
+          nudge.delivery === "pending_verify" || (nudge.sent &&
+          (nudge.delivery === "submitted" || nudge.delivery === "queued"));
         if (monitor_state === "never-armed" && !nudgeAccepted) {
           return err(
             "inbox message was queued, but the recipient has never proved that its inbox monitor is armed",
