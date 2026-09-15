@@ -6,6 +6,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -22,6 +23,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
+import type { ClaudeDeliveryEvidence } from "./claude-delivery.js";
 import { initializeNewSurfaceRuntime } from "./surface-runtime.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import { buildTitle } from "./naming.js";
@@ -294,6 +296,7 @@ export type AgentDeliveryState =
 export interface AgentDeliveryReceipt {
   submit_evidence?: string;
   frame_hash?: string;
+  claude_submit?: ClaudeDeliveryEvidence;
   delivery_id: string;
   agent_id: string;
   text: string;
@@ -353,6 +356,7 @@ function snapshotDeliveryReceipt(
   const { rpc_methods: rpcMethods, ...snapshot } = receipt;
   return {
     ...snapshot,
+    ...(receipt.claude_submit ? { claude_submit: { ...receipt.claude_submit, ...(receipt.claude_submit.pre_return ? { pre_return: { ...receipt.claude_submit.pre_return } } : {}) } } : {}),
     ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
@@ -1782,6 +1786,8 @@ export class AgentEngine {
   private deliverySnapshotReader: DeliverySnapshotReader | null = null;
   private deliveryDrainInFlight = false;
   private deliveryVerifyInFlight = false;
+  private claudeVerifyTimer: ReturnType<typeof setInterval> | null = null;
+  private deliveryVerifyGeneration = 0;
   private deliverySubmitTimeoutMs: number;
   private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
@@ -3614,6 +3620,24 @@ export class AgentEngine {
           pid_registered_at: identity.pid_registered_at!,
         }
       : {};
+    // The boot receipt can predate first session registration. Adopt only an
+    // authoritative first capture from this exact launch; never a null wildcard.
+    if (hasCapturedProcessEvidence && agent.cli === "claude" && !agent.cli_session_id) {
+      const registeredAt = Date.parse(identity.pid_registered_at!);
+      const launchedAt = Date.parse(agent.created_at);
+      if (Number.isFinite(registeredAt) && Number.isFinite(launchedAt) && registeredAt >= launchedAt && registeredAt <= Date.now()) {
+        this.observeClaudeDeliveryEvidence(receipt => {
+          const evidence = receipt.claude_submit!;
+          if (receipt.agent_id !== agent.agent_id || evidence.cli_session_id != null ||
+              evidence.agent_created_at !== agent.created_at || !evidence.surface_uuid ||
+              evidence.surface_uuid.toLowerCase() !== agent.surface_uuid?.toLowerCase() ||
+              evidence.surface_id !== agent.surface_id || (evidence.workspace_id ?? null) !== (agent.workspace_id ?? null) ||
+              evidence.retry_revoked || evidence.attribution_revoked) return false;
+          evidence.cli_session_id = identity.session_id;
+          return true;
+        });
+      }
+    }
     let updated = this.stateMgr.updateRecord(agent.agent_id, {
       cli_session_id: identity.session_id,
       cli_session_path: identity.path ?? agent.cli_session_path ?? null,
@@ -7171,6 +7195,7 @@ export class AgentEngine {
 
   setDeliveryVerifier(verifier: DeliveryVerifier | null): void {
     this.deliveryVerifier = verifier;
+    this.refreshClaudeVerifyTimer();
   }
 
   setDeliverySnapshotReader(reader: DeliverySnapshotReader | null): void {
@@ -7411,6 +7436,77 @@ export class AgentEngine {
     return snapshotDeliveryReceipt(receipt);
   }
 
+  updateClaudeDeliveryEvidence(deliveryId: string, evidence: ClaudeDeliveryEvidence): void {
+    const receipt = this.deliveryReceipts.get(deliveryId);
+    if (!receipt) return;
+    const current = receipt.claude_submit;
+    if (current && current !== evidence) {
+      // An awaited verifier may save an older snapshot after another client
+      // observed a generation change. Neither flags nor attempts go backwards.
+      for (const key of ["retry_revoked", "attribution_revoked", "weak_corroboration_revoked", "composer_cleared", "payload_observed"] as const) {
+        if (current[key]) evidence[key] = true;
+      }
+      evidence.observed_paste_id = current.observed_paste_id ?? evidence.observed_paste_id;
+      evidence.cli_session_id = current.cli_session_id ?? evidence.cli_session_id;
+      evidence.agent_created_at = current.agent_created_at ?? evidence.agent_created_at;
+      evidence.last_composer_observed_at = Math.max(current.last_composer_observed_at ?? 0, evidence.last_composer_observed_at ?? 0);
+      evidence.return_attempts = Math.max(current.return_attempts ?? 0, evidence.return_attempts ?? 0);
+      if ((current.return_at ?? -Infinity) > (evidence.return_at ?? -Infinity)) {
+        evidence.return_at = current.return_at;
+        evidence.pre_return = current.pre_return;
+        evidence.observed_frame_hash = current.observed_frame_hash;
+      }
+      Object.assign(current, evidence);
+    } else receipt.claude_submit = evidence;
+    this.persistDeliveryReceipts();
+    this.refreshClaudeVerifyTimer();
+  }
+
+  observeClaudeDeliveryEvidence(observe: (receipt: AgentDeliveryReceipt) => boolean): void {
+    let changed = false;
+    for (const receipt of this.deliveryReceipts.values()) {
+      if (receipt.claude_submit && !receipt.terminal) changed = observe(receipt) || changed;
+    }
+    if (changed) this.persistDeliveryReceipts();
+  }
+
+  noteClaudeSurfaceSubmit(surface: string, workspace: string | undefined, uuid: string | null, deliveryId?: string): void {
+    this.observeClaudeDeliveryEvidence(receipt => {
+      const evidence = receipt.claude_submit!;
+      const sameSurface = evidence.surface_uuid ? evidence.surface_uuid.toLowerCase() === uuid?.toLowerCase() : evidence.surface_id === surface;
+      if (receipt.delivery_id === deliveryId || !sameSurface || (evidence.workspace_id ?? null) !== (workspace ?? null) || evidence.return_at === undefined || evidence.weak_corroboration_revoked) return false;
+      evidence.weak_corroboration_revoked = true;
+      return true;
+    });
+  }
+
+  getDeliveryVerificationGeneration(): number {
+    return this.deliveryVerifyGeneration;
+  }
+
+  isClaudeVerifyCurrent(receipt: AgentDeliveryReceipt, generation: number, startedAt: number): boolean {
+    return this.deliveryReceipts.get(receipt.delivery_id) === receipt && !receipt.terminal &&
+      generation === this.deliveryVerifyGeneration && Date.now() - startedAt < this.deliveryVerifyTimeoutMs &&
+      (!receipt.verify_deadline_at || Date.now() < Date.parse(receipt.verify_deadline_at));
+  }
+
+  private refreshClaudeVerifyTimer(): void {
+    if (this.deliveryVerifyInFlight) return;
+    const pending = this.deliveryVerifier &&
+      [...this.deliveryReceipts.values()].some(receipt => receipt.claude_submit && !receipt.terminal);
+    if (!pending) {
+      if (this.claudeVerifyTimer) clearInterval(this.claudeVerifyTimer);
+      this.claudeVerifyTimer = null;
+    } else if (!this.claudeVerifyTimer) {
+      this.claudeVerifyTimer = setInterval(() => {
+        void this.verifyPendingDeliveries().catch(error => {
+          console.error("[cmuxlayer] Claude delivery verification failed:", error);
+        });
+      }, 2_000);
+      this.claudeVerifyTimer.unref?.();
+    }
+  }
+
   getDeliveryReceipt(deliveryId: string): AgentDeliveryReceipt | null {
     const receipt = this.deliveryReceipts.get(deliveryId);
     return receipt ? snapshotDeliveryReceipt(receipt) : null;
@@ -7455,6 +7551,7 @@ export class AgentEngine {
     const now = new Date().toISOString();
     const existing = this.deliveryReceipts.get(input.delivery_id);
     const receipt: AgentDeliveryReceipt = {
+      ...existing,
       ...input,
       delivery_state: "pending_verify",
       terminal: false,
@@ -7520,6 +7617,7 @@ export class AgentEngine {
 
   async verifyPendingDeliveries(): Promise<void> {
     if (this.deliveryVerifyInFlight || !this.deliveryVerifier) return;
+    const generation = this.deliveryVerifyGeneration;
     this.deliveryVerifyInFlight = true;
     try {
       const snapshots = new Map<string, DeliveryVerifySnapshot | null>();
@@ -7539,11 +7637,11 @@ export class AgentEngine {
         const skipRead = this.shouldSkipVerifyRead(receipt, now);
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
         if (skipRead && !timedOut) continue;
-        if (!skipRead && this.deliveryVerifier) {
+        if (!skipRead && !timedOut && this.deliveryVerifier) {
           const agent = this.getAgentState(receipt.agent_id);
           const snapshotKey = agent?.surface_id ?? receipt.agent_id;
           let snapshot: DeliveryVerifySnapshot | null | undefined;
-          if (this.deliverySnapshotReader) {
+          if (this.deliverySnapshotReader && !receipt.claude_submit) {
             if (!snapshots.has(snapshotKey)) {
               // AIDEV-NOTE (T2 #450): the snapshot read must be inside the
               // hang guard, not before it. SF8 hoisted the surface read out of
@@ -7574,6 +7672,7 @@ export class AgentEngine {
               reason: error instanceof Error ? error.message : String(error),
             };
           }
+          if (generation !== this.deliveryVerifyGeneration || this.deliveryReceipts.get(receipt.delivery_id) !== receipt || receipt.terminal) continue;
           receipt.verify_last_attempt_at = new Date().toISOString();
           this.persistDeliveryReceipts();
         }
@@ -7586,6 +7685,7 @@ export class AgentEngine {
           receipt.submit_verified = observation.submit_verified ?? true;
           receipt.error = null;
           receipt.verify_miss_count = 0;
+          this.applyClaudeDeliveryAgentState(receipt, true);
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
           continue;
@@ -7606,22 +7706,58 @@ export class AgentEngine {
           confirmedGone ||
           timedOut
         ) {
-          const reason =
-            observation.reason ??
-            (timedOut ? "verify_deadline_elapsed" : "failed_confirmed");
+          const reason = timedOut
+            ? receipt.claude_submit?.pending_reason ?? "verify_deadline_elapsed"
+            : observation.reason ?? "failed_confirmed";
           receipt.delivery_state = "failed_confirmed";
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
           receipt.submit_verified = false;
           receipt.error = reason;
+          this.applyClaudeDeliveryAgentState(receipt, false);
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
           await this.fileConfirmedFailureTicket(receipt, reason, observation);
+          const senderId = receipt.claude_submit?.sender_agent_id;
+          if (senderId) {
+            const task = `Delivery ${receipt.delivery_id} to ${receipt.agent_id} failed_confirmed: ${reason}. Return retries=${receipt.retry_count}; inspect the receipt before sending anything again.`;
+            try {
+              dispatchOnce(senderId, { id: `delivery-failed:${receipt.delivery_id}`, from: "cmuxlayer:engine", to: senderId, tag: "delivery_failed", task }, this.inboxOpts);
+              const sender = this.getAgentState(senderId);
+              if (sender?.collab_path) appendFileSync(sender.collab_path, `\n### cmuxlayer engine → ${senderId}\n${task}\n`);
+            } catch (error) {
+              receipt.needs_attention = true;
+              receipt.attention_reason = `sender_notification_failed: ${String(error)}`;
+              this.persistDeliveryReceipts();
+            }
+          }
         }
       }
     } finally {
       this.deliveryVerifyInFlight = false;
+      if (generation === this.deliveryVerifyGeneration) this.refreshClaudeVerifyTimer();
     }
+  }
+
+  private applyClaudeDeliveryAgentState(receipt: AgentDeliveryReceipt, submitted: boolean): void {
+    const evidence = receipt.claude_submit;
+    const current = this.getAgentState(receipt.agent_id);
+    if (!evidence || current?.cli !== "claude" ||
+        (current.cli_session_id ?? null) !== (evidence.cli_session_id ?? null) ||
+        current.surface_id !== evidence.surface_id ||
+        (current.surface_uuid ?? null) !== (evidence.surface_uuid ?? null) ||
+        (current.workspace_id ?? null) !== (evidence.workspace_id ?? null)) return;
+    if (receipt.source_event === "boot_prompt") {
+      const updated = this.stateMgr.updateRecord(receipt.agent_id, {
+        boot_prompt_pending: !submitted,
+        prompt_delivered: submitted,
+        submit_verified: submitted,
+      });
+      this.registry.set(receipt.agent_id, updated);
+      if (submitted && updated.state === "booting") {
+        this.registry.set(receipt.agent_id, this.stateMgr.transition(receipt.agent_id, "ready"));
+      }
+    } else if (submitted) this.markAgentWorking(receipt.agent_id);
   }
 
   /** Bound one delivery-verify side quest to the verify timeout. */
@@ -7652,6 +7788,7 @@ export class AgentEngine {
     receipt: AgentDeliveryReceipt,
     now: number,
   ): number {
+    if (receipt.claude_submit) return 2_000;
     if (
       receipt.delivery_state === "queued_followup" ||
       !receipt.verify_deadline_at
@@ -7690,7 +7827,7 @@ export class AgentEngine {
    * way, so the verdict keeps citing its evidence; only the escalation stops.
    */
   private deliveryFailureEscalationDecline(reason: string): string | null {
-    if (reason === "verify_deadline_elapsed") {
+    if (reason === "verify_deadline_elapsed" || reason === "cleared_unattributed") {
       return (
         "background verify ran out of deadline before observing an outcome; " +
         "no evidence the message was lost"
@@ -8603,6 +8740,9 @@ export class AgentEngine {
    * Stop the reconciliation sweep.
    */
   dispose(): void {
+    this.deliveryVerifyGeneration++;
+    if (this.claudeVerifyTimer) clearInterval(this.claudeVerifyTimer);
+    this.claudeVerifyTimer = null;
     if (this.sweepTimer) {
       clearTimeout(this.sweepTimer);
       this.sweepTimer = null;
