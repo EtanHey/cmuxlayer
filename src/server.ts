@@ -1629,7 +1629,7 @@ class DeliverySafetyGateError extends Error {
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
         : error_code === "blocked_by_foreign_draft"
-          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; refused before typing`
+          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -1873,6 +1873,7 @@ function shapeSuccessfulSendToResult(
   };
   const lean: Record<string, unknown> = {
     ...receiptFloor,
+    ...("caller_agent_id" in full ? { caller_agent_id: full.caller_agent_id } : {}),
     ...(args.mode === "key"
       ? {
           key: full.key ?? args.text,
@@ -3030,9 +3031,13 @@ function normalizeKnownPlaceholderComposerInput(
     .filter((line) => !/^\s*[▄▀]{8,}\s*$/.test(line))
     .join("\n")
     .trim();
+  const [firstLine = "", ...followingLines] = withoutCursorBorders.split("\n");
+  const codexPlaceholder = cli === "codex" &&
+    CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE.test(firstLine) &&
+    followingLines.every((line) => !line.trim() || line.trim() === "esc again to edit previous message");
   if (
-    (cli === "codex" &&
-      CODEX_EMPTY_COMPOSER_PLACEHOLDER_RE.test(withoutCursorBorders)) ||
+    codexPlaceholder ||
+    (cli === "claude" && withoutCursorBorders === "Press up to edit queued messages") ||
     (cli === "cursor" &&
       (withoutCursorBorders === "Plan, search, build anything" ||
         CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(withoutCursorBorders)))
@@ -3048,9 +3053,10 @@ function normalizeKnownPlaceholderComposerInput(
 function extractComposerInputRegion(
   screenText: string,
   submittedText?: string,
+  knownCli?: CliType,
 ): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
-  const cli = inferComposerCli(screenText);
+  const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
@@ -3211,9 +3217,9 @@ function screenContainsCompleteSubmittedText(
  * and chrome never does. Widening the chrome whitelist instead is what put
  * this hole in the first place.
  */
-function composerPromptLineInput(screenText: string): string | null {
+function composerPromptLineInput(screenText: string, knownCli?: CliType, preservePlaceholderText = false): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
-  const cli = inferComposerCli(screenText);
+  const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
@@ -3225,7 +3231,7 @@ function composerPromptLineInput(screenText: string): string | null {
     const match =
       matchComposerPromptLine(line) ?? matchLegacyClaudePromptLine(cli, line);
     if (match) {
-      return normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
+      return preservePlaceholderText ? match.input : normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
     }
   }
   return null;
@@ -3243,24 +3249,29 @@ function composerPromptLineInput(screenText: string): string | null {
 function composerHoldsForeignDraft(
   screenText: string,
   submittedText: string,
+  options?: { cli?: CliType },
 ): boolean {
-  // AIDEV-NOTE (T2 #442): Cursor is deliberately exempt. Its composer RETAINS
+  // AIDEV-NOTE (T2 #442): Cursor text sends are exempt. Its composer RETAINS
   // the accepted text after a submit (the "retained composer" state #441/#449
   // built evidence rules around), so a non-empty Cursor composer is the normal
   // post-send screen, not an unsent draft -- and nothing on that screen
   // distinguishes the two. Guarding it would refuse every legitimate second
   // send to a Cursor pane. Claude and Codex clear on submit, so there a
   // non-empty composer really does mean somebody's text is sitting unsent.
-  if (inferComposerCli(screenText) === "cursor") {
+  if ((options?.cli ?? inferComposerCli(screenText)) === "cursor") {
     return false;
   }
   // No recognisable composer prompt line (bare shell, unreadable frame). The
   // pre-existing gates own those cases; do not invent a refusal here.
-  const promptLine = composerPromptLineInput(screenText);
-  if (promptLine === null) {
-    return false;
-  }
-  const compactDraft = promptLine.replace(/\s+/g, "");
+  const promptLine = composerPromptLineInput(screenText, options?.cli, true);
+  if (promptLine === null || !promptLine.trim()) return false;
+  // An empty first line may be a placeholder followed by real draft text.
+  // Only the whole-region normalizer can certify that shape as empty.
+  const placeholderLine = normalizeKnownPlaceholderComposerInput(options?.cli ?? inferComposerCli(screenText), promptLine) === "";
+  const draft = placeholderLine
+    ? extractComposerInputRegion(screenText, submittedText, options?.cli) ?? promptLine
+    : promptLine;
+  const compactDraft = draft.replace(/\s+/g, "");
   if (!compactDraft) {
     return false;
   }
@@ -5249,7 +5260,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? (handlerArgs[0] as Record<string, unknown>)
                 : {};
             const verbose = rawArgs.verbose === true;
-            const handled = (await handler(...handlerArgs)) as ToolReturn;
+            const callerAgentId = toolNameString === "send_to" ? resolveCurrentCallerAgent()?.agent_id ?? null : null;
+            let handled = (await handler(...handlerArgs)) as ToolReturn;
+            if (toolNameString === "send_to") {
+              const payload = { ...handled.structuredContent, caller_agent_id: callerAgentId };
+              handled = { ...handled, structuredContent: payload, content: handled.content.map((entry) => {
+                if (entry.type !== "text") return entry;
+                try {
+                  const value = JSON.parse(entry.text);
+                  if (value && typeof value === "object" && !Array.isArray(value)) {
+                    return { ...entry, text: JSON.stringify(payload) };
+                  }
+                } catch { /* Preserve human summaries alongside their structured receipt. */ }
+                return entry;
+              }) };
+            }
             const shaped =
               toolNameString === "send_to" && !verbose
                 ? shapeSuccessfulSendToResult(handled, rawArgs)
@@ -6037,7 +6062,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // mutation, and can later submit text the caller never authorized.
     if (
       opts.draftGuardText !== undefined &&
-      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText)
+      composerHoldsForeignDraft(snapshot.text, opts.draftGuardText, { cli })
     ) {
       throw new DeliverySafetyGateError(
         "blocked_by_foreign_draft",
@@ -6777,9 +6802,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "interact";
     const draftGuardText = opts.chunks.join("");
     const targetBeforeTyping = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+    const targetCli = targetBeforeTyping?.cli;
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
       workspace: opts.workspace,
+      cli: targetCli,
       ...(draftGuardedEvent && draftGuardText.trim().length > 0
         ? { draftGuardText }
         : {}),
@@ -14786,6 +14813,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "boot_prompt_path",
               "worktree",
               "mcp_profile",
+              "collab_path",
               "parent_agent_id",
               "role",
               "placement",
@@ -17880,7 +17908,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text or a key through the shared delivery engine. Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
+      "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(

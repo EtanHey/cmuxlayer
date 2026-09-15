@@ -2565,6 +2565,20 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.auto_archive_on_done).toBe(false);
   });
 
+  it("#636 rejects collab_path on resume before resolving or mutating an agent", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const engine = (server as any)._registeredTools.interact._engine;
+    const resolve = vi.spyOn(engine, "resolveResumeAgent").mockImplementation(() => { throw new Error("resume resolution must not run"); });
+    const resume = vi.spyOn(engine, "resumeAgent");
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: "existing-agent", collab_path: join(TEST_DIR, "new-collab.md") }, {}));
+    expect(result).toMatchObject({ ok: false, error_code: "INVALID_RESUME_SPEC" });
+    expect(result.error).toContain("collab_path");
+    expect(resolve).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+    expect(exec.mock.calls.some(([, args]) => args.some((arg: string) => ["new-split", "new-surface", "send", "send-key"].includes(arg)))).toBe(false);
+  });
+
   it("spawn_agent resume_agent_id rebinds a captured session without minting a new public id", async () => {
     const agentId = "cmuxlayerCodex-stable-resume";
     const stateMgr = new StateManager(TEST_DIR);
@@ -7447,7 +7461,7 @@ describe("agent lifecycle tool handlers", () => {
       seatManifestWriter: async (manifest) => manifests.push(manifest),
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const sendTo = (server as any)._registeredTools["send_to"];
+    const readScreen = (server as any)._registeredTools["read_screen"];
     const getState = (server as any)._registeredTools["get_agent_state"];
     const result = await spawn.handler(
       { repo: "brainlayer", model: "codex", cli: "codex",
@@ -7463,9 +7477,10 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed).toMatchObject({ ok: true, spawn_state: "boot_unsubmitted",
         next_action: expect.stringContaining("never re-spawn"),
         delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
-      const call = parsed.next_action.match(/send_to\((\{.*?\})\)/)?.[1];
+      expect(parsed.next_action).not.toContain('send_to({mode:"key"');
+      const call = parsed.next_action.match(/read_screen\((\{.*?\})\)/)?.[1];
       const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
-      const sendResult = parseToolResult(await sendTo.handler(sendArgs, {} as any));
+      const sendResult = parseToolResult(await readScreen.handler(sendArgs, {} as any));
       expect(sendResult, JSON.stringify(sendResult)).toMatchObject({ ok: true });
       expect(result.content[0]!.text).toMatch(
         /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
@@ -9743,6 +9758,8 @@ describe("agent lifecycle tool handlers", () => {
       ],
     });
     expect(result.content[0].text).toContain("1 failed");
+    expect(result.structuredContent).toHaveProperty("caller_agent_id", null);
+    expect(result.content[0].text).toBe("send_to targeting: 0 submitted, 0 queued, 1 failed, 0 skipped");
   }, 20_000);
 
   it("send_to rejects targeting combined with a singular agent id", async () => {

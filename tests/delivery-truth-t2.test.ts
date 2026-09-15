@@ -162,6 +162,54 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
+  it.each([
+    { cli: "codex", frame: "› Ask Codex to do anything" },
+    { cli: "codex", frame: "› Ask Codex to do anything\n\n  esc again to edit previous message" },
+    { cli: "claude", frame: "Claude Code\n❯ Press up to edit queued messages" },
+  ] as const)("#645 recognizes complete empty hints for text sends ($cli, $frame)", async ({ cli, frame }) => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screen = "Claude Code\n❯ ";
+    const exec = makeLifecycleExec(() => screen);
+    const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context }) as any;
+      const targetId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const target = { ...engine.getRegistry().get(targetId), cli, state: "ready" };
+      engine.stateMgr.writeState(target);
+      engine.getRegistry().set(targetId, target);
+      for (const mode of ["agent"] as const) {
+        screen = frame;
+        exec.mockClear();
+        const result = parseToolResult(await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: "new message", press_enter: false }, {}));
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        expect(mutatedPane(exec)).toBe(true);
+        screen = frame + "\nmy actual second line";
+        exec.mockClear();
+        const multiline = parseToolResult(await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: "new message", press_enter: false }, {}));
+        expect(multiline.error_code).toBe("blocked_by_foreign_draft");
+        expect(mutatedPane(exec)).toBe(false);
+        screen = frame.split("\n").slice(0, -1).concat(cli === "codex" ? "› Write tests for @server.ts" : "❯ Press up to edit queued messages that I wrote").join("\n");
+        exec.mockClear();
+        const refused = await server._registeredTools.send_to.handler({ mode, ...(mode === "agent" ? { agent_id: targetId } : { surface: "surface:new" }), text: "new message", press_enter: false }, {});
+        const data = parseToolResult(refused);
+        expect(data.error_code).toBe("blocked_by_foreign_draft");
+        expect(data.error).toContain("try again in ~20 s or after your next turn");
+        expect(JSON.parse(refused.content[0].text)).toMatchObject({ error: data.error, caller_agent_id: null });
+        expect(mutatedPane(exec)).toBe(false);
+      }
+    } finally { context.dispose(); }
+  });
+
+  it.each(["agent", "surface", "command", "key"])("#636 attributes even invalid send_to %s receipts", async (mode) => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const context = createServerContext({ exec: makeLifecycleExec(() => "Claude Code\n❯ "), stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const result = await (createServer({ context }) as any)._registeredTools.send_to.handler({ mode }, {});
+      expect(parseToolResult(result)).toMatchObject({ ok: false, caller_agent_id: null });
+    } finally { context.dispose(); }
+  });
+
   it("send_to refuses a composer holding human-typed draft text, before typing anything", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";
@@ -195,6 +243,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     });
     expect(parsed.WARNING).toMatch(/terminal failure/i);
     expect(parsed.error).toMatch(/composer already holds text/i);
+    expect(parsed.error).toContain("try again in ~20 s or after your next turn");
     expect(mutatedPane(mockExec)).toBe(false);
     context.dispose();
   }, 20_000);
