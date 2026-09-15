@@ -75,3 +75,30 @@ it("#636 resumes an unsubmitted mid-turn payload when it becomes idle", async ()
   await verifyClaudeDelivery(current, { read: async () => frame({ complete: true, pending: true, cleared: false }), save: vi.fn(), returnOnly: key });
   expect(key).toHaveBeenCalledTimes(1);
 });
+
+it.each(["cleared", "edited"])("#636 D1 ownership remains revoked after an observed %s composer is restored", async kind => {
+  const current = receipt(); const key = vi.fn();
+  await verifyClaudeDelivery(current, { read: async () => frame({ cleared: kind === "cleared", hash: "observed-generation-change" }), save: vi.fn(), returnOnly: key });
+  await vi.advanceTimersByTimeAsync(2_001);
+  await verifyClaudeDelivery(current, { read: async () => frame({ complete: true, pending: true, cleared: false, hash: "owned-before-return" }), save: vi.fn(), returnOnly: key });
+  expect(key).not.toHaveBeenCalled();
+});
+
+it("#636 D1 ownership preserves later attribution after bare clearance without a replacement", async () => {
+  const current = receipt(); const key = vi.fn();
+  const io = { save: vi.fn(), returnOnly: key };
+  expect((await verifyClaudeDelivery(current, { ...io, read: async () => frame() })).outcome).toBe("pending");
+  await vi.advanceTimersByTimeAsync(2_001);
+  expect((await verifyClaudeDelivery(current, { ...io, read: async () => frame({ inTranscript: true, transcriptMatches: 1 }) })).outcome).toBe("delivered");
+  expect(key).not.toHaveBeenCalled();
+});
+
+it("#636 D1 ownership cannot attribute a replacement generation that later clears", async () => {
+  const current = receipt(); const key = vi.fn();
+  const io = { save: vi.fn(), returnOnly: key };
+  await verifyClaudeDelivery(current, { ...io, read: async () => frame() });
+  await verifyClaudeDelivery(current, { ...io, read: async () => frame({ complete: true, pending: true, cleared: false, hash: "restored-generation" }) });
+  await vi.advanceTimersByTimeAsync(2_001);
+  expect((await verifyClaudeDelivery(current, { ...io, read: async () => frame({ inTranscript: true, transcriptMatches: 1 }) })).outcome).toBe("pending");
+  expect(key).not.toHaveBeenCalled();
+});

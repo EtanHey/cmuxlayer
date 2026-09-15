@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { runWithCallerContext } from "../src/caller-context.js";
 import { readInbox } from "../src/inbox.js";
 import { parseScreen } from "../src/screen-parser.js";
-import { createServer } from "../src/server.js";
+import { createServer, createServerContext } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
@@ -279,6 +279,7 @@ class ClaudeDeliverySurface extends FakeAgentSurfaceClient {
   }
 }
 
+const serverContexts = new WeakMap<object, ReturnType<typeof createServerContext>>();
 function createVerifyServer(
   client: FakeAgentSurfaceClient,
   extras?: {
@@ -287,7 +288,7 @@ function createVerifyServer(
     deliveryIssueFiler?: (ticket: unknown) => Promise<void>;
   },
 ) {
-  const server = createServer({
+  const context = createServerContext({
     client: client as any,
     stateDir: TEST_DIR,
     inboxBaseDir: join(TEST_DIR, "inboxes"),
@@ -296,6 +297,8 @@ function createVerifyServer(
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
     ...extras,
   });
+  const server = createServer({ context });
+  serverContexts.set(server, context);
   const engine = (server as any)._registeredTools.interact._engine;
   engine.dispose();
   return server;
@@ -557,6 +560,40 @@ describe("send_to v2 background verify", () => {
     expect(client.sendKeyCalls).toEqual(["return"]);
     expect(client.composer).toBe("636 unique delivery plus the user's new draft");
   });
+
+  it("#636 D1 never retries a replacement paste placeholder", async () => {
+    const client = new ClaudeDeliverySurface(); client.collapsePastes = true;
+    await instantDelivery(client, "agent", "636 paste payload ".repeat(40));
+    expect(client.composer).toBe("[Pasted text #1 +3 lines]");
+    client.composer = "[Pasted text #2 +3 lines]";
+    await vi.advanceTimersByTimeAsync(4_000);
+    await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls).toEqual(["return"]);
+    expect(client.composer).toBe("[Pasted text #2 +3 lines]");
+  });
+
+  it.each(["cleared", "edited"].flatMap(kind => ["verifier", "read_screen", "other_client"].map(reader => ({ kind, reader }))))
+    ("#636 D1 observed composer generation cannot be restored ($kind via $reader)", async ({ kind, reader }) => {
+      const client = new ClaudeDeliverySurface();
+      await instantDelivery(client);
+      const engine = server._registeredTools.interact._engine;
+      client.composer = kind === "cleared" ? "" : "human replacement";
+      if (reader === "verifier") await engine.verifyPendingDeliveries();
+      else {
+        const observer = reader === "other_client" ? createServer({ context: serverContexts.get(server)! }) as any : server;
+        try {
+          const result = await observer._registeredTools.read_screen.handler({ surface: client.surface }, {});
+          expect(parseResult(result).ok).toBe(true);
+        } finally {
+          if (observer !== server) await observer.close();
+        }
+      }
+      client.composer = "636 unique delivery";
+      await vi.advanceTimersByTimeAsync(4_000);
+      await engine.verifyPendingDeliveries();
+      expect(client.sendKeyCalls).toEqual(["return"]);
+      expect(client.sendCalls).toEqual(["636 unique delivery"]);
+    });
 
   it.each([1, 2])("#636 D1 attributes a new paste placeholder with %s Return attempts", async returns => {
     const client = new ClaudeDeliverySurface(); client.collapsePastes = true; client.requiredReturns = returns;
