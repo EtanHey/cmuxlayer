@@ -152,7 +152,7 @@ describe("AgentRegistry", () => {
       } finally { vi.unstubAllEnvs(); }
     });
 
-    it.each(["startup", "reconcile"])("#641 purges exact benchmark ghosts from disk and memory during %s", async (operation) => {
+    it("#641 purges exact benchmark ghosts from disk and memory during startup", async () => {
       const ghost = makeRecord({ agent_id: "bench-disk", repo: "cmuxlayer", cli: "codex", state: "booting", pid: null,
         surface_id: "surface:bench-spawn", surface_uuid: "00000000-0000-4000-8000-999999999999", workspace_id: "workspace:bench" });
       stateMgr.writeState(ghost);
@@ -165,15 +165,25 @@ describe("AgentRegistry", () => {
       ];
       for (const record of controls) stateMgr.writeState(record);
       const registry = new AgentRegistry(stateMgr, async () => [makeSurface("surface:42")]);
-      if (operation === "reconcile") registry.set("bench-memory", { ...ghost, agent_id: "bench-memory" });
-      await registry[operation === "startup" ? "reconstitute" : "reconcile"]({ surfaces: [makeSurface("surface:42")] });
+      await registry.reconstitute({ surfaces: [makeSurface("surface:42")] });
       expect(registry.get("bench-disk")).toBeNull();
-      expect(registry.get("bench-memory")).toBeNull();
       expect(stateMgr.readState("bench-disk")).toBeNull();
       for (const record of controls) expect(registry.get(record.agent_id), record.agent_id).not.toBeNull();
       // Repeating the migration neither resurrects ghosts nor drops controls.
       await registry.reconcile({ surfaces: [makeSurface("surface:42")] });
       expect(registry.list().map(record => record.agent_id).sort()).toEqual(controls.map(record => record.agent_id).sort());
+    });
+
+    it("#641 does not read persisted ghost state from the periodic reconcile path", async () => {
+      const ghost = makeRecord({ agent_id: "bench-reconcile", repo: "cmuxlayer", cli: "codex", state: "booting", pid: null,
+        surface_id: "surface:bench-spawn", surface_uuid: "00000000-0000-4000-8000-999999999999", workspace_id: "workspace:bench" });
+      stateMgr.writeState(ghost);
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      registry.set(ghost.agent_id, ghost);
+      const readState = vi.spyOn(stateMgr, "readState");
+      await registry.reconcile({ surfaces: [] });
+      expect(readState).not.toHaveBeenCalled();
+      expect(registry.get(ghost.agent_id)).toEqual(ghost);
     });
 
     it("loads agents from state files", async () => {
