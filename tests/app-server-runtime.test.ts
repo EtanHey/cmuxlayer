@@ -106,6 +106,53 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it.each([1, 12])(
+    "keeps discovery listing constant while reading %i seat(s) once",
+    async (seatCount) => {
+      const testDir = `${TEST_DIR}-${seatCount}`;
+      rmSync(testDir, { recursive: true, force: true });
+      mkdirSync(testDir, { recursive: true });
+      const client = makeClient();
+      const surfaces = Array.from({ length: seatCount }, (_, index) => ({
+        id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-${String(index + 1).padStart(12, "0")}`,
+        ref: `surface:${index + 1}`,
+        title: `cmuxlayerCodex-${index + 1}`,
+        type: "terminal",
+      }));
+      client.listWorkspaces.mockResolvedValue({
+        workspaces: [{ ref: "workspace:app" }],
+      });
+      client.listPanes.mockResolvedValue({
+        workspace_ref: "workspace:app",
+        panes: surfaces.map((surface, index) => ({
+          ref: `pane:${index + 1}`,
+          surface_count: 1,
+          surface_refs: [surface.ref],
+          surface_ids: [surface.id],
+        })),
+      });
+      client.listPaneSurfaces.mockResolvedValue({
+        workspace_ref: "workspace:app",
+        pane_ref: "",
+        surfaces,
+      });
+      const runtime = new CmuxAppServerRuntime({ client, stateDir: testDir });
+
+      try {
+        await (runtime as any).discovery.scan(false);
+        expect(client.listWorkspaces).toHaveBeenCalledTimes(2);
+        // Discovery intentionally validates the completed observation with a
+        // second sweep; each sweep remains one workspace snapshot, not N panes.
+        expect(client.listPanes).toHaveBeenCalledTimes(2);
+        expect(client.listPaneSurfaces).toHaveBeenCalledTimes(2);
+        expect(client.readScreen).toHaveBeenCalledTimes(seatCount);
+      } finally {
+        runtime.dispose();
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("passes its inbox directory to the engine marker reaper", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });

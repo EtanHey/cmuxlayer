@@ -237,11 +237,17 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       );
       const surfaceGroupsByWorkspace = await Promise.all(
         panesByWorkspace.map(async ({ ref, panes }) => {
-          const rawGroups = await Promise.all(
-            panes.panes.map((pane) =>
-              this.client.listPaneSurfaces({ workspace: ref, pane: pane.ref }),
-            ),
-          );
+          if (panes.panes.length === 0) return [];
+          const workspaceSurfaces = await this.client.listPaneSurfaces({
+            workspace: ref,
+          });
+          const rawGroups = [
+            {
+              ...workspaceSurfaces,
+              workspace_ref: workspaceSurfaces.workspace_ref ?? ref,
+              pane_ref: workspaceSurfaces.pane_ref ?? "",
+            },
+          ];
           const groups = partitionPaneSurfacesByMembership(
             panes.panes,
             rawGroups,

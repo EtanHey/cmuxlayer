@@ -218,6 +218,54 @@ describe("CodexAppServerBridge thread lifecycle", () => {
 });
 
 describe("CodexAppServerBridge turn lifecycle", () => {
+  it.each([1, 12])(
+    "polls each of %i active seat(s) exactly through working to idle",
+    async (seatCount) => {
+      const reads = new Map<string, number>();
+      const notifications: Array<Record<string, unknown>> = [];
+      const runtime = createRuntime({
+        readScreen: vi.fn(async (threadId: string) => {
+          const count = (reads.get(threadId) ?? 0) + 1;
+          reads.set(threadId, count);
+          return count === 1
+            ? { text: "Working\n", status: "working", agentType: "codex" }
+            : { text: "codex>\n", status: "idle", agentType: "codex" };
+        }),
+      });
+      const bridge = new CodexAppServerBridge({
+        runtime,
+        emitNotification: (message) => notifications.push(message),
+        sleep: async () => {},
+        pollIntervalMs: 0,
+        turnCompletionTimeoutMs: 100,
+      });
+      await bridge.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: { clientInfo: { name: "test", version: "1" } },
+      });
+      await bridge.handleMessage({ method: "initialized" });
+
+      for (let index = 0; index < seatCount; index += 1) {
+        await bridge.handleMessage({
+          id: index + 2,
+          method: "turn/start",
+          params: {
+            threadId: `agent-${index + 1}`,
+            input: [{ type: "text", text: "work" }],
+          },
+        });
+      }
+
+      await vi.waitFor(() => {
+        expect(
+          notifications.filter((message) => message.method === "turn/completed"),
+        ).toHaveLength(seatCount);
+      });
+      expect(runtime.readScreen).toHaveBeenCalledTimes(seatCount * 2);
+    },
+  );
+
   it("sends a turn and emits turn/started then turn/completed when the codex prompt returns", async () => {
     const notifications: Array<Record<string, unknown>> = [];
     const runtime = createRuntime({

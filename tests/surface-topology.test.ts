@@ -108,16 +108,12 @@ function makeTopologyClient(panes: CmuxPane[], groups: CmuxPaneSurfaces[]) {
       window_ref: "window:1",
       panes,
     }),
-    listPaneSurfaces: vi.fn(
-      async (opts: { workspace?: string; pane?: string }) =>
-        groups.find((group) => group.pane_ref === opts.pane) ??
-        ({
-          workspace_ref: "workspace:1",
-          window_ref: "window:1",
-          pane_ref: opts.pane ?? "pane:unknown",
-          surfaces: [],
-        } satisfies CmuxPaneSurfaces),
-    ),
+    listPaneSurfaces: vi.fn(async () => ({
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      pane_ref: "",
+      surfaces: groups.flatMap((group) => group.surfaces),
+    } satisfies CmuxPaneSurfaces)),
   };
 }
 
@@ -196,6 +192,41 @@ describe("enrichSurfaceIdsFromPanes", () => {
 });
 
 describe("collectSurfaceTopology", () => {
+  it.each([1, 12])(
+    "uses one workspace-wide surface snapshot for %i pane(s)",
+    async (paneCount) => {
+    const panes = Array.from({ length: paneCount }, (_, index) =>
+      pane(`pane:${index + 1}`, index, [`surface:${index + 1}`]),
+    );
+    const client = {
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [workspace("workspace:1")],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes,
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "",
+        surfaces: panes.map((candidate) => surface(candidate.surface_refs[0]!)),
+      }),
+    };
+
+    const snapshot = await collectSurfaceTopology(client, "workspace:1");
+
+    expect(snapshot?.complete).toBe(true);
+    expect(snapshot?.surfaces).toHaveLength(paneCount);
+    expect(client.listPanes).toHaveBeenCalledTimes(1);
+    expect(client.listPaneSurfaces).toHaveBeenCalledTimes(1);
+    expect(client.listPaneSurfaces).toHaveBeenCalledWith({
+      workspace: "workspace:1",
+    });
+    },
+  );
+
   it("reuses one completed workspace map within a call and refreshes it across calls", async () => {
     let workspaceRef = "workspace:A";
     const client = {
@@ -686,7 +717,7 @@ describe("collectSurfaceTopology", () => {
     });
   });
 
-  it("keeps usable pane topology when another pane surface lookup fails", async () => {
+  it("marks topology incomplete when the workspace-wide surface lookup fails", async () => {
     const panes = [
       pane("pane:ok", 0, ["surface:ok"]),
       pane("pane:gone", 1, []),
@@ -700,30 +731,14 @@ describe("collectSurfaceTopology", () => {
         window_ref: "window:1",
         panes,
       }),
-      listPaneSurfaces: vi.fn(
-        async (opts: { workspace?: string; pane?: string }) => {
-          if (opts.pane === "pane:gone") {
-            throw new Error("pane closed");
-          }
-          return {
-            workspace_ref: "workspace:1",
-            window_ref: "window:1",
-            pane_ref: "pane:ok",
-            surfaces: [surface("surface:ok")],
-          } satisfies CmuxPaneSurfaces;
-        },
-      ),
+      listPaneSurfaces: vi.fn().mockRejectedValue(new Error("workspace closed")),
     };
 
     const snapshot = await collectSurfaceTopology(client);
 
     expect(snapshot).not.toBeNull();
     expect(snapshot?.complete).toBe(false);
-    expect(snapshot?.workspaceBySurface.get("surface:ok")).toBe("workspace:1");
-    expect(snapshot?.topologyBySurface.get("surface:ok")).toEqual({
-      column: 0,
-      column_count: 2,
-    });
+    expect(snapshot?.workspaceBySurface.has("surface:ok")).toBe(false);
     expect(
       resolveAgentSurfaceBinding(
         makeRecord({ surface_id: "surface:ok" }),

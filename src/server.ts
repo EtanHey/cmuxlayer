@@ -12783,11 +12783,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             panes.panes,
             `panes.panes for ${ref}`,
           );
-          const rawGroups = await Promise.all(
-            paneList.map((p) =>
-              client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
-            ),
-          );
+          if (paneList.length === 0) return [];
+          const workspaceSurfaces = await client.listPaneSurfaces({
+            workspace: ref,
+          });
+          const rawGroups = [
+            {
+              ...workspaceSurfaces,
+              workspace_ref: workspaceSurfaces.workspace_ref ?? ref,
+              pane_ref: workspaceSurfaces.pane_ref ?? "",
+            },
+          ];
           const groups = partitionPaneSurfacesByMembership(
             paneList,
             rawGroups,

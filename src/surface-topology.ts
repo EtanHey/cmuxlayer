@@ -626,24 +626,17 @@ export async function collectSurfaceTopology(
           });
         }
       }
-      const rawGroups: CmuxPaneSurfaces[] = [];
-      for (const pane of panes.panes) {
-        try {
-          const group = await client.listPaneSurfaces({
-            workspace: workspaceRef,
-            pane: pane.ref,
-          });
-          rawGroups.push({
-            ...group,
-            workspace_ref: group.workspace_ref ?? workspaceRef,
-            pane_ref: group.pane_ref ?? pane.ref,
-          });
-        } catch {
-          // Panes can close between listPanes and listPaneSurfaces. Keep the
-          // rest of the snapshot usable instead of dropping every agent's health input.
-          snapshot.complete = false;
-        }
-      }
+      // cmux surface.list is workspace-wide even when pane_id is supplied.
+      // Buy one coherent snapshot, then partition it using pane.list's
+      // membership instead of repeating the same polling request per pane.
+      const group = await client.listPaneSurfaces({ workspace: workspaceRef });
+      const rawGroups: CmuxPaneSurfaces[] = [
+        {
+          ...group,
+          workspace_ref: group.workspace_ref ?? workspaceRef,
+          pane_ref: group.pane_ref ?? "",
+        },
+      ];
       for (const group of rawGroups) {
         for (const surface of group.surfaces ?? []) {
           identityPairs.push({

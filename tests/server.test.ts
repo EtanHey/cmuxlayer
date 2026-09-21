@@ -2837,7 +2837,7 @@ describe("tool handler integration", () => {
     expect(data.column_count).toBe(2);
     expect(result.content[0].text).toContain("col 2/2");
     expect(mockClient.listPanes).toHaveBeenCalledTimes(1);
-    expect(mockClient.listPaneSurfaces).toHaveBeenCalledTimes(2);
+    expect(mockClient.listPaneSurfaces).toHaveBeenCalledTimes(1);
   });
 
   it("read_screen coalesces identical in-flight snapshots in one server context", async () => {
