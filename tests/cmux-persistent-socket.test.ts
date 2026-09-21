@@ -107,6 +107,31 @@ describe("CmuxPersistentSocket V1 demux", () => {
     });
   });
 
+  it("labels a socket close before connect as connect-phase transport", async () => {
+    class ClosingConnectSocket extends EventEmitter {
+      setTimeout(): this {
+        return this;
+      }
+
+      destroy(): this {
+        queueMicrotask(() => this.emit("close"));
+        return this;
+      }
+    }
+    const transport = new ClosingConnectSocket();
+    const socket = new CmuxPersistentSocket({
+      createConnection: () => transport as unknown as net.Socket,
+    });
+
+    const connection = socket.connect();
+    socket.disconnect();
+
+    await expect(connection).rejects.toMatchObject({
+      code: "connection_closed",
+      transport_phase: "connect",
+    });
+  });
+
   it("rejects at the connect deadline when the socket connects but never responds", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("connected-no-response");
@@ -701,34 +726,52 @@ describe("CmuxPersistentSocket V1 demux", () => {
     socket.disconnect();
   });
 
-  it("increments its connection generation when it reconnects to the same socket", async () => {
+  it("restores the full polling burst on a genuinely new connection", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("connection-generation");
+    let requestCount = 0;
     await startLineServer(path, (line, conn) => {
       const request = JSON.parse(line) as { id: string };
-      conn.end(
-        `${JSON.stringify({
-          id: request.id,
-          ok: true,
-          result: { pong: true },
-        })}\n`,
-      );
+      requestCount += 1;
+      const response = `${JSON.stringify({
+        id: request.id,
+        ok: true,
+        result: { pong: true },
+      })}\n`;
+      if (requestCount % 3 === 0) conn.end(response);
+      else conn.write(response);
     });
     const socket = new CmuxPersistentSocket({
       socketPath: path,
       timeoutMs: 500,
+      polling: { burst: 3, refillMs: 60_000, maxConcurrent: 3 },
     });
+    const sendBurst = () =>
+      Promise.all(
+        Array.from({ length: 3 }, () =>
+          socket.call("system.ping", {}, { polling: true }),
+        ),
+      );
 
     try {
       expect(socket.currentConnectionGeneration()).toBe(0);
-      await expect(socket.call("system.ping")).resolves.toEqual({ pong: true });
+      await expect(sendBurst()).resolves.toEqual([
+        { pong: true },
+        { pong: true },
+        { pong: true },
+      ]);
       expect(socket.currentConnectionGeneration()).toBe(1);
       while (socket.isConnected()) {
-        await new Promise((resolve) => setTimeout(resolve, 1));
+        await new Promise((resolve) => setImmediate(resolve));
       }
 
-      await expect(socket.call("system.ping")).resolves.toEqual({ pong: true });
+      await expect(sendBurst()).resolves.toEqual([
+        { pong: true },
+        { pong: true },
+        { pong: true },
+      ]);
       expect(socket.currentConnectionGeneration()).toBe(2);
+      expect(requestCount).toBe(6);
     } finally {
       socket.disconnect();
     }

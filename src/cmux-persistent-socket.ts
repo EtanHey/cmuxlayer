@@ -394,7 +394,7 @@ export class CmuxPersistentSocket {
             new CmuxSocketError(
               "Socket closed unexpectedly",
               "connection_closed",
-              { transportPhase: "response" },
+              { transportPhase: "connect" },
             ),
           );
         }
