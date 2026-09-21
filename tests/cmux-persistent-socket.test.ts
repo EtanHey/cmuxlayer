@@ -131,6 +131,132 @@ describe("CmuxPersistentSocket V1 demux", () => {
     }
   });
 
+  it("recovers when the first safe polling response is rate_limited", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("first-poll-rate-limited");
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify(
+          requestCount === 1
+            ? {
+                id: request.id,
+                ok: false,
+                error: {
+                  code: "rate_limited",
+                  message: "Polling rate limited for this connection",
+                },
+              }
+            : { id: request.id, ok: true, result: { workspaces: [] } },
+        )}\n`,
+      );
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        refillMs: 1,
+        rateLimitBackoffBaseMs: 1,
+        rateLimitBackoffMaxMs: 2,
+        maxRateLimitRetries: 2,
+        jitter: false,
+      },
+    });
+
+    try {
+      await expect(
+        socket.call("workspace.list", {}, { polling: true }),
+      ).resolves.toEqual({ workspaces: [] });
+      expect(requestCount).toBe(2);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("bounds repeated polling rate_limited retries", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("bounded-poll-rate-limited");
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify({
+          id: request.id,
+          ok: false,
+          error: {
+            code: "rate_limited",
+            message: "Polling rate limited for this connection",
+          },
+        })}\n`,
+      );
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        refillMs: 1,
+        rateLimitBackoffBaseMs: 1,
+        rateLimitBackoffMaxMs: 2,
+        maxRateLimitRetries: 2,
+        jitter: false,
+      },
+    });
+
+    try {
+      await expect(
+        socket.call("workspace.list", {}, { polling: true }),
+      ).rejects.toMatchObject({ code: "rate_limited" });
+      expect(requestCount).toBe(3);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("cancels a rate-limit backoff when disconnected", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("cancel-poll-rate-limited");
+    let releaseFirstResponse!: () => void;
+    const firstResponse = new Promise<void>((resolve) => {
+      releaseFirstResponse = resolve;
+    });
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify({
+          id: request.id,
+          ok: false,
+          error: {
+            code: "rate_limited",
+            message: "Polling rate limited for this connection",
+          },
+        })}\n`,
+      );
+      releaseFirstResponse();
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        rateLimitBackoffBaseMs: 30_000,
+        rateLimitBackoffMaxMs: 30_000,
+        maxRateLimitRetries: 2,
+        jitter: false,
+      },
+    });
+    const result = socket.call("workspace.list", {}, { polling: true });
+
+    await firstResponse;
+    socket.disconnect();
+
+    await expect(result).rejects.toMatchObject({ code: "connection_closed" });
+    expect(requestCount).toBe(1);
+  });
+
   it("backs off from two seconds to a bounded fifteen-second cap", () => {
     const socket = new CmuxPersistentSocket({
       backoff: { jitter: false },
