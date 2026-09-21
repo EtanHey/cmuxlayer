@@ -455,6 +455,44 @@ function startProtocolErrorServer(socketPath: string): Promise<net.Server> {
   });
 }
 
+function startRateLimitedMutationServer(
+  socketPath: string,
+): Promise<{ server: net.Server; seenMethods: string[] }> {
+  return new Promise((resolve) => {
+    fs.rmSync(socketPath, { force: true });
+    const seenMethods: string[] = [];
+    const connections = new Set<net.Socket>();
+    const server = net.createServer((conn) => {
+      connections.add(conn);
+      conn.on("close", () => connections.delete(conn));
+      let buffer = "";
+      conn.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          if (!line.trim()) continue;
+          const req = JSON.parse(line) as MockV2Request;
+          seenMethods.push(req.method);
+          conn.write(
+            `${JSON.stringify({
+              id: req.id,
+              ok: false,
+              error: {
+                code: "rate_limited",
+                message: "Polling rate limited for this connection",
+              },
+            })}\n`,
+          );
+        }
+      });
+    });
+    helperServerConnections.set(server, connections);
+    server.listen(socketPath, () => resolve({ server, seenMethods }));
+  });
+}
+
 // ── Shared lifecycle ───────────────────────────────────────────────────
 
 beforeAll(async () => {
@@ -846,7 +884,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
   });
 
   it("reuses one socket connection for 100 concurrent listPaneSurfaces calls", async () => {
-    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      polling: { refillMs: 1 },
+    });
 
     const startedAt = Date.now();
     await Promise.all(
@@ -857,6 +898,39 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
 
     expect(Date.now() - startedAt).toBeLessThan(2000);
     expect(connectionCount).toBe(1);
+  });
+
+  it("never replays send_text or send_key after rate_limited", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmux-mutation-rate-limit-"));
+    const path = join(root, "cmux.sock");
+    const { server, seenMethods } = await startRateLimitedMutationServer(path);
+    const client = new CmuxSocketClient({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        refillMs: 1,
+        rateLimitBackoffBaseMs: 1,
+        rateLimitBackoffMaxMs: 2,
+        maxRateLimitRetries: 2,
+        jitter: false,
+      },
+    });
+
+    try {
+      await expect(
+        client.send("surface:1", "hello", { workspace: "workspace:1" }),
+      ).rejects.toMatchObject({ code: "rate_limited" });
+      await expect(
+        client.sendKey("surface:1", "return", {
+          workspace: "workspace:1",
+        }),
+      ).rejects.toMatchObject({ code: "rate_limited" });
+      expect(seenMethods).toEqual(["surface.send_text", "surface.send_key"]);
+    } finally {
+      client.disconnect();
+      await stopSocketServer(server, path);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("listPanes returns panes", async () => {

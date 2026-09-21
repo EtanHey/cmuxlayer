@@ -1122,6 +1122,36 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("does not route a rate_limited response into reconnect or CLI retry ladders", async () => {
+    const socketPath = join(tmpdir(), `cmux-rate-limited-${process.pid}.sock`);
+    const response = new CmuxSocketError(
+      "Polling rate limited for this connection",
+      "rate_limited",
+      { transportPhase: "response" },
+    );
+    const exec = vi.fn();
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      listWorkspaces: vi.fn().mockRejectedValue(response),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(
+      socket,
+      new CmuxClient({ exec, bin: "cmux" }),
+      { socketPath, reprobeIntervalMs: 60_000 },
+    );
+
+    await expect(client.listWorkspaces()).rejects.toBe(response);
+    expect(socket.listWorkspaces).toHaveBeenCalledTimes(1);
+    expect(socket.disconnect).not.toHaveBeenCalled();
+    expect(exec).not.toHaveBeenCalled();
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "socket",
+      degraded: false,
+    });
+    client.stop();
+  });
+
   it("retries an interactive CLI call after errno 32 with injected backoff", async () => {
     vi.useFakeTimers();
     const transportFailure = Object.assign(

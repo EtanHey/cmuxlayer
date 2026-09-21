@@ -25,7 +25,10 @@ import type {
 } from "./types.js";
 import { CmuxClient } from "./cmux-client.js";
 import { normalizeKeyName } from "./key-names.js";
-import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
+import {
+  CmuxPersistentSocket,
+  type PollingOptions,
+} from "./cmux-persistent-socket.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
@@ -41,6 +44,15 @@ const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
 const RETRY_SAFE_V2_METHODS = new Set([
   "system.ping",
 ]);
+const POLLING_SAFE_V2_METHODS = new Set([
+  "system.ping",
+  "system.identify",
+  "window.list",
+  "workspace.list",
+  "pane.list",
+  "surface.list",
+  "surface.read_text",
+]);
 
 interface V1RawArg {
   raw: string;
@@ -52,6 +64,7 @@ export interface CmuxSocketClientOptions {
   socketPath?: string;
   timeoutMs?: number;
   maxInFlight?: number;
+  polling?: PollingOptions;
   /** Password for socket access mode "password" */
   password?: string;
   /** CLI client fallback for V2 methods not supported by the daemon */
@@ -70,6 +83,7 @@ export class CmuxSocketClient {
   private cliFallback?: CmuxClient;
   private transport: CmuxPersistentSocket;
   private maxInFlight?: number;
+  private polling?: PollingOptions;
   private socketPathResolver?: () => Promise<string | null>;
   private reconnecting?: Promise<void>;
   private transportSerial = 0;
@@ -82,12 +96,14 @@ export class CmuxSocketClient {
     this.authPassword = opts?.password;
     this.cliFallback = opts?.cliFallback;
     this.maxInFlight = opts?.maxInFlight;
+    this.polling = opts?.polling;
     this.socketPathResolver = opts?.socketPathResolver;
     this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
       socketPath: this.socketPath,
       timeoutMs: this.timeoutMs,
       maxInFlight: opts?.maxInFlight,
+      polling: opts?.polling,
     });
   }
 
@@ -153,7 +169,9 @@ export class CmuxSocketClient {
     return this.withConnectionRetry(
       async () => {
         await this.ensureAuthenticated();
-        return this.transport.call<T>(method, params);
+        return this.transport.call<T>(method, params, {
+          polling: POLLING_SAFE_V2_METHODS.has(method),
+        });
       },
       RETRY_SAFE_V2_METHODS.has(method),
     );
@@ -201,6 +219,7 @@ export class CmuxSocketClient {
       socketPath: this.socketPath,
       timeoutMs: this.timeoutMs,
       maxInFlight: this.maxInFlight,
+      polling: this.polling,
     });
   }
 
