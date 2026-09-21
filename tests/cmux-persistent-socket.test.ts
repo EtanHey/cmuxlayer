@@ -33,6 +33,7 @@ async function startLineServer(
   rmSync(path, { force: true });
   const server = net.createServer((conn) => {
     let buffer = "";
+    conn.on("error", () => {});
     conn.on("data", (chunk) => {
       buffer += chunk.toString("utf-8");
       let newlineIndex: number;
@@ -241,6 +242,7 @@ describe("CmuxPersistentSocket V1 demux", () => {
     const socket = new CmuxPersistentSocket({
       socketPath: path,
       timeoutMs: 500,
+      maxInFlight: 1,
       polling: {
         rateLimitBackoffBaseMs: 30_000,
         rateLimitBackoffMaxMs: 30_000,
@@ -251,9 +253,15 @@ describe("CmuxPersistentSocket V1 demux", () => {
     const result = socket.call("workspace.list", {}, { polling: true });
 
     await firstResponse;
+    await expect(
+      socket.call("workspace.list", {}, { polling: true }),
+    ).rejects.toMatchObject({ code: "too_many_requests" });
     socket.disconnect();
 
     await expect(result).rejects.toMatchObject({ code: "connection_closed" });
+    const reconnect = socket.call("workspace.list", {}, { polling: true });
+    socket.disconnect();
+    await expect(reconnect).rejects.toMatchObject({ code: "connection_closed" });
     expect(requestCount).toBe(1);
   });
 

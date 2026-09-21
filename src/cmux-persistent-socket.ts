@@ -137,6 +137,8 @@ export class CmuxPersistentSocket {
   private pollingTokens: number;
   private pollingLastRefillAt = Date.now();
   private pollingActive = 0;
+  private pollingOutstanding = 0;
+  private pollingCancellationGeneration = 0;
   private pollingQueue: PollingQueueEntry[] = [];
   private pollingTimer: ReturnType<typeof setTimeout> | null = null;
   private pollingBackoffs = new Set<PollingBackoffEntry>();
@@ -317,7 +319,13 @@ export class CmuxPersistentSocket {
       let settled = false;
 
       const socket = this.createConnection({ path: this.socketPath }, () => {
-        if (settled) {
+        if (settled || this.socket !== socket) {
+          if (!settled) {
+            settled = true;
+            reject(
+              new CmuxSocketError("Socket disconnected", "connection_closed"),
+            );
+          }
           socket.destroy();
           return;
         }
@@ -326,6 +334,11 @@ export class CmuxPersistentSocket {
         settled = true;
         this.connectPromise = null;
         this.resetBackoff();
+        if (this.pollingTimer) clearTimeout(this.pollingTimer);
+        this.pollingTimer = null;
+        this.pollingTokens = this.pollingBurst;
+        this.pollingLastRefillAt = Date.now();
+        this.pumpPollingQueue();
         resolve();
       });
       this.socket = socket;
@@ -374,6 +387,17 @@ export class CmuxPersistentSocket {
       });
 
       socket.on("close", () => {
+        if (!settled) {
+          settled = true;
+          this.connectPromise = null;
+          reject(
+            new CmuxSocketError(
+              "Socket closed unexpectedly",
+              "connection_closed",
+              { transportPhase: "response" },
+            ),
+          );
+        }
         if (this.socket !== socket) return;
         this.connected = false;
         this.socket = null;
@@ -612,9 +636,16 @@ export class CmuxPersistentSocket {
   private async callOnce<T = Record<string, unknown>>(
     method: string,
     params: Record<string, unknown> = {},
+    pollingGeneration = this.pollingCancellationGeneration,
   ): Promise<T> {
+    if (pollingGeneration !== this.pollingCancellationGeneration) {
+      throw new CmuxSocketError("Socket disconnected", "connection_closed");
+    }
     this.assertInFlightCapacity();
     await this.ensureConnected();
+    if (pollingGeneration !== this.pollingCancellationGeneration) {
+      throw new CmuxSocketError("Socket disconnected", "connection_closed");
+    }
 
     const id = crypto.randomUUID();
     const request: V2Request = { id, method, params };
@@ -664,22 +695,34 @@ export class CmuxPersistentSocket {
       return this.callOnce<T>(method, params);
     }
 
-    for (let attempt = 0; ; attempt += 1) {
-      const release = await this.acquirePollingSlot();
-      try {
-        return await this.callOnce<T>(method, params);
-      } catch (error) {
-        if (
-          !(error instanceof CmuxSocketError) ||
-          error.code !== "rate_limited" ||
-          attempt >= this.maxRateLimitRetries
-        ) {
-          throw error;
+    if (this.pollingOutstanding >= this.maxInFlight) {
+      throw new CmuxSocketError(
+        `Too many queued cmux polling requests (${this.pollingOutstanding}/${this.maxInFlight})`,
+        "too_many_requests",
+      );
+    }
+    this.pollingOutstanding += 1;
+    const pollingGeneration = this.pollingCancellationGeneration;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        const release = await this.acquirePollingSlot();
+        try {
+          return await this.callOnce<T>(method, params, pollingGeneration);
+        } catch (error) {
+          if (
+            !(error instanceof CmuxSocketError) ||
+            error.code !== "rate_limited" ||
+            attempt >= this.maxRateLimitRetries
+          ) {
+            throw error;
+          }
+        } finally {
+          release();
         }
-      } finally {
-        release();
+        await this.waitForPollingBackoff(this.rateLimitBackoffMs(attempt));
       }
-      await this.waitForPollingBackoff(this.rateLimitBackoffMs(attempt));
+    } finally {
+      this.pollingOutstanding = Math.max(0, this.pollingOutstanding - 1);
     }
   }
 
@@ -718,6 +761,7 @@ export class CmuxPersistentSocket {
       "Socket disconnected",
       "connection_closed",
     );
+    this.pollingCancellationGeneration += 1;
     this.cancelPollingWaiters(disconnected);
     if (this.socket) {
       this.socket.destroy();
