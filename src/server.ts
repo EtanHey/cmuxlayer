@@ -6956,9 +6956,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           exact: true,
         })
       ) {
-        await opts.beforeMutation?.();
+        const assertOwnedPointerBeforeReturn = async () => {
+          await opts.beforeMutation?.();
+          const current = await readParsedSurface(opts.surface, opts.workspace, {
+            throwOnSurfaceGone: true,
+          });
+          if (!current || current.parsed.control_state !== "ready") {
+            throw new DeliverySafetyGateError(
+              "draft_ownership_unverified", current?.parsed ?? pending.parsed,
+            );
+          }
+          if (
+            !screenShowsCompletePendingInput(current.text, pointer) ||
+            composerHoldsForeignDraft(current.text, pointer, {
+              cli: "claude",
+              exact: true,
+            })
+          ) {
+            throw new DeliverySafetyGateError(
+              "blocked_by_foreign_draft",
+              current.parsed,
+              extractComposerInputRegion(current.text, undefined, "claude")?.trim() || undefined,
+            );
+          }
+        };
         const method = await sendKeyWithRetry(
-          opts.surface, "return", opts.workspace, opts.beforeMutation,
+          opts.surface, "return", opts.workspace, assertOwnedPointerBeforeReturn,
         );
         if (method) rpcMethods.add(method);
         const verification = await verifySubmitAfterEnter({
