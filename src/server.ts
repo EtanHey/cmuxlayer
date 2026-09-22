@@ -17359,7 +17359,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const surfaceUuid = uuidKey(surface.surface_uuid);
               return agentUuid && surfaceUuid
                 ? agentUuid === surfaceUuid
-                : surface.surface_id === agent.surface_id;
+                : !agentUuid &&
+                    !surfaceUuid &&
+                    surface.surface_id === agent.surface_id;
             }) ?? true;
           const visibleRecords =
             args.detail === "full" ||
