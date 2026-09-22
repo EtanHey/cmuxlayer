@@ -3487,6 +3487,20 @@ describe("AgentRegistry", () => {
   });
 
   describe("observer-scoped cleanup", () => {
+    it("prunes orphan index entries during reconstitution without dropping a live state route", async () => {
+      const live = makeRecord({ agent_id: "indexed-live", surface_id: "surface:indexed-live", cli_session_id: "live-session" });
+      const orphan = makeRecord({ agent_id: "indexed-orphan", surface_id: "surface:indexed-orphan", cli_session_id: "orphan-session" });
+      stateMgr.writeState(live);
+      stateMgr.writeState(orphan);
+      rmSync(join(TEST_DIR, orphan.agent_id), { recursive: true, force: true });
+
+      const registry = new AgentRegistry(stateMgr, async () => [makeSurface(live.surface_id)]);
+      await registry.reconstitute();
+
+      expect(stateMgr.getSurfaceSessionIndex().lookup({ surface_id: live.surface_id })).toMatchObject({ agent_id: live.agent_id });
+      expect(stateMgr.getSurfaceSessionIndex().lookup({ surface_id: orphan.surface_id })).toBeNull();
+    });
+
     it("keeps absence guarded while explicit terminal eviction is global", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -3621,7 +3635,7 @@ describe("AgentRegistry", () => {
           workspace_id: null,
           surface_id: "surface:closed-51",
         }),
-      ).toMatchObject({ agent_id: "closed-tombstone-51" });
+      ).toBeNull();
     });
   });
 

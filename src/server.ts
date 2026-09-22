@@ -154,6 +154,7 @@ import type {
 import {
   bootPromptRegistryFields,
   isDeliberateCloseTombstone,
+  isFailedSpawnTombstone,
   shouldRetainForExplicitResume,
   summarizeTaskSummary,
 } from "./agent-types.js";
@@ -17162,7 +17163,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides retained close tombstones; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
+      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides close and failed-spawn tombstones; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
       {
         state: z
           .enum([
@@ -17340,7 +17341,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             requestedState !== undefined ||
             (args.agent_ids?.length ?? 0) > 0
               ? records
-              : records.filter((agent) => !isDeliberateCloseTombstone(agent));
+              : records.filter(
+                  (agent) =>
+                    !isDeliberateCloseTombstone(agent) &&
+                    !isFailedSpawnTombstone(agent),
+                );
           const uuidKey = (value: string | null | undefined) =>
             value?.trim().toLowerCase() || null;
           const rows = await Promise.all(

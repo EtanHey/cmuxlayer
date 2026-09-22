@@ -699,6 +699,7 @@ export class AgentRegistry {
    * Call once on startup.
    */
   async reconstitute(opts: SurfaceAbsenceOptions = {}): Promise<Set<string>> {
+    this.stateMgr.pruneOrphanSurfaceSessionEntries();
     this.agents.clear();
     this.aliases.clear();
     this.clearAbsenceObservations();

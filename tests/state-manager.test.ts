@@ -227,6 +227,19 @@ describe("StateManager", () => {
   });
 
   describe("removeState", () => {
+    it("removes the surface route with the deleted state", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const record = makeRecord({ cli_session_id: "session-removed" });
+      mgr.writeState(record);
+      expect(
+        mgr.getSurfaceSessionIndex().lookup({ surface_id: record.surface_id }),
+      ).toMatchObject({ agent_id: record.agent_id });
+
+      mgr.removeState(record.agent_id);
+
+      expect(mgr.getSurfaceSessionIndex().lookup({ surface_id: record.surface_id })).toBeNull();
+    });
+
     it("deletes the agent directory", () => {
       const mgr = new StateManager(TEST_DIR);
       const record = makeRecord();
@@ -244,6 +257,38 @@ describe("StateManager", () => {
   });
 
   describe("surface session route classification", () => {
+    it("removes a closed agent's surface route while retaining its state for resume", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const record = makeRecord({
+        agent_id: "closed-agent",
+        state: "ready",
+        cli_session_id: "session-closed",
+      });
+      mgr.writeState(record);
+      expect(mgr.getSurfaceSessionIndex().lookup({ surface_id: record.surface_id })).not.toBeNull();
+
+      mgr.updateRecord(record.agent_id, { user_killed: true });
+      mgr.transition(record.agent_id, "done");
+
+      expect(mgr.readState(record.agent_id)).toMatchObject({ state: "done", cli_session_id: "session-closed" });
+      expect(mgr.getSurfaceSessionIndex().lookup({ surface_id: record.surface_id })).toBeNull();
+    });
+
+    it("prunes only index entries without an agent state directory at startup", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const live = makeRecord({ agent_id: "live-agent", surface_id: "surface:live", cli_session_id: "session-live" });
+      const orphan = makeRecord({ agent_id: "orphan-agent", surface_id: "surface:orphan", cli_session_id: "session-orphan" });
+      mgr.writeState(live);
+      mgr.writeState(orphan);
+      rmSync(join(TEST_DIR, orphan.agent_id), { recursive: true, force: true });
+
+      new StateManager(TEST_DIR).pruneOrphanSurfaceSessionEntries();
+
+      expect(mgr.getSurfaceSessionIndex().lookup({ surface_id: live.surface_id })).toMatchObject({ agent_id: live.agent_id });
+      expect(mgr.getSurfaceSessionIndex().lookup({ surface_id: orphan.surface_id })).toBeNull();
+      expect(existsSync(join(TEST_DIR, "surface-session-index.json.tmp"))).toBe(false);
+    });
+
     it("classifies an indexed old surface as stale after respawn moves the agent", () => {
       const mgr = new StateManager(TEST_DIR);
       const record = makeRecord({

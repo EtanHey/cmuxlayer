@@ -124,7 +124,7 @@ describe("surface session crash-resume index", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("persists surface session lookup independently of agent state", () => {
+  it("removes surface session lookup when agent state is deleted", () => {
     const stateMgr = new StateManager(TEST_DIR);
     const index = stateMgr.getSurfaceSessionIndex();
     stateMgr.writeState(makeRecord({ agent_id: "agent-a" }));
@@ -135,11 +135,8 @@ describe("surface session crash-resume index", () => {
       cli_session_id: "session-a",
       agent_id: "agent-a",
     });
-    stateMgr.removeState("agent-a");
-
-    const reloaded = new StateManager(TEST_DIR).getSurfaceSessionIndex();
     expect(
-      reloaded.lookup({
+      index.lookup({
         workspace_id: "workspace:old",
         surface_id: "surface:42",
       }),
@@ -149,6 +146,15 @@ describe("surface session crash-resume index", () => {
       surface_id: "surface:42",
       workspace_id: "workspace:old",
     });
+    stateMgr.removeState("agent-a");
+
+    const reloaded = new StateManager(TEST_DIR).getSurfaceSessionIndex();
+    expect(
+      reloaded.lookup({
+        workspace_id: "workspace:old",
+        surface_id: "surface:42",
+      }),
+    ).toBeNull();
     expect(
       reloaded.lookup({
         workspace_id: "workspace:recycled",
@@ -200,7 +206,7 @@ describe("surface session crash-resume index", () => {
           workspace_id: "workspace:old",
           surface_id: "surface:42",
         }),
-      ).toMatchObject({ cli_session_id: sessionId });
+      ).toBeNull();
     } finally {
       engine.dispose();
     }

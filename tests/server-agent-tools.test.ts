@@ -6184,6 +6184,14 @@ describe("agent lifecycle tool handlers", () => {
       }>
     ).find((agent) => agent.agent_id === parsed.agent_id);
     expect(listedAgent?.state).toBe("error");
+    const defaultListed = parseToolResult(
+      await list.handler({}, {} as any),
+    );
+    expect(
+      (defaultListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(false);
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a healthy booting pane with echoed launcher output", async () => {
