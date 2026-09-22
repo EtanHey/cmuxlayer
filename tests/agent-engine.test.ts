@@ -22,6 +22,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseScreen } from "../src/screen-parser.js";
+import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import {
   AgentEngine,
   RetryableDeliveryError,
@@ -7087,6 +7088,35 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    it("does not match a done record when the live screen confirms a different state", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "done-but-ready",
+            state: "done",
+            surface_id: "surface:done-but-ready",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:done-but-ready")];
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen("Claude Code\n❯ ")),
+        );
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("done-but-ready", "done", 500);
+        await vi.advanceTimersByTimeAsync(1000);
+        const result = await pending;
+        expect(result.matched).toBe(false);
+        expect(result.state).toBe("ready");
+        const ready = await engine.waitFor("done-but-ready", "ready", 500);
+        expect(ready.matched).toBe(true);
+        expect(ready.source).toBe("screen");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
     it("returns immediately if agent is already in target state", async () => {
       stateMgr.writeState(
         makeRecord({ agent_id: "agent-ready", state: "ready" }),

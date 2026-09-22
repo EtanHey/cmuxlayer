@@ -2493,6 +2493,35 @@ describe("tool handler integration", () => {
     expect(rawParsed.content).toContain("hello");
   });
 
+  it("read_screen parses a response outside the requested eight-line preview", async () => {
+    mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        surface: "surface:1",
+        text:
+          "Claude Code\n---RESPONSE_START---\nACK from agent\n---RESPONSE_END---\n" +
+          Array.from({ length: 15 }, (_, i) => `footer ${i}`).join("\n"),
+        lines: 8,
+      }),
+      stderr: "",
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const result = await (server as any)._registeredTools.read_screen.handler(
+      { surface: "surface:1", lines: 8 },
+      {},
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["--lines", "80"]),
+    );
+    expect(result.structuredContent.parsed.response).toBe("ACK from agent");
+    const raw = await (server as any)._registeredTools.read_screen.handler(
+      { surface: "surface:1", lines: 8, raw: true },
+      {},
+    );
+    expect(raw.structuredContent.content.split("\n")).toHaveLength(8);
+    expect(raw.structuredContent.parsed.response).toBe("ACK from agent");
+  });
+
   it("read_screen parsed_only includes the tab title and recovers model context from agent state", async () => {
     const stateDir = processScopedTmpDir(
       "cmuxlayer-read-screen-parser-fallback",

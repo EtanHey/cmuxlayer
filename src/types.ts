@@ -153,6 +153,7 @@ export type ParsedScreenStatus =
   | "frozen"
   | "thinking"
   | "working"
+  | "draft_pending"
   | "idle"
   | "done";
 export type ParsedCliUpdateState = "updating" | "update_complete";

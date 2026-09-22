@@ -9358,6 +9358,14 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("wait_for accepts condition as an alias for target_state", async () => {
+    const { server } = await createBroadcastServer([]);
+    const schema = registeredTestTool(server, "wait_for").inputSchema;
+    expect(
+      schema.parse({ agent_id: "agent-1", condition: "idle" }),
+    ).toMatchObject({ condition: "idle" });
+  });
+
   it("send_to surface mode persists socket RPC provenance for wait_for", async () => {
     const record = makeServerAgentRecord({
       agent_id: "worker-surface-rpc-receipt",
