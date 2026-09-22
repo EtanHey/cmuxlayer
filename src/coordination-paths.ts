@@ -259,13 +259,16 @@ export function renderBootContractFile(input: BootContractFileInput): string {
     // operand, so `-P` and `1` folded INTO the pattern and SIGTERM went to every
     // process whose argv held a `1`: 20 launchd jobs and every
     // `--model claude-opus-5[1m]` Claude seat. The contract now hands over a PID.
-    // Keeping the pidfile write on the SAME line as the tail keeps
+    // macOS has no setsid binary. Fork before setsid (interactive shells can
+    // make background jobs group leaders). The parent waits for the child's
+    // atomic PID write; stdout stays attached so inbox messages remain visible.
+    // Keeping the monitor command verbatim also keeps
     // `monitor_command` a verbatim substring, so consumers matching on it (receipts,
     // nudges, tool descriptions) still match -- the F5 constraint above still holds.
     "Run this in the BACKGROUND -- it blocks, and holding a turn open on it is a",
     "self-deadlock (ledger #24). Detach it, record its pid, then return:",
     "",
-    `    ${input.mailbox.monitor_command} & echo $! > ${pidFile}`,
+    `    perl -MPOSIX=setsid -e 'my $pidfile=shift; pipe(my $read,my $write) or die $!; my $child=fork(); defined($child) or die $!; if ($child) { close $write; (<$read> // "") eq "ready\\n" or die "detach failed"; exit } close $read; setsid() >= 0 or die $!; my $tmp="$pidfile.$$"; open my $fh, ">", $tmp or die $!; print $fh "$$\\n"; close $fh; rename $tmp, $pidfile or die $!; print $write "ready\\n"; close $write; exec @ARGV or die $!' ${pidFile} ${input.mailbox.monitor_command} < /dev/null & wait $!`,
     "",
     "To stop it, kill that PID -- never a pattern:",
     "",
