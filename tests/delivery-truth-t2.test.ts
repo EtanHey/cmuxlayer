@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
 import { CLI_READY_PATTERNS } from "../src/pattern-registry.js";
+import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 let testDir = "";
@@ -406,6 +407,50 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       expect(parseToolResult(result)).toMatchObject({ ok: false, caller_agent_id: null });
     } finally { context.dispose(); }
   });
+
+  it("submits its exact stranded boot contract before a Claude followup", async () => {
+    const { createServer, createServerContext, __submitEvidenceTestHooks } = await loadServerModule();
+    let composer = "";
+    const submitted: string[] = [];
+    let active = false;
+    const screen = () => active
+      ? ["Claude Code", ...submitted.map((text) => `⏺ ${text}`), "Working", `❯ ${composer}`].join("\n")
+      : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("send-key") && args.includes("return")) {
+        submitted.push(composer);
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (active && args.includes("send")) {
+        composer += String(args.at(-1));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
+      engine.getRegistry().set(agentId, record);
+      const pointer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      composer = pointer;
+      active = true;
+      expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
+      expect(__submitEvidenceTestHooks.screenShowsCompletePendingInput(screen(), pointer)).toBe(true);
+      expect(__submitEvidenceTestHooks.composerHoldsForeignDraft(screen(), pointer, { cli: "claude", exact: true })).toBe(false);
+      const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "Reply exactly SOAK2_1 then stop.", press_enter: true }, {}));
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(submitted).toEqual([pointer, "Reply exactly SOAK2_1 then stop."]);
+      composer = `${pointer} human edit`;
+      const changed = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "next", press_enter: true }, {}));
+      expect(changed.error_code).toBe("blocked_by_foreign_draft");
+      expect(submitted).toHaveLength(2);
+    } finally { context.dispose(); }
+  }, 15_000);
 
   it("send_to refuses a composer holding human-typed draft text, before typing anything", async () => {
     const { createServer, createServerContext } = await loadServerModule();
@@ -1527,6 +1572,16 @@ describe("boot-submit readiness and attributable evidence", () => {
     ].join("\n");
 
     expect(__submitEvidenceTestHooks.screenShowsCompletePendingInput(screen, submitted)).toBe(true);
+  });
+
+  it("keeps a single-line Claude brief and engine contract pointer in one submit", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const brief = "Reply exactly SOAK_OK_1 then stop.";
+    const pointer = "cmuxlayer contract for cmuxlayerClaude-160e1e30: Read and follow /Users/etanheyman/.cmux/agents/cmuxlayerClaude-160e1e30/contract.md";
+    const delivered = __submitEvidenceTestHooks.composeBootDeliveryText(brief, pointer, "claude");
+    expect(delivered).toContain(brief);
+    expect(delivered).toContain(pointer);
+    expect(delivered).not.toMatch(/[\r\n]/);
   });
 
   it("requires multiple boot observations for a modern Codex ready composer without changing the global registry", async () => {

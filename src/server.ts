@@ -70,6 +70,7 @@ import {
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
   bootContractPointer,
+  coordinationContractPath,
   issueCoordinationContract,
   coordinationFooterBytes,
   writeBootContractFile,
@@ -1642,6 +1643,7 @@ class DeliverySafetyGateError extends Error {
       | "blocked_by_interactive_prompt"
       | "blocked_by_permission_prompt"
       | "blocked_by_foreign_draft"
+      | "owned_boot_contract_pending"
       | "nothing_owned_to_submit"
       | "draft_ownership_unverified",
     readonly screen: ParsedScreenResult,
@@ -1656,6 +1658,8 @@ class DeliverySafetyGateError extends Error {
         ? "delivery blocked by active permission prompt"
         : error_code === "blocked_by_foreign_draft"
           ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
+        : error_code === "owned_boot_contract_pending"
+          ? "The engine-issued boot contract is still pending in this composer. Its Return could not be verified, so no followup text was typed."
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
@@ -3691,12 +3695,32 @@ function parseSubmitEvidenceMetrics(
   };
 }
 
+function composeBootDeliveryText(
+  callerDeliveryText: string,
+  injectedPrompt?: string,
+  cli?: CliType,
+): string {
+  if (!hasInlinePrompt(injectedPrompt)) return callerDeliveryText;
+  // Claude can treat a paragraph break in a pasted boot payload as a submit
+  // boundary. Keep two single-line pointers in one composer message so the
+  // brief cannot run while the engine-issued contract remains unsent.
+  if (
+    cli === "claude" &&
+    !/[\r\n]/.test(callerDeliveryText) &&
+    !/[\r\n]/.test(injectedPrompt)
+  ) {
+    return `${callerDeliveryText} ; ${injectedPrompt}`;
+  }
+  return `${callerDeliveryText}\n\n${injectedPrompt}`;
+}
+
 export const __submitEvidenceTestHooks = {
   extractComposerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
   composerHoldsForeignDraft,
   requiredBootReadyObservations,
+  composeBootDeliveryText,
 };
 
 function hasRawSubmitEvidenceIncrease(
@@ -6901,7 +6925,65 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       opts.source_event === "report_to_parent" ||
       opts.source_event === "interact";
     const draftGuardText = opts.chunks.join("");
-    const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
+    const pendingBootAgent = resolveLatestSurfaceAgentRecord(
+      stateMgr, opts.surface, opts.stableSurfaceIdentity,
+    );
+    const targetCli = pendingBootAgent?.cli;
+    if (draftGuardedEvent && pendingBootAgent?.cli === "claude") {
+      // A previous split boot can leave only our own contract pointer in the
+      // composer after the brief was submitted. Match the exact derived line
+      // for this bound agent before sending a guarded recovery Return. Any
+      // changed draft stays under the ordinary foreign-draft refusal below.
+      const pointer = bootContractPointer(
+        pendingBootAgent.agent_id,
+        coordinationContractPath(pendingBootAgent.agent_id, inboxOpts),
+      );
+      const pending = await readParsedSurface(opts.surface, opts.workspace, {
+        throwOnSurfaceGone: true,
+      });
+      if (
+        pending &&
+        pending.parsed.control_state === "ready" &&
+        screenShowsCompletePendingInput(pending.text, pointer) &&
+        !composerHoldsForeignDraft(pending.text, pointer, {
+          cli: "claude",
+          exact: true,
+        })
+      ) {
+        await opts.beforeMutation?.();
+        const method = await sendKeyWithRetry(
+          opts.surface, "return", opts.workspace, opts.beforeMutation,
+        );
+        if (method) rpcMethods.add(method);
+        const verification = await verifySubmitAfterEnter({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          text: pointer,
+          bytes: Buffer.byteLength(pointer, "utf8"),
+          source_event: "boot_prompt",
+          verify_submit: true,
+          require_attributable_submit_evidence: true,
+          require_working_status: true,
+          allow_recovery_enter_retry: false,
+          timeout_ms: SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+          cursor_response_baseline: null,
+          pre_type_screen: pending.text,
+          pre_return_screen: pending.text,
+          pre_return_metrics: parseSubmitEvidenceMetrics(pending.text, pending.parsed),
+          beforeMutation: opts.beforeMutation,
+          rpcMethods,
+        });
+        if (verification.submit_verified !== true) {
+          throw new DeliverySafetyGateError("owned_boot_contract_pending", pending.parsed, pointer);
+        }
+        const updated = stateMgr.updateRecord(pendingBootAgent.agent_id, {
+          boot_prompt_pending: false,
+          prompt_delivered: true,
+          submit_verified: true,
+        });
+        context.lifecycleSweepEngine?.getRegistry().set(updated.agent_id, updated);
+      }
+    }
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
       surface: opts.surface,
       workspace: opts.workspace,
@@ -8101,9 +8183,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const callerDeliveryText = useFilePointer
       ? `Read and follow ${bootPromptPath}`
       : rawPrompt;
-    const deliveryText = [callerDeliveryText, opts.injected_prompt]
-      .filter((part): part is string => hasInlinePrompt(part))
-      .join("\n\n");
+    const deliveryText = composeBootDeliveryText(
+      callerDeliveryText,
+      opts.injected_prompt,
+      opts.cli,
+    );
     const sanitizedText = sanitizeTerminalInput(deliveryText);
     const chunks =
       sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
