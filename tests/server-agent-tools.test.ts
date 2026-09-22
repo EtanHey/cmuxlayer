@@ -132,6 +132,7 @@ function makeLifecycleExec(opts?: {
   shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
+  codexReadyText?: string;
 }): ExecFn {
   let readyText = "What can I help you with?\n>";
   let surfaceLive = true;
@@ -205,7 +206,7 @@ function makeLifecycleExec(opts?: {
       const text = String(args[args.length - 1] ?? "");
       if (text.includes("Codex")) {
         activeCli = "codex";
-        readyText = "codex> ";
+        readyText = opts?.codexReadyText ?? "codex> ";
       }
       if (text.includes("Claude")) {
         activeCli = "claude";
@@ -761,6 +762,80 @@ describe("lean spawn tool responses", () => {
     },
     10_000,
   );
+
+  it("delivers a worktree spawn through CLI fallback after stale Codex update chrome", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(gitsDir, "jobRadarCoach");
+    const worktreePath = join(repoRoot, ".worktrees", "jrc-fallback");
+    mkdirSync(repoRoot, { recursive: true });
+    const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("worktree") && args.includes("add")) {
+        mkdirSync(worktreePath, { recursive: true });
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const readyText = [
+      ">_ OpenAI Codex",
+      "✨ Update available! 0.142.5 -> 0.143.0",
+      "See full release notes: https://github.com/openai/codex/releases/latest",
+      "› 1. Update now",
+      "  2. Skip until next version",
+      "Press enter to continue",
+      ">_ OpenAI Codex",
+      "› Ask Codex to do anything",
+      "gpt-5.6-sol high · 100% left · ~/Gits/jobRadarCoach",
+    ].join("\n");
+    const lifecycleExec = makeLifecycleExec({ codexReadyText: readyText });
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("debug-terminals")) {
+        return { stdout: '{"terminals":[{"surface_ref":"surface:new","runtime_surface_ready":true,"ghostty_surface_ptr":"0x1234"}]}', stderr: "" };
+      }
+      if (args.includes("new-split") || args.includes("new-surface")) {
+        recordCliFallback("new_surface");
+      }
+      return lifecycleExec(cmd, args);
+    });
+    const client = new CmuxSelfHealingClient({
+      cli: new CmuxClient({ exec }),
+      socketPath: "/tmp/cmuxlayer-jrc-fallback.sock",
+      reprobeIntervalMs: 60_000,
+    });
+    try {
+      const server = createTrackedServer({
+        client,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const prompt = "Verify JRC CLI fallback delivery";
+      const spawned = parseToolResult(
+        await registeredTestTool(server, "spawn_agent").handler({
+          repo: "jobRadarCoach", cli: "codex", role: "worker", prompt,
+          worktree: { name: "jrc-fallback", branch: "wt/jrc-fallback", create: true },
+          boot_prompt_timeout_ms: 2_000, verbose: true,
+        }, {}),
+      );
+      const screen = parseToolResult(
+        await registeredTestTool(server, "read_screen").handler(
+          { surface_id: spawned.surface_id, raw: true }, {},
+        ),
+      );
+
+      expect(spawned, JSON.stringify(spawned)).toMatchObject({
+        ok: true, transport: "cli", socket_path_state: "fallback",
+        transport_fallbacks: expect.arrayContaining(["new_surface"]),
+        boot_prompt_delivered: true, boot_prompt_submit_verified: true,
+        boot_prompt_receipt: { typed: true, submit_verified: true },
+      });
+      expect(existsSync(worktreePath)).toBe(true);
+      expect(screen.parsed.status).toBe("working");
+      expect(screen.content).not.toContain(`› ${prompt}`);
+    } finally {
+      client.stop();
+    }
+  }, 10_000);
 
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {
     const exec = makeLifecycleExec();
