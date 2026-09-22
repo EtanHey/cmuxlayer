@@ -6124,6 +6124,7 @@ describe("agent lifecycle tool handlers", () => {
     let composer = "";
     let ctrlUCount = 0;
     let surfaceGone = false;
+    let recycledUuid = false;
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       const text = String(args.at(-1) ?? "");
       if (surfaceGone && args.includes("list-panes")) {
@@ -6160,6 +6161,24 @@ describe("agent lifecycle tool handlers", () => {
           stderr: "",
         };
       }
+      if (recycledUuid && args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [{
+              id: "new-occupant-uuid",
+              ref: "surface:new",
+              title: "unrelated occupant",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("send") && text === command) {
         composer = `ng ${command}`;
         return { stdout: "{}", stderr: "" };
@@ -6173,7 +6192,7 @@ describe("agent lifecycle tool handlers", () => {
         return {
           stdout: JSON.stringify({
             surface: surfaceGone ? "surface:witness" : "surface:new",
-            text: surfaceGone ? "$ " : `$ ${composer}`,
+            text: surfaceGone || recycledUuid ? "$ " : `$ ${composer}`,
             lines: 20,
             scrollback_used: false,
           }),
@@ -6227,6 +6246,13 @@ describe("agent lifecycle tool handlers", () => {
         (agent) => agent.agent_id === parsed.agent_id,
       ),
     ).toBe(true);
+    recycledUuid = true;
+    const recycledListed = parseToolResult(await list.handler({}, {} as any));
+    expect(
+      (recycledListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(false);
     surfaceGone = true;
     const absentListed = parseToolResult(await list.handler({}, {} as any));
     expect(
