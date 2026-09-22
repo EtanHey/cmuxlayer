@@ -6120,11 +6120,46 @@ describe("agent lifecycle tool handlers", () => {
 
   it("spawn_agent errors when launcher-line corruption recovery is exhausted", async () => {
     const command = "voicelayerCursor -s";
-    const baseExec = makeLifecycleExec();
+    const baseExec = makeLifecycleExec({ closeKeepsSurface: true });
     let composer = "";
     let ctrlUCount = 0;
+    let surfaceGone = false;
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       const text = String(args.at(-1) ?? "");
+      if (surfaceGone && args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [{
+              ref: "pane:witness",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:witness"],
+              selected_surface_ref: "surface:witness",
+            }],
+          }),
+          stderr: "",
+        };
+      }
+      if (surfaceGone && args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:witness",
+            surfaces: [{
+              ref: "surface:witness",
+              title: "witness",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("send") && text === command) {
         composer = `ng ${command}`;
         return { stdout: "{}", stderr: "" };
@@ -6137,8 +6172,8 @@ describe("agent lifecycle tool handlers", () => {
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
-            surface: "surface:new",
-            text: `$ ${composer}`,
+            surface: surfaceGone ? "surface:witness" : "surface:new",
+            text: surfaceGone ? "$ " : `$ ${composer}`,
             lines: 20,
             scrollback_used: false,
           }),
@@ -6184,6 +6219,21 @@ describe("agent lifecycle tool handlers", () => {
       }>
     ).find((agent) => agent.agent_id === parsed.agent_id);
     expect(listedAgent?.state).toBe("error");
+    const defaultListed = parseToolResult(
+      await list.handler({}, {} as any),
+    );
+    expect(
+      (defaultListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(true);
+    surfaceGone = true;
+    const absentListed = parseToolResult(await list.handler({}, {} as any));
+    expect(
+      (absentListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(false);
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a healthy booting pane with echoed launcher output", async () => {

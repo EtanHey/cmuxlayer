@@ -249,6 +249,16 @@ export function isDeliberateCloseTombstone(
   );
 }
 
+/** A spawn that never reached a usable agent remains inspectable by ID. */
+export function isFailedSpawnTombstone(
+  agent: Pick<AgentRecord, "state" | "error">,
+): boolean {
+  return agent.state === "error" && (
+    agent.error?.startsWith("Launch failed:") === true ||
+    agent.error?.startsWith("Initial agent state persistence failed:") === true
+  );
+}
+
 /**
  * A deliberate close or recoverable crash preserves the captured harness
  * session as a resumable tombstone. The registry caps these tombstones so

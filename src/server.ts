@@ -154,6 +154,7 @@ import type {
 import {
   bootPromptRegistryFields,
   isDeliberateCloseTombstone,
+  isFailedSpawnTombstone,
   shouldRetainForExplicitResume,
   summarizeTaskSummary,
 } from "./agent-types.js";
@@ -17162,7 +17163,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides retained close tombstones; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
+      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides close tombstones and failed spawns whose surfaces are absent; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
       {
         state: z
           .enum([
@@ -17335,31 +17336,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
         ) => {
           const registryObservedAt = Date.now();
+          const uuidKey = (value: string | null | undefined) =>
+            value?.trim().toLowerCase() || null;
+          const observedSurfaceFor = (agent: AgentRecord) =>
+            liveDiscovery?.rows.find((surface) => {
+              const agentUuid = uuidKey(agent.surface_uuid);
+              const surfaceUuid = uuidKey(surface.surface_uuid);
+              return agentUuid && surfaceUuid
+                ? agentUuid === surfaceUuid
+                : Boolean(
+                    !agentUuid &&
+                    !surfaceUuid &&
+                    agent.surface_observer_id &&
+                    agent.surface_observer_id === registry.getObserverId() &&
+                    surface.surface_id === agent.surface_id,
+                  );
+            });
+          const failedSpawnSurfaceStillListed = (agent: AgentRecord) =>
+            liveDiscovery?.rows.some((surface) => {
+              const agentUuid = uuidKey(agent.surface_uuid);
+              const surfaceUuid = uuidKey(surface.surface_uuid);
+              return agentUuid && surfaceUuid
+                ? agentUuid === surfaceUuid
+                : surface.surface_id === agent.surface_id;
+            }) ?? true;
           const visibleRecords =
             args.detail === "full" ||
             requestedState !== undefined ||
             (args.agent_ids?.length ?? 0) > 0
               ? records
-              : records.filter((agent) => !isDeliberateCloseTombstone(agent));
-          const uuidKey = (value: string | null | undefined) =>
-            value?.trim().toLowerCase() || null;
+              : records.filter(
+                  (agent) =>
+                    !isDeliberateCloseTombstone(agent) &&
+                    (!isFailedSpawnTombstone(agent) ||
+                      failedSpawnSurfaceStillListed(agent)),
+                );
           const rows = await Promise.all(
             visibleRecords.map(async (agent) => {
               try {
-                const agentUuid = uuidKey(agent.surface_uuid);
-                const observedSurface = liveDiscovery?.rows.find((surface) => {
-                  const surfaceUuid = uuidKey(surface.surface_uuid);
-                  return agentUuid && surfaceUuid
-                    ? agentUuid === surfaceUuid
-                    : Boolean(
-                        !agentUuid &&
-                        !surfaceUuid &&
-                        agent.surface_observer_id &&
-                        agent.surface_observer_id ===
-                          registry.getObserverId() &&
-                        surface.surface_id === agent.surface_id,
-                      );
-                });
+                const observedSurface = observedSurfaceFor(agent);
                 const trustedScreenObservation =
                   observedSurface && !observedSurface.read_error
                     ? observedSurface
