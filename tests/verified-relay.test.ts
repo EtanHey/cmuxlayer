@@ -212,9 +212,10 @@ describe("verified relay", () => {
       terminal: false,
       delivery_state: "pending_verify",
       submit_verified: null,
+      retry_count: 1,
     });
     expect(client.sendKeyCalls.filter((key) => key === "return").length).toBe(
-      1,
+      2,
     );
   }, 10_000);
 });

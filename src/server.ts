@@ -688,6 +688,7 @@ const SEND_KEY_SUBMIT_VERIFY_TIMEOUT_MS = 1500;
 // recovery so fleet fan-out does not inherit the general 5s timeout.
 const BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS = 1_000;
 const CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS = 250;
+const CLAUDE_PENDING_COMPOSER_RETRY_OBSERVE_MS = 4_000;
 const CURSOR_FOLLOWUP_RETRY_OBSERVE_MS = 250;
 const SEND_INPUT_SAFE_RETRY_OBSERVE_MS = 2500;
 const SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS = 300;
@@ -1246,6 +1247,25 @@ const deliverySubmitDispatchedFromError = (error: unknown): boolean =>
   (error instanceof SubmitVerificationError &&
     error.receipt.submit_attempted === true);
 
+function bootPromptFailureMutationEvidence(input: {
+  delivered_chars: number;
+  typed: boolean;
+  submit_dispatched: boolean;
+  rpc_methods: DeliveryRpcMethod[];
+}) {
+  const typed = input.typed || input.delivered_chars > 0 ||
+    input.rpc_methods.includes("surface.send_text");
+  return buildPublicDeliveryReceipt({
+    delivery_state: "failed",
+    typed,
+    submit_attempted: input.submit_dispatched,
+    submit_dispatched: input.submit_dispatched,
+    submit_verified: false,
+    retry_count: 0,
+    rpc_methods: [...input.rpc_methods],
+  });
+}
+
 const preserveDeliveryEvidenceOnError = (
   error: unknown,
   rpcMethods: ReadonlySet<DeliveryRpcMethod>,
@@ -1530,8 +1550,9 @@ class DeliveryError extends Error {
   constructor(
     message: string,
     readonly failed_chunk?: number,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, { cause });
     this.name = "DeliveryError";
   }
 }
@@ -5787,6 +5808,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw new DeliveryError(
             `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
             chunkNumber,
+            error,
           );
         }
         if (avoidDuplicateOnAmbiguousRetry) {
@@ -5830,6 +5852,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw new DeliveryError(
             `chunk ${chunkNumber}/${totalChunks} acknowledgement was ambiguous and launcher text was not retried: ${message}`,
             chunkNumber,
+            error,
           );
         }
         await delay(SEND_INPUT_RETRY_DELAY_MS);
@@ -5841,6 +5864,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     throw new DeliveryError(
       `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
       chunkNumber,
+      lastError,
     );
   };
 
@@ -6228,7 +6252,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
 
-    const timeoutMs = opts.timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
+    let timeoutMs = opts.timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
     // Once verification is requested, missing or inconclusive evidence is a
     // failed verification. The spawn launcher probe remains advisory because
     // agent-readiness detection is authoritative for that one internal path.
@@ -6457,14 +6481,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         !screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
         opts.source_event === "spawn_agent" &&
         !hasParsedAgentIdentity(snapshot.parsed);
-      const codexRetryEligiblePendingInput =
+      const agentRetryEligiblePendingInput =
         opts.allow_recovery_enter_retry !== false &&
         (opts.source_event === "send_to" ||
           opts.source_event === "dispatch_nudge" ||
           opts.source_event === "report_to_parent" ||
           opts.source_event === "boot_prompt") &&
         hasPendingSubmitEvidence &&
-        screenCli === "codex";
+        (screenCli === "codex" ||
+          (screenCli === "claude" &&
+            !isSubmitVerifiedStatus(snapshot.parsed.status)));
+      if (
+        agentRetryEligiblePendingInput &&
+        screenCli === "claude" &&
+        opts.source_event !== "boot_prompt"
+      ) {
+        // Short-pointer verification normally exits quickly, but once the exact
+        // Claude draft is still pending, allow the full retry observation window.
+        timeoutMs = Math.max(
+          timeoutMs,
+          CLAUDE_PENDING_COMPOSER_RETRY_OBSERVE_MS +
+            SEND_INPUT_RECOVERY_ENTER_DELAY_MS +
+            SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS,
+        );
+      }
       const cursorFollowupRetryEligiblePendingInput =
         opts.allow_recovery_enter_retry !== false &&
         (opts.source_event === "send_to" ||
@@ -6475,7 +6515,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         screenShowsCursorFollowupNeedsEnter(snapshot.text);
       const retryEligiblePendingInput =
         spawnRetryEligiblePendingInput ||
-        codexRetryEligiblePendingInput ||
+        agentRetryEligiblePendingInput ||
         cursorFollowupRetryEligiblePendingInput;
       lastRetryEligiblePendingInput = retryEligiblePendingInput;
       if (retryEligiblePendingInput) {
@@ -6485,8 +6525,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       const retryObserveMs = cursorFollowupRetryEligiblePendingInput
         ? Math.min(timeoutMs, CURSOR_FOLLOWUP_RETRY_OBSERVE_MS)
-        : codexRetryEligiblePendingInput
-          ? Math.min(timeoutMs, CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS)
+        : agentRetryEligiblePendingInput
+          ? Math.min(
+              timeoutMs,
+              screenCli === "claude" && opts.source_event !== "boot_prompt"
+                ? CLAUDE_PENDING_COMPOSER_RETRY_OBSERVE_MS
+                : CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS,
+            )
           : opts.source_event === "spawn_agent" &&
               !hasParsedAgentIdentity(snapshot.parsed)
             ? 0
@@ -6545,7 +6590,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_verification_reason: "input_still_pending",
           retry_count: retryCount,
           delivery:
-            opts.source_event === "send_to" ||
+            opts.source_event === "boot_prompt"
+              ? "submitted"
+              : opts.source_event === "send_to" ||
             opts.source_event === "dispatch_nudge" ||
             opts.source_event === "report_to_parent" ||
             opts.require_attributable_submit_evidence === true
@@ -6605,7 +6652,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return {
         submit_verified: null,
         submit_evidence: null,
-        submit_verification_reason: null,
+        // Keep the internal reason long enough for the delivery engine to
+        // preserve same-caller ownership of an exact draft that visibly
+        // remains in the composer. The public pending receipt is still
+        // intentionally reasonless/nonterminal below.
+        submit_verification_reason: failureReason,
         retry_count: retryCount,
         delivery: "pending_verify",
       };
@@ -6667,19 +6718,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return { submit_verified: true, submit_verification_reason: null };
       }
       const composerInput = extractComposerInputRegion(snapshot.text);
+      const transitionedFromIdleDraftToWorking =
+        opts.baseline !== null &&
+        baselineComposerInput !== null &&
+        baselineComposerInput.trim() !== "" &&
+        !isSubmitVerifiedStatus(opts.baseline.parsed.status) &&
+        isSubmitVerifiedStatus(snapshot.parsed.status) &&
+        (composerInput === null || composerInput.trim() === "");
       if (
         baselineComposerInput !== null &&
         baselineComposerInput.trim() !== "" &&
-        composerInput !== null &&
-        composerInput.trim() === ""
+        ((composerInput !== null && composerInput.trim() === "") ||
+          transitionedFromIdleDraftToWorking)
       ) {
-        // The composer was populated before Return and is now readable and
-        // empty: it visibly let go of its contents. A "working" status alone
-        // deliberately does not count: the reported target was already
-        // working on its previous turn, so status cannot distinguish "my
-        // submit started a turn" from "a turn was already running" -- and a
-        // composer that renders boxed reads as unreadable here, so accepting
-        // status would resurrect the same false-true through a blind spot.
+        // The composer was populated before Return and is now empty, or a
+        // previously idle draft transitioned to working while its composer
+        // disappeared. A pre-existing working status alone still does not
+        // count: it cannot distinguish this submit from the previous turn.
         return { submit_verified: true, submit_verification_reason: null };
       }
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
@@ -6910,6 +6965,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let submit_evidence: SubmitEvidence | null = null;
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
+    let ownedDraftPending = false;
     let retry_count = 0;
     let deliveryOutcome:
       | "submitted"
@@ -7013,6 +7069,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_verified = verification.submit_verified;
         submit_evidence = verification.submit_evidence;
         submit_verification_reason = verification.submit_verification_reason;
+        ownedDraftPending =
+          verification.submit_verification_reason === "input_still_pending";
         retry_count = verification.retry_count;
         deliveryOutcome = verification.delivery;
         if (
@@ -7065,6 +7123,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     if (submit_verified === true) typedDraftOwners.delete(ownerKey);
+    else if (
+      textDispatched &&
+      opts.press_enter &&
+      ownedDraftPending &&
+      targetCli === "claude" &&
+      caller
+    ) {
+      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
+      typedDraftOwners.set(ownerKey, {
+        caller,
+        text: submittedText,
+        at: Date.now(),
+        ref: opts.surface,
+        uuid: opts.stableSurfaceIdentity ?? null,
+        workspace: opts.workspace ?? null,
+        fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity),
+        seen: true,
+      });
+    }
     const receipt = buildPublicDeliveryReceipt({
       delivery_state: !opts.press_enter
         ? "typed"
@@ -8069,16 +8146,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
     }
-    const assertDeliveryRouteCurrent = opts.resolveRoute
-      ? async (): Promise<void> => {
+    const assertDeliveryRouteCurrent = async (): Promise<void> => {
+      if (opts.resolveRoute) {
           const current = await opts.resolveRoute!();
           if (!sameRoute(deliveryRoute, current)) {
             throw new Error(
               "Boot prompt route changed during delivery; refusing to split prompt across terminals",
             );
           }
-        }
-      : undefined;
+      }
+      await assertSurfaceMutationAllowed(
+        "boot_prompt", deliveryRoute.surface, deliveryRoute.workspace,
+      );
+    };
     if (readiness.delivery_state === "queued") {
       return fingerprintPromptReceipt({
         ...buildPublicDeliveryReceipt({
@@ -15625,11 +15705,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
               if (safetyError) {
                 return err(safetyError, {
-                  ...extra, delivered_chars: e.delivered_chars,
+                  ...extra,
+                  delivered_chars: e.delivered_chars,
+                  ...bootPromptFailureMutationEvidence({
+                    delivered_chars: e.delivered_chars,
+                    typed: e.typed,
+                    submit_dispatched: e.submit_dispatched,
+                    rpc_methods: e.rpc_methods,
+                  }),
                 });
               }
               const bootPromptReceipt = e.submit_verification_error
                 ? { ...submitVerificationFailurePayload(e.submit_verification_error),
+                    terminal: true,
                     bytes: e.delivered_chars }
                 : {
                     ...buildPublicDeliveryReceipt({

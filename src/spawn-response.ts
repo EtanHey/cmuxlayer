@@ -60,7 +60,7 @@ function record(value: unknown): JsonObject | null {
 
 function bootUnsubmittedNextAction(surface: unknown): string {
   const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
-  return `Boot prompt typed but not submitted. Read the pane with read_screen({surface:"${surfaceRef}"}); the spawning caller must report boot_unsubmitted with this agent ID to its lead using the collab path in its contract. Keep the existing brief intact; never re-spawn or send a manual Return.`;
+  return `Boot prompt typed but not submitted after automatic Return retries were exhausted. Read the pane with read_screen({surface:"${surfaceRef}"}); if the exact boot prompt still occupies the composer, the spawning caller may submit its owned draft with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}). Otherwise stop and report boot_unsubmitted with this agent ID to the lead using the contract collab path. Keep the existing brief intact; never re-spawn.`;
 }
 
 function leanHealth(value: unknown): JsonObject | undefined {
