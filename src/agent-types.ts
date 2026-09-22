@@ -319,7 +319,8 @@ export interface DeliveryTelemetryEvent {
     | "rescued"
     | "failed"
     | "pending_verify"
-    | "failed_confirmed";
+    | "failed_confirmed"
+    | "stalled_queue";
   target_agent?: string;
 }
 

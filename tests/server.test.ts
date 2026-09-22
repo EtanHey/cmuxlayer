@@ -11,7 +11,7 @@ import {
   __submitEvidenceTestHooks,
   type CreateServerOptions,
 } from "../src/server.js";
-import type { ExecFn } from "../src/cmux-client.js";
+import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { AgentEngine } from "../src/agent-engine.js";
@@ -46,6 +46,10 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
 
 const openServers = new Set<ReturnType<typeof createServerImpl>>();
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmuxlayer-server-test.sock";
+
+function refOnlyClient<T extends object>(client: T): T {
+  return Object.assign(client, { surfaceIdentityMode: "ref_only" as const });
+}
 
 describe("server inbox isolation", () => {
   it("routes implicit Vitest inbox writes to the isolated state directory", () => {
@@ -11901,7 +11905,7 @@ describe("tool handler integration", () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
     const server = createServer({
-      exec: mockExec,
+      client: refOnlyClient(new CmuxClient({ exec: mockExec, bin: "cmux" })),
       skipAgentLifecycle: true,
       stateDir,
     });
@@ -11997,7 +12001,7 @@ describe("tool handler integration", () => {
     };
 
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12062,7 +12066,7 @@ describe("tool handler integration", () => {
     };
 
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12306,7 +12310,7 @@ describe("tool handler integration", () => {
 
     expect(degradedResult.isError).toBe(true);
     expect(degradedResult.structuredContent?.error).toMatch(
-      /could not be resolved in fresh topology/i,
+      /is no longer live; refusing close_surface/i,
     );
     expect(stateMgr.readState("worker-degraded-ref-owner")).toMatchObject({
       user_killed: false,
@@ -12353,7 +12357,7 @@ describe("tool handler integration", () => {
       closeSurface: vi.fn().mockResolvedValue(undefined),
     };
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12424,7 +12428,7 @@ describe("tool handler integration", () => {
     };
 
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12499,7 +12503,7 @@ describe("tool handler integration", () => {
     };
 
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12575,7 +12579,7 @@ describe("tool handler integration", () => {
     };
 
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12664,7 +12668,7 @@ describe("tool handler integration", () => {
       return { stdout: JSON.stringify({}), stderr: "" };
     });
     const server = createServer({
-      exec,
+      client: refOnlyClient(new CmuxClient({ exec })),
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12730,7 +12734,7 @@ describe("tool handler integration", () => {
     };
 
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -12797,7 +12801,7 @@ describe("tool handler integration", () => {
     };
 
     const server = createServer({
-      client: mockClient as any,
+      client: refOnlyClient(mockClient) as any,
       stateDir,
       skipAgentLifecycle: true,
     });
