@@ -1752,7 +1752,12 @@ function hasPendingComposerDraft(
     const match = line.match(/^\s*[❯›]\s+(.+)$/);
     if (!match) continue;
     const input = match[1]?.trim() ?? "";
-    if (!input || CODEX_READY_PLACEHOLDER_RE.test(line)) return false;
+    // Codex also uses this example prompt after closing its model/update menus.
+    if (
+      !input ||
+      CODEX_READY_PLACEHOLDER_RE.test(line) ||
+      (agentType === "codex" && input === "Find and fix a bug in @filename")
+    ) return false;
     const below = tail.slice(i + 1).filter((row) => row.trim());
     return below.every(
       (row) =>
