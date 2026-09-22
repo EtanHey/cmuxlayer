@@ -4,7 +4,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -838,6 +838,8 @@ export interface AgentEngineOptions {
   haltIdleWithoutDoneDwellMs?: number;
   haltWedgedDwellMs?: number;
   haltWedgedSweeps?: number;
+  /** Test seam for background child CPU activity; production samples process time. */
+  haltBackgroundCpuProgress?: (agent: AgentRecord) => boolean;
 }
 
 export interface SelfRegistrationSessionEntry {
@@ -1791,6 +1793,8 @@ export class AgentEngine {
   private haltIdleWithoutDoneDwellMs: number;
   private haltWedgedDwellMs: number;
   private haltWedgedSweeps: number;
+  private haltBackgroundCpuProgress?: (agent: AgentRecord) => boolean;
+  private backgroundChildCpuTimes = new Map<string, Map<number, string>>();
   private autoResolvePrompts: boolean;
   constructor(
     stateMgr: StateManager,
@@ -1872,6 +1876,7 @@ export class AgentEngine {
           DEFAULT_HALT_WEDGED_SWEEPS,
         ),
     );
+    this.haltBackgroundCpuProgress = opts?.haltBackgroundCpuProgress;
     this.autoResolvePrompts =
       process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE === "1";
     this.loadDeliveryReceipts();
@@ -4280,18 +4285,6 @@ export class AgentEngine {
     );
   }
 
-  private blockingBackgroundWaitElapsedMs(screenText: string): number | null {
-    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
-    const match = visibleTail.match(
-      /\bWait(?:ing|ed) for background terminal\s*\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s(?:\s*•\s*esc to interrupt)?\)/i,
-    );
-    if (!match) return null;
-    const hours = Number.parseInt(match[1] ?? "0", 10);
-    const minutes = Number.parseInt(match[2] ?? "0", 10);
-    const seconds = Number.parseInt(match[3] ?? "0", 10);
-    return ((hours * 60 + minutes) * 60 + seconds) * 1_000;
-  }
-
   private isIdleSupervisor(agent: AgentRecord, _screenText: string): boolean {
     return agent.role === "orchestrator";
   }
@@ -4306,14 +4299,48 @@ export class AgentEngine {
       BOOT_SESSION_CAPTURE_LINES,
     );
     const transcriptMtime = this.loadGroundTruthSession(agent)?.mtime_ms ?? 0;
-    // cleanScreenText intentionally removes spinner/chrome lines. During an active
-    // background wait those lines carry the only changing progress evidence.
-    const waitElapsedMs = this.blockingBackgroundWaitElapsedMs(screenText);
-    const backgroundProgress =
-      waitElapsedMs === null
-        ? ""
-        : `:background_wait=${waitElapsedMs}:tokens=${parsed.token_count ?? "unknown"}`;
-    return `${screenTextSignature(materialScreen)}:${transcriptMtime}${backgroundProgress}`;
+    // The wait timer advances even when the background command is blocked in
+    // an editor. Screen output, transcript updates, and token activity are
+    // observable progress; elapsed time alone is not.
+    return `${screenTextSignature(materialScreen)}:${transcriptMtime}:tokens=${parsed.token_count ?? "unknown"}`;
+  }
+
+  private backgroundChildUsedCpu(agent: AgentRecord, screenText: string): boolean {
+    if (!/\bWait(?:ing|ed) for background terminal\s*\(/i.test(screenText) || !agent.pid) {
+      this.backgroundChildCpuTimes.delete(agent.agent_id);
+      return false;
+    }
+    if (this.haltBackgroundCpuProgress) return this.haltBackgroundCpuProgress(agent);
+    try {
+      const output = execFileSync("ps", ["-axo", "pid=,ppid=,time="], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 250,
+        maxBuffer: 2_000_000,
+      });
+      const rows = output.split("\n").map((line) => {
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)$/);
+        return match ? { pid: Number(match[1]), ppid: Number(match[2]), time: match[3] } : null;
+      }).filter((row): row is { pid: number; ppid: number; time: string } => row !== null);
+      const descendants = new Set<number>([agent.pid]);
+      const times = new Map<number, string>();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of rows) {
+          if (descendants.has(row.ppid) && !descendants.has(row.pid)) {
+            descendants.add(row.pid);
+            times.set(row.pid, row.time);
+            changed = true;
+          }
+        }
+      }
+      const previous = this.backgroundChildCpuTimes.get(agent.agent_id);
+      this.backgroundChildCpuTimes.set(agent.agent_id, times);
+      return [...times].some(([pid, time]) => previous?.has(pid) && previous.get(pid) !== time);
+    } catch {
+      return false;
+    }
   }
 
   private isMatureHaltEpisode(agent: AgentRecord, nowMs: number): boolean {
@@ -4718,13 +4745,16 @@ export class AgentEngine {
       screenText,
       parsed,
     );
+    const backgroundChildUsedCpu = this.backgroundChildUsedCpu(agent, screenText);
     const hasVisibleProgress = hasVisibleAgentProgress(screenText, agent.cli);
     const canObservePromptMotion =
       disposition.kind === "escalate" &&
       disposition.prompt_type === "human_or_unknown_chooser" &&
       isBlockingPromptChooserScreen(screenText) &&
       hasVisibleProgress;
-    const promptScreenSignature = screenTextSignature(screenText);
+    const promptScreenSignature = /\bWait(?:ing|ed) for background terminal\s*\(/i.test(screenText)
+      ? `${progressSignature}:${backgroundChildUsedCpu ? nowMs : ""}`
+      : screenTextSignature(screenText);
     const previousPromptScreenSignature = this.promptMotionScreenSignatures.get(
       agent.agent_id,
     );
@@ -4815,7 +4845,21 @@ export class AgentEngine {
     } else if (parsed.paused === true) {
       haltType = "paused";
     } else if (screenActive) {
-      if (agent.halt_last_progress_signature !== progressSignature) {
+      const previousSignature = agent.halt_last_progress_signature;
+      const signatureWithoutTokens = (signature: string) =>
+        signature.replace(/:tokens=(?:\d+|unknown)$/, "");
+      const previousTokenCount = previousSignature?.match(/:tokens=(\d+)$/)?.[1];
+      const tokenGrowth =
+        parsed.token_count !== null &&
+        previousTokenCount !== undefined &&
+        parsed.token_count > Number(previousTokenCount);
+      if (
+        !previousSignature ||
+        signatureWithoutTokens(previousSignature) !==
+          signatureWithoutTokens(progressSignature) ||
+        tokenGrowth ||
+        backgroundChildUsedCpu
+      ) {
         return this.clearHaltEpisode(agent, {
           halt_last_active_at: nowIso,
           halt_last_progress_at_ms: nowMs,
