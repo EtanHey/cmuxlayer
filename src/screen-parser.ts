@@ -809,6 +809,7 @@ function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
       selectorIndex -= 1
     ) {
       if (!MENU_SELECTOR_RE.test(chooserLines[selectorIndex] ?? "")) continue;
+      if (isReadyComposerLine(chooserLines[selectorIndex] ?? "")) continue;
       if (chooserLines.slice(selectorIndex + 1).some(isReadyComposerLine)) continue;
       const siblingChoices = chooserLines
         .slice(selectorIndex + 1, selectorIndex + 5)

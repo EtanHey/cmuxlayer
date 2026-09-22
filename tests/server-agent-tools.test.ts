@@ -68,6 +68,17 @@ const FIXTURE_SESSIONS = [
   "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
   "019ec0e6-1111-2222-3333-444455556666",
 ];
+const CODEX_BANNER_OVERLAY_READY_FIXTURE = readFileSync(
+  new URL(
+    "./fixtures/live/codex-0.154-update-banner-chronicle-ready.b64",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const CODEX_BANNER_OVERLAY_READY_SCREEN = Buffer.from(
+  CODEX_BANNER_OVERLAY_READY_FIXTURE.trim(),
+  "base64",
+).toString("utf8");
 beforeEach(() => {
   for (const session of FIXTURE_SESSIONS) {
     for (const cli of ["claude", "codex", "cursor"] as const) {
@@ -835,6 +846,54 @@ describe("lean spawn tool responses", () => {
     } finally {
       client.stop();
     }
+  }, 10_000);
+
+  it("delivers a Codex boot prompt from the installed banner frame", async () => {
+    const exec = makeLifecycleExec({
+      codexReadyText: CODEX_BANNER_OVERLAY_READY_SCREEN,
+    });
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const prompt = "Verify installed Codex banner delivery";
+    const spawned = parseToolResult(
+      await registeredTestTool(server, "spawn_agent").handler(
+        {
+          repo: "cmuxlayer",
+          cli: "codex",
+          role: "worker",
+          prompt,
+          boot_prompt_timeout_ms: 2_000,
+          verbose: true,
+        },
+        {},
+      ),
+    );
+    const screen = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface_id: spawned.surface_id, raw: true },
+        {},
+      ),
+    );
+
+    expect(spawned, JSON.stringify(spawned)).toMatchObject({
+      ok: true,
+      boot_prompt_delivered: true,
+      boot_prompt_submit_verified: true,
+      boot_prompt_receipt: {
+        typed: true,
+        submitted: true,
+        submit_verified: true,
+      },
+    });
+    expect(screen.parsed).toMatchObject({
+      agent_type: "codex",
+      status: "working",
+    });
+    expect(screen.content).not.toContain(`› ${prompt}`);
   }, 10_000);
 
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {

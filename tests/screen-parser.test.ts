@@ -32,6 +32,11 @@ const deadCodexShellFixture = JSON.parse(
   readFixture("live/codex-dead-pane-shell-with-stale-banner.json"),
 ) as { lines_12: string; lines_80: string };
 
+const codexBannerOverlayReadyFixture = Buffer.from(
+  readFixture("live/codex-0.154-update-banner-chronicle-ready.b64").trim(),
+  "base64",
+).toString("utf8");
+
 describe("parseScreen", () => {
   it.each([
     ["claude-api-error.txt", "req_011CeRnwUcf8wusrNawosx6c"],
@@ -805,6 +810,20 @@ TASK_DONE
       expect(parsed.errors).not.toContain("interactive_prompt");
     },
   );
+
+  it("does not classify the installed Codex banner frame as an active picker", () => {
+    const parsed = parseScreen(codexBannerOverlayReadyFixture);
+
+    expect(isPickerOrMenuScreen(codexBannerOverlayReadyFixture, "codex")).toBe(
+      false,
+    );
+    expect(parsed).toMatchObject({
+      agent_type: "codex",
+      status: "idle",
+      control_state: "ready",
+    });
+    expect(parsed.errors).not.toContain("interactive_prompt");
+  });
 
   it.each(["Downloading…", "Installing…"])(
     "recognizes standalone updater step %s without an agent transcript",
