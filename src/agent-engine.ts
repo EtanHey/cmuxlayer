@@ -10406,6 +10406,7 @@ export class AgentEngine {
     opts?: {
       userInitiated?: boolean;
       beforeSurfaceMutation?: (route: AgentRoute) => Promise<void>;
+      allowUnknownPidOwnedSurfaceClose?: boolean;
     },
   ): Promise<void> {
     let agent = this.registry.get(agentId);
@@ -10413,6 +10414,9 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
     const canonicalAgentId = agent.agent_id;
+    const ownedBeforeRouteResolution =
+      this.registry.isObserverOwnershipEnforced() &&
+      this.registry.canControlSurface(agent);
 
     const userInitiated = opts?.userInitiated ?? true;
 
@@ -10529,16 +10533,29 @@ export class AgentEngine {
     };
 
     let forceSignalAccepted = force === true && !agent.pid;
+    let unknownPidOwnedClose = false;
     if (force && agent.pid) {
       const processIdentity = agentProcessLiveness(agent);
       if (processIdentity === "gone") {
         forceSignalAccepted = true;
       } else if (processIdentity === "unknown") {
-        rollbackUnacceptedStopIntent();
-        throw new Error(
-          `Force stop refused for ${agent.agent_id}: recorded pid ${agent.pid} ` +
-            `identity is unknown; refusing SIGKILL.`,
-        );
+        unknownPidOwnedClose =
+          opts?.allowUnknownPidOwnedSurfaceClose === true &&
+          ownedBeforeRouteResolution &&
+          this.registry.canControlSurface(agent) &&
+          Boolean(route.surface_uuid) &&
+          route.surface_uuid?.trim().toLowerCase() ===
+            agent.surface_uuid?.trim().toLowerCase();
+        if (!unknownPidOwnedClose) {
+          rollbackUnacceptedStopIntent();
+          throw new Error(
+            `Force stop refused for ${agent.agent_id}: recorded pid ${agent.pid} ` +
+              `identity is unknown; refusing SIGKILL.`,
+          );
+        }
+        // The owned UUID route may be closed without signalling an unproven
+        // PID. Require both its disappearance and confirmed process absence
+        // before reporting the agent stopped.
       } else {
         try {
           process.kill(agent.pid, "SIGKILL");
@@ -10657,6 +10674,10 @@ export class AgentEngine {
         // Preserve the post-condition error for the caller.
       }
       throw new Error(error);
+    }
+
+    if (unknownPidOwnedClose) {
+      forceSignalAccepted = true;
     }
 
     if (force && !forceSignalAccepted) {
