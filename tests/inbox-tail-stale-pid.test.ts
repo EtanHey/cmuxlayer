@@ -1,0 +1,95 @@
+import { describe, expect, it } from "vitest";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { renderBootContractFile } from "../src/coordination-paths.js";
+describe("issued inbox tail teardown", () => {
+  it("clears a dead PID and never signals a reused PID", () => {
+    const base = mkdtempSync(join(tmpdir(), "cmux-stale-pid-"));
+    const agentDir = join(base, "worker");
+    const pidFile = join(agentDir, "inbox-tail.pid");
+    mkdirSync(agentDir);
+    const stop = renderBootContractFile({
+      agentId: "worker",
+      mailbox: {
+        monitor_command: `tail -n0 -F ${join(agentDir, "inbox.jsonl")}`,
+        tail_pid_path: pidFile,
+        cursor_update_env: "CMUX_INBOX_MSG_ID",
+        cursor_update_command: "cmuxlayer inbox-cursor worker",
+      },
+    }).split("To stop it, kill that PID -- never a pattern:")[1]?.match(/^    (.+)$/m)?.[1];
+    const unrelated = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      writeFileSync(pidFile, "999999\n");
+      spawnSync("/bin/sh", ["-c", stop!]);
+      expect(existsSync(pidFile)).toBe(false);
+      writeFileSync(pidFile, `${unrelated.pid}\n`);
+      const conflict = spawnSync("/bin/sh", ["-c", stop!]);
+      expect([conflict.status, existsSync(pidFile)]).toEqual([1, true]);
+      expect(() => process.kill(unrelated.pid!, 0)).not.toThrow();
+    } finally {
+      unrelated.kill();
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("stops its own live tail with a quoted spaced inbox path", () => {
+    const base = mkdtempSync(join(tmpdir(), "cmux spaced inbox "));
+    const agentDir = join(base, "worker");
+    const inbox = join(agentDir, "inbox.jsonl");
+    const pidFile = join(agentDir, "inbox-tail.pid");
+    mkdirSync(agentDir);
+    writeFileSync(inbox, "");
+    const contract = renderBootContractFile({ agentId: "worker", mailbox: {
+      monitor_command: `tail -n0 -F '${inbox}'`, tail_pid_path: pidFile,
+      cursor_update_env: "CMUX_INBOX_MSG_ID", cursor_update_command: "cmuxlayer inbox-cursor worker",
+    } });
+    const launch = contract.match(/^    (.*perl -MPOSIX=setsid.*)$/m)?.[1];
+    const stop = contract.split("To stop it, kill that PID -- never a pattern:")[1]?.match(/^    (.+)$/m)?.[1];
+    let pid = 0;
+    try {
+      expect(spawnSync("/bin/sh", ["-c", `( ${launch} ) > /dev/null 2>&1`], { timeout: 3000 }).status).toBe(0);
+      pid = Number(readFileSync(pidFile, "utf8").split(/\s+/)[0]);
+      const result = spawnSync("/bin/sh", ["-c", stop!], { encoding: "utf8" });
+      expect(result.status).toBe(0);
+      expect(existsSync(pidFile)).toBe(false);
+    } finally {
+      if (pid > 0) { try { process.kill(pid); } catch { /* already stopped */ } }
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("does not stop a different tail running the same inbox command", () => {
+    const base = mkdtempSync(join(tmpdir(), "cmux-same-tail-"));
+    const agentDir = join(base, "worker");
+    const inbox = join(agentDir, "inbox.jsonl");
+    const pidFile = join(agentDir, "inbox-tail.pid");
+    mkdirSync(agentDir);
+    writeFileSync(inbox, "");
+    const contract = renderBootContractFile({ agentId: "worker", mailbox: {
+      monitor_command: `tail -n0 -F ${inbox}`, tail_pid_path: pidFile,
+      cursor_update_env: "CMUX_INBOX_MSG_ID", cursor_update_command: "cmuxlayer inbox-cursor worker",
+    } });
+    const launch = contract.match(/^    (.*perl -MPOSIX=setsid.*)$/m)?.[1];
+    const stop = contract.split("To stop it, kill that PID -- never a pattern:")[1]?.match(/^    (.+)$/m)?.[1];
+    const other = spawn("tail", ["-n0", "-F", inbox], { stdio: "ignore" });
+    let armedPid = 0;
+    try {
+      expect(spawnSync("/bin/sh", ["-c", `( ${launch} ) > /dev/null 2>&1`], { timeout: 3000 }).status).toBe(0);
+      const armed = readFileSync(pidFile, "utf8").trim().split(" ");
+      armedPid = Number(armed[0]);
+      expect(armed[1]).toMatch(/^[0-9a-f]{32}$/);
+      expect(spawnSync("/bin/sh", ["-c", stop!]).status).toBe(0);
+      writeFileSync(pidFile, `${other.pid} ${armed[1]}\n`);
+      const result = spawnSync("/bin/sh", ["-c", stop!], { encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(existsSync(pidFile)).toBe(true);
+      expect(() => process.kill(other.pid!, 0)).not.toThrow();
+    } finally {
+      if (armedPid > 0) { try { process.kill(armedPid); } catch { /* already stopped */ } }
+      other.kill();
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
