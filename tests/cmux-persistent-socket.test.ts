@@ -351,6 +351,47 @@ describe("CmuxPersistentSocket V1 demux", () => {
     }
   });
 
+  it("does not pace eligible reads before this connection reports rate_limited", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reactive-poll-budget");
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify({ id: request.id, ok: true, result: { pong: true } })}\n`,
+      );
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        burst: 1,
+        refillMs: 60_000,
+        maxConcurrent: 1,
+        reactive: true,
+      },
+    });
+
+    try {
+      await socket.connect();
+      await expect(
+        Promise.race([
+          Promise.all([
+            socket.call("system.ping", {}, { polling: true }),
+            socket.call("system.ping", {}, { polling: true }),
+          ]),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("eligible reads were paced")), 250),
+          ),
+        ]),
+      ).resolves.toEqual([{ pong: true }, { pong: true }]);
+      expect(requestCount).toBe(2);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
   it("bounds repeated polling rate_limited retries", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("bounded-poll-rate-limited");

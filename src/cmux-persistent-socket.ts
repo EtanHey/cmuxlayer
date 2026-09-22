@@ -46,6 +46,8 @@ export interface BackoffOptions {
 }
 
 export interface PollingOptions {
+  /** Start pacing only after this connection returns rate_limited. */
+  reactive?: boolean;
   /** Shared per-connection burst budget. Defaults below cmux's burst of 9. */
   burst?: number;
   /** One token is restored per interval (cmux 0.64.24: approximately 100ms). */
@@ -139,6 +141,8 @@ export class CmuxPersistentSocket {
   // reconnect backoff: rate_limited is an application response on a healthy
   // connection, not a reason to reconnect and evade the per-connection limit.
   private pollingBurst: number;
+  private pollingReactive: boolean;
+  private pollingRateLimitObserved = false;
   private pollingRefillMs: number;
   private pollingMaxConcurrent: number;
   private maxRateLimitRetries: number;
@@ -163,6 +167,7 @@ export class CmuxPersistentSocket {
     this.backoffBaseMs = opts?.backoff?.baseMs ?? BACKOFF_BASE_MS;
     this.backoffMaxMs = opts?.backoff?.maxMs ?? BACKOFF_MAX_MS;
     this.backoffJitter = opts?.backoff?.jitter ?? true;
+    this.pollingReactive = opts?.polling?.reactive ?? false;
     this.pollingBurst = finiteOption(
       opts?.polling?.burst,
       POLLING_BURST,
@@ -356,6 +361,7 @@ export class CmuxPersistentSocket {
         this.resetBackoff();
         if (this.pollingTimer) clearTimeout(this.pollingTimer);
         this.pollingTimer = null;
+        this.pollingRateLimitObserved = false;
         this.pollingTokens = this.pollingBurst;
         this.pollingLastRefillAt = Date.now();
         this.pumpPollingQueue();
@@ -741,7 +747,25 @@ export class CmuxPersistentSocket {
     this.pollingOutstanding += 1;
     const pollingGeneration = this.pollingCancellationGeneration;
     try {
-      for (let attempt = 0; ; attempt += 1) {
+      let attempt = 0;
+      if (this.pollingReactive && !this.pollingRateLimitObserved) {
+        try {
+          return await this.callOnce<T>(method, params, pollingGeneration);
+        } catch (error) {
+          if (
+            !(error instanceof CmuxSocketError) ||
+            error.code !== "rate_limited" ||
+            this.maxRateLimitRetries === 0
+          ) {
+            throw error;
+          }
+          this.pollingRateLimitObserved = true;
+          await this.waitForPollingBackoff(this.rateLimitBackoffMs(attempt));
+          attempt += 1;
+        }
+      }
+
+      for (;; attempt += 1) {
         const release = await this.acquirePollingSlot();
         try {
           return await this.callOnce<T>(method, params, pollingGeneration);
@@ -800,6 +824,7 @@ export class CmuxPersistentSocket {
     );
     this.pollingCancellationGeneration += 1;
     this.cancelPollingWaiters(disconnected);
+    this.pollingRateLimitObserved = false;
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;

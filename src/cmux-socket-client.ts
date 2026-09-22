@@ -83,7 +83,7 @@ export class CmuxSocketClient {
   private cliFallback?: CmuxClient;
   private transport: CmuxPersistentSocket;
   private maxInFlight?: number;
-  private polling?: PollingOptions;
+  private polling: PollingOptions;
   private socketPathResolver?: () => Promise<string | null>;
   private reconnecting?: Promise<void>;
   private transportSerial = 0;
@@ -96,14 +96,14 @@ export class CmuxSocketClient {
     this.authPassword = opts?.password;
     this.cliFallback = opts?.cliFallback;
     this.maxInFlight = opts?.maxInFlight;
-    this.polling = opts?.polling;
+    this.polling = { ...opts?.polling, reactive: true };
     this.socketPathResolver = opts?.socketPathResolver;
     this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
       socketPath: this.socketPath,
       timeoutMs: this.timeoutMs,
       maxInFlight: opts?.maxInFlight,
-      polling: opts?.polling,
+      polling: this.polling,
     });
   }
 
