@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { EventLog } from "./event-log.js";
 import {
   assertValidTransition,
+  isFailedSpawnTombstone,
   type AgentRecord,
   type AgentRole,
   type AgentState,
@@ -143,6 +144,10 @@ export class SurfaceSessionIndex {
   }
 
   persistRecord(record: AgentRecord): SurfaceSessionIndexEntry | null {
+    if (record.user_killed === true || isFailedSpawnTombstone(record)) {
+      this.removeAgent(record.agent_id);
+      return null;
+    }
     if (!record.cli_session_id) return null;
     return this.persist({
       workspace_id: record.workspace_id ?? null,
@@ -157,6 +162,18 @@ export class SurfaceSessionIndex {
     if (!index.by_agent_id[agentId]) return;
     delete index.by_agent_id[agentId];
     this.writeIndex(index);
+  }
+
+  pruneOrphans(agentDirectories: ReadonlySet<string>): number {
+    const index = this.readIndex();
+    let removed = 0;
+    for (const agentId of Object.keys(index.by_agent_id)) {
+      if (agentDirectories.has(agentId)) continue;
+      delete index.by_agent_id[agentId];
+      removed += 1;
+    }
+    if (removed > 0) this.writeIndex(index);
+    return removed;
   }
 
   lookup(key: SurfaceSessionLookupKey): SurfaceSessionIndexEntry | null {
@@ -209,6 +226,20 @@ export class StateManager {
 
   getSurfaceSessionIndex(): SurfaceSessionIndex {
     return this.surfaceSessionIndex;
+  }
+
+  /** Boot repair: preserve every entry with an agent directory, even if its state is unreadable. */
+  pruneOrphanSurfaceSessionEntries(): number {
+    const agentDirectories = new Set(
+      readdirSync(this.baseDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name),
+    );
+    // Legacy state directories may be named differently from record.agent_id.
+    for (const record of this.listStates()) {
+      agentDirectories.add(record.agent_id);
+    }
+    return this.surfaceSessionIndex.pruneOrphans(agentDirectories);
   }
 
   private stateFilePath(dirName: string): string {
@@ -606,7 +637,10 @@ export class StateManager {
 
   removeState(agentId: string): void {
     const dirName = this.resolveStateDir(agentId);
-    if (!dirName) return;
+    if (!dirName) {
+      this.surfaceSessionIndex.removeAgent(agentId);
+      return;
+    }
 
     const agentDir = join(this.baseDir, dirName);
     const current = this.readStateFromDir(dirName);
@@ -623,6 +657,7 @@ export class StateManager {
     });
 
     rmSync(agentDir, { recursive: true, force: true });
+    this.surfaceSessionIndex.removeAgent(agentId);
   }
 
   ensureAutoRecord(

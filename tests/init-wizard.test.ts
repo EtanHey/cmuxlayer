@@ -649,6 +649,12 @@ describe("launcher registry merge", () => {
 });
 
 describe("WIZARD_COPY", () => {
+  it("shows Codex the pane identity and socket capability forwarding names", () => {
+    const hint = WIZARD_COPY.codexMcpHint.join("\n");
+    expect(hint).toContain("env_vars =");
+    expect(hint).toContain("CMUX_SURFACE_ID");
+    expect(hint).toContain("CMUX_SOCKET_CAPABILITY");
+  });
   it("never names a personal setup, a private repo layout, or a fleet convention", () => {
     const copy = JSON.stringify(WIZARD_COPY);
     expect(copy).not.toMatch(

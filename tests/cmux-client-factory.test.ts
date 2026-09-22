@@ -5,7 +5,7 @@
  *  - When unpinned, warn only when more than one cmux instance is actually
  *    LIVE, so the warning means real ambiguity, not just a multi-path list.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import { mkdtempSync } from "node:fs";
@@ -16,6 +16,13 @@ import { stateSocketPath } from "../src/cmux-socket-path.js";
 import { getTransportHealth } from "../src/cmux-transport-self-heal.js";
 
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
+const originalCapability = process.env.CMUX_SOCKET_CAPABILITY;
+
+beforeAll(() => { delete process.env.CMUX_SOCKET_CAPABILITY; });
+afterAll(() => {
+  if (originalCapability === undefined) delete process.env.CMUX_SOCKET_CAPABILITY;
+  else process.env.CMUX_SOCKET_CAPABILITY = originalCapability;
+});
 
 function startPingServer(socketPath: string): Promise<net.Server> {
   return new Promise((resolve) => {

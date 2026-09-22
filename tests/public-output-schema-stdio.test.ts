@@ -164,7 +164,10 @@ describe("public tool output schemas over stdio", () => {
             'send_to({mode:"key"',
           );
           expect(String(result.structuredContent?.next_action)).toMatch(
-            /automatic Return retr(?:y|ies).*exhausted/i,
+            /Boot prompt submission was not verified/i,
+          );
+          expect(String(result.structuredContent?.next_action)).not.toMatch(
+            /retr(?:y|ies).*exhausted/i,
           );
         }
       }

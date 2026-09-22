@@ -11,7 +11,10 @@
  * The contract is the upstream fix: it must give the exact stop command.
  */
 import { describe, it, expect } from "vitest";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { renderBootContractFile } from "../src/coordination-paths.js";
 import { shellQuote } from "../src/shell-safe.js";
 
@@ -44,17 +47,51 @@ function mailboxBlock(contract: string): string {
 }
 
 describe("boot contract mailbox teardown", () => {
-  it("records the tail's pid so the seat never has to find it", () => {
+  it("records the detached supervisor's pid so the seat never has to find it", () => {
     const block = mailboxBlock(render());
-    expect(block).toContain(`tail -n0 -F ${INBOX} &`);
-    expect(block).toContain(`echo $! > ${shellQuote(PID_FILE)}`);
+    expect(block).toContain(`perl -MPOSIX=setsid -e 'my $pidfile=shift;`);
+    expect(block).toContain("rename $tmp, $pidfile or die $!; close $lock; print $write");
+    expect(block).toContain("$0=\"cmuxlayer-inbox-tail:$token\"");
+    expect(block).toContain(`' ${shellQuote(PID_FILE)} tail -n0 -F ${INBOX}`);
+  });
+
+  it("publishes the detached PID before returning and keeps inbox output visible", () => {
+    const base = mkdtempSync(join(tmpdir(), "cmux-inbox-detach-"));
+    const agentDir = join(base, AGENT_ID);
+    const inbox = join(agentDir, "inbox.jsonl");
+    const pidFile = join(agentDir, "inbox-tail.pid");
+    const output = join(base, "monitor.out");
+    mkdirSync(agentDir);
+    writeFileSync(inbox, "");
+    writeFileSync(pidFile, "999999\n");
+    let pid = 0;
+    try {
+      const block = mailboxBlock(render(base));
+      const command = block.match(/^    (.*perl -MPOSIX=setsid.*)$/m)?.[1];
+      const launcher = spawnSync("/bin/sh", ["-c", `( ${command!} ) > ${shellQuote(output)} 2>&1`], { timeout: 3000 });
+      expect(launcher.status).toBe(0);
+      pid = Number(readFileSync(pidFile, "utf8").split(/\s+/)[0]);
+      expect(pid).not.toBe(999999);
+      const state = spawnSync("ps", ["-p", String(pid), "-o", "pgid=", "-o", "stat="], { encoding: "utf8" });
+      const [pgid] = state.stdout.trim().split(/\s+/);
+      expect(Number(pgid)).toBe(pid);
+      for (let attempt = 0; attempt < 20 && !readFileSync(output, "utf8").includes("visible-after-launch"); attempt++) {
+        appendFileSync(inbox, '{"id":"visible-after-launch"}\n');
+        spawnSync("sleep", ["0.05"]);
+      }
+      expect(readFileSync(output, "utf8")).toContain("visible-after-launch");
+    } finally {
+      if (pid > 0 && pid !== 999999) {
+        try { process.kill(pid); } catch { /* already exited */ }
+      }
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it("gives the exact stop command, addressed by pid", () => {
     const block = mailboxBlock(render());
-    expect(block).toContain(
-      `kill "$(cat ${shellQuote(PID_FILE)})" && rm -f ${shellQuote(PID_FILE)}`,
-    );
+    expect(block).toContain(`read pid token < ${shellQuote(PID_FILE)}`);
+    expect(block).toContain(`then kill "$pid" && remove_if_current`);
   });
 
   it("survives an agent dir with spaces in it", () => {
@@ -64,8 +101,9 @@ describe("boot contract mailbox teardown", () => {
     const spaced = "/tmp/cmux w27b fixture";
     const pid = join(spaced, AGENT_ID, "inbox-tail.pid");
     const block = mailboxBlock(render(spaced));
-    expect(block).toContain(`echo $! > '${pid}'`);
-    expect(block).toContain(`kill "$(cat '${pid}')" && rm -f '${pid}'`);
+    expect(block).toContain(`' '${pid}' tail -n0 -F`);
+    expect(block).toContain(`read pid token < '${pid}'`);
+    expect(block).toContain(`unlink $path if defined($line) && $line eq "$record\\n" }' '${pid}'`);
   });
 
   it("never hands the seat a pattern-matching killer", () => {

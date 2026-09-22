@@ -766,7 +766,7 @@ describe("lean spawn tool responses", () => {
           boot_prompt_receipt: { typed: true, submitted: false, terminal: true,
             retry_count: 1, submit_verified: false },
         });
-        expect(result.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+        expect(result.next_action).toMatch(/after 1 automatic Return retry/i);
         expect(result.next_action).not.toMatch(/never .*manual Return/i);
       }
       // One Return launches the CLI; two more are the bounded prompt submit attempts.
@@ -6120,11 +6120,65 @@ describe("agent lifecycle tool handlers", () => {
 
   it("spawn_agent errors when launcher-line corruption recovery is exhausted", async () => {
     const command = "voicelayerCursor -s";
-    const baseExec = makeLifecycleExec();
+    const baseExec = makeLifecycleExec({ closeKeepsSurface: true });
     let composer = "";
     let ctrlUCount = 0;
+    let surfaceGone = false;
+    let recycledUuid = false;
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       const text = String(args.at(-1) ?? "");
+      if (surfaceGone && args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [{
+              ref: "pane:witness",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:witness"],
+              selected_surface_ref: "surface:witness",
+            }],
+          }),
+          stderr: "",
+        };
+      }
+      if (surfaceGone && args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:witness",
+            surfaces: [{
+              ref: "surface:witness",
+              title: "witness",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            }],
+          }),
+          stderr: "",
+        };
+      }
+      if (recycledUuid && args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [{
+              id: "new-occupant-uuid",
+              ref: "surface:new",
+              title: "unrelated occupant",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("send") && text === command) {
         composer = `ng ${command}`;
         return { stdout: "{}", stderr: "" };
@@ -6137,8 +6191,8 @@ describe("agent lifecycle tool handlers", () => {
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({
-            surface: "surface:new",
-            text: `$ ${composer}`,
+            surface: surfaceGone ? "surface:witness" : "surface:new",
+            text: surfaceGone || recycledUuid ? "$ " : `$ ${composer}`,
             lines: 20,
             scrollback_used: false,
           }),
@@ -6184,6 +6238,28 @@ describe("agent lifecycle tool handlers", () => {
       }>
     ).find((agent) => agent.agent_id === parsed.agent_id);
     expect(listedAgent?.state).toBe("error");
+    const defaultListed = parseToolResult(
+      await list.handler({}, {} as any),
+    );
+    expect(
+      (defaultListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(true);
+    recycledUuid = true;
+    const recycledListed = parseToolResult(await list.handler({}, {} as any));
+    expect(
+      (recycledListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(false);
+    surfaceGone = true;
+    const absentListed = parseToolResult(await list.handler({}, {} as any));
+    expect(
+      (absentListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(false);
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a healthy booting pane with echoed launcher output", async () => {
@@ -7685,7 +7761,7 @@ describe("agent lifecycle tool handlers", () => {
         next_action: expect.stringContaining("never re-spawn"),
         delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
       expect(parsed.next_action).toContain('send_to({mode:"key"');
-      expect(parsed.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+      expect(parsed.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
       const call = parsed.next_action.match(/read_screen\((\{.*?\})\)/)?.[1];
       const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
       const sendResult = parseToolResult(await readScreen.handler(sendArgs, {} as any));
@@ -7761,7 +7837,8 @@ describe("agent lifecycle tool handlers", () => {
       /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
     );
     expect(result.spawn_state).toBe("boot_unsubmitted");
-    expect(result.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+    expect(result.next_action).toMatch(/Boot prompt submission was not verified/i);
+    expect(result.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
     expect(result.surface_id).toBe("surface:new");
     expect(result.boot_prompt_receipt).toMatchObject({
       delivery_state: "queued",
@@ -13469,12 +13546,17 @@ codex>
     const registry = engine.getRegistry();
     const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
     registry.set(agentId, working);
+    const callerId = "source-caller";
+    const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const caller = { ...working, agent_id: callerId, surface_id: "surface:caller", surface_uuid: callerUuid, state: "ready" };
+    engine.stateMgr.writeState(caller);
+    registry.set(callerId, caller);
     mockExec.mockClear();
 
-    const result = await sendTo.handler(
+    const result = await runWithCallerContext({ surfaceId: callerUuid }, () => sendTo.handler(
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
-    );
+    ));
     const delivered = parseToolResult(result);
     expect(result.isError).toBeFalsy();
     expect(delivered).toMatchObject({
@@ -13487,6 +13569,10 @@ codex>
       submit_verified: true,
       queued_behind_turn: true,
     });
+    const deliveryEvents = readFileSync(join(TEST_DIR, "events.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    expect(deliveryEvents.findLast((event) => event.event_type === "send_to"))
+      .toMatchObject({ source_agent: callerId, target_surface: working.surface_id });
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("send")),
     ).not.toHaveLength(0);

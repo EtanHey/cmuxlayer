@@ -82,6 +82,13 @@ export const WIZARD_COPY = {
     "Done. Load the configuration in new shells by adding this line to your",
     "shell profile (~/.zshrc, ~/.bashrc, ...):",
   ],
+  codexMcpHint: [
+    "",
+    "If Codex uses cmuxlayer as an MCP server, add this to ~/.codex/config.toml:",
+    "[mcp_servers.cmuxlayer]",
+    'command = "cmuxlayer"',
+    'env_vars = ["CMUX_SURFACE_ID", "CMUX_WORKSPACE_ID", "CMUX_TAB_ID", "CMUX_SOCKET_CAPABILITY", "CMUX_SOCKET_PATH"]',
+  ],
 } as const;
 
 export const INIT_HELP_TEXT = `cmuxlayer init — set up agent spawning on this machine.
@@ -874,6 +881,7 @@ export async function runInitCommand(
       `\n  [ -f ${configArtifact.path} ] && . ${configArtifact.path}\n\n`,
     );
   }
+  io.write(`${WIZARD_COPY.codexMcpHint.join("\n")}\n`);
   return 0;
 }
 

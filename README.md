@@ -73,7 +73,10 @@ T3 Code inherits MCP servers from the Codex CLI config file at `~/.codex/config.
 ```toml
 [mcp_servers.cmuxlayer]
 command = "cmuxlayer"
+env_vars = ["CMUX_SURFACE_ID", "CMUX_WORKSPACE_ID", "CMUX_TAB_ID", "CMUX_SOCKET_CAPABILITY", "CMUX_SOCKET_PATH"]
 ```
+
+`env_vars` forwards the pane's existing values into Codex's MCP process. Do not paste a capability value into this file.
 
 **Claude Code, Cursor, VS Code, Claude Desktop**
 

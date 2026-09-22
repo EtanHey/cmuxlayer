@@ -154,6 +154,7 @@ import type {
 import {
   bootPromptRegistryFields,
   isDeliberateCloseTombstone,
+  isFailedSpawnTombstone,
   shouldRetainForExplicitResume,
   summarizeTaskSummary,
 } from "./agent-types.js";
@@ -648,9 +649,8 @@ const SEND_INPUT_RETRY_DELAY_MS = 25;
 const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
 const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
-// Pre-Return correlation is a safety gate, not the full submit-verification
-// window. Keep it independently bounded so a surface that never paints typed
-// composer text cannot hold an entire spawn on the 5s verification timeout.
+// CLI fallback paste acknowledgement can precede the Claude composer repaint.
+// Keep a short budget for surfaces that never paint the owned payload.
 const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 250;
 function parsePositiveIntegerMs(
   value: string | undefined,
@@ -6095,6 +6095,44 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  const shouldVerifyRawSurfaceSubmit = async (
+    record: AgentRecord | undefined,
+    surface: string,
+    workspace?: string,
+  ): Promise<boolean> => {
+    if (!record) return false;
+    if (INTERACTIVE_AGENT_STATES.has(record.state)) return true;
+    // The registry may still say working after the screen has returned to a
+    // ready prompt. Check that target directly before deciding whether a
+    // surface-mode receipt can verify its Return.
+    const snapshot = await readParsedSurface(surface, workspace, { agent: record });
+    return isLiveDeliverable(
+      resolveLiveAgentState(
+        record,
+        snapshot
+          ? {
+              status: snapshot.parsed.status,
+              agent_type: snapshot.parsed.agent_type,
+              control_state: snapshot.parsed.control_state,
+              errors: snapshot.parsed.errors,
+            }
+          : null,
+      ),
+    );
+  };
+
+  const liveTrackedSurfaceIsDeliverable = (
+    record: AgentRecord | undefined,
+    snapshot: { parsed: ParsedScreenResult } | null,
+  ): boolean => {
+    if (!record) return false;
+    if (INTERACTIVE_AGENT_STATES.has(record.state)) return true;
+    // This decides whether to verify the Return already requested for a raw
+    // tracked surface. A live ready composer warrants that read even when the
+    // lifecycle registry has not advanced past booting yet.
+    return !!snapshot && screenConfirmedAgentState(snapshot.parsed) === "ready";
+  };
+
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;
     workspace?: string;
@@ -6190,8 +6228,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     screenText: string;
     metrics: RawSubmitEvidenceMetrics;
   } | null> => {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < opts.timeout_ms) {
+    // One slow CLI read can consume the old 250ms deadline while returning a
+    // pre-paste frame. Three bounded reads allow a stale frame and a repaint;
+    // short caller deadlines still get only one read.
+    const readLimit = opts.timeout_ms >= BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS
+      ? 3 : 1;
+    for (let read = 0; read < readLimit; read += 1) {
       await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
@@ -6205,11 +6247,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
         };
       }
-      const remaining = opts.timeout_ms - (Date.now() - startedAt);
-      if (remaining <= 0) {
-        break;
+      if (read + 1 < readLimit) {
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
       }
-      await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remaining));
     }
     return null;
   };
@@ -6768,6 +6808,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_agent?: string | null;
     delivery_id?: string;
     verify_submit?: boolean;
+    verify_submit_for_tracked_surface?: AgentRecord;
     allow_recovery_enter_retry?: boolean;
     require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
@@ -6908,6 +6949,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ? { draftGuardText }
         : {}),
     });
+    // This screen read is already required by the safety gate and occurs under
+    // the surface write lock. Reuse it for raw tracked-surface verification.
+    const verifySubmit =
+      opts.verify_submit === true ||
+      liveTrackedSurfaceIsDeliverable(
+        opts.verify_submit_for_tracked_surface,
+        deliverySafetySnapshot,
+      );
     // Boot delivery is always attributable. Established relay paths retain
     // their lighter verification unless an existing interrupt marker makes a
     // later marker ambiguous; in that collision case, observe the payload
@@ -6977,7 +7026,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
-        requireObservedPayloadBeforeEnter && (opts.verify_submit ?? false)
+        requireObservedPayloadBeforeEnter && verifySubmit
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
               workspace: opts.workspace,
@@ -6992,7 +7041,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
       if (
         requireObservedPayloadBeforeEnter &&
-        (opts.verify_submit ?? false) &&
+        verifySubmit &&
         preReturnBootEvidence === null
       ) {
         submit_verified = null;
@@ -7000,7 +7049,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         deliveryOutcome = "pending_verify";
       } else {
         if (
-          opts.verify_submit &&
+          verifySubmit &&
           deliverySafetySnapshot &&
           inferComposerCli(
             deliverySafetySnapshot.text,
@@ -7052,7 +7101,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               bytes,
               source_event: opts.source_event ?? "send_command",
               source_agent: opts.source_agent,
-              verify_submit: opts.verify_submit ?? false,
+              verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
               timeout_ms: opts.submit_verify_timeout_ms,
               cursor_response_baseline: cursorResponseBaseline,
@@ -7155,7 +7204,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? "rescued"
                 : submit_verified === true
                   ? "submitted"
-                  : opts.verify_submit !== true
+                  : !verifySubmit
                     ? "typed"
                     : undefined,
       delivery_id: opts.delivery_id,
@@ -7170,7 +7219,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       WARNING:
         opts.press_enter &&
         submit_verified === null &&
-        opts.verify_submit !== true
+        !verifySubmit
           ? "NOT VERIFIED — Return was dispatched, but submission was not verified; this receipt confirms only that text was typed."
           : undefined,
     });
@@ -10840,12 +10889,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           cli: targetRecord?.cli,
           allowLongInline: args.allow_long_inline,
         });
-        const shouldVerifySubmit =
-          args.press_enter &&
-          !!targetRecord &&
-          INTERACTIVE_AGENT_STATES.has(targetRecord.state);
-
         if (args.background) {
+          const shouldVerifySubmit =
+            args.press_enter &&
+            (await shouldVerifyRawSurfaceSubmit(
+              targetRecord,
+              route.surface,
+              route.workspace,
+            ));
           await assertSurfaceMutationAllowed(
             "send_input",
             route.surface,
@@ -10947,7 +10998,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: sourceEvent,
               delivery_id: deliveryId,
-              verify_submit: shouldVerifySubmit,
+              verify_submit:
+                args.press_enter &&
+                !!targetRecord &&
+                INTERACTIVE_AGENT_STATES.has(targetRecord.state),
+              verify_submit_for_tracked_surface:
+                args.press_enter ? targetRecord : undefined,
               beforeMutation: route.assertCurrent,
               timings,
             });
@@ -11147,9 +11203,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stateMgr,
           route.surface,
         );
-        const shouldVerifySubmit =
-          !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
-
         const delivery = await withSurfaceWrite(
           route.surface,
           async () => {
@@ -11163,7 +11216,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: true,
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: "send_command",
-              verify_submit: bootPromptPath ? false : shouldVerifySubmit,
+              verify_submit:
+                !bootPromptPath &&
+                !!targetRecord &&
+                INTERACTIVE_AGENT_STATES.has(targetRecord.state),
+              verify_submit_for_tracked_surface:
+                bootPromptPath ? undefined : targetRecord,
               beforeMutation: route.assertCurrent,
             });
           },
@@ -14041,7 +14099,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             press_enter: args.press_enter,
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
-            source_agent: args.agent_id,
+            source_agent: resolveCurrentCallerAgent()?.agent_id ?? null,
             delivery_id: args.delivery_id,
             // Verify every submitted agent relay — not just long ones. A short
             // relay (the common agent-to-agent case) to a frozen terminal must
@@ -17182,7 +17240,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides retained close tombstones; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
+      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary returns flat addressable scalars and hides close tombstones and failed spawns whose surfaces are absent; request a terminal state or detail=full to include them. Full detail also includes provenance, health diagnostics, the registry record, and up to 20 unresolved or attention delivery receipts.",
       {
         state: z
           .enum([
@@ -17355,31 +17413,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
         ) => {
           const registryObservedAt = Date.now();
+          const uuidKey = (value: string | null | undefined) =>
+            value?.trim().toLowerCase() || null;
+          const observedSurfaceFor = (agent: AgentRecord) =>
+            liveDiscovery?.rows.find((surface) => {
+              const agentUuid = uuidKey(agent.surface_uuid);
+              const surfaceUuid = uuidKey(surface.surface_uuid);
+              return agentUuid && surfaceUuid
+                ? agentUuid === surfaceUuid
+                : Boolean(
+                    !agentUuid &&
+                    !surfaceUuid &&
+                    agent.surface_observer_id &&
+                    agent.surface_observer_id === registry.getObserverId() &&
+                    surface.surface_id === agent.surface_id,
+                  );
+            });
+          const failedSpawnSurfaceStillListed = (agent: AgentRecord) =>
+            liveDiscovery?.rows.some((surface) => {
+              const agentUuid = uuidKey(agent.surface_uuid);
+              const surfaceUuid = uuidKey(surface.surface_uuid);
+              return agentUuid && surfaceUuid
+                ? agentUuid === surfaceUuid
+                : !agentUuid &&
+                    !surfaceUuid &&
+                    surface.surface_id === agent.surface_id;
+            }) ?? true;
           const visibleRecords =
             args.detail === "full" ||
             requestedState !== undefined ||
             (args.agent_ids?.length ?? 0) > 0
               ? records
-              : records.filter((agent) => !isDeliberateCloseTombstone(agent));
-          const uuidKey = (value: string | null | undefined) =>
-            value?.trim().toLowerCase() || null;
+              : records.filter(
+                  (agent) =>
+                    !isDeliberateCloseTombstone(agent) &&
+                    (!isFailedSpawnTombstone(agent) ||
+                      failedSpawnSurfaceStillListed(agent)),
+                );
           const rows = await Promise.all(
             visibleRecords.map(async (agent) => {
               try {
-                const agentUuid = uuidKey(agent.surface_uuid);
-                const observedSurface = liveDiscovery?.rows.find((surface) => {
-                  const surfaceUuid = uuidKey(surface.surface_uuid);
-                  return agentUuid && surfaceUuid
-                    ? agentUuid === surfaceUuid
-                    : Boolean(
-                        !agentUuid &&
-                        !surfaceUuid &&
-                        agent.surface_observer_id &&
-                        agent.surface_observer_id ===
-                          registry.getObserverId() &&
-                        surface.surface_id === agent.surface_id,
-                      );
-                });
+                const observedSurface = observedSurfaceFor(agent);
                 const trustedScreenObservation =
                   observedSurface && !observedSurface.read_error
                     ? observedSurface

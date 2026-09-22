@@ -699,6 +699,11 @@ export class AgentRegistry {
    * Call once on startup.
    */
   async reconstitute(opts: SurfaceAbsenceOptions = {}): Promise<Set<string>> {
+    try {
+      this.stateMgr.pruneOrphanSurfaceSessionEntries();
+    } catch (error) {
+      console.warn("[cmuxlayer] surface session index prune deferred:", error);
+    }
     this.agents.clear();
     this.aliases.clear();
     this.clearAbsenceObservations();

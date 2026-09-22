@@ -336,9 +336,6 @@ function readState() {
 function writeState(state) {
   if (statePath) fs.writeFileSync(statePath, JSON.stringify(state));
 }
-function patchState(patch) {
-  writeState({ ...readState(), ...patch });
-}
 function keyedStatePath(kind, key) {
   const safeKey = String(key || "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
   return statePath + "." + kind + "-" + safeKey;
@@ -362,6 +359,12 @@ function optionValue(name, fallback = "") {
   return index >= 0 ? args[index + 1] || fallback : fallback;
 }
 const state = readState();
+function spawnedId(sequence) {
+  return "00000000-0000-4000-8000-" + String(900000000000 + sequence).padStart(12, "0");
+}
+function spawnedRef(sequence) {
+  return "surface:bench-" + String(sequence).padStart(5, "0");
+}
 const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   ref: "surface:bench-" + index,
   id: "00000000-0000-4000-8000-" + String(index).padStart(12, "0"),
@@ -371,16 +374,10 @@ const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   selected: index === 0,
   current_directory: cwd
 }));
-const spawnedSurface = {
-  ref: "surface:bench-spawn",
-  id: "00000000-0000-4000-8000-999999999999",
-  title: state.title,
-  type: "terminal",
-  index: surfaceCount,
-  selected: false,
-  current_directory: cwd
-};
-const surfaces = state.closed ? baseSurfaces : baseSurfaces.concat([spawnedSurface]);
+const spawnedSurfaces = state.spawnedSurfaces || [];
+const surfaces = baseSurfaces.concat(spawnedSurfaces
+  .filter((surface) => !surface.closed)
+  .map((surface, index) => ({ ...surface, type: "terminal", index: surfaceCount + index, selected: false, current_directory: cwd })));
 function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
@@ -393,13 +390,18 @@ if (command === "list-workspaces") {
 } else if (command === "list-pane-surfaces") {
   write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: "pane:bench", surfaces });
 } else if (command === "new-split") {
-  patchState({ closed: false, runtimeReady: false });
-  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: "surface:bench-spawn", surface_id: "00000000-0000-4000-8000-999999999999", title: state.title, type: "terminal" });
+  const spawnSequence = (state.spawnSequence || 0) + 1;
+  const primary = !spawnedSurfaces.some((surface) => surface.primary && !surface.closed);
+  const surface = { ref: spawnedRef(spawnSequence), id: spawnedId(spawnSequence), title: primary ? state.title || "bench-spawn" : "bench-extra", primary, runtimeReady: false, closed: false };
+  writeState({ ...state, spawnSequence, spawnedSurfaces: [...spawnedSurfaces, surface] });
+  writeSurfaceState(surface.ref, { composer: "", transcript: "" });
+  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: surface.ref, surface_id: surface.id, title: surface.title, type: "terminal" });
 } else if (command === "close-surface") {
-  patchState({ closed: true });
+  const target = optionValue("--surface", "");
+  writeState({ ...state, spawnedSurfaces: spawnedSurfaces.map((surface) => [surface.ref, surface.id].includes(target) ? { ...surface, closed: true } : surface) });
   write({ ok: true });
 } else if (command === "debug-terminals") {
-  write({ terminals: surfaces.map((surface) => ({ surface_ref: surface.ref, surface_id: surface.id, current_directory: cwd, runtime_surface_ready: surface.ref !== "surface:bench-spawn" || state.runtimeReady === true, ghostty_surface_ptr: surface.ref !== "surface:bench-spawn" || state.runtimeReady === true ? "0x1234" : "nil" })) });
+  write({ terminals: surfaces.map((surface) => { const ready = spawnedSurfaces.find((spawned) => spawned.ref === surface.ref)?.runtimeReady !== false; return { surface_ref: surface.ref, surface_id: surface.id, current_directory: cwd, runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }; }) });
 } else if (command === "read-screen") {
   const surface = args[args.indexOf("--surface") + 1] || surfaces[0].ref;
   const surfaceState = readSurfaceState(surface);
@@ -427,7 +429,9 @@ if (command === "list-workspaces") {
   write({ ok: true });
 } else if (command === "send-key") {
   const surface = optionValue("--surface", surfaces[0].ref);
-  if (["surface:bench-spawn", spawnedSurface.id].includes(surface) && (args.at(-1) || "").toLowerCase() === "ctrl-u") patchState({ runtimeReady: true });
+  if ((args.at(-1) || "").toLowerCase() === "ctrl-u") {
+    writeState({ ...state, spawnedSurfaces: spawnedSurfaces.map((spawned) => [spawned.ref, spawned.id].includes(surface) ? { ...spawned, runtimeReady: true } : spawned) });
+  }
   const surfaceState = readSurfaceState(surface);
   if ((args.at(-1) || "").toLowerCase() === "return") {
     surfaceState.transcript = surfaceState.composer;
@@ -436,6 +440,8 @@ if (command === "list-workspaces") {
   }
   write({ ok: true });
 } else if (command === "rename-tab") {
+  const target = optionValue("--surface", "");
+  state.spawnedSurfaces = spawnedSurfaces.map((surface) => [surface.ref, surface.id].includes(target) ? { ...surface, title: args.at(-1) || surface.title } : surface);
   state.title = args.at(-1) || state.title;
   writeState(state);
   write({ ok: true });
@@ -451,6 +457,7 @@ if (command === "list-workspaces") {
 async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
   const surfaceStates = new Map();
   const surfaceMutationQueues = new Map();
+  const fakeStateMutationQueue = { current: Promise.resolve() };
   const server = net.createServer((socket) => {
     // Benchmark clients may disappear while the fake server is replying.
     // Treat that expected teardown reset as connection-local evidence, not an
@@ -471,6 +478,7 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
           surfaceCount,
           surfaceStates,
           surfaceMutationQueues,
+          fakeStateMutationQueue,
         ).catch((error) => socket.destroy(error));
       }
     });
@@ -488,6 +496,25 @@ function fakeSurfaceStateKey(surfaceIdentifier, surfaces) {
       candidate.ref === surfaceIdentifier || candidate.id === surfaceIdentifier,
   );
   return surface?.ref ?? surfaceIdentifier;
+}
+
+function spawnedSurfaceId(sequence) {
+  return `00000000-0000-4000-8000-${String(900000000000 + sequence).padStart(12, "0")}`;
+}
+
+function spawnedSurfaceRef(sequence) {
+  return `surface:bench-${String(sequence).padStart(5, "0")}`;
+}
+
+async function mutateFakeState(statePath, queue, mutate) {
+  const operation = queue.current.then(async () => {
+    const state = await readFakeState(statePath);
+    const updated = mutate(state);
+    await writeFakeState(statePath, updated);
+    return updated;
+  });
+  queue.current = operation.then(() => undefined, () => undefined);
+  return operation;
 }
 
 function mutateFakeSurfaceState(
@@ -523,6 +550,7 @@ async function handleFakeCmuxSocketLine(
   surfaceCount,
   surfaceStates,
   surfaceMutationQueues,
+  fakeStateMutationQueue,
 ) {
   if (!line.startsWith("{")) {
     socket.write(`${line.startsWith("list_status") ? "[]" : "OK"}\n`);
@@ -541,16 +569,17 @@ async function handleFakeCmuxSocketLine(
     selected: index === 0,
     current_directory: cwd,
   }));
-  const spawned = {
-    ref: "surface:bench-spawn",
-    id: "00000000-0000-4000-8000-999999999999",
-    title: state.title ?? "bench-spawn",
-    type: "terminal",
-    index: surfaceCount,
-    selected: false,
-    current_directory: cwd,
-  };
-  const surfaces = state.closed ? baseSurfaces : [...baseSurfaces, spawned];
+  const spawnedSurfaces = state.spawnedSurfaces ?? [];
+  const surfaces = [
+    ...baseSurfaces,
+    ...spawnedSurfaces.filter((surface) => !surface.closed).map((surface, index) => ({
+      ...surface,
+      type: "terminal",
+      index: surfaceCount + index,
+      selected: false,
+      current_directory: cwd,
+    })),
+  ];
   const layout = {
     workspace_ref: "workspace:bench",
     window_ref: "window:bench",
@@ -636,16 +665,32 @@ async function handleFakeCmuxSocketLine(
       };
       break;
     }
-    case "surface.split":
-      await writeFakeState(statePath, { ...state, closed: false, runtimeReady: false });
+    case "surface.split": {
+      const updated = await mutateFakeState(statePath, fakeStateMutationQueue, (current) => {
+        const currentSurfaces = current.spawnedSurfaces ?? [];
+        const spawnSequence = (current.spawnSequence ?? 0) + 1;
+        const primary = !currentSurfaces.some((surface) => surface.primary && !surface.closed);
+        const surface = {
+          ref: spawnedSurfaceRef(spawnSequence),
+          id: spawnedSurfaceId(spawnSequence),
+          title: primary ? current.title ?? "bench-spawn" : "bench-extra",
+          primary,
+          runtimeReady: false,
+          closed: false,
+        };
+        return { ...current, spawnSequence, spawnedSurfaces: [...currentSurfaces, surface] };
+      });
+      const surface = updated.spawnedSurfaces.at(-1);
+      surfaceStates.delete(surface.ref);
       result = {
         ...layout,
-        surface_ref: spawned.ref,
-        surface_id: spawned.id,
-        title: spawned.title,
+        surface_ref: surface.ref,
+        surface_id: surface.id,
+        title: surface.title,
         type: "terminal",
       };
       break;
+    }
     case "surface.send_text": {
       const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
       await mutateFakeSurfaceState(
@@ -662,8 +707,14 @@ async function handleFakeCmuxSocketLine(
     }
     case "surface.send_key": {
       const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
-      if ([spawned.ref, spawned.id].includes(params.surface_id) && String(params.key).toLowerCase() === "ctrl-u") {
-        await writeFakeState(statePath, { ...state, runtimeReady: true });
+      if (String(params.key).toLowerCase() === "ctrl-u") {
+        await mutateFakeState(statePath, fakeStateMutationQueue, (current) => ({
+          ...current,
+          spawnedSurfaces: (current.spawnedSurfaces ?? []).map((surface) =>
+            [surface.ref, surface.id].includes(params.surface_id)
+              ? { ...surface, runtimeReady: true }
+              : surface),
+        }));
       }
       await mutateFakeSurfaceState(
         surfaceKey,
@@ -682,14 +733,24 @@ async function handleFakeCmuxSocketLine(
       break;
     }
     case "surface.close":
-      await writeFakeState(statePath, { ...state, closed: true });
+      await mutateFakeState(statePath, fakeStateMutationQueue, (current) => ({
+        ...current,
+        spawnedSurfaces: (current.spawnedSurfaces ?? []).map((surface) =>
+          [surface.ref, surface.id].includes(params.surface_id)
+            ? { ...surface, closed: true }
+            : surface),
+      }));
       result = { ok: true };
       break;
     case "tab.action":
-      await writeFakeState(statePath, {
-        ...state,
-        title: params.title ?? state.title,
-      });
+      await mutateFakeState(statePath, fakeStateMutationQueue, (current) => ({
+        ...current,
+        title: params.title ?? current.title,
+        spawnedSurfaces: (current.spawnedSurfaces ?? []).map((surface) =>
+          [surface.ref, surface.id].includes(params.surface_id)
+            ? { ...surface, title: params.title ?? surface.title }
+            : surface),
+      }));
       result = { ok: true };
       break;
     case "workspace.select":
@@ -1012,6 +1073,11 @@ async function measureSpawnLifecycleOnce(
   if (!spawnResult.agent_id || !spawnResult.surface_id) {
     throw new Error(`spawn_agent omitted identity: ${compact(spawnResult)}`);
   }
+  if (!/^cmuxlayerCodex-[a-z0-9]{8}$/.test(spawnResult.agent_id)) {
+    throw new Error(
+      `benchmark spawn was not the managed Codex agent: ${spawnResult.agent_id}`,
+    );
+  }
 
   const measureSend = async (
     args,
@@ -1041,6 +1107,9 @@ async function measureSpawnLifecycleOnce(
         ...args,
         ...(canonicalText ? { text: canonicalText } : {}),
         ...(normalizeAgentId ? { agent_id: "$SPAWNED_AGENT_ID" } : {}),
+        ...(args.mode === "surface" && canonicalText
+          ? { surface: "surface:bench-spawn" }
+          : {}),
       }),
       lock_hold_ms: requireFiniteLockHold(
         receipt.timings_ms?.lock_hold,
@@ -1101,7 +1170,7 @@ async function measureSpawnLifecycleOnce(
           client,
           terminal,
           surfaceArgs,
-          "surface:bench-spawn",
+          spawnResult.surface_id,
           "sampled surface send",
         );
         surfaceWaitFor = {
@@ -1427,6 +1496,7 @@ async function main() {
     : join(repoRoot, "docs.local", "scratch", "run5r3");
   await mkdir(scratchRoot, { recursive: true });
   const tempRoot = await mkdtemp(join(scratchRoot, "b-"));
+  await mkdir(join(tempRoot, "home"), { recursive: true });
   const socketScratchRoot = join(
     homedir(),
     ".local",
@@ -1461,6 +1531,7 @@ async function main() {
   const sweepHoldState = join(tempRoot, "sweep-hold-state.json");
   const baseEnv = {
     ...process.env,
+    HOME: join(tempRoot, "home"),
     CMUX_AGENT_ID: "",
     CMUX_SURFACE_ID: "",
     CMUX_WORKSPACE_ID: "",
@@ -1470,6 +1541,7 @@ async function main() {
     CMUXLAYER_BENCH_SURFACES: String(surfaceCount),
     CMUXLAYER_BENCH_STATE: fakeCmuxState,
     CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
+    CMUXLAYER_INBOX_BASE_DIR: join(tempRoot, "inbox"),
     CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
     CMUXLAYER_SWEEP_INTERVAL_MS: "1000",
     CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "1000",
@@ -1869,7 +1941,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exit(1);
-});
+export { startFakeCmuxSocket, writeFakeCmux };
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : String(error));
+    process.exit(1);
+  });
+}
