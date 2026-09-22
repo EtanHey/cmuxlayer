@@ -177,7 +177,7 @@ const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const CODEX_READY_PLACEHOLDER_RE =
-  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)\s*$/;
+  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/;
 const isReadyComposerLine = (line: string): boolean =>
   BARE_READY_PROMPT_RE.test(line) || CODEX_READY_PLACEHOLDER_RE.test(line);
 const PICKER_BLOCK_WINDOW_LINES = 32;
@@ -1752,12 +1752,7 @@ function hasPendingComposerDraft(
     const match = line.match(/^\s*[❯›]\s+(.+)$/);
     if (!match) continue;
     const input = match[1]?.trim() ?? "";
-    // Codex also uses this example prompt after closing its model/update menus.
-    if (
-      !input ||
-      CODEX_READY_PLACEHOLDER_RE.test(line) ||
-      (agentType === "codex" && input === "Find and fix a bug in @filename")
-    ) return false;
+    if (!input || CODEX_READY_PLACEHOLDER_RE.test(line)) return false;
     const below = tail.slice(i + 1).filter((row) => row.trim());
     return below.every(
       (row) =>
