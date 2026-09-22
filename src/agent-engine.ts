@@ -1384,7 +1384,7 @@ export type AgentLaunchMode = "launcher" | "raw";
 export type ModelPinSource = "launcher" | "cli_flag" | "cli_default";
 
 /**
- * Model tokens in this repo are LAUNCHER vocabulary: `claude-opus-5[1m]`,
+ * Model tokens in this repo are LAUNCHER vocabulary: `claude-opus-5-5[1m]`,
  * `pro`, `codex`, `auto`. Raw binaries do not share it. This returns the token
  * that is safe to hand a raw CLI, or null when the pin cannot be expressed.
  *

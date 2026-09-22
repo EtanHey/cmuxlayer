@@ -77,11 +77,11 @@ export const MODEL_POLICY_CONTRACT: {
       modelAliases: {},
     },
     claude: {
-      defaultModel: "claude-opus-5[1m]",
+      defaultModel: "claude-opus-5-5[1m]",
       allowModelOverrideByDefault: true,
       forbiddenModelPatterns: [],
       modelAliases: {
-        opus: "opus",
+        opus: "claude-opus-5-5[1m]",
         sonnet: "sonnet",
         haiku: "haiku",
       },
@@ -138,7 +138,8 @@ function modelAliasUsesUngatedLauncherPath(
   cli: CliType,
   alias: string,
 ): boolean {
-  if (cli === "claude") return alias === "sonnet";
+  if (cli === "claude")
+    return alias === "sonnet" || modelMatchesDefault(cli, alias);
   return cli === "gemini" || cli === "kiro";
 }
 

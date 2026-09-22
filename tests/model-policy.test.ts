@@ -15,7 +15,7 @@ describe("model policy contract", () => {
     });
     expect(MODEL_POLICY_CONTRACT.cli.gemini.defaultModel).toBe("pro");
     expect(MODEL_POLICY_CONTRACT.cli.claude.defaultModel).toBe(
-      "claude-opus-5[1m]",
+      "claude-opus-5-5[1m]",
     );
     expect(MODEL_POLICY_CONTRACT.cli.codex.defaultModel).toBe("codex");
     expect(MODEL_POLICY_CONTRACT.cli.codex.allowModelOverrideByDefault).toBe(
@@ -62,7 +62,7 @@ describe("model policy contract", () => {
       "auto",
     );
     expect(resolveSpawnModelPolicy("claude", undefined, {}).effective_model).toBe(
-      "claude-opus-5[1m]",
+      "claude-opus-5-5[1m]",
     );
     expect(resolveSpawnModelPolicy("gemini", undefined, {}).effective_model).toBe(
       "pro",
@@ -82,6 +82,22 @@ describe("model policy contract", () => {
     );
   });
 
+  it("resolves the Claude opus alias and explicit newest model to the default", () => {
+    const canonical = "claude-opus-5-5[1m]";
+    expect(resolveModelAlias("claude", "opus")).toBe(
+      canonical,
+    );
+    for (const requested of ["opus", canonical]) {
+      expect(resolveSpawnModelPolicy("claude", requested, {})).toMatchObject({
+        requested_model: requested,
+        effective_model: canonical,
+        launcher_model: null,
+        coerced: false,
+        override_allowed: false,
+      });
+    }
+  });
+
   it("advertises only Claude models reachable without the override gate", () => {
     let message = "";
     try {
@@ -90,9 +106,9 @@ describe("model policy contract", () => {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toContain(
-      "Accepted models: claude-opus-5[1m], sonnet.",
+      "Accepted models: claude-opus-5-5[1m], opus, sonnet.",
     );
-    expect(message).not.toMatch(/haiku|, opus/);
+    expect(message).not.toMatch(/haiku/);
     expect(() => resolveSpawnModelPolicy("claude", "haiku", {})).toThrow(
       /Unsupported model "haiku"/,
     );
