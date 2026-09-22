@@ -186,12 +186,34 @@ describe("spawn response shaping", () => {
           next_action: expect.stringContaining('read_screen({surface:"surface:1"})'),
           boot_prompt_receipt: { submit_verified } });
         expect(result.structuredContent.next_action).toContain('send_to({mode:"key"');
-        expect(result.structuredContent.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+        expect(result.structuredContent.next_action).toMatch(/Boot prompt submission was not verified/i);
+        expect(result.structuredContent.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
         expect(result.content[0]!.text).toMatch(
           /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
         );
       }
     }
+  });
+
+  it("describes the observed 0.4.80 Claude boot receipt without inventing exhausted retries", () => {
+    const result = buildSpawnToolReturn({
+      ...base,
+      spawn_state: "boot_unsubmitted",
+      boot_prompt_receipt: {
+        delivered: false,
+        typed: true,
+        submit_attempted: true,
+        submit_dispatched: false,
+        submit_verified: null,
+        submitted: false,
+        retry_count: 0,
+        rpc_methods: [],
+        delivery_state: "pending_verify",
+      },
+    });
+
+    expect(result.structuredContent.next_action).toMatch(/Return was not dispatched/i);
+    expect(result.structuredContent.next_action).not.toMatch(/retries.*exhausted/i);
   });
 
   it.each([

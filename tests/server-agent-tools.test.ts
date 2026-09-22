@@ -766,7 +766,7 @@ describe("lean spawn tool responses", () => {
           boot_prompt_receipt: { typed: true, submitted: false, terminal: true,
             retry_count: 1, submit_verified: false },
         });
-        expect(result.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+        expect(result.next_action).toMatch(/after 1 automatic Return retry/i);
         expect(result.next_action).not.toMatch(/never .*manual Return/i);
       }
       // One Return launches the CLI; two more are the bounded prompt submit attempts.
@@ -7735,7 +7735,7 @@ describe("agent lifecycle tool handlers", () => {
         next_action: expect.stringContaining("never re-spawn"),
         delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
       expect(parsed.next_action).toContain('send_to({mode:"key"');
-      expect(parsed.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+      expect(parsed.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
       const call = parsed.next_action.match(/read_screen\((\{.*?\})\)/)?.[1];
       const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
       const sendResult = parseToolResult(await readScreen.handler(sendArgs, {} as any));
@@ -7811,7 +7811,8 @@ describe("agent lifecycle tool handlers", () => {
       /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
     );
     expect(result.spawn_state).toBe("boot_unsubmitted");
-    expect(result.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+    expect(result.next_action).toMatch(/Boot prompt submission was not verified/i);
+    expect(result.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
     expect(result.surface_id).toBe("surface:new");
     expect(result.boot_prompt_receipt).toMatchObject({
       delivery_state: "queued",
