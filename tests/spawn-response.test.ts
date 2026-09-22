@@ -185,7 +185,8 @@ describe("spawn response shaping", () => {
           surface_id: "surface:1", workspace_id: "workspace:1",
           next_action: expect.stringContaining('read_screen({surface:"surface:1"})'),
           boot_prompt_receipt: { submit_verified } });
-        expect(result.structuredContent.next_action).not.toContain('send_to({mode:"key"');
+        expect(result.structuredContent.next_action).toContain('send_to({mode:"key"');
+        expect(result.structuredContent.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
         expect(result.content[0]!.text).toMatch(
           /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
         );

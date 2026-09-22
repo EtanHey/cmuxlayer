@@ -333,7 +333,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       if (kind.startsWith("leading-blank")) screen = render("\nprivate human draft");
       exec.mockClear();
       const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return", engineSubmitProof: "launcher_pending_command" }, (kind === "shared-owner" || kind === "shared-other") ? peer : server));
-      if (kind === "owned" || kind === "unchanged-space" || kind === "prefix-read" || kind === "shared-owner" || kind.endsWith("-control") || kind === "picker" || kind === "permission") {
+      if (kind === "owned" || kind === "unchanged-space" || kind === "prefix-read" || kind === "shared-owner" || (kind === "auto-spent" && cli === "claude") || kind.endsWith("-control") || kind === "picker" || kind === "permission") {
         expect(result.ok).toBe(true);
         expect(mutatedPane(exec)).toBe(true);
         if (kind === "shared-owner") {
@@ -1838,7 +1838,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     expect(harness.returnPresses()).toBe(2);
   }, 20_000);
 
-  it("returns nonterminal pending_verify when one recovery Return still leaves the observed payload pending", async () => {
+  it("fails honestly when one recovery Return still leaves the observed boot payload pending", async () => {
     const { createServer } = await loadServerModule();
     const harness = makeCodexBootExec({
       payloadAppears: true,
@@ -1860,14 +1860,11 @@ describe("boot-submit readiness and attributable evidence", () => {
     );
     const parsed = parseToolResult(result);
 
-    expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_receipt).toMatchObject({
-      terminal: false,
-      delivered: false,
-      delivery_state: "pending_verify",
-      submit_verified: null,
-      retry_count: 1,
-    });
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivered_chars).toBeGreaterThan(0);
+    expect(parsed.error).toMatch(
+      /boot prompt delivery failed.*submit could not be verified/i,
+    );
     expect(harness.returnPresses()).toBe(2);
   }, 20_000);
 });

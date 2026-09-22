@@ -128,6 +128,7 @@ function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
   bootPromptFailure?: "return" | "surface-gone";
+  requiredPromptReturns?: number;
   shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
@@ -139,6 +140,7 @@ function makeLifecycleExec(opts?: {
   let activeCli: "claude" | "codex" | "cursor" = "claude";
   let createdSurfaceCount = 0;
   let bootPromptReturnFailures = 0;
+  let promptReturns = 0;
   let currentSurface = "surface:new";
   const listedSurface = () =>
     surfaceLive
@@ -184,6 +186,10 @@ function makeLifecycleExec(opts?: {
         ) {
           throw new Error("Return delivery failed");
         }
+        promptReturns += 1;
+        if (promptReturns < (opts?.requiredPromptReturns ?? 1)) {
+          return { stdout: "{}", stderr: "" };
+        }
         readyText =
           activeCli === "codex"
             ? `${pendingText}\n${workingText()}`
@@ -216,6 +222,7 @@ function makeLifecycleExec(opts?: {
         )
       ) {
         promptPending = true;
+        promptReturns = 0;
         pendingText = text;
         if (activeCli === "codex") {
           readyText = [
@@ -699,6 +706,61 @@ describe("lean spawn tool responses", () => {
       ),
     ).toBe(false);
   });
+
+  it.each([
+    { requiredPromptReturns: 2, recovered: true },
+    { requiredPromptReturns: 99, recovered: false },
+  ])(
+    "#636 D1 Claude boot recovery is bounded (Returns=$requiredPromptReturns)",
+    async ({ requiredPromptReturns, recovered }) => {
+      mkdirSync(TEST_DIR, { recursive: true });
+      const promptPath = join(TEST_DIR, `claude-recovery-${requiredPromptReturns}.md`);
+      writeFileSync(promptPath, "Claude boot recovery specimen", "utf8");
+      const exec = makeLifecycleExec({ requiredPromptReturns });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      });
+      const result = parseToolResult(
+        await (server as any)._registeredTools.spawn_agent.handler(
+          {
+            repo: "brainlayer",
+            model: "sonnet",
+            cli: "claude",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 1_000,
+          },
+          {} as any,
+        ),
+      );
+      const returnCount = (exec as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([, args]) => args.includes("send-key") && args.includes("return"),
+      ).length;
+
+      if (recovered) {
+        expect(result).toMatchObject({
+          ok: true,
+          boot_prompt_delivered: true,
+          boot_prompt_submit_verified: true,
+          boot_prompt_receipt: { typed: true, retry_count: 1, submit_verified: true },
+        });
+      } else {
+        expect(result).toMatchObject({
+          ok: true,
+          spawn_state: "boot_unsubmitted",
+          boot_prompt_delivered: false,
+          boot_prompt_receipt: { typed: true, retry_count: 1, submit_verified: false },
+        });
+        expect(result.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
+        expect(result.next_action).not.toMatch(/never .*manual Return/i);
+      }
+      // One Return launches the CLI; two more are the bounded prompt submit attempts.
+      expect(returnCount).toBe(3);
+    },
+    10_000,
+  );
 
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {
     const exec = makeLifecycleExec();
@@ -7456,7 +7518,8 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed).toMatchObject({ ok: true, spawn_state: "boot_unsubmitted",
         next_action: expect.stringContaining("never re-spawn"),
         delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
-      expect(parsed.next_action).not.toContain('send_to({mode:"key"');
+      expect(parsed.next_action).toContain('send_to({mode:"key"');
+      expect(parsed.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
       const call = parsed.next_action.match(/read_screen\((\{.*?\})\)/)?.[1];
       const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
       const sendResult = parseToolResult(await readScreen.handler(sendArgs, {} as any));
@@ -7532,7 +7595,7 @@ describe("agent lifecycle tool handlers", () => {
       /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
     );
     expect(result.spawn_state).toBe("boot_unsubmitted");
-    expect(result.next_action).toContain("never re-spawn");
+    expect(result.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
     expect(result.surface_id).toBe("surface:new");
     expect(result.boot_prompt_receipt).toMatchObject({
       delivery_state: "queued",

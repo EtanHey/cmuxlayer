@@ -6,10 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createServer,
+  __bootPromptReceiptTestHooks,
   __leanReceiptTestHooks,
   __submitEvidenceTestHooks,
 } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-enter-reliability-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-enter-reliability-test.sock";
@@ -717,6 +719,131 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
+  it.each(["claude", "codex"] as const)(
+    "#636 D1 submits an idle %s composer within 5s when the first Return is lost",
+    async (cli) => {
+      const client = new FakeClaudeSurfaceClient();
+      client.cli = cli;
+      client.requiredReturns = 2;
+      server = createReliabilityServer(client);
+      registerAgent(server, { cli, state: "ready" });
+
+      const startedAt = Date.now();
+      let settled = false;
+      const resultPromise = server._registeredTools.send_to
+        .handler({
+        agent_id: "agent-1",
+        text: `D1 ${cli} lost Return`,
+        press_enter: true,
+        }, {} as any)
+        .then((value: any) => {
+          settled = true;
+          return value;
+        });
+      for (let elapsed = 0; elapsed < 5_000 && !settled; elapsed += 100) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      const result = await resultPromise;
+      const parsed = parseResult(result);
+      const finalScreen = client.screenReads.at(-1) ?? "";
+
+      expect(parsed).toMatchObject({
+        delivery_state: "submitted",
+        submit_verified: true,
+        retry_count: 1,
+      });
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(5_000);
+      expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
+      expect(
+        __submitEvidenceTestHooks.screenShowsPendingInput(
+          finalScreen,
+          `D1 ${cli} lost Return`,
+        ),
+      ).toBe(false);
+      expect(finalScreen).toMatch(cli === "claude" ? /Working/ : /Working \(/);
+    },
+    10_000,
+  );
+
+  it("#636 D1 lets the original caller submit its exhausted owned Claude draft", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 3;
+    server = createReliabilityServer(client);
+    const target = registerAgent(server, { cli: "claude", state: "ready" });
+    const asCaller = <T>(operation: () => T) =>
+      runWithCallerContext({ surfaceId: target.surface_id }, operation);
+
+    const initialPromise = asCaller(() =>
+      server._registeredTools.send_to.handler(
+        {
+          agent_id: target.agent_id,
+          text: "D1 caller-owned exhausted draft",
+          press_enter: true,
+        },
+        {} as any,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+    const initial = parseResult(await initialPromise);
+    expect(initial).toMatchObject({
+      delivery_state: "pending_verify",
+      retry_count: 1,
+      typed: true,
+      submit_verified: null,
+    });
+
+    const recoveredPromise = asCaller(() =>
+      server._registeredTools.send_to.handler(
+        {
+          mode: "key",
+          surface: target.surface_id,
+          workspace: target.workspace_id ?? undefined,
+          text: "return",
+        },
+        {} as any,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    const recovered = parseResult(await recoveredPromise);
+    const finalScreen = client.screenReads.at(-1) ?? "";
+
+    expect(recovered.error_code).not.toBe("blocked_by_foreign_draft");
+    expect(recovered).toMatchObject({
+      ok: true,
+      key_dispatched: true,
+      submit_verified: true,
+    });
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(3);
+    expect(
+      __submitEvidenceTestHooks.screenShowsPendingInput(
+        finalScreen,
+        "D1 caller-owned exhausted draft",
+      ),
+    ).toBe(false);
+    expect(finalScreen).toContain("Working");
+  }, 10_000);
+
+  it.each([
+    { deliveredChars: 21, typed: false, expectedTyped: true },
+    { deliveredChars: 0, typed: false, expectedTyped: false },
+  ])(
+    "#636 D1 preserves Codex typed truth after a later refusal ($deliveredChars chars)",
+    ({ deliveredChars, typed, expectedTyped }) => {
+      expect(
+        __bootPromptReceiptTestHooks.failureMutationEvidence({
+          delivered_chars: deliveredChars,
+          typed,
+          submit_dispatched: false,
+          rpc_methods: deliveredChars > 0 ? ["surface.send_text"] : [],
+        }),
+      ).toMatchObject({
+        typed: expectedTyped,
+        submit_attempted: false,
+        submit_dispatched: false,
+      });
+    },
+  );
+
   it("verifies a cleared idle composer without waiting for working status", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
@@ -1277,16 +1404,16 @@ describe("enter reliability", () => {
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.retry_count).toBe(0);
+    expect(parsed.retry_count).toBe(1);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
+      2,
     );
     expect(
       events.some(
         (event) =>
           event.event_type === "send_to" &&
           event.delivery_state === "pending_verify" &&
-          event.retry_count === 0,
+          event.retry_count === 1,
       ),
     ).toBe(true);
   }, 10_000);

@@ -11006,7 +11006,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(1);
   }, 10_000);
 
-  it("new_split fails loudly when a short boot prompt stays pending without retrying Return", async () => {
+  it("new_split fails loudly when a short boot prompt stays pending after one recovery Return", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "split-short-dropped-return.md");
     const prompt = "short boot prompt";
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -11066,18 +11066,12 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(false);
-    expect(parsed.boot_prompt_receipt).toMatchObject({
-      delivered: false,
-      terminal: false,
-      typed: true,
-      submit_attempted: true,
-      submit_verified: null,
-      delivery_state: "pending_verify",
-      retry_count: 1,
-    });
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivered_chars).toBeGreaterThan(0);
+    expect(parsed.error).toMatch(
+      /boot prompt delivery failed.*submit could not be verified/i,
+    );
     expect(returnPresses).toBe(2);
   }, 10_000);
 
