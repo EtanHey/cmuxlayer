@@ -145,6 +145,10 @@ class FakeClaudeSurfaceClient {
   private returnCount = 0;
   private queuedCodexReadsRemaining = 0;
   private mode: "idle" | "working" = "idle";
+
+  startWorking() {
+    this.mode = "working";
+  }
   transportHealth: {
     mode: "socket";
     degraded: boolean;
@@ -1594,6 +1598,8 @@ describe("enter reliability", () => {
   it("does not false-fail send_input to a busy cached agent surface", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
+    client.startWorking();
+    client.keepWorkingStatusWhilePending = true;
     server = createReliabilityServer(client);
     registerAgent(server, { state: "working" });
 
@@ -1610,6 +1616,7 @@ describe("enter reliability", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
+    expect(client.screenReads[0]).toContain("✻ Working");
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
