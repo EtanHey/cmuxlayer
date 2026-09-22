@@ -12306,7 +12306,7 @@ describe("tool handler integration", () => {
 
     expect(degradedResult.isError).toBe(true);
     expect(degradedResult.structuredContent?.error).toMatch(
-      /could not be resolved in fresh topology/i,
+      /is no longer live; refusing close_surface/i,
     );
     expect(stateMgr.readState("worker-degraded-ref-owner")).toMatchObject({
       user_killed: false,

@@ -819,6 +819,7 @@ const DeliveryOutputShape = {
       "failed",
       "pending_verify",
       "failed_confirmed",
+      "stalled_queue",
     ])
     .optional(),
   delivery_state: z
@@ -831,6 +832,7 @@ const DeliveryOutputShape = {
       "failed",
       "pending_verify",
       "failed_confirmed",
+      "stalled_queue",
     ])
     .optional(),
   terminal: z.boolean().optional(),
@@ -1178,7 +1180,8 @@ type PublicDeliveryState =
   | "rescued"
   | "failed"
   | "pending_verify"
-  | "failed_confirmed";
+  | "failed_confirmed"
+  | "stalled_queue";
 
 export interface PublicDeliveryReceipt {
   delivered: boolean;
@@ -1402,7 +1405,8 @@ export function buildPublicDeliveryReceipt(input: {
     input.delivery_state === "rescued" ||
     input.delivery_state === "failed" ||
     input.delivery_state === "pending_verify" ||
-    input.delivery_state === "failed_confirmed"
+    input.delivery_state === "failed_confirmed" ||
+    input.delivery_state === "stalled_queue"
       ? input.delivery_state
       : input.delivery_state === "submitted" && input.submit_verified === true
         ? "submitted"
@@ -1412,7 +1416,8 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "submitted" ||
     evidencedState === "rescued" ||
     evidencedState === "failed" ||
-    evidencedState === "failed_confirmed";
+    evidencedState === "failed_confirmed" ||
+    evidencedState === "stalled_queue";
   const warning =
     input.WARNING ??
     defaultNonDeliveryWarning(
@@ -1481,6 +1486,10 @@ function defaultNonDeliveryWarning(
       );
     case "failed":
     case "failed_confirmed":
+    case "stalled_queue":
+      if (state === "stalled_queue") {
+        return "STALLED QUEUE — the target is idle but still shows the queued message. Inspect its pane and use Escape to release it, then verify delivery before retrying.";
+      }
       if (typed || rpcMethods.includes("surface.send_text")) {
         return submitDispatched || rpcMethods.includes("surface.send_key")
           ? `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}) after ` +
@@ -6794,16 +6803,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
-      const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
+      const targetAgent = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+      const targetCli = targetAgent?.cli;
       const submitAttempted = isSubmitKey(key);
       const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
       const submitBaseline = submitAttempted && !opts.engineSubmitProof
         ? await readParsedSurface(opts.surface, opts.workspace) : null;
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
+      const ownedQueuedReceipt = callerSubmit && targetAgent && submitBaseline &&
+        targetCli === "codex"
+        ? context.lifecycleSweepEngine?.listDeliveryReceipts().find((receipt) =>
+            receipt.agent_id === targetAgent.agent_id &&
+            receipt.delivery_state === "queued" &&
+            receipt.composer_accepted === true &&
+            receipt.press_enter &&
+            screenShowsQueuedAgentInput(submitBaseline.text, receipt.text)
+          )
+        : undefined;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
           (targetCli && ["claude", "codex", "cursor"].includes(targetCli) &&
             submitBaseline.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(submitBaseline.text) &&
-            extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null))) {
+            extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null &&
+            !ownedQueuedReceipt))) {
         typedDraftOwners.delete(ownerKey);
         throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
       }
@@ -6812,13 +6833,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !isPickerOrMenuScreen(submitBaseline.text)) {
         const owner = typedDraftOwners.get(ownerKey);
         const caller = resolveCurrentCallerAgent()?.agent_id;
-        const ownedText = caller && owner?.caller === caller && owner.fp === draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000 ? owner.text : "";
-        if (composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
+        const ownedText = caller && owner?.caller === caller && owner.fp === draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000 ? owner.text : (ownedQueuedReceipt?.text ?? "");
+        const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
+        const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
+        if ((!ownedQueuedReceipt || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
           typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
-        const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
-        if (rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
+        if (!ownedQueuedReceipt && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
         if (!composerHoldsForeignDraft(submitBaseline.text, "", { cli: targetCli })) typedDraftOwners.delete(ownerKey);
@@ -9060,7 +9082,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       throw new Error(diagnostic ? `${occupancy} (${diagnostic})` : occupancy);
     };
 
-    if (topology?.complete === true) {
+    if (topology) {
       const uuidTargetRef = findSurfaceRefByUuid(topology, requestedSurface);
       captureSurfaceIdentities(topology.surfaceIdByRef, topologyObserverEpoch);
       const currentUuidAtRequestedRef =
@@ -9096,16 +9118,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const workspace = observedWorkspace ?? explicitWorkspace;
         const assertCurrent = async (): Promise<void> => {
           const current = await collectSurfaceTopology();
-          const currentRefForUuid =
-            current?.complete === true
-              ? findSurfaceRefByUuid(current, stableUuid)
-              : null;
+          const currentRefForUuid = current
+            ? findSurfaceRefByUuid(current, stableUuid)
+            : null;
           const currentWorkspace = currentRefForUuid
             ? current?.workspaceBySurface.get(currentRefForUuid)
             : null;
           if (
             !current ||
-            current.complete !== true ||
             currentRefForUuid !== currentRef ||
             (currentWorkspace ?? null) !== (workspace ?? null)
           ) {
@@ -9122,6 +9142,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stableSurfaceIdentity: stableUuid,
           assertCurrent,
         });
+      }
+
+      if (topology.complete !== true) {
+        if (topology.surfaceIdByRef.size > 0 || topology.surfaceRefById.size > 0) {
+          throwStaleSurfaceRef("Fresh topology was incomplete and did not prove a stable UUID");
+        }
+        // Legacy/mock connectors expose no stable identity. Retain their
+        // ref-only I/O fallback; a partial UUID-backed observation never gets it.
+        return {
+          surface: requestedSurface,
+          workspace: explicitWorkspace,
+          title: null,
+          stableSurfaceIdentity: null,
+          assertCurrent: async () => {},
+        };
       }
 
       if (
@@ -14008,10 +14043,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           current = await timeDeliveryPhase(args.timings, "enumerate", () =>
             engine.resolveAgentIoRoute(args.agent_id),
           );
-        } catch {
+        } catch (error) {
           throw new Error(
-            `Agent "${args.agent_id}" surface route changed during terminal ` +
-              `delivery; refusing to continue on another surface.`,
+            `Agent "${args.agent_id}" route re-resolution failed before terminal ` +
+              `delivery: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
           );
         }
         if (
@@ -14574,7 +14610,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
-          return { outcome: "pending" as const };
+          return {
+            outcome: "pending" as const,
+            ...(queued &&
+              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.control_state === "ready" &&
+              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.status === "idle"
+              ? { reason: "queued_idle" }
+              : {}),
+          };
         }
         const composerCleared = composer !== null && composer.trim() === "";
         const correlationTail = receipt.text
@@ -18728,6 +18771,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 rpc_methods: errorRpcMethods,
                 timings_ms: timings,
               }),
+              retry_safe:
+                errorRpcMethods.length === 0 &&
+                !errorTyped &&
+                !errorSubmitDispatched,
             };
             throw error;
           }

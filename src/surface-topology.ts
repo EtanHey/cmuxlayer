@@ -264,23 +264,30 @@ export async function enumerateAllWindowWorkspaces(
           complete = false;
           return [] as CmuxWorkspace[];
         }
-        const listed = await client.listWorkspaces({ window: windowTarget });
-        if (!Array.isArray(listed.workspaces)) {
-          throw new Error(
-            `Malformed cmux workspace enumeration for ${windowTarget}`,
-          );
-        }
-        if (
-          typeof window.workspace_count === "number"
-            ? listed.workspaces.length !== window.workspace_count
-            : listed.workspaces.length === 0
-        ) {
+        try {
+          const listed = await client.listWorkspaces({ window: windowTarget });
+          if (!Array.isArray(listed.workspaces)) {
+            throw new Error(
+              `Malformed cmux workspace enumeration for ${windowTarget}`,
+            );
+          }
+          if (
+            typeof window.workspace_count === "number"
+              ? listed.workspaces.length !== window.workspace_count
+              : listed.workspaces.length === 0
+          ) {
+            complete = false;
+          }
+          return listed.workspaces.map((workspace) => ({
+            ...workspace,
+            window_ref: workspace.window_ref ?? windowTarget,
+          }));
+        } catch {
+          // A failed window is unknown, while other windows still provide
+          // positive UUID evidence. Only a complete snapshot proves absence.
           complete = false;
+          return [] as CmuxWorkspace[];
         }
-        return listed.workspaces.map((workspace) => ({
-          ...workspace,
-          window_ref: workspace.window_ref ?? windowTarget,
-        }));
       }),
     );
     const byRef = new Map<string, CmuxWorkspace>();
@@ -323,8 +330,8 @@ export async function enumerateAllWindowWorkspacesWithRetry(
   const first = await enumerateAllWindowWorkspaces(
     client,
     observerEpochProvider,
-  );
-  if (first.complete) return first;
+  ).catch(() => null);
+  if (first?.complete) return first;
   invalidateSurfaceTopologyCallScope(client as object);
   const retryObserverEpoch = captureSurfaceObserverEpoch(
     observerEpochProvider,
@@ -762,18 +769,19 @@ export async function collectSurfaceTopology(
  *
  * A persisted UUID is authoritative and may move to a new ref. If that UUID is
  * absent, fail closed: the record must not borrow a live recycled ref's title,
- * screen state, or focus route. Legacy records without a UUID can be upgraded
- * from the current complete topology and retain ref-only compatibility with
- * older cmux clients that do not expose UUIDs.
+ * screen state, or focus route. A unique positive UUID match remains usable
+ * when an unrelated enumeration failed; absence and ref-only ownership still
+ * require a complete topology.
  */
 export function resolveAgentSurfaceBinding(
   agent: Pick<AgentRecord, "surface_id" | "surface_uuid">,
   snapshot: SurfaceTopologySnapshot | null,
 ): ResolvedAgentSurfaceBinding | null {
-  if (!snapshot || snapshot.complete !== true) return null;
+  if (!snapshot) return null;
 
   const expectedUuid = agent.surface_uuid?.trim() || null;
   const expectedUuidKey = expectedUuid?.toLowerCase() ?? null;
+  if (!expectedUuid && snapshot.complete !== true) return null;
   const surfaceRef = expectedUuid
     ? [...snapshot.surfaceRefById].find(
         ([observedUuid]) =>

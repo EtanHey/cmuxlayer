@@ -513,6 +513,46 @@ describe("send_to v2 background verify", () => {
     });
   });
 
+  it("ends a Codex queue stalled across two idle reads with recovery guidance", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.title = "cmuxlayerCodex";
+    client.screenOverride = [
+      "OpenAI Codex",
+      "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+      "  ↳ queued request",
+      "› Ask Codex to do anything",
+      "gpt-5.6-sol xhigh · 99% left",
+    ].join("\n");
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "codex", state: "ready" });
+    const engine = server._registeredTools.interact._engine;
+    const queued = engine.acceptComposerQueue({
+      delivery_id: "stalled-codex-queue",
+      agent_id: "agent-1",
+      text: "queued request",
+      press_enter: true,
+      source_event: "send_to",
+      retry_count: 0,
+      typed: true,
+      submit_dispatched: true,
+    });
+
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+    });
+    await vi.advanceTimersByTimeAsync(5_100);
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "stalled_queue",
+      terminal: true,
+      submit_verified: false,
+      error: expect.stringMatching(/inspect.*queued.*Escape/i),
+    });
+    expect(client.sendKeyCalls).toEqual([]);
+  });
+
   it("promotes a pending_verify delivery to submitted once the composer clears", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);

@@ -196,6 +196,43 @@ describe("enrichSurfaceIdsFromPanes", () => {
 });
 
 describe("collectSurfaceTopology", () => {
+  it("keeps the healthy window when another window workspace read times out", async () => {
+    const client = {
+      listWindows: vi.fn().mockResolvedValue({
+        windows: [
+          { ref: "window:ok", workspace_count: 1 },
+          { ref: "window:timeout", workspace_count: 1 },
+        ],
+      }),
+      listWorkspaces: vi.fn(async (opts?: { window?: string }) => {
+        if (opts?.window === "window:timeout") throw new Error("window.list timed out");
+        return { workspaces: [workspace("workspace:ok")] };
+      }),
+    };
+
+    await expect(enumerateAllWindowWorkspaces(client)).resolves.toMatchObject({
+      complete: false,
+      workspaces: [expect.objectContaining({ ref: "workspace:ok" })],
+    });
+  });
+
+  it("retries a transient top-level window.list timeout", async () => {
+    const client = {
+      listWindows: vi.fn()
+        .mockRejectedValueOnce(new Error("window.list timed out"))
+        .mockResolvedValueOnce({ windows: [{ ref: "window:ok", workspace_count: 1 }] }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [workspace("workspace:ok")],
+      }),
+    };
+
+    await expect(enumerateAllWindowWorkspacesWithRetry(client)).resolves.toMatchObject({
+      complete: true,
+      workspaces: [expect.objectContaining({ ref: "workspace:ok" })],
+    });
+    expect(client.listWindows).toHaveBeenCalledTimes(2);
+  });
+
   it("reuses one completed workspace map within a call and refreshes it across calls", async () => {
     let workspaceRef = "workspace:A";
     const client = {
@@ -769,6 +806,15 @@ describe("collectSurfaceTopology", () => {
         }),
         snapshot,
       ),
+    ).toMatchObject({ surfaceRef: "surface:first", provenance: "uuid" });
+    expect(
+      resolveAgentSurfaceBinding(
+        makeRecord({
+          surface_id: "surface:missing",
+          surface_uuid: missingUuid,
+        }),
+        snapshot,
+      ),
     ).toBeNull();
   });
 
@@ -847,6 +893,12 @@ describe("collectSurfaceTopology", () => {
           surface_id: "surface:identified",
           surface_uuid: stableUuid,
         }),
+        snapshot,
+      ),
+    ).toMatchObject({ surfaceRef: "surface:identified", provenance: "uuid" });
+    expect(
+      resolveAgentSurfaceBinding(
+        makeRecord({ surface_id: "surface:ref-only" }),
         snapshot,
       ),
     ).toBeNull();

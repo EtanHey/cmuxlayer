@@ -165,6 +165,53 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
+  it("lets key Return act on an exact engine-owned Codex queue", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screen = "OpenAI Codex\n› Ask Codex to do anything";
+    const exec = makeLifecycleExec(() => screen);
+    const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context }) as any;
+      const targetId = await spawnReadyAgent(server, "codex");
+      const engine = server._registeredTools.interact._engine;
+      engine.acceptComposerQueue({
+        delivery_id: "engine-owned-queue",
+        agent_id: targetId,
+        text: "queued request",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+        typed: true,
+        submit_dispatched: true,
+      });
+      screen = [
+        "OpenAI Codex",
+        "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+        "  ↳ queued request",
+        "› Ask Codex to do anything",
+      ].join("\n");
+      exec.mockClear();
+
+      const result = parseToolResult(await server._registeredTools.send_to.handler(
+        { mode: "key", surface: "surface:new", text: "return", press_enter: false },
+        {},
+      ));
+
+      expect(result.error_code).not.toBe("nothing_owned_to_submit");
+      expect(mutatedPane(exec), JSON.stringify(result)).toBe(true);
+      screen = screen.replace("› Ask Codex to do anything", "› human draft");
+      exec.mockClear();
+      const foreign = parseToolResult(await server._registeredTools.send_to.handler(
+        { mode: "key", surface: "surface:new", text: "return", press_enter: false },
+        {},
+      ));
+      expect(foreign.error_code).toBe("blocked_by_foreign_draft");
+      expect(mutatedPane(exec)).toBe(false);
+    } finally {
+      context.dispose();
+    }
+  });
+
   it.each([
     // Captured read-only from surface:1144, 2026-09-15; scrollback falsely infers Claude.
     { cli: "codex", live: true, frame: readFileSync(new URL("../docs/fixtures/issue-645-codex-frame.txt", import.meta.url), "utf8") },
