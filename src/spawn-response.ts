@@ -58,9 +58,21 @@ function record(value: unknown): JsonObject | null {
     : null;
 }
 
-function bootUnsubmittedNextAction(surface: unknown): string {
+function bootUnsubmittedNextAction(surface: unknown, receipt: unknown): string {
   const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
-  return `Boot prompt typed but not submitted after automatic Return retries were exhausted. Read the pane with read_screen({surface:"${surfaceRef}"}); if the exact boot prompt still occupies the composer, the spawning caller may submit its owned draft with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}). Otherwise stop and report boot_unsubmitted with this agent ID to the lead using the contract collab path. Keep the existing brief intact; never re-spawn.`;
+  const evidence = record(receipt);
+  const retryCount = typeof evidence?.retry_count === "number"
+    ? evidence.retry_count : 0;
+  const status = evidence?.submit_dispatched === false
+    ? evidence.typed === true
+      ? "Boot prompt was typed, but Return was not dispatched."
+      : "Boot prompt was not submitted; Return was not dispatched."
+    : retryCount > 0
+      ? `Boot prompt submission was not verified after ${retryCount} automatic Return ${retryCount === 1 ? "retry" : "retries"}.`
+      : evidence?.submit_dispatched === true
+        ? "Return was dispatched, but boot prompt submission was not verified."
+        : "Boot prompt submission was not verified.";
+  return `${status} Read the pane with read_screen({surface:"${surfaceRef}"}); if the exact boot prompt still occupies the composer, the spawning caller may submit its owned draft with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}). Otherwise stop and report boot_unsubmitted with this agent ID to the lead using the contract collab path. Keep the existing brief intact; never re-spawn.`;
 }
 
 function leanHealth(value: unknown): JsonObject | undefined {
@@ -168,7 +180,7 @@ export function buildSpawnToolReturn(
   const stateFields = state
     ? { spawn_state: state,
         ...(state === "boot_unsubmitted"
-          ? { next_action: bootUnsubmittedNextAction(data.surface_id) }
+          ? { next_action: bootUnsubmittedNextAction(data.surface_id, data.boot_prompt_receipt) }
           : {}) }
     : {};
   const full = { ok: true, ...stateFields, ...data };

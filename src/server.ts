@@ -648,10 +648,11 @@ const SEND_INPUT_RETRY_DELAY_MS = 25;
 const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
 const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
-// Pre-Return correlation is a safety gate, not the full submit-verification
-// window. Keep it independently bounded so a surface that never paints typed
-// composer text cannot hold an entire spawn on the 5s verification timeout.
-const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 250;
+// Pre-Return correlation is a safety gate. Bound it by the caller's submit
+// timeout so a surface that never paints typed text cannot stall indefinitely.
+// A CLI fallback paste can be acknowledged before Claude repaints its composer.
+// Keep observing the exact owned payload before deciding whether Return is safe.
+const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 5_000;
 function parsePositiveIntegerMs(
   value: string | undefined,
   fallback: number,

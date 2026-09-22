@@ -1286,6 +1286,7 @@ describe("boot-submit readiness and attributable evidence", () => {
 
   function makeCodexBootExec(opts: {
     payloadAppears: boolean;
+    payloadDelayMs?: number;
     submitAfterReturn?: number | null;
     staleReadyAfterReturn?: boolean;
     frontMatterReads?: number;
@@ -1300,6 +1301,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     promptSentAfterRead: () => number | null;
   } {
     let promptSent = false;
+    let promptSentAt = 0;
     let promptSentAfterRead: number | null = null;
     let returnPresses = 0;
     let screenReads = 0;
@@ -1359,6 +1361,7 @@ describe("boot-submit readiness and attributable evidence", () => {
         }
         if (args.includes("send") && !args.includes("send-key")) {
           promptSent = true;
+          promptSentAt = Date.now();
           promptSentAfterRead = screenReads;
           return { stdout: "{}", stderr: "" };
         }
@@ -1431,7 +1434,8 @@ describe("boot-submit readiness and attributable evidence", () => {
                     "Working (1s • esc to interrupt)",
                     "gpt-5.6-sol high · ~/Gits/cmuxlayer",
                   ].join("\n")
-              : opts.payloadAppears
+            : opts.payloadAppears &&
+                Date.now() - promptSentAt >= (opts.payloadDelayMs ?? 0)
                 ? cli === "claude"
                   ? ["Claude Code", "❯ Read and follow the brief"].join("\n")
                   : [
@@ -1768,6 +1772,39 @@ describe("boot-submit readiness and attributable evidence", () => {
       retry_count: 0,
     });
     expect(harness.returnPresses()).toBe(0);
+  }, 20_000);
+
+  it("submits a Claude boot prompt when CLI fallback renders the owned draft after the first 250ms", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      cli: "claude",
+      payloadAppears: true,
+      payloadDelayMs: 400,
+      submitAfterReturn: 1,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        cli: "claude",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 2_000,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      typed: true,
+      submit_attempted: true,
+      submit_dispatched: true,
+      submit_verified: true,
+      delivered: true,
+      delivery_state: "submitted",
+    });
+    expect(harness.returnPresses()).toBe(1);
   }, 20_000);
 
   it("does not certify a stale pre-type ready frame after Return", async () => {
