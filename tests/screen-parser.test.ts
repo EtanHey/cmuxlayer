@@ -38,6 +38,22 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("marks a multiline Claude composer draft as pending instead of ready", () => {
+    const parsed = parseScreen(
+      "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
+    );
+    expect(parsed.status).not.toBe("idle");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("returns the latest framed response in a screen window", () => {
+    expect(
+      parseScreen(
+        "Claude Code\n---RESPONSE_START---\nold\n---RESPONSE_END---\n---RESPONSE_START---\nlatest\n---RESPONSE_END---\n❯ ",
+      ).response,
+    ).toBe("latest");
+  });
+
   it.each([
     ["claude-api-error.txt", "req_011CeRnwUcf8wusrNawosx6c"],
     ["claude-safeguard-refusal.txt", "req_011CeRnwgFeHAsTb3hU4n9jt"],

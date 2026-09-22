@@ -155,7 +155,7 @@ const ORPHAN_TTY_CONTROL_TRAILER_RE =
 const DONE_SIGNAL_LINE_RE =
   /^\s*([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_DONE)(?:\s+\S{1,16})?\s*$/;
 const CLAUDE_COUNTER_RE = /^\s*CLAUDE_COUNTER:\s*(\d+)\s*$/m;
-const RESPONSE_BLOCK_RE = /---RESPONSE_START---\s*(.*?)\s*---RESPONSE_END---/s;
+const RESPONSE_BLOCKS_RE = /---RESPONSE_START---\s*(.*?)\s*---RESPONSE_END---/gs;
 const TOKEN_USAGE_RE = /Token usage:\s*total=([0-9][0-9,]*)/i;
 // Match standalone token counts in footer/status lines, not prose.
 // Valid: "418310 tokens" (standalone) or "  🤖 ... 418310 tokens" (right-aligned)
@@ -651,7 +651,10 @@ function extractClaudeResponseTail(text: string): string | null {
 }
 
 function parseResponse(text: string): string | null {
-  const response = text.match(RESPONSE_BLOCK_RE)?.[1]?.trim();
+  let response: string | undefined;
+  for (const match of text.matchAll(RESPONSE_BLOCKS_RE)) {
+    response = match[1]?.trim();
+  }
   return response || extractClaudeResponseTail(text);
 }
 
@@ -1294,6 +1297,7 @@ function inferControlState(
   if (hasOsShellPrompt(text)) {
     return "shell";
   }
+  if (status === "draft_pending") return "composer_dirty";
   if (status === "thinking" || status === "working") {
     return "busy";
   }
@@ -1679,6 +1683,10 @@ function inferStatus(
     return "done";
   }
 
+  if (!hasOsShellPrompt(text) && hasPendingComposerDraft(text, agentType)) {
+    return "draft_pending";
+  }
+
   if (agentType === "cursor") {
     if (
       CURSOR_HEX_RUNNING_RE.test(text) ||
@@ -1731,6 +1739,29 @@ function inferStatus(
   }
 
   return "idle";
+}
+
+function hasPendingComposerDraft(
+  text: string,
+  agentType: ParsedScreenAgentType,
+): boolean {
+  if (agentType !== "claude" && agentType !== "codex") return false;
+  const tail = text.split("\n").slice(-16);
+  for (let i = tail.length - 1; i >= 0; i -= 1) {
+    const line = tail[i] ?? "";
+    const match = line.match(/^\s*[❯›]\s+(.+)$/);
+    if (!match) continue;
+    const input = match[1]?.trim() ?? "";
+    if (!input || CODEX_READY_PLACEHOLDER_RE.test(line)) return false;
+    const below = tail.slice(i + 1).filter((row) => row.trim());
+    return below.every(
+      (row) =>
+        /^\s{2,}\S/.test(row) ||
+        RULE_LINE_RE.test(row.trim()) ||
+        /bypass permissions on|\/ commands · @ files|% left/i.test(row),
+    );
+  }
+  return false;
 }
 
 export function parseScreen(text: string): ParsedScreenResult {
