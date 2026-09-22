@@ -123,6 +123,26 @@ describe("CmuxPersistentSocket V1 demux", () => {
     }
   });
 
+  it("preserves a capability-shaped string in successful V1 and V2 reply data", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("capability-success-data");
+    await startLineServer(path, (line, conn) => {
+      if (line.includes("system.ping")) {
+        const request = JSON.parse(line.replace(/^_cmux_capability_v1 \S+ /, ""));
+        conn.write(`${JSON.stringify({ id: request.id, ok: true, result: { text: "literal test-secret value" } })}\n`);
+      } else {
+        conn.write("literal test-secret value\n");
+      }
+    });
+    const client = new CmuxPersistentSocket({ socketPath: path, capability: "test-secret" });
+    try {
+      await expect(client.call("system.ping")).resolves.toEqual({ text: "literal test-secret value" });
+      await expect(client.sendLine("list-workspaces")).resolves.toBe("literal test-secret value");
+    } finally {
+      client.disconnect();
+    }
+  });
+
   it("rejects when the connect leg never settles", async () => {
     vi.useFakeTimers();
     class HangingConnectSocket extends EventEmitter {
