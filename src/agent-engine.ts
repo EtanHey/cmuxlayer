@@ -4,7 +4,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -839,7 +839,7 @@ export interface AgentEngineOptions {
   haltWedgedDwellMs?: number;
   haltWedgedSweeps?: number;
   /** Test seam for process snapshots; production samples process time with ps. */
-  haltProcessSnapshot?: () => string;
+  haltProcessSnapshot?: () => string | Promise<string>;
 }
 
 export interface SelfRegistrationSessionEntry {
@@ -1793,7 +1793,8 @@ export class AgentEngine {
   private haltIdleWithoutDoneDwellMs: number;
   private haltWedgedDwellMs: number;
   private haltWedgedSweeps: number;
-  private haltProcessSnapshot?: () => string;
+  private haltProcessSnapshot?: () => string | Promise<string>;
+  private sweepBackgroundProcessSnapshot: Promise<string | null> | null = null;
   private backgroundChildCpuTimes = new Map<string, Map<number, string>>();
   private autoResolvePrompts: boolean;
   constructor(
@@ -4305,7 +4306,25 @@ export class AgentEngine {
     return `${screenTextSignature(materialScreen)}:${transcriptMtime}:tokens=${parsed.token_count ?? "unknown"}`;
   }
 
-  private backgroundChildUsedCpu(agent: AgentRecord, screenText: string): boolean {
+  private async readBackgroundProcessSnapshot(): Promise<string | null> {
+    try {
+      if (this.haltProcessSnapshot) return await this.haltProcessSnapshot();
+      const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,time=,command="], {
+        encoding: "utf8",
+        timeout: 250,
+        maxBuffer: 2_000_000,
+      });
+      return stdout;
+    } catch {
+      return null;
+    }
+  }
+
+  private async backgroundChildUsedCpu(
+    agent: AgentRecord,
+    screenText: string,
+    ctx: SweepAgentContext = {},
+  ): Promise<boolean> {
     if (!/\bWait(?:ing|ed) for background terminal\s*\(/i.test(screenText) || !agent.pid) {
       this.backgroundChildCpuTimes.delete(agent.agent_id);
       return false;
@@ -4324,12 +4343,10 @@ export class AgentEngine {
       .find((command): command is string => Boolean(command));
     if (!waitingCommand) return false;
     try {
-      const output = this.haltProcessSnapshot?.() ?? execFileSync("ps", ["-axo", "pid=,ppid=,time=,command="], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 250,
-        maxBuffer: 2_000_000,
-      });
+      const output = ctx.sweep
+        ? await (this.sweepBackgroundProcessSnapshot ??= this.readBackgroundProcessSnapshot())
+        : await this.readBackgroundProcessSnapshot();
+      if (output === null) return false;
       const rows = output.split("\n").map((line) => {
         const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
         return match ? { pid: Number(match[1]), ppid: Number(match[2]), time: match[3], command: match[4] } : null;
@@ -4366,7 +4383,11 @@ export class AgentEngine {
         .map((row) => [row.pid, row.time] as const));
       const previous = this.backgroundChildCpuTimes.get(agent.agent_id);
       this.backgroundChildCpuTimes.set(agent.agent_id, times);
-      return [...times].some(([pid, time]) => previous?.has(pid) && previous.get(pid) !== time);
+      return [...times].some(([pid, time]) =>
+        previous?.has(pid)
+          ? previous.get(pid) !== time
+          : previous !== undefined && /[1-9]/.test(time),
+      );
     } catch {
       return false;
     }
@@ -4774,7 +4795,7 @@ export class AgentEngine {
       screenText,
       parsed,
     );
-    const backgroundChildUsedCpu = this.backgroundChildUsedCpu(agent, screenText);
+    const backgroundChildUsedCpu = await this.backgroundChildUsedCpu(agent, screenText, ctx);
     const hasVisibleProgress = hasVisibleAgentProgress(screenText, agent.cli);
     const canObservePromptMotion =
       disposition.kind === "escalate" &&
@@ -5371,6 +5392,7 @@ export class AgentEngine {
     this.cliExitShellMatches.delete(agentId);
     this.promptMotionObservedAtMs.delete(agentId);
     this.promptMotionScreenSignatures.delete(agentId);
+    this.backgroundChildCpuTimes.delete(agentId);
   }
 
   private isLeadWatchBlind(
@@ -8147,6 +8169,7 @@ export class AgentEngine {
   }
 
   private async runSweepOnce(): Promise<void> {
+    this.sweepBackgroundProcessSnapshot = null;
     const timings: Record<string, number> = {};
     const sweepStartedAt = Date.now();
     const time = async <T>(name: string, operation: () => Promise<T>) => {
@@ -8278,6 +8301,7 @@ export class AgentEngine {
       if (this.shouldYieldSweep()) return;
       await time("outbox_ms", () => this.drainOutboxBestEffort());
     } finally {
+      this.sweepBackgroundProcessSnapshot = null;
       timings.total_ms = Date.now() - sweepStartedAt;
       this.sweepDebugLog(
         `[cmuxlayer] sweep timing ${Object.entries(timings)
