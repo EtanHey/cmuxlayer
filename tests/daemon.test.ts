@@ -11,6 +11,7 @@ import {
   CmuxLayerDaemon,
   daemonExitCode,
   SocketJsonRpcTransport,
+  runDaemon,
 } from "../src/daemon.js";
 import {
   createServer as createProductionServer,
@@ -500,6 +501,63 @@ describe("CmuxLayerDaemon", () => {
     );
     intervalDaemons.clear();
     rmSync(TEST_ROOT, { recursive: true, force: true });
+  });
+
+  it("runDaemon persists only inside the configured state sandbox", async () => {
+    const sandbox = stateDir("env-state-sandbox");
+    const sandboxHome = join(sandbox, "home");
+    const sandboxState = join(sandbox, "state");
+    const legacyState = join(sandboxHome, ".local", "state", "cmux-agents");
+    mkdirSync(sandboxHome, { recursive: true });
+    vi.stubEnv("HOME", sandboxHome);
+    vi.stubEnv("CMUXLAYER_STATE_DIR", sandboxState);
+    vi.stubEnv("CMUXLAYER_INBOX_BASE_DIR", join(sandbox, "inbox"));
+    try {
+      const daemon = trackIntervalDaemon(await runDaemon({
+        socketPath: join(sandbox, "daemon.sock"),
+        exec: createListSurfacesExec(),
+        skipAgentLifecycle: true,
+        monitorRegistryPath: join(sandbox, "monitor-registry.json"),
+        watchRegistryPath: join(sandbox, "watch-registry.json"),
+        monitorReconcile: () => undefined,
+        detectStaleBuild: () => null,
+      }));
+      const context = await (daemon as any).getContext();
+      context.eventLog.append({
+        ts: "2026-09-23T00:00:00.000Z",
+        agent_id: "sandbox-probe",
+        event: "created",
+        from_state: null,
+        to_state: "ready",
+        surface_id: "surface:probe",
+        source: "test",
+        error: null,
+      });
+      expect(context.stateMgr.getBaseDir()).toBe(sandboxState);
+      expect(existsSync(join(sandboxState, "events.jsonl"))).toBe(true);
+      expect((daemon as any).opts.inboxBaseDir).toBe(join(sandbox, "inbox"));
+      const client = await connectClient(join(sandbox, "daemon.sock"));
+      try {
+        await client.callTool({
+          name: "dispatch_to_agent",
+          arguments: {
+            agent_id: "sandbox-probe",
+            task: "sandboxed inbox probe",
+            from: "daemon-test",
+            nudge: "never",
+          },
+        });
+      } finally {
+        await client.close();
+      }
+      expect(readInbox("sandbox-probe", { baseDir: join(sandbox, "inbox") }))
+        .toHaveLength(1);
+      expect(existsSync(inboxPath("sandbox-probe", { baseDir: join(sandboxHome, ".cmux", "agents") })))
+        .toBe(false);
+      expect(existsSync(legacyState)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("rejects start after the socket transport has been closed", async () => {
