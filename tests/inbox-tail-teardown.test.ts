@@ -47,10 +47,11 @@ function mailboxBlock(contract: string): string {
 }
 
 describe("boot contract mailbox teardown", () => {
-  it("records the tail's pid so the seat never has to find it", () => {
+  it("records the detached supervisor's pid so the seat never has to find it", () => {
     const block = mailboxBlock(render());
     expect(block).toContain(`perl -MPOSIX=setsid -e 'my $pidfile=shift;`);
     expect(block).toContain("rename $tmp, $pidfile or die $!; print $write");
+    expect(block).toContain("$0=\"cmuxlayer-inbox-tail:$token\"");
     expect(block).toContain(`' ${shellQuote(PID_FILE)} tail -n0 -F ${INBOX}`);
   });
 
@@ -69,7 +70,7 @@ describe("boot contract mailbox teardown", () => {
       const command = block.match(/^    (.*perl -MPOSIX=setsid.*)$/m)?.[1];
       const launcher = spawnSync("/bin/sh", ["-c", `( ${command!} ) > ${shellQuote(output)} 2>&1`], { timeout: 3000 });
       expect(launcher.status).toBe(0);
-      pid = Number(readFileSync(pidFile, "utf8").trim());
+      pid = Number(readFileSync(pidFile, "utf8").split(/\s+/)[0]);
       expect(pid).not.toBe(999999);
       const state = spawnSync("ps", ["-p", String(pid), "-o", "pgid=", "-o", "stat="], { encoding: "utf8" });
       const [pgid] = state.stdout.trim().split(/\s+/);
@@ -89,9 +90,8 @@ describe("boot contract mailbox teardown", () => {
 
   it("gives the exact stop command, addressed by pid", () => {
     const block = mailboxBlock(render());
-    expect(block).toContain(
-      `kill "$(cat ${shellQuote(PID_FILE)})" && rm -f ${shellQuote(PID_FILE)}`,
-    );
+    expect(block).toContain(`read pid token < ${shellQuote(PID_FILE)}`);
+    expect(block).toContain(`then kill "$pid" && rm -f ${shellQuote(PID_FILE)}`);
   });
 
   it("survives an agent dir with spaces in it", () => {
@@ -102,7 +102,8 @@ describe("boot contract mailbox teardown", () => {
     const pid = join(spaced, AGENT_ID, "inbox-tail.pid");
     const block = mailboxBlock(render(spaced));
     expect(block).toContain(`' '${pid}' tail -n0 -F`);
-    expect(block).toContain(`kill "$(cat '${pid}')" && rm -f '${pid}'`);
+    expect(block).toContain(`read pid token < '${pid}'`);
+    expect(block).toContain(`rm -f '${pid}'`);
   });
 
   it("never hands the seat a pattern-matching killer", () => {
