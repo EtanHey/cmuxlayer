@@ -6124,6 +6124,7 @@ describe("agent lifecycle tool handlers", () => {
     let composer = "";
     let ctrlUCount = 0;
     let surfaceGone = false;
+    let recycledUuid = false;
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       const text = String(args.at(-1) ?? "");
       if (surfaceGone && args.includes("list-panes")) {
@@ -6160,6 +6161,24 @@ describe("agent lifecycle tool handlers", () => {
           stderr: "",
         };
       }
+      if (recycledUuid && args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [{
+              id: "new-occupant-uuid",
+              ref: "surface:new",
+              title: "unrelated occupant",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            }],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("send") && text === command) {
         composer = `ng ${command}`;
         return { stdout: "{}", stderr: "" };
@@ -6173,7 +6192,7 @@ describe("agent lifecycle tool handlers", () => {
         return {
           stdout: JSON.stringify({
             surface: surfaceGone ? "surface:witness" : "surface:new",
-            text: surfaceGone ? "$ " : `$ ${composer}`,
+            text: surfaceGone || recycledUuid ? "$ " : `$ ${composer}`,
             lines: 20,
             scrollback_used: false,
           }),
@@ -6227,6 +6246,13 @@ describe("agent lifecycle tool handlers", () => {
         (agent) => agent.agent_id === parsed.agent_id,
       ),
     ).toBe(true);
+    recycledUuid = true;
+    const recycledListed = parseToolResult(await list.handler({}, {} as any));
+    expect(
+      (recycledListed.agents as Array<{ agent_id?: string }>).some(
+        (agent) => agent.agent_id === parsed.agent_id,
+      ),
+    ).toBe(false);
     surfaceGone = true;
     const absentListed = parseToolResult(await list.handler({}, {} as any));
     expect(
@@ -13506,12 +13532,17 @@ codex>
     const registry = engine.getRegistry();
     const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
     registry.set(agentId, working);
+    const callerId = "source-caller";
+    const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const caller = { ...working, agent_id: callerId, surface_id: "surface:caller", surface_uuid: callerUuid, state: "ready" };
+    engine.stateMgr.writeState(caller);
+    registry.set(callerId, caller);
     mockExec.mockClear();
 
-    const result = await sendTo.handler(
+    const result = await runWithCallerContext({ surfaceId: callerUuid }, () => sendTo.handler(
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
-    );
+    ));
     const delivered = parseToolResult(result);
     expect(result.isError).toBeFalsy();
     expect(delivered).toMatchObject({
@@ -13524,6 +13555,10 @@ codex>
       submit_verified: true,
       queued_behind_turn: true,
     });
+    const deliveryEvents = readFileSync(join(TEST_DIR, "events.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    expect(deliveryEvents.findLast((event) => event.event_type === "send_to"))
+      .toMatchObject({ source_agent: callerId, target_surface: working.surface_id });
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("send")),
     ).not.toHaveLength(0);

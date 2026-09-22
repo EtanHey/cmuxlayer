@@ -103,7 +103,10 @@ Codex CLI / T3 Code, in `~/.codex/config.toml`:
 ```toml
 [mcp_servers.cmuxlayer]
 command = "cmuxlayer"
+env_vars = ["CMUX_SURFACE_ID", "CMUX_WORKSPACE_ID", "CMUX_TAB_ID", "CMUX_SOCKET_CAPABILITY", "CMUX_SOCKET_PATH"]
 ```
+
+List variable names only; cmux supplies the capability value to each pane.
 
 Restart the client afterwards.
 

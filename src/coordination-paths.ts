@@ -260,21 +260,22 @@ export function renderBootContractFile(input: BootContractFileInput): string {
     // process whose argv held a `1`: 20 launchd jobs and every
     // `--model claude-opus-5[1m]` Claude seat. The contract now hands over a PID.
     // macOS has no setsid binary. Fork before setsid (interactive shells can
-    // make background jobs group leaders). The parent waits for the child's
-    // atomic PID write; stdout stays attached so inbox messages remain visible.
+    // make background jobs group leaders). The parent waits for the detached
+    // supervisor's atomic PID/token write; tail's stdout remains visible.
     // Keeping the monitor command verbatim also keeps
     // `monitor_command` a verbatim substring, so consumers matching on it (receipts,
     // nudges, tool descriptions) still match -- the F5 constraint above still holds.
     "Run this in the BACKGROUND -- it blocks, and holding a turn open on it is a",
     "self-deadlock (ledger #24). Detach it, record its pid, then return:",
     "",
-    `    perl -MPOSIX=setsid -e 'my $pidfile=shift; pipe(my $read,my $write) or die $!; my $child=fork(); defined($child) or die $!; if ($child) { close $write; (<$read> // "") eq "ready\\n" or die "detach failed"; exit } close $read; setsid() >= 0 or die $!; my $tmp="$pidfile.$$"; open my $fh, ">", $tmp or die $!; print $fh "$$\\n"; close $fh; rename $tmp, $pidfile or die $!; print $write "ready\\n"; close $write; exec @ARGV or die $!' ${pidFile} ${input.mailbox.monitor_command} < /dev/null & wait $!`,
+    `    perl -MPOSIX=setsid -e 'my $pidfile=shift; pipe(my $read,my $write) or die $!; my $child=fork(); defined($child) or die $!; if ($child) { close $write; (<$read> // "") eq "ready\\n" or die "detach failed"; exit } close $read; setsid() >= 0 or die $!; open my $ur, "<", "/dev/urandom" or die $!; read($ur, my $bytes, 16)==16 or die "random token failed"; my $token=unpack("H*",$bytes); $0="cmuxlayer-inbox-tail:$token"; my $tail=fork(); defined($tail) or die $!; if (!$tail) { close $write; exec @ARGV or die $! } $SIG{TERM}=sub { kill "TERM",$tail }; my $record="$$ $token\\n"; my $tmp="$pidfile.$$"; open my $fh, ">", $tmp or die $!; print $fh $record; close $fh; open my $lock, ">>", "$pidfile.lock" or die $!; flock($lock,2) or die $!; rename $tmp, $pidfile or die $!; close $lock; print $write "ready\\n"; close $write; waitpid($tail,0); open my $cleanup_lock, ">>", "$pidfile.lock" or die $!; flock($cleanup_lock,2) or die $!; if (open my $current, "<", $pidfile) { my $line=<$current>; close $current; unlink $pidfile if defined($line) && $line eq $record }' ${pidFile} ${input.mailbox.monitor_command} < /dev/null & wait $!`,
     "",
     "To stop it, kill that PID -- never a pattern:",
     "",
-    // `rm -f` on success: a pidfile outliving its tail is a stale PID, and PIDs
-    // are reused -- a second teardown would then SIGTERM whatever inherited it.
-    `    kill "$(cat ${pidFile})" && rm -f ${pidFile}`,
+    // The supervisor carries a random launch token in its process title. A
+    // reused PID or a different tail of the same inbox cannot match it. The
+    // pidfile lock serializes rearm with both compare-and-delete paths.
+    `    read pid token < ${pidFile}; record="$pid"; if [ -n "$token" ]; then record="$pid $token"; fi; remove_if_current() { perl -e 'my ($path,$record)=@ARGV; open my $lock, ">>", "$path.lock" or die $!; flock($lock,2) or die $!; if (open my $fh, "<", $path) { my $line=<$fh>; close $fh; unlink $path if defined($line) && $line eq "$record\\n" }' ${pidFile} "$record"; }; if ! kill -0 "$pid" 2>/dev/null; then remove_if_current; else observed="$(ps -p "$pid" -o command= 2>/dev/null)"; case "$observed" in "cmuxlayer-inbox-tail:$token"|"cmuxlayer-inbox-tail:$token "*) if [ -n "$token" ]; then kill "$pid" && remove_if_current; else false; fi ;; *) printf 'INBOX_TAIL_PID_CONFLICT pid=%s' "$pid" >&2; false ;; esac; fi`,
     "",
     "Do NOT reach for a pattern-matching killer here. Trailing flags fold into the",
     "pattern under BSD getopt, which is how one such command SIGTERM'd 20 launchd",

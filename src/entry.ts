@@ -81,7 +81,9 @@ async function probeEntryCmuxSocket(
     socketPath: candidates[0] ?? "unknown",
   };
   for (const socketPath of candidates) {
-    const result = await probeSocketHealth(socketPath);
+    const result = await probeSocketHealth(socketPath, {
+      capability: env.CMUX_SOCKET_CAPABILITY,
+    });
     if (result.usable || result.denied_reason === "access-control") {
       return result;
     }

@@ -33,6 +33,7 @@ import {
 // ── Mock V2 Socket Server ──────────────────────────────────────────────
 
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
+const originalCapability = process.env.CMUX_SOCKET_CAPABILITY;
 const MOCK_SOCKET_PATH = "/tmp/cmux-test-mock.sock";
 const INTERLEAVED_STATUS_FRAME = readFileSync(
   new URL("./fixtures/cmux-interleaved-sidebar-status-frame.txt", import.meta.url),
@@ -275,7 +276,7 @@ function stopMockServer(): Promise<void> {
   });
 }
 
-function startSocketServer(socketPath: string): Promise<net.Server> {
+function startSocketServer(socketPath: string, capability?: string, seenLines?: string[]): Promise<net.Server> {
   return new Promise((resolve) => {
     try {
       fs.unlinkSync(socketPath);
@@ -295,8 +296,15 @@ function startSocketServer(socketPath: string): Promise<net.Server> {
           const line = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 1);
           if (!line.trim()) continue;
-
-          const req = JSON.parse(line);
+          seenLines?.push(line);
+          if (capability && !line.startsWith(`_cmux_capability_v1 ${capability} `)) {
+            conn.write("cmux access-control denial\n");
+            continue;
+          }
+          const command = capability
+            ? line.slice(`_cmux_capability_v1 ${capability} `.length)
+            : line;
+          const req = JSON.parse(command);
           conn.write(
             JSON.stringify({
               id: req.id,
@@ -458,6 +466,7 @@ function startProtocolErrorServer(socketPath: string): Promise<net.Server> {
 // ── Shared lifecycle ───────────────────────────────────────────────────
 
 beforeAll(async () => {
+  delete process.env.CMUX_SOCKET_CAPABILITY;
   if (!CAN_BIND_MOCK_SOCKET) {
     return;
   }
@@ -465,6 +474,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (originalCapability === undefined) delete process.env.CMUX_SOCKET_CAPABILITY;
+  else process.env.CMUX_SOCKET_CAPABILITY = originalCapability;
   if (!CAN_BIND_MOCK_SOCKET) {
     return;
   }
@@ -1957,6 +1968,28 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
       expect(client.currentObserverTransportEpoch()).toBe("1:1");
     } finally {
       await stopSocketServer(secondServer, secondSocketPath);
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a daemon's pane capability across socket re-resolution after its parent env is gone", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-capability-reconnect-"));
+    const socketPath = join(stateDir, "cmux.sock");
+    const seenLines: string[] = [];
+    const token = "test-reconnect-capability";
+    const server = await startSocketServer(socketPath, token, seenLines);
+    const client = new CmuxSocketClient({
+      socketPath: join(stateDir, "old.sock"),
+      capability: token,
+      socketPathResolver: async () => socketPath,
+    });
+    try {
+      await expect(client.ping()).resolves.toBe(true);
+      expect(seenLines).toHaveLength(1);
+      expect(seenLines[0]).toMatch(/^_cmux_capability_v1 test-reconnect-capability /);
+    } finally {
+      client.disconnect();
+      await stopSocketServer(server, socketPath);
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });

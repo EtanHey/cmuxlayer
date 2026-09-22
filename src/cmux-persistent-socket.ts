@@ -69,6 +69,8 @@ export interface CmuxCallOptions {
 
 export interface CmuxPersistentSocketOptions {
   socketPath?: string;
+  /** cmux-issued pane capability; never include its value in diagnostics. */
+  capability?: string;
   timeoutMs?: number;
   connectTimeoutMs?: number;
   maxInFlight?: number;
@@ -104,6 +106,7 @@ interface V2Response {
 export class CmuxPersistentSocket {
   private socket: net.Socket | null = null;
   private socketPath: string;
+  private readonly capability?: string;
   private buffer = "";
   private pending = new Map<
     string,
@@ -157,6 +160,8 @@ export class CmuxPersistentSocket {
   constructor(opts?: CmuxPersistentSocketOptions) {
     this.socketPath =
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
+    const capability = opts?.capability;
+    this.capability = capability && !/\s/.test(capability) ? capability : undefined;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.connectTimeoutMs = opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
     this.maxInFlight = opts?.maxInFlight ?? MAX_IN_FLIGHT;
@@ -526,7 +531,7 @@ export class CmuxPersistentSocket {
         if (!this.isJsonLikeFrame(line) && isCmuxAccessControlDenied(line)) {
           this.rejectAllPending(
             new CmuxSocketError(
-              `cmux access-control denial: ${line.slice(0, 120)}`,
+              `cmux access-control denial: ${this.redactCapability(line).slice(0, 120)}`,
               "access_denied",
               { transportPhase: "response" },
             ),
@@ -557,9 +562,11 @@ export class CmuxPersistentSocket {
   }
 
   private rejectMalformedFrame(line: string, error: unknown): void {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = this.capability
+      ? "invalid JSON"
+      : error instanceof Error ? error.message : String(error);
     const socketError = new CmuxSocketError(
-      `Malformed cmux socket frame: ${detail}; frame=${line.slice(0, 120)}`,
+      `Malformed cmux socket frame: ${detail}; frame=${this.redactCapability(line).slice(0, 120)}`,
       "protocol_error",
     );
     if (line.trimStart().startsWith("{") && this.pending.size > 0) {
@@ -583,7 +590,7 @@ export class CmuxPersistentSocket {
   private rejectUnexpectedV2Frame(line: string): void {
     this.rejectPendingV2(
       new CmuxSocketError(
-        `Unexpected cmux socket frame: frame=${line.slice(0, 120)}`,
+        `Unexpected cmux socket frame: frame=${this.redactCapability(line).slice(0, 120)}`,
         "protocol_error",
       ),
     );
@@ -616,10 +623,20 @@ export class CmuxPersistentSocket {
     transportPhase: "connect" | "write" | "response" = "response",
   ): CmuxSocketError {
     return new CmuxSocketError(
-      `Socket error: ${error.message}`,
+      `Socket error: ${this.redactCapability(error.message)}`,
       "connection_error",
       { transportPhase },
     );
+  }
+
+  private redactCapability(value: string): string {
+    return this.capability ? value.replaceAll(this.capability, "[REDACTED]") : value;
+  }
+
+  private envelope(command: string): string {
+    return this.capability
+      ? `_cmux_capability_v1 ${this.capability} ${command}`
+      : command;
   }
 
   private writePayload(
@@ -686,7 +703,7 @@ export class CmuxPersistentSocket {
 
     const id = crypto.randomUUID();
     const request: V2Request = { id, method, params };
-    const payload = JSON.stringify(request) + "\n";
+    const payload = this.envelope(JSON.stringify(request)) + "\n";
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -704,7 +721,10 @@ export class CmuxPersistentSocket {
           if (!response.ok) {
             const errCode = response.error?.code ?? "unknown";
             const errMsg = response.error?.message ?? "Unknown error";
-            reject(new CmuxSocketError(`${errCode}: ${errMsg}`, errCode));
+            reject(new CmuxSocketError(
+              this.redactCapability(`${errCode}: ${errMsg}`),
+              this.redactCapability(errCode),
+            ));
           } else {
             resolve((response.result ?? {}) as T);
           }
@@ -768,7 +788,7 @@ export class CmuxPersistentSocket {
     await this.ensureConnected();
 
     const shouldWriteNow = this.pendingV1.length === 0;
-    const payload = command + "\n";
+    const payload = this.envelope(command) + "\n";
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

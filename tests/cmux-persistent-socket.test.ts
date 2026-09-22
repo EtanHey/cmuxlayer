@@ -77,6 +77,72 @@ describe("CmuxPersistentSocket V1 demux", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("prefixes V2 and V1 commands only when a capability is supplied", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("capability-envelope");
+    const lines: string[] = [];
+    await startLineServer(path, (line, conn) => {
+      lines.push(line);
+      if (line.includes("system.ping")) {
+        const request = JSON.parse(line.replace(/^_cmux_capability_v1 \S+ /, ""));
+        conn.write(`${JSON.stringify({ id: request.id, ok: true, result: { pong: true } })}\n`);
+      } else {
+        conn.write("OK\n");
+      }
+    });
+    const plain = new CmuxPersistentSocket({ socketPath: path });
+    const capable = new CmuxPersistentSocket({ socketPath: path, capability: "test-secret" });
+    try {
+      await plain.call("system.ping");
+      await plain.sendLine("list-workspaces");
+      await capable.call("system.ping");
+      await capable.sendLine("list-workspaces");
+      expect(lines[0]).toMatch(/^\{"id":/);
+      expect(lines[1]).toBe("list-workspaces");
+      expect(lines[2]).toMatch(/^_cmux_capability_v1 test-secret \{"id":/);
+      expect(lines[3]).toBe("_cmux_capability_v1 test-secret list-workspaces");
+    } finally {
+      plain.disconnect();
+      capable.disconnect();
+    }
+  });
+
+  it("redacts a capability echoed in socket errors", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("capability-error");
+    await startLineServer(path, (_line, conn) => {
+      conn.write("error test-secret denied\n");
+    });
+    const client = new CmuxPersistentSocket({ socketPath: path, capability: "test-secret" });
+    try {
+      await expect(client.call("system.ping")).rejects.toSatisfy(
+        (error: Error) => !error.message.includes("test-secret"),
+      );
+    } finally {
+      client.disconnect();
+    }
+  });
+
+  it("preserves a capability-shaped string in successful V1 and V2 reply data", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("capability-success-data");
+    await startLineServer(path, (line, conn) => {
+      if (line.includes("system.ping")) {
+        const request = JSON.parse(line.replace(/^_cmux_capability_v1 \S+ /, ""));
+        conn.write(`${JSON.stringify({ id: request.id, ok: true, result: { text: "literal test-secret value" } })}\n`);
+      } else {
+        conn.write("literal test-secret value\n");
+      }
+    });
+    const client = new CmuxPersistentSocket({ socketPath: path, capability: "test-secret" });
+    try {
+      await expect(client.call("system.ping")).resolves.toEqual({ text: "literal test-secret value" });
+      await expect(client.sendLine("list-workspaces")).resolves.toBe("literal test-secret value");
+    } finally {
+      client.disconnect();
+    }
+  });
+
   it("rejects when the connect leg never settles", async () => {
     vi.useFakeTimers();
     class HangingConnectSocket extends EventEmitter {

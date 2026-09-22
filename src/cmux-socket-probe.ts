@@ -12,6 +12,7 @@ import {
 
 export interface SocketProbeOptions {
   socketPath?: string;
+  capability?: string;
   socketStateDir?: string;
   timeoutMs?: number;
   password?: string;
@@ -80,14 +81,14 @@ export function candidateSocketPathsForOpts(
 
 export async function probeUsableSocket(
   socketPath: string,
-  opts?: Pick<SocketProbeOptions, "timeoutMs" | "password">,
+  opts?: Pick<SocketProbeOptions, "timeoutMs" | "password" | "capability">,
 ): Promise<boolean> {
   return (await probeSocketHealth(socketPath, opts)).usable;
 }
 
 export async function probeSocketHealth(
   socketPath: string,
-  opts?: Pick<SocketProbeOptions, "timeoutMs" | "password">,
+  opts?: Pick<SocketProbeOptions, "timeoutMs" | "password" | "capability">,
 ): Promise<SocketProbeResult> {
   if (!(await probeSocket(socketPath, opts?.timeoutMs))) {
     return { usable: false, socketPath };
@@ -95,6 +96,7 @@ export async function probeSocketHealth(
 
   const transport = new CmuxPersistentSocket({
     socketPath,
+    capability: opts?.capability,
     timeoutMs: Math.min(
       opts?.timeoutMs ?? PROBE_PING_TIMEOUT_MS,
       PROBE_PING_TIMEOUT_MS,

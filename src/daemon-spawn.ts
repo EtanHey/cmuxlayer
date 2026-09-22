@@ -27,6 +27,10 @@ export interface SpawnDaemonOptions {
 const STDERR_BUFFER_LIMIT = 8_000;
 const capturedStderr = new WeakMap<object, { text: string }>();
 
+function redactCapability(text: string, capability?: string): string {
+  return capability ? text.replaceAll(capability, "[REDACTED]") : text;
+}
+
 /** Bounded excerpt of what a spawned daemon printed on stderr. */
 export function capturedDaemonStderr(child: unknown): string {
   if (!child || typeof child !== "object") return "";
@@ -102,6 +106,7 @@ export async function spawnDaemonProcess(
     ...opts.env,
     CMUXLAYER_DAEMON_SOCKET: opts.socketPath,
   };
+  const capability = env.CMUX_SOCKET_CAPABILITY;
   const nodeOptions = env.NODE_OPTIONS ?? "";
   if (!/(^|\s)--max-old-space-size(=|\s)/.test(nodeOptions)) {
     env.NODE_OPTIONS = `${nodeOptions} --max-old-space-size=${
@@ -155,8 +160,21 @@ export async function spawnDaemonProcess(
       process.stderr.off("close", breakForwarding);
       process.stderr.off("drain", resumeStderr);
     };
-    stderrStream.once("close", detachParentStderrListeners);
-    stderrStream.once("end", detachParentStderrListeners);
+    let stderrCarry = "";
+    const captureRedacted = (text: string) => {
+      buffer.text = `${buffer.text}${text}`.slice(-STDERR_BUFFER_LIMIT);
+    };
+    const flushStderrCarry = () => {
+      if (stderrCarry) {
+        const finalChunk = capability ? "[REDACTED]" : stderrCarry;
+        captureRedacted(finalChunk);
+        sink(finalChunk);
+        stderrCarry = "";
+      }
+      detachParentStderrListeners();
+    };
+    stderrStream.once("close", flushStderrCarry);
+    stderrStream.once("end", flushStderrCarry);
     const sink =
       opts.stderrSink ??
       ((chunk: string) => {
@@ -175,17 +193,39 @@ export async function spawnDaemonProcess(
       });
     stderrStream.setEncoding("utf8");
     stderrStream.on("data", (chunk: string) => {
-      buffer.text = `${buffer.text}${chunk}`.slice(-STDERR_BUFFER_LIMIT);
-      sink(chunk);
+      stderrCarry += chunk;
+      let forward = "";
+      if (capability) {
+        let tokenIndex: number;
+        while ((tokenIndex = stderrCarry.indexOf(capability)) >= 0) {
+          forward += `${stderrCarry.slice(0, tokenIndex)}[REDACTED]`;
+          stderrCarry = stderrCarry.slice(tokenIndex + capability.length);
+        }
+      }
+      let hold = 0;
+      if (capability) {
+        for (let length = Math.min(capability.length - 1, stderrCarry.length); length > 0; length--) {
+          if (stderrCarry.endsWith(capability.slice(0, length))) {
+            hold = length;
+            break;
+          }
+        }
+      }
+      forward += stderrCarry.slice(0, stderrCarry.length - hold);
+      stderrCarry = hold ? stderrCarry.slice(-hold) : "";
+      if (forward) {
+        captureRedacted(forward);
+        sink(forward);
+      }
     });
     stderrStream.on("error", () => {});
     (stderrStream as unknown as { unref?: () => void }).unref?.();
   }
 
   child.once("error", (error) => {
-    recordDaemonLifecycleError(error.message);
+    recordDaemonLifecycleError(redactCapability(error.message, capability));
     opts.logger.error(
-      `[cmuxlayer-proxy] spawned daemon failed (pid=${child.pid ?? "unknown"}): ${error.message}`,
+      `[cmuxlayer-proxy] spawned daemon failed (pid=${child.pid ?? "unknown"}): ${redactCapability(error.message, capability)}`,
     );
   });
   // #536 review (Macroscope): the lifecycle record used to be written from the

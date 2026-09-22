@@ -18,8 +18,30 @@ import {
   computeReconnectDelay,
   VersionBumpReconnectGuard,
 } from "../src/proxy.js";
+import { callerContextFromAncestry } from "../src/caller-context.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-proxy-test");
+
+describe("caller context ancestry fallback", () => {
+  it("takes the nearest pane identity when the MCP proxy env is filtered", () => {
+    const seen: number[] = [];
+    const context = callerContextFromAncestry(30, (pid) => {
+      seen.push(pid);
+      if (pid === 30) return { parentPid: 20, environment: "codex --model x" };
+      if (pid === 20) return {
+        parentPid: 1,
+        environment: "zsh CMUX_SURFACE_ID=surface-uuid CMUX_WORKSPACE_ID=workspace-uuid",
+      };
+      return null;
+    });
+    expect(context).toEqual({ surfaceId: "surface-uuid", workspaceId: "workspace-uuid", tabId: undefined });
+    expect(seen).toEqual([30, 20]);
+  });
+
+  it("fails closed when ancestry has no pane identity", () => {
+    expect(callerContextFromAncestry(30, () => null)).toBeUndefined();
+  });
+});
 
 function socketPath(name: string): string {
   return join(TEST_ROOT, `${name}-${process.pid}-${Date.now()}.sock`);
@@ -456,7 +478,7 @@ describe("CmuxLayerProxy", () => {
       const daemon = new FakeDaemon(path);
       daemons.push(daemon);
       await daemon.start();
-      const { input, collector } = createProxy(path);
+      const { input, collector } = createProxy(path, { env: process.env });
 
       writeFrame(input, request(1, "initialize", { capabilities: {} }));
       await collector.waitForMessage(isResponseFor(1));

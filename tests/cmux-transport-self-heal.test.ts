@@ -6,7 +6,7 @@ import * as net from "node:net";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { CmuxClient } from "../src/cmux-client.js";
 import { CmuxSocketError } from "../src/cmux-socket-error.js";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
@@ -21,6 +21,13 @@ import {
 import { SURFACE_TOPOLOGY_CLIENT_METHODS } from "../src/surface-topology.js";
 
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
+const originalCapability = process.env.CMUX_SOCKET_CAPABILITY;
+
+beforeAll(() => { delete process.env.CMUX_SOCKET_CAPABILITY; });
+afterAll(() => {
+  if (originalCapability === undefined) delete process.env.CMUX_SOCKET_CAPABILITY;
+  else process.env.CMUX_SOCKET_CAPABILITY = originalCapability;
+});
 const ACCESS_CONTROL_DENIED_TEXT =
   "Access denied — only processes started inside cmux can connect";
 

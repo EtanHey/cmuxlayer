@@ -731,7 +731,9 @@ async function checkDaemonIntegrity(
     try {
       if (cmuxSocketPath) {
         const cmuxProbe = await (
-          opts.probeCmuxSocket ?? ((path) => probeSocketHealth(path))
+          opts.probeCmuxSocket ?? ((path) => probeSocketHealth(path, {
+            capability: env.CMUX_SOCKET_CAPABILITY,
+          }))
         )(cmuxSocketPath);
         cmuxSocketUsable = cmuxProbe.usable;
       }
