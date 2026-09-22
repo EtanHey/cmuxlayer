@@ -1,0 +1,10 @@
+{
+  "source": "~/.cmux/agents/cmuxlayerCodex-2eab5248/codex-boot-proof.json",
+  "source_field": "screen.structuredContent.content",
+  "capture_timestamp_ms": 1790097034171,
+  "surface": "surface:183",
+  "installed_version": "0.4.79",
+  "encoding": "base64",
+  "extraction": "jq -jr, then base64; decoded fixture is the exact UTF-8 frame with no reconstruction, normalization, or appended LF",
+  "sha256": "bc9e639e46dc0859bb541b3ebef1b0aa721a4f249c10dfe13a6d3f27b8277d25"
+}
