@@ -6496,12 +6496,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         screenCli === "claude" &&
         opts.source_event !== "boot_prompt"
       ) {
-        // Short-pointer verification normally exits quickly, but once the
-        // exact Claude draft is visibly still pending we need enough time to
-        // distinguish a slow accepted repaint from a genuinely lost Return.
+        // Short-pointer verification normally exits quickly, but once the exact
+        // Claude draft is still pending, allow the full retry observation window.
         timeoutMs = Math.max(
           timeoutMs,
           CLAUDE_PENDING_COMPOSER_RETRY_OBSERVE_MS +
+            SEND_INPUT_RECOVERY_ENTER_DELAY_MS +
             SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS,
         );
       }
