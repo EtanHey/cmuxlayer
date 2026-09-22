@@ -190,6 +190,14 @@ export async function spawnDaemonProcess(
     stderrStream.on("data", (chunk: string) => {
       buffer.text = redactCapability(`${buffer.text}${chunk}`, capability).slice(-STDERR_BUFFER_LIMIT);
       stderrCarry += chunk;
+      let forward = "";
+      if (capability) {
+        let tokenIndex: number;
+        while ((tokenIndex = stderrCarry.indexOf(capability)) >= 0) {
+          forward += `${stderrCarry.slice(0, tokenIndex)}[REDACTED]`;
+          stderrCarry = stderrCarry.slice(tokenIndex + capability.length);
+        }
+      }
       let hold = 0;
       if (capability) {
         for (let length = Math.min(capability.length - 1, stderrCarry.length); length > 0; length--) {
@@ -199,9 +207,9 @@ export async function spawnDaemonProcess(
           }
         }
       }
-      const forward = stderrCarry.slice(0, stderrCarry.length - hold);
+      forward += stderrCarry.slice(0, stderrCarry.length - hold);
       stderrCarry = hold ? stderrCarry.slice(-hold) : "";
-      if (forward) sink(redactCapability(forward, capability));
+      if (forward) sink(forward);
     });
     stderrStream.on("error", () => {});
     (stderrStream as unknown as { unref?: () => void }).unref?.();
