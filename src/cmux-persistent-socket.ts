@@ -510,7 +510,7 @@ export class CmuxPersistentSocket {
   private processBuffer(): void {
     let newlineIdx: number;
     while ((newlineIdx = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.redactCapability(this.buffer.slice(0, newlineIdx));
+      const line = this.buffer.slice(0, newlineIdx);
       this.buffer = this.buffer.slice(newlineIdx + 1);
 
       if (!line.trim()) continue;
@@ -531,7 +531,7 @@ export class CmuxPersistentSocket {
         if (!this.isJsonLikeFrame(line) && isCmuxAccessControlDenied(line)) {
           this.rejectAllPending(
             new CmuxSocketError(
-              `cmux access-control denial: ${line.slice(0, 120)}`,
+              `cmux access-control denial: ${this.redactCapability(line).slice(0, 120)}`,
               "access_denied",
               { transportPhase: "response" },
             ),
@@ -562,9 +562,11 @@ export class CmuxPersistentSocket {
   }
 
   private rejectMalformedFrame(line: string, error: unknown): void {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = this.capability
+      ? "invalid JSON"
+      : error instanceof Error ? error.message : String(error);
     const socketError = new CmuxSocketError(
-      `Malformed cmux socket frame: ${detail}; frame=${line.slice(0, 120)}`,
+      `Malformed cmux socket frame: ${detail}; frame=${this.redactCapability(line).slice(0, 120)}`,
       "protocol_error",
     );
     if (line.trimStart().startsWith("{") && this.pending.size > 0) {
@@ -588,7 +590,7 @@ export class CmuxPersistentSocket {
   private rejectUnexpectedV2Frame(line: string): void {
     this.rejectPendingV2(
       new CmuxSocketError(
-        `Unexpected cmux socket frame: frame=${line.slice(0, 120)}`,
+        `Unexpected cmux socket frame: frame=${this.redactCapability(line).slice(0, 120)}`,
         "protocol_error",
       ),
     );
@@ -719,7 +721,10 @@ export class CmuxPersistentSocket {
           if (!response.ok) {
             const errCode = response.error?.code ?? "unknown";
             const errMsg = response.error?.message ?? "Unknown error";
-            reject(new CmuxSocketError(`${errCode}: ${errMsg}`, errCode));
+            reject(new CmuxSocketError(
+              this.redactCapability(`${errCode}: ${errMsg}`),
+              this.redactCapability(errCode),
+            ));
           } else {
             resolve((response.result ?? {}) as T);
           }

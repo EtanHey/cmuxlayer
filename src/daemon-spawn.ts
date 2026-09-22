@@ -161,9 +161,14 @@ export async function spawnDaemonProcess(
       process.stderr.off("drain", resumeStderr);
     };
     let stderrCarry = "";
+    const captureRedacted = (text: string) => {
+      buffer.text = `${buffer.text}${text}`.slice(-STDERR_BUFFER_LIMIT);
+    };
     const flushStderrCarry = () => {
       if (stderrCarry) {
-        sink(redactCapability(stderrCarry, capability));
+        const finalChunk = capability ? "[REDACTED]" : stderrCarry;
+        captureRedacted(finalChunk);
+        sink(finalChunk);
         stderrCarry = "";
       }
       detachParentStderrListeners();
@@ -188,7 +193,6 @@ export async function spawnDaemonProcess(
       });
     stderrStream.setEncoding("utf8");
     stderrStream.on("data", (chunk: string) => {
-      buffer.text = redactCapability(`${buffer.text}${chunk}`, capability).slice(-STDERR_BUFFER_LIMIT);
       stderrCarry += chunk;
       let forward = "";
       if (capability) {
@@ -209,7 +213,10 @@ export async function spawnDaemonProcess(
       }
       forward += stderrCarry.slice(0, stderrCarry.length - hold);
       stderrCarry = hold ? stderrCarry.slice(-hold) : "";
-      if (forward) sink(forward);
+      if (forward) {
+        captureRedacted(forward);
+        sink(forward);
+      }
     });
     stderrStream.on("error", () => {});
     (stderrStream as unknown as { unref?: () => void }).unref?.();
