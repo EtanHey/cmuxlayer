@@ -784,7 +784,6 @@ describe("lean spawn tool responses", () => {
       "Press enter to continue",
       ">_ OpenAI Codex",
       "› Ask Codex to do anything",
-      "gpt-5.6-sol high · 100% left · ~/Gits/jobRadarCoach",
     ].join("\n");
     const lifecycleExec = makeLifecycleExec({ codexReadyText: readyText });
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {

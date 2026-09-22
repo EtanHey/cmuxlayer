@@ -177,7 +177,7 @@ const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const CODEX_READY_PLACEHOLDER_RE =
-  /^\s*›\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)\s*$/;
+  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)\s*$/;
 const isReadyComposerLine = (line: string): boolean =>
   BARE_READY_PROMPT_RE.test(line) || CODEX_READY_PLACEHOLDER_RE.test(line);
 const PICKER_BLOCK_WINDOW_LINES = 32;
@@ -445,6 +445,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
 
   if (
     CODEX_HEADER_RE.test(text) ||
+    text.split("\n").some((line) => CODEX_READY_PLACEHOLDER_RE.test(line)) ||
     (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text)) ||
     hasActiveCodexUpdateMenuScreen(text) ||
     CODEX_WORKING_RE.test(text) ||
@@ -808,6 +809,7 @@ function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
       selectorIndex -= 1
     ) {
       if (!MENU_SELECTOR_RE.test(chooserLines[selectorIndex] ?? "")) continue;
+      if (chooserLines.slice(selectorIndex + 1).some(isReadyComposerLine)) continue;
       const siblingChoices = chooserLines
         .slice(selectorIndex + 1, selectorIndex + 5)
         .filter((line) => /^\s{2,}\S/.test(line));
