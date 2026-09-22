@@ -3701,6 +3701,7 @@ function composeBootDeliveryText(
   cli?: CliType,
 ): string {
   if (!hasInlinePrompt(injectedPrompt)) return callerDeliveryText;
+  if (!hasInlinePrompt(callerDeliveryText)) return injectedPrompt;
   // Claude can treat a paragraph break in a pasted boot payload as a submit
   // boundary. Keep two single-line pointers in one composer message so the
   // brief cannot run while the engine-issued contract remains unsent.
