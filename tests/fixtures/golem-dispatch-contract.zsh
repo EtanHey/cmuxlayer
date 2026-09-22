@@ -2,7 +2,7 @@
 if [[ -n "${CLAUDE_MODEL:-}" ]]; then
   _claude_model="$CLAUDE_MODEL"
 else
-  _claude_model="claude-opus-5[1m]"
+  _claude_model="claude-opus-5-5[1m]"
 fi
 
 _golem_parse_codex_flags() {

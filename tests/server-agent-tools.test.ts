@@ -1563,9 +1563,11 @@ describe("lean spawn tool responses", () => {
       'Unsupported model "fable-5" for cli "claude"',
     );
     expect(result.structuredContent.error).toContain(
-      'would actually run "claude-opus-5[1m]"',
+      'would actually run "claude-opus-5-5[1m]"',
     );
-    expect(result.structuredContent.error).toContain("Accepted models:");
+    expect(result.structuredContent.error).toContain(
+      "Accepted models: claude-opus-5-5[1m], opus, sonnet, haiku",
+    );
     for (const alias of ["opus", "sonnet", "haiku"]) {
       expect(result.structuredContent.error).toMatch(
         new RegExp(`Accepted models: [^.]*\\b${alias}\\b`),
@@ -3851,7 +3853,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.model).toBe("claude-opus-5[1m]");
+    expect(parsed.model).toBe("claude-opus-5-5[1m]");
     expect(parsed.requested_model).toBe("");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
@@ -3865,7 +3867,7 @@ describe("agent lifecycle tool handlers", () => {
     );
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-    expect(persisted.model).toBe("claude-opus-5[1m]");
+    expect(persisted.model).toBe("claude-opus-5-5[1m]");
   });
 
   it("spawn_agent coerces legacy placement=ic to worker and reports the compatibility correction", async () => {
