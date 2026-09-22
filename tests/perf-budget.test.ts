@@ -968,6 +968,9 @@ describe("daemon performance budget", () => {
     expect(source).toContain("const DEFAULT_CLIENTS = 8");
     expect(source).toContain("const DEFAULT_ROUNDS = 12");
     expect(source).toContain("const PARALLEL_STRESS_COUNT = 10");
+    expect(source).toContain('HOME: join(tempRoot, "home")');
+    expect(source).toContain('CMUXLAYER_STATE_DIR: join(tempRoot, "state")');
+    expect(source).toContain('CMUXLAYER_INBOX_BASE_DIR: join(tempRoot, "inbox")');
     expect(source).toContain('sampling: "sampled"');
     expect(source).toContain("samples_per_run");
     expect(source).toContain("for (const [clientIndex, client] of clients.entries())");

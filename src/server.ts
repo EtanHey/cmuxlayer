@@ -6095,6 +6095,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  const shouldVerifyRawSurfaceSubmit = async (
+    record: AgentRecord | undefined,
+    surface: string,
+    workspace?: string,
+  ): Promise<boolean> => {
+    if (!record) return false;
+    if (INTERACTIVE_AGENT_STATES.has(record.state)) return true;
+    // The registry may still say working after the screen has returned to a
+    // ready prompt. Check that target directly before deciding whether a
+    // surface-mode receipt can verify its Return.
+    const snapshot = await readParsedSurface(surface, workspace, { agent: record });
+    return isLiveDeliverable(
+      resolveLiveAgentState(
+        record,
+        snapshot
+          ? {
+              status: snapshot.parsed.status,
+              agent_type: snapshot.parsed.agent_type,
+              control_state: snapshot.parsed.control_state,
+              errors: snapshot.parsed.errors,
+            }
+          : null,
+      ),
+    );
+  };
+
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;
     workspace?: string;
@@ -10842,8 +10868,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
         const shouldVerifySubmit =
           args.press_enter &&
-          !!targetRecord &&
-          INTERACTIVE_AGENT_STATES.has(targetRecord.state);
+          (await shouldVerifyRawSurfaceSubmit(
+            targetRecord,
+            route.surface,
+            route.workspace,
+          ));
 
         if (args.background) {
           await assertSurfaceMutationAllowed(
@@ -11147,8 +11176,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stateMgr,
           route.surface,
         );
-        const shouldVerifySubmit =
-          !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
+        const shouldVerifySubmit = await shouldVerifyRawSurfaceSubmit(
+          targetRecord,
+          route.surface,
+          route.workspace,
+        );
 
         const delivery = await withSurfaceWrite(
           route.surface,

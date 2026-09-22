@@ -1427,6 +1427,7 @@ async function main() {
     : join(repoRoot, "docs.local", "scratch", "run5r3");
   await mkdir(scratchRoot, { recursive: true });
   const tempRoot = await mkdtemp(join(scratchRoot, "b-"));
+  await mkdir(join(tempRoot, "home"), { recursive: true });
   const socketScratchRoot = join(
     homedir(),
     ".local",
@@ -1461,6 +1462,7 @@ async function main() {
   const sweepHoldState = join(tempRoot, "sweep-hold-state.json");
   const baseEnv = {
     ...process.env,
+    HOME: join(tempRoot, "home"),
     CMUX_AGENT_ID: "",
     CMUX_SURFACE_ID: "",
     CMUX_WORKSPACE_ID: "",
@@ -1470,6 +1472,7 @@ async function main() {
     CMUXLAYER_BENCH_SURFACES: String(surfaceCount),
     CMUXLAYER_BENCH_STATE: fakeCmuxState,
     CMUXLAYER_STATE_DIR: join(tempRoot, "state"),
+    CMUXLAYER_INBOX_BASE_DIR: join(tempRoot, "inbox"),
     CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0",
     CMUXLAYER_SWEEP_INTERVAL_MS: "1000",
     CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "1000",

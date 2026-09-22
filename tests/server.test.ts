@@ -5807,6 +5807,79 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(1);
   });
 
+  it.each(["send_input", "send_command"])(
+    "%s verifies submit when the registry is stale-working but the screen is ready",
+    async (toolName) => {
+      vi.useFakeTimers();
+      const stateDir = processScopedTmpDir(`cmuxlayer-stale-working-${toolName}`);
+      rmSync(stateDir, { recursive: true, force: true });
+      mkdirSync(stateDir, { recursive: true });
+      const stateMgr = new StateManager(stateDir);
+      stateMgr.writeState({
+        agent_id: `agent-stale-working-${toolName}`,
+        surface_id: "surface:stale-working",
+        workspace_id: null,
+        state: "working",
+        repo: "cmuxlayer",
+        model: "gpt-5",
+        cli: "codex",
+        cli_session_id: null,
+        task_summary: "stale working submit verification",
+        pid: null,
+        version: 1,
+        created_at: "2026-09-23T00:00:00.000Z",
+        updated_at: "2026-09-23T00:00:00.000Z",
+        error: null,
+        parent_agent_id: null,
+        spawn_depth: 0,
+        deletion_intent: false,
+        quality: "unknown",
+        max_cost_per_agent: null,
+        crash_recover: false,
+        respawn_attempts: 0,
+        user_killed: false,
+      });
+      let textSent = false;
+      let returnPresses = 0;
+      mockExec = vi.fn().mockImplementation((_cmd, args: string[]) => {
+        if (args.includes("send-key") && args.includes("return")) {
+          returnPresses += 1;
+        }
+        if (args.includes("send")) textSent = true;
+        if (args.includes("read-screen")) {
+          return Promise.resolve({
+            stdout: JSON.stringify({
+              surface_ref: "surface:stale-working",
+              text:
+                textSent && returnPresses > 0
+                  ? "OpenAI Codex\ncodex> \ngpt-5 · idle\n"
+                  : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
+              lines: 4,
+            }),
+            stderr: "",
+          });
+        }
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      });
+
+      const server = createServer({ exec: mockExec, skipAgentLifecycle: true, stateDir });
+      const tool = (server as any)._registeredTools[toolName];
+      const resultPromise = tool.handler(
+        toolName === "send_input"
+          ? { surface: "surface:stale-working", text: "ping codex", press_enter: true }
+          : { surface: "surface:stale-working", command: "ping codex" },
+        {} as any,
+      );
+      await advanceTimers(250);
+      const result = await resultPromise;
+      const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.submit_verified).toBe(true);
+      expect(returnPresses).toBe(1);
+    },
+  );
+
   it("send_input does not retry Return for a non-Cursor idle composer that may have queued input", async () => {
     vi.useFakeTimers();
     const stateDir = processScopedTmpDir(
