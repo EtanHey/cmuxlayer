@@ -11469,12 +11469,13 @@ Session ID: ${sessionId}`,
       },
       {
         name: "background child CPU activity",
-        first: "Waiting for background terminal (4m 02s • esc to interrupt)",
-        second: "Waiting for background terminal (4m 03s • esc to interrupt)",
+        first: "Waiting for background terminal (4m 02s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        second: "Waiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
         cpuProgress: true,
       },
     ])("does not report a live worker wedged with $name", async ({ first, second, cpuProgress }) => {
       let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
+      let cpuSample = 0;
       engine.dispose();
       engine = new AgentEngine(
         stateMgr,
@@ -11486,7 +11487,8 @@ Session ID: ${sessionId}`,
           haltNow: () => nowMs,
           haltWedgedDwellMs: 1_000,
           haltWedgedSweeps: 1,
-          haltBackgroundCpuProgress: () => cpuProgress === true,
+          haltProcessSnapshot: () =>
+            `12345 1 0:00.00 codex\n12346 12345 0:0${cpuSample++}.00 tail -n0 -F /tmp/probe.log`,
         },
       );
       const parent = makeRecord({
@@ -11540,6 +11542,7 @@ Session ID: ${sessionId}`,
           haltNow: () => nowMs,
           haltWedgedDwellMs: 1_000,
           haltWedgedSweeps: 1,
+          haltProcessSnapshot: () => "12345 1 0:00.00 codex\n12346 12345 0:01.00 unrelated-worker",
         },
       );
       const parent = makeRecord({
@@ -11557,6 +11560,7 @@ Session ID: ${sessionId}`,
         parent_agent_id: parent.agent_id,
         spawn_depth: 1,
         halt_escalation: true,
+        pid: 12345,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
@@ -11583,6 +11587,72 @@ Session ID: ${sessionId}`,
         screen("52m 02s"),
       );
 
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_wedged",
+        ),
+      ).toHaveLength(1);
+    });
+
+    it("does not count unrelated child CPU as progress for the waiting command", async () => {
+      let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
+      let cpuSample = 0;
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltWedgedDwellMs: 1_000,
+          haltWedgedSweeps: 1,
+          haltProcessSnapshot: () =>
+            `12345 1 0:00.00 codex\n12346 12345 0:00.00 tail -n0 -F /tmp/probe.log\n12347 12345 0:0${cpuSample++}.00 unrelated-worker`,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "sibling-cpu-parent",
+        surface_id: "surface:sibling-cpu-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "sibling-cpu-child",
+        surface_id: "surface:sibling-cpu-child",
+        state: "working",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        pid: 12345,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\n✻ Working",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const screen = (elapsed: string) =>
+        `OpenAI Codex\nModel: gpt-5.6\nWaiting for background terminal (${elapsed} • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log`;
+      await (engine as any).maybeEscalateLiveHalt(child, screen("52m 00s"));
+      nowMs += 1_001;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 01s"),
+      );
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 02s"),
+      );
       expect(
         readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
           (message) => message.tag === "agent_halt_wedged",

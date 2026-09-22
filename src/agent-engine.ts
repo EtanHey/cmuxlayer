@@ -838,8 +838,8 @@ export interface AgentEngineOptions {
   haltIdleWithoutDoneDwellMs?: number;
   haltWedgedDwellMs?: number;
   haltWedgedSweeps?: number;
-  /** Test seam for background child CPU activity; production samples process time. */
-  haltBackgroundCpuProgress?: (agent: AgentRecord) => boolean;
+  /** Test seam for process snapshots; production samples process time with ps. */
+  haltProcessSnapshot?: () => string;
 }
 
 export interface SelfRegistrationSessionEntry {
@@ -1793,7 +1793,7 @@ export class AgentEngine {
   private haltIdleWithoutDoneDwellMs: number;
   private haltWedgedDwellMs: number;
   private haltWedgedSweeps: number;
-  private haltBackgroundCpuProgress?: (agent: AgentRecord) => boolean;
+  private haltProcessSnapshot?: () => string;
   private backgroundChildCpuTimes = new Map<string, Map<number, string>>();
   private autoResolvePrompts: boolean;
   constructor(
@@ -1876,7 +1876,7 @@ export class AgentEngine {
           DEFAULT_HALT_WEDGED_SWEEPS,
         ),
     );
-    this.haltBackgroundCpuProgress = opts?.haltBackgroundCpuProgress;
+    this.haltProcessSnapshot = opts?.haltProcessSnapshot;
     this.autoResolvePrompts =
       process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE === "1";
     this.loadDeliveryReceipts();
@@ -4310,31 +4310,60 @@ export class AgentEngine {
       this.backgroundChildCpuTimes.delete(agent.agent_id);
       return false;
     }
-    if (this.haltBackgroundCpuProgress) return this.haltBackgroundCpuProgress(agent);
+    const visibleLines = screenText.split(/\r?\n/).slice(-24);
+    // An editor waiting for input is a known blocked command. Other busy
+    // descendants of the harness cannot make that command progress.
+    if (visibleLines.some((line) =>
+      /^\s*(?:└\s*)?(?:git\s+commit\s+-e\b|(?:vi|vim|nvim|nano)\b|(?:EDITOR|VISUAL)\s*=)/i.test(line),
+    )) {
+      this.backgroundChildCpuTimes.delete(agent.agent_id);
+      return false;
+    }
+    const waitingCommand = visibleLines
+      .map((line) => line.match(/^\s*└\s*(.+)$/)?.[1]?.trim())
+      .find((command): command is string => Boolean(command));
+    if (!waitingCommand) return false;
     try {
-      const output = execFileSync("ps", ["-axo", "pid=,ppid=,time="], {
+      const output = this.haltProcessSnapshot?.() ?? execFileSync("ps", ["-axo", "pid=,ppid=,time=,command="], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
         timeout: 250,
         maxBuffer: 2_000_000,
       });
       const rows = output.split("\n").map((line) => {
-        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)$/);
-        return match ? { pid: Number(match[1]), ppid: Number(match[2]), time: match[3] } : null;
-      }).filter((row): row is { pid: number; ppid: number; time: string } => row !== null);
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
+        return match ? { pid: Number(match[1]), ppid: Number(match[2]), time: match[3], command: match[4] } : null;
+      }).filter((row): row is { pid: number; ppid: number; time: string; command: string } => row !== null);
       const descendants = new Set<number>([agent.pid]);
-      const times = new Map<number, string>();
       let changed = true;
       while (changed) {
         changed = false;
         for (const row of rows) {
           if (descendants.has(row.ppid) && !descendants.has(row.pid)) {
             descendants.add(row.pid);
-            times.set(row.pid, row.time);
             changed = true;
           }
         }
       }
+      const commandRoot = rows.find((row) =>
+        row.pid !== agent.pid &&
+        descendants.has(row.pid) &&
+        row.command.includes(waitingCommand),
+      );
+      const commandTree = new Set<number>(commandRoot ? [commandRoot.pid] : []);
+      changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of rows) {
+          if (commandTree.has(row.ppid) && !commandTree.has(row.pid)) {
+            commandTree.add(row.pid);
+            changed = true;
+          }
+        }
+      }
+      const times = new Map(rows
+        .filter((row) => commandTree.has(row.pid))
+        .map((row) => [row.pid, row.time] as const));
       const previous = this.backgroundChildCpuTimes.get(agent.agent_id);
       this.backgroundChildCpuTimes.set(agent.agent_id, times);
       return [...times].some(([pid, time]) => previous?.has(pid) && previous.get(pid) !== time);
