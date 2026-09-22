@@ -7021,6 +7021,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         };
         const method = await sendKeyWithRetry(
           opts.surface, "return", opts.workspace, assertOwnedPointerBeforeReturn,
+          1,
         );
         if (method) rpcMethods.add(method);
         const verification = await verifySubmitAfterEnter({
@@ -7044,11 +7045,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (verification.submit_verified !== true) {
           throw new DeliverySafetyGateError("owned_boot_contract_pending", pending.parsed, pointer);
         }
-        const updated = stateMgr.updateRecord(pendingBootAgent.agent_id, {
+        let updated = stateMgr.updateRecord(pendingBootAgent.agent_id, {
           boot_prompt_pending: false,
           prompt_delivered: true,
           submit_verified: true,
         });
+        // Recovery has verified the managed boot submission. Complete its
+        // lifecycle through valid transitions so the followup can be tracked
+        // as working instead of leaving the record stuck in booting.
+        if (updated.state === "booting") {
+          updated = stateMgr.transition(updated.agent_id, "ready");
+        }
+        if (updated.state === "ready") {
+          updated = stateMgr.transition(updated.agent_id, "working");
+        }
         context.lifecycleSweepEngine?.getRegistry().set(updated.agent_id, updated);
       }
     }
