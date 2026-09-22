@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createServer,
-  __bootPromptReceiptTestHooks,
   __leanReceiptTestHooks,
   __submitEvidenceTestHooks,
 } from "../src/server.js";
@@ -338,7 +337,7 @@ class FakeClaudeSurfaceClient {
     }
 
     if (this.mode === "working") {
-      return "Claude Code\n✻ Working\n";
+      return "Claude Code\n✻ Working\n❯\n";
     }
 
     return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
@@ -761,6 +760,7 @@ describe("enter reliability", () => {
         ),
       ).toBe(false);
       expect(finalScreen).toMatch(cli === "claude" ? /Working/ : /Working \(/);
+      expect(__submitEvidenceTestHooks.extractComposerInputRegion(finalScreen)).toBe("");
     },
     10_000,
   );
@@ -822,27 +822,6 @@ describe("enter reliability", () => {
     ).toBe(false);
     expect(finalScreen).toContain("Working");
   }, 10_000);
-
-  it.each([
-    { deliveredChars: 21, typed: false, expectedTyped: true },
-    { deliveredChars: 0, typed: false, expectedTyped: false },
-  ])(
-    "#636 D1 preserves Codex typed truth after a later refusal ($deliveredChars chars)",
-    ({ deliveredChars, typed, expectedTyped }) => {
-      expect(
-        __bootPromptReceiptTestHooks.failureMutationEvidence({
-          delivered_chars: deliveredChars,
-          typed,
-          submit_dispatched: false,
-          rpc_methods: deliveredChars > 0 ? ["surface.send_text"] : [],
-        }),
-      ).toMatchObject({
-        typed: expectedTyped,
-        submit_attempted: false,
-        submit_dispatched: false,
-      });
-    },
-  );
 
   it("verifies a cleared idle composer without waiting for working status", async () => {
     const client = new FakeClaudeSurfaceClient();

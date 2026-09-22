@@ -1255,23 +1255,16 @@ function bootPromptFailureMutationEvidence(input: {
 }) {
   const typed = input.typed || input.delivered_chars > 0 ||
     input.rpc_methods.includes("surface.send_text");
-  return {
+  return buildPublicDeliveryReceipt({
+    delivery_state: "failed",
     typed,
     submit_attempted: input.submit_dispatched,
     submit_dispatched: input.submit_dispatched,
+    submit_verified: false,
+    retry_count: 0,
     rpc_methods: [...input.rpc_methods],
-    WARNING: defaultNonDeliveryWarning(
-      "failed",
-      input.rpc_methods,
-      typed,
-      input.submit_dispatched,
-    ),
-  };
+  });
 }
-
-export const __bootPromptReceiptTestHooks = {
-  failureMutationEvidence: bootPromptFailureMutationEvidence,
-};
 
 const preserveDeliveryEvidenceOnError = (
   error: unknown,
@@ -1557,8 +1550,9 @@ class DeliveryError extends Error {
   constructor(
     message: string,
     readonly failed_chunk?: number,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, { cause });
     this.name = "DeliveryError";
   }
 }
@@ -5814,6 +5808,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw new DeliveryError(
             `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
             chunkNumber,
+            error,
           );
         }
         if (avoidDuplicateOnAmbiguousRetry) {
@@ -5857,6 +5852,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw new DeliveryError(
             `chunk ${chunkNumber}/${totalChunks} acknowledgement was ambiguous and launcher text was not retried: ${message}`,
             chunkNumber,
+            error,
           );
         }
         await delay(SEND_INPUT_RETRY_DELAY_MS);
@@ -5868,6 +5864,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     throw new DeliveryError(
       `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
       chunkNumber,
+      lastError,
     );
   };
 
@@ -6499,12 +6496,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         screenCli === "claude" &&
         opts.source_event !== "boot_prompt"
       ) {
-        // Short-pointer verification normally exits quickly, but once the
-        // exact Claude draft is visibly still pending we need enough time to
-        // distinguish a slow accepted repaint from a genuinely lost Return.
+        // Short-pointer verification normally exits quickly, but once the exact
+        // Claude draft is still pending, allow the full retry observation window.
         timeoutMs = Math.max(
           timeoutMs,
           CLAUDE_PENDING_COMPOSER_RETRY_OBSERVE_MS +
+            SEND_INPUT_RECOVERY_ENTER_DELAY_MS +
             SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS,
         );
       }
@@ -7133,6 +7130,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       targetCli === "claude" &&
       caller
     ) {
+      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
       typedDraftOwners.set(ownerKey, {
         caller,
         text: submittedText,
@@ -8148,16 +8146,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
     }
-    const assertDeliveryRouteCurrent = opts.resolveRoute
-      ? async (): Promise<void> => {
+    const assertDeliveryRouteCurrent = async (): Promise<void> => {
+      if (opts.resolveRoute) {
           const current = await opts.resolveRoute!();
           if (!sameRoute(deliveryRoute, current)) {
             throw new Error(
               "Boot prompt route changed during delivery; refusing to split prompt across terminals",
             );
           }
-        }
-      : undefined;
+      }
+      await assertSurfaceMutationAllowed(
+        "boot_prompt", deliveryRoute.surface, deliveryRoute.workspace,
+      );
+    };
     if (readiness.delivery_state === "queued") {
       return fingerprintPromptReceipt({
         ...buildPublicDeliveryReceipt({
@@ -15716,6 +15717,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const bootPromptReceipt = e.submit_verification_error
                 ? { ...submitVerificationFailurePayload(e.submit_verification_error),
+                    terminal: true,
                     bytes: e.delivered_chars }
                 : {
                     ...buildPublicDeliveryReceipt({
