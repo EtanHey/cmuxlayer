@@ -648,11 +648,9 @@ const SEND_INPUT_RETRY_DELAY_MS = 25;
 const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
 const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
-// Pre-Return correlation is a safety gate. Bound it by the caller's submit
-// timeout so a surface that never paints typed text cannot stall indefinitely.
-// A CLI fallback paste can be acknowledged before Claude repaints its composer.
-// Keep observing the exact owned payload before deciding whether Return is safe.
-const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 5_000;
+// CLI fallback paste acknowledgement can precede the Claude composer repaint.
+// Keep a short budget for surfaces that never paint the owned payload.
+const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 250;
 function parsePositiveIntegerMs(
   value: string | undefined,
   fallback: number,
@@ -6191,8 +6189,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     screenText: string;
     metrics: RawSubmitEvidenceMetrics;
   } | null> => {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < opts.timeout_ms) {
+    // One slow CLI read can consume the old 250ms deadline while returning a
+    // pre-paste frame. Three bounded reads allow a stale frame and a repaint;
+    // short caller deadlines still get only one read.
+    const readLimit = opts.timeout_ms >= BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS
+      ? 3 : 1;
+    for (let read = 0; read < readLimit; read += 1) {
       await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
@@ -6206,11 +6208,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
         };
       }
-      const remaining = opts.timeout_ms - (Date.now() - startedAt);
-      if (remaining <= 0) {
-        break;
+      if (read + 1 < readLimit) {
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
       }
-      await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remaining));
     }
     return null;
   };

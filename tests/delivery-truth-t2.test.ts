@@ -1286,7 +1286,8 @@ describe("boot-submit readiness and attributable evidence", () => {
 
   function makeCodexBootExec(opts: {
     payloadAppears: boolean;
-    payloadDelayMs?: number;
+    payloadAppearsAfterPostPasteReads?: number;
+    firstPostPasteReadDelayMs?: number;
     submitAfterReturn?: number | null;
     staleReadyAfterReturn?: boolean;
     frontMatterReads?: number;
@@ -1301,10 +1302,10 @@ describe("boot-submit readiness and attributable evidence", () => {
     promptSentAfterRead: () => number | null;
   } {
     let promptSent = false;
-    let promptSentAt = 0;
     let promptSentAfterRead: number | null = null;
     let returnPresses = 0;
     let screenReads = 0;
+    let postPasteReads = 0;
     let postReturnReads = 0;
     const exec: ExecFn = vi.fn().mockImplementation(
       async (_cmd, args: string[]) => {
@@ -1361,7 +1362,6 @@ describe("boot-submit readiness and attributable evidence", () => {
         }
         if (args.includes("send") && !args.includes("send-key")) {
           promptSent = true;
-          promptSentAt = Date.now();
           promptSentAfterRead = screenReads;
           return { stdout: "{}", stderr: "" };
         }
@@ -1371,6 +1371,12 @@ describe("boot-submit readiness and attributable evidence", () => {
         }
         if (args.includes("read-screen")) {
           screenReads += 1;
+          if (promptSent && returnPresses === 0) {
+            postPasteReads += 1;
+            if (postPasteReads === 1 && opts.firstPostPasteReadDelayMs) {
+              await new Promise((resolve) => setTimeout(resolve, opts.firstPostPasteReadDelayMs));
+            }
+          }
           if (returnPresses > 0) {
             postReturnReads += 1;
           }
@@ -1435,7 +1441,7 @@ describe("boot-submit readiness and attributable evidence", () => {
                     "gpt-5.6-sol high · ~/Gits/cmuxlayer",
                   ].join("\n")
             : opts.payloadAppears &&
-                Date.now() - promptSentAt >= (opts.payloadDelayMs ?? 0)
+                postPasteReads >= (opts.payloadAppearsAfterPostPasteReads ?? 1)
                 ? cli === "claude"
                   ? ["Claude Code", "❯ Read and follow the brief"].join("\n")
                   : [
@@ -1501,6 +1507,26 @@ describe("boot-submit readiness and attributable evidence", () => {
         submitted,
       ),
     ).toBe(false);
+  });
+
+  it("recognizes the full wrapped Claude brief and contract pointers before Return", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const submitted = [
+      "Read and follow /tmp/brief.md",
+      "",
+      "cmuxlayer contract for agent-1: Read and follow /tmp/contract.md",
+    ].join("\n");
+    const screen = [
+      "Claude Code",
+      "❯ Read and follow /tmp/brief.md",
+      "  ",
+      "  cmuxlayer contract for agent-1: Read and follow",
+      "  /tmp/contract.md",
+      "────────────────────────────────────────────────────────────────",
+      "🤖 Opus 5.5 (1M context) | 💰 $0.00",
+    ].join("\n");
+
+    expect(__submitEvidenceTestHooks.screenShowsCompletePendingInput(screen, submitted)).toBe(true);
   });
 
   it("requires multiple boot observations for a modern Codex ready composer without changing the global registry", async () => {
@@ -1779,7 +1805,8 @@ describe("boot-submit readiness and attributable evidence", () => {
     const harness = makeCodexBootExec({
       cli: "claude",
       payloadAppears: true,
-      payloadDelayMs: 400,
+      payloadAppearsAfterPostPasteReads: 2,
+      firstPostPasteReadDelayMs: 400,
       submitAfterReturn: 1,
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
@@ -1802,6 +1829,38 @@ describe("boot-submit readiness and attributable evidence", () => {
       submit_dispatched: true,
       submit_verified: true,
       delivered: true,
+      delivery_state: "submitted",
+    });
+    expect(harness.returnPresses()).toBe(1);
+  }, 20_000);
+
+  it("takes another Claude composer read after one slow stale CLI frame exceeds the observe deadline", async () => {
+    const { createServer } = await loadServerModule();
+    const harness = makeCodexBootExec({
+      cli: "claude",
+      payloadAppears: true,
+      payloadAppearsAfterPostPasteReads: 2,
+      firstPostPasteReadDelayMs: 800,
+      submitAfterReturn: 1,
+    });
+    const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
+
+    const result = await (server as any)._registeredTools.new_split.handler(
+      {
+        direction: "right",
+        workspace: "workspace:1",
+        cli: "claude",
+        boot_prompt_path: writeBootPrompt(),
+        boot_prompt_timeout_ms: 2_000,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      typed: true,
+      submit_dispatched: true,
+      submit_verified: true,
       delivery_state: "submitted",
     });
     expect(harness.returnPresses()).toBe(1);
