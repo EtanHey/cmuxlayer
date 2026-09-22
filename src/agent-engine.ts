@@ -4283,7 +4283,7 @@ export class AgentEngine {
   private blockingBackgroundWaitElapsedMs(screenText: string): number | null {
     const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
     const match = visibleTail.match(
-      /\bWait(?:ing|ed) for background terminal\s*\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s\s*•\s*esc to interrupt\)/i,
+      /\bWait(?:ing|ed) for background terminal\s*\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s(?:\s*•\s*esc to interrupt)?\)/i,
     );
     if (!match) return null;
     const hours = Number.parseInt(match[1] ?? "0", 10);
@@ -4299,13 +4299,21 @@ export class AgentEngine {
   private observableHaltProgressSignature(
     agent: AgentRecord,
     screenText: string,
+    parsed: ParsedScreenResult,
   ): string {
     const materialScreen = cleanScreenText(
       screenText,
       BOOT_SESSION_CAPTURE_LINES,
     );
     const transcriptMtime = this.loadGroundTruthSession(agent)?.mtime_ms ?? 0;
-    return `${screenTextSignature(materialScreen)}:${transcriptMtime}`;
+    // cleanScreenText intentionally removes spinner/chrome lines. During an active
+    // background wait those lines carry the only changing progress evidence.
+    const waitElapsedMs = this.blockingBackgroundWaitElapsedMs(screenText);
+    const backgroundProgress =
+      waitElapsedMs === null
+        ? ""
+        : `:background_wait=${waitElapsedMs}:tokens=${parsed.token_count ?? "unknown"}`;
+    return `${screenTextSignature(materialScreen)}:${transcriptMtime}${backgroundProgress}`;
   }
 
   private isMatureHaltEpisode(agent: AgentRecord, nowMs: number): boolean {
@@ -4708,6 +4716,7 @@ export class AgentEngine {
     const progressSignature = this.observableHaltProgressSignature(
       agent,
       screenText,
+      parsed,
     );
     const hasVisibleProgress = hasVisibleAgentProgress(screenText, agent.cli);
     const canObservePromptMotion =
@@ -4794,8 +4803,6 @@ export class AgentEngine {
 
     const screenActive =
       parsed.status === "working" || parsed.status === "thinking";
-    const blockingBackgroundWaitMs =
-      this.blockingBackgroundWaitElapsedMs(screenText);
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
     if (hasHarnessApiError) {
@@ -4808,10 +4815,7 @@ export class AgentEngine {
     } else if (parsed.paused === true) {
       haltType = "paused";
     } else if (screenActive) {
-      if (blockingBackgroundWaitMs !== null) {
-        haltType = "wedged";
-        episodeStartedAtMs = nowMs - blockingBackgroundWaitMs;
-      } else if (agent.halt_last_progress_signature !== progressSignature) {
+      if (agent.halt_last_progress_signature !== progressSignature) {
         return this.clearHaltEpisode(agent, {
           halt_last_active_at: nowIso,
           halt_last_progress_at_ms: nowMs,
@@ -4846,10 +4850,7 @@ export class AgentEngine {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
         halt_episode_type: haltType,
         halt_episode_started_at: new Date(episodeStartedAtMs).toISOString(),
-        halt_episode_observations:
-          haltType === "wedged" && blockingBackgroundWaitMs !== null
-            ? this.haltWedgedSweeps
-            : 1,
+        halt_episode_observations: 1,
         halt_notification_sent_at: null,
         halt_notified_ancestor_id: null,
         halt_fallback_sink_id: null,
