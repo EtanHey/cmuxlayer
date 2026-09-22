@@ -766,6 +766,46 @@ TASK_DONE
     expect(parsed.cli_update_state).toBeUndefined();
   });
 
+  it("does not classify stale update choices above a modern Codex placeholder as a picker", () => {
+    const parsed = parseScreen([
+      codexAutoUpdateFixture.screens.interactive_update,
+      ">_ OpenAI Codex",
+      "› Ask Codex to do anything",
+      "gpt-5.6-sol high · 100% left · ~/Gits/jobRadarCoach",
+    ].join("\n"));
+
+    expect(parsed).toMatchObject({ agent_type: "codex", control_state: "ready" });
+    expect(parsed.errors).not.toContain("interactive_prompt");
+  });
+
+  it.each([
+    ["›", false],
+    ["»", false],
+    ["»", true],
+  ] as const)(
+    "does not classify a trailing %s Codex placeholder after stale update choices as a picker (status=%s)",
+    (promptGlyph, withStatus) => {
+      const screen = [
+        ">_ OpenAI Codex",
+        "✨ Update available! 0.142.5 -> 0.143.0",
+        "See full release notes: https://github.com/openai/codex/releases/latest",
+        "› 1. Update now",
+        "  2. Skip until next version",
+        "Press enter to continue",
+        ">_ OpenAI Codex",
+        `${promptGlyph} Ask Codex to do anything`,
+        ...(withStatus
+          ? ["gpt-5.6-sol high · 100% left · ~/Gits/jobRadarCoach"]
+          : []),
+      ].join("\n");
+      const parsed = parseScreen(screen);
+
+      expect(isPickerOrMenuScreen(screen, "codex")).toBe(false);
+      expect(parsed).toMatchObject({ agent_type: "codex", control_state: "ready" });
+      expect(parsed.errors).not.toContain("interactive_prompt");
+    },
+  );
+
   it.each(["Downloading…", "Installing…"])(
     "recognizes standalone updater step %s without an agent transcript",
     (outputLine) => {

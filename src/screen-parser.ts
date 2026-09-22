@@ -176,6 +176,10 @@ const PROMPT_BLOCK_WINDOW_LINES = 8;
 const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
+const CODEX_READY_PLACEHOLDER_RE =
+  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)\s*$/;
+const isReadyComposerLine = (line: string): boolean =>
+  BARE_READY_PROMPT_RE.test(line) || CODEX_READY_PLACEHOLDER_RE.test(line);
 const PICKER_BLOCK_WINDOW_LINES = 32;
 const PICKER_NUMBERED_OPTION_RE =
   /^\s*(?:[>❯›]\s*)?(?:[☐☑◉○●◯✓✔]\s*)?\d+\.\s+\S.+$/;
@@ -360,7 +364,7 @@ function isCodexUpdateMenuScreenNormalized(
     if (
       lines
         .slice(index + 1)
-        .some((line) => BARE_READY_PROMPT_RE.test(line))
+        .some(isReadyComposerLine)
     ) {
       continue;
     }
@@ -441,6 +445,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
 
   if (
     CODEX_HEADER_RE.test(text) ||
+    text.split("\n").some((line) => CODEX_READY_PLACEHOLDER_RE.test(line)) ||
     (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text)) ||
     hasActiveCodexUpdateMenuScreen(text) ||
     CODEX_WORKING_RE.test(text) ||
@@ -664,7 +669,7 @@ function hasMenuBlock(text: string, opts?: { tailOnly?: boolean }): boolean {
       opts?.tailOnly &&
       lines
         .slice(index + 1)
-        .some((line) => BARE_READY_PROMPT_RE.test(line))
+        .some(isReadyComposerLine)
     ) {
       continue;
     }
@@ -689,7 +694,7 @@ function hasPermissionPromptBlock(text: string): boolean {
     if (
       lines
         .slice(footerIndex + 1)
-        .some((line) => BARE_READY_PROMPT_RE.test(line))
+        .some(isReadyComposerLine)
     ) {
       continue;
     }
@@ -724,7 +729,7 @@ function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
     if (
       afterFooter.some(
         (line) =>
-          BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+          isReadyComposerLine(line) || CURSOR_FOLLOWUP_RE.test(line),
       ) || hasShellPrompt(afterFooter.join("\n"))
     ) {
       continue;
@@ -770,7 +775,7 @@ function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
     if (
       afterSelector.some(
         (line) =>
-          BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+          isReadyComposerLine(line) || CURSOR_FOLLOWUP_RE.test(line),
       ) ||
       hasShellPrompt(afterSelector.join("\n"))
     ) {
@@ -804,6 +809,7 @@ function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
       selectorIndex -= 1
     ) {
       if (!MENU_SELECTOR_RE.test(chooserLines[selectorIndex] ?? "")) continue;
+      if (chooserLines.slice(selectorIndex + 1).some(isReadyComposerLine)) continue;
       const siblingChoices = chooserLines
         .slice(selectorIndex + 1, selectorIndex + 5)
         .filter((line) => /^\s{2,}\S/.test(line));
@@ -1008,7 +1014,7 @@ function hasPickerNavigationBlock(text: string): boolean {
     if (
       afterFooter.some(
         (line) =>
-          BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+          isReadyComposerLine(line) || CURSOR_FOLLOWUP_RE.test(line),
       ) || hasShellPrompt(afterFooter.join("\n"))
     ) {
       continue;
