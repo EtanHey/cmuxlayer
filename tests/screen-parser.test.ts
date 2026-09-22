@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   parseScreen,
@@ -38,6 +39,40 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("bounds parsing of whitespace-heavy draft and other long terminal lines", () => {
+    // Run synchronously in a child so a backtracking parser cannot hang Vitest.
+    const parserUrl = new URL("../src/screen-parser.ts", import.meta.url).href;
+    const code = `
+      import { performance } from "node:perf_hooks";
+      import { parseScreen } from ${JSON.stringify(parserUrl)};
+      const frames = [
+        "╭ OpenAI Codex ╮\\nmodel: gpt-5.6-sol\\n› " + " ".repeat(8000) + "\\n› ",
+        "╭ OpenAI Codex ╮\\nmodel: gpt-5.6-sol\\n› " + " ".repeat(200) + "\\n› ",
+        "Claude Code\\n" + "─".repeat(8000) + "\\n✻ Thinking…\\n❯ Ready",
+        "╭ OpenAI Codex ╮\\n" + "x".repeat(8000) + "\\n› Find a bug",
+      ];
+      const durations = frames.map((frame) => {
+        let slowest = 0;
+        for (let i = 0; i < 3; i++) {
+          const start = performance.now();
+          parseScreen(frame);
+          slowest = Math.max(slowest, performance.now() - start);
+        }
+        return slowest;
+      });
+      console.log(JSON.stringify(durations));
+    `;
+    const result = spawnSync("bun", ["-e", code], {
+      encoding: "utf8",
+      timeout: 2000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    const durations = JSON.parse(result.stdout.trim()) as number[];
+    expect(durations).toHaveLength(4);
+    expect(durations[1]).toBeLessThan(5);
+    expect(Math.max(durations[0], durations[2], durations[3])).toBeLessThan(50);
+  });
   it.each([
     ["claude-api-error.txt", "req_011CeRnwUcf8wusrNawosx6c"],
     ["claude-safeguard-refusal.txt", "req_011CeRnwgFeHAsTb3hU4n9jt"],
