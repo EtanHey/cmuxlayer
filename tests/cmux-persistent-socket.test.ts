@@ -33,6 +33,7 @@ async function startLineServer(
   rmSync(path, { force: true });
   const server = net.createServer((conn) => {
     let buffer = "";
+    conn.on("error", () => {});
     conn.on("data", (chunk) => {
       buffer += chunk.toString("utf-8");
       let newlineIndex: number;
@@ -55,6 +56,18 @@ async function startLineServer(
   });
   servers.push(server);
   return server;
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  label: string,
+  maxTurns = 100,
+): Promise<void> {
+  for (let turn = 0; turn < maxTurns; turn += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
 }
 
 describe("CmuxPersistentSocket V1 demux", () => {
@@ -106,6 +119,169 @@ describe("CmuxPersistentSocket V1 demux", () => {
     });
   });
 
+  it("labels a socket close before connect as connect-phase transport", async () => {
+    class ClosingConnectSocket extends EventEmitter {
+      setTimeout(): this {
+        return this;
+      }
+
+      destroy(): this {
+        queueMicrotask(() => this.emit("close"));
+        return this;
+      }
+    }
+    const transport = new ClosingConnectSocket();
+    const socket = new CmuxPersistentSocket({
+      createConnection: () => transport as unknown as net.Socket,
+    });
+
+    const connection = socket.connect();
+    socket.disconnect();
+
+    await expect(connection).rejects.toMatchObject({
+      code: "connection_closed",
+      transport_phase: "connect",
+    });
+  });
+
+  it("keeps a newer shared connect promise when a stale socket closes", async () => {
+    class DeferredConnectSocket extends EventEmitter {
+      destroyed = false;
+
+      setTimeout(): this {
+        return this;
+      }
+
+      destroy(): this {
+        this.destroyed = true;
+        return this;
+      }
+    }
+    const transports: DeferredConnectSocket[] = [];
+    const callbacks: Array<() => void> = [];
+    const socket = new CmuxPersistentSocket({
+      createConnection: ((_options, callback) => {
+        const transport = new DeferredConnectSocket();
+        transports.push(transport);
+        callbacks.push(() => callback?.());
+        return transport as unknown as net.Socket;
+      }) as typeof net.createConnection,
+    });
+
+    const stale = socket.connect().then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    socket.disconnect();
+    const currentA = socket.connect();
+    const currentB = socket.connect();
+    expect(transports).toHaveLength(2);
+
+    transports[0].emit("close");
+    await expect(stale).resolves.toMatchObject({
+      status: "rejected",
+      error: { code: "connection_closed", transport_phase: "connect" },
+    });
+    const currentC = socket.connect();
+    expect(transports).toHaveLength(2);
+
+    callbacks[1]();
+    await expect(Promise.all([currentA, currentB, currentC])).resolves.toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(transports[1].destroyed).toBe(false);
+    socket.disconnect();
+  });
+
+  it("does not let a stale socket timeout clear a newer connected socket", async () => {
+    class DeferredConnectSocket extends EventEmitter {
+      destroyed = false;
+      timeoutListener: (() => void) | null = null;
+
+      setTimeout(_ms: number, listener: () => void): this {
+        this.timeoutListener = listener;
+        return this;
+      }
+
+      destroy(): this {
+        this.destroyed = true;
+        return this;
+      }
+    }
+    const transports: DeferredConnectSocket[] = [];
+    const callbacks: Array<() => void> = [];
+    const socket = new CmuxPersistentSocket({
+      createConnection: ((_options, callback) => {
+        const transport = new DeferredConnectSocket();
+        transports.push(transport);
+        callbacks.push(() => callback?.());
+        return transport as unknown as net.Socket;
+      }) as typeof net.createConnection,
+    });
+
+    const stale = socket.connect().then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    socket.disconnect();
+    const current = socket.connect();
+    callbacks[1]();
+    await expect(current).resolves.toBeUndefined();
+    expect(socket.isConnected()).toBe(true);
+
+    transports[0].timeoutListener?.();
+    await expect(stale).resolves.toMatchObject({
+      status: "rejected",
+      error: { code: "connection_error", transport_phase: "connect" },
+    });
+    await expect(socket.connect()).resolves.toBeUndefined();
+    expect(socket.isConnected()).toBe(true);
+    expect(transports).toHaveLength(2);
+    expect(transports[1].destroyed).toBe(false);
+    socket.disconnect();
+  });
+
+  it("does not reconnect a stale polling call after explicit disconnect during connection backoff", async () => {
+    vi.useFakeTimers();
+    let connectionCount = 0;
+    class ImmediateConnectSocket extends EventEmitter {
+      setTimeout(): this {
+        return this;
+      }
+
+      destroy(): this {
+        return this;
+      }
+    }
+    const socket = new CmuxPersistentSocket({
+      backoff: { baseMs: 25, maxMs: 25, jitter: false },
+      createConnection: ((_options, callback) => {
+        connectionCount += 1;
+        const transport = new ImmediateConnectSocket();
+        queueMicrotask(() => callback?.());
+        return transport as unknown as net.Socket;
+      }) as typeof net.createConnection,
+    });
+    socket.incrementBackoff();
+
+    const result = socket.call("workspace.list", {}, { polling: true }).then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    socket.disconnect();
+    await vi.advanceTimersByTimeAsync(25);
+
+    await expect(result).resolves.toMatchObject({
+      status: "rejected",
+      error: { code: "connection_closed" },
+    });
+    expect(connectionCount).toBe(0);
+  });
+
   it("rejects at the connect deadline when the socket connects but never responds", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("connected-no-response");
@@ -129,6 +305,367 @@ describe("CmuxPersistentSocket V1 demux", () => {
     } finally {
       socket.disconnect();
     }
+  });
+
+  it("recovers when the first safe polling response is rate_limited", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("first-poll-rate-limited");
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify(
+          requestCount === 1
+            ? {
+                id: request.id,
+                ok: false,
+                error: {
+                  code: "rate_limited",
+                  message: "Polling rate limited for this connection",
+                },
+              }
+            : { id: request.id, ok: true, result: { workspaces: [] } },
+        )}\n`,
+      );
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        refillMs: 1,
+        rateLimitBackoffBaseMs: 1,
+        rateLimitBackoffMaxMs: 2,
+        maxRateLimitRetries: 2,
+        jitter: false,
+      },
+    });
+
+    try {
+      await expect(
+        socket.call("workspace.list", {}, { polling: true }),
+      ).resolves.toEqual({ workspaces: [] });
+      expect(requestCount).toBe(2);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("bounds repeated polling rate_limited retries", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("bounded-poll-rate-limited");
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify({
+          id: request.id,
+          ok: false,
+          error: {
+            code: "rate_limited",
+            message: "Polling rate limited for this connection",
+          },
+        })}\n`,
+      );
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        refillMs: 1,
+        rateLimitBackoffBaseMs: 1,
+        rateLimitBackoffMaxMs: 2,
+        maxRateLimitRetries: 2,
+        jitter: false,
+      },
+    });
+
+    try {
+      await expect(
+        socket.call("workspace.list", {}, { polling: true }),
+      ).rejects.toMatchObject({ code: "rate_limited" });
+      expect(requestCount).toBe(3);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+    "falls back to a finite retry bound for maxRateLimitRetries=%s",
+    async (invalidRetries) => {
+      mkdirSync(TEST_ROOT, { recursive: true });
+      const path = socketPath("finite-poll-retries");
+      let requestCount = 0;
+      await startLineServer(path, (line, conn) => {
+        const request = JSON.parse(line) as { id: string };
+        requestCount += 1;
+        conn.write(
+          `${JSON.stringify({
+            id: request.id,
+            ok: false,
+            error: { code: "rate_limited", message: "limited" },
+          })}\n`,
+        );
+      });
+      const socket = new CmuxPersistentSocket({
+        socketPath: path,
+        timeoutMs: 500,
+        polling: {
+          refillMs: 1,
+          rateLimitBackoffBaseMs: 1,
+          rateLimitBackoffMaxMs: 1,
+          maxRateLimitRetries: invalidRetries,
+          jitter: false,
+        },
+      });
+
+      try {
+        await expect(
+          Promise.race([
+            socket.call("workspace.list", {}, { polling: true }),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("retry bound exceeded")), 250),
+            ),
+          ]),
+        ).rejects.toMatchObject({ code: "rate_limited" });
+        expect(requestCount).toBe(4);
+      } finally {
+        socket.disconnect();
+      }
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+    "restores queued polling with the finite default for refillMs=%s",
+    async (invalidRefill) => {
+      mkdirSync(TEST_ROOT, { recursive: true });
+      const path = socketPath("finite-poll-refill");
+      let requestCount = 0;
+      await startLineServer(path, (line, conn) => {
+        const request = JSON.parse(line) as { id: string };
+        requestCount += 1;
+        conn.write(
+          `${JSON.stringify({ id: request.id, ok: true, result: { pong: true } })}\n`,
+        );
+      });
+      const socket = new CmuxPersistentSocket({
+        socketPath: path,
+        timeoutMs: 500,
+        polling: { burst: 1, refillMs: invalidRefill, maxConcurrent: 2 },
+      });
+
+      try {
+        await socket.call("system.ping");
+        await expect(
+          Promise.race([
+            Promise.all([
+              socket.call("system.ping", {}, { polling: true }),
+              socket.call("system.ping", {}, { polling: true }),
+            ]),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("finite refill stalled")), 300),
+            ),
+          ]),
+        ).resolves.toEqual([{ pong: true }, { pong: true }]);
+        expect(requestCount).toBe(3);
+      } finally {
+        socket.disconnect();
+      }
+    },
+  );
+
+  it("preserves an explicit zero polling retry count", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("zero-poll-retries");
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify({
+          id: request.id,
+          ok: false,
+          error: { code: "rate_limited", message: "limited" },
+        })}\n`,
+      );
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: { maxRateLimitRetries: 0 },
+    });
+
+    try {
+      await expect(
+        socket.call("workspace.list", {}, { polling: true }),
+      ).rejects.toMatchObject({ code: "rate_limited" });
+      expect(requestCount).toBe(1);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("cancels a rate-limit backoff when disconnected", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("cancel-poll-rate-limited");
+    let releaseFirstResponse!: () => void;
+    const firstResponse = new Promise<void>((resolve) => {
+      releaseFirstResponse = resolve;
+    });
+    let requestCount = 0;
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify({
+          id: request.id,
+          ok: false,
+          error: {
+            code: "rate_limited",
+            message: "Polling rate limited for this connection",
+          },
+        })}\n`,
+      );
+      releaseFirstResponse();
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      maxInFlight: 1,
+      polling: {
+        rateLimitBackoffBaseMs: 30_000,
+        rateLimitBackoffMaxMs: 30_000,
+        maxRateLimitRetries: 2,
+        jitter: false,
+      },
+    });
+    const result = socket.call("workspace.list", {}, { polling: true });
+
+    await firstResponse;
+    await waitForCondition(
+      () =>
+        (
+          socket as unknown as { pollingBackoffs: Set<unknown> }
+        ).pollingBackoffs.size === 1,
+      "polling backoff waiter",
+    );
+    await expect(
+      socket.call("workspace.list", {}, { polling: true }),
+    ).rejects.toMatchObject({ code: "too_many_requests" });
+    socket.disconnect();
+
+    await expect(result).rejects.toMatchObject({ code: "connection_closed" });
+    const reconnect = socket.call("workspace.list", {}, { polling: true });
+    socket.disconnect();
+    await expect(reconnect).rejects.toMatchObject({ code: "connection_closed" });
+    expect(requestCount).toBe(1);
+  });
+
+  it("cancels limiter backoff when the active socket closes", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("active-close-poll-backoff");
+    let connectionCount = 0;
+    let requestCount = 0;
+    let activeConnection: net.Socket | null = null;
+    const server = await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      conn.write(
+        `${JSON.stringify(
+          requestCount === 1
+            ? {
+                id: request.id,
+                ok: false,
+                error: { code: "rate_limited", message: "limited" },
+              }
+            : { id: request.id, ok: true, result: { pong: true } },
+        )}\n`,
+      );
+    });
+    server.on("connection", (conn) => {
+      connectionCount += 1;
+      activeConnection = conn;
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: {
+        refillMs: 1,
+        rateLimitBackoffBaseMs: 20,
+        rateLimitBackoffMaxMs: 20,
+        jitter: false,
+      },
+    });
+    const result = socket.call("system.ping", {}, { polling: true });
+
+    await waitForCondition(
+      () =>
+        (
+          socket as unknown as { pollingBackoffs: Set<unknown> }
+        ).pollingBackoffs.size === 1,
+      "active limiter backoff",
+    );
+    activeConnection?.destroy();
+
+    await expect(result).rejects.toMatchObject({ code: "connection_closed" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(connectionCount).toBe(1);
+    expect(requestCount).toBe(1);
+    socket.disconnect();
+  });
+
+  it("cancels queued polling when the active socket closes", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("active-close-poll-queue");
+    let connectionCount = 0;
+    let requestCount = 0;
+    let activeConnection: net.Socket | null = null;
+    const server = await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      if (requestCount > 1) {
+        conn.write(
+          `${JSON.stringify({ id: request.id, ok: true, result: { pong: true } })}\n`,
+        );
+      }
+    });
+    server.on("connection", (conn) => {
+      connectionCount += 1;
+      activeConnection = conn;
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: { burst: 1, refillMs: 60_000, maxConcurrent: 1 },
+    });
+
+    const active = socket.call("system.ping", {}, { polling: true });
+    await waitForCondition(() => requestCount === 1, "first polling request");
+    const queued = socket.call("system.ping", {}, { polling: true });
+    await waitForCondition(
+      () =>
+        (socket as unknown as { pollingQueue: unknown[] }).pollingQueue.length ===
+        1,
+      "queued polling request",
+    );
+    activeConnection?.destroy();
+
+    const outcomes = await Promise.allSettled([active, queued]);
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "connection_closed" }),
+      }),
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "connection_closed" }),
+      }),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(connectionCount).toBe(1);
+    expect(requestCount).toBe(1);
+    socket.disconnect();
   });
 
   it("backs off from two seconds to a bounded fifteen-second cap", () => {
@@ -567,34 +1104,106 @@ describe("CmuxPersistentSocket V1 demux", () => {
     socket.disconnect();
   });
 
-  it("increments its connection generation when it reconnects to the same socket", async () => {
+  it("restores the full polling burst on a genuinely new connection", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("connection-generation");
+    let requestCount = 0;
     await startLineServer(path, (line, conn) => {
       const request = JSON.parse(line) as { id: string };
-      conn.end(
-        `${JSON.stringify({
-          id: request.id,
-          ok: true,
-          result: { pong: true },
-        })}\n`,
-      );
+      requestCount += 1;
+      const response = `${JSON.stringify({
+        id: request.id,
+        ok: true,
+        result: { pong: true },
+      })}\n`;
+      if (requestCount % 3 === 0) conn.end(response);
+      else conn.write(response);
     });
     const socket = new CmuxPersistentSocket({
       socketPath: path,
       timeoutMs: 500,
+      polling: { burst: 3, refillMs: 60_000, maxConcurrent: 3 },
     });
+    const sendBurst = () =>
+      Promise.all(
+        Array.from({ length: 3 }, () =>
+          socket.call("system.ping", {}, { polling: true }),
+        ),
+      );
 
     try {
       expect(socket.currentConnectionGeneration()).toBe(0);
-      await expect(socket.call("system.ping")).resolves.toEqual({ pong: true });
+      await expect(sendBurst()).resolves.toEqual([
+        { pong: true },
+        { pong: true },
+        { pong: true },
+      ]);
       expect(socket.currentConnectionGeneration()).toBe(1);
       while (socket.isConnected()) {
-        await new Promise((resolve) => setTimeout(resolve, 1));
+        await new Promise((resolve) => setImmediate(resolve));
       }
 
-      await expect(socket.call("system.ping")).resolves.toEqual({ pong: true });
+      await expect(sendBurst()).resolves.toEqual([
+        { pong: true },
+        { pong: true },
+        { pong: true },
+      ]);
       expect(socket.currentConnectionGeneration()).toBe(2);
+      expect(requestCount).toBe(6);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("admits a new poll after natural close exhausts the old connection budget", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("natural-close-exhausted-budget");
+    let connectionCount = 0;
+    let requestCount = 0;
+    const server = await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      requestCount += 1;
+      const response = `${JSON.stringify({
+        id: request.id,
+        ok: true,
+        result: { pong: true },
+      })}\n`;
+      if (requestCount === 4) conn.end(response);
+      else conn.write(response);
+    });
+    server.on("connection", () => {
+      connectionCount += 1;
+    });
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+      polling: { burst: 3, refillMs: 60_000, maxConcurrent: 3 },
+    });
+
+    try {
+      await expect(socket.call("system.ping")).resolves.toEqual({ pong: true });
+      await expect(
+        Promise.all(
+          Array.from({ length: 3 }, () =>
+            socket.call("system.ping", {}, { polling: true }),
+          ),
+        ),
+      ).resolves.toHaveLength(3);
+      await waitForCondition(
+        () => !socket.isConnected(),
+        "natural socket close",
+      );
+
+      await expect(
+        Promise.race([
+          socket.call("system.ping", {}, { polling: true }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("new poll was not admitted")), 250),
+          ),
+        ]),
+      ).resolves.toEqual({ pong: true });
+      expect(connectionCount).toBe(2);
+      expect(requestCount).toBe(5);
     } finally {
       socket.disconnect();
     }
