@@ -1672,6 +1672,20 @@ function inferStatus(
     return "idle";
   }
 
+  // Claude may keep an older Thinking line on screen while the current
+  // composer holds a new draft. The draft controls where the next keystroke
+  // lands, so surface it even though activity is also visible above it.
+  // Prompt overlays and harness errors retain their own precedence.
+  if (
+    agentType === "claude" &&
+    errors.length === 0 &&
+    PENDING_COMPOSER_LINE_RE.test(text) &&
+    !hasOsShellPrompt(text) &&
+    hasPendingComposerDraft(text, agentType)
+  ) {
+    return "draft_pending";
+  }
+
   if (hasActiveAgentWork(text, agentType)) {
     return THINKING_RE.test(text) ? "thinking" : "working";
   }
