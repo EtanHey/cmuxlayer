@@ -6929,7 +6929,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       stateMgr, opts.surface, opts.stableSurfaceIdentity,
     );
     const targetCli = pendingBootAgent?.cli;
-    if (draftGuardedEvent && pendingBootAgent?.cli === "claude") {
+    if (
+      draftGuardedEvent &&
+      pendingBootAgent?.cli === "claude" &&
+      pendingBootAgent.boot_prompt_pending === true &&
+      pendingBootAgent.prompt_delivered !== true
+    ) {
       // A previous split boot can leave only our own contract pointer in the
       // composer after the brief was submitted. Match the exact derived line
       // for this bound agent before sending a guarded recovery Return. Any
