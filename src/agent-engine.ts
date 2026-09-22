@@ -2033,21 +2033,15 @@ export class AgentEngine {
   /**
    * The live state a WAIT may terminate on.
    *
-   * AIDEV-NOTE (F1b round 2): F1's rule, applied to termination. Only positive
-   * evidence of ACTIVITY -- the screen showing the agent still working -- is
-   * strong enough to overturn a terminal record. A ready prompt is where a
-   * finished worker sits, and a pane reclaimed by a bare shell says nothing
-   * about whether the task completed; treating either as truth would fail an
-   * agent that genuinely finished (`wait_for(done)` reporting `error` because
-   * the pane was later reclaimed). The record keeps terminal states it earned;
-   * it only loses the ones the screen contradicts with work in progress.
+   * wait_for reports a match only against a screen-confirmed state when one
+   * exists. Preserve the record only when the screen cannot classify the pane.
    */
   private terminationStateOf(
     agent: AgentRecord,
     live: LiveAgentState,
   ): AgentState {
-    if (TERMINAL_STATES.has(agent.state) && !isLiveActive(live)) {
-      return agent.state;
+    if (live.screen_state !== null && live.screen_state !== agent.state) {
+      return live.screen_state;
     }
     return live.state;
   }
@@ -9380,7 +9374,7 @@ export class AgentEngine {
     );
     if (initialEvidence) {
       const stateEstablishedByScreen =
-        initialLive?.source === "screen" && initialState !== initial.state;
+        initialLive.screen_state !== null && initialState !== initial.state;
       return {
         matched: true,
         state: initialState,
@@ -9498,7 +9492,7 @@ export class AgentEngine {
           }
           const timeoutStateEstablishedByScreen =
             current !== null &&
-            timeoutLive?.source === "screen" &&
+            timeoutLive?.screen_state !== null &&
             timeoutState !== current.state;
           const singleObservationReadyIsSafe =
             current !== null &&
@@ -9601,7 +9595,7 @@ export class AgentEngine {
         );
         if (evidenceSource) {
           const stateEstablishedByScreen =
-            live?.source === "screen" && liveState !== current.state;
+            live.screen_state !== null && liveState !== current.state;
           clearInterval(checkInterval);
           finish({
             matched: true,
