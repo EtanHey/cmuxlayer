@@ -751,7 +751,8 @@ describe("lean spawn tool responses", () => {
           ok: true,
           spawn_state: "boot_unsubmitted",
           boot_prompt_delivered: false,
-          boot_prompt_receipt: { typed: true, retry_count: 1, submit_verified: false },
+          boot_prompt_receipt: { typed: true, submitted: false, terminal: true,
+            retry_count: 1, submit_verified: false },
         });
         expect(result.next_action).toMatch(/automatic Return retr(?:y|ies).*exhausted/i);
         expect(result.next_action).not.toMatch(/never .*manual Return/i);
@@ -4370,6 +4371,36 @@ describe("agent lifecycle tool handlers", () => {
         args.includes(join(gitsDir, "ralph")),
       ),
     ).toBe(false);
+  });
+
+  it.each([{ afterText: false, expectedTyped: false }, { afterText: true, expectedTyped: true }])(
+  "spawn_agent preserves typed=$expectedTyped through boot delivery safety refusal",
+  async ({ afterText, expectedTyped }) => {
+    const baseExec = makeLifecycleExec();
+    let launched = false, typed = false, readyReads = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("list-status")) return { stdout: JSON.stringify([
+        { key: "mode.control", value: launched && (afterText ? typed : readyReads >= 3)
+          ? "manual" : "autonomous" },
+      ]), stderr: "" };
+      const text = String(args.at(-1) ?? "");
+      const result = await baseExec(cmd, args);
+      if (args.includes("send") && /Codex\b/.test(text)) launched = true;
+      if (launched && args.includes("read-screen")) readyReads += 1;
+      if ((args.includes("send") || args.includes("set-buffer")) &&
+        text.includes("typed before refusal")) typed = true;
+      return result;
+    });
+    const server = createLifecycleServer(exec);
+    const result = await (server as any)._registeredTools.spawn_agent.handler({
+      repo: "brainlayer", cli: "codex", role: "worker",
+      prompt: "typed before refusal", verbose: true,
+    }, {} as any);
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({ error_code: "manual_mode", typed: expectedTyped,
+      delivered: false, submitted: false, terminal: true, submit_dispatched: false });
   });
 
   it("spawn_agent rejects an unresolvable repo before worktree or focus mutation", async () => {
