@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderBootContractFile } from "../src/coordination-paths.js";
+import { shellQuote } from "../src/shell-safe.js";
 describe("issued inbox tail teardown", () => {
   it("clears a dead PID and never signals a reused PID", () => {
     const base = mkdtempSync(join(tmpdir(), "cmux-stale-pid-"));
@@ -89,6 +90,39 @@ describe("issued inbox tail teardown", () => {
     } finally {
       if (armedPid > 0) { try { process.kill(armedPid); } catch { /* already stopped */ } }
       other.kill();
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a newer monitor record when rearmed after signaling the old one", () => {
+    const base = mkdtempSync(join(tmpdir(), "cmux-tail-rearm-"));
+    const agentDir = join(base, "worker");
+    const inbox = join(agentDir, "inbox.jsonl");
+    const pidFile = join(agentDir, "inbox-tail.pid");
+    const capture = join(base, "new-record");
+    mkdirSync(agentDir);
+    writeFileSync(inbox, "");
+    const contract = renderBootContractFile({ agentId: "worker", mailbox: {
+      monitor_command: `tail -n0 -F ${inbox}`, tail_pid_path: pidFile,
+      cursor_update_env: "CMUX_INBOX_MSG_ID", cursor_update_command: "cmuxlayer inbox-cursor worker",
+    } });
+    const launch = contract.match(/^    (.*perl -MPOSIX=setsid.*)$/m)?.[1];
+    const stop = contract.split("To stop it, kill that PID -- never a pattern:")[1]?.match(/^    (.+)$/m)?.[1];
+    let oldPid = 0;
+    let newPid = 0;
+    try {
+      expect(spawnSync("/bin/sh", ["-c", `( ${launch} ) > /dev/null 2>&1`], { timeout: 3000 }).status).toBe(0);
+      oldPid = Number(readFileSync(pidFile, "utf8").split(" ")[0]);
+      const interleaved = `kill() { if [ "$1" = -0 ]; then command kill "$@"; return; fi; command kill "$@" || return; ( ${launch} ) > /dev/null 2>&1; cat ${shellQuote(pidFile)} > ${shellQuote(capture)}; }; ${stop}`;
+      expect(spawnSync("/bin/sh", ["-c", interleaved], { timeout: 3000 }).status).toBe(0);
+      const newRecord = readFileSync(capture, "utf8");
+      newPid = Number(newRecord.split(" ")[0]);
+      expect(newPid).not.toBe(oldPid);
+      expect(readFileSync(pidFile, "utf8")).toBe(newRecord);
+      expect(() => process.kill(newPid, 0)).not.toThrow();
+    } finally {
+      if (oldPid > 0) { try { process.kill(oldPid); } catch { /* already stopped */ } }
+      if (newPid > 0) { try { process.kill(newPid); } catch { /* already stopped */ } }
       rmSync(base, { recursive: true, force: true });
     }
   });

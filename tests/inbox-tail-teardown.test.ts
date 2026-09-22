@@ -50,7 +50,7 @@ describe("boot contract mailbox teardown", () => {
   it("records the detached supervisor's pid so the seat never has to find it", () => {
     const block = mailboxBlock(render());
     expect(block).toContain(`perl -MPOSIX=setsid -e 'my $pidfile=shift;`);
-    expect(block).toContain("rename $tmp, $pidfile or die $!; print $write");
+    expect(block).toContain("rename $tmp, $pidfile or die $!; close $lock; print $write");
     expect(block).toContain("$0=\"cmuxlayer-inbox-tail:$token\"");
     expect(block).toContain(`' ${shellQuote(PID_FILE)} tail -n0 -F ${INBOX}`);
   });
@@ -91,7 +91,7 @@ describe("boot contract mailbox teardown", () => {
   it("gives the exact stop command, addressed by pid", () => {
     const block = mailboxBlock(render());
     expect(block).toContain(`read pid token < ${shellQuote(PID_FILE)}`);
-    expect(block).toContain(`then kill "$pid" && rm -f ${shellQuote(PID_FILE)}`);
+    expect(block).toContain(`then kill "$pid" && remove_if_current`);
   });
 
   it("survives an agent dir with spaces in it", () => {
@@ -103,7 +103,7 @@ describe("boot contract mailbox teardown", () => {
     const block = mailboxBlock(render(spaced));
     expect(block).toContain(`' '${pid}' tail -n0 -F`);
     expect(block).toContain(`read pid token < '${pid}'`);
-    expect(block).toContain(`rm -f '${pid}'`);
+    expect(block).toContain(`unlink $path if defined($line) && $line eq "$record\\n" }' '${pid}'`);
   });
 
   it("never hands the seat a pattern-matching killer", () => {
