@@ -6124,21 +6124,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const liveTrackedSurfaceIsDeliverable = (
     record: AgentRecord | undefined,
     snapshot: { parsed: ParsedScreenResult } | null,
-  ): boolean =>
-    !!record &&
-    isLiveDeliverable(
-      resolveLiveAgentState(
-        record,
-        snapshot
-          ? {
-              status: snapshot.parsed.status,
-              agent_type: snapshot.parsed.agent_type,
-              control_state: snapshot.parsed.control_state,
-              errors: snapshot.parsed.errors,
-            }
-          : null,
-      ),
-    );
+  ): boolean => {
+    if (!record) return false;
+    if (INTERACTIVE_AGENT_STATES.has(record.state)) return true;
+    // This decides whether to verify the Return already requested for a raw
+    // tracked surface. A live ready composer warrants that read even when the
+    // lifecycle registry has not advanced past booting yet.
+    return !!snapshot && screenConfirmedAgentState(snapshot.parsed) === "ready";
+  };
 
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;

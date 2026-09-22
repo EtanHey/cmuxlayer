@@ -365,6 +365,9 @@ const state = readState();
 function spawnedId(sequence) {
   return "00000000-0000-4000-8000-" + String(900000000000 + sequence).padStart(12, "0");
 }
+function spawnedRef(sequence) {
+  return "surface:bench-" + String(sequence).padStart(5, "0");
+}
 const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   ref: "surface:bench-" + index,
   id: "00000000-0000-4000-8000-" + String(index).padStart(12, "0"),
@@ -375,15 +378,25 @@ const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   current_directory: cwd
 }));
 const spawnedSurface = {
-  ref: "surface:bench-spawn",
-  id: spawnedId(state.spawnSequence || 0),
+  ref: state.spawnRef || "surface:bench-spawn",
+  id: state.spawnId || spawnedId(0),
   title: state.title,
   type: "terminal",
   index: surfaceCount,
   selected: false,
   current_directory: cwd
 };
-const surfaces = state.closed === false ? baseSurfaces.concat([spawnedSurface]) : baseSurfaces;
+const extraSurface = {
+  ...spawnedSurface,
+  ref: "surface:bench-extra",
+  id: state.extraId || spawnedId(0),
+  title: "bench-extra",
+  index: surfaceCount + 1,
+};
+const surfaces = baseSurfaces.concat(
+  state.closed === false ? [spawnedSurface] : [],
+  state.extraClosed === false ? [extraSurface] : [],
+);
 function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
@@ -397,14 +410,21 @@ if (command === "list-workspaces") {
   write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: "pane:bench", surfaces });
 } else if (command === "new-split") {
   const spawnSequence = (state.spawnSequence || 0) + 1;
-  patchState({ closed: false, runtimeReady: false, spawnSequence });
-  writeSurfaceState("surface:bench-spawn", { composer: "", transcript: "" });
-  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: "surface:bench-spawn", surface_id: spawnedId(spawnSequence), title: state.title, type: "terminal" });
+  const openingSpawn = state.closed !== false;
+  const target = openingSpawn ? spawnedSurface : extraSurface;
+  const id = spawnedId(spawnSequence);
+  const ref = openingSpawn ? spawnedRef(spawnSequence) : target.ref;
+  patchState({ spawnSequence, ...(openingSpawn
+    ? { closed: false, runtimeReady: false, spawnId: id, spawnRef: ref }
+    : { extraClosed: false, extraRuntimeReady: false, extraId: id }) });
+  writeSurfaceState(ref, { composer: "", transcript: "" });
+  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: ref, surface_id: id, title: target.title, type: "terminal" });
 } else if (command === "close-surface") {
-  patchState({ closed: true });
+  const surface = optionValue("--surface", spawnedSurface.ref);
+  patchState([extraSurface.ref, extraSurface.id].includes(surface) ? { extraClosed: true } : { closed: true });
   write({ ok: true });
 } else if (command === "debug-terminals") {
-  write({ terminals: surfaces.map((surface) => ({ surface_ref: surface.ref, surface_id: surface.id, current_directory: cwd, runtime_surface_ready: surface.ref !== "surface:bench-spawn" || state.runtimeReady === true, ghostty_surface_ptr: surface.ref !== "surface:bench-spawn" || state.runtimeReady === true ? "0x1234" : "nil" })) });
+  write({ terminals: surfaces.map((surface) => { const ready = surface.ref === spawnedSurface.ref ? state.runtimeReady === true : surface.ref === extraSurface.ref ? state.extraRuntimeReady === true : true; return { surface_ref: surface.ref, surface_id: surface.id, current_directory: cwd, runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }; }) });
 } else if (command === "read-screen") {
   const surface = args[args.indexOf("--surface") + 1] || surfaces[0].ref;
   const surfaceState = readSurfaceState(surface);
@@ -432,7 +452,10 @@ if (command === "list-workspaces") {
   write({ ok: true });
 } else if (command === "send-key") {
   const surface = optionValue("--surface", surfaces[0].ref);
-  if (["surface:bench-spawn", spawnedSurface.id].includes(surface) && (args.at(-1) || "").toLowerCase() === "ctrl-u") patchState({ runtimeReady: true });
+  if ((args.at(-1) || "").toLowerCase() === "ctrl-u") {
+    if ([spawnedSurface.ref, spawnedSurface.id].includes(surface)) patchState({ runtimeReady: true });
+    if ([extraSurface.ref, extraSurface.id].includes(surface)) patchState({ extraRuntimeReady: true });
+  }
   const surfaceState = readSurfaceState(surface);
   if ((args.at(-1) || "").toLowerCase() === "return") {
     surfaceState.transcript = surfaceState.composer;
@@ -499,6 +522,10 @@ function spawnedSurfaceId(sequence) {
   return `00000000-0000-4000-8000-${String(900000000000 + sequence).padStart(12, "0")}`;
 }
 
+function spawnedSurfaceRef(sequence) {
+  return `surface:bench-${String(sequence).padStart(5, "0")}`;
+}
+
 function mutateFakeSurfaceState(
   surfaceId,
   surfaceStates,
@@ -551,15 +578,26 @@ async function handleFakeCmuxSocketLine(
     current_directory: cwd,
   }));
   const spawned = {
-    ref: "surface:bench-spawn",
-    id: spawnedSurfaceId(state.spawnSequence ?? 0),
+    ref: state.spawnRef ?? "surface:bench-spawn",
+    id: state.spawnId ?? spawnedSurfaceId(0),
     title: state.title ?? "bench-spawn",
     type: "terminal",
     index: surfaceCount,
     selected: false,
     current_directory: cwd,
   };
-  const surfaces = state.closed === false ? [...baseSurfaces, spawned] : baseSurfaces;
+  const extra = {
+    ...spawned,
+    ref: "surface:bench-extra",
+    id: state.extraId ?? spawnedSurfaceId(0),
+    title: "bench-extra",
+    index: surfaceCount + 1,
+  };
+  const surfaces = [
+    ...baseSurfaces,
+    ...(state.closed === false ? [spawned] : []),
+    ...(state.extraClosed === false ? [extra] : []),
+  ];
   const layout = {
     workspace_ref: "workspace:bench",
     window_ref: "window:bench",
@@ -645,22 +683,29 @@ async function handleFakeCmuxSocketLine(
       };
       break;
     }
-    case "surface.split":
+    case "surface.split": {
+      const openingSpawn = state.closed !== false;
+      const target = openingSpawn ? spawned : extra;
+      const spawnSequence = (state.spawnSequence ?? 0) + 1;
+      const id = spawnedSurfaceId(spawnSequence);
+      const ref = openingSpawn ? spawnedSurfaceRef(spawnSequence) : target.ref;
       await writeFakeState(statePath, {
         ...state,
-        closed: false,
-        runtimeReady: false,
-        spawnSequence: (state.spawnSequence ?? 0) + 1,
+        spawnSequence,
+        ...(openingSpawn
+          ? { closed: false, runtimeReady: false, spawnId: id, spawnRef: ref }
+          : { extraClosed: false, extraRuntimeReady: false, extraId: id }),
       });
-      surfaceStates.delete(spawned.ref);
+      surfaceStates.delete(ref);
       result = {
         ...layout,
-        surface_ref: spawned.ref,
-        surface_id: spawnedSurfaceId((state.spawnSequence ?? 0) + 1),
-        title: spawned.title,
+        surface_ref: ref,
+        surface_id: id,
+        title: target.title,
         type: "terminal",
       };
       break;
+    }
     case "surface.send_text": {
       const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
       await mutateFakeSurfaceState(
@@ -677,8 +722,12 @@ async function handleFakeCmuxSocketLine(
     }
     case "surface.send_key": {
       const surfaceKey = fakeSurfaceStateKey(params.surface_id, surfaces);
-      if ([spawned.ref, spawned.id].includes(params.surface_id) && String(params.key).toLowerCase() === "ctrl-u") {
-        await writeFakeState(statePath, { ...state, runtimeReady: true });
+      if (String(params.key).toLowerCase() === "ctrl-u") {
+        if ([spawned.ref, spawned.id].includes(params.surface_id)) {
+          await writeFakeState(statePath, { ...state, runtimeReady: true });
+        } else if ([extra.ref, extra.id].includes(params.surface_id)) {
+          await writeFakeState(statePath, { ...state, extraRuntimeReady: true });
+        }
       }
       await mutateFakeSurfaceState(
         surfaceKey,
@@ -697,7 +746,12 @@ async function handleFakeCmuxSocketLine(
       break;
     }
     case "surface.close":
-      await writeFakeState(statePath, { ...state, closed: true });
+      await writeFakeState(statePath, {
+        ...state,
+        ...([extra.ref, extra.id].includes(params.surface_id)
+          ? { extraClosed: true }
+          : { closed: true }),
+      });
       result = { ok: true };
       break;
     case "tab.action":
@@ -1061,6 +1115,9 @@ async function measureSpawnLifecycleOnce(
         ...args,
         ...(canonicalText ? { text: canonicalText } : {}),
         ...(normalizeAgentId ? { agent_id: "$SPAWNED_AGENT_ID" } : {}),
+        ...(args.mode === "surface" && canonicalText
+          ? { surface: "surface:bench-spawn" }
+          : {}),
       }),
       lock_hold_ms: requireFiniteLockHold(
         receipt.timings_ms?.lock_hold,
@@ -1121,7 +1178,7 @@ async function measureSpawnLifecycleOnce(
           client,
           terminal,
           surfaceArgs,
-          "surface:bench-spawn",
+          spawnResult.surface_id,
           "sampled surface send",
         );
         surfaceWaitFor = {
@@ -1892,7 +1949,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exit(1);
-});
+export { startFakeCmuxSocket, writeFakeCmux };
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : String(error));
+    process.exit(1);
+  });
+}

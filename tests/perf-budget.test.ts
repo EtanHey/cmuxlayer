@@ -972,9 +972,10 @@ describe("daemon performance budget", () => {
     expect(source).toContain('HOME: join(tempRoot, "home")');
     expect(source).toContain('CMUXLAYER_STATE_DIR: join(tempRoot, "state")');
     expect(source).toContain('CMUXLAYER_INBOX_BASE_DIR: join(tempRoot, "inbox")');
-    expect(source).toContain('const surfaces = state.closed === false ? [...baseSurfaces, spawned] : baseSurfaces');
-    expect(source).toContain('spawnSequence: (state.spawnSequence ?? 0) + 1');
-    expect(source).toContain('surface_id: spawnedSurfaceId((state.spawnSequence ?? 0) + 1)');
+    expect(source).toContain('...(state.closed === false ? [spawned] : [])');
+    expect(source).toContain('...(state.extraClosed === false ? [extra] : [])');
+    expect(source).toContain('const openingSpawn = state.closed !== false');
+    expect(source).toContain('const spawnSequence = (state.spawnSequence ?? 0) + 1');
     expect(source).toContain('/^cmuxlayerCodex-[a-z0-9]{8}$/.test(spawnResult.agent_id)');
     expect(source).toContain('request_bytes: requestBytes("close_surface", closeArgs)');
     expect(source).toContain('sampling: "sampled"');
