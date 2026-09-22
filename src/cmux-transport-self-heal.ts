@@ -687,6 +687,7 @@ export class CmuxSelfHealingClient {
       const cliFallback = this.opts.cli;
       const client = new CmuxSocketClient({
         socketPath,
+        capability: factoryOpts?.capability,
         timeoutMs: factoryOpts?.timeoutMs,
         password: factoryOpts?.password,
         cliFallback,

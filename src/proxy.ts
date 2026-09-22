@@ -14,6 +14,7 @@ import {
 } from "./json-rpc-line-buffer.js";
 import {
   attachCallerContextToMessage,
+  callerContextFromAncestry,
   callerContextFromEnv,
 } from "./caller-context.js";
 import {
@@ -305,6 +306,7 @@ export class CmuxLayerProxy {
   private readonly reconnectLogIntervalMs: number;
   private readonly reconnectLogNow: () => number;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly callerContext: ReturnType<typeof callerContextFromEnv>;
   private readonly runningEntryScriptPath: string;
   private readonly installedEntryScriptPath: () => string | null;
   private readonly execveFn: ExecveFn | null;
@@ -352,6 +354,10 @@ export class CmuxLayerProxy {
 
   constructor(opts: CmuxLayerProxyOptions = {}) {
     this.env = opts.env ?? process.env;
+    const envCallerContext = callerContextFromEnv(this.env);
+    this.callerContext = envCallerContext?.surfaceId || (opts.env && opts.env !== process.env)
+      ? envCallerContext
+      : callerContextFromAncestry();
     this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(this.env);
     this.input = opts.input ?? process.stdin;
     this.output = opts.output ?? process.stdout;
@@ -512,7 +518,7 @@ export class CmuxLayerProxy {
     this.expiredRequestKeys.delete(key);
     const messageForDaemon = attachCallerContextToMessage(
       cloneMessage(message),
-      callerContextFromEnv(),
+      this.callerContext,
     );
     const pending: PendingRequest = {
       id: message.id,
@@ -1488,7 +1494,9 @@ async function probeProxyCmuxSocket(
     socketPath: candidates[0] ?? "unknown",
   };
   for (const socketPath of candidates) {
-    const result = await probeSocketHealth(socketPath);
+    const result = await probeSocketHealth(socketPath, {
+      capability: env.CMUX_SOCKET_CAPABILITY,
+    });
     if (result.usable || result.denied_reason === "access-control") {
       return result;
     }

@@ -69,6 +69,8 @@ export interface CmuxCallOptions {
 
 export interface CmuxPersistentSocketOptions {
   socketPath?: string;
+  /** cmux-issued pane capability; never include its value in diagnostics. */
+  capability?: string;
   timeoutMs?: number;
   connectTimeoutMs?: number;
   maxInFlight?: number;
@@ -104,6 +106,7 @@ interface V2Response {
 export class CmuxPersistentSocket {
   private socket: net.Socket | null = null;
   private socketPath: string;
+  private readonly capability?: string;
   private buffer = "";
   private pending = new Map<
     string,
@@ -157,6 +160,8 @@ export class CmuxPersistentSocket {
   constructor(opts?: CmuxPersistentSocketOptions) {
     this.socketPath =
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
+    const capability = opts?.capability;
+    this.capability = capability && !/\s/.test(capability) ? capability : undefined;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.connectTimeoutMs = opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
     this.maxInFlight = opts?.maxInFlight ?? MAX_IN_FLIGHT;
@@ -505,7 +510,7 @@ export class CmuxPersistentSocket {
   private processBuffer(): void {
     let newlineIdx: number;
     while ((newlineIdx = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.slice(0, newlineIdx);
+      const line = this.redactCapability(this.buffer.slice(0, newlineIdx));
       this.buffer = this.buffer.slice(newlineIdx + 1);
 
       if (!line.trim()) continue;
@@ -616,10 +621,20 @@ export class CmuxPersistentSocket {
     transportPhase: "connect" | "write" | "response" = "response",
   ): CmuxSocketError {
     return new CmuxSocketError(
-      `Socket error: ${error.message}`,
+      `Socket error: ${this.redactCapability(error.message)}`,
       "connection_error",
       { transportPhase },
     );
+  }
+
+  private redactCapability(value: string): string {
+    return this.capability ? value.replaceAll(this.capability, "[REDACTED]") : value;
+  }
+
+  private envelope(command: string): string {
+    return this.capability
+      ? `_cmux_capability_v1 ${this.capability} ${command}`
+      : command;
   }
 
   private writePayload(
@@ -686,7 +701,7 @@ export class CmuxPersistentSocket {
 
     const id = crypto.randomUUID();
     const request: V2Request = { id, method, params };
-    const payload = JSON.stringify(request) + "\n";
+    const payload = this.envelope(JSON.stringify(request)) + "\n";
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -768,7 +783,7 @@ export class CmuxPersistentSocket {
     await this.ensureConnected();
 
     const shouldWriteNow = this.pendingV1.length === 0;
-    const payload = command + "\n";
+    const payload = this.envelope(command) + "\n";
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

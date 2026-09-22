@@ -57,6 +57,17 @@ afterEach(() => {
 });
 
 describe("control health", () => {
+  it("does not expose a pane capability in its structured or formatted snapshot", async () => {
+    const token = "test-health-capability";
+    const health = await collectControlHealth({
+      homeDir: TEST_ROOT,
+      tmpDir: TEST_ROOT,
+      env: { PATH: "", CMUX_SOCKET_CAPABILITY: token },
+      execFile: async () => ({ stdout: "" }),
+    });
+    expect(JSON.stringify(health)).not.toContain(token);
+    expect(formatControlHealth(health)).not.toContain(token);
+  });
   it.each([
     "/opt/homebrew/bin/node /home/test-user/dist/daemon.js --cli /Applications/cmux.app/Contents/MacOS/cmux",
     "/opt/homebrew/bin/node /home/test-user/dist/daemon.js /Applications/cmux.app/Contents/MacOS/cmux",

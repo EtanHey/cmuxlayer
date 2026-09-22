@@ -91,6 +91,7 @@ function instancePin(
 export async function createCmuxClient(
   opts?: CreateCmuxClientOptions,
 ): Promise<CmuxClient | CmuxSocketClient> {
+  opts = { ...opts, capability: opts?.capability ?? process.env.CMUX_SOCKET_CAPABILITY };
   const logger = opts?.logger ?? console;
   const pin = instancePin(opts);
   const cliFallback = new CmuxClient({
@@ -116,6 +117,7 @@ export async function createCmuxClient(
   for (const socketPath of usable) {
     const client = new CmuxSocketClient({
       socketPath,
+      capability: opts?.capability,
       timeoutMs: opts?.timeoutMs,
       password: opts?.password,
       cliFallback,

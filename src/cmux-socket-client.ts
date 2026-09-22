@@ -50,6 +50,7 @@ type V1Arg = string | V1RawArg;
 
 export interface CmuxSocketClientOptions {
   socketPath?: string;
+  capability?: string;
   timeoutMs?: number;
   maxInFlight?: number;
   /** Password for socket access mode "password" */
@@ -66,6 +67,7 @@ export class CmuxSocketClient {
   private socketPath: string;
   private timeoutMs: number;
   private password?: string;
+  private readonly capability?: string;
   private authPassword?: string;
   private cliFallback?: CmuxClient;
   private transport: CmuxPersistentSocket;
@@ -79,6 +81,7 @@ export class CmuxSocketClient {
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.password = opts?.password;
+    this.capability = opts?.capability;
     this.authPassword = opts?.password;
     this.cliFallback = opts?.cliFallback;
     this.maxInFlight = opts?.maxInFlight;
@@ -86,6 +89,7 @@ export class CmuxSocketClient {
     this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
       socketPath: this.socketPath,
+      capability: this.capability,
       timeoutMs: this.timeoutMs,
       maxInFlight: opts?.maxInFlight,
     });
@@ -199,6 +203,7 @@ export class CmuxSocketClient {
     this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
       socketPath: this.socketPath,
+      capability: this.capability,
       timeoutMs: this.timeoutMs,
       maxInFlight: this.maxInFlight,
     });
