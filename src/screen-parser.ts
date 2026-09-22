@@ -178,6 +178,7 @@ const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const CODEX_READY_PLACEHOLDER_RE =
   /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/;
+const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/m;
 const isReadyComposerLine = (line: string): boolean =>
   BARE_READY_PROMPT_RE.test(line) || CODEX_READY_PLACEHOLDER_RE.test(line);
 const PICKER_BLOCK_WINDOW_LINES = 32;
@@ -1683,7 +1684,11 @@ function inferStatus(
     return "done";
   }
 
-  if (!hasOsShellPrompt(text) && hasPendingComposerDraft(text, agentType)) {
+  if (
+    PENDING_COMPOSER_LINE_RE.test(text) &&
+    !hasOsShellPrompt(text) &&
+    hasPendingComposerDraft(text, agentType)
+  ) {
     return "draft_pending";
   }
 

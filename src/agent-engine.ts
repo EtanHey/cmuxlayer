@@ -935,6 +935,7 @@ function toParsedScreenStatus(
   status: string | null | undefined,
 ): ParsedScreenStatus | null {
   switch (status) {
+    case "draft_pending":
     case "frozen":
     case "thinking":
     case "working":
@@ -8460,7 +8461,12 @@ export class AgentEngine {
     }
     return {
       exists: true,
-      state: parsed.status === "frozen" ? "error" : parsed.status,
+      state:
+        parsed.status === "frozen"
+          ? "error"
+          : parsed.status === "draft_pending"
+            ? "working"
+            : parsed.status,
       source,
     };
   };
