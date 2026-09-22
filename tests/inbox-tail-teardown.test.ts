@@ -52,9 +52,8 @@ describe("boot contract mailbox teardown", () => {
 
   it("gives the exact stop command, addressed by pid", () => {
     const block = mailboxBlock(render());
-    expect(block).toContain(
-      `kill "$(cat ${shellQuote(PID_FILE)})" && rm -f ${shellQuote(PID_FILE)}`,
-    );
+    expect(block).toContain(`pid="$(cat ${shellQuote(PID_FILE)})"`);
+    expect(block).toContain(`then kill "$pid" && rm -f ${shellQuote(PID_FILE)}`);
   });
 
   it("survives an agent dir with spaces in it", () => {
@@ -65,7 +64,8 @@ describe("boot contract mailbox teardown", () => {
     const pid = join(spaced, AGENT_ID, "inbox-tail.pid");
     const block = mailboxBlock(render(spaced));
     expect(block).toContain(`echo $! > '${pid}'`);
-    expect(block).toContain(`kill "$(cat '${pid}')" && rm -f '${pid}'`);
+    expect(block).toContain(`pid="$(cat '${pid}')"`);
+    expect(block).toContain(`rm -f '${pid}'`);
   });
 
   it("never hands the seat a pattern-matching killer", () => {

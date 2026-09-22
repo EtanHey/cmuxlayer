@@ -222,6 +222,7 @@ export function renderBootContractFile(input: BootContractFileInput): string {
   // Agent dirs are user-configurable (CMUXLAYER_INBOX_BASE_DIR), so the path can
   // carry spaces. Both generated commands are pasted into a shell verbatim.
   const pidFile = shellQuote(input.mailbox.tail_pid_path);
+  const monitorCommand = shellQuote(input.mailbox.monitor_command);
   const lines = [
     `# cmuxlayer contract for ${input.agentId}`,
     "",
@@ -269,9 +270,8 @@ export function renderBootContractFile(input: BootContractFileInput): string {
     "",
     "To stop it, kill that PID -- never a pattern:",
     "",
-    // `rm -f` on success: a pidfile outliving its tail is a stale PID, and PIDs
-    // are reused -- a second teardown would then SIGTERM whatever inherited it.
-    `    kill "$(cat ${pidFile})" && rm -f ${pidFile}`,
+    // A dead tail leaves a stale pidfile; a reused PID must not be signaled.
+    `    pid="$(cat ${pidFile})"; if ! kill -0 "$pid" 2>/dev/null; then rm -f ${pidFile}; elif [ "$(ps -p "$pid" -o command= 2>/dev/null)" = ${monitorCommand} ]; then kill "$pid" && rm -f ${pidFile}; else printf 'INBOX_TAIL_PID_CONFLICT pid=%s' "$pid" >&2; false; fi`,
     "",
     "Do NOT reach for a pattern-matching killer here. Trailing flags fold into the",
     "pattern under BSD getopt, which is how one such command SIGTERM'd 20 launchd",
