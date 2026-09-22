@@ -14039,7 +14039,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             press_enter: args.press_enter,
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
-            source_agent: args.agent_id,
+            source_agent: resolveCurrentCallerAgent()?.agent_id ?? null,
             delivery_id: args.delivery_id,
             // Verify every submitted agent relay — not just long ones. A short
             // relay (the common agent-to-agent case) to a frozen terminal must

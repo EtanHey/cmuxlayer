@@ -13532,12 +13532,17 @@ codex>
     const registry = engine.getRegistry();
     const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
     registry.set(agentId, working);
+    const callerId = "source-caller";
+    const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const caller = { ...working, agent_id: callerId, surface_id: "surface:caller", surface_uuid: callerUuid, state: "ready" };
+    engine.stateMgr.writeState(caller);
+    registry.set(callerId, caller);
     mockExec.mockClear();
 
-    const result = await sendTo.handler(
+    const result = await runWithCallerContext({ surfaceId: callerUuid }, () => sendTo.handler(
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
-    );
+    ));
     const delivered = parseToolResult(result);
     expect(result.isError).toBeFalsy();
     expect(delivered).toMatchObject({
@@ -13550,6 +13555,10 @@ codex>
       submit_verified: true,
       queued_behind_turn: true,
     });
+    const deliveryEvents = readFileSync(join(TEST_DIR, "events.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    expect(deliveryEvents.findLast((event) => event.event_type === "send_to"))
+      .toMatchObject({ source_agent: callerId, target_surface: working.surface_id });
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("send")),
     ).not.toHaveLength(0);

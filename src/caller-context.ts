@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { execFileSync } from "node:child_process";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
 export const CALLER_CONTEXT_META_KEY = "cmuxlayer/callerContext";
@@ -32,6 +33,54 @@ export function callerContextFromEnv(
     surfaceId: nonEmptyString(env.CMUX_SURFACE_ID),
   };
   return hasCallerContext(context) ? context : undefined;
+}
+
+interface AncestorProcess {
+  parentPid: number;
+  environment: string;
+}
+
+function readAncestorProcess(pid: number): AncestorProcess | null {
+  try {
+    // Read only our own process ancestry. Never log the output: `ps eww`
+    // includes the ancestor's complete environment, including secrets.
+    const parentPid = Number(execFileSync("ps", ["-p", String(pid), "-o", "ppid="], {
+      encoding: "utf8", timeout: 500, maxBuffer: 64 * 1024,
+    }).trim());
+    if (!Number.isSafeInteger(parentPid) || parentPid < 1) return null;
+    const environment = execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], {
+      encoding: "utf8", timeout: 500, maxBuffer: 256 * 1024,
+    });
+    return { parentPid, environment };
+  } catch {
+    return null;
+  }
+}
+
+/** Recover pane identity from the MCP proxy's parent when a CLI filters env. */
+export function callerContextFromAncestry(
+  startPid: number = process.ppid,
+  readProcess: (pid: number) => AncestorProcess | null = readAncestorProcess,
+): CallerContext | undefined {
+  let pid = startPid;
+  const seen = new Set<number>();
+  for (let depth = 0; depth < 6 && pid > 1 && !seen.has(pid); depth++) {
+    seen.add(pid);
+    const ancestor = readProcess(pid);
+    if (!ancestor) break;
+    const value = (name: string): string | undefined => {
+      const match = ancestor.environment.match(new RegExp(`(?:^|\\s)${name}=([A-Za-z0-9_-]+)`));
+      return match?.[1];
+    };
+    const context: CallerContext = {
+      workspaceId: value("CMUX_WORKSPACE_ID"),
+      tabId: value("CMUX_TAB_ID"),
+      surfaceId: value("CMUX_SURFACE_ID"),
+    };
+    if (context.surfaceId) return context;
+    pid = ancestor.parentPid;
+  }
+  return undefined;
 }
 
 export function currentCallerContext(): CallerContext | undefined {
