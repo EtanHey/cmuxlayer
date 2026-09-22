@@ -431,6 +431,12 @@ type ToolReturn = {
   isError?: boolean;
 };
 
+// Only the internal scope=agent close delegate can request this teardown path.
+// A remote JSON tool caller cannot supply a symbol property.
+const OWNED_AGENT_CLOSE_ON_UNKNOWN_PID = Symbol(
+  "owned-agent-close-on-unknown-pid",
+);
+
 const TRANSPORT_PROVENANCE_TOOLS = new Set([
   "spawn_agent",
   "send_to",
@@ -11946,7 +11952,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const result = await lifecycleEngine.runLifecycleMutation(
             () =>
               handler(
-                { agent_id: args.agent_id, force: args.force },
+                {
+                  agent_id: args.agent_id,
+                  force: args.force,
+                  [OWNED_AGENT_CLOSE_ON_UNKNOWN_PID]: args.force === true,
+                },
                 {},
               ),
             { label: "close-agent" },
@@ -11966,21 +11976,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } = rawStopContent;
           if (!agentStopped) {
             // The stop itself failed: keep its verbatim ok:false/error and add
-            // the surface half, which was never attempted.
+            // the independently observed surface half. Stop may have closed
+            // the exact UUID route before its process post-condition failed.
             const reason =
               typeof rawStopContent.error === "string"
                 ? rawStopContent.error
                 : "Agent stop could not establish a safe terminal I/O route";
-            const remedy =
-              "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
+            const boundUuid = boundAgent?.surface_uuid;
+            const topology = boundUuid
+              ? await collectSurfaceTopology().catch(() => null)
+              : null;
+            const surfaceClosed = Boolean(
+              boundUuid &&
+                topology?.complete === true &&
+                topology.workspaceBySurface.size > 0 &&
+                !findSurfaceRefByUuid(topology, boundUuid),
+            );
+            const remedy = surfaceClosed
+              ? "The exact surface is gone, but the recorded PID was not proven stopped. Verify that PID before clearing the agent."
+              : "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
             return err(
               new Error(`close_surface scope=agent refused: ${reason}`),
               {
                 ...rawStopContent,
                 scope: "agent",
                 agent_stopped: false,
-                surface_closed: false,
-                surface_close_skipped: "agent_stop_failed",
+                surface: boundSurface,
+                surface_closed: surfaceClosed,
+                ...(!surfaceClosed
+                  ? { surface_close_skipped: "agent_stop_failed" }
+                  : {}),
                 reason,
                 remedy,
                 WARNING: remedy,
@@ -17995,6 +18020,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await engine.stopAgent(args.agent_id, args.force, {
+            allowUnknownPidOwnedSurfaceClose:
+              (args as typeof args & {
+                [OWNED_AGENT_CLOSE_ON_UNKNOWN_PID]?: boolean;
+              })[OWNED_AGENT_CLOSE_ON_UNKNOWN_PID] === true,
             beforeSurfaceMutation: (route) =>
               assertSurfaceMutationAllowed(
                 "stop_agent",
