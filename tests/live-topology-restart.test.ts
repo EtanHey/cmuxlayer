@@ -96,6 +96,8 @@ async function terminateFixturePid(pid: number): Promise<void> {
   }
 }
 
+const TEST_SOCKET_CAPABILITY = "test-live-topology-capability";
+
 async function startFakeCmuxSocket(path: string): Promise<void> {
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
@@ -109,11 +111,17 @@ async function startFakeCmuxSocket(path: string): Promise<void> {
         const line = buffer.slice(0, newlineIndex);
         buffer = buffer.slice(newlineIndex + 1);
         if (!line.trim()) continue;
-        if (!line.startsWith("{")) {
+        const prefix = `_cmux_capability_v1 ${TEST_SOCKET_CAPABILITY} `;
+        if (!line.startsWith(prefix)) {
+          socket.write("ERROR: capability required\n");
+          continue;
+        }
+        const command = line.slice(prefix.length);
+        if (!command.startsWith("{")) {
           socket.write("OK\n");
           continue;
         }
-        const request = JSON.parse(line) as {
+        const request = JSON.parse(command) as {
           id?: string;
           method?: string;
         };
@@ -336,6 +344,7 @@ describe("live daemon-first restart topology", () => {
             HOME: root,
             HOMEBREW_PREFIX: join(root, "brew"),
             CMUX_SOCKET_PATH: cmuxSocket,
+            CMUX_SOCKET_CAPABILITY: TEST_SOCKET_CAPABILITY,
             CMUXLAYER_DAEMON_SOCKET: daemonSocket,
             CMUXLAYER_DAEMON_PID_RECEIPT: daemonPidReceipt,
             CMUXLAYER_DEV: "0",
@@ -416,6 +425,7 @@ describe("live daemon-first restart topology", () => {
             ...process.env,
             HOME: root,
             CMUX_SOCKET_PATH: cmuxSocket,
+            CMUX_SOCKET_CAPABILITY: TEST_SOCKET_CAPABILITY,
             CMUXLAYER_DAEMON_SOCKET: daemonSocket,
             CMUXLAYER_DEV: "0",
           },
