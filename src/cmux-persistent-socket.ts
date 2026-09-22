@@ -25,6 +25,17 @@ const RATE_LIMIT_RETRY_MAX = 3;
 const RATE_LIMIT_BACKOFF_BASE_MS = 100;
 const RATE_LIMIT_BACKOFF_MAX_MS = 1_000;
 
+function finiteOption(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+): number {
+  return Math.max(
+    minimum,
+    typeof value === "number" && Number.isFinite(value) ? value : fallback,
+  );
+}
+
 export interface BackoffOptions {
   /** Base delay in milliseconds (default: 2_000) */
   baseMs?: number;
@@ -152,26 +163,35 @@ export class CmuxPersistentSocket {
     this.backoffBaseMs = opts?.backoff?.baseMs ?? BACKOFF_BASE_MS;
     this.backoffMaxMs = opts?.backoff?.maxMs ?? BACKOFF_MAX_MS;
     this.backoffJitter = opts?.backoff?.jitter ?? true;
-    this.pollingBurst = Math.max(1, opts?.polling?.burst ?? POLLING_BURST);
-    this.pollingRefillMs = Math.max(
+    this.pollingBurst = finiteOption(
+      opts?.polling?.burst,
+      POLLING_BURST,
       1,
-      opts?.polling?.refillMs ?? POLLING_REFILL_MS,
     );
-    this.pollingMaxConcurrent = Math.max(
+    this.pollingRefillMs = finiteOption(
+      opts?.polling?.refillMs,
+      POLLING_REFILL_MS,
       1,
-      opts?.polling?.maxConcurrent ?? POLLING_MAX_CONCURRENT,
     );
-    this.maxRateLimitRetries = Math.max(
+    this.pollingMaxConcurrent = finiteOption(
+      opts?.polling?.maxConcurrent,
+      POLLING_MAX_CONCURRENT,
+      1,
+    );
+    this.maxRateLimitRetries = finiteOption(
+      opts?.polling?.maxRateLimitRetries,
+      RATE_LIMIT_RETRY_MAX,
       0,
-      opts?.polling?.maxRateLimitRetries ?? RATE_LIMIT_RETRY_MAX,
     );
-    this.rateLimitBackoffBaseMs = Math.max(
+    this.rateLimitBackoffBaseMs = finiteOption(
+      opts?.polling?.rateLimitBackoffBaseMs,
+      RATE_LIMIT_BACKOFF_BASE_MS,
       1,
-      opts?.polling?.rateLimitBackoffBaseMs ?? RATE_LIMIT_BACKOFF_BASE_MS,
     );
-    this.rateLimitBackoffMaxMs = Math.max(
+    this.rateLimitBackoffMaxMs = finiteOption(
+      opts?.polling?.rateLimitBackoffMaxMs,
+      RATE_LIMIT_BACKOFF_MAX_MS,
       this.rateLimitBackoffBaseMs,
-      opts?.polling?.rateLimitBackoffMaxMs ?? RATE_LIMIT_BACKOFF_MAX_MS,
     );
     this.rateLimitJitter = opts?.polling?.jitter ?? true;
     this.pollingTokens = this.pollingBurst;
@@ -351,6 +371,14 @@ export class CmuxPersistentSocket {
           "connection_error",
           { transportPhase },
         );
+        if (this.socket !== socket) {
+          socket.destroy();
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+          return;
+        }
         this.connected = false;
         this.connectPromise = null;
         socket.destroy();
@@ -389,7 +417,7 @@ export class CmuxPersistentSocket {
       socket.on("close", () => {
         if (!settled) {
           settled = true;
-          this.connectPromise = null;
+          if (this.socket === socket) this.connectPromise = null;
           reject(
             new CmuxSocketError(
               "Socket closed unexpectedly",
@@ -401,14 +429,15 @@ export class CmuxPersistentSocket {
         if (this.socket !== socket) return;
         this.connected = false;
         this.socket = null;
-        // Reject all inflight requests — transport is gone
-        this.rejectAllPending(
-          new CmuxSocketError(
-            "Socket closed unexpectedly",
-            "connection_closed",
-            { transportPhase: "response" },
-          ),
+        const disconnected = new CmuxSocketError(
+          "Socket closed unexpectedly",
+          "connection_closed",
+          { transportPhase: "response" },
         );
+        this.pollingCancellationGeneration += 1;
+        this.cancelPollingWaiters(disconnected);
+        // Reject all inflight requests — transport is gone
+        this.rejectAllPending(disconnected);
       });
     });
 
@@ -422,7 +451,17 @@ export class CmuxPersistentSocket {
     }
   }
 
-  private async ensureConnected(): Promise<void> {
+  private assertPollingGeneration(pollingGeneration?: number): void {
+    if (
+      pollingGeneration !== undefined &&
+      pollingGeneration !== this.pollingCancellationGeneration
+    ) {
+      throw new CmuxSocketError("Socket disconnected", "connection_closed");
+    }
+  }
+
+  private async ensureConnected(pollingGeneration?: number): Promise<void> {
+    this.assertPollingGeneration(pollingGeneration);
     if (this.connected && this.socket) return;
     if (this.connectPromise) return this.connectPromise;
 
@@ -431,6 +470,8 @@ export class CmuxPersistentSocket {
         setTimeout(resolve, this._currentBackoffMs),
       );
     }
+
+    this.assertPollingGeneration(pollingGeneration);
 
     try {
       await this.connect();
@@ -636,16 +677,12 @@ export class CmuxPersistentSocket {
   private async callOnce<T = Record<string, unknown>>(
     method: string,
     params: Record<string, unknown> = {},
-    pollingGeneration = this.pollingCancellationGeneration,
+    pollingGeneration?: number,
   ): Promise<T> {
-    if (pollingGeneration !== this.pollingCancellationGeneration) {
-      throw new CmuxSocketError("Socket disconnected", "connection_closed");
-    }
+    this.assertPollingGeneration(pollingGeneration);
     this.assertInFlightCapacity();
-    await this.ensureConnected();
-    if (pollingGeneration !== this.pollingCancellationGeneration) {
-      throw new CmuxSocketError("Socket disconnected", "connection_closed");
-    }
+    await this.ensureConnected(pollingGeneration);
+    this.assertPollingGeneration(pollingGeneration);
 
     const id = crypto.randomUUID();
     const request: V2Request = { id, method, params };
