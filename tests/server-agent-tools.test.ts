@@ -8563,6 +8563,7 @@ describe("agent lifecycle tool handlers", () => {
       ],
     });
     routeClient.client.send.mockClear();
+    routeClient.client.readScreen.mockClear();
     routeClient.sendCalls.length = 0;
 
     const result = await registeredTestTool(server, "send_to").handler(
@@ -8578,6 +8579,11 @@ describe("agent lifecycle tool handlers", () => {
     expect(routeClient.sendCalls).toEqual([
       { surface: "surface:199", text: "keep going" },
     ]);
+    const sendReadWindows = routeClient.client.readScreen.mock.calls.map(
+      ([, opts]) => opts?.lines,
+    );
+    expect(sendReadWindows.length).toBeGreaterThan(0);
+    expect(Math.max(...sendReadWindows)).toBeLessThanOrEqual(30);
     expect(testLifecycleEngine(server).getAgentState("brainClaude")?.repo).toBe(
       "brainlayer",
     );
