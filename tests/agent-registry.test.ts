@@ -3487,6 +3487,65 @@ describe("AgentRegistry", () => {
   });
 
   describe("observer-scoped cleanup", () => {
+    it("continues startup if best-effort index pruning fails", async () => {
+      vi.spyOn(stateMgr, "pruneOrphanSurfaceSessionEntries").mockImplementation(
+        () => {
+          throw new Error("index temporarily unavailable");
+        },
+      );
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+
+      await expect(registry.reconstitute()).resolves.toBeDefined();
+      expect(warning).toHaveBeenCalledWith(
+        "[cmuxlayer] surface session index prune deferred:",
+        expect.any(Error),
+      );
+      warning.mockRestore();
+    });
+
+    it("failed spawns do not evict fifty resumable close tombstones", async () => {
+      for (let index = 0; index < 50; index += 1) {
+        const timestamp = new Date(Date.UTC(2026, 7, 25, 10, 0, index));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `closed-cap-${index}`,
+            state: "done",
+            cli_session_id: `closed-session-${index}`,
+            user_killed: true,
+            pid: null,
+            created_at: timestamp.toISOString(),
+            updated_at: timestamp.toISOString(),
+          }),
+        );
+      }
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "newer-failed-spawn",
+          state: "error",
+          cli_session_id: "failed-session",
+          error: "Launch failed: terminal write timed out",
+          pid: null,
+          created_at: "2026-08-25T11:00:00.000Z",
+          updated_at: "2026-08-25T11:00:00.000Z",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      await registry.reconstitute();
+
+      expect(
+        registry
+          .list()
+          .filter((agent) => agent.agent_id.startsWith("closed-cap-")),
+      ).toHaveLength(50);
+      expect(stateMgr.readState("closed-cap-0")).not.toBeNull();
+    });
+
     it("prunes orphan index entries during reconstitution without dropping a live state route", async () => {
       const live = makeRecord({ agent_id: "indexed-live", surface_id: "surface:indexed-live", cli_session_id: "live-session" });
       const orphan = makeRecord({ agent_id: "indexed-orphan", surface_id: "surface:indexed-orphan", cli_session_id: "orphan-session" });

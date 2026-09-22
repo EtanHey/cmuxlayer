@@ -39,7 +39,7 @@ describe("VALID_TRANSITIONS", () => {
 });
 
 describe("shouldRetainForExplicitResume", () => {
-  it("retains a failed spawn with a captured session as a hidden resumable tombstone", () => {
+  it("does not let a failed spawn consume the close-tombstone resume cap", () => {
     expect(
       shouldRetainForExplicitResume({
         state: "error",
@@ -47,7 +47,7 @@ describe("shouldRetainForExplicitResume", () => {
         cli_session_id: "failed-spawn-session",
         error: "Launch failed: terminal write timed out",
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("retains an explicit-resume failure with a captured session", () => {

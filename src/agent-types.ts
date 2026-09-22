@@ -270,9 +270,7 @@ export function shouldRetainForExplicitResume(
   return (
     (agent.state === "done" || agent.state === "error") &&
     !!agent.cli_session_id &&
-    (agent.user_killed === true ||
-      hasRecoverableCrashError(agent.error) ||
-      isFailedSpawnTombstone(agent))
+    (agent.user_killed === true || hasRecoverableCrashError(agent.error))
   );
 }
 
