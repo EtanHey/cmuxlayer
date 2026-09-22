@@ -536,6 +536,24 @@ describe("CmuxLayerDaemon", () => {
       expect(context.stateMgr.getBaseDir()).toBe(sandboxState);
       expect(existsSync(join(sandboxState, "events.jsonl"))).toBe(true);
       expect((daemon as any).opts.inboxBaseDir).toBe(join(sandbox, "inbox"));
+      const client = await connectClient(join(sandbox, "daemon.sock"));
+      try {
+        await client.callTool({
+          name: "dispatch_to_agent",
+          arguments: {
+            agent_id: "sandbox-probe",
+            task: "sandboxed inbox probe",
+            from: "daemon-test",
+            nudge: "never",
+          },
+        });
+      } finally {
+        await client.close();
+      }
+      expect(readInbox("sandbox-probe", { baseDir: join(sandbox, "inbox") }))
+        .toHaveLength(1);
+      expect(existsSync(inboxPath("sandbox-probe", { baseDir: join(sandboxHome, ".cmux", "agents") })))
+        .toBe(false);
       expect(existsSync(legacyState)).toBe(false);
     } finally {
       vi.unstubAllEnvs();

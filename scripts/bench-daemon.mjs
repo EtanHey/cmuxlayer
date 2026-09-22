@@ -362,6 +362,9 @@ function optionValue(name, fallback = "") {
   return index >= 0 ? args[index + 1] || fallback : fallback;
 }
 const state = readState();
+function spawnedId(sequence) {
+  return "00000000-0000-4000-8000-" + String(900000000000 + sequence).padStart(12, "0");
+}
 const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   ref: "surface:bench-" + index,
   id: "00000000-0000-4000-8000-" + String(index).padStart(12, "0"),
@@ -373,14 +376,14 @@ const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
 }));
 const spawnedSurface = {
   ref: "surface:bench-spawn",
-  id: "00000000-0000-4000-8000-999999999999",
+  id: spawnedId(state.spawnSequence || 0),
   title: state.title,
   type: "terminal",
   index: surfaceCount,
   selected: false,
   current_directory: cwd
 };
-const surfaces = state.closed ? baseSurfaces : baseSurfaces.concat([spawnedSurface]);
+const surfaces = state.closed === false ? baseSurfaces.concat([spawnedSurface]) : baseSurfaces;
 function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
@@ -393,8 +396,10 @@ if (command === "list-workspaces") {
 } else if (command === "list-pane-surfaces") {
   write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: "pane:bench", surfaces });
 } else if (command === "new-split") {
-  patchState({ closed: false, runtimeReady: false });
-  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: "surface:bench-spawn", surface_id: "00000000-0000-4000-8000-999999999999", title: state.title, type: "terminal" });
+  const spawnSequence = (state.spawnSequence || 0) + 1;
+  patchState({ closed: false, runtimeReady: false, spawnSequence });
+  writeSurfaceState("surface:bench-spawn", { composer: "", transcript: "" });
+  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: "surface:bench-spawn", surface_id: spawnedId(spawnSequence), title: state.title, type: "terminal" });
 } else if (command === "close-surface") {
   patchState({ closed: true });
   write({ ok: true });
@@ -490,6 +495,10 @@ function fakeSurfaceStateKey(surfaceIdentifier, surfaces) {
   return surface?.ref ?? surfaceIdentifier;
 }
 
+function spawnedSurfaceId(sequence) {
+  return `00000000-0000-4000-8000-${String(900000000000 + sequence).padStart(12, "0")}`;
+}
+
 function mutateFakeSurfaceState(
   surfaceId,
   surfaceStates,
@@ -543,14 +552,14 @@ async function handleFakeCmuxSocketLine(
   }));
   const spawned = {
     ref: "surface:bench-spawn",
-    id: "00000000-0000-4000-8000-999999999999",
+    id: spawnedSurfaceId(state.spawnSequence ?? 0),
     title: state.title ?? "bench-spawn",
     type: "terminal",
     index: surfaceCount,
     selected: false,
     current_directory: cwd,
   };
-  const surfaces = state.closed ? baseSurfaces : [...baseSurfaces, spawned];
+  const surfaces = state.closed === false ? [...baseSurfaces, spawned] : baseSurfaces;
   const layout = {
     workspace_ref: "workspace:bench",
     window_ref: "window:bench",
@@ -637,11 +646,17 @@ async function handleFakeCmuxSocketLine(
       break;
     }
     case "surface.split":
-      await writeFakeState(statePath, { ...state, closed: false, runtimeReady: false });
+      await writeFakeState(statePath, {
+        ...state,
+        closed: false,
+        runtimeReady: false,
+        spawnSequence: (state.spawnSequence ?? 0) + 1,
+      });
+      surfaceStates.delete(spawned.ref);
       result = {
         ...layout,
         surface_ref: spawned.ref,
-        surface_id: spawned.id,
+        surface_id: spawnedSurfaceId((state.spawnSequence ?? 0) + 1),
         title: spawned.title,
         type: "terminal",
       };
@@ -1011,6 +1026,11 @@ async function measureSpawnLifecycleOnce(
   }
   if (!spawnResult.agent_id || !spawnResult.surface_id) {
     throw new Error(`spawn_agent omitted identity: ${compact(spawnResult)}`);
+  }
+  if (!/^cmuxlayerCodex-[a-z0-9]{8}$/.test(spawnResult.agent_id)) {
+    throw new Error(
+      `benchmark spawn was not the managed Codex agent: ${spawnResult.agent_id}`,
+    );
   }
 
   const measureSend = async (

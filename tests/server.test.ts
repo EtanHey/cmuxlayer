@@ -5841,12 +5841,14 @@ describe("tool handler integration", () => {
       });
       let textSent = false;
       let returnPresses = 0;
+      let preTypeReads = 0;
       mockExec = vi.fn().mockImplementation((_cmd, args: string[]) => {
         if (args.includes("send-key") && args.includes("return")) {
           returnPresses += 1;
         }
         if (args.includes("send")) textSent = true;
         if (args.includes("read-screen")) {
+          if (!textSent) preTypeReads += 1;
           return Promise.resolve({
             stdout: JSON.stringify({
               surface_ref: "surface:stale-working",
@@ -5877,6 +5879,7 @@ describe("tool handler integration", () => {
       expect(parsed.ok).toBe(true);
       expect(parsed.submit_verified).toBe(true);
       expect(returnPresses).toBe(1);
+      expect(preTypeReads).toBe(1);
     },
   );
 

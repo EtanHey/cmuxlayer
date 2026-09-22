@@ -6121,6 +6121,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
   };
 
+  const liveTrackedSurfaceIsDeliverable = (
+    record: AgentRecord | undefined,
+    snapshot: { parsed: ParsedScreenResult } | null,
+  ): boolean =>
+    !!record &&
+    isLiveDeliverable(
+      resolveLiveAgentState(
+        record,
+        snapshot
+          ? {
+              status: snapshot.parsed.status,
+              agent_type: snapshot.parsed.agent_type,
+              control_state: snapshot.parsed.control_state,
+              errors: snapshot.parsed.errors,
+            }
+          : null,
+      ),
+    );
+
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;
     workspace?: string;
@@ -6794,6 +6813,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_agent?: string | null;
     delivery_id?: string;
     verify_submit?: boolean;
+    verify_submit_for_tracked_surface?: AgentRecord;
     allow_recovery_enter_retry?: boolean;
     require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
@@ -6934,6 +6954,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ? { draftGuardText }
         : {}),
     });
+    // This screen read is already required by the safety gate and occurs under
+    // the surface write lock. Reuse it for raw tracked-surface verification.
+    const verifySubmit =
+      opts.verify_submit === true ||
+      liveTrackedSurfaceIsDeliverable(
+        opts.verify_submit_for_tracked_surface,
+        deliverySafetySnapshot,
+      );
     // Boot delivery is always attributable. Established relay paths retain
     // their lighter verification unless an existing interrupt marker makes a
     // later marker ambiguous; in that collision case, observe the payload
@@ -7003,7 +7031,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
-        requireObservedPayloadBeforeEnter && (opts.verify_submit ?? false)
+        requireObservedPayloadBeforeEnter && verifySubmit
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
               workspace: opts.workspace,
@@ -7018,7 +7046,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : null;
       if (
         requireObservedPayloadBeforeEnter &&
-        (opts.verify_submit ?? false) &&
+        verifySubmit &&
         preReturnBootEvidence === null
       ) {
         submit_verified = null;
@@ -7026,7 +7054,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         deliveryOutcome = "pending_verify";
       } else {
         if (
-          opts.verify_submit &&
+          verifySubmit &&
           deliverySafetySnapshot &&
           inferComposerCli(
             deliverySafetySnapshot.text,
@@ -7078,7 +7106,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               bytes,
               source_event: opts.source_event ?? "send_command",
               source_agent: opts.source_agent,
-              verify_submit: opts.verify_submit ?? false,
+              verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
               timeout_ms: opts.submit_verify_timeout_ms,
               cursor_response_baseline: cursorResponseBaseline,
@@ -7181,7 +7209,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? "rescued"
                 : submit_verified === true
                   ? "submitted"
-                  : opts.verify_submit !== true
+                  : !verifySubmit
                     ? "typed"
                     : undefined,
       delivery_id: opts.delivery_id,
@@ -7196,7 +7224,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       WARNING:
         opts.press_enter &&
         submit_verified === null &&
-        opts.verify_submit !== true
+        !verifySubmit
           ? "NOT VERIFIED — Return was dispatched, but submission was not verified; this receipt confirms only that text was typed."
           : undefined,
     });
@@ -10866,15 +10894,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           cli: targetRecord?.cli,
           allowLongInline: args.allow_long_inline,
         });
-        const shouldVerifySubmit =
-          args.press_enter &&
-          (await shouldVerifyRawSurfaceSubmit(
-            targetRecord,
-            route.surface,
-            route.workspace,
-          ));
-
         if (args.background) {
+          const shouldVerifySubmit =
+            args.press_enter &&
+            (await shouldVerifyRawSurfaceSubmit(
+              targetRecord,
+              route.surface,
+              route.workspace,
+            ));
           await assertSurfaceMutationAllowed(
             "send_input",
             route.surface,
@@ -10976,7 +11003,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: sourceEvent,
               delivery_id: deliveryId,
-              verify_submit: shouldVerifySubmit,
+              verify_submit:
+                args.press_enter &&
+                !!targetRecord &&
+                INTERACTIVE_AGENT_STATES.has(targetRecord.state),
+              verify_submit_for_tracked_surface:
+                args.press_enter ? targetRecord : undefined,
               beforeMutation: route.assertCurrent,
               timings,
             });
@@ -11176,12 +11208,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stateMgr,
           route.surface,
         );
-        const shouldVerifySubmit = await shouldVerifyRawSurfaceSubmit(
-          targetRecord,
-          route.surface,
-          route.workspace,
-        );
-
         const delivery = await withSurfaceWrite(
           route.surface,
           async () => {
@@ -11195,7 +11221,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: true,
               stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: "send_command",
-              verify_submit: bootPromptPath ? false : shouldVerifySubmit,
+              verify_submit:
+                !bootPromptPath &&
+                !!targetRecord &&
+                INTERACTIVE_AGENT_STATES.has(targetRecord.state),
+              verify_submit_for_tracked_surface:
+                bootPromptPath ? undefined : targetRecord,
               beforeMutation: route.assertCurrent,
             });
           },
