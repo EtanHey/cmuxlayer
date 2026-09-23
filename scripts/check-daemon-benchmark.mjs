@@ -357,7 +357,7 @@ function firstSendRounds(measurement, expectedSamples, clients) {
       measurement?.paired_control?.kind !== "fake_socket_timed_ping" ||
       !Array.isArray(samples) || samples.length !== expectedSamples ||
       samples.some((sample, index) => sample?.sample_index !== index ||
-        !Number.isFinite(sample.send_elapsed_ms) || sample.send_elapsed_ms < 0)) return null;
+        pairedSampleInvalidReason(sample, index) !== null)) return null;
   const all = samples.map((sample) => sample.send_elapsed_ms);
   if (rounded(percentile(all, 50)) !== measurement.p50_ms ||
       rounded(percentile(all, 95)) !== measurement.p95_ms) return null;

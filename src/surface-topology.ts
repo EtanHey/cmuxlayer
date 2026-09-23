@@ -224,16 +224,22 @@ export async function enumerateAllWindowWorkspaces(
     try { return await call(); }
     finally { opts.onRpc?.(method, Math.max(0, performance.now() - startedAt)); }
   };
+  const sharedWait = (pending: Promise<AllWindowWorkspaceEnumeration>) => {
+    if (!opts.onRpc) return pending;
+    const startedAt = performance.now();
+    return pending.finally(() => opts.onRpc?.(
+      "listWorkspaces(shared)", Math.max(0, performance.now() - startedAt)));
+  };
   const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
   const cacheKey = client as object;
   if (observerEpoch && opts.cache !== false) {
     const callCached =
       currentWorkspaceEnumerationCallScope()?.cache.get(cacheKey);
     if (callCached?.observerEpoch === observerEpoch) {
-      return callCached.pending;
+      return sharedWait(callCached.pending);
     }
     const cached = workspaceEnumerationCache.get(cacheKey);
-    if (cached?.observerEpoch === observerEpoch) return cached.pending;
+    if (cached?.observerEpoch === observerEpoch) return sharedWait(cached.pending);
   }
 
   const enumerate = async (): Promise<AllWindowWorkspaceEnumeration> => {
