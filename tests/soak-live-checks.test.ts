@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkStateAgreement,
-  checkSoakSession, checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
+  checkSoakSession, checkToolFailure, hasReplyMarker, healthSampleEntry, nextSoakDelayMs, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
 
 describe("live soak invariant checkers", () => {
   it("rejects a pending boot or send receipt even when the response landed", () => {
@@ -156,6 +156,18 @@ describe("live soak invariant checkers", () => {
     expect(checkControlHealthSample({ ...health, health: { ...health.health,
       selected_transport: { transport_mode: "cli", transport_degraded: true } } }, 123, 123))
       .toContain("control_transport_unhealthy");
+  });
+
+  it("keeps the complete control health result in a serialized JSONL sample", () => {
+    const result = { ok: true, isError: false, health: {
+      current_process: { pid: 999, rss_kb: 12_345 }, warnings: [],
+      selected_transport: { transport_mode: "socket", transport_degraded: false },
+      diagnostic: { reconnects: 0, last_probe_ms: 17 },
+    }, request_id: "health-minute-1" };
+    const entry = JSON.parse(JSON.stringify(healthSampleEntry("minute:1", result, 123, [])));
+    expect(entry.kind).toBe("health");
+    expect(entry.healthy).toBe(true);
+    expect(entry.control_health).toEqual(result);
   });
 
   it("rejects incomplete or non-boolean control transport status", () => {

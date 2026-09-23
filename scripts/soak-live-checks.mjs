@@ -122,6 +122,16 @@ export function checkControlHealthSample(result, mcpPid, expectedMcpPid) {
   return failures;
 }
 
+export function healthSampleEntry(label, result, mcpPid, failures) {
+  const health = record(record(result).health);
+  const selected = record(health.selected_transport);
+  return { kind: "health", label, healthy: failures.length === 0,
+    control_health: result,
+    control_daemon_pid: health.current_process?.pid, mcp_server_pid: mcpPid, failures,
+    transport_mode: selected.transport_mode, transport_degraded: selected.transport_degraded,
+    warnings: health.warnings, error: record(result).error };
+}
+
 export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
   const full = record(fullRead);
   const parsedOnly = record(parsedOnlyRead);
