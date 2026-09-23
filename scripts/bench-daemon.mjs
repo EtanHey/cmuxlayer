@@ -179,6 +179,7 @@ class McpProcess {
     this.label = label;
     this.nextId = 1;
     this.pending = new Map();
+    this.timedPendingCount = 0;
     this.stderr = "";
     this.readBuffer = new JsonRpcLineBuffer();
     this.child = spawn(command, args, {
@@ -189,9 +190,13 @@ class McpProcess {
     this.child.stdout.on("data", (chunk) => {
       this.readBuffer.append(chunk);
       while (true) {
+        const parseStartedAt = this.timedPendingCount > 0 ? nowMs() : null;
         const message = this.readBuffer.readMessage();
         if (message === null) break;
-        this.handleMessage(message);
+        this.handleMessage(
+          message,
+          parseStartedAt === null ? 0 : nowMs() - parseStartedAt,
+        );
       }
     });
     this.child.stderr.on("data", (chunk) => {
@@ -216,7 +221,7 @@ class McpProcess {
     return this.child.exitCode === null && this.child.signalCode === null;
   }
 
-  handleMessage(message) {
+  handleMessage(message, responseParseMs = 0) {
     if (!message || typeof message !== "object" || !("id" in message)) {
       return;
     }
@@ -226,6 +231,15 @@ class McpProcess {
     }
     clearTimeout(pending.timeout);
     this.pending.delete(message.id);
+    if (pending.onTiming) {
+      this.timedPendingCount -= 1;
+      const elapsedMs = nowMs() - pending.startedAt;
+      pending.onTiming({
+        request_serialize: round(pending.requestSerializeMs),
+        response_parse: round(responseParseMs),
+        mcp_wait: round(Math.max(0, elapsedMs - pending.requestSerializeMs - responseParseMs)),
+      });
+    }
     if ("error" in message) {
       pending.reject(
         new Error(`${this.label} JSON-RPC error: ${compact(message.error)}`),
@@ -235,15 +249,21 @@ class McpProcess {
     pending.resolve(message);
   }
 
-  send(message) {
-    this.child.stdin.write(serializeMessage(message));
+  send(message, pending) {
+    const serializeStartedAt = pending?.onTiming ? nowMs() : null;
+    const serialized = serializeMessage(message);
+    if (serializeStartedAt !== null) {
+      pending.requestSerializeMs = nowMs() - serializeStartedAt;
+    }
+    this.child.stdin.write(serialized);
   }
 
-  request(method, params = {}, timeoutMs = 10_000) {
+  request(method, params = {}, timeoutMs = 10_000, onTiming) {
     const id = this.nextId++;
     const message = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolvePromise, reject) => {
       const timeout = setTimeout(() => {
+        if (onTiming && this.pending.has(id)) this.timedPendingCount -= 1;
         this.pending.delete(id);
         reject(
           new Error(
@@ -251,8 +271,17 @@ class McpProcess {
           ),
         );
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolvePromise, reject, timeout });
-      this.send(message);
+      const pending = {
+        resolve: resolvePromise,
+        reject,
+        timeout,
+        onTiming,
+        startedAt: onTiming ? nowMs() : 0,
+        requestSerializeMs: 0,
+      };
+      this.pending.set(id, pending);
+      if (onTiming) this.timedPendingCount += 1;
+      this.send(message, pending);
     });
   }
 
@@ -269,13 +298,14 @@ class McpProcess {
     this.notify("notifications/initialized");
   }
 
-  async callTool(name, args = {}, timeoutMs = 10_000) {
+  async callTool(name, args = {}, timeoutMs = 10_000, onTiming) {
     let response;
     try {
       response = await this.request(
         "tools/call",
         { name, arguments: args },
         timeoutMs,
+        onTiming,
       );
     } catch (error) {
       throw new Error(
@@ -454,7 +484,7 @@ if (command === "list-workspaces") {
   return fakePath;
 }
 
-async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
+async function startFakeCmuxSocket(socketPath, statePath, surfaceCount, onRequestTiming) {
   const surfaceStates = new Map();
   const surfaceMutationQueues = new Map();
   const fakeStateMutationQueue = { current: Promise.resolve() };
@@ -479,6 +509,7 @@ async function startFakeCmuxSocket(socketPath, statePath, surfaceCount) {
           surfaceStates,
           surfaceMutationQueues,
           fakeStateMutationQueue,
+          onRequestTiming,
         ).catch((error) => socket.destroy(error));
       }
     });
@@ -551,6 +582,7 @@ async function handleFakeCmuxSocketLine(
   surfaceStates,
   surfaceMutationQueues,
   fakeStateMutationQueue,
+  onRequestTiming,
 ) {
   if (!line.startsWith("{")) {
     socket.write(`${line.startsWith("list_status") ? "[]" : "OK"}\n`);
@@ -558,7 +590,9 @@ async function handleFakeCmuxSocketLine(
   }
   const request = JSON.parse(line);
   const params = request.params ?? {};
+  const requestStartedAt = nowMs();
   const state = await readFakeState(statePath);
+  const stateReadMs = nowMs() - requestStartedAt;
   const cwd = process.cwd();
   const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
     ref: `surface:bench-${index}`,
@@ -763,6 +797,12 @@ async function handleFakeCmuxSocketLine(
       );
       return;
   }
+  if (request.method === "surface.read_text") {
+    onRequestTiming?.({
+      elapsed_ms: round(nowMs() - requestStartedAt),
+      state_read_ms: round(stateReadMs),
+    });
+  }
   socket.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
 }
 
@@ -781,9 +821,54 @@ async function startClients(label, count, env) {
   return clients;
 }
 
-async function measureLatency(clients) {
+function summarizeReadDiagnostics(samples, slowestLimit = 12) {
+  const ordered = [...samples].sort(
+    (a, b) => a.round_index - b.round_index || a.client_index - b.client_index,
+  );
+  const byRound = new Map();
+  for (const sample of ordered) {
+    const roundSamples = byRound.get(sample.round_index) ?? [];
+    roundSamples.push(sample.elapsed_ms);
+    byRound.set(sample.round_index, roundSamples);
+  }
+  return {
+    sample_count: ordered.length,
+    // Canonical replay is 8 x 12, so retaining every read is bounded.
+    samples: ordered,
+    rounds: [...byRound].map(([roundIndex, elapsed]) => ({
+      round_index: roundIndex,
+      sample_count: elapsed.length,
+      max_elapsed_ms: round(Math.max(...elapsed)),
+      p50_ms: round(percentile(elapsed, 50)),
+      p95_ms: round(percentile(elapsed, 95)),
+    })),
+    slowest: [...ordered]
+      .sort((a, b) => b.elapsed_ms - a.elapsed_ms)
+      .slice(0, slowestLimit),
+  };
+}
+
+function summarizeFakeSocketRounds(events, phase) {
+  const byRound = new Map();
+  for (const event of events) {
+    if (event.phase !== phase) continue;
+    const roundEvents = byRound.get(event.round_index) ?? [];
+    roundEvents.push(event);
+    byRound.set(event.round_index, roundEvents);
+  }
+  return [...byRound].map(([roundIndex, roundEvents]) => ({
+    round_index: roundIndex,
+    sample_count: roundEvents.length,
+    max_service_ms: Math.max(...roundEvents.map((event) => event.elapsed_ms)),
+    p95_service_ms: round(percentile(roundEvents.map((event) => event.elapsed_ms), 95)),
+    max_state_read_ms: Math.max(...roundEvents.map((event) => event.state_read_ms)),
+  }));
+}
+
+async function measureLatency(clients, phase, fakeSocketTrace) {
   const listSamples = [];
   const readSamples = [];
+  const readDiagnostics = [];
   const listTransports = [];
   const readTransports = [];
   const listFallbackSources = new Set();
@@ -799,10 +884,12 @@ async function measureLatency(clients) {
     workspace: "workspace:bench",
     lines: 5,
   };
+  const measurementStartedAt = nowMs();
 
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+    if (fakeSocketTrace) fakeSocketTrace.active = { phase, round_index: roundIndex };
     await Promise.all(
-      clients.map(async (client) => {
+      clients.map(async (client, clientIndex) => {
         let startedAt = nowMs();
         const list = await client.callTool("list_surfaces", listArgs);
         const listReceipt = toolData(list, "list_surfaces");
@@ -814,9 +901,37 @@ async function measureLatency(clients) {
         }
 
         startedAt = nowMs();
-        const read = await client.callTool("read_screen", readArgs);
+        const startedAtUtc = new Date().toISOString();
+        let mcpStages = null;
+        const read = await client.callTool(
+          "read_screen",
+          readArgs,
+          10_000,
+          (timings) => { mcpStages = timings; },
+        );
+        const receiptDecodeStartedAt = nowMs();
         const readReceipt = toolData(read, "read_screen");
-        readSamples.push(nowMs() - startedAt);
+        const receiptDecodeMs = nowMs() - receiptDecodeStartedAt;
+        const elapsedMs = nowMs() - startedAt;
+        const recordedMcpMs = mcpStages
+          ? mcpStages.request_serialize + mcpStages.response_parse + mcpStages.mcp_wait
+          : Math.max(0, elapsedMs - receiptDecodeMs);
+        readSamples.push(elapsedMs);
+        readDiagnostics.push({
+          round_index: roundIndex,
+          client_index: clientIndex,
+          started_at_utc: startedAtUtc,
+          started_offset_ms: round(startedAt - measurementStartedAt),
+          elapsed_ms: round(elapsedMs),
+          stages_ms: {
+            request_serialize: mcpStages?.request_serialize ?? 0,
+            response_parse: mcpStages?.response_parse ?? 0,
+            // Includes daemon dispatch, cmux socket I/O, and process scheduling.
+            mcp_wait: mcpStages?.mcp_wait ?? round(recordedMcpMs),
+            receipt_decode: round(receiptDecodeMs),
+            caller_resume: round(Math.max(0, elapsedMs - recordedMcpMs - receiptDecodeMs)),
+          },
+        });
         readResult ??= read;
         readTransports.push(operationTransport(readReceipt, "read_screen"));
         for (const source of readReceipt.transport_fallbacks ?? []) {
@@ -824,6 +939,7 @@ async function measureLatency(clients) {
         }
       }),
     );
+    if (fakeSocketTrace) fakeSocketTrace.active = null;
   }
 
   return {
@@ -848,6 +964,23 @@ async function measureLatency(clients) {
         ? "socket"
         : "cli",
       transport_fallbacks: [...readFallbackSources],
+    },
+    read_screen_diagnostics: {
+      ...summarizeReadDiagnostics(readDiagnostics),
+      timing_scope: {
+        request_serialize: "benchmark MCP client request serialization",
+        response_parse: "benchmark MCP client JSON-RPC response parse",
+        mcp_wait: "inclusive daemon, cmux socket, IPC, and scheduling wait",
+        receipt_decode: "benchmark tool receipt decode",
+        caller_resume: "caller setup and promise continuation after MCP response",
+        fake_socket_rounds: "same-round fake cmux socket service; not per-client attributable",
+      },
+      // The fake socket runs in the benchmark process. These per-round
+      // service times cannot be attributed to a particular MCP client.
+      fake_socket_rounds: summarizeFakeSocketRounds(
+        fakeSocketTrace?.events ?? [],
+        phase,
+      ),
     },
     firstResults: { listResult, readResult },
   };
@@ -1052,6 +1185,9 @@ function summarizeSendSampleDiagnostics(samples, field) {
         tool_elapsed_ms: send.tool_elapsed_ms,
         proof_elapsed_ms: send.proof_elapsed_ms,
         lock_hold_ms: send.lock_hold_ms,
+        payload_bytes: send.payload_bytes,
+        press_enter: send.press_enter,
+        rpc_methods: receipt.rpc_methods ?? null,
         retry_count: receipt.retry_count ?? null,
         submit_verified: receipt.submit_verified ?? null,
         submit_evidence: receipt.submit_evidence ?? null,
@@ -1149,6 +1285,8 @@ async function measureSpawnLifecycleOnce(
         receipt.timings_ms?.lock_hold,
         `${args.mode} send`,
       ),
+      payload_bytes: Buffer.byteLength(args.text ?? "", "utf8"),
+      press_enter: args.press_enter === true,
       transport: receipt.transport,
       receipt,
     };
@@ -1552,6 +1690,7 @@ async function main() {
   const missingCmuxSocket = join(socketRoot, "m.sock");
   const fakeCmuxState = join(tempRoot, "fake-cmux-state.json");
   const surfaceCount = Math.max(clientCount, PARALLEL_STRESS_COUNT);
+  const fakeSocketTrace = { active: null, events: [] };
   const fakeCmuxSocketServer =
     process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1"
       ? net.createServer((socket) => socket.destroy())
@@ -1559,6 +1698,11 @@ async function main() {
           missingCmuxSocket,
           fakeCmuxState,
           surfaceCount,
+          (timing) => {
+            if (fakeSocketTrace.active) {
+              fakeSocketTrace.events.push({ ...fakeSocketTrace.active, ...timing });
+            }
+          },
         );
   if (process.env.CMUXLAYER_BENCH_FORCE_CLI_FALLBACK === "1") {
     await new Promise((resolvePromise, reject) => {
@@ -1596,7 +1740,11 @@ async function main() {
       CMUXLAYER_FORCE_INPROCESS: "1",
       CMUXLAYER_DAEMON_SOCKET: join(socketRoot, "u.sock"),
     });
-    const baselineLatency = await measureLatency(baselineClients);
+    const baselineLatency = await measureLatency(
+      baselineClients,
+      "baseline",
+      fakeSocketTrace,
+    );
     const baselineRssMb = await totalRssMb(
       baselineClients.map((client) => client.pid).filter(Boolean),
     );
@@ -1633,7 +1781,11 @@ async function main() {
         `${error instanceof Error ? error.message : String(error)}; daemon stderr=${daemonStderr.trim()}`,
       );
     }
-    const daemonLatency = await measureLatency(daemonClients);
+    const daemonLatency = await measureLatency(
+      daemonClients,
+      "daemon",
+      fakeSocketTrace,
+    );
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
@@ -1935,6 +2087,12 @@ async function main() {
         send_to_surface_10_parallel: sendToSurface10Parallel,
         read_screen_10_parallel: readScreen10Parallel,
       },
+      diagnostics: {
+        read_screen: {
+          baseline_inprocess: baselineLatency.read_screen_diagnostics,
+          daemon_path: daemonLatency.read_screen_diagnostics,
+        },
+      },
       daemon_cpu_pct: round(daemonStats.cpuPct, 2),
       gates,
     };
@@ -1979,7 +2137,13 @@ async function main() {
   }
 }
 
-export { startFakeCmuxSocket, writeFakeCmux };
+export {
+  measureLatency,
+  startFakeCmuxSocket,
+  summarizeReadDiagnostics,
+  summarizeSendSampleDiagnostics,
+  writeFakeCmux,
+};
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
