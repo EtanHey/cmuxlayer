@@ -579,6 +579,20 @@ describe("daemon performance budget", () => {
       .toBe(false);
   });
 
+  it("keeps the full-row failure when every hosted paired timer receipt is missing", () => {
+    const hosted = structuredClone(p6Hosted.fail_747.sampled);
+    hosted.paired_control.samples = hosted.paired_control.samples.map((sample) => ({
+      sample_index: sample.sample_index,
+      send_elapsed_ms: sample.send_elapsed_ms,
+    }));
+    const candidate = { ...result, latency: { ...result.latency,
+      first_send_after_spawn: { ...result.latency.first_send_after_spawn, sampled: hosted } } };
+    const comparison = compareBenchmark(hostedBaseline, candidate);
+    expect(comparison.first_send_rounds).toBeNull();
+    expect(comparison.rows.find((entry) => entry.operation === "first_send_after_spawn" &&
+      entry.metric === "p95_ms")).toMatchObject({ current: 122.32, passed: false });
+  });
+
   it("keeps a steady round regression blocking even when round zero is excluded", () => {
     const hosted = structuredClone(p6Hosted.fail_747.sampled);
     const samples = hosted.paired_control.samples;
@@ -600,6 +614,8 @@ describe("daemon performance budget", () => {
 
   it("reports a cold-start alert without turning it into a blocking verdict", () => {
     const hosted = structuredClone(p6Hosted.fail_747.sampled);
+    const cold = hosted.paired_control.samples[0];
+    cold.send_completed_at_ms += 175 - cold.send_elapsed_ms;
     hosted.paired_control.samples[0].send_elapsed_ms = 175;
     const elapsed = hosted.paired_control.samples.map((sample) => sample.send_elapsed_ms)
       .sort((a, b) => a - b);
@@ -649,29 +665,30 @@ describe("daemon performance budget", () => {
     const sample = tooEarly.latency.first_send_after_spawn.sampled.paired_control.samples[8];
     sample.control_timer_fired_at_ms = sample.control_timer_due_at_ms - 3;
     const rejected = compareBenchmark(baseline, tooEarly);
+    expect(rejected.first_send_rounds).toBeNull();
     expect(rejected.paired_control_evaluation.first_send_after_spawn).toMatchObject({
-      verdict_basis: "adjusted", valid_pairs: 87, invalid_pairs: 1,
+      verdict_basis: "adjusted", valid_pairs: 95, invalid_pairs: 1,
       invalid_reasons: { timer_fired_too_early: 1 },
     });
     const forged = structuredClone(candidate);
     forged.latency.first_send_after_spawn.sampled.paired_control.samples[8].control_timer_overrun_ms = 5;
     expect(compareBenchmark(baseline, forged).paired_control_evaluation.first_send_after_spawn).toMatchObject({
-      valid_pairs: 87, invalid_pairs: 1,
+      valid_pairs: 95, invalid_pairs: 1,
       invalid_reasons: { timer_overrun_inconsistent: 1 },
     });
     const tinyForged = structuredClone(candidate);
     tinyForged.latency.first_send_after_spawn.sampled.paired_control.samples[8].control_timer_overrun_ms = 0.01;
     expect(compareBenchmark(baseline, tinyForged).paired_control_evaluation.first_send_after_spawn)
-      .toMatchObject({ valid_pairs: 87, invalid_reasons: { timer_overrun_inconsistent: 1 } });
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { timer_overrun_inconsistent: 1 } });
     const beforeStart = structuredClone(candidate);
     beforeStart.latency.first_send_after_spawn.sampled.paired_control.samples[8].control_timer_fired_at_ms =
       beforeStart.latency.first_send_after_spawn.sampled.paired_control.samples[8].control_timer_started_at_ms - 0.1;
     expect(compareBenchmark(baseline, beforeStart).paired_control_evaluation.first_send_after_spawn)
-      .toMatchObject({ valid_pairs: 87, invalid_reasons: { timer_timing_inconsistent: 1 } });
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { timer_timing_inconsistent: 1 } });
     const forgedOverlap = structuredClone(candidate);
     forgedOverlap.latency.first_send_after_spawn.sampled.paired_control.samples[8].control_elapsed_ms = 0.01;
     expect(compareBenchmark(baseline, forgedOverlap).paired_control_evaluation.first_send_after_spawn)
-      .toMatchObject({ valid_pairs: 87, invalid_reasons: { control_overlap_inconsistent: 1 } });
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { control_overlap_inconsistent: 1 } });
   });
 
   it("shows raw send and phase-local control timings for the slowest samples", () => {
