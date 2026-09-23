@@ -1,24 +1,40 @@
 const record = (value) => value && typeof value === "object" ? value : {};
+const agentStates = new Set(["creating", "booting", "ready", "working", "idle", "done", "error"]);
+const screenStatuses = new Set(["frozen", "thinking", "working", "draft_pending", "idle", "done"]);
+const controlStates = new Set(["shell", "agent_booting", "ready", "busy", "interactive_overlay",
+  "permission_prompt", "composer_dirty", "dead", "stale_surface", "poisoned_registry"]);
+const validProgress = (cycles, minimum, elapsed, duration) =>
+  Number.isInteger(cycles) && cycles >= 0 && Number.isInteger(minimum) && minimum > 0 &&
+  cycles <= minimum && Number.isFinite(elapsed) && elapsed >= 0 &&
+  Number.isFinite(duration) && duration >= 0;
 
 export function checkReceipt(receipt, landed = false) {
   const value = record(receipt);
   const failures = [];
   if (value.submit_verified !== true) failures.push("unverified_receipt");
+  if (typeof landed !== "boolean") failures.push("malformed_receipt");
   if (landed && value.submit_verified !== true) {
     failures.push("landed_with_unverified_receipt");
   }
-  if (["pending_verify", "failed", "rescued", "queued", "queued_followup"]
-    .includes(value.delivery_state)) failures.push("nonterminal_or_failed_receipt");
+  // Boot receipts may omit delivery_state; a present value must be submitted.
+  if (value.delivery_state !== undefined && value.delivery_state !== "submitted") {
+    failures.push("nonterminal_or_failed_receipt");
+  }
   return failures;
 }
 
 export function checkStateAgreement(agent, screen) {
   const registry = record(agent).state;
   const parsed = record(screen);
+  if (!agentStates.has(registry) || !screenStatuses.has(parsed.status) ||
+    !controlStates.has(parsed.control_state)) {
+    return ["state_unavailable"];
+  }
   const screenBusy = ["working", "thinking"].includes(parsed.status)
     || parsed.control_state === "busy"
     || parsed.control_state === "composer_dirty";
-  return screenBusy && ["idle", "done", "error"].includes(registry)
+  return (screenBusy && registry !== "working") ||
+    (["idle", "done"].includes(parsed.status) && registry === "working")
     ? ["stale_registry_state"] : [];
 }
 
@@ -31,14 +47,15 @@ export function checkToolFailure(result) {
     failures.push("topology_incomplete_refusal");
   }
   if (/route changed/i.test(message)) failures.push("route_changed");
-  if (value.ok === false || value.isError === true) failures.push("tool_error");
+  if (value.ok !== true || value.isError !== false ||
+    value.error != null || value.error_code != null) failures.push("tool_error");
   return failures;
 }
 
 export function checkPlacement(screen) {
   const { column, column_count: count } = record(screen);
   return Number.isInteger(column) && Number.isInteger(count)
-    && count >= 2 && column === count - 1 ? [] : ["wrong_column"];
+    && count === 2 && column === 1 ? [] : ["wrong_column"];
 }
 
 export function checkClose(close, defaultListed, explicitRow, indexEntry, surface, liveSurfaces) {
@@ -47,7 +64,13 @@ export function checkClose(close, defaultListed, explicitRow, indexEntry, surfac
   if (value.agent_stopped !== true || value.surface_closed !== true) {
     failures.push("close_unverified");
   }
-  const isLive = (ref) => Array.isArray(liveSurfaces) && liveSurfaces.some((row) =>
+  const surfacesKnown = Array.isArray(liveSurfaces) && Array.from(liveSurfaces).every((row) =>
+    row && typeof row === "object" && [row.ref, row.id, row.surface_id]
+      .some((id) => typeof id === "string" && id.length > 0));
+  if (typeof defaultListed !== "boolean" || typeof surface !== "string" || !surface ||
+    !surfacesKnown || (record(indexEntry).cli_session_id &&
+      typeof indexEntry.surface_id !== "string")) failures.push("close_observation_unavailable");
+  const isLive = (ref) => surfacesKnown && liveSurfaces.some((row) =>
     row.ref === ref || row.id === ref || row.surface_id === ref);
   if (defaultListed) failures.push("agent_ghost");
   if (explicitRow && !["done", "error"].includes(explicitRow.state)) failures.push("nonterminal_tombstone");
@@ -57,6 +80,7 @@ export function checkClose(close, defaultListed, explicitRow, indexEntry, surfac
 }
 
 export function hasReplyMarker(screen, marker) {
+  if (typeof marker !== "string" || !marker.trim()) return false;
   const value = record(screen);
   const response = record(value.parsed).response;
   const replyLine = (line) => line.trim().replace(/^[⏺•]\s*/, "") === marker;
@@ -66,10 +90,16 @@ export function hasReplyMarker(screen, marker) {
 }
 
 export function shouldContinueSoak(cyclesCompleted, minCycles, elapsedMs, minDurationMs) {
+  if (!validProgress(cyclesCompleted, minCycles, elapsedMs, minDurationMs)) {
+    throw new TypeError("invalid soak progress");
+  }
   return cyclesCompleted < minCycles || elapsedMs < minDurationMs;
 }
 
 export function nextSoakDelayMs(cyclesCompleted, minCycles, elapsedMs, minDurationMs) {
+  if (!validProgress(cyclesCompleted, minCycles, elapsedMs, minDurationMs)) {
+    throw new TypeError("invalid soak progress");
+  }
   if (minDurationMs <= 0) return 0;
   const targetMs = minDurationMs * Math.min(cyclesCompleted, minCycles) / minCycles;
   return Math.min(30_000, Math.max(0, Math.ceil(targetMs - elapsedMs)));
@@ -84,9 +114,10 @@ export function checkControlHealthSample(result, mcpPid, expectedMcpPid) {
     mcpPid !== expectedMcpPid) failures.push("mcp_pid_changed");
   // control_health.current_process.pid belongs to the control daemon, not
   // the stdio MCP process held by this client transport.
-  if (value.ok !== true || value.isError === true ||
-    selected.transport_mode !== "socket" || selected.transport_degraded === true ||
-    selected.transport_denied || !Array.isArray(health.warnings) ||
+  if (value.ok !== true || value.isError !== false ||
+    selected.transport_mode !== "socket" || selected.transport_degraded !== false ||
+    (selected.transport_denied !== undefined && selected.transport_denied !== false) ||
+    !Array.isArray(health.warnings) ||
     health.warnings.length > 0) failures.push("control_transport_unhealthy");
   return failures;
 }
@@ -94,11 +125,18 @@ export function checkControlHealthSample(result, mcpPid, expectedMcpPid) {
 export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
   const full = record(fullRead);
   const parsedOnly = record(parsedOnlyRead);
-  if (full.ok !== true || parsedOnly.ok !== true || !full.parsed || !parsedOnly.parsed) {
+  if (full.ok !== true || parsedOnly.ok !== true || full.isError !== false ||
+    parsedOnly.isError !== false || !full.parsed || !parsedOnly.parsed ||
+    !Number.isFinite(elapsedMs) || elapsedMs < 0) {
     return ["parsed_read_unavailable"];
   }
   const a = record(full.parsed);
   const b = record(parsedOnly.parsed);
+  if (![a, b].every((parsed) => screenStatuses.has(parsed.status) &&
+    controlStates.has(parsed.control_state) &&
+    Number.isFinite(parsed.token_count) && parsed.token_count >= 0)) {
+    return ["parsed_read_unavailable"];
+  }
   const failures = [];
   if (elapsedMs > 2_000) failures.push("parsed_sweep_window_exceeded");
   if (a.status !== b.status) failures.push("parsed_status_mismatch");
@@ -116,10 +154,7 @@ export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
 export function checkSoakSession(session) {
   const value = record(session);
   const failures = [];
-  if (!Number.isInteger(value.cyclesCompleted) || value.cyclesCompleted < 0 ||
-    !Number.isInteger(value.minCycles) || value.minCycles <= 0 ||
-    !Number.isFinite(value.elapsedMs) || value.elapsedMs < 0 ||
-    !Number.isFinite(value.minDurationMs) || value.minDurationMs < 0 ||
+  if (!validProgress(value.cyclesCompleted, value.minCycles, value.elapsedMs, value.minDurationMs) ||
     !Array.isArray(value.healthSamples)) failures.push("malformed_session");
   if (!Number.isInteger(value.startPid) || value.startPid <= 0 ||
     value.endPid !== value.startPid) failures.push("server_pid_changed");
@@ -132,7 +167,7 @@ export function checkSoakSession(session) {
     samples.length < Math.ceil(value.elapsedMs / 60_000) + 1) {
     failures.push("missing_control_samples");
   }
-  if (samples.some((healthy) => healthy !== true)) failures.push("unhealthy_control_sample");
+  if (Array.from(samples).some((healthy) => healthy !== true)) failures.push("unhealthy_control_sample");
   if (!Number.isFinite(value.rssStartKb) || value.rssStartKb <= 0 ||
     !Number.isFinite(value.rssEndKb) || value.rssEndKb <= 0) failures.push("server_rss_unavailable");
   else if (value.rssEndKb > value.rssStartKb * 2) failures.push("server_rss_over_2x");
