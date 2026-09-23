@@ -52,6 +52,7 @@
     "proxy": "node dist/proxy.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --maxWorkers=1",
+    "test:repro:632": "vitest run --maxWorkers=1 --config vitest.issue-632.config.ts",
     "test:topology": "vitest run tests/topology-contract.test.ts",
     "test:parity": "vitest run tests/spawn-resume-parity.test.ts tests/launcher-registry.test.ts tests/repo-root-fallback.test.ts tests/registry-optional-resume.test.ts",
     "test:contract": "bun run build && tsx scripts/run-real-cmux-contract.ts",
@@ -81,6 +82,15 @@
     "transform-tty": "^1.0.11",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
-    "vitest": "^3.0.0"
+    "vite": "7.3.5",
+    "vitest": "4.1.11"
+  },
+  "overrides": {
+    "vite": "7.3.5"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "7.3.5"
+    }
   }
 }
