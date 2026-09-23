@@ -282,7 +282,18 @@ export async function enumerateAllWindowWorkspaces(
             ...workspace,
             window_ref: workspace.window_ref ?? windowTarget,
           }));
-        } catch {
+        } catch (error) {
+          // An unsupported workspace-list method is a connector capability
+          // signal. Callers such as notify must still see it to use their
+          // surface-only fallback; an ordinary failed window remains partial.
+          if (
+            error &&
+            typeof error === "object" &&
+            "code" in error &&
+            error.code === "method_not_found"
+          ) {
+            throw error;
+          }
           // A failed window is unknown, while other windows still provide
           // positive UUID evidence. Only a complete snapshot proves absence.
           complete = false;

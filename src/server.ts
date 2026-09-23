@@ -9054,10 +9054,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
    * Old/ref-only cmux clients retain compatibility, but once UUID evidence has
    * been captured the route always fails closed if that UUID is absent.
    */
+  const agentScopedSurfaceClose = Symbol("agent-scoped-surface-close");
   const resolveRawSurfaceMutationRoute = async (
     requestedSurface: string,
     requestedWorkspace: string | undefined,
     operation: string,
+    trustedAgentScopedClose = false,
   ): Promise<RawSurfaceMutationRoute> => {
     const explicitWorkspace = requestedWorkspace
       ? normalizeWorkspaceRefAlias(requestedWorkspace)
@@ -9089,12 +9091,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const registryUuid =
       registryUuids.size === 1 ? [...registryUuids][0] : null;
     const expectedUuid = capturedUuid ?? registryUuid;
-    // Legacy connectors must opt into ref-only semantics explicitly. A failed
-    // topology read from a UUID-capable connector is not such an opt-in.
+    // A failed topology read from a UUID-capable connector is not evidence
+    // that an anonymous raw ref is safe to close.
     const refOnlyConnector =
       (client as typeof client & { surfaceIdentityMode?: string })
         .surfaceIdentityMode === "ref_only";
     const topologyObserverEpoch = context.surfaceObserverEpoch;
+    const managedRefOnlyBinding = !topologyObserverEpoch &&
+      stateMgr.listStates().filter((record) =>
+        record.surface_id === requestedSurface && !record.surface_uuid
+      ).length === 1;
+    // Preserve the pre-UUID managed close contract only when no stable
+    // observer exists. An anonymous raw ref cannot use this exception.
+    const allowRefOnlyClose = refOnlyConnector ||
+      (!topologyObserverEpoch &&
+        (trustedAgentScopedClose || managedRefOnlyBinding));
     const topology = await collectSurfaceTopology();
     const withSurfaceRemap = (
       route: Omit<RawSurfaceMutationRoute, "remapped_from" | "remapped_to">,
@@ -9209,7 +9220,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (topology.surfaceIdByRef.size > 0 || topology.surfaceRefById.size > 0) {
           throwStaleSurfaceRef("Fresh topology was incomplete and did not prove a stable UUID");
         }
-        if (operation === "close_surface" && !refOnlyConnector) {
+        if (operation === "close_surface" && !allowRefOnlyClose) {
           refuseUnverifiedClose();
         }
         // Legacy/mock connectors expose no stable identity. Retain their
@@ -9265,7 +9276,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     }
 
-    if (operation === "close_surface" && !refOnlyConnector) {
+    if (operation === "close_surface" && !allowRefOnlyClose) {
       refuseUnverifiedClose();
     }
 
@@ -12156,6 +12167,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // process check protects this record; it does not authorize
               // tearing down a surface another nonterminal record owns.
               force: args.force ?? false,
+              // A managed agent ID was resolved before stop_agent. This
+              // internal-only symbol allows its ref-only close when no stable
+              // identity exists; raw callers cannot supply it through MCP.
+              [agentScopedSurfaceClose]: true,
             },
             {},
           );
@@ -12238,6 +12253,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.surface,
           args.workspace,
           "close_surface",
+          (args as Record<PropertyKey, unknown>)[agentScopedSurfaceClose] === true,
         );
         await assertSurfaceMutationAllowed(
           "close_surface",
