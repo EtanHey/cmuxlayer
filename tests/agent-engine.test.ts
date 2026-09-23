@@ -12781,6 +12781,44 @@ Session ID: ${sessionId}`,
       );
     });
 
+    it("closes an owned UUID route under its stable surface identity", async () => {
+      engine.dispose();
+      const observerId = "cmux:/tmp/owned-stop.sock";
+      const stableUuid = "11111111-2222-4333-8444-555555555555";
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerIdProvider: () => observerId,
+      });
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        stopPostConditionTimeoutMs: 20,
+      });
+      const record = makeRecord({
+        agent_id: "agent-stop-owned-stable-close",
+        state: "working",
+        surface_id: "surface:owned",
+        surface_uuid: stableUuid,
+        surface_observer_id: observerId,
+        workspace_id: "ws:1",
+      });
+      stateMgr.writeState(record);
+      liveSurfaces = [
+        {
+          ...makeSurface(record.surface_id),
+          id: stableUuid,
+          workspace_ref: "ws:1",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.stopAgent(record.agent_id);
+
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        record.surface_id,
+        expect.objectContaining({ stableSurfaceIdentity: stableUuid }),
+      );
+    });
+
     it("refuses socketless teardown when another record claims the same stable UUID", async () => {
       engine.dispose();
       const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
