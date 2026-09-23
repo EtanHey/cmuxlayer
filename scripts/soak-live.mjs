@@ -10,6 +10,7 @@ import {
   checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
   checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak,
 } from "./soak-live-checks.mjs";
+import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 
 const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -210,16 +211,9 @@ async function main() {
     check("reply_visible", ["missing_reply_marker"], { cycle, agent_id: agentId, marker });
     return false;
   };
-  const closeOwned = async (cycle, agentId, surface) => {
-    const close = agentId
-      ? await call("close_surface", { scope: "agent", agent_id: agentId, force: true }, cycle)
-      : surface
-        ? await call("close_surface", { scope: "surface", surface, workspace: WORKSPACE, force: true }, cycle)
-        : null;
-    if (agentId && close?.ok !== true && surface) {
-      // Keep the agent-close failure visible, then try exact-surface cleanup.
-      await call("close_surface", { scope: "surface", surface, workspace: WORKSPACE, force: true }, cycle);
-    }
+  const closeOwned = async (cycle, agentId, surface, surfaceUuid) => {
+    const { close, leaked } = await closeSpawnedAgent({ call, check, cycle, agentId, surface, surfaceUuid });
+    if (leaked) return false;
     if (agentId) {
       let listed, explicit, surfaces;
       let index = null;
@@ -250,7 +244,7 @@ async function main() {
   const runCycle = async (cycle) => {
     const cli = cycle % 2 === 0 ? "codex" : "claude";
     summary.cli_counts[cli] += 1;
-    let agentId, surface;
+    let agentId, surface, surfaceUuid;
     try {
       const first = `SOAK_OK_${cycle}`;
       const second = `SOAK2_${cycle}`;
@@ -260,7 +254,8 @@ async function main() {
         mcp_profile: "sterile", prompt: `Reply exactly ${first} then stop.` }, cycle);
       agentId = spawn.agent_id;
       surface = spawn.surface_id ?? spawn.surface;
-      if (agentId) { active.set(agentId, surface); spawnedIds.add(agentId); }
+      surfaceUuid = spawn.surface_uuid ?? null;
+      if (agentId) { active.set(agentId, { surface, surfaceUuid }); spawnedIds.add(agentId); }
       check("spawn_receipt", checkReceipt(spawn.boot_prompt_receipt ?? {
         submit_verified: spawn.boot_prompt_submit_verified,
         delivery_state: spawn.boot_prompt_receipt?.delivery_state,
@@ -290,10 +285,13 @@ async function main() {
     } catch (error) {
       check("cycle_exception", ["cycle_exception"], { cycle, error: String(error) });
     } finally {
-      let closed = false;
-      try { if (agentId || surface) closed = await closeOwned(cycle, agentId, surface); }
+      try {
+        if (agentId || surface) {
+          await closeOwned(cycle, agentId, surface, surfaceUuid);
+          if (agentId) active.delete(agentId); // A recorded leak is left for human cleanup.
+        }
+      }
       catch (error) { check("cleanup", ["cleanup_exception"], { cycle, error: String(error) }); }
-      if (agentId && closed) active.delete(agentId);
       summary.cycles_completed += 1;
       log({ kind: "cycle_done", cycle, cli });
     }
@@ -322,8 +320,8 @@ async function main() {
   } catch (error) {
     check("harness", ["harness_exception"], { error: String(error) });
   } finally {
-    for (const [agentId, surface] of active) {
-      try { await closeOwned("final", agentId, surface); }
+    for (const [agentId, { surface, surfaceUuid }] of active) {
+      try { await closeOwned("final", agentId, surface, surfaceUuid); }
       catch (error) { check("cleanup", ["cleanup_exception"], { agent_id: agentId, error: String(error) }); }
     }
     try { inboxCheck("final"); }
