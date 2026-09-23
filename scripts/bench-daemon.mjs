@@ -27,7 +27,7 @@ const PARALLEL_STRESS_COUNT = 10;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
 const READ_SCREEN_P50_BUDGET_MS = 250;
-const PAIRED_CONTROL_HOLD_MS = 250;
+const PAIRED_CONTROL_HOLD_MS = 1;
 const LOCAL_HARD_GATES = process.env.CMUXLAYER_BENCH_LOCAL_GATE === "1";
 let JsonRpcLineBuffer;
 
@@ -78,11 +78,22 @@ function measureFakeCmuxPing(socketPath) {
         if (response.id !== 1 || response.ok !== true || response.result?.pong !== true) {
           throw new Error("paired fake-socket ping returned an invalid receipt");
         }
-        const totalMs = round(nowMs() - startedAt);
+        const timer = response.result;
+        if (
+          !Number.isFinite(timer.timer_started_at_ms) ||
+          !Number.isFinite(timer.timer_due_at_ms) ||
+          !Number.isFinite(timer.timer_fired_at_ms) ||
+          !Number.isFinite(timer.timer_overrun_ms)
+        ) {
+          throw new Error("paired fake-socket ping omitted timer proof");
+        }
         settle(null, {
           started_at_ms: startedAt,
-          total_ms: totalMs,
-          delay_ms: round(Math.max(0, totalMs - PAIRED_CONTROL_HOLD_MS)),
+          total_ms: round(nowMs() - startedAt),
+          timer_started_at_ms: timer.timer_started_at_ms,
+          timer_due_at_ms: timer.timer_due_at_ms,
+          timer_fired_at_ms: timer.timer_fired_at_ms,
+          timer_overrun_ms: timer.timer_overrun_ms,
         });
       } catch (error) {
         settle(error);
@@ -640,6 +651,27 @@ async function handleFakeCmuxSocketLine(
   }
   const request = JSON.parse(line);
   const params = request.params ?? {};
+  // Keep the runner control independent of fake-state I/O and topology work.
+  // It measures only this event loop's timer overrun, with server timestamps.
+  if (request.method === "system.ping" && params.delay_ms === PAIRED_CONTROL_HOLD_MS) {
+    const timerStartedAt = nowMs();
+    const timerDueAt = timerStartedAt + PAIRED_CONTROL_HOLD_MS;
+    setTimeout(() => {
+      const timerFiredAt = nowMs();
+      socket.write(`${JSON.stringify({
+        id: request.id,
+        ok: true,
+        result: {
+          pong: true,
+          timer_started_at_ms: timerStartedAt,
+          timer_due_at_ms: timerDueAt,
+          timer_fired_at_ms: timerFiredAt,
+          timer_overrun_ms: Math.max(0, timerFiredAt - timerDueAt),
+        },
+      })}\n`);
+    }, PAIRED_CONTROL_HOLD_MS);
+    return;
+  }
   const requestStartedAt = nowMs();
   const state = await readFakeState(statePath);
   const stateReadMs = nowMs() - requestStartedAt;
@@ -675,9 +707,6 @@ async function handleFakeCmuxSocketLine(
   let result;
   switch (request.method) {
     case "system.ping":
-      if (params.delay_ms === PAIRED_CONTROL_HOLD_MS) {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, PAIRED_CONTROL_HOLD_MS));
-      }
       result = { pong: true };
       break;
     case "system.identify":
@@ -1295,6 +1324,7 @@ async function measureSpawnLifecycleOnce(
   sweepHoldState,
   sampleIndex,
   fakeCmuxSocketPath,
+  pendingControls,
 ) {
   const spawnResult = toolData(
     await client.callTool(
@@ -1361,9 +1391,7 @@ async function measureSpawnLifecycleOnce(
     const completedAt = nowMs();
     const elapsedMs = round(completedAt - startedAt);
     const proofElapsedMs = round(completedAt - startedAt - toolElapsedMs);
-    const controlOutcome = controlPromise ? await controlPromise : null;
-    const control = controlOutcome?.value;
-    return {
+    const sendSample = {
       elapsed_ms: elapsedMs,
       tool_elapsed_ms: round(toolElapsedMs),
       proof_elapsed_ms: proofElapsedMs,
@@ -1384,24 +1412,35 @@ async function measureSpawnLifecycleOnce(
       press_enter: args.press_enter === true,
       transport: receipt.transport,
       receipt,
-      ...(control ? {
-        paired_control: {
-          control_elapsed_ms: control.delay_ms,
+    };
+    if (controlPromise) {
+      // Resolve telemetry after the entire canonical lifecycle workload. A
+      // control never inserts a wait between first, warm, or surface sends.
+      pendingControls.push(controlPromise.then((outcome) => {
+        const control = outcome.value;
+        sendSample.paired_control = control ? {
+          control_elapsed_ms: round(Math.max(0,
+            Math.min(control.timer_fired_at_ms, completedAt) -
+            Math.max(control.timer_due_at_ms, startedAt))),
           control_total_ms: control.total_ms,
           control_hold_ms: PAIRED_CONTROL_HOLD_MS,
           control_transport: "socket",
-          start_delta_ms: round(Math.abs(control.started_at_ms - startedAt)),
-        },
-      } : pairedControl ? {
-        paired_control: {
+          send_started_at_ms: startedAt,
+          send_completed_at_ms: completedAt,
+          control_timer_started_at_ms: control.timer_started_at_ms,
+          control_timer_due_at_ms: control.timer_due_at_ms,
+          control_timer_fired_at_ms: control.timer_fired_at_ms,
+          control_timer_overrun_ms: control.timer_overrun_ms,
+        } : {
           control_elapsed_ms: null,
           control_transport: "unavailable",
-          error: controlOutcome?.error instanceof Error
-            ? controlOutcome.error.message
-            : String(controlOutcome?.error),
-        },
-      } : {}),
-    };
+          error: outcome.error instanceof Error
+            ? outcome.error.message
+            : String(outcome.error),
+        };
+      }));
+    }
+    return sendSample;
   };
 
   // The daemon sweep acknowledges this unique token only after it owns the
@@ -1645,14 +1684,16 @@ async function measureSpawnLifecycleAcrossClients(
   fakeCmuxSocketPath,
 ) {
   const samples = [];
+  const pendingControls = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     for (const [clientIndex, client] of clients.entries()) {
       const sampleIndex = roundIndex * clients.length + clientIndex;
       samples.push(
-        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex, fakeCmuxSocketPath),
+        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex, fakeCmuxSocketPath, pendingControls),
       );
     }
   }
+  await Promise.all(pendingControls);
   return {
     first: samples[0].first,
     second: samples[0].second,

@@ -242,9 +242,8 @@ function percentile(values, percentage) {
   return sorted[Math.ceil((percentage / 100) * sorted.length) - 1];
 }
 
-// A socket ping launched with each send can identify delay shared with the
-// benchmark runner. A fast ping never discounts a slow send. The control is
-// deliberately outside the daemon, so a slow daemon send path stays visible.
+// Discount only fake-socket timer overrun that actually overlaps this send.
+// Connection, fake-state I/O, and timer delay after the send do not qualify.
 function pairedSendMetrics(measurement, expectedSamples) {
   const control = measurement?.paired_control;
   const samples = control?.samples;
@@ -256,20 +255,32 @@ function pairedSendMetrics(measurement, expectedSamples) {
     expectedSamples < 1 ||
     !Array.isArray(samples) ||
     samples.length !== expectedSamples ||
-    samples.some((sample, index) =>
-      sample?.sample_index !== index ||
-      !Number.isFinite(sample.send_elapsed_ms) ||
-      sample.send_elapsed_ms < 0 ||
-      !Number.isFinite(sample.control_elapsed_ms) ||
-      sample.control_elapsed_ms < 0 ||
-      sample.control_hold_ms !== 250 ||
-      !Number.isFinite(sample.control_total_ms) ||
-      Math.abs(sample.control_total_ms - sample.control_hold_ms - sample.control_elapsed_ms) > 0.02 ||
-      sample.control_transport !== "socket" ||
-      !Number.isFinite(sample.start_delta_ms) ||
-      sample.start_delta_ms > 5 ||
-      sample.start_delta_ms < 0
-    )
+    samples.some((sample, index) => {
+      if (
+        sample?.sample_index !== index ||
+        !Number.isFinite(sample.send_elapsed_ms) ||
+        sample.send_elapsed_ms < 0 ||
+        sample.control_hold_ms !== 1 ||
+        sample.control_transport !== "socket" ||
+        !Number.isFinite(sample.send_started_at_ms) ||
+        !Number.isFinite(sample.send_completed_at_ms) ||
+        !Number.isFinite(sample.control_timer_started_at_ms) ||
+        !Number.isFinite(sample.control_timer_due_at_ms) ||
+        !Number.isFinite(sample.control_timer_fired_at_ms) ||
+        !Number.isFinite(sample.control_timer_overrun_ms) ||
+        !Number.isFinite(sample.control_elapsed_ms)
+      ) return true;
+      const overlap = Math.max(0,
+        Math.min(sample.control_timer_fired_at_ms, sample.send_completed_at_ms) -
+        Math.max(sample.control_timer_due_at_ms, sample.send_started_at_ms));
+      return sample.send_completed_at_ms < sample.send_started_at_ms ||
+        Math.abs(sample.send_completed_at_ms - sample.send_started_at_ms - sample.send_elapsed_ms) > 0.05 ||
+        Math.abs(sample.control_timer_due_at_ms - sample.control_timer_started_at_ms - 1) > 0.05 ||
+        sample.control_timer_fired_at_ms < sample.control_timer_due_at_ms ||
+        Math.abs(sample.control_timer_fired_at_ms - sample.control_timer_due_at_ms - sample.control_timer_overrun_ms) > 0.05 ||
+        sample.control_elapsed_ms < 0 ||
+        Math.abs(sample.control_elapsed_ms - overlap) > 0.05;
+    })
   ) return null;
   const raw = samples.map((sample) => sample.send_elapsed_ms);
   if (

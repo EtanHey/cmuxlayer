@@ -342,15 +342,30 @@ describe("daemon performance budget", () => {
 
   it("excuses only send latency matched by a simultaneous socket control stall", () => {
     const pairedSamples = (fastSend: number, slowSend: number, slowControl: number) =>
-      Array.from({ length: 96 }, (_, sample_index) => ({
-        sample_index,
-        send_elapsed_ms: sample_index < 90 ? fastSend : slowSend,
-        control_elapsed_ms: sample_index < 90 ? 1 : slowControl,
-        control_total_ms: 250 + (sample_index < 90 ? 1 : slowControl),
-        control_hold_ms: 250,
-        control_transport: "socket",
-        start_delta_ms: 0.1,
-      }));
+      Array.from({ length: 96 }, (_, sample_index) => {
+        const send_elapsed_ms = sample_index < 90 ? fastSend : slowSend;
+        const control_timer_overrun_ms = sample_index < 90 ? 1 : slowControl;
+        const send_started_at_ms = sample_index * 2_000;
+        const send_completed_at_ms = send_started_at_ms + send_elapsed_ms;
+        const control_timer_started_at_ms = send_started_at_ms;
+        const control_timer_due_at_ms = control_timer_started_at_ms + 1;
+        const control_timer_fired_at_ms = control_timer_due_at_ms + control_timer_overrun_ms;
+        return {
+          sample_index,
+          send_elapsed_ms,
+          send_started_at_ms,
+          send_completed_at_ms,
+          control_elapsed_ms: Math.max(0,
+            Math.min(control_timer_fired_at_ms, send_completed_at_ms) -
+            Math.max(control_timer_due_at_ms, send_started_at_ms)),
+          control_timer_started_at_ms,
+          control_timer_due_at_ms,
+          control_timer_fired_at_ms,
+          control_timer_overrun_ms,
+          control_hold_ms: 1,
+          control_transport: "socket",
+        };
+      });
     const candidate = {
       ...result,
       latency: {
@@ -433,6 +448,49 @@ describe("daemon performance budget", () => {
       },
     };
     expect(compareBenchmark(baseline, malformed).rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+
+    // A timer delayed only after send completion is not simultaneous proof.
+    const postSend = pairedSamples(240, 340, 101).map((sample) =>
+      sample.sample_index < 90 ? sample : {
+        ...sample,
+        control_timer_started_at_ms: sample.send_completed_at_ms + 1,
+        control_timer_due_at_ms: sample.send_completed_at_ms + 2,
+        control_timer_fired_at_ms: sample.send_completed_at_ms + 103,
+        control_elapsed_ms: 0,
+      });
+    const postSendCandidate = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: { kind: "fake_socket_timed_ping", samples: postSend },
+        },
+      },
+    };
+    expect(compareBenchmark(baseline, postSendCandidate).rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+
+    // Receipt fields must prove the timer interval, not just claim an overlap.
+    const forged = pairedSamples(240, 340, 101).map((sample) =>
+      sample.sample_index < 90 ? sample : {
+        ...sample,
+        control_timer_overrun_ms: 1,
+      });
+    const forgedCandidate = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: { kind: "fake_socket_timed_ping", samples: forged },
+        },
+      },
+    };
+    expect(compareBenchmark(baseline, forgedCandidate).rows.find((entry) =>
       entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
     )).toMatchObject({ current: 340, passed: false });
 
