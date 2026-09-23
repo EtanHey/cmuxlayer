@@ -4,6 +4,7 @@
  * Path: {baseDir}/{agentId}/state.json
  */
 
+import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   writeFileSync,
@@ -371,6 +372,7 @@ export class StateManager {
     const updated: AgentRecord = {
       ...current,
       state: toState,
+      ...(toState === "booting" ? { boot_instance_id: randomUUID() } : {}),
       version: current.version + 1,
       updated_at: new Date().toISOString(),
       ...(extra?.error !== undefined ? { error: extra.error } : {}),
@@ -458,6 +460,10 @@ export class StateManager {
     const updated: AgentRecord = {
       ...current,
       ...fields,
+      ...(fields.boot_prompt_pending === true &&
+      (current.boot_prompt_pending !== true || !current.boot_instance_id)
+        ? { boot_instance_id: randomUUID() }
+        : {}),
       version: current.version + 1,
       updated_at: new Date().toISOString(),
     };
@@ -542,6 +548,7 @@ export class StateManager {
       ...current,
       ...fields,
       state: toState,
+      ...(toState === "booting" ? { boot_instance_id: randomUUID() } : {}),
       version: current.version + 1,
       updated_at: new Date().toISOString(),
     };

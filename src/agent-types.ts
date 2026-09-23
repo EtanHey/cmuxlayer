@@ -148,6 +148,8 @@ export interface AgentRecord {
   halt_last_progress_signature?: string | null;
   // Boot prompt delivery guard
   boot_prompt_pending?: boolean;
+  /** Changes on each managed boot, including resume under the same agent ID. */
+  boot_instance_id?: string;
   // Spawn settlement evidence (PR #326): a managed agent must not report
   // ready without retaining what was actually observed about prompt delivery
   // and the model shown by the CLI.
