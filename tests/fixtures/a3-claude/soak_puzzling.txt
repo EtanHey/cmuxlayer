@@ -1,0 +1,10 @@
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Opus 5.5 (1M context) with high effort · Claude Max
+  ▝▝ ▝▝    ~/Gits/cmuxlayer
+
+❯ Reply exactly SOAK_OK_1 then stop. ; cmuxlayer contract for capture-agent: Read and
+  follow /home/capture-user/.cmux/agents/capture-agent/contract.md
+
+· Puzzling… (3s · thinking with high effort)
+❯
+  ⎇ main | 🔧 13
