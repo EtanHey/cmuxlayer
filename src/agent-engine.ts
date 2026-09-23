@@ -10131,6 +10131,7 @@ export class AgentEngine {
     const topology = await collectSurfaceTopology(this.client);
     const binding = resolveAgentSurfaceBinding(agent, topology);
     if (
+      topology?.complete !== true ||
       !binding ||
       binding.provenance !== "uuid" ||
       topology?.surfaceIdByRef.get(binding.surfaceRef)?.trim().toLowerCase() !==

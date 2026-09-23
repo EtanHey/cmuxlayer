@@ -212,6 +212,54 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     }
   });
 
+  it("does not submit a human queue item that prefixes an engine-owned receipt", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screen = "OpenAI Codex\n› Ask Codex to do anything";
+    const exec = makeLifecycleExec(() => screen);
+    const context = createServerContext({
+      exec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    try {
+      const server = createServer({ context }) as any;
+      const targetId = await spawnReadyAgent(server, "codex");
+      const engine = server._registeredTools.interact._engine;
+      engine.acceptComposerQueue({
+        delivery_id: "engine-owned-long-queue",
+        agent_id: targetId,
+        text: "queued request from engine",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+        typed: true,
+        submit_dispatched: true,
+      });
+      screen = [
+        "OpenAI Codex",
+        "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+        "  ↳ queued request",
+        "› Ask Codex to do anything",
+      ].join("\n");
+      exec.mockClear();
+
+      const result = parseToolResult(
+        await server._registeredTools.send_to.handler(
+          { mode: "key", surface: "surface:new", text: "return", press_enter: false },
+          {},
+        ),
+      );
+
+      expect(result.error_code).toMatch(
+        /draft_ownership_unverified|nothing_owned_to_submit/,
+      );
+      expect(mutatedPane(exec)).toBe(false);
+    } finally {
+      context.dispose();
+    }
+  });
+
   it.each([
     // Captured read-only from surface:1144, 2026-09-15; scrollback falsely infers Claude.
     { cli: "codex", live: true, frame: readFileSync(new URL("../docs/fixtures/issue-645-codex-frame.txt", import.meta.url), "utf8") },

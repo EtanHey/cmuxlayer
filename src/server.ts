@@ -3449,6 +3449,7 @@ function screenShowsFreshCursorResponseAfterSubmittedInput(
 function screenShowsQueuedAgentInput(
   screenText: string,
   submittedText: string,
+  opts: { exact?: boolean } = {},
 ): boolean {
   const lines = normalizeTerminalText(screenText).split("\n");
   if (inferComposerCli(screenText) !== "codex") {
@@ -3526,6 +3527,13 @@ function screenShowsQueuedAgentInput(
   }
   if (!foundHeading) {
     return false;
+  }
+
+  if (opts.exact) {
+    const normalizeFullText = (text: string): string =>
+      normalizeTerminalText(text).replace(/\s+/g, " ").trim();
+    return normalizeFullText(queuedItemRows.join(" ")) ===
+      normalizeFullText(submittedText);
   }
 
   const visiblePrefix = compactQueueCorrelationText(
@@ -6858,7 +6866,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true &&
             receipt.press_enter &&
-            screenShowsQueuedAgentInput(submitBaseline.text, receipt.text)
+            screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true })
           )
         : undefined;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
