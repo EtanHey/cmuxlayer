@@ -1,3 +1,5 @@
+import { userInfo } from "node:os";
+
 /** Raise a fresh shell's nofile soft limit without lowering an existing one. */
 export const RAISE_NOFILE_SOFT_LIMIT = [
   "cmux_nf_s=$(ulimit -Sn);",
@@ -12,10 +14,11 @@ const POSIX_SHELLS = new Set(["bash", "zsh", "sh", "dash", "ksh"]);
 
 export function withRaisedNofileSoftLimit(
   command: string,
-  shellPath: string | undefined = process.env.SHELL,
+  shellPath: string | undefined =
+    process.env.SHELL || userInfo().shell || undefined,
 ): string {
-  // The pane uses the user's shell. A POSIX assignment is a parse error in
-  // fish, so preserve the launch command when the shell is not known POSIX.
+  // SHELL/passwd names the login shell; a pane-specific cmux override may differ.
+  // A POSIX assignment breaks fish, so preserve unknown-shell launch commands.
   const shell = shellPath?.split("/").at(-1)?.replace(/^-/, "");
   if (!shell || !POSIX_SHELLS.has(shell)) return command;
   if (command.startsWith("cmux_nf_s=$(ulimit -Sn);")) return command;

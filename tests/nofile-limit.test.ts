@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { userInfo } from "node:os";
 import { describe, expect, it } from "vitest";
 import { nofileExecSpec, withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 
@@ -28,6 +29,26 @@ describe("nofile launch wrappers", () => {
     try {
       process.env.SHELL = "/opt/homebrew/bin/fish";
       expect(withRaisedNofileSoftLimit(command)).toBe(command);
+    } finally {
+      if (priorShell === undefined) delete process.env.SHELL;
+      else process.env.SHELL = priorShell;
+    }
+  });
+
+  it("uses the passwd login shell when SHELL is absent", () => {
+    const priorShell = process.env.SHELL;
+    const command = "cmuxlayerCodex -s --worker";
+    try {
+      delete process.env.SHELL;
+      const loginShell = userInfo().shell.split("/").at(-1);
+      const wrapped = withRaisedNofileSoftLimit(command);
+      if (["bash", "zsh", "sh", "dash", "ksh"].includes(loginShell)) {
+        expect(wrapped).toContain("ulimit -Sn");
+      } else {
+        expect(wrapped).toBe(command);
+      }
+      expect(withRaisedNofileSoftLimit(command, "/opt/homebrew/bin/fish"))
+        .toBe(command);
     } finally {
       if (priorShell === undefined) delete process.env.SHELL;
       else process.env.SHELL = priorShell;
