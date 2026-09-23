@@ -75,6 +75,7 @@ async function probeEntryCmuxSocket(
 ): Promise<SocketProbeResult> {
   const candidates = candidateSocketPathsForOpts({
     socketPath: env.CMUX_SOCKET_PATH?.trim() || undefined,
+    env,
   });
   let lastResult: SocketProbeResult = {
     usable: false,
@@ -402,7 +403,7 @@ export async function startInProcessRuntime(
   installHeapGuard();
   const runtimeEnv = opts.env ?? process.env;
   const client = await createCmuxClient({
-    socketPath: runtimeEnv.CMUX_SOCKET_PATH,
+    socketPath: runtimeEnv.CMUX_SOCKET_PATH?.trim() || undefined,
     capability: runtimeEnv.CMUX_SOCKET_CAPABILITY,
     env: runtimeEnv,
   });

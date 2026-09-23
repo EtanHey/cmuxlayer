@@ -22,8 +22,6 @@ import {
 } from "./cmux-transport-self-heal.js";
 
 export interface CreateCmuxClientOptions extends SocketProbeOptions {
-  /** Environment of the MCP process that selected this cmux instance. */
-  env?: NodeJS.ProcessEnv;
   /** CLI exec function (for testing) */
   exec?: ExecFn;
   /** CLI binary name */

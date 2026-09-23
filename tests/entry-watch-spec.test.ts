@@ -62,6 +62,16 @@ describe("in-process WatchSpec production wiring", () => {
     );
   });
 
+  it("REG1c trims an injected socket path before creating the fallback client", async () => {
+    vi.stubEnv("CMUX_SOCKET_PATH", "/tmp/reg1c-instance-b.sock");
+    await startInProcessRuntime({
+      env: { CMUX_SOCKET_PATH: "  /tmp/reg1c-instance-a.sock  " },
+    });
+    expect(createCmuxClient).toHaveBeenCalledWith(
+      expect.objectContaining({ socketPath: "/tmp/reg1c-instance-a.sock" }),
+    );
+  });
+
   it("passes the production watch registry and notifier into createServer", async () => {
     await startInProcessRuntime({ env: {} });
 

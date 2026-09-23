@@ -11,6 +11,8 @@ import {
 } from "./cmux-socket-path.js";
 
 export interface SocketProbeOptions {
+  /** Environment of the MCP process selecting the cmux instance. */
+  env?: NodeJS.ProcessEnv;
   socketPath?: string;
   capability?: string;
   socketStateDir?: string;
@@ -61,19 +63,22 @@ function probeSocket(path: string, timeoutMs = 1000): Promise<boolean> {
 }
 
 function instancePin(
-  opts?: Pick<SocketProbeOptions, "socketPath">,
+  opts?: Pick<SocketProbeOptions, "socketPath" | "env">,
 ): string | undefined {
   if (opts?.socketPath) return opts.socketPath;
-  const fromEnv = (process.env.CMUX_SOCKET_PATH ?? "").trim();
+  const fromEnv = (
+    opts?.env?.CMUX_SOCKET_PATH ?? process.env.CMUX_SOCKET_PATH ?? ""
+  ).trim();
   return fromEnv.length > 0 ? fromEnv : undefined;
 }
 
 export function candidateSocketPathsForOpts(
-  opts?: Pick<SocketProbeOptions, "socketPath" | "socketStateDir">,
+  opts?: Pick<SocketProbeOptions, "socketPath" | "socketStateDir" | "env">,
 ): string[] {
   const pinned = instancePin(opts);
   if (pinned) return [pinned];
-  if (/(?:^|\.)nightly$/i.test(process.env.CMUX_BUNDLE_ID?.trim() ?? "")) {
+  const bundleId = opts?.env?.CMUX_BUNDLE_ID ?? process.env.CMUX_BUNDLE_ID;
+  if (/(?:^|\.)nightly$/i.test(bundleId?.trim() ?? "")) {
     return nightlySocketPathCandidates({ stateDir: opts?.socketStateDir });
   }
   return cmuxSocketPathCandidates({ stateDir: opts?.socketStateDir });
