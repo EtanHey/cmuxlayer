@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { capturedDaemonStderr, spawnDaemonProcess } from "../src/daemon-spawn.js";
 
 describe("spawnDaemonProcess", () => {
-  it("raises a daemon child's inherited open-file soft limit", async () => {
+  it("launches the daemon through the nofile wrapper", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmuxlayer-daemon-nofile-"));
     try {
       const proofPath = join(root, "nofile-soft.txt");
@@ -27,6 +27,7 @@ describe("spawnDaemonProcess", () => {
         "  logger: { error() {} },",
         "  daemonScriptPath: process.env.DAEMON_SCRIPT_PATH,",
         "});",
+        "if (child.spawnfile !== '/bin/sh') throw new Error('daemon bypassed nofile wrapper');",
         "const keepAlive = setInterval(() => {}, 1000);",
         "await new Promise((resolve) => child.once('close', resolve));",
         "clearInterval(keepAlive);",

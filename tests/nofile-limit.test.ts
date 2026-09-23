@@ -16,8 +16,26 @@ function runUnderSoftLimit(limit: number, command: string): number {
 }
 
 describe("nofile launch wrappers", () => {
+  it("leaves a fish or unknown shell launch intact", () => {
+    const command = "cmuxlayerCodex -s --worker";
+    expect(withRaisedNofileSoftLimit(command, "/opt/homebrew/bin/fish"))
+      .toBe(command);
+    expect(withRaisedNofileSoftLimit(command, "/opt/homebrew/bin/nu"))
+      .toBe(command);
+    expect(withRaisedNofileSoftLimit(command, "/bin/zsh"))
+      .toContain("ulimit -Sn");
+    const priorShell = process.env.SHELL;
+    try {
+      process.env.SHELL = "/opt/homebrew/bin/fish";
+      expect(withRaisedNofileSoftLimit(command)).toBe(command);
+    } finally {
+      if (priorShell === undefined) delete process.env.SHELL;
+      else process.env.SHELL = priorShell;
+    }
+  });
+
   it("raises a managed seat shell from 256 without lowering a higher limit", () => {
-    const probe = withRaisedNofileSoftLimit("ulimit -Sn");
+    const probe = withRaisedNofileSoftLimit("ulimit -Sn", "/bin/sh");
     expect(runUnderSoftLimit(256, probe)).toBe(Math.min(65_536, hostHard));
     if (hostHard >= 131_072) {
       expect(runUnderSoftLimit(131_072, probe)).toBe(131_072);
