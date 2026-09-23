@@ -8708,6 +8708,74 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it.each([
+      {
+        tier: "1M",
+        banner: "Opus 5.5 (1M context)",
+        mismatch: false,
+      },
+      {
+        tier: "200K",
+        banner: "Opus 5.5 (200K context)",
+        mismatch: true,
+      },
+      {
+        tier: "unreported",
+        banner: "Opus 5.5",
+        mismatch: null,
+      },
+    ])("settles the live Claude Opus 5.5 $tier banner through the registry", async ({ banner, mismatch }) => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-opus-1m",
+          state: "booting",
+          surface_id: "surface:opus-1m",
+          cli: "claude",
+          model: "claude-opus-5-5[1m]",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:opus-1m")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:opus-1m",
+        text: [
+          "Claude Code",
+          `🤖 ${banner}`,
+          "❯",
+          "⏵⏵ bypass permissions on",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-opus-1m")).toMatchObject({
+        state: "ready",
+        model: "claude-opus-5-5[1m]",
+        parsed_model: banner,
+        model_mismatch: mismatch,
+      });
+    });
+
+    it("compares Claude ID and display aliases without hiding a real model drift", () => {
+      expect(
+        computeModelMismatch(
+          "claude-opus-5-5[1m]",
+          "Opus 5.5 (1M context)",
+        ),
+      ).toBe(false);
+      expect(
+        computeModelMismatch("claude-opus-5-5[1m]", "Sonnet 5.5 (1M context)"),
+      ).toBe(true);
+      expect(
+        computeModelMismatch("claude-opus-5-5[1m]", "Opus 5.4 (1M context)"),
+      ).toBe(true);
+      expect(
+        computeModelMismatch("claude-opus-5-5[1m]", "Opus 5.5 (200K context)"),
+      ).toBe(true);
+    });
+
     it("leaves a fresh noninteractive boot record inside its boot window", async () => {
       stateMgr.writeState(
         makeRecord({

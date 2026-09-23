@@ -1233,11 +1233,16 @@ Token usage: total=356,835
 `);
 
     expect(parsed.agent_type).toBe("claude");
-    expect(parsed.model).toBe("Opus 4.6");
+    expect(parsed.model).toBe("Opus 4.6 (1M context)");
     expect(parsed.token_count).toBe(356835);
     // "(1M" detected in text → 1M window
     expect(parsed.context_window).toBe(1_000_000);
     expect(parsed.context_pct).toBe(36); // 356835/1000000
+  });
+
+  it("retains an explicit context tier in a Claude header", () => {
+    const parsed = parseScreen("Claude Code\n▝ Opus 5.5 (200K context)\n❯");
+    expect(parsed.model).toBe("Opus 5.5 (200K context)");
   });
 
   it("extracts model from narrow pane (keyword only)", () => {
@@ -1945,6 +1950,7 @@ Token usage: total=50,000
 🤖 Opus 4.6 (1M context)
 `);
 
+      expect(parsed.model).toBe("Opus 4.6 (1M context)");
       expect(parsed.context_window).toBe(1_000_000); // "(1M" detected
       expect(parsed.context_pct).toBe(5); // 50000/1000000
     });
