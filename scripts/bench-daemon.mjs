@@ -1041,6 +1041,37 @@ function summarizeTimedSamples(samples) {
   };
 }
 
+function summarizeSendSampleDiagnostics(samples, field) {
+  const ranked = samples
+    .map((sample, index) => {
+      const send = sample[field];
+      const receipt = send.receipt ?? {};
+      return {
+        sample_index: index,
+        elapsed_ms: send.elapsed_ms,
+        tool_elapsed_ms: send.tool_elapsed_ms,
+        proof_elapsed_ms: send.proof_elapsed_ms,
+        lock_hold_ms: send.lock_hold_ms,
+        retry_count: receipt.retry_count ?? null,
+        submit_verified: receipt.submit_verified ?? null,
+        submit_evidence: receipt.submit_evidence ?? null,
+        delivery_state: receipt.delivery_state ?? null,
+        timings_ms: receipt.timings_ms ?? null,
+        ...(field === "surface"
+          ? {
+              wait_for_delivery_state: send.wait_for?.delivery_state ?? null,
+              read_back_verified: send.wait_for?.read_back_verified ?? null,
+            }
+          : {}),
+      };
+    })
+    .sort((a, b) => a.elapsed_ms - b.elapsed_ms);
+  return {
+    fastest: ranked.slice(0, 6),
+    slowest: ranked.slice(-12).reverse(),
+  };
+}
+
 async function measureSpawnLifecycleOnce(
   client,
   sweepHoldState,
@@ -1096,12 +1127,15 @@ async function measureSpawnLifecycleOnce(
       await client.callTool("send_to", { ...args, verbose: true }),
       "send_to",
     );
+    const toolElapsedMs = nowMs() - startedAt;
     if (requireSubmitted) {
       requireTerminalSubmission(receipt, `${args.mode} send`);
     }
     await validateReceipt?.(receipt);
     return {
       elapsed_ms: round(nowMs() - startedAt),
+      tool_elapsed_ms: round(toolElapsedMs),
+      proof_elapsed_ms: round(nowMs() - startedAt - toolElapsedMs),
       request_bytes: requestBytes("send_to", args),
       request_sha256: requestSha256("send_to", {
         ...args,
@@ -1380,6 +1414,10 @@ async function measureSpawnLifecycleAcrossClients(
     send_to_surface_warm: summarizeTimedSamples(
       samples.map((sample) => sample.surface),
     ),
+    sample_diagnostics: {
+      send_to_agent_warm: summarizeSendSampleDiagnostics(samples, "second"),
+      send_to_surface_warm: summarizeSendSampleDiagnostics(samples, "surface"),
+    },
     spawn_close_during_sweep: summarizeTimedSamples(
       samples.map((sample) => sample.spawn_close_during_sweep),
     ),
