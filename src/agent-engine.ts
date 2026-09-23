@@ -312,6 +312,10 @@ export interface AgentDeliveryReceipt {
   submit_dispatched?: boolean;
   /** An uncertain recovered boot Return; passive confirmation completes boot. */
   boot_recovery?: boolean;
+  /** The exact boot generation whose pointer the receipt verifies. */
+  boot_instance_id?: string;
+  /** Durable one-time completion after the matching boot state is repaired. */
+  boot_recovery_finalized_at?: string;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
@@ -7451,6 +7455,7 @@ export class AgentEngine {
     typed?: boolean;
     submit_dispatched?: boolean;
     boot_recovery?: boolean;
+    boot_instance_id?: string;
     created_at?: string;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
@@ -7525,7 +7530,8 @@ export class AgentEngine {
     try {
       const snapshots = new Map<string, DeliveryVerifySnapshot | null>();
       for (const receipt of this.deliveryReceipts.values()) {
-        if (receipt.boot_recovery && receipt.delivery_state === "submitted" &&
+        if (receipt.boot_recovery && !receipt.boot_recovery_finalized_at &&
+          receipt.delivery_state === "submitted" &&
           receipt.submit_verified === true) {
           // Repair a crash between persisting the confirmed receipt and the
           // managed state transition. This is idempotent on later sweeps.
@@ -7632,10 +7638,12 @@ export class AgentEngine {
   }
 
   private finalizeConfirmedBootRecovery(receipt: AgentDeliveryReceipt): void {
-    if (!receipt.boot_recovery || receipt.delivery_state !== "submitted" ||
-      receipt.submit_verified !== true) return;
+    if (!receipt.boot_recovery || receipt.boot_recovery_finalized_at ||
+      receipt.delivery_state !== "submitted" ||
+      receipt.submit_verified !== true || !receipt.boot_instance_id) return;
     let agent = this.stateMgr.readState(receipt.agent_id);
-    if (!agent || !["booting", "ready", "working"].includes(agent.state)) return;
+    if (!agent || agent.boot_instance_id !== receipt.boot_instance_id ||
+      !["booting", "ready", "working"].includes(agent.state)) return;
     if (agent.boot_prompt_pending !== false || agent.prompt_delivered !== true ||
       agent.submit_verified !== true) {
       agent = this.stateMgr.updateRecord(agent.agent_id, {
@@ -7651,6 +7659,8 @@ export class AgentEngine {
       agent = this.stateMgr.transition(agent.agent_id, "working");
     }
     this.registry.set(agent.agent_id, agent);
+    receipt.boot_recovery_finalized_at = new Date().toISOString();
+    this.persistDeliveryReceipts();
   }
 
   /** Bound one delivery-verify side quest to the verify timeout. */
@@ -8892,6 +8902,7 @@ export class AgentEngine {
       surface_provenance: "cmuxlayer_spawn",
       workspace_id: surface.workspace,
       state: "booting",
+      boot_instance_id: randomUUID(),
       repo: spawnParams.repo,
       model: spawnParams.model ?? modelPolicy.effective_model,
       effort: spawnParams.cli === "codex" ? (effort ?? "high") : null,

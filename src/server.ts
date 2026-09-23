@@ -18847,6 +18847,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // The caller's followup was never typed. Track the boot pointer
               // itself so passive verification cannot falsely complete that
               // followup, and do not put it on the retryable delivery queue.
+              const pendingBoot = stateMgr.updateRecord(agentId, {
+                boot_prompt_pending: true,
+              });
+              engine.getRegistry().set(agentId, pendingBoot);
               const receipt = engine.acceptPendingVerify({
                 delivery_id: deliveryId,
                 agent_id: agentId,
@@ -18856,6 +18860,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 retry_count: 0,
                 typed: true,
                 boot_recovery: true,
+                boot_instance_id: pendingBoot.boot_instance_id,
               });
               return err(error, {
                 agent_id: agentId,

@@ -509,10 +509,12 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       expect(receipt?.text).toBe(composer);
       expect(receipt?.source_event).toBe("boot_prompt");
       expect(receipt?.boot_recovery).toBe(true);
+      expect(receipt?.boot_instance_id).toBe(engine.stateMgr.readState(agentId)?.boot_instance_id);
       expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
       composer = ""; // Return landed despite its lost acknowledgement.
       await engine.verifyPendingDeliveries();
       expect(engine.getDeliveryReceipt(result.delivery_id)?.delivery_state).toBe("submitted");
+      expect(engine.getDeliveryReceipt(result.delivery_id)?.boot_recovery_finalized_at).toBeTruthy();
       expect(engine.stateMgr.readState(agentId)?.boot_prompt_pending).toBe(false);
       expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(false);
       expect(engine.stateMgr.readState(agentId)?.prompt_delivered).toBe(true);
@@ -521,6 +523,49 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       expect(engine.getAgentState(agentId)?.state).toBe("working");
       expect(returnAttempts).toBe(1);
       expect(followupWrites).toEqual([]);
+      const rebooted = engine.stateMgr.updateRecord(agentId, {
+        state: "booting",
+        boot_prompt_pending: true,
+        prompt_delivered: false,
+        submit_verified: null,
+      });
+      expect(rebooted.boot_instance_id).not.toBe(receipt?.boot_instance_id);
+      engine.getRegistry().set(agentId, rebooted);
+      await engine.verifyPendingDeliveries();
+      expect(engine.getAgentState(agentId)?.state).toBe("booting");
+      expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+      // A crash after receipt persistence and flag clearing can still repair
+      // this *new* boot; the old receipt remains bound to its prior instance.
+      const newReceipt = engine.acceptPendingVerify({
+        delivery_id: "new-boot-repair",
+        agent_id: agentId,
+        text: composer,
+        press_enter: true,
+        source_event: "boot_prompt",
+        retry_count: 0,
+        typed: true,
+        boot_recovery: true,
+        boot_instance_id: rebooted.boot_instance_id,
+      });
+      engine.resolveDelivery({
+        ...newReceipt,
+        delivery_state: "submitted",
+        terminal: true,
+        submit_verified: true,
+        error: null,
+      });
+      const partial = engine.stateMgr.updateRecord(agentId, {
+        boot_prompt_pending: false,
+        prompt_delivered: true,
+        submit_verified: true,
+      });
+      engine.getRegistry().set(agentId, partial);
+      await engine.verifyPendingDeliveries();
+      expect(engine.getAgentState(agentId)?.state).toBe("working");
+      expect(engine.getDeliveryReceipt(newReceipt.delivery_id)?.boot_recovery_finalized_at).toBeTruthy();
+      expect(returnAttempts).toBe(1);
     } finally { context.dispose(); }
   }, 15_000);
 
