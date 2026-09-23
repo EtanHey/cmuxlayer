@@ -24,15 +24,28 @@ Use `--cycles 4 --duration-minutes 0` for an installed smoke;
 installed executable. Source builds are useful for diagnosis but are not
 installed-release proof.
 
-The runner clears inherited pane identity before starting MCP stdio. It writes
+The runner clears inherited pane identity before starting MCP stdio. The proxy
+can still recover a managed worker identity from process ancestry, so launch
+the runner as a genuinely external process when using a worker pane. Avoid
+`launchctl submit`: it restarts a nonzero soak and can create extra seats. Use a
+plain detached process, or a launchd job with `KeepAlive` false and `RunAtLoad`
+true, when the run must survive the worker pane. The runner writes
 timed JSONL calls and a pass/fail, p50/p95 summary under
 `~/.cmux/agents/<worker-id>/soak/`. Any violation exits 1 while remaining cycles
 continue. It checks boot/send receipts, replies, registry and screen agreement,
-full versus immediate `parsed_only` read agreement, right-column placement,
+full versus immediate `parsed_only` read agreement on equal screen-content
+hashes, right-column placement,
 lead inbox, and exact-seat cleanup. The lead ID is used
 only to inspect halt notices; soak seats have no parent, so their report notices
 do not route to the lead. Preserve failing
 receipts for the owning lane; inspect `summary.violations` before claiming green.
+The JSONL records each reply check's bounded matching-line context and origin;
+an echoed prompt or tool output alone never proves an authored reply. A `done`
+terminal result after an instructed stop satisfies the wait check. Different
+screen hashes between sequential reads are logged as snapshot changes; parsed
+fields are compared only when the hashes match. Flagged parity mismatches keep
+bounded raw-screen context in the JSONL.
+
 If an agent-scoped close fails, the runner retries once by agent ID without
 force. It records `cleanup_leak` with the saved identities for human cleanup;
 it never force-closes a saved surface ref that another seat may now own.
