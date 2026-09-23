@@ -7079,6 +7079,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!returnDispatchStarted) throw error;
           throw new AmbiguousBootRecoveryReturnError(pointer, recoveryBootInstanceId, error);
         }
+        // The recovery Return was acknowledged, even though this call has not
+        // typed the caller's followup and submission verification can fail.
+        submitDispatched = true;
         if (method) rpcMethods.add(method);
         const verification = await verifySubmitAfterEnter({
           surface: opts.surface,
@@ -19000,7 +19003,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 submit_attempted:
                   error instanceof SubmitVerificationError
                     ? (error.receipt?.submit_attempted ?? args.press_enter)
-                    : args.press_enter,
+                    : args.press_enter || errorSubmitDispatched,
                 submit_dispatched: errorSubmitDispatched,
                 submit_verified: failedReceipt.submit_verified,
                 retry_count: failedReceipt.retry_count,

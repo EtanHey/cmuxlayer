@@ -569,6 +569,51 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   }, 15_000);
 
+  it("reports an acknowledged recovery Return when verification fails before a followup", async () => {
+    vi.stubEnv("CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", "100");
+    const { createServer, createServerContext } = await loadServerModule();
+    let composer = "";
+    let active = false;
+    let returnAttempts = 0;
+    const followupWrites: string[] = [];
+    const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("send-key") && args.includes("return")) {
+        returnAttempts += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (active && args.includes("send")) {
+        followupWrites.push(String(args.at(-1)));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
+      engine.getRegistry().set(agentId, record);
+      composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      active = true;
+
+      const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: false }, {}));
+      expect(result.delivery_state).toBe("failed");
+      expect(result.error_code).toBe("owned_boot_contract_pending");
+      expect(result.typed).toBe(false);
+      expect(result.submit_attempted).toBe(true);
+      expect(result.submit_dispatched).toBe(true);
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+      expect(engine.getDeliveryReceipt(result.delivery_id)?.submit_dispatched).toBe(true);
+    } finally {
+      context.dispose();
+      vi.unstubAllEnvs();
+    }
+  }, 15_000);
+
   it("keeps a newer boot pending when a recovered Return loses its ack during restart", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let composer = "";
