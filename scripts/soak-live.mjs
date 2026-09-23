@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
-  checkClose, checkControlHealthSample, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
+  checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
   checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak,
 } from "./soak-live-checks.mjs";
 
@@ -174,7 +174,12 @@ async function main() {
   const observe = async (cycle, agentId, surface) => {
     const listed = await call("list_agents", { agent_ids: [agentId], max_age_ms: 0 }, cycle);
     const row = object(listed.agents?.find((item) => item.agent_id === agentId));
+    const sweepStartedAt = Date.now();
     const screen = await call("read_screen", { surface, workspace: WORKSPACE, lines: 100 }, cycle);
+    const parsedOnly = await call("read_screen", { surface, workspace: WORKSPACE,
+      lines: 100, parsed_only: true }, cycle);
+    check("parsed_read_agreement", checkParsedReadAgreement(screen, parsedOnly, Date.now() - sweepStartedAt),
+      { cycle, agent_id: agentId, surface });
     if (listed.ok && screen.ok) {
       check("registry_presence", row.agent_id === agentId ? [] : ["agent_missing_from_registry"],
         { cycle, agent_id: agentId });
