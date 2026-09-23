@@ -3553,13 +3553,41 @@ function screenShowsQueuedAgentInput(
 function countVisibleExactQueuedRows(
   screenText: string,
   authoredText: string,
-): number {
-  return normalizeTerminalText(screenText)
-    .split("\n")
-    .filter((line) => {
-      const row = /^↳ (.*)$/.exec(stripCodexQueueGutter(line).trimStart());
-      return row !== null && row[1] === authoredText;
-    }).length;
+): number | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let cursor = lines.length - 1;
+  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
+  if (cursor < 0) return null;
+  cursor -= 1;
+  while (cursor >= 0 && (!stripCodexQueueGutter(lines[cursor] ?? "").trim() || /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(stripCodexQueueGutter(lines[cursor] ?? "")))) cursor -= 1;
+
+  const queueRow = (index: number): RegExpExecArray | null =>
+    /^↳ (.*)$/.exec(stripCodexQueueGutter(lines[index] ?? "").trimStart());
+  const queueHeading = (index: number): boolean =>
+    /^messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?$/i.test(
+      stripCodexQueueGutter(lines[index] ?? "").trim().replace(/^•\s*/, ""),
+    );
+  let count: number | null = null;
+  while (cursor >= 0) {
+    const blockEnd = cursor;
+    let blockCount = 0;
+    while (cursor >= 0) {
+      const row = queueRow(cursor);
+      if (!row) break;
+      if (row[1] === authoredText) blockCount += 1;
+      cursor -= 1;
+    }
+    if (cursor === blockEnd) return count;
+    while (cursor >= 0 && !stripCodexQueueGutter(lines[cursor] ?? "").trim()) cursor -= 1;
+    if (!queueHeading(cursor)) return count;
+    count = (count ?? 0) + blockCount;
+    cursor -= 1;
+
+    let previousHeading = cursor;
+    while (previousHeading >= 0 && queueRow(previousHeading)) previousHeading -= 1;
+    if (previousHeading === cursor || !queueHeading(previousHeading)) break;
+  }
+  return count;
 }
 
 function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {
