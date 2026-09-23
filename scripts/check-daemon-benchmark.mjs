@@ -833,7 +833,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
     `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot or untrusted-history rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
-    "First-send and warm-agent p50/p95 may subtract only delay above the median of paired 250ms fake-socket timer pings launched with each send. Current shows the adjusted value with raw latency alongside it. Missing, stale, or malformed paired controls leave raw latency in force.",
+    "First-send and warm-agent p50/p95 may subtract only the part of a paired 1ms fake-socket timer's overrun that overlaps the measured send and exceeds the run's median overlap. Current shows the adjusted value with raw latency alongside it. Missing, stale, or malformed timer proof leaves raw latency in force.",
     "",
     ...tableHeader,
     ...changed.map(tableRow),
