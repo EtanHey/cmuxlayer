@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { expect, it, vi } from "vitest";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
 import { CmuxClient } from "../src/cmux-client.js";
@@ -19,6 +20,26 @@ it("reports actual fake-socket timer overrun without counting connection time", 
     expect(ping.timer_overrun_ms).toBeCloseTo(
       Math.max(0, ping.timer_fired_at_ms - ping.timer_due_at_ms), 5);
     expect(ping.started_at_ms).toBeGreaterThan(0);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("rejects a paired ping when the socket peer ends before a receipt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-control-eof-"));
+  const socketPath = join(root, "cmux.sock");
+  const server = createServer((socket) => socket.once("data", () => socket.end()));
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  try {
+    const outcome = await Promise.race([
+      measureFakeCmuxPing(socketPath).then(
+        () => "resolved",
+        (error: Error) => error.message,
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 150)),
+    ]);
+    expect(outcome).toBe("paired fake-socket ping closed before a receipt");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(root, { recursive: true, force: true });
