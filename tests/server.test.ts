@@ -9727,6 +9727,7 @@ describe("tool handler integration", () => {
     let bootPromptSubmitted = false;
     let readsAfterFirstLaunch = 0;
     let updateMenuSeen = false;
+    let selectedSkipObserved = false;
     let surfaceCreated = false;
     const stableSurfaceId = "11111111-2222-4333-8444-555555555555";
     const sentTexts: string[] = [];
@@ -9798,7 +9799,7 @@ describe("tool handler integration", () => {
         }
         if (updateMenuSeen && !updateAccepted) {
           updateMenuKeys.push(key);
-          if (updateMenuKeys.join(",") === "down,down,return") {
+          if (updateMenuKeys.join(",") === "down,down,return" && selectedSkipObserved) {
             updateAccepted = true;
           }
         }
@@ -9835,7 +9836,14 @@ describe("tool handler integration", () => {
             text = fixture.screens.ready;
           } else {
             updateMenuSeen = true;
-            text = fixture.screens.interactive_update;
+            text = updateMenuKeys.filter((key) => key === "down").length === 2
+              ? fixture.screens.interactive_update
+                  .replace("› 1. Update now", "  1. Update now")
+                  .replace("  3. Skip until next version", "› 3. Skip until next version")
+              : fixture.screens.interactive_update;
+            if (text.includes("› 3. Skip until next version")) {
+              selectedSkipObserved = true;
+            }
           }
         } else if (launcherSends === 1 && updateAccepted && !promptSent) {
           text = fixture.screens.ready;
@@ -9909,6 +9917,7 @@ describe("tool handler integration", () => {
           .digest("hex"),
       );
       expect(updateAccepted).toBe(true);
+      expect(selectedSkipObserved).toBe(true);
       expect(updateMenuKeys).toEqual(["down", "down", "return"]);
       expect(launcherSends).toBe(1);
       expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
@@ -10115,12 +10124,17 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent returns truthful recovery when the Codex update menu remains", async () => {
+  it.each([
+    ["ref-only binding", "original", false],
+    ["reworded skip", "reworded", true],
+    ["approval overlay", "approval", true],
+    ["duplicate skip candidate", "duplicate", true],
+  ] as const)("spawn_agent refuses the %s Codex update menu without menu keys", async (_name, variant, stableBinding) => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked-state");
     const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked.md");
-    const updateMenu = JSON.parse(
+    const reconstructedMenu = JSON.parse(
       readFileSync(
         new URL(
           "./fixtures/spawn/codex-auto-update-restart.json",
@@ -10129,6 +10143,17 @@ describe("tool handler integration", () => {
         "utf8",
       ),
     ).screens.interactive_update as string;
+    const updateMenu = variant === "reworded"
+      ? reconstructedMenu.replace("Skip until next version", "Skip for now")
+      : variant === "approval"
+        ? `${reconstructedMenu}\n\nApprove this command? (y/n)`
+        : variant === "duplicate"
+          ? reconstructedMenu.replace(
+              "  3. Skip until next version",
+              "  3. Skip until next version\n  4. Skip until next version",
+            )
+          : reconstructedMenu;
+    const stableSurfaceId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot that should be blocked", "utf8");
@@ -10161,8 +10186,11 @@ describe("tool handler integration", () => {
         };
       }
       if (args.includes("list-pane-surfaces")) {
+        const topology = spawnUpdatePaneSurfaces();
         return {
-          stdout: JSON.stringify(spawnUpdatePaneSurfaces()),
+          stdout: JSON.stringify(stableBinding
+            ? { ...topology, surfaces: [{ ...topology.surfaces[0], id: stableSurfaceId }] }
+            : topology),
           stderr: "",
         };
       }
@@ -10172,6 +10200,7 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             workspace: "workspace:1",
             surface: "surface:2",
+            ...(stableBinding ? { surface_id: stableSurfaceId } : {}),
             pane: "pane:1",
             title: "New",
             type: "terminal",
