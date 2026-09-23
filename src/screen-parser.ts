@@ -155,7 +155,7 @@ const ORPHAN_TTY_CONTROL_TRAILER_RE =
 const DONE_SIGNAL_LINE_RE =
   /^\s*([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_DONE)(?:\s+\S{1,16})?\s*$/;
 const CLAUDE_COUNTER_RE = /^\s*CLAUDE_COUNTER:\s*(\d+)\s*$/m;
-const RESPONSE_BLOCK_RE = /---RESPONSE_START---\s*(.*?)\s*---RESPONSE_END---/s;
+const RESPONSE_BLOCKS_RE = /---RESPONSE_START---\s*(.*?)\s*---RESPONSE_END---/gs;
 const TOKEN_USAGE_RE = /Token usage:\s*total=([0-9][0-9,]*)/i;
 // Match standalone token counts in footer/status lines, not prose.
 // Valid: "418310 tokens" (standalone) or "  🤖 ... 418310 tokens" (right-aligned)
@@ -196,7 +196,12 @@ const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const CODEX_READY_PLACEHOLDER_RE =
-  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)\s*$/;
+  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/;
+const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/m;
+const CODEX_ALT_COMPOSER_LINE_RE = /^[ \t]*»[ \t]+\S/m;
+const CODEX_MODEL_FOOTER_RE =
+  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s]+(?:[ \t]+·[ \t]+\S[^\r\n·]{0,119})?$/i;
+const CODEX_QUEUED_FOLLOWUP_RE = /^[ \t]*• Messages to be submitted after next tool call\b/m;
 const isReadyComposerLine = (line: string): boolean =>
   BARE_READY_PROMPT_RE.test(line) || CODEX_READY_PLACEHOLDER_RE.test(line);
 const PICKER_BLOCK_WINDOW_LINES = 32;
@@ -677,7 +682,10 @@ function extractClaudeResponseTail(text: string): string | null {
 }
 
 function parseResponse(text: string): string | null {
-  const response = text.match(RESPONSE_BLOCK_RE)?.[1]?.trim();
+  let response: string | undefined;
+  for (const match of text.matchAll(RESPONSE_BLOCKS_RE)) {
+    response = match[1]?.trim();
+  }
   return response || extractClaudeResponseTail(text);
 }
 
@@ -1320,6 +1328,7 @@ function inferControlState(
   if (hasOsShellPrompt(text)) {
     return "shell";
   }
+  if (status === "draft_pending") return "composer_dirty";
   if (status === "thinking" || status === "working") {
     return "busy";
   }
@@ -1693,6 +1702,21 @@ function inferStatus(
     return "idle";
   }
 
+  // Claude and Codex may keep older activity or resume output above a current
+  // draft. A Codex footer below the draft distinguishes it from an active
+  // screen that still shows a prompt-like line; queued follow-ups stay active.
+  // Prompt overlays and harness errors retain their own precedence.
+  if (
+    (agentType === "claude" || agentType === "codex") &&
+    errors.length === 0 &&
+    hasPendingComposerLine(text, agentType) &&
+    !hasOsShellPrompt(text) &&
+    !(agentType === "codex" && CODEX_QUEUED_FOLLOWUP_RE.test(text.slice(-4096))) &&
+    hasPendingComposerDraft(text, agentType, agentType === "codex")
+  ) {
+    return "draft_pending";
+  }
+
   if (hasActiveAgentWork(text, agentType)) {
     return THINKING_RE.test(text) ? "thinking" : "working";
   }
@@ -1703,6 +1727,14 @@ function inferStatus(
 
   if (agentType === "codex" && CODEX_RESUME_RE.test(text)) {
     return "done";
+  }
+
+  if (
+    hasPendingComposerLine(text, agentType) &&
+    !hasOsShellPrompt(text) &&
+    hasPendingComposerDraft(text, agentType)
+  ) {
+    return "draft_pending";
   }
 
   if (agentType === "cursor") {
@@ -1757,6 +1789,43 @@ function inferStatus(
   }
 
   return "idle";
+}
+
+function hasPendingComposerLine(
+  text: string,
+  agentType: ParsedScreenAgentType,
+): boolean {
+  return PENDING_COMPOSER_LINE_RE.test(text) ||
+    (agentType === "codex" && CODEX_ALT_COMPOSER_LINE_RE.test(text));
+}
+
+function hasPendingComposerDraft(
+  text: string,
+  agentType: ParsedScreenAgentType,
+  requireCodexFooter = false,
+): boolean {
+  if (agentType !== "claude" && agentType !== "codex") return false;
+  const tail = text.split("\n").slice(-16);
+  const composerLineRe = agentType === "codex"
+    ? /^\s*[❯›»]\s+(.+)$/
+    : /^\s*[❯›]\s+(.+)$/;
+  for (let i = tail.length - 1; i >= 0; i -= 1) {
+    const line = tail[i] ?? "";
+    const match = line.match(composerLineRe);
+    if (!match) continue;
+    const input = match[1]?.trim() ?? "";
+    if (!input || CODEX_READY_PLACEHOLDER_RE.test(line)) return false;
+    const below = tail.slice(i + 1).filter((row) => row.trim());
+    if (requireCodexFooter && !below.some((row) => CODEX_MODEL_FOOTER_RE.test(row))) return false;
+    return below.every(
+      (row) =>
+        /^\s{2,}\S/.test(row) ||
+        RULE_LINE_RE.test(row.trim()) ||
+        (agentType === "codex" && CODEX_MODEL_FOOTER_RE.test(row)) ||
+        /bypass permissions on|\/ commands · @ files|% left/i.test(row),
+    );
+  }
+  return false;
 }
 
 export function parseScreen(text: string): ParsedScreenResult {

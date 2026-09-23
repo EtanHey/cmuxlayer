@@ -39,6 +39,15 @@ function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 describe("screenConfirmedAgentState — the one screen->state rule", () => {
+  it("does not turn a pending draft into an interactive ready state", () => {
+    expect(
+      screenConfirmedAgentState({
+        status: "draft_pending",
+        agent_type: "claude",
+        control_state: "composer_dirty",
+      }),
+    ).toBe("working");
+  });
   it("treats a harness API error marker as error independent of frozen status", () => {
     expect(
       screenConfirmedAgentState({

@@ -11478,7 +11478,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const snapshotOpts = {
           surface: surfaceRef,
           workspace: args.workspace,
-          lines: args.lines,
+          lines: Math.max(args.lines ?? 20, 80),
           scrollback: args.scrollback,
         };
         try {
@@ -11588,13 +11588,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
         if (args.raw) {
           // Full untrimmed terminal content on explicit request.
+          const rawText = result.text
+            .split("\n")
+            .slice(-(args.lines ?? 20))
+            .join("\n");
           const data = {
             surface: result.surface,
             title,
             column,
             column_count,
-            lines: result.lines,
-            content: result.text,
+            lines: rawText.split("\n").length,
+            content: rawText,
             scrollback_used: result.scrollback_used,
             parsed,
             delivery: getSurfaceDelivery(result.surface),
@@ -11603,10 +11607,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const formatted = formatReadScreen(
             result.surface,
             title,
-            result.text,
+            rawText,
             parsed,
             result.scrollback_used,
-            result.lines,
+            rawText.split("\n").length,
             column,
             column_count,
           );
@@ -16802,8 +16806,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         target_state: z
           .enum(["ready", "working", "idle", "done", "error"])
           .optional()
-          .default("done")
           .describe("State to wait for"),
+        condition: z
+          .enum(["ready", "working", "idle", "done", "error"])
+          .optional()
+          .describe("Alias for target_state"),
         timeout_ms: z
           .number()
           .int()
@@ -16889,7 +16896,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
             return okFormatted(formatOk("wait_for", data), data);
           }
-          const targetState = args.target_state ?? "done";
+          if (
+            args.condition &&
+            args.target_state &&
+            args.condition !== args.target_state
+          ) {
+            throw new Error(
+              "wait_for condition and target_state disagree; provide one state",
+            );
+          }
+          const targetState = args.target_state ?? args.condition ?? "done";
           if (args.mine && (args.agent_id || args.ids)) {
             throw new Error(
               "wait_for mine=true is mutually exclusive with agent_id and ids",
@@ -16959,6 +16975,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   : undefined;
                 return {
                   ...result,
+                  registry_state: resultAgent?.state ?? null,
+                  screen_confirmed_state: health?.screen_confirmed_state ?? null,
                   health,
                   ...(harvest
                     ? {
@@ -17015,6 +17033,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             {
               agent_id: args.agent_id,
               ...result,
+              registry_state: resultAgent?.state ?? null,
+              screen_confirmed_state: health?.screen_confirmed_state ?? null,
               health,
               agent:
                 result.agent && health

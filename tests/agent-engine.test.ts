@@ -22,6 +22,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseScreen } from "../src/screen-parser.js";
+import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import {
   AgentEngine,
   RetryableDeliveryError,
@@ -370,6 +371,21 @@ describe("AgentEngine", () => {
       observed_value: "idle",
       liveness_source: `screen:${surfaceUuid}`,
       liveness: { value: true, source: "screen" },
+    });
+
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+      surface: worker.surface_id,
+      text: "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
+      lines: 5,
+      scrollback_used: false,
+    });
+    now = 3_000;
+    await watchEngine.runSweep();
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      observed_value: "working",
     });
     watchEngine.dispose();
   });
@@ -7087,6 +7103,36 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    it("keeps a completed worker done when its live screen returns to ready", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "done-but-ready",
+            state: "done",
+            surface_id: "surface:done-but-ready",
+            cli: "claude",
+            role: "worker",
+            task_done_detected_at: "2026-09-23T00:00:00.000Z",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:done-but-ready")];
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen("Claude Code\n❯ ")),
+        );
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("done-but-ready", "done", 500);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await pending;
+        expect(result.matched).toBe(true);
+        expect(result.state).toBe("done");
+        const ready = await engine.waitFor("done-but-ready", "ready", 500);
+        expect(ready.matched).toBe(false);
+        expect(ready.state).toBe("done");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
     it("returns immediately if agent is already in target state", async () => {
       stateMgr.writeState(
         makeRecord({ agent_id: "agent-ready", state: "ready" }),

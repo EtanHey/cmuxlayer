@@ -71,6 +71,9 @@ export function screenConfirmedAgentState(
   // and transient SQLITE_BUSY contention. Only the terminal harness API error
   // marker is strong enough to force agent state to `error`.
   if (hasHarnessApiError) return "error";
+  // AgentState has no draft state; keep a composed prompt out of the
+  // ready/idle and done matching paths while parsed status retains the detail.
+  if (status === "draft_pending") return "working";
   if (status === "working" || status === "thinking") return "working";
   if (
     controlState === "ready" &&
