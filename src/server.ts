@@ -3324,9 +3324,29 @@ const sameRenderedDraft = (left: string, right: string): boolean => {
     normalizeTerminalText(value).replace(/\u00a0/g, " ").trimEnd();
   const expected = normalize(right);
   const observed = normalize(left);
-  return expected.includes("\n")
-    ? observed === expected
-    : observed.replace(/\n(?:[ \t]{2})?/g, "") === expected;
+  if (expected.includes("\n")) return observed === expected;
+  const rows = observed.split("\n");
+  let positions = new Set([0]);
+  for (const [index, row] of rows.entries()) {
+    // A short explicit newline is an edit, not a terminal-width wrap.
+    if (index > 0 && rows[index - 1]!.trimEnd().length < 32) return false;
+    const next = new Set<number>();
+    const variants = index > 0 && /^[ \t]{2}/.test(row)
+      ? [row, row.slice(2)]
+      : [row];
+    for (const position of positions) {
+      for (const start of index === 0
+        ? [position]
+        : expected[position] === " " ? [position, position + 1] : [position]) {
+        for (const variant of variants) {
+          if (expected.startsWith(variant, start)) next.add(start + variant.length);
+        }
+      }
+    }
+    if (next.size === 0) return false;
+    positions = next;
+  }
+  return positions.has(expected.length);
 };
 
 function screenContainsCompleteSubmittedText(

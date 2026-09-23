@@ -2229,6 +2229,20 @@ describe("boot-submit readiness and attributable evidence", () => {
     expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen.replace("  ", "  HUMAN "), owned, cli)).toBe(false);
   });
 
+  it.each([
+    ["claude", "Claude Code", "❯\u00a0", "⏵⏵ bypass permissions on · 2 monitors"],
+    ["codex", ">_ OpenAI Codex", "› ", "gpt-5.6-sol high · ~/Gits/cmuxlayer"],
+  ] as const)("accepts an exact owned %s draft when word-wrap drops the break space", async (cli, header, prompt, footer) => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const owned = "Read and follow the long boot contract in this narrow worker pane, then report the exact result to the lead.";
+    const breakAt = owned.lastIndexOf(" ", 70);
+    const screen = [header, `${prompt}${owned.slice(0, breakAt)}`, `  ${owned.slice(breakAt + 1)}`, footer].join("\n");
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen, owned, cli)).toBe(true);
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen.replace("  then", "  HUMAN then"), owned, cli)).toBe(false);
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen.replace("the lead.", "the lead. HUMAN"), owned, cli)).toBe(false);
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput([header, `${prompt}foo`, "  bar", footer].join("\n"), "foo bar", cli)).toBe(false);
+  });
+
   it("ignores Claude's shortcuts hint beneath an exact owned draft", async () => {
     const { __submitEvidenceTestHooks } = await loadServerModule();
     const owned = "Read and follow /tmp/brief.md";
