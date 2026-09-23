@@ -212,7 +212,12 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     }
   });
 
-  it("does not submit a human queue item that prefixes an engine-owned receipt", async () => {
+  it.each([
+    ["prefixes an engine receipt", "queued request from engine", ["  ↳ queued request"]],
+    ["differs only in spaces", "queued  request", ["  ↳ queued request"]],
+    ["has extra space after the queue marker", "queued request", ["  ↳  queued request"]],
+    ["is ambiguously wrapped", "queued request continued", ["  ↳ queued request", "  │ continued"]],
+  ])("does not submit a human queue item that %s", async (_case, receiptText, queueLines) => {
     const { createServer, createServerContext } = await loadServerModule();
     let screen = "OpenAI Codex\n› Ask Codex to do anything";
     const exec = makeLifecycleExec(() => screen);
@@ -229,7 +234,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       engine.acceptComposerQueue({
         delivery_id: "engine-owned-long-queue",
         agent_id: targetId,
-        text: "queued request from engine",
+        text: receiptText,
         press_enter: true,
         source_event: "send_to",
         retry_count: 0,
@@ -239,7 +244,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       screen = [
         "OpenAI Codex",
         "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
-        "  ↳ queued request",
+        ...queueLines,
         "› Ask Codex to do anything",
       ].join("\n");
       exec.mockClear();

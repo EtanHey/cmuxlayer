@@ -3480,12 +3480,14 @@ function screenShowsQueuedAgentInput(
 
   const queuedItemRows: string[] = [];
   let foundQueuedItem = false;
+  let exactQueuedItemText: string | null = null;
   while (index >= 0) {
     const rawLine = lines[index] ?? "";
     const activeLine = stripCodexQueueGutter(rawLine).trim();
     const itemMatch = /^↳(?:\s+(.*)|\s*$)/.exec(activeLine);
     if (itemMatch) {
       queuedItemRows.unshift(itemMatch[1] ?? "");
+      exactQueuedItemText = /^↳ (.*)$/.exec(activeLine)?.[1] ?? null;
       foundQueuedItem = true;
       index -= 1;
       break;
@@ -3530,10 +3532,15 @@ function screenShowsQueuedAgentInput(
   }
 
   if (opts.exact) {
-    const normalizeFullText = (text: string): string =>
-      normalizeTerminalText(text).replace(/\s+/g, " ").trim();
-    return normalizeFullText(queuedItemRows.join(" ")) ===
-      normalizeFullText(submittedText);
+    // A wrapped or partially rendered item cannot prove ownership. Preserve
+    // authored spaces; only CR line endings and terminal right padding vary.
+    if (queuedItemRows.length !== 1 || exactQueuedItemText === null) {
+      return false;
+    }
+    const stripRightPadding = (text: string): string =>
+      normalizeTerminalText(text).replace(/[ \t]+$/, "");
+    const visible = stripRightPadding(exactQueuedItemText);
+    return visible.length > 0 && visible === stripRightPadding(submittedText);
   }
 
   const visiblePrefix = compactQueueCorrelationText(
