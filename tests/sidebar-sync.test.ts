@@ -974,6 +974,22 @@ describe("Sidebar Sync", () => {
     ]));
   });
 
+  it("records a failed sweep summary with the failing phase", async () => {
+    vi.spyOn(engine as any, "collectObservedSurfaceTopology").mockRejectedValueOnce(
+      new Error("topology scan failed"),
+    );
+
+    await expect(engine.runSweep()).rejects.toThrow("topology scan failed");
+    const summary = stateMgr.getEventLog().readEntries().find(
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" &&
+        "phase" in entry && entry.phase === "summary",
+    );
+    expect(summary).toMatchObject({
+      stage: "failed",
+      failed_phase: "topology_ms",
+    });
+  });
+
   it("does not hold the lifecycle lock during one blocked screen read", async () => {
     stateMgr.writeState(makeRecord({
       agent_id: "blocked-read-agent",

@@ -8689,6 +8689,42 @@ describe("agent lifecycle tool handlers", () => {
     expect(reads).toBeGreaterThanOrEqual(2);
   });
 
+  it("list_agents retries when a surface rebinds during its unlocked discovery scan", async () => {
+    const stableUuid = "71111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([{
+      ref: "surface:before-scan",
+      id: stableUuid,
+      workspace_ref: "workspace:1",
+    }]);
+    const record = makeServerAgentRecord({
+      agent_id: "list-rebound-agent",
+      surface_id: "surface:before-scan",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "working",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    let reads = 0;
+    routeClient.client.readScreen.mockImplementation(async (surface: string) => {
+      reads += 1;
+      if (reads === 1) {
+        routeClient.setLiveSurfaces([{
+          ref: "surface:after-scan",
+          id: stableUuid,
+          workspace_ref: "workspace:1",
+        }]);
+      }
+      return { surface, text: "OpenAI Codex\nWorking", lines: 20, scrollback_used: false };
+    });
+
+    const result = await registeredTestTool(server, "list_agents").handler({ max_age_ms: 0 }, {});
+    expect(result.isError).not.toBe(true);
+    expect(parseToolResult(result).agents).toEqual(
+      expect.arrayContaining([expect.objectContaining({ agent_id: "list-rebound-agent" })]),
+    );
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+
   it("list_agents keeps a corrupt legacy repo visible and raw-resumable", async () => {
     const routeClient = makeUuidRouteClient([
       {

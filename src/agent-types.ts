@@ -354,6 +354,7 @@ export interface SweepPhaseTelemetryEvent {
   agent_count: number;
   lock_held: boolean;
   durations_ms?: Record<string, number>;
+  failed_phase?: string;
 }
 
 export interface AgentCliExitEvent {

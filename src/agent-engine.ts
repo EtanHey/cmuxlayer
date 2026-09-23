@@ -8866,6 +8866,8 @@ export class AgentEngine {
     const timings: Record<string, number> = {};
     const sweepStartedAt = Date.now();
     const sweepId = ++this.sweepTelemetrySeq;
+    let sweepCompleted = false;
+    let failedPhase: string | null = null;
     const slowPhaseThresholdMs = 250;
     const time = async <T>(
       name: string,
@@ -8912,6 +8914,7 @@ export class AgentEngine {
         }
         return result;
       } catch (error) {
+        failedPhase = name;
         appendPhase("failed", Date.now() - startedAt);
         throw error;
       } finally {
@@ -9047,6 +9050,7 @@ export class AgentEngine {
       }
       await yieldToWaiters();
       await time("outbox_ms", () => this.drainOutboxBestEffort());
+      sweepCompleted = true;
     } finally {
       this.sweepBackgroundProcessSnapshot = null;
       timings.total_ms = Date.now() - sweepStartedAt;
@@ -9056,7 +9060,8 @@ export class AgentEngine {
           event_type: "sweep_phase",
           sweep_id: sweepId,
           phase: "summary",
-          stage: "completed",
+          stage: sweepCompleted ? "completed" : "failed",
+          ...(!sweepCompleted ? { failed_phase: failedPhase ?? "unknown" } : {}),
           started_at: new Date(sweepStartedAt).toISOString(),
           duration_ms: timings.total_ms,
           agent_count: this.registry.list().length,
