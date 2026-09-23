@@ -1,0 +1,16 @@
+/home/capture/launch-capture.sh
+Last login: Wed Sep 23 11:40:22 on ttys006
+capture-user ~/capture  $ /home/capture/launch-capture.sh
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Opus 5.5 (1M context) · Claude Max
+  ▝▝ ▝▝    ~/capture
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ detached | 🔧 13                                          
+  🤖 Opus 5.5 (1M context) | 💰 $0.00 | ⏱️  0m | 🧠 0.0%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents
+                                                                                         0 tokens
+                                            MCP server blocked by enterprise policy: computer-use

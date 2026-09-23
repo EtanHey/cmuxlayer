@@ -1,0 +1,60 @@
+             "held_for_ms": null,
+             "queue_depth": 0,
+             "acquire_timeout_ms": 45000,
+             "hold_timeout_ms": 120000,
+             "forced_releases": 0,
+             "sweep_skipped_mutations": 0,
+             "sweep_skipped_reason": null,
+             "sweep_yielded": 3,
+             "timeouts": 0,
+             "last_timeout": null
+           },
+           "lifecycle_start": {
+             "started": true,
+             "settled": true,
+             "waiting_for_ms": null,
+             "timeout_ms": 60000,
+             "error": null,
+             "timeouts": 0,
+             "last_timeout_at": null
+           }
+         },
+         "self_heal": {
+           "pane_pty_dead": 0,
+           "collapsed_monitors": 0
+         },
+         "caller_live_watches": {
+           "count": 0,
+           "watches": []
+         }
+       },
+       "transport": "socket",
+       "socket_path": "/home/capture-user/.local/state/cmux/cmux-501.sock",
+       "socket_path_state": "active"
+     }
+
+⏺ Yes, control_health responded: ok: true, socket transport not degraded, no warnings.
+
+⏺ Bash(python3 -c "import subprocess; subprocess.run(['/usr/bin/caffeinate','-t','20'],
+  check=True)")
+  ⎿  (No output)
+
+⏺ Step 2:
+
+  Running tests
+
+⏺ Bash(python3 -c "import subprocess; subprocess.run(['/usr/bin/caffeinate','-t','20'],
+  check=True)")
+  ⎿  (No output)
+
+⏺ Bash(npm --version)
+  ⎿  10.2.4
+
+✢ Mustering… (59s · ↓ 1.5k tokens)
+                                                                              58256 tokens
+────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ main | 🔧 13
+  🤖 Opus 5.5 (1M context) | 💰 $0.31 | ⏱️  0m | 📦 4hr 59m | 🧠 5.8%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents

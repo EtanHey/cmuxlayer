@@ -167,6 +167,40 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
+  it("lets key Return confirm a Claude permission menu after key Down", async () => {
+    const { createServer, createServerContext, __submitEvidenceTestHooks } = await loadServerModule();
+    let screen = "Claude Code\n❯ ";
+    const exec = makeLifecycleExec(() => screen);
+    const context = createServerContext({
+      exec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    try {
+      const server = createServer({ context }) as any;
+      await spawnReadyAgent(server);
+      const sendKey = (key: string) => server._registeredTools.send_to.handler(
+        { mode: "key", surface: "surface:new", text: key, verify_submit: false },
+        {},
+      );
+      screen = readFileSync(new URL("./fixtures/a3-claude/permission_menu_yes.txt", import.meta.url), "utf8");
+      exec.mockClear();
+      const down = parseToolResult(await sendKey("down"));
+      expect(down.key_dispatched, JSON.stringify(down)).toBe(true);
+      screen = readFileSync(new URL("./fixtures/a3-claude/permission_menu_no.txt", import.meta.url), "utf8");
+      expect(__submitEvidenceTestHooks.composerHoldsForeignDraft(screen, "", { cli: "claude", exact: true })).toBe(false);
+      exec.mockClear();
+      const confirmed = parseToolResult(await sendKey("return"));
+      expect(confirmed.error_code, JSON.stringify(confirmed)).not.toBe("blocked_by_foreign_draft");
+      expect(confirmed.key_dispatched, JSON.stringify(confirmed)).toBe(true);
+      expect(exec.mock.calls.some(([, args]: [string, string[]]) =>
+        args.includes("send-key") && args.includes("return"))).toBe(true);
+    } finally {
+      context.dispose();
+    }
+  });
+
   it("lets key Return act on an owned Codex queue below scrollback with a wrapped heading", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screen = "OpenAI Codex\n› Ask Codex to do anything";
