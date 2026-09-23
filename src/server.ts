@@ -896,6 +896,8 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       coordination_footer_delivered: z.boolean().optional(),
       coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
+      update_menu_skipped: z.boolean().optional(),
+      update_menu_text_hash: z.string().optional(),
       spawn_state: z.enum(["started", "boot_unsubmitted"]).optional(),
       next_action: z.string().optional(),
       delivered_chars: z.number().int().nonnegative().optional(),
@@ -2884,8 +2886,56 @@ function shouldHandleCodexUpdateMenu(
   text: string,
 ): boolean {
   return (
-    (cli === undefined || cli === "codex") && isCodexUpdateMenuScreen(text)
+    (cli === undefined || cli === "codex") &&
+    (isCodexUpdateMenuScreen(text) ||
+      (/^\s*✨?\s*Update available!/m.test(text) &&
+        /^\s*Release notes: https:\/\/github\.com\/openai\/codex\/releases\/latest\s*$/m.test(text) &&
+        /^[›> ]*1\. Update now\b/m.test(text) &&
+        /^\s*Press enter to continue\s*$/m.test(text) &&
+        !/\n(?:codex>|» )/.test(text.slice(text.lastIndexOf("Press enter to continue")))))
   );
+}
+
+/** The reconstructed menu must be the final complete block of the current pane. */
+function codexUpdateSkipPlan(text: string): { downCount: number; textHash: string } | null {
+  const allLines = text.split(/\r?\n/);
+  while (allLines.length > 0 && allLines.at(-1)?.trim() === "") allLines.pop();
+  const lines = allLines.slice(-9);
+  const preamble = allLines.slice(0, -9);
+  // Shell launch output is expected above the menu. A second chooser or
+  // approval there makes the screen ambiguous even if its final block matches.
+  if (preamble.some((line) =>
+    /^\s*(?:[›❯>]\s*)?\d+[.)]\s+\S/.test(line) ||
+    /(?:update available!|skip until next version|press enter to continue|\b(?:approval|permission|approve|allow|deny|confirm|choose|select|picker|menu)\b)/i.test(line)
+  )) return null;
+  if (
+    lines.length !== 9 ||
+    !/^  ✨ Update available! \d+\.\d+\.\d+ -> \d+\.\d+\.\d+$/.test(lines[0] ?? "") ||
+    lines[1]?.trim() !== "" ||
+    lines[2] !== "  Release notes: https://github.com/openai/codex/releases/latest" ||
+    lines[3]?.trim() !== "" ||
+    lines[7]?.trim() !== "" ||
+    lines[8] !== "  Press enter to continue"
+  ) return null;
+  const options = [
+    "1. Update now (runs `npm install -g @openai/codex@latest`)",
+    "2. Skip",
+    "3. Skip until next version",
+  ];
+  let selected = -1;
+  for (let index = 0; index < options.length; index += 1) {
+    const line = lines[index + 4];
+    if (line === `› ${options[index]}`) {
+      if (selected !== -1) return null;
+      selected = index;
+    } else if (line !== `  ${options[index]}`) {
+      return null;
+    }
+  }
+  return selected === -1 ? null : {
+    downCount: 2 - selected,
+    textHash: createHash("sha256").update(lines.join("\n")).digest("hex"),
+  };
 }
 
 function readyPatternCandidates(cli?: CliType): CliType[] {
@@ -7634,16 +7684,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const waitForBootPromptReady = async (opts: {
     surface: string;
     workspace?: string;
+    stableSurfaceIdentity?: string | null;
+    initialUpdateMenuTextHash?: string;
     cli?: CliType;
     text: string;
     timeout_ms: number;
     onUpdateShellRelaunch?: () => Promise<void>;
     resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
+    assertStableSurfaceIdentity?: () => Promise<void>;
   }): Promise<{
     delivery_state: "ready" | "queued";
     metrics: RawSubmitEvidenceMetrics | null;
     route: { surface: string; workspace?: string };
     cli: CliType;
+    updateMenuTextHash?: string;
     observation?: NonNullable<PublicDeliveryReceipt["observation"]>;
   }> => {
     let deadline = Date.now() + opts.timeout_ms;
@@ -7655,6 +7709,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateElapsedMs = 0;
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
+    let updateMenuTextHash = opts.initialUpdateMenuTextHash;
     type QueuedBootObservation = {
       metrics: RawSubmitEvidenceMetrics;
       route: { surface: string; workspace?: string };
@@ -7671,6 +7726,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: opts.surface,
         workspace: opts.workspace,
       };
+      let selectingUpdateMenu = false;
       try {
         target = opts.resolveRoute ? await opts.resolveRoute() : target;
         lastSurface = target.surface;
@@ -7695,11 +7751,54 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         if (shouldHandleCodexUpdateMenu(opts.cli, screen.text)) {
-          throw new BootPromptUpdateMenuBlockedError(
-            `Boot prompt delivery blocked by Codex update menu on ${target.surface}; cmuxlayer will not press Return before the prompt is typed`,
+          const blocked = () => new BootPromptUpdateMenuBlockedError(
+            `Boot prompt delivery blocked by Codex update menu on ${target.surface}; cmuxlayer will not press Return on an unverified menu`,
             tailLines(lastText, 10),
             target.surface,
           );
+          const plan = codexUpdateSkipPlan(screen.text);
+          if (
+            !plan || updateMenuTextHash !== undefined ||
+            !opts.stableSurfaceIdentity || !opts.resolveRoute ||
+            !opts.assertStableSurfaceIdentity
+          ) throw blocked();
+          selectingUpdateMenu = true;
+          await withSurfaceWrite(target.surface, async () => {
+            const assertRoute = async () => {
+              await opts.assertStableSurfaceIdentity!();
+              const current = await opts.resolveRoute!();
+              if (current.surface !== target.surface ||
+                  (current.workspace ?? null) !== (target.workspace ?? null)) {
+                throw blocked();
+              }
+            };
+            await assertRoute();
+            const confirmed = await client.readScreen(target.surface, {
+              workspace: target.workspace, lines: 80, scrollback: false,
+            });
+            if (confirmed.text !== screen.text) throw blocked();
+            for (let index = 0; index < plan.downCount; index += 1) {
+              await assertRoute();
+              await client.sendKey(target.surface, "down", { workspace: target.workspace });
+            }
+            await assertRoute();
+            const selected = await client.readScreen(target.surface, {
+              workspace: target.workspace, lines: 80, scrollback: false,
+            });
+            if (codexUpdateSkipPlan(selected.text)?.downCount !== 0) throw blocked();
+            await assertRoute();
+            await client.sendKey(target.surface, "return", { workspace: target.workspace });
+          }, {
+            toolName: "boot_prompt",
+            workspace: target.workspace,
+            stableSurfaceIdentity: opts.stableSurfaceIdentity,
+            observePtyWrite: true,
+          });
+          selectingUpdateMenu = false;
+          updateMenuTextHash = plan.textHash;
+          deadline = Math.max(deadline, Date.now() + BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS);
+          consecutiveMatches.clear();
+          continue;
         }
 
         if (updateState === "updating") {
@@ -7797,7 +7896,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             };
           }
-          const ready = identified && !codexTurnStillRunning;
+          const ready = identified && !codexTurnStillRunning &&
+            (!updateMenuTextHash || (
+              candidate === "codex" &&
+              parsed.agent_type === "codex" &&
+              parsed.status === "idle" &&
+              parsed.control_state === "ready" &&
+              composer !== null && composer.trim() === ""
+            ));
           const count = ready
             ? (consecutiveMatches.get(candidate) ?? 0) + 1
             : 0;
@@ -7808,11 +7914,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
               route: target,
               cli: candidate,
+              ...(updateMenuTextHash ? { updateMenuTextHash } : {}),
             };
           }
         }
         queuedObservation = frameQueuedObservation;
       } catch (error) {
+        if (selectingUpdateMenu) {
+          if (isSurfaceGoneReadFailure(error, target.surface)) {
+            throw new SurfaceGoneError(target.surface, error);
+          }
+          throw error;
+        }
         if (
           error instanceof BootPromptTimeoutError ||
           error instanceof LauncherReadinessError ||
@@ -7835,12 +7948,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     if (queuedObservation) {
+      if (updateMenuTextHash) {
+        throw new BootPromptUpdateMenuBlockedError(
+          `Codex update menu skip did not lead to a ready composer on ${lastSurface}`,
+          tailLines(lastText, 10), lastSurface,
+        );
+      }
       return {
         delivery_state: "queued",
         ...queuedObservation,
       };
     }
 
+    if (updateMenuTextHash) {
+      throw new BootPromptUpdateMenuBlockedError(
+        `Codex update menu skip did not lead to a ready composer on ${lastSurface}`,
+        tailLines(lastText, 10), lastSurface,
+      );
+    }
     throw new BootPromptTimeoutError(
       `Timed out after ${opts.timeout_ms}ms waiting for boot prompt readiness on ${lastSurface}`,
       tailLines(lastText, 10),
@@ -8485,11 +8610,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     timeout_ms?: number;
     onUpdateShellRelaunch?: () => Promise<void>;
     resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
+    assertStableSurfaceIdentity?: () => Promise<void>;
   }): Promise<
     PublicDeliveryReceipt & {
       bytes: number;
       prompt_text: string | null;
       prompt_warning: string | null;
+      update_menu_skipped?: boolean;
+      update_menu_text_hash?: string;
     }
   > => {
     const bootPromptPath = getBootPromptPath(opts.boot_prompt_path);
@@ -8541,11 +8669,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let readiness = await waitForBootPromptReady({
       surface: opts.surface,
       workspace: opts.workspace,
+      stableSurfaceIdentity: opts.stableSurfaceIdentity,
       cli: opts.cli,
       text: sanitizedText,
       timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
       onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
       resolveRoute: opts.resolveRoute,
+      assertStableSurfaceIdentity: opts.assertStableSurfaceIdentity,
     });
 
     let deliveryRoute = opts.resolveRoute
@@ -8561,11 +8691,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       readiness = await waitForBootPromptReady({
         surface: deliveryRoute.surface,
         workspace: deliveryRoute.workspace,
+        stableSurfaceIdentity: opts.stableSurfaceIdentity,
+        initialUpdateMenuTextHash: readiness.updateMenuTextHash,
         cli: opts.cli,
         text: sanitizedText,
         timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
         onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
         resolveRoute: opts.resolveRoute,
+        assertStableSurfaceIdentity: opts.assertStableSurfaceIdentity,
       });
       deliveryRoute = opts.resolveRoute
         ? await opts.resolveRoute()
@@ -8645,6 +8778,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return fingerprintPromptReceipt({
         ...delivery,
         prompt_warning: promptWarning,
+        ...(readiness.updateMenuTextHash ? {
+          update_menu_skipped: true,
+          update_menu_text_hash: readiness.updateMenuTextHash,
+        } : {}),
       }, rawPrompt);
     } catch (error) {
       if (error instanceof SurfaceGoneError) {
@@ -8700,6 +8837,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }),
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
             prompt_warning: promptWarning,
+            ...(readiness.updateMenuTextHash ? {
+              update_menu_skipped: true,
+              update_menu_text_hash: readiness.updateMenuTextHash,
+            } : {}),
           }, rawPrompt);
         }
       }
@@ -16203,6 +16344,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 resolveRoute: spawnedBinding?.surface_uuid
                   ? () => resolveManagedDeliveryRoute(result.agent_id)
                   : undefined,
+                assertStableSurfaceIdentity: spawnedBinding?.surface_uuid
+                  ? async () => {
+                    const current = engine.getAgentState(result.agent_id);
+                    if (current?.surface_uuid?.toLowerCase() !==
+                        spawnedBinding.surface_uuid?.toLowerCase()) {
+                      throw new Error("Spawn surface UUID changed during Codex update menu selection");
+                    }
+                  }
+                  : undefined,
                 cli: args.cli,
                 prompt: args.prompt,
                 boot_prompt_path: bootPromptPath,
@@ -16486,6 +16636,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             boot_prompt_bytes: bootPromptDelivery?.bytes,
             boot_prompt_submit_verified:
               bootPromptDelivery?.submit_verified ?? null,
+            ...(bootPromptDelivery?.update_menu_skipped ? {
+              update_menu_skipped: true,
+              update_menu_text_hash: bootPromptDelivery.update_menu_text_hash,
+            } : {}),
             ...(launchShellRecovery?.recovered
               ? {
                   readiness_recovered: true,
