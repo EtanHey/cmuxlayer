@@ -712,6 +712,7 @@ export class CmuxLayerDaemon {
 
     const mcpServer = createServer({
       context,
+      inboxBaseDir: this.opts.inboxBaseDir,
       outboxDrain: this.opts.outboxDrain,
       monitorRegistryPath: this.opts.monitorRegistryPath,
       monitorRegistryNow: this.opts.monitorRegistryNow,
@@ -1362,6 +1363,9 @@ export async function runDaemon(
 ): Promise<CmuxLayerDaemon> {
   ensureNodeMaxOldSpaceEnv();
   installHeapGuard();
+  const configuredStateDir = process.env.CMUXLAYER_STATE_DIR?.trim() || undefined;
+  const configuredInboxBaseDir =
+    process.env.CMUXLAYER_INBOX_BASE_DIR?.trim() || undefined;
   const testProcess =
     process.env.VITEST === "true" || process.env.NODE_ENV === "test";
   let exitStarted = false;
@@ -1375,6 +1379,8 @@ export async function runDaemon(
   };
   const daemon = new CmuxLayerDaemon({
     ...opts,
+    stateDir: opts.stateDir ?? configuredStateDir,
+    inboxBaseDir: opts.inboxBaseDir ?? configuredInboxBaseDir,
     outboxDrain:
       opts.outboxDrain ??
       (testProcess
