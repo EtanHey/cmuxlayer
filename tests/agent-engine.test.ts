@@ -144,6 +144,29 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
   } as unknown as CmuxClient;
 }
 
+function exposeWorkerColumnAfterSplit(client: CmuxClient): void {
+  const listPanes = client.listPanes as ReturnType<typeof vi.fn>;
+  const original = listPanes.getMockImplementation();
+  listPanes.mockImplementation(async (...args: unknown[]) => {
+    const result = await original?.(...args);
+    if (
+      !result ||
+      (client.newSplit as ReturnType<typeof vi.fn>).mock.calls.length === 0 ||
+      result.panes.length !== 1
+    ) return result;
+    return {
+      ...result,
+      panes: [...result.panes, {
+        ref: "pane:observed-worker",
+        index: 1,
+        focused: false,
+        surface_count: 0,
+        surface_refs: [],
+      }],
+    };
+  });
+}
+
 function makeSurface(ref: string): CmuxSurface {
   return { ref, title: "", type: "terminal", index: 0, selected: false };
 }
@@ -731,6 +754,7 @@ describe("AgentEngine", () => {
       vi.useFakeTimers();
       try {
         liveSurfaces = [makeSpawnSurface()];
+        exposeWorkerColumnAfterSplit(mockClient);
         engine.dispose();
         engine = new AgentEngine(
           stateMgr,
@@ -762,6 +786,7 @@ describe("AgentEngine", () => {
       vi.useFakeTimers();
       try {
         liveSurfaces = [makeSpawnSurface()];
+        exposeWorkerColumnAfterSplit(mockClient);
         engine.dispose();
         engine = new AgentEngine(
           stateMgr,
@@ -1140,6 +1165,7 @@ describe("AgentEngine", () => {
         pane_ref: "pane:left",
         surfaces: [makeSurface("surface:interactive")],
       });
+      exposeWorkerColumnAfterSplit(mockClient);
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -1177,6 +1203,7 @@ describe("AgentEngine", () => {
         pane_ref: "pane:left",
         surfaces: [makeSurface("surface:interactive")],
       });
+      exposeWorkerColumnAfterSplit(mockClient);
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -1298,6 +1325,7 @@ describe("AgentEngine", () => {
         title: "",
         type: "terminal",
       });
+      exposeWorkerColumnAfterSplit(mockClient);
 
       const result = await engine.spawnAgent({
         repo: "voicelayer",
@@ -1367,6 +1395,7 @@ describe("AgentEngine", () => {
         title: "",
         type: "terminal",
       });
+      exposeWorkerColumnAfterSplit(mockClient);
 
       const result = await engine.spawnAgent({
         repo: "brainlayer",
@@ -1591,6 +1620,7 @@ describe("AgentEngine", () => {
         title: "",
         type: "terminal",
       } satisfies CmuxNewSplitResult);
+      exposeWorkerColumnAfterSplit(mockClient);
 
       const result = await engine.spawnAgent({
         repo: "voicelayer",
@@ -1722,6 +1752,7 @@ describe("AgentEngine", () => {
         title: "",
         type: "terminal",
       });
+      exposeWorkerColumnAfterSplit(mockClient);
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -1739,6 +1770,364 @@ describe("AgentEngine", () => {
         type: "terminal",
       });
       expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { name: "a single lead", stackedLeads: false },
+      { name: "stacked leads", stackedLeads: true },
+    ])("keeps concurrent right-placement spawns in the same worker column with $name", async ({ stackedLeads }) => {
+      const workspace = "workspace:concurrent-placement";
+      const lead = {
+        ...makeSurface("surface:lead"),
+        id: "00000000-0000-4000-8000-000000000001",
+        workspace_ref: workspace,
+      };
+      const secondLead = {
+        ...makeSurface("surface:lead-2"),
+        id: "00000000-0000-4000-8000-000000000099",
+        workspace_ref: workspace,
+      };
+      const surfacesByPane = new Map<string, CmuxSurface[]>([
+        ["pane:lead", [lead]],
+        ...(stackedLeads ? [["pane:lead-2", [secondLead]] as [string, CmuxSurface[]]] : []),
+      ]);
+      liveSurfaces = stackedLeads ? [lead, secondLead] : [lead];
+      const leadAgent = makeRecord({
+        agent_id: "lead-concurrent-placement",
+        surface_id: lead.ref,
+        workspace_id: workspace,
+        role: "orchestrator",
+        state: "ready",
+      });
+      stateMgr.writeState(leadAgent);
+      engine.getRegistry().set(leadAgent.agent_id, leadAgent);
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => ({
+          workspace_ref: workspace,
+          window_ref: "window:concurrent-placement",
+          panes: [...surfacesByPane].map(([ref, surfaces], index) => ({
+            ref,
+            index,
+            focused: index === 0,
+            pixel_frame: {
+              x: ref.startsWith("pane:worker") ? 500 : 0,
+              y: ref === "pane:lead-2" ? 450 : 0,
+              width: 500,
+              height: stackedLeads && !ref.startsWith("pane:worker") ? 450 : 900,
+            },
+            surface_count: surfaces.length,
+            surface_refs: surfaces.map((surface) => surface.ref),
+            surface_ids: surfaces.map((surface) => surface.id!),
+          })),
+        }),
+      );
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:concurrent-placement",
+          pane_ref: pane,
+          surfaces: [...(surfacesByPane.get(pane) ?? [])],
+        }),
+      );
+      let nextSurface = 1;
+      const createWorkerSurface = (): CmuxSurface => {
+        const index = nextSurface++;
+        return {
+          ...makeSurface(`surface:worker-${index}`),
+          id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+          workspace_ref: workspace,
+        };
+      };
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          const pane = `pane:worker-${nextSurface}`;
+          const surface = createWorkerSurface();
+          // A successful mutation response can precede topology visibility.
+          // The second caller must wait for this independent observation.
+          setTimeout(() => {
+            surfacesByPane.set(pane, [surface]);
+            liveSurfaces.push(surface);
+          }, 30);
+          return {
+            workspace,
+            surface: surface.ref,
+            surface_id: surface.id,
+            pane,
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => {
+          const surface = createWorkerSurface();
+          surfacesByPane.get(pane)?.push(surface);
+          liveSurfaces.push(surface);
+          return {
+            workspace,
+            surface: surface.ref,
+            surface_id: surface.id,
+            pane,
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+
+      await Promise.all([
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          model: "gpt-5.4",
+          prompt: "First worker",
+          role: "worker",
+          placement: "right",
+          workspace,
+          focus: false,
+        }),
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          model: "gpt-5.4",
+          prompt: "Second worker",
+          role: "worker",
+          placement: "right",
+          workspace,
+          focus: false,
+        }),
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 35));
+
+      expect(surfacesByPane.size).toBe(stackedLeads ? 3 : 2);
+      expect(surfacesByPane.get("pane:worker-1")).toHaveLength(2);
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:worker-1",
+        workspace,
+        type: "terminal",
+        focus: false,
+      });
+    });
+
+    it("review scratch: refuses a lone split whose new column never becomes visible", async () => {
+      const workspace = "workspace:unseen-first-split";
+      const lead = makeSurface("surface:lead");
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace,
+        window_ref: "window:unseen-first-split",
+        panes: [{ ref: "pane:lead", index: 0, focused: true,
+          surface_count: 1, surface_refs: [lead.ref] }],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace,
+        window_ref: "window:unseen-first-split",
+        pane_ref: "pane:lead",
+        surfaces: [lead],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace,
+        surface: "surface:worker",
+        surface_id: "00000000-0000-4000-8000-000000000002",
+        pane: "pane:worker",
+        title: "",
+        type: "terminal",
+      });
+      await expect(engine.spawnAgent({
+        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        prompt: "Worker", role: "worker", placement: "right",
+        workspace, boot_prompt_timeout_ms: 100,
+      })).rejects.toThrow(/timed out.*split|split.*timed out/i);
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses another split when the prior worker column never becomes visible", async () => {
+      const workspace = "workspace:missing-worker-column";
+      const internalEngine = engine as unknown as {
+        pendingPlacementSplits: Map<string, {
+          pane: string;
+          surface: string;
+          surfaceId?: string;
+        }>;
+      };
+      internalEngine.pendingPlacementSplits.set(workspace, {
+        pane: "pane:worker",
+        surface: "surface:worker",
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace,
+        window_ref: "window:missing-worker-column",
+        panes: [{
+          ref: "pane:lead",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:lead"],
+        }],
+      });
+
+      await expect(engine.spawnAgent({
+        repo: "brainlayer",
+        cli: "codex",
+        model: "gpt-5.4",
+        prompt: "Second worker",
+        role: "worker",
+        placement: "right",
+        workspace,
+        boot_prompt_timeout_ms: 100,
+      })).rejects.toThrow(/timed out.*split/i);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("uses an empty right column after the first split surface closes", async () => {
+      const workspace = "workspace:empty-worker-column";
+      const internalEngine = engine as unknown as {
+        pendingPlacementSplits: Map<string, {
+          pane: string;
+          surface: string;
+          surfaceId?: string;
+        }>;
+      };
+      internalEngine.pendingPlacementSplits.set(workspace, {
+        pane: "pane:worker",
+        surface: "surface:closed-worker",
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace,
+        window_ref: "window:empty-worker-column",
+        panes: [
+          { ref: "pane:lead", index: 0, focused: true,
+            surface_count: 1, surface_refs: ["surface:lead"] },
+          { ref: "pane:worker", index: 1, focused: false,
+            surface_count: 0, surface_refs: [] },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:empty-worker-column",
+          pane_ref: pane,
+          surfaces: pane === "pane:lead" ? [makeSurface("surface:lead")] : [],
+        }),
+      );
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        cli: "codex",
+        model: "gpt-5.4",
+        prompt: "Replacement worker",
+        role: "worker",
+        placement: "right",
+        workspace,
+      });
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:worker",
+        workspace,
+        type: "terminal",
+      });
+    });
+
+    it("bounds a queued placement behind a stalled workspace observation", async () => {
+      const workspace = "workspace:stalled-placement";
+      let releaseObservation!: () => void;
+      let observationStarted!: () => void;
+      const started = new Promise<void>((resolve) => { observationStarted = resolve; });
+      const stalled = new Promise<void>((resolve) => { releaseObservation = resolve; });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          observationStarted();
+          await stalled;
+          return {
+            workspace_ref: workspace,
+            window_ref: "window:stalled-placement",
+            panes: [{
+              ref: "pane:lead",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:lead"],
+            }],
+          };
+        },
+      );
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace,
+        window_ref: "window:stalled-placement",
+        pane_ref: "pane:lead",
+        surfaces: [makeSurface("surface:lead")],
+      });
+      const spawn = () => engine.spawnAgent({
+        repo: "brainlayer",
+        cli: "codex",
+        model: "gpt-5.4",
+        prompt: "Worker",
+        role: "worker",
+        placement: "right",
+        workspace,
+        boot_prompt_timeout_ms: 100,
+      });
+
+      const first = spawn();
+      const firstSettled = first.then(
+        () => ({ status: "resolved" as const }),
+        (error: unknown) => ({ status: "rejected" as const, error }),
+      );
+      await started;
+      const second = spawn();
+      await expect(second).rejects.toThrow(/timed out waiting for workspace.*refusing topology mutation/i);
+      const firstOutcome = await Promise.race([
+        firstSettled.then((result) => result.status),
+        new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 150)),
+      ]);
+      releaseObservation();
+      expect(await firstSettled).toMatchObject({
+        status: "rejected",
+        error: { code: "placement_timeout",
+          message: expect.stringMatching(/timed out.*refusing topology mutation/i) },
+      });
+      expect(firstOutcome).toBe("rejected");
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
+    it("refuses a second split while a timed-out split is still in flight", async () => {
+      const workspace = "workspace:uncertain-split";
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace,
+        window_ref: "window:uncertain-split",
+        panes: [{ ref: "pane:lead", index: 0, focused: true,
+          surface_count: 1, surface_refs: ["surface:lead"] }],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace,
+        window_ref: "window:uncertain-split",
+        pane_ref: "pane:lead",
+        surfaces: [makeSurface("surface:lead")],
+      });
+      let releaseSplit!: (result: CmuxNewSplitResult) => void;
+      let splitStarted!: () => void;
+      const started = new Promise<void>((resolve) => { splitStarted = resolve; });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise<CmuxNewSplitResult>((resolve) => {
+          releaseSplit = resolve;
+          splitStarted();
+        }),
+      );
+      const spawn = () => engine.spawnAgent({
+        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        prompt: "Worker", role: "worker", placement: "right",
+        workspace, boot_prompt_timeout_ms: 100,
+      });
+
+      const first = spawn();
+      await started;
+      await expect(first).rejects.toMatchObject({ code: "placement_timeout" });
+      await expect(spawn()).rejects.toMatchObject({ code: "placement_timeout" });
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+      releaseSplit({ workspace, surface: "surface:late", pane: "pane:worker",
+        title: "", type: "terminal" });
+      await vi.waitFor(() => expect(mockClient.closeSurface).toHaveBeenCalled());
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
     });
 
     it("docks the first worker into the rightmost sparse non-lead pane when user panes already exist", async () => {
@@ -2900,6 +3289,7 @@ describe("AgentEngine", () => {
         pane_ref: "pane:worker",
         surfaces: [makeSurface("surface:worker-existing")],
       });
+      exposeWorkerColumnAfterSplit(mockClient);
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -4347,6 +4737,7 @@ describe("AgentEngine", () => {
   describe("boot session capture", () => {
     beforeEach(() => {
       vi.useFakeTimers();
+      exposeWorkerColumnAfterSplit(mockClient);
     });
 
     afterEach(() => {

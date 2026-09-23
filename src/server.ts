@@ -2005,6 +2005,13 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === PLACEMENT_WORKSPACE_UNRESOLVED
       ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
       : {};
+  const placementTimeoutExtra =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "placement_timeout"
+      ? { error_code: "placement_timeout", retryable: true }
+      : {};
   // #529: the bounded lifecycle timeouts carry a `code` that must reach the
   // tool payload, or automated callers see only free text and cannot tell a
   // bounded control-plane wait from any other failure. Both are retryable.
@@ -2081,6 +2088,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
+    ...placementTimeoutExtra,
     ...lifecycleTimeoutExtra,
     ...readinessExtra,
     ...deliveryRpcExtra,
