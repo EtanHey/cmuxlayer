@@ -1205,6 +1205,24 @@ codex>
     expect(parsed.actions).toContain("recoverable_blocker:pr_loop");
   });
 
+  it("does not report a historical PR permission sentence as a blocker while Codex works", () => {
+    const parsed = parseScreen(`
+OpenAI Codex
+
+Earlier note: I cannot push a PR without explicit permission, so I am waiting for Etan.
+
+• PL1b's full local suite passed: 167 files, 4,135 passed.
+• Ran python3 -m pytest
+Working (3m 12s • esc to interrupt)
+
+› Ask Codex to do anything
+gpt-6-sol high · 8% used
+`);
+
+    expect(parsed.status).toBe("working");
+    expect(parsed.actions).not.toContain("recoverable_blocker:pr_loop");
+  });
+
   it("detects recoverable MCP restart and successor blockers", () => {
     const parsed = parseScreen(`
 OpenAI Codex

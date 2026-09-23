@@ -1560,9 +1560,12 @@ function uniqueActions(actions: string[]): string[] {
   return Array.from(new Set(actions));
 }
 
-function parseRecoverableBlockerActions(text: string): string[] {
+function parseRecoverableBlockerActions(
+  text: string,
+  status: ParsedScreenStatus,
+): string[] {
   const actions: string[] = [];
-  if (RECOVERABLE_PR_LOOP_BLOCKER_RE.test(text)) {
+  if (status === "idle" && RECOVERABLE_PR_LOOP_BLOCKER_RE.test(text)) {
     actions.push("recoverable_blocker:pr_loop");
   }
   if (RECOVERABLE_RESTART_BLOCKER_RE.test(text)) {
@@ -1868,12 +1871,12 @@ export function parseScreen(text: string): ParsedScreenResult {
     contextPct = Math.min(100, Math.round((tokenCount / contextWindow) * 100));
   }
 
-  const actions = parseRecoverableBlockerActions(normalized);
+  const status = inferStatus(normalized, doneSignal, errors, agentType);
+  const actions = parseRecoverableBlockerActions(normalized, status);
   if (agentType === "codex") {
     actions.push(...parseCodexActions(normalized));
   }
 
-  const status = inferStatus(normalized, doneSignal, errors, agentType);
   const cliUpdateState = parseCliUpdateState(normalized, agentType);
   const honesty = pauseHonestyFields("inferred");
   const result: ParsedScreenResult = {
