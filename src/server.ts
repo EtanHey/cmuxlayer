@@ -10,6 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import { CmuxSocketError } from "./cmux-socket-error.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -2021,6 +2022,10 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
             retryable: true,
           }
         : {};
+  const cmuxUnavailableExtra =
+    error instanceof CmuxSocketError && error.code === "cmux_unavailable"
+      ? { error_code: "cmux_unavailable", retryable: true }
+      : {};
   const readinessTimeout = findErrorInChain(
     error,
     (candidate): candidate is BootPromptTimeoutError | LauncherReadinessError =>
@@ -2082,6 +2087,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
     ...lifecycleTimeoutExtra,
+    ...cmuxUnavailableExtra,
     ...readinessExtra,
     ...deliveryRpcExtra,
     ...deliveryMutationExtra,

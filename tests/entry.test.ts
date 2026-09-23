@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Writable } from "node:stream";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   defaultDaemonSocketPath,
   runDaemonFirstEntry,
   type DaemonFirstEntryOptions,
 } from "../src/entry.js";
 import { AgentEngine } from "../src/agent-engine.js";
+import { createServer } from "../src/server.js";
 
 function createEntryOptions(
   overrides: Partial<DaemonFirstEntryOptions> = {},
@@ -113,6 +118,72 @@ describe("daemon-first MCP entry", () => {
       expect.stringMatching(/daemon must be spawned from inside a cmux pane/i),
     );
   });
+
+  it("REG1 initializes and lists tools within five seconds without cmux", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmuxlayer-reg1-"));
+    const logger = { error: vi.fn() };
+    const opts = createEntryOptions({
+      logger,
+      probeDaemon: vi.fn().mockResolvedValue(false),
+      probeCmuxSocket: vi.fn().mockResolvedValue({
+        usable: false,
+        socketPath: "/tmp/missing-cmux.sock",
+      }),
+      spawnDaemon: vi.fn().mockResolvedValue(undefined),
+      startInProcess: vi.fn().mockImplementation(async ({ fallbackWarnings }) =>
+        createServer({
+          stateDir,
+          skipAgentLifecycle: true,
+          exposeInternalToolsForTests: false,
+          controlHealthWarnings: fallbackWarnings,
+          exec: vi.fn().mockRejectedValue(
+            Object.assign(new Error("Command failed: cmux list-windows\nError: Socket not found at /tmp/missing-cmux.sock"), { code: 1 }),
+          ),
+        }),
+      ),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      autostartTimeoutMs: 5_500,
+    });
+    const startedAt = Date.now();
+    let mcpClient: Client | null = null;
+    let result: Awaited<ReturnType<typeof runDaemonFirstEntry>> | null = null;
+    try {
+      result = await runDaemonFirstEntry(opts);
+      expect(result.mode).toBe("in-process");
+      if (result.mode !== "in-process") return;
+      mcpClient = new Client({ name: "reg1-no-cmux", version: "0.1.0" });
+      const [clientTransport, serverTransport] =
+        InMemoryTransport.createLinkedPair();
+      await Promise.all([
+        result.server.connect(serverTransport),
+        mcpClient.connect(clientTransport),
+      ]);
+      expect(mcpClient.getServerVersion()?.name).toBe("cmuxlayer");
+      const tools = (await mcpClient.listTools()).tools.map((tool) => tool.name);
+      expect(tools).toContain("list_surfaces");
+      expect(tools).toContain("control_health");
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(5_000);
+
+      const unavailable = await mcpClient.callTool({
+        name: "list_surfaces",
+        arguments: {},
+      });
+      expect(unavailable.isError).toBe(true);
+      expect(unavailable.structuredContent).toMatchObject({
+        error_code: "cmux_unavailable",
+        retryable: true,
+      });
+      expect(opts.spawnDaemon).not.toHaveBeenCalled();
+      expect(opts.runProxy).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining("cmux is unavailable"),
+      );
+    } finally {
+      await mcpClient?.close();
+      if (result?.mode === "in-process") await result.server.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  }, 12_000);
 
   it("falls back to in-process mode with a loud warning when daemon start fails", async () => {
     const logger = { error: vi.fn() };

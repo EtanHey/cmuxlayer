@@ -576,10 +576,12 @@ export async function runDaemonFirstEntry(
   }
 
   const cmuxProbe = await probeCmuxSocket();
-  if (cmuxProbe.denied_reason === "access-control") {
+  if (!cmuxProbe.usable) {
     return fallback(
-      `daemon autostart suppressed because this proxy is denied by cmux at ${cmuxProbe.socketPath}; ` +
-        "daemon must be spawned from inside a cmux pane",
+      cmuxProbe.denied_reason === "access-control"
+        ? `daemon autostart suppressed because this proxy is denied by cmux at ${cmuxProbe.socketPath}; ` +
+            "daemon must be spawned from inside a cmux pane"
+        : `cmux is unavailable at ${cmuxProbe.socketPath}; daemon autostart suppressed until a cmux pane can own it`,
     );
   }
 
