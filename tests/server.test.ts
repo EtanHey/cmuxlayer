@@ -9701,6 +9701,8 @@ describe("tool handler integration", () => {
     ["second chooser above the menu", "second_menu"],
     ["menu persists", "menu"],
     ["surface UUID changes", "changed_uuid"],
+    ["surface disappears on a menu key", "surface_gone"],
+    ["submit verification needs fallback after skip", "submit_fallback"],
   ] as const)("spawn_agent skips the reconstructed Codex update menu only when %s follows", async (_name, outcome) => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
@@ -9749,6 +9751,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let pendingBootText = "";
     let bootPromptSubmitted = false;
+    let postSubmitReads = 0;
     let readsAfterFirstLaunch = 0;
     let updateMenuSeen = false;
     let selectedSkipObserved = false;
@@ -9836,6 +9839,9 @@ describe("tool handler integration", () => {
         }
         if (updateMenuSeen && !updateAccepted) {
           updateMenuKeys.push(key);
+          if (outcome === "surface_gone" && key === "down") {
+            throw new Error("surface_not_found: surface:2");
+          }
           if (outcome === "changed_uuid" && key === "down") {
             surfaceUuidChanged = true;
           }
@@ -9893,9 +9899,20 @@ describe("tool handler integration", () => {
                 .replace("  3. Skip until next version", "› 3. Skip until next version")
             : fixture.screens.ready;
         } else if (promptSent) {
-          text = bootPromptSubmitted
-            ? codexSubmittedFrame(pendingBootText)
-            : codexComposerFrame(pendingBootText);
+          if (bootPromptSubmitted) {
+            postSubmitReads += 1;
+            text = outcome === "submit_fallback" && postSubmitReads === 1
+              ? [
+                  "OpenAI Codex",
+                  "Messages to be submitted after next tool call",
+                  `↳ ${pendingBootText.replace(/\s+/g, " ").slice(0, 24)}`,
+                  "» ",
+                  "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+                ].join("\n")
+              : codexSubmittedFrame(pendingBootText);
+          } else {
+            text = codexComposerFrame(pendingBootText);
+          }
         }
         return {
           stdout: JSON.stringify({
@@ -9951,10 +9968,35 @@ describe("tool handler integration", () => {
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
+      if (outcome === "changed_uuid") {
+        expect(parsed.ok).toBe(false);
+        expect(parsed.error).toContain("Stable surface UUID");
+        expect(parsed.error).toContain("refusing terminal I/O");
+        expect(parsed.error_code).not.toBe("blocked_by_update_menu");
+        expect(updateMenuKeys).toEqual(["down"]);
+        expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
+        return;
+      }
+      if (outcome === "submit_fallback") {
+        expect(parsed.boot_prompt_receipt?.submit_evidence).toBe("status_only");
+        expect(parsed.boot_prompt_receipt?.update_menu_skipped).toBe(true);
+        expect(parsed.boot_prompt_receipt?.update_menu_text_hash).toBe(
+          createHash("sha256")
+            .update(fixture.screens.interactive_update)
+            .digest("hex"),
+        );
+      }
+      if (outcome === "surface_gone") {
+        expect(parsed.ok).toBe(false);
+        expect(parsed.error_code).toBe("pane_died");
+        expect(updateMenuKeys).toEqual(["down"]);
+        expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
+        return;
+      }
       if (!parsed.ok) {
         expect(parsed.error_code).toBe("blocked_by_update_menu");
       }
-      if (!["ready", "preamble", "blank_rows", "shell_prompt", "route_moved"].includes(outcome)) {
+      if (!["ready", "preamble", "blank_rows", "shell_prompt", "route_moved", "submit_fallback"].includes(outcome)) {
         expect(parsed.ok).toBe(false);
         expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
         expect(updateMenuKeys.filter((key) => key === "return")).toHaveLength(
@@ -9977,6 +10019,7 @@ describe("tool handler integration", () => {
       expect(launcherSends).toBe(1);
       expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
       expect(bootPromptSubmitted).toBe(true);
+      if (outcome === "submit_fallback") expect(postSubmitReads).toBeGreaterThanOrEqual(3);
       expect(sentKeys.filter((key) => key === "return")).toHaveLength(3);
     } finally {
       if (previousAllowModel === undefined) {
