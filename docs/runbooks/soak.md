@@ -21,7 +21,8 @@ The runner clears inherited pane identity before starting MCP stdio. It writes
 timed JSONL calls and a pass/fail, p50/p95 summary under
 `~/.cmux/agents/<worker-id>/soak/`. Any violation exits 1 while remaining cycles
 continue. It checks boot/send receipts, replies, registry and screen agreement,
-right-column placement, lead inbox, and exact-seat cleanup. The lead ID is used
+full versus immediate `parsed_only` read agreement, right-column placement,
+lead inbox, and exact-seat cleanup. The lead ID is used
 only to inspect halt notices; soak seats have no parent, so their report notices
 do not route to the lead. Preserve failing
 receipts for the owning lane; inspect `summary.violations` before claiming green.
