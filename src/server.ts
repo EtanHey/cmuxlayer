@@ -18121,9 +18121,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return renderListAgentsResponse(cached);
           }
           const live = await engine.runLifecycleMutation(
-            async () => {
-              discovery.invalidate();
-              const discovered = await discovery.scan(true);
+            async (withUnlocked) => {
+              let discovered: DiscoveredAgent[] | null = null;
+              for (let attempt = 0; attempt < 2; attempt += 1) {
+                discovery.invalidate();
+                const revision = engine.lifecycleLockRevision();
+                let observed: DiscoveredAgent[];
+                try {
+                  observed = await withUnlocked(() => discovery.scan(true));
+                } catch (error) {
+                  if (error instanceof SurfaceBindingChangedDuringDiscoveryError) {
+                    // The lock was lent while discovery read the pane. Discard
+                    // that scan and retry from the current surface binding.
+                    continue;
+                  }
+                  throw error;
+                }
+                if (engine.lifecycleLockRevision() === revision + 1) {
+                  discovered = observed;
+                  break;
+                }
+              }
+              if (!discovered) {
+                // Continuous unrelated lifecycle traffic must not turn a
+                // status request into an error. One final scan under the lock
+                // guarantees progress after the bounded unlocked attempts.
+                discovery.invalidate();
+                discovered = await discovery.scan(true);
+              }
               const observedAtMs = Date.now();
               registry.repairFromDiscovery(discovered, {
                 seatRegistry,

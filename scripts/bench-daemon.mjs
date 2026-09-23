@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import {
   chmod,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -1880,6 +1881,10 @@ async function main() {
   const baseEnv = {
     ...process.env,
     HOME: join(tempRoot, "home"),
+    // A worker running the benchmark inside a real cmux pane must not send
+    // its live socket capability to the isolated fake socket.
+    CMUX_SOCKET_CAPABILITY: "",
+    CMUX_SOCKET: "",
     CMUX_AGENT_ID: "",
     CMUX_SURFACE_ID: "",
     CMUX_WORKSPACE_ID: "",
@@ -1955,6 +1960,19 @@ async function main() {
       "daemon",
       fakeSocketTrace,
     );
+    // Later lifecycle stages can fail independently. Keep the read samples
+    // already measured so a failed run can still explain a tail spike.
+    if (process.env.CMUXLAYER_BENCH_JSON_PATH) {
+      const partialPath = join(
+        dirname(resolve(process.env.CMUXLAYER_BENCH_JSON_PATH)),
+        "read-screen-partial.json",
+      );
+      await mkdir(dirname(partialPath), { recursive: true });
+      await writeFile(partialPath, JSON.stringify({
+        baseline: baselineLatency.read_screen_diagnostics,
+        daemon: daemonLatency.read_screen_diagnostics,
+      }, null, 2));
+    }
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
@@ -2302,6 +2320,19 @@ async function main() {
     await new Promise((resolvePromise) =>
       fakeCmuxSocketServer.close(resolvePromise),
     );
+    // Preserve the isolated daemon's phase breadcrumbs even when a benchmark
+    // stage throws; the scratch state is removed immediately below.
+    if (process.env.CMUXLAYER_BENCH_JSON_PATH) {
+      const eventsPath = join(tempRoot, "state", "events.jsonl");
+      if (existsSync(eventsPath)) {
+        const artifactPath = join(
+          dirname(resolve(process.env.CMUXLAYER_BENCH_JSON_PATH)),
+          "events.jsonl",
+        );
+        await mkdir(dirname(artifactPath), { recursive: true });
+        await copyFile(eventsPath, artifactPath);
+      }
+    }
     await rm(tempRoot, { recursive: true, force: true });
     await rm(socketRoot, { recursive: true, force: true });
   }

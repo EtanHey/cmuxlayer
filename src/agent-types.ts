@@ -342,6 +342,22 @@ export interface ControlHealthTelemetryEvent {
   snapshot: unknown;
 }
 
+/** Durable sweep breadcrumb: a start row survives a stalled phase. */
+export interface SweepPhaseTelemetryEvent {
+  ts: string;
+  event_type: "sweep_phase";
+  process_id?: number;
+  sweep_id: number;
+  phase: string;
+  stage: "started" | "completed" | "failed";
+  started_at: string;
+  duration_ms: number | null;
+  agent_count: number;
+  lock_held: boolean;
+  durations_ms?: Record<string, number>;
+  failed_phase?: string;
+}
+
 export interface AgentCliExitEvent {
   ts: string;
   event_type: "agent_cli_exit";
@@ -481,6 +497,7 @@ export type EventLogEntry =
   | StateTransition
   | DeliveryTelemetryEvent
   | ControlHealthTelemetryEvent
+  | SweepPhaseTelemetryEvent
   | AgentCliExitEvent
   | AgentHaltEscalationEvent
   | ResolvedPromptEvent
