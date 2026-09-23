@@ -5,7 +5,7 @@ const controlStates = new Set(["shell", "agent_booting", "ready", "busy", "inter
   "permission_prompt", "composer_dirty", "dead", "stale_surface", "poisoned_registry"]);
 const validProgress = (cycles, minimum, elapsed, duration) =>
   Number.isInteger(cycles) && cycles >= 0 && Number.isInteger(minimum) && minimum > 0 &&
-  cycles <= minimum && Number.isFinite(elapsed) && elapsed >= 0 &&
+  Number.isFinite(elapsed) && elapsed >= 0 &&
   Number.isFinite(duration) && duration >= 0;
 
 export function checkReceipt(receipt, landed = false) {

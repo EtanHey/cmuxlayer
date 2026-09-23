@@ -87,6 +87,27 @@ describe("live soak invariant checkers", () => {
     expect(() => nextSoakDelayMs(1, 0, 0, 60_000)).toThrow();
   });
 
+  it.each([
+    { cycles: 40, elapsedMs: 60 * 60_000, rssEndKb: 100_000 },
+    { cycles: 41, elapsedMs: 60 * 60_000 + 1, rssEndKb: 190_000 },
+    { cycles: 45, elapsedMs: 61 * 60_000 + 30_000, rssEndKb: 100_000 },
+    { cycles: 80, elapsedMs: 75 * 60_000, rssEndKb: 190_000 },
+  ])("accepts a healthy full soak with $cycles cycles after $elapsedMs ms", ({ cycles, elapsedMs, rssEndKb }) => {
+    const minDurationMs = 60 * 60_000;
+    const session = { startPid: 123, endPid: 123, elapsedMs, minDurationMs,
+      minCycles: 40, cyclesCompleted: cycles,
+      healthSamples: Array.from({ length: Math.ceil(elapsedMs / 60_000) + 1 }, () => true),
+      rssStartKb: 100_000, rssEndKb };
+    expect(checkSoakSession(session)).toEqual([]);
+    expect(shouldContinueSoak(cycles, 40, elapsedMs, minDurationMs)).toBe(false);
+    expect(nextSoakDelayMs(cycles, 40, elapsedMs, minDurationMs)).toBe(0);
+    const read = (token_count: number | null) => ({ ok: true, isError: false,
+      parsed: { status: "working", control_state: "busy", token_count } });
+    expect(checkParsedReadAgreement(read(null), read(null), 100)).toEqual([]);
+    expect(checkParsedReadAgreement(read(100), read(100), 100)).toEqual([]);
+    expect(checkPlacement({ column: 1, column_count: 2 })).toEqual([]);
+  });
+
   it("checks one continuous healthy MCP process and bounded RSS growth", () => {
     const healthy = { startPid: 123, endPid: 123, elapsedMs: 60 * 60_000,
       minDurationMs: 60 * 60_000, minCycles: 40, cyclesCompleted: 40,
