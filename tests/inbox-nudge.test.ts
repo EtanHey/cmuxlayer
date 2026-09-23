@@ -43,6 +43,7 @@ import {
   withTestSurfaceObserver,
 } from "./helpers/test-surface-observer.js";
 import { runWithCallerContext } from "../src/caller-context.js";
+import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-inbox-nudge");
@@ -1326,6 +1327,53 @@ describe("report_to_parent hierarchy-bound escalation", () => {
       submit_dispatched: true,
     });
   });
+
+  it("validates G2-G8 recovery receipts with the SDK declared output schemas", async () => {
+    await server.close();
+    const screen = { text: "Claude Code\n❯ " };
+    const baseExec = makeExec(screen.text, "parent-pane", screen,
+      [{ id: childUuid, ref: "surface:child", title: "child-pane", text: "Claude Code\n❯ " }], parentUuid);
+    exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("send-key") && args.includes("return")) throw new Error("lost ack");
+      return baseExec(cmd, args);
+    });
+    server = createInboxServer(exec, inboxDir);
+    const parent = { ...hierarchyRecord({ agentId: "lead-parent", surfaceId: "surface:new",
+      surfaceUuid: parentUuid, parentAgentId: null }), boot_prompt_pending: true,
+      prompt_delivered: false, submit_verified: null };
+    const child = hierarchyRecord({ agentId: "worker-child", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id });
+    register(parent, child);
+    screen.text = `Claude Code\nWorking\n❯ ${bootContractPointer(parent.agent_id,
+      coordinationContractPath(parent.agent_id, { baseDir: inboxDir }))}`;
+    const tool = server._registeredTools.report_to_parent;
+    const result = await runWithCallerContext({ surfaceId: childUuid }, () =>
+      tool.handler({ blocker: "Boot receipt needs verification" }, {}));
+    expect(result.structuredContent).toMatchObject({ ok: true, delivery: "pending_verify",
+      delivery_id: expect.any(String), route: "direct", durable: true });
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return"))).toHaveLength(1);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(result.structuredContent?.delivery_id))
+      .toMatchObject({ boot_recovery: true, delivery_state: "pending_verify" });
+    await expect(server.validateToolOutput(tool, result, "report_to_parent")).resolves.toBeUndefined();
+    const pending = { delivery_id: "receipt-1", delivery_state: "pending_verify",
+      submit_verified: null, boot_recovery: true, boot_instance_id: "boot-1" };
+    const base = { ok: true, retry_count: 0 };
+    const cases = [
+      ["send_to", { ...base, delivery: "pending_verify", ...pending, boot_prompt_receipt: pending }],
+      ["spawn_agent", { ...base, spawn_state: "boot_unsubmitted", boot_prompt_receipt: pending }],
+      ["wait_for", { ...base, ...pending }],
+    ] as const;
+    for (const [name, structuredContent] of cases) {
+      const candidate = server._registeredTools[name];
+      expect(candidate.outputSchema, name).toBeDefined();
+      await expect(server.validateToolOutput(candidate,
+        { content: [{ type: "text", text: name }], structuredContent }, name)).resolves.toBeUndefined();
+    }
+    // The SDK bypasses output validation for error results; interact has no declared output schema.
+    await expect(server.validateToolOutput(server._registeredTools.send_to,
+      { isError: true, content: [], structuredContent: { ok: false, retry_count: 0,
+        error_code: "owned_boot_contract_pending", ...pending } }, "send_to")).resolves.toBeUndefined();
+    expect(server._registeredTools.interact.outputSchema).toBeUndefined();
+  }, 15_000);
 
   it("keeps a parent blocker durable and escalates past a foreign draft", async () => {
     await server.close();
