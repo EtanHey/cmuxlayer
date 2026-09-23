@@ -400,8 +400,12 @@ export async function startInProcessRuntime(
 
   ensureNodeMaxOldSpaceEnv();
   installHeapGuard();
-  const client = await createCmuxClient();
   const runtimeEnv = opts.env ?? process.env;
+  const client = await createCmuxClient({
+    socketPath: runtimeEnv.CMUX_SOCKET_PATH,
+    capability: runtimeEnv.CMUX_SOCKET_CAPABILITY,
+    env: runtimeEnv,
+  });
   const explicitStateDir = runtimeEnv.CMUXLAYER_STATE_DIR?.trim();
   const rawReportWatchDeadlineMs =
     runtimeEnv.CMUXLAYER_REPORT_WATCH_DEADLINE_MS?.trim();
@@ -540,7 +544,7 @@ export async function runDaemonFirstEntry(
     logger.error(`[cmuxlayer] WARNING: ${warning}`);
     return {
       mode: "in-process",
-      server: await startInProcess({ fallbackWarnings: [warning] }),
+      server: await startInProcess({ fallbackWarnings: [warning], env }),
       fallbackWarnings: [warning],
     };
   };

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const captured = vi.hoisted(() => ({
   options: null as Record<string, unknown> | null,
@@ -30,6 +30,7 @@ vi.mock("../src/self-registration.js", () => ({
 }));
 
 import { startInProcessRuntime } from "../src/entry.js";
+import { createCmuxClient } from "../src/cmux-client-factory.js";
 import {
   defaultWatchRegistryPath,
   httpNotifyWatch,
@@ -38,6 +39,27 @@ import {
 describe("in-process WatchSpec production wiring", () => {
   beforeEach(() => {
     captured.options = null;
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("REG1b pins the fallback client to the injected socket and capability", async () => {
+    vi.stubEnv("CMUX_SOCKET_PATH", "/tmp/reg1b-instance-b.sock");
+    vi.stubEnv("CMUX_SOCKET_CAPABILITY", "instance-b-token");
+
+    await startInProcessRuntime({
+      env: {
+        CMUX_SOCKET_PATH: "/tmp/reg1b-instance-a.sock",
+        CMUX_SOCKET_CAPABILITY: "instance-a-token",
+      },
+    });
+
+    expect(createCmuxClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        socketPath: "/tmp/reg1b-instance-a.sock",
+        capability: "instance-a-token",
+      }),
+    );
   });
 
   it("passes the production watch registry and notifier into createServer", async () => {
