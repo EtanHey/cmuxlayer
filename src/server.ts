@@ -3426,6 +3426,16 @@ function composerHoldsForeignDraft(
   submittedText: string,
   options?: { cli?: CliType; exact?: boolean },
 ): boolean {
+  const cli = options?.cli ?? inferComposerCli(screenText);
+  // A selected permission option resembles a non-empty Claude composer line.
+  // Let the menu classifier own it, including the exact Return guard.
+  if (
+    cli === "claude" &&
+    /(?:^|\n)\s*[>❯›]\s+\d+\.\s+\S/m.test(screenText) &&
+    isPickerOrMenuScreen(screenText, cli)
+  ) {
+    return false;
+  }
   // AIDEV-NOTE (T2 #442): Cursor text sends are exempt. Its composer RETAINS
   // the accepted text after a submit (the "retained composer" state #441/#449
   // built evidence rules around), so a non-empty Cursor composer is the normal
@@ -3433,7 +3443,7 @@ function composerHoldsForeignDraft(
   // distinguishes the two. Guarding it would refuse every legitimate second
   // send to a Cursor pane. Claude and Codex clear on submit, so there a
   // non-empty composer really does mean somebody's text is sitting unsent.
-  if (!options?.exact && (options?.cli ?? inferComposerCli(screenText)) === "cursor") {
+  if (!options?.exact && cli === "cursor") {
     return false;
   }
   // No recognisable composer prompt line (bare shell, unreadable frame). The

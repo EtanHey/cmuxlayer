@@ -1,0 +1,7 @@
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Opus 5.5 (1M context) with high effort · Claude Max
+  ▝▝ ▝▝    ~/project
+
+                                                                                         0 tokens
+❯ 
+  ⎇ main | 🔧 13

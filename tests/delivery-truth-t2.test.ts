@@ -167,6 +167,40 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
+  it("lets key Return confirm a Claude permission menu after key Down", async () => {
+    const { createServer, createServerContext, __submitEvidenceTestHooks } = await loadServerModule();
+    let screen = "Claude Code\n❯ ";
+    const exec = makeLifecycleExec(() => screen);
+    const context = createServerContext({
+      exec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    try {
+      const server = createServer({ context }) as any;
+      await spawnReadyAgent(server);
+      const sendKey = (key: string) => server._registeredTools.send_to.handler(
+        { mode: "key", surface: "surface:new", text: key, verify_submit: false },
+        {},
+      );
+      screen = readFileSync(new URL("./fixtures/a3-claude/permission_menu_yes.txt", import.meta.url), "utf8");
+      exec.mockClear();
+      const down = parseToolResult(await sendKey("down"));
+      expect(down.key_dispatched, JSON.stringify(down)).toBe(true);
+      screen = readFileSync(new URL("./fixtures/a3-claude/permission_menu_no.txt", import.meta.url), "utf8");
+      expect(__submitEvidenceTestHooks.composerHoldsForeignDraft(screen, "", { cli: "claude", exact: true })).toBe(false);
+      exec.mockClear();
+      const confirmed = parseToolResult(await sendKey("return"));
+      expect(confirmed.error_code, JSON.stringify(confirmed)).not.toBe("blocked_by_foreign_draft");
+      expect(confirmed.key_dispatched, JSON.stringify(confirmed)).toBe(true);
+      expect(exec.mock.calls.some(([, args]: [string, string[]]) =>
+        args.includes("send-key") && args.includes("return"))).toBe(true);
+    } finally {
+      context.dispose();
+    }
+  });
+
   it("lets key Return act on an owned Codex queue below scrollback with a wrapped heading", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screen = "OpenAI Codex\n› Ask Codex to do anything";
@@ -278,7 +312,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
   });
 
   it.each([
-    // Captured read-only from surface:1144, 2026-09-15; scrollback falsely infers Claude.
+    // Captured read-only from surface:1144, 2026-09-15; Codex footer below composer wins over quoted Claude text.
     { cli: "codex", live: true, frame: readFileSync(new URL("../docs/fixtures/issue-645-codex-frame.txt", import.meta.url), "utf8") },
     { cli: "codex", frame: "› Ask Codex to do anything" },
     { cli: "codex", frame: "› Ask Codex to do anything\n\n  esc again to edit previous message" },
@@ -286,7 +320,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
   ] as const)("#645 shares placeholder classification for text and Return ($cli, $frame)", async (specimen) => {
     const { cli, frame } = specimen;
     const live = "live" in specimen;
-    if (live) expect((await import("../src/screen-parser.js")).parseScreen(frame).agent_type).toBe("claude");
+    if (live) expect((await import("../src/screen-parser.js")).parseScreen(frame).agent_type).toBe("codex");
     const { createServer, createServerContext } = await loadServerModule();
     let screen = cli === "codex" ? "› " : "Claude Code\n❯ ";
     const surfaceUuid = live ? "D9793BD9-0509-4884-B3D4-5C27BD2D8F57" : undefined;
