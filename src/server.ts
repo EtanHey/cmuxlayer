@@ -2006,6 +2006,28 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === PLACEMENT_WORKSPACE_UNRESOLVED
       ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
       : {};
+  const placementTimeoutExtra =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "placement_timeout"
+      ? { error_code: "placement_timeout", retryable: true }
+      : {};
+  const placementPendingExtra =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "placement_pending"
+      ? {
+          error_code: "placement_pending",
+          retryable: true,
+          ...("remainingMs" in error &&
+          typeof error.remainingMs === "number" &&
+          Number.isFinite(error.remainingMs)
+            ? { remaining_ms: error.remainingMs }
+            : {}),
+        }
+      : {};
   // #529: the bounded lifecycle timeouts carry a `code` that must reach the
   // tool payload, or automated callers see only free text and cannot tell a
   // bounded control-plane wait from any other failure. Both are retryable.
@@ -2086,6 +2108,8 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
+    ...placementTimeoutExtra,
+    ...placementPendingExtra,
     ...lifecycleTimeoutExtra,
     ...cmuxUnavailableExtra,
     ...readinessExtra,
@@ -15068,13 +15092,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
+        // Compaction can temporarily render Codex's ready footer while the
+        // queued message still belongs to the active turn's next tool call.
+        const compactingCodexQueue =
+          cli === "codex" &&
+          /(?:^|\n)\s*[•·]\s*Context compacted\s*[·•]\s*\d+s\b/i.test(
+            resolvedSnapshot.text.slice(-4096),
+          );
+        const parsed = resolvedSnapshot.parsed as ParsedScreenResult | undefined;
+        const queuedReady = parsed?.control_state === "ready" && parsed.status === "idle";
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
           return {
             outcome: "pending" as const,
-            ...(queued &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.control_state === "ready" &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.status === "idle"
-              ? { reason: "queued_idle" }
+            ...(queued
+              ? {
+                  reason: compactingCodexQueue
+                    ? queuedReady
+                      ? "queued_compaction_idle"
+                      : "queued_compaction_busy"
+                    : queuedReady
+                      ? "queued_idle"
+                      : undefined,
+                }
               : {}),
           };
         }
@@ -15143,7 +15182,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
+      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
       {
         version: z
           .literal(1)
@@ -15217,7 +15256,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .positive()
           .optional()
           .describe(
-            "Optional timeout override in milliseconds for initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (10s shell, 15s launch, 60s boot prompt).",
+            "Optional timeout override in milliseconds for pane placement, initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (45s placement, 10s shell, 15s launch, 60s boot prompt).",
           ),
         workspace: z
           .string()

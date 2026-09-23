@@ -27,6 +27,7 @@ const PARALLEL_STRESS_COUNT = 10;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
 const READ_SCREEN_P50_BUDGET_MS = 250;
+const PAIRED_CONTROL_HOLD_MS = 1;
 const LOCAL_HARD_GATES = process.env.CMUXLAYER_BENCH_LOCAL_GATE === "1";
 let JsonRpcLineBuffer;
 
@@ -46,6 +47,59 @@ const rounds = parsePositiveInt(
 
 function nowMs() {
   return Number(process.hrtime.bigint()) / 1_000_000;
+}
+
+function measureFakeCmuxPing(socketPath) {
+  const startedAt = nowMs();
+  return new Promise((resolvePromise, reject) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    let buffer = "";
+    const settle = (error, result) => {
+      if (settled) return;
+      settled = true;
+      socket.removeAllListeners();
+      socket.on("error", () => {});
+      socket.destroy();
+      if (error) reject(error);
+      else resolvePromise(result);
+    };
+    socket.setTimeout(30_000, () => settle(new Error("paired fake-socket ping timed out")));
+    socket.once("error", (error) => settle(error));
+    socket.once("connect", () => {
+      socket.write(`${JSON.stringify({ id: 1, method: "system.ping", params: { delay_ms: PAIRED_CONTROL_HOLD_MS } })}\n`);
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      const end = buffer.indexOf("\n");
+      if (end < 0) return;
+      try {
+        const response = JSON.parse(buffer.slice(0, end));
+        if (response.id !== 1 || response.ok !== true || response.result?.pong !== true) {
+          throw new Error("paired fake-socket ping returned an invalid receipt");
+        }
+        const timer = response.result;
+        if (
+          !Number.isFinite(timer.timer_started_at_ms) ||
+          !Number.isFinite(timer.timer_due_at_ms) ||
+          !Number.isFinite(timer.timer_fired_at_ms) ||
+          !Number.isFinite(timer.timer_overrun_ms)
+        ) {
+          throw new Error("paired fake-socket ping omitted timer proof");
+        }
+        settle(null, {
+          started_at_ms: startedAt,
+          total_ms: round(nowMs() - startedAt),
+          timer_started_at_ms: timer.timer_started_at_ms,
+          timer_due_at_ms: timer.timer_due_at_ms,
+          timer_fired_at_ms: timer.timer_fired_at_ms,
+          timer_overrun_ms: timer.timer_overrun_ms,
+        });
+      } catch (error) {
+        settle(error);
+      }
+    });
+  });
 }
 
 function percentile(samples, pct) {
@@ -400,6 +454,7 @@ const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   id: "00000000-0000-4000-8000-" + String(index).padStart(12, "0"),
   title: "bench-agent-" + index,
   type: "terminal",
+  pane_ref: "pane:bench",
   index,
   selected: index === 0,
   current_directory: cwd
@@ -408,6 +463,8 @@ const spawnedSurfaces = state.spawnedSurfaces || [];
 const surfaces = baseSurfaces.concat(spawnedSurfaces
   .filter((surface) => !surface.closed)
   .map((surface, index) => ({ ...surface, type: "terminal", index: surfaceCount + index, selected: false, current_directory: cwd })));
+const rightSurfaces = surfaces.filter((surface) => surface.pane_ref === "pane:bench-right");
+const leftSurfaces = surfaces.filter((surface) => surface.pane_ref !== "pane:bench-right");
 function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
@@ -416,16 +473,20 @@ if (command === "list-workspaces") {
 } else if (command === "list-windows") {
   write({ windows: [{ ref: "window:bench", title: "Bench", index: 0, selected: true, workspace_refs: ["workspace:bench"] }] });
 } else if (command === "list-panes") {
-  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", panes: [{ ref: "pane:bench", index: 0, focused: true, surface_count: surfaces.length, surface_refs: surfaces.map((surface) => surface.ref), surface_ids: surfaces.map((surface) => surface.id), selected_surface_ref: surfaces[0].ref, current_directory: cwd }] });
+  const panes = [{ ref: "pane:bench", index: 0, focused: true, surface_count: leftSurfaces.length, surface_refs: leftSurfaces.map((surface) => surface.ref), surface_ids: leftSurfaces.map((surface) => surface.id), selected_surface_ref: leftSurfaces[0].ref, pixel_frame: { x: 0, y: 0, width: 500, height: 900 }, current_directory: cwd }];
+  if (rightSurfaces.length) panes.push({ ref: "pane:bench-right", index: 1, focused: false, surface_count: rightSurfaces.length, surface_refs: rightSurfaces.map((surface) => surface.ref), surface_ids: rightSurfaces.map((surface) => surface.id), selected_surface_ref: rightSurfaces[0].ref, pixel_frame: { x: 500, y: 0, width: 500, height: 900 }, current_directory: cwd });
+  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", panes });
 } else if (command === "list-pane-surfaces") {
-  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: "pane:bench", surfaces });
-} else if (command === "new-split") {
+  const pane = optionValue("--pane", "");
+  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: pane || "pane:bench", surfaces: pane === "pane:bench-right" ? rightSurfaces : pane === "pane:bench" ? leftSurfaces : surfaces });
+} else if (command === "new-split" || command === "new-surface") {
   const spawnSequence = (state.spawnSequence || 0) + 1;
   const primary = !spawnedSurfaces.some((surface) => surface.primary && !surface.closed);
-  const surface = { ref: spawnedRef(spawnSequence), id: spawnedId(spawnSequence), title: primary ? state.title || "bench-spawn" : "bench-extra", primary, runtimeReady: false, closed: false };
+  const pane = command === "new-split" ? "pane:bench-right" : optionValue("--pane", "pane:bench");
+  const surface = { ref: spawnedRef(spawnSequence), id: spawnedId(spawnSequence), title: primary ? state.title || "bench-spawn" : "bench-extra", pane_ref: pane, primary, runtimeReady: false, closed: false };
   writeState({ ...state, spawnSequence, spawnedSurfaces: [...spawnedSurfaces, surface] });
   writeSurfaceState(surface.ref, { composer: "", transcript: "" });
-  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: surface.ref, surface_id: surface.id, title: surface.title, type: "terminal" });
+  write({ workspace_ref: "workspace:bench", pane_ref: pane, surface_ref: surface.ref, surface_id: surface.id, title: surface.title, type: "terminal" });
 } else if (command === "close-surface") {
   const target = optionValue("--surface", "");
   writeState({ ...state, spawnedSurfaces: spawnedSurfaces.map((surface) => [surface.ref, surface.id].includes(target) ? { ...surface, closed: true } : surface) });
@@ -590,6 +651,27 @@ async function handleFakeCmuxSocketLine(
   }
   const request = JSON.parse(line);
   const params = request.params ?? {};
+  // Keep the runner control independent of fake-state I/O and topology work.
+  // It measures only this event loop's timer overrun, with server timestamps.
+  if (request.method === "system.ping" && params.delay_ms === PAIRED_CONTROL_HOLD_MS) {
+    const timerStartedAt = nowMs();
+    const timerDueAt = timerStartedAt + PAIRED_CONTROL_HOLD_MS;
+    setTimeout(() => {
+      const timerFiredAt = nowMs();
+      socket.write(`${JSON.stringify({
+        id: request.id,
+        ok: true,
+        result: {
+          pong: true,
+          timer_started_at_ms: timerStartedAt,
+          timer_due_at_ms: timerDueAt,
+          timer_fired_at_ms: timerFiredAt,
+          timer_overrun_ms: Math.max(0, timerFiredAt - timerDueAt),
+        },
+      })}\n`);
+    }, PAIRED_CONTROL_HOLD_MS);
+    return;
+  }
   const requestStartedAt = nowMs();
   const state = await readFakeState(statePath);
   const stateReadMs = nowMs() - requestStartedAt;
@@ -599,6 +681,7 @@ async function handleFakeCmuxSocketLine(
     id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
     title: `bench-agent-${index}`,
     type: "terminal",
+    pane_ref: "pane:bench",
     index,
     selected: index === 0,
     current_directory: cwd,
@@ -614,6 +697,8 @@ async function handleFakeCmuxSocketLine(
       current_directory: cwd,
     })),
   ];
+  const rightSurfaces = surfaces.filter((surface) => surface.pane_ref === "pane:bench-right");
+  const leftSurfaces = surfaces.filter((surface) => surface.pane_ref !== "pane:bench-right");
   const layout = {
     workspace_ref: "workspace:bench",
     window_ref: "window:bench",
@@ -671,12 +756,24 @@ async function handleFakeCmuxSocketLine(
             ref: "pane:bench",
             index: 0,
             focused: true,
-            surface_count: surfaces.length,
-            surface_refs: surfaces.map((surface) => surface.ref),
-            surface_ids: surfaces.map((surface) => surface.id),
-            selected_surface_ref: surfaces[0]?.ref,
+            surface_count: leftSurfaces.length,
+            surface_refs: leftSurfaces.map((surface) => surface.ref),
+            surface_ids: leftSurfaces.map((surface) => surface.id),
+            selected_surface_ref: leftSurfaces[0]?.ref,
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
             current_directory: cwd,
           },
+          ...(rightSurfaces.length ? [{
+            ref: "pane:bench-right",
+            index: 1,
+            focused: false,
+            surface_count: rightSurfaces.length,
+            surface_refs: rightSurfaces.map((surface) => surface.ref),
+            surface_ids: rightSurfaces.map((surface) => surface.id),
+            selected_surface_ref: rightSurfaces[0]?.ref,
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+            current_directory: cwd,
+          }] : []),
         ],
       };
       break;
@@ -708,6 +805,7 @@ async function handleFakeCmuxSocketLine(
           ref: spawnedSurfaceRef(spawnSequence),
           id: spawnedSurfaceId(spawnSequence),
           title: primary ? current.title ?? "bench-spawn" : "bench-extra",
+          pane_ref: "pane:bench-right",
           primary,
           runtimeReady: false,
           closed: false,
@@ -718,6 +816,7 @@ async function handleFakeCmuxSocketLine(
       surfaceStates.delete(surface.ref);
       result = {
         ...layout,
+        pane_ref: "pane:bench-right",
         surface_ref: surface.ref,
         surface_id: surface.id,
         title: surface.title,
@@ -1193,6 +1292,7 @@ function summarizeSendSampleDiagnostics(samples, field) {
         submit_evidence: receipt.submit_evidence ?? null,
         delivery_state: receipt.delivery_state ?? null,
         timings_ms: receipt.timings_ms ?? null,
+        paired_control_ms: send.paired_control?.control_elapsed_ms ?? null,
         ...(field === "surface"
           ? {
               wait_for_delivery_state: send.wait_for?.delivery_state ?? null,
@@ -1208,10 +1308,23 @@ function summarizeSendSampleDiagnostics(samples, field) {
   };
 }
 
+function pairedControlSamples(samples, field) {
+  return {
+    kind: "fake_socket_timed_ping",
+    samples: samples.map((sample, sample_index) => ({
+      sample_index,
+      send_elapsed_ms: sample[field].elapsed_ms,
+      ...sample[field].paired_control,
+    })),
+  };
+}
+
 async function measureSpawnLifecycleOnce(
   client,
   sweepHoldState,
   sampleIndex,
+  fakeCmuxSocketPath,
+  pendingControls,
 ) {
   const spawnResult = toolData(
     await client.callTool(
@@ -1253,9 +1366,16 @@ async function measureSpawnLifecycleOnce(
       requireSubmitted = true,
       canonicalText,
       validateReceipt,
+      pairedControl = false,
     } = {},
   ) => {
     const startedAt = nowMs();
+    const controlPromise = pairedControl
+      ? measureFakeCmuxPing(fakeCmuxSocketPath).then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        )
+      : null;
     // Receipt diagnostics are benchmark instrumentation, not workload input.
     // Keep canonical request bytes/hashes based on args while opting into the
     // timing, terminal, and transport fields the benchmark validates below.
@@ -1268,10 +1388,13 @@ async function measureSpawnLifecycleOnce(
       requireTerminalSubmission(receipt, `${args.mode} send`);
     }
     await validateReceipt?.(receipt);
-    return {
-      elapsed_ms: round(nowMs() - startedAt),
+    const completedAt = nowMs();
+    const elapsedMs = round(completedAt - startedAt);
+    const proofElapsedMs = round(completedAt - startedAt - toolElapsedMs);
+    const sendSample = {
+      elapsed_ms: elapsedMs,
       tool_elapsed_ms: round(toolElapsedMs),
-      proof_elapsed_ms: round(nowMs() - startedAt - toolElapsedMs),
+      proof_elapsed_ms: proofElapsedMs,
       request_bytes: requestBytes("send_to", args),
       request_sha256: requestSha256("send_to", {
         ...args,
@@ -1290,6 +1413,34 @@ async function measureSpawnLifecycleOnce(
       transport: receipt.transport,
       receipt,
     };
+    if (controlPromise) {
+      // Resolve telemetry after the entire canonical lifecycle workload. A
+      // control never inserts a wait between first, warm, or surface sends.
+      pendingControls.push(controlPromise.then((outcome) => {
+        const control = outcome.value;
+        sendSample.paired_control = control ? {
+          control_elapsed_ms: round(Math.max(0,
+            Math.min(control.timer_fired_at_ms, completedAt) -
+            Math.max(control.timer_due_at_ms, startedAt))),
+          control_total_ms: control.total_ms,
+          control_hold_ms: PAIRED_CONTROL_HOLD_MS,
+          control_transport: "socket",
+          send_started_at_ms: startedAt,
+          send_completed_at_ms: completedAt,
+          control_timer_started_at_ms: control.timer_started_at_ms,
+          control_timer_due_at_ms: control.timer_due_at_ms,
+          control_timer_fired_at_ms: control.timer_fired_at_ms,
+          control_timer_overrun_ms: control.timer_overrun_ms,
+        } : {
+          control_elapsed_ms: null,
+          control_transport: "unavailable",
+          error: outcome.error instanceof Error
+            ? outcome.error.message
+            : String(outcome.error),
+        };
+      }));
+    }
+    return sendSample;
   };
 
   // The daemon sweep acknowledges this unique token only after it owns the
@@ -1304,7 +1455,7 @@ async function measureSpawnLifecycleOnce(
       text: "Read and follow docs.local/scratch/run5r3/bench-first-send.md",
       press_enter: true,
     },
-    { normalizeAgentId: true },
+    { normalizeAgentId: true, pairedControl: true },
   );
   await writeFile(
     sweepHoldState,
@@ -1318,7 +1469,7 @@ async function measureSpawnLifecycleOnce(
       text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
       press_enter: true,
     },
-    { normalizeAgentId: true },
+    { normalizeAgentId: true, pairedControl: true },
   );
   const surfaceArgs = {
     mode: "surface",
@@ -1530,29 +1681,37 @@ async function measureLiveListAgentsAcrossClients(clients) {
 async function measureSpawnLifecycleAcrossClients(
   clients,
   sweepHoldState,
+  fakeCmuxSocketPath,
 ) {
   const samples = [];
+  const pendingControls = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     for (const [clientIndex, client] of clients.entries()) {
       const sampleIndex = roundIndex * clients.length + clientIndex;
       samples.push(
-        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex),
+        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex, fakeCmuxSocketPath, pendingControls),
       );
     }
   }
+  await Promise.all(pendingControls);
   return {
     first: samples[0].first,
     second: samples[0].second,
     surface: samples[0].surface,
     spawn_close_sample: samples[0].spawn_close_during_sweep,
-    sampled: summarizeTimedSamples(samples.map((sample) => sample.first)),
-    send_to_agent_warm: summarizeTimedSamples(
-      samples.map((sample) => sample.second),
-    ),
+    sampled: {
+      ...summarizeTimedSamples(samples.map((sample) => sample.first)),
+      paired_control: pairedControlSamples(samples, "first"),
+    },
+    send_to_agent_warm: {
+      ...summarizeTimedSamples(samples.map((sample) => sample.second)),
+      paired_control: pairedControlSamples(samples, "second"),
+    },
     send_to_surface_warm: summarizeTimedSamples(
       samples.map((sample) => sample.surface),
     ),
     sample_diagnostics: {
+      first_send_after_spawn: summarizeSendSampleDiagnostics(samples, "first"),
       send_to_agent_warm: summarizeSendSampleDiagnostics(samples, "second"),
       send_to_surface_warm: summarizeSendSampleDiagnostics(samples, "surface"),
     },
@@ -1789,6 +1948,7 @@ async function main() {
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
+      missingCmuxSocket,
     );
     const listAgents = await measureLiveListAgentsAcrossClients(daemonClients);
     const controlHealth = await measureWarmToolAcrossClients(
@@ -2138,6 +2298,7 @@ async function main() {
 }
 
 export {
+  measureFakeCmuxPing,
   measureLatency,
   startFakeCmuxSocket,
   summarizeReadDiagnostics,

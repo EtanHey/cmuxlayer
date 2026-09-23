@@ -7,7 +7,23 @@ import { CmuxSocketClient } from "../src/cmux-socket-client.js";
 import { CmuxClient } from "../src/cmux-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
 import { initializeNewSurfaceRuntime } from "../src/surface-runtime.js";
-import { startFakeCmuxSocket, writeFakeCmux } from "../scripts/bench-daemon.mjs";
+import { measureFakeCmuxPing, startFakeCmuxSocket, writeFakeCmux } from "../scripts/bench-daemon.mjs";
+
+it("reports actual fake-socket timer overrun without counting connection time", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-control-"));
+  const server = await startFakeCmuxSocket(join(root, "cmux.sock"), join(root, "state.json"), 10);
+  try {
+    const ping = await measureFakeCmuxPing(join(root, "cmux.sock"));
+    expect(ping.total_ms).toBeGreaterThanOrEqual(1);
+    expect(ping.timer_due_at_ms - ping.timer_started_at_ms).toBe(1);
+    expect(ping.timer_overrun_ms).toBeCloseTo(
+      Math.max(0, ping.timer_fired_at_ms - ping.timer_due_at_ms), 5);
+    expect(ping.started_at_ms).toBeGreaterThan(0);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it("realizes each fake split surface on input demand", async () => {
   const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-fixture-"));
@@ -33,11 +49,17 @@ it("realizes each fake split surface on input demand", async () => {
       expect(refs.has(split.surface)).toBe(false);
       refs.add(split.surface);
       expect(split.surface.length).toBe("surface:bench-spawn".length);
+      const panes = (await client.listPanes({ workspace: split.workspace })).panes;
+      expect(panes).toHaveLength(2);
+      expect(new Set(panes.map((pane) => pane.pixel_frame?.x)).size).toBe(2);
+      expect(panes.find((pane) => pane.ref === split.pane)?.surface_refs).toContain(split.surface);
+      expect(panes.find((pane) => pane.ref === "pane:bench")?.surface_refs).not.toContain(split.surface);
       expect(await initializeNewSurfaceRuntime({
         listTerminalMetadata: metadata,
         sendKey: (surface, key, opts) => client.sendKey(surface, key, opts),
       }, split.surface, split.workspace, 500, undefined, split.surface_id)).toBe("input_demand");
       await client.closeSurface(split.surface, { workspace: split.workspace });
+      expect((await client.listPanes({ workspace: split.workspace })).panes).toHaveLength(1);
     }
   } finally {
     client.disconnect();
@@ -129,6 +151,12 @@ it("realizes the fake split surface through the CLI fallback", async () => {
   });
   try {
     const split = await client.newSplit("right", { workspace: "workspace:bench" });
+    const panes = (await client.listPanes({ workspace: split.workspace })).panes;
+    expect(panes).toHaveLength(2);
+    expect(new Set(panes.map((pane) => pane.pixel_frame?.x)).size).toBe(2);
+    expect(panes.find((pane) => pane.ref === split.pane)?.surface_refs).toContain(split.surface);
+    expect((await client.listPaneSurfaces({ workspace: split.workspace, pane: split.pane })).surfaces)
+      .toContainEqual(expect.objectContaining({ ref: split.surface, id: split.surface_id }));
     expect(await initializeNewSurfaceRuntime(client, split.surface, split.workspace, 500, undefined, split.surface_id))
       .toBe("input_demand");
   } finally {

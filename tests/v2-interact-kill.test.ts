@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
@@ -50,7 +51,7 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
           surfaceRef: "surface:post-close-witness",
           title: "witness-pane",
         };
-  return vi.fn().mockImplementation(async (_cmd, args) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-windows")) {
       return {
         stdout: JSON.stringify({
@@ -155,7 +156,7 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       }),
       stderr: "",
     };
-  });
+  }));
 }
 
 function makeSharedPaneExec(): ExecFn {
@@ -172,7 +173,7 @@ function makeSharedPaneExec(): ExecFn {
           surfaceRefs: ["surface:post-close-witness"],
           title: "witness-pane",
         };
-  return vi.fn().mockImplementation(async (_cmd, args) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-windows")) {
       return {
         stdout: JSON.stringify({
@@ -256,7 +257,7 @@ function makeSharedPaneExec(): ExecFn {
       };
     }
     return { stdout: JSON.stringify({}), stderr: "" };
-  });
+  }));
 }
 
 function makeAgentRecord(overrides: Partial<AgentRecord>): AgentRecord {

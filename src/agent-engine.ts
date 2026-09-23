@@ -340,6 +340,10 @@ export interface AgentDeliveryReceipt {
   verify_miss_count?: number;
   /** Consecutive reads with this queued payload still visible on an idle target. */
   queue_idle_observations?: number;
+  /** First verified idle observation for this queued payload; survives verifier restarts. */
+  queue_idle_since_at?: string | null;
+  /** First visible compaction marker for this queued payload; bounds the idle grace. */
+  queue_compaction_seen_at?: string | null;
   /** Last time background verify actually read the target surface. */
   verify_last_attempt_at?: string | null;
   /** A nonterminal retry stall that now requires a human to inspect the pane. */
@@ -367,6 +371,9 @@ function snapshotDeliveryReceipt(
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
 export const DEFAULT_DELIVERY_QUEUE_DEADLINE_MS = 10 * 60 * 1000;
 export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
+// Two 5-second sweeps can coincide with a transient Codex compaction pause.
+const DELIVERY_QUEUED_IDLE_MIN_MS = 15_000;
+const DELIVERY_COMPACTION_GRACE_MS = 30_000;
 export const DELIVERY_UNCHANGED_SCREEN_ATTENTION_ATTEMPTS = 3;
 const DELIVERY_WAIT_POLL_MS = 100;
 
@@ -1071,6 +1078,18 @@ interface SweepMutationSkipAccounting {
 
 class PlacementSurfaceBindingError extends Error {}
 
+class PlacementTimeoutError extends PlacementSurfaceBindingError {
+  readonly code = "placement_timeout";
+}
+
+class PlacementPendingError extends PlacementSurfaceBindingError {
+  readonly code = "placement_pending";
+
+  constructor(message: string, readonly remainingMs: number) {
+    super(message);
+  }
+}
+
 interface StopPostConditionResult {
   processGone: boolean;
   surfaceGone: boolean;
@@ -1141,6 +1160,11 @@ function parsePositiveInteger(
  */
 export const DEFAULT_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS = 45_000;
 export const DEFAULT_LIFECYCLE_LOCK_HOLD_TIMEOUT_MS = 120_000;
+const DEFAULT_SPAWN_PLACEMENT_TIMEOUT_MS = 60_000;
+const SPAWN_PLACEMENT_OBSERVE_INTERVAL_MS = 50;
+// Both the socket RPC and CLI fallback default to a 10s command timeout.
+// An unknown newSplit outcome must retain its guard for at least this long.
+const UNKNOWN_SPLIT_RPC_TIMEOUT_MS = 10_000;
 
 export interface LifecycleLockTimeoutRecord {
   holder: string | null;
@@ -1802,6 +1826,15 @@ export class AgentEngine {
   private fleetWorkingNoProgressTimeoutMs: number;
   private startupInitializePromise: Promise<void> | null = null;
   private lifecycleMutationTail: Promise<void> = Promise.resolve();
+  /** Serialize placement decisions and topology mutations within one workspace. */
+  private placementTails = new Map<string, Promise<void>>();
+  /** A split returned by cmux must be visible before the next placement reads topology. */
+  private pendingPlacementSplits = new Map<
+    string,
+    { pane: string; surface: string; surfaceId?: string; uncertain?: boolean;
+      unknownStartedAt?: number; settleWindowMs?: number }
+  >();
+  private placementSplitInFlight = new Set<string>();
   private readonly lifecycleLockAcquireTimeoutMs: number;
   private readonly lifecycleLockHoldTimeoutMs: number;
   private lifecycleLockHolder: string | null = null;
@@ -2948,6 +2981,7 @@ export class AgentEngine {
       repo?: string;
       worktree?: boolean;
       focus?: boolean;
+      placementTimeoutMs?: number;
     },
   ): Promise<CreatedAgentSurface> {
     const observerEpoch = this.captureSurfaceObserverEpoch();
@@ -2986,8 +3020,29 @@ export class AgentEngine {
       this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
     }
 
+    const placementWorkspace = workspace
+      ? normalizeWorkspaceRefAlias(workspace)
+      : "<focused-workspace>";
+    const placementBudgetMs = Math.min(
+        context?.placementTimeoutMs ?? DEFAULT_SPAWN_PLACEMENT_TIMEOUT_MS,
+        DEFAULT_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS,
+      );
+    const placementDeadline = Date.now() + placementBudgetMs;
+    const unknownSplitSettleWindowMs = Math.max(
+      UNKNOWN_SPLIT_RPC_TIMEOUT_MS, placementBudgetMs,
+    );
+    return this.withPlacementLock(placementWorkspace, placementDeadline, async (assertActive) => {
+      const observedPriorSplit = await this.awaitPendingPlacementSplit(
+        placementWorkspace,
+        workspace,
+        placementDeadline,
+        observerEpoch,
+        assertActive,
+      );
+      assertActive();
     try {
       const panes = await this.client.listPanes({ workspace });
+      assertActive();
       const rawPaneSurfaces = await Promise.all(
         panes.panes.map(async (pane) => {
           const ps = await this.client.listPaneSurfaces({
@@ -2997,6 +3052,7 @@ export class AgentEngine {
           return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
         }),
       );
+      assertActive();
       const paneSurfaces = partitionPaneSurfacesByMembership(
         panes.panes,
         rawPaneSurfaces,
@@ -3107,7 +3163,13 @@ export class AgentEngine {
           worktree: context?.worktree,
         },
       );
+      if (observedPriorSplit && placement.kind === "split") {
+        throw new PlacementSurfaceBindingError(
+          `Worker column vanished while placing in ${placementWorkspace}; refusing another split.`,
+        );
+      }
       this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
+      assertActive();
       // AIDEV-NOTE (#510): target the pane by its STABLE id, not its positional
       // ref. `placement.pane` is a `pane:N` ref chosen from the observation above,
       // and positional refs renumber when panes close -- so by the time
@@ -3123,39 +3185,118 @@ export class AgentEngine {
           ? (panes.panes.find((pane) => pane.ref === placement.pane)?.id ??
             placement.pane)
           : undefined;
-      let surface;
+      const createdRightSplit =
+        placement.kind === "split" &&
+        placement.direction === "right" &&
+        new Set(deriveRoleColumnIndex(panes.panes).values()).size === 1;
+      if (createdRightSplit) {
+        // A timed-out newSplit may still finish in cmux. Until its result is
+        // observed, later spawns must not choose another split.
+        this.pendingPlacementSplits.set(placementWorkspace, {
+          pane: "<split in flight>",
+          surface: "",
+        });
+        this.placementSplitInFlight.add(placementWorkspace);
+      }
+      let splitCommandStarted = false;
+      let splitCommandStartedAt = 0;
+      let splitCommandReturned = false;
+      let splitDefiniteNoMutation = false;
+      let splitCompleted = false;
+      let createdSurface: CreatedAgentSurface | null = null;
+      let surface: AgentSurfacePlacement | undefined;
       try {
-        surface =
-          placement.kind === "surface"
-            ? await this.client.newSurface({
-                focus: context?.focus,
-                pane: newSurfacePaneTarget ?? placement.pane,
-                type: "terminal",
-                workspace,
-              })
-            : await this.client.newSplit(placement.direction, {
-                ...(placement.pane ? { pane: placement.pane } : {}),
-                workspace,
-                type: "terminal",
-                focus: context?.focus,
-              });
+        assertActive();
+        if (placement.kind === "surface") {
+          surface = await this.client.newSurface({
+            focus: context?.focus,
+            pane: newSurfacePaneTarget ?? placement.pane,
+            type: "terminal",
+            workspace,
+          });
+        } else {
+          splitCommandStarted = true;
+          splitCommandStartedAt = Date.now();
+          surface = await this.client.newSplit(placement.direction, {
+            ...(placement.pane ? { pane: placement.pane } : {}),
+            workspace,
+            type: "terminal",
+            focus: context?.focus,
+          });
+          splitCommandReturned = true;
+        }
+        if (!surface) {
+          throw new PlacementSurfaceBindingError(
+            "cmux returned no surface for agent placement; refusing an unbound spawn.",
+          );
+        }
+        // Transfer the created handle to the caller before any post-mutation
+        // epoch assertion can throw. The caller owns cleanup until it durably
+        // binds this exact surface into agent state.
+        createdSurface = {
+          ...this.withWorkspacePlacementObservation(surface, workspace),
+          observerEpoch,
+          observerId,
+        };
+        if (createdRightSplit) {
+          const prior = this.pendingPlacementSplits.get(placementWorkspace);
+          this.pendingPlacementSplits.set(placementWorkspace, {
+            pane: createdSurface.pane,
+            surface: createdSurface.surface,
+            surfaceId: createdSurface.surface_id,
+            uncertain: prior?.uncertain,
+          });
+        }
+        // The lock's deadline can win while cmux is still creating a surface.
+        // Its late result belongs to this operation, but must never be returned
+        // or left open after the caller has received placement_timeout.
+        assertActive();
+        if (
+          createdSurface.actual_workspace &&
+          normalizeWorkspaceRefAlias(createdSurface.actual_workspace) !==
+            normalizeWorkspaceRefAlias(createdSurface.workspace)
+        ) {
+          throw new PlacementSurfaceBindingError(
+            `Spawn placement blocked: requested ${createdSurface.workspace} ` +
+              `but cmux returned ${createdSurface.actual_workspace} for surface ` +
+              `${createdSurface.surface}`,
+          );
+        }
+        if (createdRightSplit) {
+          await this.awaitPendingPlacementSplit(
+            placementWorkspace,
+            workspace,
+            placementDeadline,
+            observerEpoch,
+            assertActive,
+          );
+        }
+        assertActive();
+        splitCompleted = true;
+        return createdSurface;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const code =
           error && typeof error === "object" && "code" in error
             ? String((error as { code?: unknown }).code)
             : "";
+        // A typed, pre-mutation rejection proves no split was created. All
+        // marker changes happen in the single right-split finally below.
+        splitDefiniteNoMutation = Boolean(
+          createdRightSplit &&
+          (!splitCommandStarted ||
+            (!splitCommandReturned && (code === "not_found" || code === "invalid_argument")))
+        );
+        if (!createdRightSplit && createdSurface) {
+          await this.cleanupUnboundCreatedSurface(createdSurface, "agent-placement");
+        }
         const paneGone =
           placement.kind === "surface" &&
           (code === "not_found" || /\bnot_found\b/.test(message)) &&
           /pane/i.test(message);
         if (paneGone) {
-          // With a UUID target this is no longer a drifted ref -- the pane is
-          // genuinely gone. Do NOT re-place inside this call: that would re-run
-          // placement against a fresh observation under the SAME observer epoch,
-          // which is exactly what the refusals above exist to prevent. Fail
-          // loudly instead. A caller that swallows this and continues with a
-          // native subagent leaves an invisible worker (#510, #519 consequence).
+          // A UUID target cannot drift to another pane. Do not silently
+          // re-place or substitute an untracked native worker (#510, #519).
           throw new PlacementSurfaceBindingError(
             `Target pane ${placement.pane}${
               newSurfacePaneTarget && newSurfacePaneTarget !== placement.pane
@@ -3168,31 +3309,22 @@ export class AgentEngine {
           );
         }
         throw error;
+      } finally {
+        if (createdRightSplit) {
+          await this.settleRightSplitExit(placementWorkspace, {
+            requestedWorkspace: workspace,
+            observerEpoch,
+            observerId,
+            commandStarted: splitCommandStarted,
+            commandStartedAt: splitCommandStartedAt,
+            settleWindowMs: unknownSplitSettleWindowMs,
+            definiteNoMutation: splitDefiniteNoMutation,
+            completed: splitCompleted,
+            createdSurface,
+            rawSurface: surface,
+          });
+        }
       }
-      // Transfer the created handle to the caller before any post-mutation
-      // epoch assertion can throw. The caller owns cleanup until it durably
-      // binds this exact surface into agent state.
-      const createdSurface: CreatedAgentSurface = {
-        ...this.withWorkspacePlacementObservation(surface, workspace),
-        observerEpoch,
-        observerId,
-      };
-      if (
-        createdSurface.actual_workspace &&
-        normalizeWorkspaceRefAlias(createdSurface.actual_workspace) !==
-          normalizeWorkspaceRefAlias(createdSurface.workspace)
-      ) {
-        await this.cleanupUnboundCreatedSurface(
-          createdSurface,
-          "agent-placement",
-        );
-        throw new PlacementSurfaceBindingError(
-          `Spawn placement blocked: requested ${createdSurface.workspace} ` +
-            `but cmux returned ${createdSurface.actual_workspace} for surface ` +
-            `${createdSurface.surface}`,
-        );
-      }
-      return createdSurface;
     } catch (error) {
       if (
         isAgentRoleInferenceError(error) ||
@@ -3203,6 +3335,7 @@ export class AgentEngine {
         throw error;
       }
       this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
+      assertActive();
       const surface = await this.client.newSplit("right", {
         workspace,
         type: "terminal",
@@ -3212,6 +3345,310 @@ export class AgentEngine {
         observerEpoch,
         observerId,
       };
+    }
+    });
+  }
+
+  private async withPlacementLock<T>(
+    workspace: string,
+    deadline: number,
+    operation: (assertActive: () => void) => Promise<T>,
+  ): Promise<T> {
+    const previous = this.placementTails.get(workspace) ?? Promise.resolve();
+    let release!: () => void;
+    const own = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => own);
+    this.placementTails.set(workspace, tail);
+    const releaseAbandoned = () => {
+      release();
+      if (this.placementTails.get(workspace) === tail) {
+        this.placementTails.delete(workspace);
+      }
+    };
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      void previous.then(releaseAbandoned, releaseAbandoned);
+      throw new PlacementTimeoutError(
+        `Spawn placement timed out waiting for workspace ${workspace}; refusing topology mutation.`,
+      );
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        previous,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new PlacementTimeoutError(
+            `Spawn placement timed out waiting for workspace ${workspace}; refusing topology mutation.`,
+          )), remaining);
+        }),
+      ]);
+    } catch (error) {
+      void previous.then(releaseAbandoned, releaseAbandoned);
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    let expired = false;
+    let operationTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutError = () => new PlacementTimeoutError(
+      `Spawn placement timed out waiting for workspace ${workspace} split/topology; refusing topology mutation.`,
+    );
+    const assertActive = () => {
+      if (expired || Date.now() >= deadline) throw timeoutError();
+    };
+    try {
+      assertActive();
+      return await Promise.race([
+        operation(assertActive),
+        new Promise<never>((_resolve, reject) => {
+          operationTimer = setTimeout(() => {
+            expired = true;
+            if (this.placementSplitInFlight.has(workspace)) {
+              const pending = this.pendingPlacementSplits.get(workspace);
+              if (pending) this.pendingPlacementSplits.set(workspace, {
+                ...pending,
+                uncertain: true,
+              });
+            }
+            reject(timeoutError());
+          }, Math.max(1, deadline - Date.now()));
+        }),
+      ]);
+    } finally {
+      if (operationTimer) clearTimeout(operationTimer);
+      release();
+      if (this.placementTails.get(workspace) === tail) {
+        this.placementTails.delete(workspace);
+      }
+    }
+  }
+
+  private async awaitPendingPlacementSplit(
+    key: string,
+    workspace: string | undefined,
+    deadline: number,
+    observerEpoch: SurfaceObserverEpoch,
+    assertActive: () => void,
+  ): Promise<boolean> {
+    const pending = this.pendingPlacementSplits.get(key);
+    if (!pending) return false;
+    if (pending.unknownStartedAt !== undefined && pending.settleWindowMs !== undefined) {
+      // A rejected creation RPC has no returned handle to prove settlement.
+      // Observe first: adopt a late landing, or hold the guard until the
+      // command's upper-bound window expires before allowing another split.
+      const rightColumnExists = await this.observePlacementColumnState(
+        key, workspace, observerEpoch, assertActive,
+      );
+      if (rightColumnExists) {
+        this.placementSplitInFlight.delete(key);
+        this.pendingPlacementSplits.delete(key);
+        return true;
+      }
+      const remainingMs = Math.max(0,
+        pending.unknownStartedAt + pending.settleWindowMs - Date.now(),
+      );
+      if (remainingMs > 0) {
+        throw new PlacementPendingError(
+          `Spawn placement has an unknown split outcome in ${key}; retry in ${remainingMs}ms.`,
+          remainingMs,
+        );
+      }
+      this.placementSplitInFlight.delete(key);
+      this.pendingPlacementSplits.delete(key);
+      return false;
+    }
+    if (pending.uncertain) {
+      if (this.placementSplitInFlight.has(key)) {
+        throw new PlacementTimeoutError(
+          `Spawn placement timed out with a split still in flight in ${key}; refusing topology mutation.`,
+        );
+      }
+      // A settled but ambiguous outcome is recoverable. Read the entire pane
+      // membership again under this workspace's placement lock; one failed
+      // read blocks only this attempt, never every future spawn.
+      const rightColumnExists = await this.observePlacementColumnState(
+        key, workspace, observerEpoch, assertActive,
+      );
+      this.pendingPlacementSplits.delete(key);
+      return rightColumnExists;
+    }
+    while (Date.now() < deadline) {
+      assertActive();
+      this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
+      const panes = await this.client.listPanes({ workspace });
+      assertActive();
+      this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
+      const columns = deriveRoleColumnIndex(panes.panes);
+      // The first surface may close before the next spawn, leaving an empty
+      // right pane. The split is observed once the column itself exists.
+      if ([...columns.values()].includes(1)) {
+        this.pendingPlacementSplits.delete(key);
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(
+        SPAWN_PLACEMENT_OBSERVE_INTERVAL_MS,
+        Math.max(1, deadline - Date.now()),
+      )));
+    }
+    throw new PlacementTimeoutError(
+      `Spawn placement timed out waiting for split ${pending.pane} in ${key} to appear; refusing another split.`,
+    );
+  }
+
+  private async observePlacementColumnState(
+    key: string,
+    workspace: string | undefined,
+    observerEpoch: SurfaceObserverEpoch,
+    assertActive: () => void,
+  ): Promise<boolean> {
+    try {
+      assertActive();
+      this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement recovery");
+      const panes = await this.client.listPanes({ workspace });
+      assertActive();
+      if (!Array.isArray(panes.panes) || panes.panes.length === 0) {
+        throw new Error("no pane topology");
+      }
+      if (
+        workspace && panes.workspace_ref &&
+        normalizeWorkspaceRefAlias(panes.workspace_ref) !== normalizeWorkspaceRefAlias(workspace)
+      ) {
+        throw new Error("workspace topology changed");
+      }
+      const groups = await Promise.all(panes.panes.map(async (pane) => {
+        const group = await this.client.listPaneSurfaces({ workspace, pane: pane.ref });
+        return group.pane_ref ? group : { ...group, pane_ref: pane.ref };
+      }));
+      assertActive();
+      this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement recovery");
+      const partitioned = partitionPaneSurfacesByMembership(panes.panes, groups, {
+        workspace_ref: panes.workspace_ref ?? workspace,
+        window_ref: panes.window_ref,
+      });
+      if (!isPaneSurfaceEnumerationComplete(panes.panes, partitioned)) {
+        throw new Error("incomplete pane topology");
+      }
+      const observation = buildSurfaceBindingObservation(panes.panes, partitioned);
+      if (observation.coverage === "mixed" || observation.coverage === "conflict") {
+        throw new Error("ambiguous surface identity");
+      }
+      const columns = new Set(deriveRoleColumnIndex(panes.panes).values());
+      if (columns.size > 2 || !columns.has(0)) {
+        throw new Error("invalid role columns");
+      }
+      return columns.has(1);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new PlacementTimeoutError(
+        `Spawn placement could not confirm split topology in ${key}: ${reason}; retry after a fresh observation.`,
+      );
+    }
+  }
+
+  private async settleRightSplitExit(
+    key: string,
+    exit: {
+      requestedWorkspace?: string;
+      observerEpoch: SurfaceObserverEpoch;
+      observerId: string | null;
+      commandStarted: boolean;
+      commandStartedAt: number;
+      settleWindowMs: number;
+      definiteNoMutation: boolean;
+      completed: boolean;
+      createdSurface: CreatedAgentSurface | null;
+      rawSurface?: AgentSurfacePlacement;
+    },
+  ): Promise<void> {
+    if (exit.completed) {
+      this.placementSplitInFlight.delete(key);
+      return;
+    }
+    if (exit.definiteNoMutation || !exit.commandStarted) {
+      this.placementSplitInFlight.delete(key);
+      if (this.pendingPlacementSplits.get(key)?.surface === "") {
+        this.pendingPlacementSplits.delete(key);
+      }
+      return;
+    }
+    if (!exit.createdSurface && !exit.rawSurface) {
+      // The command rejected without a handle. Keep its guard until the
+      // bounded settle window ends, since cmux may still land the split.
+      const pending = this.pendingPlacementSplits.get(key);
+      if (pending?.surface === "") {
+        this.pendingPlacementSplits.set(key, { ...pending, uncertain: true,
+          unknownStartedAt: exit.commandStartedAt,
+          settleWindowMs: exit.settleWindowMs });
+      }
+      return;
+    }
+    const raw = exit.rawSurface!;
+    const unbound = exit.createdSurface ?? {
+      ...raw,
+      ...(exit.requestedWorkspace && raw.workspace !== exit.requestedWorkspace
+        ? { workspace: exit.requestedWorkspace, actual_workspace: raw.workspace }
+        : {}),
+      observerEpoch: exit.observerEpoch,
+      observerId: exit.observerId,
+    };
+    const pending = this.pendingPlacementSplits.get(key);
+    if (pending?.surface === "") {
+      this.pendingPlacementSplits.set(key, {
+        pane: unbound.pane,
+        surface: unbound.surface,
+        surfaceId: unbound.surface_id,
+        uncertain: pending.uncertain,
+      });
+    }
+    let closed = false;
+    try {
+      closed = await this.cleanupUnboundCreatedSurface(unbound, "agent-placement");
+    } finally {
+      await this.settleLatePlacementSplit(key, unbound, closed);
+    }
+  }
+
+  private async settleLatePlacementSplit(
+    key: string,
+    surface: CreatedAgentSurface,
+    closeSucceeded: boolean,
+  ): Promise<void> {
+    const pending = this.pendingPlacementSplits.get(key);
+    if (!pending) {
+      this.placementSplitInFlight.delete(key);
+      return;
+    }
+    if (
+      pending.surface !== surface.surface ||
+      (pending.surfaceId && pending.surfaceId !== surface.surface_id)
+    ) return;
+    // The newSplit command has resolved. Drop the actual in-flight guard even
+    // when close or confirmation fails, so a later spawn can re-observe.
+    this.placementSplitInFlight.delete(key);
+    const uncertain = { ...pending, uncertain: true };
+    this.pendingPlacementSplits.set(key, uncertain);
+    if (!closeSucceeded || !surface.surface_id) return;
+    const workspace = surface.actual_workspace ?? surface.workspace;
+    let topology: SurfaceTopologySnapshot | null;
+    try {
+      topology = await collectSurfaceTopology(
+        this.client,
+        workspace,
+        this.surfaceObserverEpochProvider(),
+        this.surfaceObserverIdProvider(),
+      );
+    } catch {
+      return;
+    }
+    if (
+      topology?.complete !== true ||
+      topology.surfaceIdByRef.size !== topology.workspaceBySurface.size ||
+      !this.isSurfaceObserverEpochCurrent(surface.observerEpoch)
+    ) return;
+    const targetId = surface.surface_id.toLowerCase();
+    if ([...topology.surfaceRefById.keys()].some((id) => id.toLowerCase() === targetId)) return;
+    if (this.pendingPlacementSplits.get(key) === uncertain) {
+      this.pendingPlacementSplits.delete(key);
     }
   }
 
@@ -5235,7 +5672,7 @@ export class AgentEngine {
   private async cleanupUnboundCreatedSurface(
     surface: CreatedAgentSurface,
     operation: "agent-placement" | "crash-recovery",
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const sameObserverEpoch = this.isSurfaceObserverEpochCurrent(
         surface.observerEpoch,
@@ -5252,7 +5689,7 @@ export class AgentEngine {
               `(${surface.surface_id ?? "UUID unknown"}); surface observer ` +
               `ownership changed (orphan-risk)`,
           );
-          return;
+          return false;
         }
       }
 
@@ -5283,7 +5720,7 @@ export class AgentEngine {
           `${operation}: orphan-risk: unbound surface ${surface.surface_id ?? "UUID unknown"} ` +
             `was not uniquely resolvable for cleanup`,
         );
-        return;
+        return false;
       }
 
       this.assertSurfaceObserverEpochCurrent(
@@ -5312,12 +5749,14 @@ export class AgentEngine {
           }
         },
       });
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.logUnboundSurfaceCleanupWarning(
         `${operation}: failed to clean unbound surface ${surface.surface} ` +
           `(${surface.surface_id ?? "UUID unknown"}): ${message}`,
       );
+      return false;
     }
   }
 
@@ -7763,22 +8202,48 @@ export class AgentEngine {
           receipt.error = null;
           receipt.verify_miss_count = 0;
           this.persistDeliveryReceipts();
+          if (receipt.press_enter && receipt.submit_verified === true) {
+            this.markAgentWorking(receipt.agent_id, {
+              verifiedDelivery: receipt.source_event === "send_to",
+            });
+          }
           this.appendDeliveryReceiptEventBestEffort(receipt);
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
-        if (observation.reason === "queued_idle") {
+        const compactionVisible =
+          observation.reason === "queued_compaction_busy" ||
+          observation.reason === "queued_compaction_idle";
+        if (compactionVisible && !receipt.queue_compaction_seen_at) {
+          receipt.queue_compaction_seen_at = new Date().toISOString();
+          this.persistDeliveryReceipts();
+        } else if (!compactionVisible && receipt.queue_compaction_seen_at) {
+          receipt.queue_compaction_seen_at = null;
+          this.persistDeliveryReceipts();
+        }
+        const compactionIdleExpired =
+          observation.reason === "queued_compaction_idle" &&
+          receipt.queue_compaction_seen_at !== null &&
+          receipt.queue_compaction_seen_at !== undefined &&
+          Date.now() - Date.parse(receipt.queue_compaction_seen_at) >=
+            DELIVERY_COMPACTION_GRACE_MS;
+        if (observation.reason === "queued_idle" || compactionIdleExpired) {
+          receipt.queue_idle_since_at ??= new Date().toISOString();
           receipt.queue_idle_observations =
             (receipt.queue_idle_observations ?? 0) + 1;
-          if (receipt.queue_idle_observations >= 2) {
+          if (
+            receipt.queue_idle_observations >= 2 &&
+            Date.now() - new Date(receipt.queue_idle_since_at).getTime() >=
+              DELIVERY_QUEUED_IDLE_MIN_MS
+          ) {
             receipt.delivery_state = "stalled_queue";
             receipt.terminal = true;
             receipt.resolved_at = new Date().toISOString();
             receipt.submit_verified = false;
             receipt.error =
               "Target is idle but the message remains queued. Inspect the queued " +
-              "message on the target pane; use Escape there to release it, then " +
-              "verify delivery before retrying.";
+              "message on the target pane and verify whether a tool call is still " +
+              "in flight before intervening or retrying.";
             receipt.needs_attention = true;
             receipt.attention_reason = receipt.error;
             this.persistDeliveryReceipts();
@@ -7786,8 +8251,9 @@ export class AgentEngine {
             continue;
           }
           this.persistDeliveryReceipts();
-        } else if ((receipt.queue_idle_observations ?? 0) > 0) {
+        } else if ((receipt.queue_idle_observations ?? 0) > 0 || receipt.queue_idle_since_at) {
           receipt.queue_idle_observations = 0;
+          receipt.queue_idle_since_at = null;
           this.persistDeliveryReceipts();
         }
         if (observation.reason === "target_gone") {
@@ -9033,6 +9499,7 @@ export class AgentEngine {
       parentAgent,
       repo: spawnParams.repo,
       worktree: isWorktreeLaunch(spawnParams),
+      placementTimeoutMs: spawnParams.boot_prompt_timeout_ms,
     });
     try {
       this.assertSurfaceObserverEpochCurrent(

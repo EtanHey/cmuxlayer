@@ -33,6 +33,7 @@ import {
   readInbox,
 } from "../src/inbox.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import {
   FleetSidebarPublisher,
   type FleetSidebarPublication,
@@ -81,7 +82,7 @@ function makeExec(
     currentScreenText = text;
     if (mutableScreen) mutableScreen.text = text;
   };
-  return vi.fn().mockImplementation(async (_cmd, args) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-windows")) {
       return {
         stdout: JSON.stringify({
@@ -210,7 +211,7 @@ function makeExec(
       }),
       stderr: "",
     };
-  });
+  }));
 }
 
 function sendCalls(exec: ExecFn): string[][] {

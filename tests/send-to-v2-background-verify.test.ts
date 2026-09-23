@@ -513,7 +513,210 @@ describe("send_to v2 background verify", () => {
     });
   });
 
-  it("ends a Codex queue stalled across two idle reads with recovery guidance", async () => {
+  it("R1-b reopens a done agent only after its queued send_to verifies and the screen works", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.cli = "cursor";
+    client.title = "cmuxlayerCursor";
+    client.cursorFollowUpBox = true;
+    client.getTransportHealth = () => ({
+      mode: "socket",
+      degraded: false,
+      current_socket_path: "/tmp/cmux-send-to-v2-verify-test.sock",
+    });
+    server = createVerifyServer(client);
+    await vi.advanceTimersByTimeAsync(0);
+    const engine = server._registeredTools.interact._engine;
+    engine.dispose();
+    await engine.runSweep();
+    const reportPath = join(TEST_DIR, "r1b-report.md");
+    writeFileSync(reportPath, "Earlier task complete\nDONE_R1B\n");
+    registerAgent(server, {
+      agent_id: "cmuxlayerCodex-r1b",
+      cli: "cursor",
+      state: "done",
+      report_path: reportPath,
+      done_marker: "DONE_R1B",
+      task_done_detected_at: "2026-08-17T19:59:00Z",
+      reopen_count: 0,
+    });
+    expect(engine.stateMgr.readState("cmuxlayerCodex-r1b")?.state).toBe("done");
+
+    const sent = parseResult(await callTool(server, "send_to", {
+      agent_id: "cmuxlayerCodex-r1b",
+      text: "new task after done",
+      press_enter: true,
+    }));
+    expect(sent.delivery_state).toBe("queued_followup");
+    expect(sent.submit_verified).toBeNull();
+    expect(engine.stateMgr.readState("cmuxlayerCodex-r1b")?.state).toBe("done");
+    expect(engine.stateMgr.readState("cmuxlayerCodex-r1b")?.reopen_pending_at ?? null).toBeNull();
+
+    client.clearComposer("new task after done");
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_state: "submitted",
+      submit_verified: true,
+    });
+    client.screenOverride = [
+      "Auto · 22.5% · 4 files edited",
+      "",
+      "⬡ Running...  3.3k tokens",
+      "",
+      "→ Add a follow-up",
+      "ctrl+c to stop",
+    ].join("\n");
+    await engine.runSweep();
+    expect(engine.stateMgr.readState("cmuxlayerCodex-r1b")).toMatchObject({
+      state: "working",
+      task_done_detected_at: null,
+      reopen_pending_at: null,
+      reopened_at: expect.any(String),
+      reopen_count: 1,
+    });
+    await engine.runSweep();
+    expect(engine.stateMgr.readState("cmuxlayerCodex-r1b")?.reopen_count).toBe(1);
+  });
+
+  it.each(["pending", "failed_confirmed"] as const)(
+    "R1-b leaves a done agent closed after %s async verification",
+    async (outcome) => {
+      const client = new FakeAgentSurfaceClient();
+      client.cli = "cursor";
+      client.title = "cmuxlayerCursor";
+      client.cursorFollowUpBox = true;
+      client.getTransportHealth = () => ({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: "/tmp/cmux-send-to-v2-verify-test.sock",
+      });
+      server = createVerifyServer(client);
+      await vi.advanceTimersByTimeAsync(0);
+      const engine = server._registeredTools.interact._engine;
+      engine.dispose();
+      await engine.runSweep();
+      const reportPath = join(TEST_DIR, "r1b-negative-report.md");
+      writeFileSync(reportPath, "Earlier task complete\nDONE_R1B_NEGATIVE\n");
+      registerAgent(server, {
+        agent_id: "cmuxlayerCodex-r1b-negative",
+        cli: "cursor",
+        state: "done",
+        report_path: reportPath,
+        done_marker: "DONE_R1B_NEGATIVE",
+        task_done_detected_at: "2026-08-17T19:59:00Z",
+        reopen_count: 0,
+      });
+
+      const sent = parseResult(await callTool(server, "send_to", {
+        agent_id: "cmuxlayerCodex-r1b-negative",
+        text: "unverified queued task",
+        press_enter: true,
+      }));
+      expect(sent.delivery_state).toBe("queued_followup");
+      engine.setDeliveryVerifier(async () =>
+        outcome === "pending"
+          ? { outcome: "pending" as const }
+          : { outcome: "failed_confirmed" as const, reason: "composer_rejected_input" },
+      );
+      await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject(
+        outcome === "pending"
+          ? { delivery_state: "queued_followup", terminal: false, submit_verified: null }
+          : { delivery_state: "failed_confirmed", terminal: true, submit_verified: false },
+      );
+      client.screenOverride = [
+        "Auto · 22.5% · 4 files edited",
+        "",
+        "⬡ Running...  3.3k tokens",
+        "",
+        "→ Add a follow-up",
+        "ctrl+c to stop",
+      ].join("\n");
+      await engine.runSweep();
+      expect(engine.stateMgr.readState("cmuxlayerCodex-r1b-negative")).toMatchObject({
+        state: "done",
+        task_done_detected_at: "2026-08-17T19:59:00Z",
+        reopen_count: 0,
+      });
+      expect(engine.stateMgr.readState("cmuxlayerCodex-r1b-negative")?.reopen_pending_at ?? null).toBeNull();
+    },
+  );
+
+  it("keeps a Codex compaction queue pending despite a ready-looking footer", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.title = "cmuxlayerCodex";
+    client.screenOverride = [
+      "OpenAI Codex",
+      "• Context compacted · 47s",
+      "• Messages to be submitted after next tool call (press esc to interrupt and send",
+      "  immediately)",
+      "  ↳ queued request",
+      "› Ask Codex to do anything",
+      "gpt-6-sol high · 8% used",
+    ].join("\n");
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "codex", state: "working" });
+    const engine = server._registeredTools.interact._engine;
+    const queued = engine.acceptComposerQueue({
+      delivery_id: "compacting-codex-queue",
+      agent_id: "agent-1",
+      text: "queued request",
+      press_enter: true,
+      source_event: "send_to",
+      retry_count: 0,
+      typed: true,
+      submit_dispatched: true,
+    });
+
+    await engine.verifyPendingDeliveries();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+    });
+    expect(engine.getDeliveryReceipt(queued.delivery_id)?.needs_attention).toBeFalsy();
+    expect(client.sendKeyCalls).toEqual([]);
+  });
+
+  it("still flags a stalled queue after compaction finishes but its history stays visible", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.title = "cmuxlayerCodex";
+    client.screenOverride = [
+      "OpenAI Codex",
+      "• Context compacted · 47s",
+      "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+      "  ↳ queued request",
+      "Working (1s • esc to interrupt)",
+      "› Ask Codex to do anything",
+      "gpt-6-sol high · 8% used",
+    ].join("\n");
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "codex", state: "working" });
+    const engine = server._registeredTools.interact._engine;
+    const queued = engine.acceptComposerQueue({
+      delivery_id: "compaction-history-stalled-queue",
+      agent_id: "agent-1",
+      text: "queued request",
+      press_enter: true,
+      source_event: "send_to",
+      retry_count: 0,
+      typed: true,
+      submit_dispatched: true,
+    });
+
+    await engine.verifyPendingDeliveries();
+    client.screenOverride = client.screenOverride.replace("Working (1s • esc to interrupt)\n", "");
+    await vi.advanceTimersByTimeAsync(30_000);
+    await engine.verifyPendingDeliveries();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "stalled_queue",
+      terminal: true,
+    });
+  });
+
+  it("ends a Codex queue only after sustained idle evidence with recovery guidance", async () => {
     const client = new FakeAgentSurfaceClient();
     client.title = "cmuxlayerCodex";
     client.screenOverride = [
@@ -545,11 +748,18 @@ describe("send_to v2 background verify", () => {
     await vi.advanceTimersByTimeAsync(5_100);
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
       delivery_state: "stalled_queue",
       terminal: true,
       submit_verified: false,
-      error: expect.stringMatching(/inspect.*queued.*Escape/i),
+      error: expect.stringMatching(/inspect.*queued.*tool call/i),
     });
+    expect(engine.getDeliveryReceipt(queued.delivery_id)?.error).not.toMatch(/Escape/i);
     expect(client.sendKeyCalls).toEqual([]);
   });
 
