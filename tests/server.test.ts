@@ -9695,6 +9695,8 @@ describe("tool handler integration", () => {
   it.each([
     ["ready composer", "ready"],
     ["ready composer after shell preamble", "preamble"],
+    ["ready composer after whitespace-only menu separators", "blank_rows"],
+    ["ready composer after a glyph shell prompt", "shell_prompt"],
     ["ready composer after its surface route moves", "route_moved"],
     ["second chooser above the menu", "second_menu"],
     ["menu persists", "menu"],
@@ -9728,8 +9730,13 @@ describe("tool handler integration", () => {
       "etanheyman ~ $ REPOGOLEM_ALLOW_MODEL=1 cmuxlayerCodex -s -m gpt-5.5",
       "",
     ].join("\n");
+    const menuWithBlankRows = fixture.screens.interactive_update.replaceAll("\n\n", "\n \n");
     const menuFrame = outcome === "preamble"
       ? `${shellPreamble}${fixture.screens.interactive_update}\n  \n`
+      : outcome === "blank_rows"
+        ? `${shellPreamble}${menuWithBlankRows}`
+        : outcome === "shell_prompt"
+          ? `❯ codex --dangerously-bypass-approvals-and-sandbox\n\n${fixture.screens.interactive_update}`
       : outcome === "second_menu"
         ? `${shellPreamble}Choose a profile:\n› 1. Primary\n  2. Secondary\n\n${fixture.screens.interactive_update}`
         : fixture.screens.interactive_update;
@@ -9947,7 +9954,7 @@ describe("tool handler integration", () => {
       if (!parsed.ok) {
         expect(parsed.error_code).toBe("blocked_by_update_menu");
       }
-      if (outcome !== "ready" && outcome !== "preamble" && outcome !== "route_moved") {
+      if (!["ready", "preamble", "blank_rows", "shell_prompt", "route_moved"].includes(outcome)) {
         expect(parsed.ok).toBe(false);
         expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
         expect(updateMenuKeys.filter((key) => key === "return")).toHaveLength(
@@ -9961,7 +9968,7 @@ describe("tool handler integration", () => {
       expect(parsed.update_menu_skipped).toBe(true);
       expect(parsed.update_menu_text_hash).toBe(
         createHash("sha256")
-          .update(fixture.screens.interactive_update)
+          .update(outcome === "blank_rows" ? menuWithBlankRows : fixture.screens.interactive_update)
           .digest("hex"),
       );
       expect(updateAccepted).toBe(true);

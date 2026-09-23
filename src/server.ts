@@ -2890,16 +2890,15 @@ function codexUpdateSkipPlan(text: string): { downCount: number; textHash: strin
   // approval there makes the screen ambiguous even if its final block matches.
   if (preamble.some((line) =>
     /^\s*(?:[›❯>]\s*)?\d+[.)]\s+\S/.test(line) ||
-    /^\s*[›❯]\s+\S/.test(line) ||
     /(?:update available!|skip until next version|press enter to continue|\b(?:approval|permission|approve|allow|deny|confirm|choose|select|picker|menu)\b)/i.test(line)
   )) return null;
   if (
     lines.length !== 9 ||
     !/^  ✨ Update available! \d+\.\d+\.\d+ -> \d+\.\d+\.\d+$/.test(lines[0] ?? "") ||
-    lines[1] !== "" ||
+    lines[1]?.trim() !== "" ||
     lines[2] !== "  Release notes: https://github.com/openai/codex/releases/latest" ||
-    lines[3] !== "" ||
-    lines[7] !== "" ||
+    lines[3]?.trim() !== "" ||
+    lines[7]?.trim() !== "" ||
     lines[8] !== "  Press enter to continue"
   ) return null;
   const options = [
