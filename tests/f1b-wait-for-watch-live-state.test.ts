@@ -880,8 +880,8 @@ describe("F1b round 2 — finding B: the ready-evidence gate no longer reads the
       scrollback_used: false,
     });
     buildEngine(readScreen);
-    // `VALID_TRANSITIONS.done` is empty: no screen can move this record to
-    // idle, so the widened gate must not spend a read per tick trying.
+    // A done record cannot transition to idle, so this wait must not spend
+    // a screen read per tick trying. R1 reopening requires verified delivery.
     stateMgr.writeState(
       makeRecord({ state: "done", surface_uuid: "uuid-worker" }),
     );

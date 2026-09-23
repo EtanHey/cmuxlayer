@@ -110,6 +110,11 @@ export interface AgentRecord {
   auto_archive_on_done?: boolean;
   task_done_candidate_at?: string | null;
   task_done_detected_at?: string | null;
+  /** Verified delivery to a done agent; a working screen must confirm reopening. */
+  reopen_pending_at?: string | null;
+  /** Last confirmed return from done to working on the same live surface. */
+  reopened_at?: string | null;
+  reopen_count?: number;
   /** First-connect skipped transcript identity resolution; retry on bounded sweeps. */
   transcript_session_capture_deferred?: boolean;
   /** Failed deferred transcript resolver calls, persisted across restarts. */
@@ -505,7 +510,7 @@ export const VALID_TRANSITIONS: Record<AgentState, AgentState[]> = {
   ready: ["working", "done", "error"],
   working: ["idle", "done", "error"],
   idle: ["working", "done", "error"],
-  done: [],
+  done: ["working"],
   error: ["creating"],
 };
 

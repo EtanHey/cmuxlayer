@@ -29,8 +29,8 @@ describe("VALID_TRANSITIONS", () => {
     expect(VALID_TRANSITIONS.idle).toEqual(["working", "done", "error"]);
   });
 
-  it("done is terminal — no transitions allowed", () => {
-    expect(VALID_TRANSITIONS.done).toEqual([]);
+  it("done may reopen as working", () => {
+    expect(VALID_TRANSITIONS.done).toEqual(["working"]);
   });
 
   it("error can only go to creating (restart)", () => {
@@ -71,6 +71,7 @@ describe("isValidTransition", () => {
     expect(isValidTransition("working", "done")).toBe(true);
     expect(isValidTransition("working", "idle")).toBe(true);
     expect(isValidTransition("idle", "working")).toBe(true);
+    expect(isValidTransition("done", "working")).toBe(true);
   });
 
   it("allows error transitions from any non-terminal state", () => {
@@ -88,13 +89,11 @@ describe("isValidTransition", () => {
   it("rejects backward transitions", () => {
     expect(isValidTransition("ready", "booting")).toBe(false);
     expect(isValidTransition("working", "ready")).toBe(false);
-    expect(isValidTransition("done", "working")).toBe(false);
   });
 
-  it("rejects transitions from terminal done state", () => {
+  it("rejects unsupported transitions from done", () => {
     expect(isValidTransition("done", "creating")).toBe(false);
     expect(isValidTransition("done", "error")).toBe(false);
-    expect(isValidTransition("done", "working")).toBe(false);
   });
 
   it("rejects skipping states", () => {
@@ -108,11 +107,12 @@ describe("assertValidTransition", () => {
   it("does not throw for valid transitions", () => {
     expect(() => assertValidTransition("creating", "booting")).not.toThrow();
     expect(() => assertValidTransition("working", "done")).not.toThrow();
+    expect(() => assertValidTransition("done", "working")).not.toThrow();
   });
 
   it("throws with descriptive message for invalid transitions", () => {
-    expect(() => assertValidTransition("done", "working")).toThrow(
-      /Invalid state transition: done → working/,
+    expect(() => assertValidTransition("done", "error")).toThrow(
+      /Invalid state transition: done → error/,
     );
     expect(() => assertValidTransition("creating", "ready")).toThrow(
       /Allowed from creating: \[booting, error\]/,

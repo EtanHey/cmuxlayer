@@ -357,7 +357,12 @@ export class StateManager {
     agentId: string,
     toState: AgentState,
     extra?: Partial<
-      Pick<AgentRecord, "error" | "pid" | "cli_session_id" | "cli_session_path">
+      Pick<AgentRecord,
+        "error" | "pid" | "cli_session_id" | "cli_session_path" |
+        "task_done_candidate_at" | "task_done_detected_at" |
+        "reopen_pending_at" | "reopened_at" | "reopen_count" |
+        "halt_last_active_at"
+      >
     >,
   ): AgentRecord {
     const dirName = this.resolveStateDir(agentId);
@@ -380,6 +385,24 @@ export class StateManager {
         : {}),
       ...(extra?.cli_session_path !== undefined
         ? { cli_session_path: extra.cli_session_path }
+        : {}),
+      ...(extra?.task_done_candidate_at !== undefined
+        ? { task_done_candidate_at: extra.task_done_candidate_at }
+        : {}),
+      ...(extra?.task_done_detected_at !== undefined
+        ? { task_done_detected_at: extra.task_done_detected_at }
+        : {}),
+      ...(extra?.reopen_pending_at !== undefined
+        ? { reopen_pending_at: extra.reopen_pending_at }
+        : {}),
+      ...(extra?.reopened_at !== undefined
+        ? { reopened_at: extra.reopened_at }
+        : {}),
+      ...(extra?.reopen_count !== undefined
+        ? { reopen_count: extra.reopen_count }
+        : {}),
+      ...(extra?.halt_last_active_at !== undefined
+        ? { halt_last_active_at: extra.halt_last_active_at }
         : {}),
     };
 
