@@ -2880,9 +2880,19 @@ function shouldHandleCodexUpdateMenu(
   );
 }
 
-/** Only the reconstructed nine-line menu is eligible for automatic selection. */
+/** The reconstructed menu must be the final complete block of the current pane. */
 function codexUpdateSkipPlan(text: string): { downCount: number; textHash: string } | null {
-  const lines = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+  const allLines = text.split(/\r?\n/);
+  while (allLines.length > 0 && allLines.at(-1)?.trim() === "") allLines.pop();
+  const lines = allLines.slice(-9);
+  const preamble = allLines.slice(0, -9);
+  // Shell launch output is expected above the menu. A second chooser or
+  // approval there makes the screen ambiguous even if its final block matches.
+  if (preamble.some((line) =>
+    /^\s*(?:[›❯>]\s*)?\d+[.)]\s+\S/.test(line) ||
+    /^\s*[›❯]\s+\S/.test(line) ||
+    /(?:update available!|skip until next version|press enter to continue|\b(?:approval|permission|approve|allow|deny|confirm|choose|select|picker|menu)\b)/i.test(line)
+  )) return null;
   if (
     lines.length !== 9 ||
     !/^  ✨ Update available! \d+\.\d+\.\d+ -> \d+\.\d+\.\d+$/.test(lines[0] ?? "") ||
@@ -2909,7 +2919,7 @@ function codexUpdateSkipPlan(text: string): { downCount: number; textHash: strin
   }
   return selected === -1 ? null : {
     downCount: 2 - selected,
-    textHash: createHash("sha256").update(text).digest("hex"),
+    textHash: createHash("sha256").update(lines.join("\n")).digest("hex"),
   };
 }
 
@@ -7659,6 +7669,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     stableSurfaceIdentity?: string | null;
+    initialUpdateMenuTextHash?: string;
     cli?: CliType;
     text: string;
     timeout_ms: number;
@@ -7682,7 +7693,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateElapsedMs = 0;
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
-    let updateMenuTextHash: string | undefined;
+    let updateMenuTextHash = opts.initialUpdateMenuTextHash;
     type QueuedBootObservation = {
       metrics: RawSubmitEvidenceMetrics;
       route: { surface: string; workspace?: string };
@@ -8660,6 +8671,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: deliveryRoute.surface,
         workspace: deliveryRoute.workspace,
         stableSurfaceIdentity: opts.stableSurfaceIdentity,
+        initialUpdateMenuTextHash: readiness.updateMenuTextHash,
         cli: opts.cli,
         text: sanitizedText,
         timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
