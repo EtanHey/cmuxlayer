@@ -964,23 +964,23 @@ async function measureLatency(clients, phase, fakeSocketTrace) {
         ? "socket"
         : "cli",
       transport_fallbacks: [...readFallbackSources],
-      sample_diagnostics: {
-        ...summarizeReadDiagnostics(readDiagnostics),
-        timing_scope: {
-          request_serialize: "benchmark MCP client request serialization",
-          response_parse: "benchmark MCP client JSON-RPC response parse",
-          mcp_wait: "inclusive daemon, cmux socket, IPC, and scheduling wait",
-          receipt_decode: "benchmark tool receipt decode",
-          caller_resume: "caller setup and promise continuation after MCP response",
-          fake_socket_rounds: "same-round fake cmux socket service; not per-client attributable",
-        },
-        // The fake socket runs in the benchmark process. These per-round
-        // service times cannot be attributed to a particular MCP client.
-        fake_socket_rounds: summarizeFakeSocketRounds(
-          fakeSocketTrace?.events ?? [],
-          phase,
-        ),
+    },
+    read_screen_diagnostics: {
+      ...summarizeReadDiagnostics(readDiagnostics),
+      timing_scope: {
+        request_serialize: "benchmark MCP client request serialization",
+        response_parse: "benchmark MCP client JSON-RPC response parse",
+        mcp_wait: "inclusive daemon, cmux socket, IPC, and scheduling wait",
+        receipt_decode: "benchmark tool receipt decode",
+        caller_resume: "caller setup and promise continuation after MCP response",
+        fake_socket_rounds: "same-round fake cmux socket service; not per-client attributable",
       },
+      // The fake socket runs in the benchmark process. These per-round
+      // service times cannot be attributed to a particular MCP client.
+      fake_socket_rounds: summarizeFakeSocketRounds(
+        fakeSocketTrace?.events ?? [],
+        phase,
+      ),
     },
     firstResults: { listResult, readResult },
   };
@@ -2086,6 +2086,12 @@ async function main() {
           firstSendAfterSpawn.spawn_close_during_sweep,
         send_to_surface_10_parallel: sendToSurface10Parallel,
         read_screen_10_parallel: readScreen10Parallel,
+      },
+      diagnostics: {
+        read_screen: {
+          baseline_inprocess: baselineLatency.read_screen_diagnostics,
+          daemon_path: daemonLatency.read_screen_diagnostics,
+        },
       },
       daemon_cpu_pct: round(daemonStats.cpuPct, 2),
       gates,

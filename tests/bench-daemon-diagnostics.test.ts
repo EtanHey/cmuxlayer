@@ -94,9 +94,10 @@ describe("P2 benchmark read diagnostics", () => {
       workspace: "workspace:bench",
       lines: 5,
     });
-    expect(result.read_screen.sample_diagnostics.sample_count).toBe(12);
-    expect(result.read_screen.sample_diagnostics.rounds).toHaveLength(12);
-    expect(result.read_screen.sample_diagnostics.samples[0]).toMatchObject({
+    expect(result.read_screen).not.toHaveProperty("sample_diagnostics");
+    expect(result.read_screen_diagnostics.sample_count).toBe(12);
+    expect(result.read_screen_diagnostics.rounds).toHaveLength(12);
+    expect(result.read_screen_diagnostics.samples[0]).toMatchObject({
       round_index: 0,
       client_index: 0,
       stages_ms: { request_serialize: 0.01, response_parse: 0.02, mcp_wait: 0.03, caller_resume: expect.any(Number) },
