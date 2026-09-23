@@ -7,7 +7,21 @@ import { CmuxSocketClient } from "../src/cmux-socket-client.js";
 import { CmuxClient } from "../src/cmux-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
 import { initializeNewSurfaceRuntime } from "../src/surface-runtime.js";
-import { startFakeCmuxSocket, writeFakeCmux } from "../scripts/bench-daemon.mjs";
+import { measureFakeCmuxPing, startFakeCmuxSocket, writeFakeCmux } from "../scripts/bench-daemon.mjs";
+
+it("times a fake-socket control across the send window", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-control-"));
+  const server = await startFakeCmuxSocket(join(root, "cmux.sock"), join(root, "state.json"), 10);
+  try {
+    const ping = await measureFakeCmuxPing(join(root, "cmux.sock"));
+    expect(ping.total_ms).toBeGreaterThanOrEqual(250);
+    expect(ping.delay_ms).toBeCloseTo(ping.total_ms - 250, 2);
+    expect(ping.started_at_ms).toBeGreaterThan(0);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it("realizes each fake split surface on input demand", async () => {
   const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-fixture-"));

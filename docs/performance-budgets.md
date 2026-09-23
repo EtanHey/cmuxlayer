@@ -6,6 +6,8 @@ The committed baseline was measured by GitHub Actions on `ubuntu-latest` in work
 
 The replay records both request byte counts and SHA-256 identities of canonical `{name, arguments}` JSON. The checker rejects request drift even when the serialized length is unchanged. It also validates a refresh content hash over the baseline: editing measurements or replay data without a refresh makes the consistency assertion fail before the benchmark can pass.
 
+For `first_send_after_spawn` and `send_to_agent_warm`, each sampled send starts a read-only `system.ping` against the benchmark's fake cmux socket. The ping deliberately waits 250 ms, spanning the normal send, and the checker subtracts that known wait from its elapsed time. Only ping delay above the run's median ping delay may be subtracted from the paired send, capped at the send's excess over its own run median, before comparing p50/p95 with the existing committed ceilings. A fast ping leaves a slow send over budget; missing or malformed paired controls leave raw send latency in force. The artifact retains both raw and paired samples, and the CI comment shows the slowest sends with route, lock, enumerate, type, and verify timings. The ping runs outside the daemon, so daemon-only latency is still charged to the product.
+
 ## Refresh after a legitimate speedup
 
 Dispatch the `CI` workflow on the commit whose performance should become the new floor:
