@@ -18855,6 +18855,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 source_event: "boot_prompt",
                 retry_count: 0,
                 typed: true,
+                boot_recovery: true,
               });
               return err(error, {
                 agent_id: agentId,

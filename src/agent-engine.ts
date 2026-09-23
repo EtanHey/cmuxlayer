@@ -310,6 +310,8 @@ export interface AgentDeliveryReceipt {
   typed?: boolean;
   /** A submit key reached the target through either socket or CLI transport. */
   submit_dispatched?: boolean;
+  /** An uncertain recovered boot Return; passive confirmation completes boot. */
+  boot_recovery?: boolean;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
@@ -7448,6 +7450,7 @@ export class AgentEngine {
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
     typed?: boolean;
     submit_dispatched?: boolean;
+    boot_recovery?: boolean;
     created_at?: string;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
@@ -7522,6 +7525,13 @@ export class AgentEngine {
     try {
       const snapshots = new Map<string, DeliveryVerifySnapshot | null>();
       for (const receipt of this.deliveryReceipts.values()) {
+        if (receipt.boot_recovery && receipt.delivery_state === "submitted" &&
+          receipt.submit_verified === true) {
+          // Repair a crash between persisting the confirmed receipt and the
+          // managed state transition. This is idempotent on later sweeps.
+          this.finalizeConfirmedBootRecovery(receipt);
+          continue;
+        }
         const watching =
           receipt.delivery_state === "pending_verify" ||
           receipt.delivery_state === "queued_followup" ||
@@ -7584,6 +7594,7 @@ export class AgentEngine {
           receipt.verify_miss_count = 0;
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
+          this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
         if (observation.reason === "target_gone") {
@@ -7618,6 +7629,28 @@ export class AgentEngine {
     } finally {
       this.deliveryVerifyInFlight = false;
     }
+  }
+
+  private finalizeConfirmedBootRecovery(receipt: AgentDeliveryReceipt): void {
+    if (!receipt.boot_recovery || receipt.delivery_state !== "submitted" ||
+      receipt.submit_verified !== true) return;
+    let agent = this.stateMgr.readState(receipt.agent_id);
+    if (!agent || !["booting", "ready", "working"].includes(agent.state)) return;
+    if (agent.boot_prompt_pending !== false || agent.prompt_delivered !== true ||
+      agent.submit_verified !== true) {
+      agent = this.stateMgr.updateRecord(agent.agent_id, {
+        boot_prompt_pending: false,
+        prompt_delivered: true,
+        submit_verified: true,
+      });
+    }
+    if (agent.state === "booting") {
+      agent = this.stateMgr.transition(agent.agent_id, "ready");
+    }
+    if (agent.state === "ready") {
+      agent = this.stateMgr.transition(agent.agent_id, "working");
+    }
+    this.registry.set(agent.agent_id, agent);
   }
 
   /** Bound one delivery-verify side quest to the verify timeout. */
