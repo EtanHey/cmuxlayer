@@ -91,6 +91,28 @@ export function checkControlHealthSample(result, mcpPid, expectedMcpPid) {
   return failures;
 }
 
+export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
+  const full = record(fullRead);
+  const parsedOnly = record(parsedOnlyRead);
+  if (full.ok !== true || parsedOnly.ok !== true || !full.parsed || !parsedOnly.parsed) {
+    return ["parsed_read_unavailable"];
+  }
+  const a = record(full.parsed);
+  const b = record(parsedOnly.parsed);
+  const failures = [];
+  if (elapsedMs > 2_000) failures.push("parsed_sweep_window_exceeded");
+  if (a.status !== b.status) failures.push("parsed_status_mismatch");
+  if (a.control_state !== b.control_state) failures.push("parsed_control_state_mismatch");
+  const countA = a.token_count;
+  const countB = b.token_count;
+  if (Number.isFinite(countA) && Number.isFinite(countB)) {
+    if (Math.abs(countA - countB) > Math.max(512, Math.max(countA, countB) * 0.02)) {
+      failures.push("parsed_token_count_drift");
+    }
+  } else if (countA !== countB) failures.push("parsed_token_count_drift");
+  return failures;
+}
+
 export function checkSoakSession(session) {
   const value = record(session);
   const failures = [];

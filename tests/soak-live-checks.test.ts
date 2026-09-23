@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkClose, checkControlHealthSample, checkPlacement, checkReceipt, checkStateAgreement,
+import { checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkStateAgreement,
   checkSoakSession, checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
 
 describe("live soak invariant checkers", () => {
@@ -75,5 +75,15 @@ describe("live soak invariant checkers", () => {
     expect(checkControlHealthSample({ ...health, health: { ...health.health,
       selected_transport: { transport_mode: "cli", transport_degraded: true } } }, 123, 123))
       .toContain("control_transport_unhealthy");
+  });
+
+  it("catches a stale parsed_only read against the immediate full read", () => {
+    const full = { ok: true, parsed: { status: "working", control_state: "busy", token_count: 190_479 } };
+    const stale = { ok: true, parsed: { status: "idle", control_state: "ready", token_count: 79_126 } };
+    expect(checkParsedReadAgreement(full, stale, 200)).toEqual([
+      "parsed_status_mismatch", "parsed_control_state_mismatch", "parsed_token_count_drift",
+    ]);
+    expect(checkParsedReadAgreement(full, { ...full, parsed: { ...full.parsed, token_count: 191_000 } }, 200)).toEqual([]);
+    expect(checkParsedReadAgreement(full, full, 2_001)).toContain("parsed_sweep_window_exceeded");
   });
 });
