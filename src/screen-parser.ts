@@ -241,6 +241,7 @@ const CODEX_CURRENT_ACTION_RE =
   /^(?:Ran|Explored|Updated Plan|Waited for|Read|Edited|Searched|Called|Running|Writing)\b/i;
 const CLAUDE_GLYPH_ACTION_RE =
   /^\s*[⏺●⬢⬡]\s+((?:Bash|Read|Edit|Write|Search|Glob|Grep|Task|WebFetch|WebSearch|NotebookEdit|Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
+const CLAUDE_GLYPH_TOOL_CALL_RE = /^[⏺●]\s+(?:mcp__\S+|[A-Za-z_][\w.:-]*\s*\()/i;
 const CLAUDE_INDENTED_ACTIVITY_RE =
   /^\s{2,}((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
 const CLAUDE_ACTIVE_BANNER_RE = /^\s*[✻✢✳✶]\s+.*(?:working|thinking|esc to interrupt)/i;
@@ -643,7 +644,13 @@ function extractClaudeResponseTail(text: string): string | null {
   }
 
   const lines = text.split("\n");
-  const counterIndex = lines.findIndex((line) => CLAUDE_COUNTER_RE.test(line));
+  let counterIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (CLAUDE_COUNTER_RE.test(lines[index] ?? "")) {
+      counterIndex = index;
+      break;
+    }
+  }
   if (counterIndex === -1) {
     return null;
   }
@@ -651,7 +658,12 @@ function extractClaudeResponseTail(text: string): string | null {
   let startIndex = 0;
   for (let i = counterIndex - 1; i >= 0; i--) {
     const line = lines[i];
-    if (CLAUDE_WORKING_LINE_RE.test(line) || CLAUDE_DONE_LINE_RE.test(line)) {
+    if (
+      CLAUDE_WORKING_LINE_RE.test(line) ||
+      CLAUDE_DONE_LINE_RE.test(line) ||
+      CLAUDE_COUNTER_RE.test(line) ||
+      /^❯(?:\s|$)/.test(line)
+    ) {
       startIndex = i + 1;
       break;
     }
@@ -681,12 +693,84 @@ function extractClaudeResponseTail(text: string): string | null {
   return candidateLines.join("\n");
 }
 
-function parseResponse(text: string): string | null {
-  let response: string | undefined;
-  for (const match of text.matchAll(RESPONSE_BLOCKS_RE)) {
-    response = match[1]?.trim();
+function extractClaudeReadyResponseTail(
+  text: string,
+): { response: string; position: number } | null {
+  const lines = text.split("\n");
+  let promptIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (BARE_READY_PROMPT_RE.test(lines[index] ?? "")) {
+      promptIndex = index;
+      break;
+    }
   }
-  return response || extractClaudeResponseTail(text);
+  if (promptIndex < 0) return null;
+
+  // Claude renders an ordinary completed reply as a glyph-headed block above
+  // its ready composer. The last glyph must be a reply, not an older tool call.
+  for (let index = promptIndex - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    const reply = line.match(/^[⏺●]\s+(.+)$/);
+    if (!reply) continue;
+    if (
+      CLAUDE_GLYPH_ACTION_RE.test(line) ||
+      CLAUDE_GLYPH_TOOL_CALL_RE.test(line) ||
+      CLAUDE_DONE_LINE_RE.test(line) ||
+      CLAUDE_WORKING_LINE_RE.test(line)
+    ) return null;
+
+    const candidateLines = trimBlankEdges([
+      reply[1],
+      ...lines.slice(index + 1, promptIndex).filter((row) =>
+        !RULE_LINE_RE.test(row.trim()) &&
+        footerTokenCount(row) === null &&
+        !MODEL_COST_RE.test(row) &&
+        !/bypass permissions on/i.test(row) &&
+        !/^\s*⎇\s/.test(row),
+      ),
+    ]);
+    const response = candidateLines.join("\n");
+    return response
+      ? {
+          response,
+          position: lines.slice(0, index).reduce((n, row) => n + row.length + 1, 0),
+        }
+      : null;
+  }
+  return null;
+}
+
+function parseResponse(
+  text: string,
+  agentType: ParsedScreenAgentType,
+  status: ParsedScreenStatus,
+): string | null {
+  const candidates: { response: string; position: number }[] = [];
+  for (const match of text.matchAll(RESPONSE_BLOCKS_RE)) {
+    const response = match[1]?.trim();
+    if (response) candidates.push({ response, position: match.index });
+  }
+  const counterResponse = extractClaudeResponseTail(text);
+  if (counterResponse) {
+    const counters = [...text.matchAll(/^\s*CLAUDE_COUNTER:\s*\d+\s*$/gm)];
+    const lastCounter = counters.at(-1);
+    if (lastCounter) {
+      candidates.push({ response: counterResponse, position: lastCounter.index });
+    }
+  }
+  if (agentType === "claude" && status === "idle") {
+    const readyReply = extractClaudeReadyResponseTail(text);
+    if (readyReply) candidates.push(readyReply);
+  }
+  // A submitted question starts a new turn. No earlier response source may
+  // masquerade as the answer while that turn is still waiting at the composer.
+  const latestUserPrompt = agentType === "claude"
+    ? [...text.matchAll(/^❯[ \t]+\S/gm)].at(-1)?.index ?? -1
+    : -1;
+  return candidates
+    .filter((candidate) => candidate.position > latestUserPrompt)
+    .sort((a, b) => a.position - b.position)
+    .at(-1)?.response ?? null;
 }
 
 function hasMenuBlock(text: string, opts?: { tailOnly?: boolean }): boolean {
@@ -1310,6 +1394,9 @@ function parseErrors(text: string): string[] {
   }
 
   for (const match of text.matchAll(EXIT_CODE_RE)) {
+    // A successful terminal tool block is evidence of completion, not a
+    // frozen harness error. The code can also appear in the agent's prose.
+    if (Number(match[1]) === 0) continue;
     const code = `exit_code:${match[1]}`;
     if (!errors.includes(code)) {
       errors.push(code);
@@ -1884,7 +1971,7 @@ export function parseScreen(text: string): ParsedScreenResult {
     context_pct: contextPct,
     context_window: contextWindow,
     done_signal: doneSignal,
-    response: parseResponse(normalized),
+    response: parseResponse(normalized, agentType, status),
     current_action: parseCurrentAction(normalized, agentType),
     errors,
     model,
