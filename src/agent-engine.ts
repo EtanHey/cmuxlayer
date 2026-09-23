@@ -340,6 +340,8 @@ export interface AgentDeliveryReceipt {
   verify_miss_count?: number;
   /** Consecutive reads with this queued payload still visible on an idle target. */
   queue_idle_observations?: number;
+  /** First verified idle observation for this queued payload; survives verifier restarts. */
+  queue_idle_since_at?: string | null;
   /** Last time background verify actually read the target surface. */
   verify_last_attempt_at?: string | null;
   /** A nonterminal retry stall that now requires a human to inspect the pane. */
@@ -367,6 +369,8 @@ function snapshotDeliveryReceipt(
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
 export const DEFAULT_DELIVERY_QUEUE_DEADLINE_MS = 10 * 60 * 1000;
 export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
+// Two 5-second sweeps can coincide with a transient Codex compaction pause.
+const DELIVERY_QUEUED_IDLE_MIN_MS = 15_000;
 export const DELIVERY_UNCHANGED_SCREEN_ATTENTION_ATTEMPTS = 3;
 const DELIVERY_WAIT_POLL_MS = 100;
 
@@ -7757,17 +7761,22 @@ export class AgentEngine {
           continue;
         }
         if (observation.reason === "queued_idle") {
+          receipt.queue_idle_since_at ??= new Date().toISOString();
           receipt.queue_idle_observations =
             (receipt.queue_idle_observations ?? 0) + 1;
-          if (receipt.queue_idle_observations >= 2) {
+          if (
+            receipt.queue_idle_observations >= 2 &&
+            Date.now() - new Date(receipt.queue_idle_since_at).getTime() >=
+              DELIVERY_QUEUED_IDLE_MIN_MS
+          ) {
             receipt.delivery_state = "stalled_queue";
             receipt.terminal = true;
             receipt.resolved_at = new Date().toISOString();
             receipt.submit_verified = false;
             receipt.error =
               "Target is idle but the message remains queued. Inspect the queued " +
-              "message on the target pane; use Escape there to release it, then " +
-              "verify delivery before retrying.";
+              "message on the target pane and verify whether a tool call is still " +
+              "in flight before intervening or retrying.";
             receipt.needs_attention = true;
             receipt.attention_reason = receipt.error;
             this.persistDeliveryReceipts();
@@ -7775,8 +7784,9 @@ export class AgentEngine {
             continue;
           }
           this.persistDeliveryReceipts();
-        } else if ((receipt.queue_idle_observations ?? 0) > 0) {
+        } else if ((receipt.queue_idle_observations ?? 0) > 0 || receipt.queue_idle_since_at) {
           receipt.queue_idle_observations = 0;
+          receipt.queue_idle_since_at = null;
           this.persistDeliveryReceipts();
         }
         if (observation.reason === "target_gone") {
