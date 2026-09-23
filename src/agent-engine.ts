@@ -10768,6 +10768,7 @@ export class AgentEngine {
       try {
         await this.client.closeSurface(route.surface_id, {
           workspace: route.workspace_id ?? undefined,
+          ...this.stableSurfaceWriteOptions(route.surface_uuid),
           collapsePane: stopClosePolicy.collapsePane,
           beforeMutation: assertCloseRouteCurrent,
         });
