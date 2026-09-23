@@ -1106,6 +1106,36 @@ describe("WatchSpec arm contract", () => {
     );
   });
 
+  it("W5 coalesces a burst of engine report writes until the file is quiet", async () => {
+    const target = join(TEST_DIR, "burst-report.md");
+    writeFileSync(target, "initial\n");
+    const notify = vi.fn().mockResolvedValue(true);
+    let now = 1_000;
+    await armWatch({
+      owner: "lead-a", provenance: "engine", subject_agent_id: "worker-a",
+      target, change: "content", deadline: 60_000,
+    }, { registryPath: registryPath(), now: () => now });
+
+    writeFileSync(target, "first\n");
+    now = 2_000;
+    await sweepWatches({ registryPath: registryPath(), now: () => now, notify });
+    expect(notify).toHaveBeenCalledTimes(1);
+    for (let index = 0; index < 3; index++) {
+      writeFileSync(target, `burst ${index}\n`);
+      now += 100;
+      await sweepWatches({ registryPath: registryPath(), now: () => now, notify });
+    }
+    expect(notify).toHaveBeenCalledTimes(1);
+    now += 999;
+    await sweepWatches({ registryPath: registryPath(), now: () => now, notify });
+    expect(notify).toHaveBeenCalledTimes(1);
+    now += 1;
+    await sweepWatches({ registryPath: registryPath(), now: () => now, notify });
+    expect(notify).toHaveBeenCalledTimes(2);
+    await sweepWatches({ registryPath: registryPath(), now: () => now + 1, notify });
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
   it("never rolls an engine report deadline beyond MAX_SAFE_INTEGER", async () => {
     const target = join(TEST_DIR, "legacy-infinite-report.md");
     writeFileSync(target, "before\n", "utf8");
