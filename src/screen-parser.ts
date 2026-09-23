@@ -201,6 +201,7 @@ const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/m;
 const CODEX_ALT_COMPOSER_LINE_RE = /^[ \t]*»[ \t]+\S/m;
 const CODEX_MODEL_FOOTER_RE =
   /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s]+(?:[ \t]+·[ \t]+\S[^\r\n·]{0,119})?$/i;
+const CODEX_QUEUED_FOLLOWUP_RE = /^[ \t]*• Messages to be submitted after next tool call\b/m;
 const isReadyComposerLine = (line: string): boolean =>
   BARE_READY_PROMPT_RE.test(line) || CODEX_READY_PLACEHOLDER_RE.test(line);
 const PICKER_BLOCK_WINDOW_LINES = 32;
@@ -1701,16 +1702,17 @@ function inferStatus(
     return "idle";
   }
 
-  // Claude may keep an older Thinking line on screen while the current
-  // composer holds a new draft. The draft controls where the next keystroke
-  // lands, so surface it even though activity is also visible above it.
+  // Claude and Codex may keep older activity or resume output above a current
+  // draft. A Codex footer below the draft distinguishes it from an active
+  // screen that still shows a prompt-like line; queued follow-ups stay active.
   // Prompt overlays and harness errors retain their own precedence.
   if (
-    agentType === "claude" &&
+    (agentType === "claude" || agentType === "codex") &&
     errors.length === 0 &&
     hasPendingComposerLine(text, agentType) &&
     !hasOsShellPrompt(text) &&
-    hasPendingComposerDraft(text, agentType)
+    !(agentType === "codex" && CODEX_QUEUED_FOLLOWUP_RE.test(text.slice(-4096))) &&
+    hasPendingComposerDraft(text, agentType, agentType === "codex")
   ) {
     return "draft_pending";
   }
@@ -1800,6 +1802,7 @@ function hasPendingComposerLine(
 function hasPendingComposerDraft(
   text: string,
   agentType: ParsedScreenAgentType,
+  requireCodexFooter = false,
 ): boolean {
   if (agentType !== "claude" && agentType !== "codex") return false;
   const tail = text.split("\n").slice(-16);
@@ -1813,6 +1816,7 @@ function hasPendingComposerDraft(
     const input = match[1]?.trim() ?? "";
     if (!input || CODEX_READY_PLACEHOLDER_RE.test(line)) return false;
     const below = tail.slice(i + 1).filter((row) => row.trim());
+    if (requireCodexFooter && !below.some((row) => CODEX_MODEL_FOOTER_RE.test(row))) return false;
     return below.every(
       (row) =>
         /^\s{2,}\S/.test(row) ||

@@ -39,6 +39,29 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("keeps a current Codex draft dirty despite older working output", () => {
+    const parsed = parseScreen("Codex\nWorking (0m 12s · esc to interrupt)\n› Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("keeps a current Codex draft dirty despite older resume output", () => {
+    const parsed = parseScreen("Codex\nTo continue this session, run codex resume 1234\n» Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("keeps active Codex work active when a prompt-like line has no footer", () => {
+    const parsed = parseScreen("Working (15m 57s • esc to interrupt)\n› Explain this codebase");
+    expect(parsed.status).toBe("working");
+  });
+
+  it("keeps an active Codex queued follow-up busy despite its footer", () => {
+    const parsed = parseScreen(readFixture("painpoints/codex-pr343-live-queued-followup.txt"));
+    expect(parsed.status).toBe("working");
+    expect(parsed.control_state).toBe("busy");
+  });
+
   it("keeps quoted chevron output in a clean Claude pane ready", () => {
     const parsed = parseScreen("Claude Code\n» quoted output\n  bypass permissions on");
     expect(parsed.status).toBe("idle");
