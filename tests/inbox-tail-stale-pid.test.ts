@@ -5,6 +5,31 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderBootContractFile } from "../src/coordination-paths.js";
 import { shellQuote } from "../src/shell-safe.js";
+
+function childPid(parentPid: number): number {
+  const listing = spawnSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" }).stdout;
+  const child = listing.split("\n").map((line) => line.trim().split(/\s+/).map(Number))
+    .find(([, ppid]) => ppid === parentPid);
+  return child?.[0] ?? 0;
+}
+
+async function waitForExit(pids: number[]): Promise<void> {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const live = pids.filter((pid) => {
+      try { process.kill(pid, 0); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw error;
+      }
+      const state = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).stdout.trim();
+      return state.length > 0 && !state.startsWith("Z");
+    });
+    if (live.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`detached inbox processes did not exit: ${pids.join(", ")}`);
+}
+
 describe("issued inbox tail teardown", () => {
   it("clears a dead PID and never signals a reused PID", () => {
     const base = mkdtempSync(join(tmpdir(), "cmux-stale-pid-"));
@@ -94,7 +119,7 @@ describe("issued inbox tail teardown", () => {
     }
   });
 
-  it("keeps a newer monitor record when rearmed after signaling the old one", () => {
+  it("keeps a newer monitor record when rearmed after signaling the old one", async () => {
     const base = mkdtempSync(join(tmpdir(), "cmux-tail-rearm-"));
     const agentDir = join(base, "worker");
     const inbox = join(agentDir, "inbox.jsonl");
@@ -110,20 +135,27 @@ describe("issued inbox tail teardown", () => {
     const stop = contract.split("To stop it, kill that PID -- never a pattern:")[1]?.match(/^    (.+)$/m)?.[1];
     let oldPid = 0;
     let newPid = 0;
+    let oldTailPid = 0;
+    let newTailPid = 0;
     try {
       expect(spawnSync("/bin/sh", ["-c", `( ${launch} ) > /dev/null 2>&1`], { timeout: 3000 }).status).toBe(0);
       oldPid = Number(readFileSync(pidFile, "utf8").split(" ")[0]);
+      oldTailPid = childPid(oldPid);
+      expect(oldTailPid).toBeGreaterThan(0);
       const interleaved = `kill() { if [ "$1" = -0 ]; then command kill "$@"; return; fi; command kill "$@" || return; ( ${launch} ) > /dev/null 2>&1; cat ${shellQuote(pidFile)} > ${shellQuote(capture)}; }; ${stop}`;
       expect(spawnSync("/bin/sh", ["-c", interleaved], { timeout: 3000 }).status).toBe(0);
       const newRecord = readFileSync(capture, "utf8");
       newPid = Number(newRecord.split(" ")[0]);
+      newTailPid = childPid(newPid);
+      expect(newTailPid).toBeGreaterThan(0);
       expect(newPid).not.toBe(oldPid);
       expect(readFileSync(pidFile, "utf8")).toBe(newRecord);
       expect(() => process.kill(newPid, 0)).not.toThrow();
     } finally {
       if (oldPid > 0) { try { process.kill(oldPid); } catch { /* already stopped */ } }
       if (newPid > 0) { try { process.kill(newPid); } catch { /* already stopped */ } }
-      rmSync(base, { recursive: true, force: true });
+      await waitForExit([oldPid, oldTailPid, newPid, newTailPid].filter((pid) => pid > 0));
+      rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
     }
   });
 });
