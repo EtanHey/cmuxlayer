@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { inboxPath, monitorAlive, readInbox } from "../src/inbox.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
@@ -20,7 +21,7 @@ function makeExec(): ExecFn {
   let submitted = false;
   let bootTextSent = false;
   let activeCli: "claude" | "codex" = "claude";
-  return vi.fn().mockImplementation(async (_cmd, args) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-windows")) {
       return {
         stdout: JSON.stringify({
@@ -120,7 +121,7 @@ function makeExec(): ExecFn {
       }),
       stderr: "",
     };
-  });
+  }));
 }
 
 function parseToolResult(result: any): Record<string, any> {

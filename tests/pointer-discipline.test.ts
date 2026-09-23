@@ -9,6 +9,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const previousMaxInlineChars = process.env.CMUXLAYER_MAX_INLINE_CHARS;
@@ -81,7 +82,7 @@ function makeLifecycleExec(
   let pendingText = "";
   let submissionObservationPending = false;
 
-  return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("list-windows")) {
       return {
         stdout: JSON.stringify({
@@ -223,7 +224,7 @@ function makeLifecycleExec(
       }),
       stderr: "",
     };
-  });
+  }));
 }
 
 function makeStaticScreenExec(text: string): ExecFn {

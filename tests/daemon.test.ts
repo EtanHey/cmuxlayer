@@ -19,6 +19,7 @@ import {
   type CreateServerOptions,
 } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { AgentDiscovery } from "../src/agent-discovery.js";
 import {
   readMonitorRegistry,
@@ -139,7 +140,7 @@ function createListSurfacesExec(): ExecFn {
 }
 
 function createLifecycleExec(): ExecFn {
-  return vi.fn().mockImplementation(async (_cmd, args) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -219,7 +220,7 @@ function createLifecycleExec(): ExecFn {
       }),
       stderr: "",
     };
-  });
+  }));
 }
 
 function createPlacementClient(

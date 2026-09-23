@@ -29,6 +29,7 @@ import {
 } from "../src/server.js";
 import * as serverModule from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { runWithCallerContext } from "../src/caller-context.js";
 import {
@@ -88,7 +89,7 @@ function makeExec(
       if (mutableScreen) mutableScreen.text = text;
     }
   };
-  return vi.fn().mockImplementation(async (_cmd, args) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-windows")) {
       return {
         stdout: JSON.stringify({
@@ -226,7 +227,7 @@ function makeExec(
       }),
       stderr: "",
     };
-  });
+  }));
 }
 
 /** Everything typed or pasted at the pane, however it was routed. */
@@ -377,6 +378,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       if (scenario === "failed-worker" && (args.includes("new-split") || args.includes("new-surface"))) throw new Error("controlled creation failure");
       return baseExec(cmd, args);
     });
+    exec = withFakeRightSplitTopology(exec);
     server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
     const engine = server._registeredTools.interact._engine;
     const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "original.md") };
@@ -487,6 +489,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
       return baseExec(cmd, args);
     });
+    exec = withFakeRightSplitTopology(exec);
     let watchNow = 1_000;
     const unavailableExternalNotify = vi.fn().mockResolvedValue(false);
     server = createServer(
@@ -672,6 +675,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
       return baseExec(cmd, args);
     });
+    exec = withFakeRightSplitTopology(exec);
     let watchNow = 1_000;
     const serverOptions = withTestSurfaceObserver({
       exec,
@@ -3853,6 +3857,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
       return baseExec(cmd, args);
     });
+    exec = withFakeRightSplitTopology(exec);
     server = createServer(
       withTestSurfaceObserver({
         exec,
@@ -4265,8 +4270,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const existingChildUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const spawnedChildUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    let holdNextSplit = false;
-    let releaseSplit: (() => void) | null = null;
+    let holdNextPlacement = false;
+    let releasePlacement: (() => void) | null = null;
+    let nextSurface = 1;
     const spawnedSurface: TestSurface = { id: spawnedChildUuid, ref: "surface:spawned", title: "spawned-child", text: "Claude Code\nWhat can I help you with?\n❯ " };
     const baseExec = makeExec(
       "Claude Code\nWhat can I help you with?\n❯ ",
@@ -4282,16 +4288,24 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         spawnedSurface,
       ],
       parentUuid,
+      () => ({
+        id: `dddddddd-dddd-4ddd-8ddd-${String(nextSurface).padStart(12, "0")}`,
+        ref: `surface:additional-${nextSurface++}`,
+        title: "spawned-child",
+        text: "Claude Code\nWhat can I help you with?\n❯ ",
+      }),
     );
     exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
-      if (args.includes("new-split")) {
-        spawnedSurface.text = "Claude Code\nWhat can I help you with?\n❯ ";
-        if (holdNextSplit) {
-          holdNextSplit = false;
+      if (args.includes("new-split") || args.includes("new-surface")) {
+        if (holdNextPlacement) {
+          holdNextPlacement = false;
           await new Promise<void>((resolve) => {
-            releaseSplit = resolve;
+            releasePlacement = resolve;
           });
         }
+      }
+      if (args.includes("new-split")) {
+        spawnedSurface.text = "Claude Code\nWhat can I help you with?\n❯ ";
         return {
           stdout: JSON.stringify({
             workspace: "workspace:1",
@@ -4306,6 +4320,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }
       return baseExec(cmd, args);
     });
+    exec = withFakeRightSplitTopology(exec);
     const serverOptions = withTestSurfaceObserver({
       exec,
       stateDir: STATE_DIR,
@@ -4331,11 +4346,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     stateMgr.writeState({ ...existingChild, report_path: override });
     mkdirSync(join(inboxDir, "collab"), { recursive: true });
     writeFileSync(override, "", "utf8");
-    const splitCalls = () =>
+    const placementCalls = () =>
       (exec as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([, args]: [string, string[]]) => args.includes("new-split"),
+        ([, args]: [string, string[]]) =>
+          args.includes("new-split") || args.includes("new-surface"),
       ).length;
-    const before = splitCalls();
+    const before = placementCalls();
 
     const second = await spawn({
       parent_agent_id: parent.agent_id,
@@ -4344,7 +4360,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     expect(second.ok).toBe(false);
     expect(String(second.error)).toMatch(/report_path.*already.*child/i);
-    expect(splitCalls()).toBe(before);
+    expect(placementCalls()).toBe(before);
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toHaveLength(0);
@@ -4354,14 +4370,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "collab",
       "concurrent-shared-report.md",
     );
-    const beforeConcurrent = splitCalls();
-    holdNextSplit = true;
-    releaseSplit = null;
+    const beforeConcurrent = placementCalls();
+    holdNextPlacement = true;
+    releasePlacement = null;
     const winningSpawn = spawn({
       parent_agent_id: parent.agent_id,
       report_path: concurrentOverride,
     });
-    await vi.waitFor(() => expect(splitCalls()).toBe(beforeConcurrent + 1));
+    await vi.waitFor(() => expect(placementCalls()).toBe(beforeConcurrent + 1));
     const rejectedSpawn = spawn(
       {
         parent_agent_id: parent.agent_id,
@@ -4370,13 +4386,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       siblingServer,
     );
     await Promise.resolve();
-    holdNextSplit = false;
-    await vi.waitFor(() => expect(releaseSplit).toBeTypeOf("function"));
-    releaseSplit?.();
+    holdNextPlacement = false;
+    await vi.waitFor(() => expect(releasePlacement).toBeTypeOf("function"));
+    releasePlacement?.();
     const concurrent = await Promise.all([winningSpawn, rejectedSpawn]);
-    // This fixture's one successful spawn uses two new-split calls: placement
-    // and launch. A third call would prove that the rejected socket launched.
-    expect(splitCalls() - beforeConcurrent).toBe(2);
+    // The winning spawn creates one right-column surface. The rejected socket
+    // must not create a surface of its own.
+    expect(placementCalls() - beforeConcurrent).toBe(1);
     expect(concurrent.map((result) => result.ok).sort()).toEqual([false, true]);
     expect(concurrent.find((result) => result.ok === false)?.error_code).toBe(
       "REPORT_PATH_IN_USE",
@@ -4395,9 +4411,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "collab",
       "forced-inprocess-shared-report.md",
     );
-    const beforeIsolated = splitCalls();
-    holdNextSplit = true;
-    releaseSplit = null;
+    const beforeIsolated = placementCalls();
+    holdNextPlacement = true;
+    releasePlacement = null;
     const isolatedWinner = spawn(
       {
         parent_agent_id: parent.agent_id,
@@ -4405,7 +4421,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       },
       isolatedServerA,
     );
-    await vi.waitFor(() => expect(splitCalls()).toBe(beforeIsolated + 1));
+    await vi.waitFor(() => expect(placementCalls()).toBe(beforeIsolated + 1));
     const isolatedLoser = spawn(
       {
         parent_agent_id: parent.agent_id,
@@ -4414,14 +4430,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       isolatedServerB,
     );
     await Promise.resolve();
-    await vi.waitFor(() => expect(releaseSplit).toBeTypeOf("function"));
-    releaseSplit?.();
+    await vi.waitFor(() => expect(releasePlacement).toBeTypeOf("function"));
+    releasePlacement?.();
     const isolated = await Promise.all([isolatedWinner, isolatedLoser]);
     expect(isolated.map((result) => result.ok).sort()).toEqual([false, true]);
     expect(isolated.find((result) => result.ok === false)?.error_code).toBe(
       "REPORT_PATH_IN_USE",
     );
-    expect(splitCalls() - beforeIsolated).toBe(2);
+    expect(placementCalls() - beforeIsolated).toBe(1);
     await isolatedServerA.close();
     await isolatedServerB.close();
     expect(
