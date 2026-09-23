@@ -14,6 +14,11 @@ describe("live soak invariant checkers", () => {
     expect(checkStateAgreement({ state: "working" }, { status: "working", control_state: "busy" })).toEqual([]);
   });
 
+  it("flags an error registry row over a busy screen as stale", () => {
+    expect(checkStateAgreement({ state: "error" }, { status: "working", control_state: "busy" }))
+      .toContain("stale_registry_state");
+  });
+
   it("catches false topology and in-flight refusals", () => {
     expect(checkToolFailure({ ok: false, error: "too many in-flight requests" })).toContain("too_many_in_flight");
     expect(checkToolFailure({ ok: false, error: "topology_incomplete" })).toContain("topology_incomplete_refusal");
@@ -65,6 +70,25 @@ describe("live soak invariant checkers", () => {
       .toContain("missing_control_samples");
     expect(checkSoakSession({ ...healthy, rssEndKb: 210_000 })).toContain("server_rss_over_2x");
     expect(checkSoakSession({ ...healthy, elapsedMs: 59 * 60_000 })).toContain("duration_short");
+  });
+
+  it("rejects missing or non-finite soak counters and missing health samples", () => {
+    const valid = { startPid: 123, endPid: 123, elapsedMs: 60_000,
+      minDurationMs: 60_000, minCycles: 1, cyclesCompleted: 1,
+      healthSamples: [true, true], rssStartKb: 100, rssEndKb: 100 };
+    for (const key of ["cyclesCompleted", "minCycles", "elapsedMs", "minDurationMs"] as const) {
+      expect(checkSoakSession({ ...valid, [key]: undefined })).toContain("malformed_session");
+      expect(checkSoakSession({ ...valid, [key]: Number.NaN })).toContain("malformed_session");
+    }
+    expect(checkSoakSession({ ...valid, healthSamples: undefined })).toContain("malformed_session");
+  });
+
+  it("requires an endpoint health sample after a partial final minute", () => {
+    const session = { startPid: 123, endPid: 123, elapsedMs: 60_001,
+      minDurationMs: 60_000, minCycles: 1, cyclesCompleted: 1,
+      healthSamples: [true, true], rssStartKb: 100, rssEndKb: 100 };
+    expect(checkSoakSession(session)).toContain("missing_control_samples");
+    expect(checkSoakSession({ ...session, healthSamples: [true, true, true] })).toEqual([]);
   });
 
   it("tracks the MCP stdio PID separately from the control daemon PID", () => {

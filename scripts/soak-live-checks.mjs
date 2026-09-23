@@ -18,7 +18,7 @@ export function checkStateAgreement(agent, screen) {
   const screenBusy = ["working", "thinking"].includes(parsed.status)
     || parsed.control_state === "busy"
     || parsed.control_state === "composer_dirty";
-  return screenBusy && ["idle", "done"].includes(registry)
+  return screenBusy && ["idle", "done", "error"].includes(registry)
     ? ["stale_registry_state"] : [];
 }
 
@@ -116,6 +116,11 @@ export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
 export function checkSoakSession(session) {
   const value = record(session);
   const failures = [];
+  if (!Number.isInteger(value.cyclesCompleted) || value.cyclesCompleted < 0 ||
+    !Number.isInteger(value.minCycles) || value.minCycles <= 0 ||
+    !Number.isFinite(value.elapsedMs) || value.elapsedMs < 0 ||
+    !Number.isFinite(value.minDurationMs) || value.minDurationMs < 0 ||
+    !Array.isArray(value.healthSamples)) failures.push("malformed_session");
   if (!Number.isInteger(value.startPid) || value.startPid <= 0 ||
     value.endPid !== value.startPid) failures.push("server_pid_changed");
   if (value.cyclesCompleted < value.minCycles) failures.push("cycles_short");
@@ -123,7 +128,10 @@ export function checkSoakSession(session) {
   const samples = Array.isArray(value.healthSamples) ? value.healthSamples : [];
   // Initial and final samples cover the endpoints; each elapsed full minute
   // still needs a sample in the same uninterrupted session.
-  if (samples.length < Math.floor(value.elapsedMs / 60_000) + 1) failures.push("missing_control_samples");
+  if (Number.isFinite(value.elapsedMs) && value.elapsedMs >= 0 &&
+    samples.length < Math.ceil(value.elapsedMs / 60_000) + 1) {
+    failures.push("missing_control_samples");
+  }
   if (samples.some((healthy) => healthy !== true)) failures.push("unhealthy_control_sample");
   if (!Number.isFinite(value.rssStartKb) || value.rssStartKb <= 0 ||
     !Number.isFinite(value.rssEndKb) || value.rssEndKb <= 0) failures.push("server_rss_unavailable");
