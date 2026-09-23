@@ -66,6 +66,9 @@ function measureFakeCmuxPing(socketPath) {
     };
     socket.setTimeout(30_000, () => settle(new Error("paired fake-socket ping timed out")));
     socket.once("error", (error) => settle(error));
+    const missingReceipt = () => settle(new Error("paired fake-socket ping closed before a receipt"));
+    socket.once("end", missingReceipt);
+    socket.once("close", missingReceipt);
     socket.once("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "system.ping", params: { delay_ms: PAIRED_CONTROL_HOLD_MS } })}\n`);
     });
