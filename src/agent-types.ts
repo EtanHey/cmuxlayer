@@ -346,6 +346,7 @@ export interface ControlHealthTelemetryEvent {
 export interface SweepPhaseTelemetryEvent {
   ts: string;
   event_type: "sweep_phase";
+  process_id?: number;
   sweep_id: number;
   phase: string;
   stage: "started" | "completed" | "failed";

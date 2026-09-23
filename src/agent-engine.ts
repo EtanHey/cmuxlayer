@@ -8887,6 +8887,7 @@ export class AgentEngine {
           this.stateMgr.getEventLog().appendSweepPhase({
             ts: new Date().toISOString(),
             event_type: "sweep_phase",
+            process_id: process.pid,
             sweep_id: sweepId,
             phase: name,
             stage,
@@ -9058,6 +9059,7 @@ export class AgentEngine {
         this.stateMgr.getEventLog().appendSweepPhase({
           ts: new Date().toISOString(),
           event_type: "sweep_phase",
+          process_id: process.pid,
           sweep_id: sweepId,
           phase: "summary",
           stage: sweepCompleted ? "completed" : "failed",
