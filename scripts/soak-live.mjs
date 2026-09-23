@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
-  checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak,
+  checkToolFailure, hasReplyMarker, healthSampleEntry, nextSoakDelayMs, shouldContinueSoak,
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 
@@ -139,21 +139,17 @@ async function main() {
   const sampleHealth = async (label) => {
     if (healthInFlight) {
       healthSamples.push(false);
-      log({ kind: "health", label, healthy: false, reason: "previous_sample_in_flight" });
+      log({ kind: "health", label, healthy: false, control_health: null,
+        reason: "previous_sample_in_flight" });
       return;
     }
     const pending = (async () => {
       const result = await call("control_health", { detail: "full" }, `health:${label}`);
-      const health = object(result.health);
-      const selected = object(health.selected_transport);
       const failures = checkControlHealthSample(result, transport.pid, startPid);
       const healthy = failures.length === 0;
       healthSamples.push(healthy);
       check("control_health", failures, { label });
-      log({ kind: "health", label, healthy, control_daemon_pid: health.current_process?.pid,
-        mcp_server_pid: transport.pid, failures,
-        transport_mode: selected.transport_mode, transport_degraded: selected.transport_degraded,
-        warnings: health.warnings, error: result.error });
+      log(healthSampleEntry(label, result, transport.pid, failures));
     })();
     healthInFlight = pending;
     try { await pending; } finally { healthInFlight = null; }
