@@ -13843,6 +13843,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
+            // Persisted public watches can predate the arm-time guard. A
+            // shared collab revision is never a per-agent report event.
+            if (
+              event.target_kind === "file" &&
+              event.reason === "target_changed" &&
+              [...stateMgr.listStates(), ...registry.list()].some(
+                (agent) => agent.collab_path &&
+                  resolve(agent.collab_path) === resolve(event.target),
+              )
+            ) {
+              return {
+                delivered: false,
+                retryable: false,
+                reason: "shared_collab_watch_target",
+              };
+            }
+            if (event.provenance !== "public" && event.subject_agent_id) {
+              const subject = stateMgr.readState(event.subject_agent_id) ??
+                registry.get(event.subject_agent_id);
+              if (subject?.report_path &&
+                  resolve(subject.report_path) !== resolve(event.target)) {
+                return {
+                  delivered: false,
+                  retryable: false,
+                  reason: "report_target_mismatch",
+                };
+              }
+            }
             const externalNotifyOptedIn =
               event.notify === true && Boolean(opts?.watchNotify);
             const deliverExternalNotification = async (): Promise<boolean> => {
@@ -13975,7 +14003,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   event.reason === "target_changed"
                 ) {
                   return event.target_kind === "file"
-                    ? `[report] changed — read ${event.target}`
+                    ? event.provenance !== "public" && event.subject_agent_id
+                      ? `[report] changed — read ${event.target}`
+                      : `[watch] file changed — inspect ${event.target}`
                     : `[watch] agent predicate matched — inspect ${event.target}`;
                 }
                 if (event.reason === "target_missing") {
@@ -14107,6 +14137,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const publicSpec = { ...(args as WatchSpec) };
           delete (publicSpec as WatchSpec & { provenance?: unknown })
             .provenance;
+          if (
+            publicSpec.change === "content" &&
+            [...stateMgr.listStates(), ...registry.list()].some(
+              (agent) => agent.collab_path &&
+                resolve(agent.collab_path) === resolve(publicSpec.target),
+            )
+          ) {
+            throw new WatchArmError(
+              "shared_collab_watch_target",
+              publicSpec.target,
+              "A shared collab_path cannot be a content-change pane watch; use a marker watch for a specific handoff",
+            );
+          }
           const watch = await engine.armWatch({
             ...publicSpec,
             provenance: "public",
@@ -14825,6 +14868,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return `Report watch was not armed: ${childAgentId} is not a direct child of ${parentAgentId}`;
         }
         const reportPath = resolve(coordination.report_path);
+        if ([...stateMgr.listStates(), ...registry.list()].some(
+          (agent) => agent.collab_path &&
+            resolve(agent.collab_path) === reportPath,
+        )) {
+          return `Report watch was not armed: shared_collab_report_path (${reportPath})`;
+        }
         const legacyEngineReportPath = resolve(
           issueSpawnCoordination(childAgentId).report_path,
         );
@@ -15430,6 +15479,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (args.collab_path && !isAbsolute(args.collab_path.trim())) {
             throw new Error("collab_path must be absolute");
+          }
+          if (
+            args.report_path &&
+            [args.collab_path, ...stateMgr.listStates().map((agent) => agent.collab_path)]
+              .some((path) => path && resolve(path) === resolve(args.report_path!.trim()))
+          ) {
+            return err(
+              new Error("report_path cannot target a shared collab_path"),
+              { error_code: "shared_collab_report_path" },
+            );
           }
           if (args.resume_agent_id) {
             const incompatible = [
