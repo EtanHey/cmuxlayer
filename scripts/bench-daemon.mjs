@@ -400,6 +400,7 @@ const baseSurfaces = Array.from({ length: surfaceCount }, (_, index) => ({
   id: "00000000-0000-4000-8000-" + String(index).padStart(12, "0"),
   title: "bench-agent-" + index,
   type: "terminal",
+  pane_ref: "pane:bench",
   index,
   selected: index === 0,
   current_directory: cwd
@@ -408,6 +409,8 @@ const spawnedSurfaces = state.spawnedSurfaces || [];
 const surfaces = baseSurfaces.concat(spawnedSurfaces
   .filter((surface) => !surface.closed)
   .map((surface, index) => ({ ...surface, type: "terminal", index: surfaceCount + index, selected: false, current_directory: cwd })));
+const rightSurfaces = surfaces.filter((surface) => surface.pane_ref === "pane:bench-right");
+const leftSurfaces = surfaces.filter((surface) => surface.pane_ref !== "pane:bench-right");
 function write(value) {
   process.stdout.write(JSON.stringify(value));
 }
@@ -416,16 +419,20 @@ if (command === "list-workspaces") {
 } else if (command === "list-windows") {
   write({ windows: [{ ref: "window:bench", title: "Bench", index: 0, selected: true, workspace_refs: ["workspace:bench"] }] });
 } else if (command === "list-panes") {
-  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", panes: [{ ref: "pane:bench", index: 0, focused: true, surface_count: surfaces.length, surface_refs: surfaces.map((surface) => surface.ref), surface_ids: surfaces.map((surface) => surface.id), selected_surface_ref: surfaces[0].ref, current_directory: cwd }] });
+  const panes = [{ ref: "pane:bench", index: 0, focused: true, surface_count: leftSurfaces.length, surface_refs: leftSurfaces.map((surface) => surface.ref), surface_ids: leftSurfaces.map((surface) => surface.id), selected_surface_ref: leftSurfaces[0].ref, pixel_frame: { x: 0, y: 0, width: 500, height: 900 }, current_directory: cwd }];
+  if (rightSurfaces.length) panes.push({ ref: "pane:bench-right", index: 1, focused: false, surface_count: rightSurfaces.length, surface_refs: rightSurfaces.map((surface) => surface.ref), surface_ids: rightSurfaces.map((surface) => surface.id), selected_surface_ref: rightSurfaces[0].ref, pixel_frame: { x: 500, y: 0, width: 500, height: 900 }, current_directory: cwd });
+  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", panes });
 } else if (command === "list-pane-surfaces") {
-  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: "pane:bench", surfaces });
-} else if (command === "new-split") {
+  const pane = optionValue("--pane", "");
+  write({ workspace_ref: "workspace:bench", window_ref: "window:bench", pane_ref: pane || "pane:bench", surfaces: pane === "pane:bench-right" ? rightSurfaces : pane === "pane:bench" ? leftSurfaces : surfaces });
+} else if (command === "new-split" || command === "new-surface") {
   const spawnSequence = (state.spawnSequence || 0) + 1;
   const primary = !spawnedSurfaces.some((surface) => surface.primary && !surface.closed);
-  const surface = { ref: spawnedRef(spawnSequence), id: spawnedId(spawnSequence), title: primary ? state.title || "bench-spawn" : "bench-extra", primary, runtimeReady: false, closed: false };
+  const pane = command === "new-split" ? "pane:bench-right" : optionValue("--pane", "pane:bench");
+  const surface = { ref: spawnedRef(spawnSequence), id: spawnedId(spawnSequence), title: primary ? state.title || "bench-spawn" : "bench-extra", pane_ref: pane, primary, runtimeReady: false, closed: false };
   writeState({ ...state, spawnSequence, spawnedSurfaces: [...spawnedSurfaces, surface] });
   writeSurfaceState(surface.ref, { composer: "", transcript: "" });
-  write({ workspace_ref: "workspace:bench", pane_ref: "pane:bench", surface_ref: surface.ref, surface_id: surface.id, title: surface.title, type: "terminal" });
+  write({ workspace_ref: "workspace:bench", pane_ref: pane, surface_ref: surface.ref, surface_id: surface.id, title: surface.title, type: "terminal" });
 } else if (command === "close-surface") {
   const target = optionValue("--surface", "");
   writeState({ ...state, spawnedSurfaces: spawnedSurfaces.map((surface) => [surface.ref, surface.id].includes(target) ? { ...surface, closed: true } : surface) });
@@ -599,6 +606,7 @@ async function handleFakeCmuxSocketLine(
     id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
     title: `bench-agent-${index}`,
     type: "terminal",
+    pane_ref: "pane:bench",
     index,
     selected: index === 0,
     current_directory: cwd,
@@ -614,6 +622,8 @@ async function handleFakeCmuxSocketLine(
       current_directory: cwd,
     })),
   ];
+  const rightSurfaces = surfaces.filter((surface) => surface.pane_ref === "pane:bench-right");
+  const leftSurfaces = surfaces.filter((surface) => surface.pane_ref !== "pane:bench-right");
   const layout = {
     workspace_ref: "workspace:bench",
     window_ref: "window:bench",
@@ -671,12 +681,24 @@ async function handleFakeCmuxSocketLine(
             ref: "pane:bench",
             index: 0,
             focused: true,
-            surface_count: surfaces.length,
-            surface_refs: surfaces.map((surface) => surface.ref),
-            surface_ids: surfaces.map((surface) => surface.id),
-            selected_surface_ref: surfaces[0]?.ref,
+            surface_count: leftSurfaces.length,
+            surface_refs: leftSurfaces.map((surface) => surface.ref),
+            surface_ids: leftSurfaces.map((surface) => surface.id),
+            selected_surface_ref: leftSurfaces[0]?.ref,
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
             current_directory: cwd,
           },
+          ...(rightSurfaces.length ? [{
+            ref: "pane:bench-right",
+            index: 1,
+            focused: false,
+            surface_count: rightSurfaces.length,
+            surface_refs: rightSurfaces.map((surface) => surface.ref),
+            surface_ids: rightSurfaces.map((surface) => surface.id),
+            selected_surface_ref: rightSurfaces[0]?.ref,
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+            current_directory: cwd,
+          }] : []),
         ],
       };
       break;
@@ -708,6 +730,7 @@ async function handleFakeCmuxSocketLine(
           ref: spawnedSurfaceRef(spawnSequence),
           id: spawnedSurfaceId(spawnSequence),
           title: primary ? current.title ?? "bench-spawn" : "bench-extra",
+          pane_ref: "pane:bench-right",
           primary,
           runtimeReady: false,
           closed: false,
@@ -718,6 +741,7 @@ async function handleFakeCmuxSocketLine(
       surfaceStates.delete(surface.ref);
       result = {
         ...layout,
+        pane_ref: "pane:bench-right",
         surface_ref: surface.ref,
         surface_id: surface.id,
         title: surface.title,
