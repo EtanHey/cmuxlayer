@@ -8708,7 +8708,23 @@ Session ID: ${sessionId}`,
       });
     });
 
-    it("settles the live Claude Opus 5.5 1M banner as the requested registry model", async () => {
+    it.each([
+      {
+        tier: "1M",
+        banner: "Opus 5.5 (1M context)",
+        mismatch: false,
+      },
+      {
+        tier: "200K",
+        banner: "Opus 5.5 (200K context)",
+        mismatch: true,
+      },
+      {
+        tier: "unreported",
+        banner: "Opus 5.5",
+        mismatch: null,
+      },
+    ])("settles the live Claude Opus 5.5 $tier banner through the registry", async ({ banner, mismatch }) => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-opus-1m",
@@ -8723,7 +8739,7 @@ Session ID: ${sessionId}`,
         surface: "surface:opus-1m",
         text: [
           "Claude Code",
-          "🤖 Opus 5.5 (1M context)",
+          `🤖 ${banner}`,
           "❯",
           "⏵⏵ bypass permissions on",
         ].join("\n"),
@@ -8737,8 +8753,8 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("agent-opus-1m")).toMatchObject({
         state: "ready",
         model: "claude-opus-5-5[1m]",
-        parsed_model: "Opus 5.5",
-        model_mismatch: false,
+        parsed_model: banner,
+        model_mismatch: mismatch,
       });
     });
 

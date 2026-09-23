@@ -992,18 +992,19 @@ export function computeModelMismatch(
   const requestedClaude = parseClaudeModelIdentity(requested);
   const parsedClaude = parseClaudeModelIdentity(parsed);
   if (requestedClaude && parsedClaude) {
-    return (
+    if (
       requestedClaude.family !== parsedClaude.family ||
       (requestedClaude.major !== null &&
         parsedClaude.major !== null &&
         requestedClaude.major !== parsedClaude.major) ||
       (requestedClaude.minor !== null &&
         parsedClaude.minor !== null &&
-        requestedClaude.minor !== parsedClaude.minor) ||
-      (requestedClaude.context !== null &&
-        parsedClaude.context !== null &&
-        requestedClaude.context !== parsedClaude.context)
-    );
+        requestedClaude.minor !== parsedClaude.minor)
+    ) return true;
+    if (requestedClaude.context !== null && parsedClaude.context !== null) {
+      return requestedClaude.context !== parsedClaude.context;
+    }
+    return requestedClaude.context === parsedClaude.context ? false : null;
   }
   return !parsed.includes(requested) && !requested.includes(parsed);
 }

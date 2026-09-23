@@ -184,10 +184,10 @@ function footerTokenCount(line: string): string | null {
 const MAX_SCREEN_LINE_WIDTH = 1024;
 const MODEL_COST_RE = /🤖\s*([^|\n]+?)\s*\|\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)/i;
 const HEADER_MODEL_RE =
-  /^\s*[▝▜▛▘▐].*?\b((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][^(\n·|]*)/m;
+  /^\s*[▝▜▛▘▐].*?\b((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][^(\n·|]*(?:\(\d+(?:\.\d+)?[KM]\s+context\))?)/im;
 // Fallback: 🤖 + model name + version, without requiring cost or pipe
 const MODEL_EMOJI_RE =
-  /🤖\s*((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][0-9.]*)/i;
+  /🤖\s*((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][0-9.]*(?:\s+\(\d+(?:\.\d+)?[KM]\s+context\))?)/i;
 // Last resort: 🤖 + bare model family name (for narrow panes where version is cut off)
 const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
