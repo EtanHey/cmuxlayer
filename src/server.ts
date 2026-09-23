@@ -3540,7 +3540,7 @@ function screenShowsQueuedAgentInput(
     const stripRightPadding = (text: string): string =>
       normalizeTerminalText(text).replace(/[ \t]+$/, "");
     const visible = stripRightPadding(exactQueuedItemText);
-    return visible.length > 0 && visible === stripRightPadding(submittedText);
+    return visible.length > 0 && visible === submittedText;
   }
 
   const visiblePrefix = compactQueueCorrelationText(
@@ -3548,6 +3548,18 @@ function screenShowsQueuedAgentInput(
   );
   const submitted = compactQueueCorrelationText(submittedText.trim());
   return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
+}
+
+function countVisibleExactQueuedRows(
+  screenText: string,
+  authoredText: string,
+): number {
+  return normalizeTerminalText(screenText)
+    .split("\n")
+    .filter((line) => {
+      const row = /^↳ (.*)$/.exec(stripCodexQueueGutter(line).trimStart());
+      return row !== null && row[1] === authoredText;
+    }).length;
 }
 
 function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {
@@ -6866,15 +6878,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const submitBaseline = submitAttempted && !opts.engineSubmitProof
         ? await readParsedSurface(opts.surface, opts.workspace) : null;
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
-      const ownedQueuedReceipt = callerSubmit && targetAgent && submitBaseline &&
+      const eligibleQueuedReceipts = callerSubmit && targetAgent && submitBaseline &&
         targetCli === "codex"
-        ? context.lifecycleSweepEngine?.listDeliveryReceipts().find((receipt) =>
+        ? context.lifecycleSweepEngine?.listDeliveryReceipts().filter((receipt) =>
             receipt.agent_id === targetAgent.agent_id &&
             receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true &&
-            receipt.press_enter &&
-            screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true })
-          )
+            receipt.press_enter
+          ) ?? []
+        : [];
+      const ownedQueuedReceipt = submitBaseline
+        ? eligibleQueuedReceipts.find((receipt) => {
+            const visibleCount = countVisibleExactQueuedRows(
+              submitBaseline.text,
+              receipt.text,
+            );
+            const ownedCount = eligibleQueuedReceipts.filter(
+              (candidate) => candidate.text === receipt.text,
+            ).length;
+            return visibleCount === 1 && visibleCount <= ownedCount &&
+              screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true });
+          })
         : undefined;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
           (targetCli && ["claude", "codex", "cursor"].includes(targetCli) &&

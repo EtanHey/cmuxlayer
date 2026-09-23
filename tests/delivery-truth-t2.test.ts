@@ -217,6 +217,12 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     ["differs only in spaces", "queued  request", ["  ↳ queued request"]],
     ["has extra space after the queue marker", "queued request", ["  ↳  queued request"]],
     ["is ambiguously wrapped", "queued request continued", ["  ↳ queued request", "  │ continued"]],
+    ["differs only by authored trailing space", "queued request ", ["  ↳ queued request"]],
+    ["duplicates the visible text across queue blocks", "queued request", [
+      "  ↳ queued request",
+      "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+      "  ↳ queued request",
+    ]],
   ])("does not submit a human queue item that %s", async (_case, receiptText, queueLines) => {
     const { createServer, createServerContext } = await loadServerModule();
     let screen = "OpenAI Codex\n› Ask Codex to do anything";
