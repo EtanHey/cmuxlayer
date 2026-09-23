@@ -838,6 +838,8 @@ export interface AgentEngineOptions {
   haltIdleWithoutDoneDwellMs?: number;
   haltWedgedDwellMs?: number;
   haltWedgedSweeps?: number;
+  /** Test seam for process snapshots; production samples process time with ps. */
+  haltProcessSnapshot?: () => string | Promise<string>;
 }
 
 export interface SelfRegistrationSessionEntry {
@@ -1791,6 +1793,9 @@ export class AgentEngine {
   private haltIdleWithoutDoneDwellMs: number;
   private haltWedgedDwellMs: number;
   private haltWedgedSweeps: number;
+  private haltProcessSnapshot?: () => string | Promise<string>;
+  private sweepBackgroundProcessSnapshot: Promise<string | null> | null = null;
+  private backgroundChildCpuTimes = new Map<string, Map<number, string>>();
   private autoResolvePrompts: boolean;
   constructor(
     stateMgr: StateManager,
@@ -1872,6 +1877,7 @@ export class AgentEngine {
           DEFAULT_HALT_WEDGED_SWEEPS,
         ),
     );
+    this.haltProcessSnapshot = opts?.haltProcessSnapshot;
     this.autoResolvePrompts =
       process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE === "1";
     this.loadDeliveryReceipts();
@@ -4280,18 +4286,6 @@ export class AgentEngine {
     );
   }
 
-  private blockingBackgroundWaitElapsedMs(screenText: string): number | null {
-    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
-    const match = visibleTail.match(
-      /\bWait(?:ing|ed) for background terminal\s*\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s\s*•\s*esc to interrupt\)/i,
-    );
-    if (!match) return null;
-    const hours = Number.parseInt(match[1] ?? "0", 10);
-    const minutes = Number.parseInt(match[2] ?? "0", 10);
-    const seconds = Number.parseInt(match[3] ?? "0", 10);
-    return ((hours * 60 + minutes) * 60 + seconds) * 1_000;
-  }
-
   private isIdleSupervisor(agent: AgentRecord, _screenText: string): boolean {
     return agent.role === "orchestrator";
   }
@@ -4299,13 +4293,104 @@ export class AgentEngine {
   private observableHaltProgressSignature(
     agent: AgentRecord,
     screenText: string,
+    parsed: ParsedScreenResult,
   ): string {
     const materialScreen = cleanScreenText(
       screenText,
       BOOT_SESSION_CAPTURE_LINES,
     );
     const transcriptMtime = this.loadGroundTruthSession(agent)?.mtime_ms ?? 0;
-    return `${screenTextSignature(materialScreen)}:${transcriptMtime}`;
+    // The wait timer advances even when the background command is blocked in
+    // an editor. Screen output, transcript updates, and token activity are
+    // observable progress; elapsed time alone is not.
+    return `${screenTextSignature(materialScreen)}:${transcriptMtime}:tokens=${parsed.token_count ?? "unknown"}`;
+  }
+
+  private async readBackgroundProcessSnapshot(): Promise<string | null> {
+    try {
+      if (this.haltProcessSnapshot) return await this.haltProcessSnapshot();
+      const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,time=,command="], {
+        encoding: "utf8",
+        timeout: 250,
+        maxBuffer: 2_000_000,
+      });
+      return stdout;
+    } catch {
+      return null;
+    }
+  }
+
+  private async backgroundChildUsedCpu(
+    agent: AgentRecord,
+    screenText: string,
+    ctx: SweepAgentContext = {},
+  ): Promise<boolean> {
+    if (!/\bWait(?:ing|ed) for background terminal\s*\(/i.test(screenText) || !agent.pid) {
+      this.backgroundChildCpuTimes.delete(agent.agent_id);
+      return false;
+    }
+    const visibleLines = screenText.split(/\r?\n/).slice(-24);
+    // An editor waiting for input is a known blocked command. Other busy
+    // descendants of the harness cannot make that command progress.
+    if (visibleLines.some((line) =>
+      /^\s*(?:└\s*)?(?:git\s+commit\s+-e\b|(?:vi|vim|nvim|nano)\b|(?:EDITOR|VISUAL)\s*=)/i.test(line),
+    )) {
+      this.backgroundChildCpuTimes.delete(agent.agent_id);
+      return false;
+    }
+    const waitingCommand = visibleLines
+      .map((line) => line.match(/^\s*└\s*(.+)$/)?.[1]?.trim())
+      .find((command): command is string => Boolean(command));
+    if (!waitingCommand) return false;
+    try {
+      const output = ctx.sweep
+        ? await (this.sweepBackgroundProcessSnapshot ??= this.readBackgroundProcessSnapshot())
+        : await this.readBackgroundProcessSnapshot();
+      if (output === null) return false;
+      const rows = output.split("\n").map((line) => {
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
+        return match ? { pid: Number(match[1]), ppid: Number(match[2]), time: match[3], command: match[4] } : null;
+      }).filter((row): row is { pid: number; ppid: number; time: string; command: string } => row !== null);
+      const descendants = new Set<number>([agent.pid]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of rows) {
+          if (descendants.has(row.ppid) && !descendants.has(row.pid)) {
+            descendants.add(row.pid);
+            changed = true;
+          }
+        }
+      }
+      const commandRoot = rows.find((row) =>
+        row.pid !== agent.pid &&
+        descendants.has(row.pid) &&
+        row.command.includes(waitingCommand),
+      );
+      const commandTree = new Set<number>(commandRoot ? [commandRoot.pid] : []);
+      changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of rows) {
+          if (commandTree.has(row.ppid) && !commandTree.has(row.pid)) {
+            commandTree.add(row.pid);
+            changed = true;
+          }
+        }
+      }
+      const times = new Map(rows
+        .filter((row) => commandTree.has(row.pid))
+        .map((row) => [row.pid, row.time] as const));
+      const previous = this.backgroundChildCpuTimes.get(agent.agent_id);
+      this.backgroundChildCpuTimes.set(agent.agent_id, times);
+      return [...times].some(([pid, time]) =>
+        previous?.has(pid)
+          ? previous.get(pid) !== time
+          : previous !== undefined && /[1-9]/.test(time),
+      );
+    } catch {
+      return false;
+    }
   }
 
   private isMatureHaltEpisode(agent: AgentRecord, nowMs: number): boolean {
@@ -4708,14 +4793,18 @@ export class AgentEngine {
     const progressSignature = this.observableHaltProgressSignature(
       agent,
       screenText,
+      parsed,
     );
+    const backgroundChildUsedCpu = await this.backgroundChildUsedCpu(agent, screenText, ctx);
     const hasVisibleProgress = hasVisibleAgentProgress(screenText, agent.cli);
     const canObservePromptMotion =
       disposition.kind === "escalate" &&
       disposition.prompt_type === "human_or_unknown_chooser" &&
       isBlockingPromptChooserScreen(screenText) &&
       hasVisibleProgress;
-    const promptScreenSignature = screenTextSignature(screenText);
+    const promptScreenSignature = /\bWait(?:ing|ed) for background terminal\s*\(/i.test(screenText)
+      ? `${progressSignature}:${backgroundChildUsedCpu ? nowMs : ""}`
+      : screenTextSignature(screenText);
     const previousPromptScreenSignature = this.promptMotionScreenSignatures.get(
       agent.agent_id,
     );
@@ -4794,8 +4883,6 @@ export class AgentEngine {
 
     const screenActive =
       parsed.status === "working" || parsed.status === "thinking";
-    const blockingBackgroundWaitMs =
-      this.blockingBackgroundWaitElapsedMs(screenText);
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
     if (hasHarnessApiError) {
@@ -4808,10 +4895,21 @@ export class AgentEngine {
     } else if (parsed.paused === true) {
       haltType = "paused";
     } else if (screenActive) {
-      if (blockingBackgroundWaitMs !== null) {
-        haltType = "wedged";
-        episodeStartedAtMs = nowMs - blockingBackgroundWaitMs;
-      } else if (agent.halt_last_progress_signature !== progressSignature) {
+      const previousSignature = agent.halt_last_progress_signature;
+      const signatureWithoutTokens = (signature: string) =>
+        signature.replace(/:tokens=(?:\d+|unknown)$/, "");
+      const previousTokenCount = previousSignature?.match(/:tokens=(\d+)$/)?.[1];
+      const tokenGrowth =
+        parsed.token_count !== null &&
+        previousTokenCount !== undefined &&
+        parsed.token_count > Number(previousTokenCount);
+      if (
+        !previousSignature ||
+        signatureWithoutTokens(previousSignature) !==
+          signatureWithoutTokens(progressSignature) ||
+        tokenGrowth ||
+        backgroundChildUsedCpu
+      ) {
         return this.clearHaltEpisode(agent, {
           halt_last_active_at: nowIso,
           halt_last_progress_at_ms: nowMs,
@@ -4846,10 +4944,7 @@ export class AgentEngine {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
         halt_episode_type: haltType,
         halt_episode_started_at: new Date(episodeStartedAtMs).toISOString(),
-        halt_episode_observations:
-          haltType === "wedged" && blockingBackgroundWaitMs !== null
-            ? this.haltWedgedSweeps
-            : 1,
+        halt_episode_observations: 1,
         halt_notification_sent_at: null,
         halt_notified_ancestor_id: null,
         halt_fallback_sink_id: null,
@@ -5297,6 +5392,7 @@ export class AgentEngine {
     this.cliExitShellMatches.delete(agentId);
     this.promptMotionObservedAtMs.delete(agentId);
     this.promptMotionScreenSignatures.delete(agentId);
+    this.backgroundChildCpuTimes.delete(agentId);
   }
 
   private isLeadWatchBlind(
@@ -8073,6 +8169,7 @@ export class AgentEngine {
   }
 
   private async runSweepOnce(): Promise<void> {
+    this.sweepBackgroundProcessSnapshot = null;
     const timings: Record<string, number> = {};
     const sweepStartedAt = Date.now();
     const time = async <T>(name: string, operation: () => Promise<T>) => {
@@ -8204,6 +8301,7 @@ export class AgentEngine {
       if (this.shouldYieldSweep()) return;
       await time("outbox_ms", () => this.drainOutboxBestEffort());
     } finally {
+      this.sweepBackgroundProcessSnapshot = null;
       timings.total_ms = Date.now() - sweepStartedAt;
       this.sweepDebugLog(
         `[cmuxlayer] sweep timing ${Object.entries(timings)
