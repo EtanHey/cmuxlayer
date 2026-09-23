@@ -1022,7 +1022,7 @@ describe("AgentEngine", () => {
       ).rejects.toThrow("state disk unavailable");
 
       expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        "surface:new",
+        SPAWN_SURFACE_UUID,
         expect.objectContaining({
           workspace: "ws:1",
           collapsePane: false,
@@ -1060,7 +1060,7 @@ describe("AgentEngine", () => {
       ).rejects.toThrow("state disk unavailable");
 
       expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        "surface:renumbered",
+        SPAWN_SURFACE_UUID,
         expect.objectContaining({
           workspace: "ws:2",
           collapsePane: false,
@@ -1110,6 +1110,50 @@ describe("AgentEngine", () => {
         expect.stringMatching(/orphan-risk.*changed binding before cleanup/i),
         expect.objectContaining({ level: "warning", source: "cmuxlayer" }),
       );
+    });
+
+    it("targets the UUID when a positional ref is reused after beforeMutation", async () => {
+      const foreignUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      let closeTarget: string | undefined;
+      let closedUuid: string | undefined;
+      vi.spyOn(stateMgr, "writeState").mockImplementationOnce(() => {
+        liveSurfaces = [{ ...makeSpawnSurface(), workspace_ref: "ws:1" }];
+        throw new Error("state disk unavailable");
+      });
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async (target: string, opts: { beforeMutation?: () => Promise<void> }) => {
+          await opts.beforeMutation?.();
+          // cmux renumbers the created surface after the final topology read.
+          liveSurfaces = [
+            {
+              ...makeSurface("surface:new"),
+              id: foreignUuid,
+              workspace_ref: "ws:1",
+            },
+            {
+              ...makeSurface("surface:renumbered"),
+              id: SPAWN_SURFACE_UUID,
+              workspace_ref: "ws:1",
+            },
+          ];
+          closeTarget = target;
+          closedUuid = liveSurfaces.find(
+            (surface) => surface.ref === target || surface.id === target,
+          )?.id;
+        },
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Fail after the close gate",
+        }),
+      ).rejects.toThrow("state disk unavailable");
+
+      expect(closeTarget).toBe(SPAWN_SURFACE_UUID);
+      expect(closedUuid).toBe(SPAWN_SURFACE_UUID);
+      expect(closedUuid).not.toBe(foreignUuid);
     });
 
     it.each([
@@ -1190,7 +1234,7 @@ describe("AgentEngine", () => {
         state: "error",
       });
       expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        "surface:new",
+        SPAWN_SURFACE_UUID,
         expect.objectContaining({
           workspace: "ws:1",
           collapsePane: false,
@@ -2661,7 +2705,7 @@ describe("AgentEngine", () => {
       expect(mockClient.newSurface).toHaveBeenCalledTimes(1);
       expect(mockClient.newSplit).not.toHaveBeenCalled();
       expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        "surface:created-tab",
+        SPAWN_SURFACE_UUID,
         expect.objectContaining({
           workspace: "ws:1",
           collapsePane: false,

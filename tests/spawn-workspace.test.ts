@@ -666,7 +666,7 @@ describe("workspace spawn tools", () => {
       `Spawn placement blocked: requested ${fixture.parent_agent.workspace_id} but cmux returned workspace:B`,
     );
     expect(client.closeSurface).toHaveBeenCalledWith(
-      "surface:2",
+      "11111111-2222-4333-8444-000000000002",
       expect.objectContaining({
         workspace: "workspace:B",
         collapsePane: false,
