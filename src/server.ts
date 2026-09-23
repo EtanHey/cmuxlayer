@@ -15145,7 +15145,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
+      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
       {
         version: z
           .literal(1)
@@ -15219,7 +15219,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .positive()
           .optional()
           .describe(
-            "Optional timeout override in milliseconds for initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (10s shell, 15s launch, 60s boot prompt).",
+            "Optional timeout override in milliseconds for pane placement, initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (45s placement, 10s shell, 15s launch, 60s boot prompt).",
           ),
         workspace: z
           .string()

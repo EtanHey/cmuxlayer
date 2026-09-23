@@ -3163,6 +3163,19 @@ export class AgentEngine {
           error && typeof error === "object" && "code" in error
             ? String((error as { code?: unknown }).code)
             : "";
+        // A typed, pre-mutation rejection proves no split was created. A
+        // timeout or untyped transport failure has an unknown mutation outcome
+        // and must retain the in-flight guard against a third column.
+        if (
+          createdRightSplit &&
+          (code === "not_found" || code === "invalid_argument")
+        ) {
+          this.placementSplitInFlight.delete(placementWorkspace);
+          const pending = this.pendingPlacementSplits.get(placementWorkspace);
+          if (pending?.surface === "") {
+            this.pendingPlacementSplits.delete(placementWorkspace);
+          }
+        }
         const paneGone =
           placement.kind === "surface" &&
           (code === "not_found" || /\bnot_found\b/.test(message)) &&
@@ -3203,6 +3216,15 @@ export class AgentEngine {
           surfaceId: createdSurface.surface_id,
           uncertain: prior?.uncertain,
         });
+      }
+      // The lock's deadline can win while cmux is still creating a surface.
+      // Its late result belongs to this operation, but must never be returned
+      // or left open after the caller has received placement_timeout.
+      try {
+        assertActive();
+      } catch (error) {
+        await this.cleanupUnboundCreatedSurface(createdSurface, "agent-placement");
+        throw error;
       }
       if (
         createdSurface.actual_workspace &&
