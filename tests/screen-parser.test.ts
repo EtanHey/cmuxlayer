@@ -102,7 +102,6 @@ describe("parseScreen", () => {
     // Run synchronously in a child so a backtracking parser cannot hang Vitest.
     const parserUrl = new URL("../src/screen-parser.ts", import.meta.url).href;
     const code = `
-      import { performance } from "node:perf_hooks";
       import { parseScreen } from ${JSON.stringify(parserUrl)};
       const frames = [
         "╭ OpenAI Codex ╮\\nmodel: gpt-5.6-sol\\n› " + " ".repeat(8000) + "\\n› ",
@@ -111,11 +110,14 @@ describe("parseScreen", () => {
         "╭ OpenAI Codex ╮\\n" + "x".repeat(8000) + "\\n› Find a bug",
       ];
       const durations = frames.map((frame) => {
+        // Warm first-call JIT work; the child timeout still bounds this call.
+        parseScreen(frame);
         let slowest = 0;
         for (let i = 0; i < 3; i++) {
-          const start = performance.now();
+          const start = process.cpuUsage();
           parseScreen(frame);
-          slowest = Math.max(slowest, performance.now() - start);
+          const used = process.cpuUsage(start);
+          slowest = Math.max(slowest, (used.user + used.system) / 1000);
         }
         return slowest;
       });
