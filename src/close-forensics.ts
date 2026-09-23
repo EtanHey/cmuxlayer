@@ -27,12 +27,11 @@ import {
   openSync,
   readFileSync,
   readSync,
-  renameSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { atomicWriteJson } from "./atomic-json-write.js";
 import type {
   CloseForensicsEvent,
   CloseTelemetryEvent,
@@ -635,9 +634,7 @@ function writeSurfaceRefMapCache(
   map: Map<string, string>,
 ): void {
   const entries = [...map.entries()].slice(-SURFACE_REF_MAP_CACHE_LIMIT);
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(Object.fromEntries(entries)), "utf-8");
-  renameSync(tmp, path);
+  atomicWriteJson(path, Object.fromEntries(entries));
 }
 
 function mergeSurfaceRefMaps(
@@ -753,10 +750,9 @@ export function createDefaultCloseForensicsRunner(config: {
     },
     read: () => cursor.readState?.().lastSeq ?? 0,
     writeState: (state: CloseForensicsCursorState) => {
-      const tmp = `${cursorPath}.tmp`;
-      writeFileSync(
-        tmp,
-        JSON.stringify({
+      atomicWriteJson(
+        cursorPath,
+        {
           last_seq: state.lastSeq,
           last_offset: state.lastOffset,
           last_close_boot_id: state.lastCloseBootId,
@@ -766,23 +762,18 @@ export function createDefaultCloseForensicsRunner(config: {
                 occurred_at: state.lastWindowKeyEvent.occurredAt,
               }
             : null,
-        }),
-        "utf-8",
+        },
       );
-      renameSync(tmp, cursorPath);
     },
     write: (seq: number) => {
-      const tmp = `${cursorPath}.tmp`;
-      writeFileSync(
-        tmp,
-        JSON.stringify({
+      atomicWriteJson(
+        cursorPath,
+        {
           last_seq: seq,
           last_offset: 0,
           last_window_key_event: null,
-        }),
-        "utf-8",
+        },
       );
-      renameSync(tmp, cursorPath);
     },
   };
 
