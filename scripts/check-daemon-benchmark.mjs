@@ -237,6 +237,61 @@ function standardDeviation(values) {
   );
 }
 
+function percentile(values, percentage) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.ceil((percentage / 100) * sorted.length) - 1];
+}
+
+// A socket ping launched with each send can identify delay shared with the
+// benchmark runner. A fast ping never discounts a slow send. The control is
+// deliberately outside the daemon, so a slow daemon send path stays visible.
+function pairedSendMetrics(measurement, expectedSamples) {
+  const control = measurement?.paired_control;
+  const samples = control?.samples;
+  if (
+    control?.kind !== "fake_socket_timed_ping" ||
+    !Number.isFinite(measurement?.p50_ms) ||
+    !Number.isFinite(measurement?.p95_ms) ||
+    !Number.isSafeInteger(expectedSamples) ||
+    expectedSamples < 1 ||
+    !Array.isArray(samples) ||
+    samples.length !== expectedSamples ||
+    samples.some((sample, index) =>
+      sample?.sample_index !== index ||
+      !Number.isFinite(sample.send_elapsed_ms) ||
+      sample.send_elapsed_ms < 0 ||
+      !Number.isFinite(sample.control_elapsed_ms) ||
+      sample.control_elapsed_ms < 0 ||
+      sample.control_hold_ms !== 250 ||
+      !Number.isFinite(sample.control_total_ms) ||
+      Math.abs(sample.control_total_ms - sample.control_hold_ms - sample.control_elapsed_ms) > 0.02 ||
+      sample.control_transport !== "socket" ||
+      !Number.isFinite(sample.start_delta_ms) ||
+      sample.start_delta_ms > 5 ||
+      sample.start_delta_ms < 0
+    )
+  ) return null;
+  const raw = samples.map((sample) => sample.send_elapsed_ms);
+  if (
+    Math.abs(rounded(percentile(raw, 50)) - measurement.p50_ms) > 0.01 ||
+    Math.abs(rounded(percentile(raw, 95)) - measurement.p95_ms) > 0.01
+  ) return null;
+  const controlMedian = percentile(
+    samples.map((sample) => sample.control_elapsed_ms),
+    50,
+  );
+  const sendMedian = percentile(raw, 50);
+  const adjusted = samples.map((sample) => sample.send_elapsed_ms - Math.min(
+    Math.max(0, sample.control_elapsed_ms - controlMedian),
+    Math.max(0, sample.send_elapsed_ms - sendMedian),
+  ));
+  return {
+    p50_ms: rounded(percentile(adjusted, 50)),
+    p95_ms: rounded(percentile(adjusted, 95)),
+    control_median_ms: rounded(controlMedian),
+  };
+}
+
 function operationMargin(
   baseline,
   operation,
@@ -491,6 +546,8 @@ function row(
     history_degraded: metadata.history_degraded === true,
     margin_ms: metadata.margin_ms,
     margin_rule: metadata.margin_rule,
+    raw_current: metadata.raw_current,
+    control_median_ms: metadata.control_median_ms,
     passed,
   };
 }
@@ -529,6 +586,14 @@ export function compareBenchmark(
   const rows = [];
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay.row_metadata[operation];
+    const paired = ["first_send_after_spawn", "send_to_agent_warm"].includes(operation)
+      ? pairedSendMetrics(
+          operation === "first_send_after_spawn"
+            ? result?.latency?.first_send_after_spawn?.sampled
+            : result?.latency?.send_to_agent_warm,
+          (metadata.samples_per_run * expectedRounds) / baseline.replay.rounds,
+        )
+      : null;
     const marginMs = operationMargin(
       baseline,
       operation,
@@ -542,12 +607,13 @@ export function compareBenchmark(
       historyDegraded,
     );
     for (const metric of ["p50_ms", "p95_ms"]) {
+      const rawCurrent = current[operation]?.[metric];
       rows.push(
         row(
           operation,
           metric,
           baseline.measurements[operation][metric],
-          current[operation]?.[metric],
+          paired?.[metric] ?? rawCurrent,
           performanceCeiling(
             baseline.measurements[operation][metric],
             ratio,
@@ -561,6 +627,10 @@ export function compareBenchmark(
             margin_ms: marginMs,
             margin_rule: marginRule,
             history_degraded: historyDegraded,
+            ...(paired ? {
+              raw_current: rawCurrent,
+              control_median_ms: paired.control_median_ms,
+            } : {}),
           },
         ),
       );
@@ -742,7 +812,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "|---|:---:|:---:|:---:|---:|---:|---:|---:|:---:|",
   ];
   const tableRow = (entry) =>
-    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
+    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)}${entry.raw_current === undefined ? "" : ` (raw ${formatted(entry.raw_current, entry.unit)})`} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
   const changed = comparison.rows.filter(
     (entry) => !entry.passed || entry.current !== entry.baseline,
   );
@@ -752,6 +822,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
     `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot or untrusted-history rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
+    "First-send and warm-agent p50/p95 may subtract only delay above the median of paired 250ms fake-socket timer pings launched with each send. Current shows the adjusted value with raw latency alongside it. Missing, stale, or malformed paired controls leave raw latency in force.",
     "",
     ...tableHeader,
     ...changed.map(tableRow),
@@ -766,6 +837,24 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "",
     "</details>",
   ];
+  for (const [operation, diagnostics] of [
+    ["first_send_after_spawn", result?.latency?.first_send_after_spawn?.sample_diagnostics?.first_send_after_spawn],
+    ["send_to_agent_warm", result?.latency?.first_send_after_spawn?.sample_diagnostics?.send_to_agent_warm],
+  ]) {
+    if (!Array.isArray(diagnostics?.slowest)) continue;
+    lines.push(
+      "",
+      `Worst ${operation} samples (ms; raw send and paired fake-socket ping):`,
+      "",
+      "| Sample | Send | Control | Route | Lock | Enumerate | Type | Verify |",
+      "|---:|---:|---:|---:|---:|---:|---:|---:|",
+      ...diagnostics.slowest.slice(0, 6).map((sample) => {
+        const phases = sample.timings_ms ?? {};
+        const value = (number) => Number.isFinite(number) ? number : "missing";
+        return `| ${sample.sample_index} | ${value(sample.elapsed_ms)} | ${value(sample.paired_control_ms)} | ${value(phases.route)} | ${value(phases.lock)} | ${value(phases.enumerate)} | ${value(phases.type)} | ${value(phases.verify)} |`;
+      }),
+    );
+  }
   if (comparison.failures.length) {
     lines.push(
       "",

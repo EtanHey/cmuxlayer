@@ -340,6 +340,151 @@ describe("daemon performance budget", () => {
     ).toBe("measured (1 run)");
   });
 
+  it("excuses only send latency matched by a simultaneous socket control stall", () => {
+    const pairedSamples = (fastSend: number, slowSend: number, slowControl: number) =>
+      Array.from({ length: 96 }, (_, sample_index) => ({
+        sample_index,
+        send_elapsed_ms: sample_index < 90 ? fastSend : slowSend,
+        control_elapsed_ms: sample_index < 90 ? 1 : slowControl,
+        control_total_ms: 250 + (sample_index < 90 ? 1 : slowControl),
+        control_hold_ms: 250,
+        control_transport: "socket",
+        start_delta_ms: 0.1,
+      }));
+    const candidate = {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          sampled: {
+            p50_ms: 900,
+            p95_ms: 1_100,
+            lock_hold_ms: 20,
+            transport: "socket",
+            paired_control: {
+              kind: "fake_socket_timed_ping",
+              samples: pairedSamples(900, 1_100, 201),
+            },
+          },
+        },
+        send_to_agent_warm: {
+          ...result.latency.send_to_agent_warm,
+          p50_ms: 240,
+          p95_ms: 340,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(240, 340, 101),
+          },
+        },
+      },
+    };
+    const matched = compareBenchmark(baseline, candidate);
+    const first = matched.rows.find((entry) =>
+      entry.operation === "first_send_after_spawn" && entry.metric === "p95_ms",
+    );
+    const warm = matched.rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    );
+    expect(first).toMatchObject({ current: 900, raw_current: 1_100, passed: true });
+    expect(warm).toMatchObject({ current: 240, raw_current: 340, passed: true });
+
+    const sendOnly = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        first_send_after_spawn: {
+          ...candidate.latency.first_send_after_spawn,
+          sampled: {
+            ...candidate.latency.first_send_after_spawn.sampled,
+            paired_control: {
+              kind: "fake_socket_timed_ping",
+              samples: pairedSamples(900, 1_100, 1),
+            },
+          },
+        },
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(240, 340, 1),
+          },
+        },
+      },
+    };
+    const unpaired = compareBenchmark(baseline, sendOnly);
+    expect(unpaired.rows.find((entry) =>
+      entry.operation === "first_send_after_spawn" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 1_100, passed: false });
+    expect(unpaired.rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+    const malformed = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(240, 340, 101).slice(1),
+          },
+        },
+      },
+    };
+    expect(compareBenchmark(baseline, malformed).rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+
+    const broadRegression = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          p50_ms: 340,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(340, 340, 101),
+          },
+        },
+      },
+    };
+    expect(compareBenchmark(baseline, broadRegression).rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+  });
+
+  it("shows raw send and phase-local control timings for the slowest samples", () => {
+    const withDiagnostics = {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          sample_diagnostics: {
+            first_send_after_spawn: {
+              slowest: [{
+                sample_index: 7,
+                elapsed_ms: 150,
+                paired_control_ms: 2,
+                timings_ms: { route: 1, lock: 3, enumerate: 80, type: 55, verify: 4 },
+              }],
+            },
+          },
+        },
+      },
+    };
+    const markdown = renderMarkdownComparison(
+      baseline,
+      withDiagnostics,
+      compareBenchmark(baseline, withDiagnostics),
+    );
+    expect(markdown).toContain("Worst first_send_after_spawn samples");
+    expect(markdown).toContain("| Sample | Send | Control | Route | Lock | Enumerate | Type | Verify |");
+    expect(markdown).toContain("| 7 | 150 | 2 | 1 | 3 | 80 | 55 | 4 |");
+  });
+
   it("rejects single-shot metadata for every canonical row", () => {
     const singleShot = attest({
       ...baseline,
@@ -1045,8 +1190,12 @@ describe("daemon performance budget", () => {
     expect(source).toContain(
       "lock_hold_ms: lockHoldFromElapsed ? elapsedMs : 0",
     );
-    expect(source.indexOf("await validateReceipt?.(receipt)")).toBeLessThan(
-      source.indexOf("elapsed_ms: round(nowMs() - startedAt)"),
+    const sendBody = source.slice(
+      source.indexOf("const measureSend = async"),
+      source.indexOf("// The daemon sweep acknowledges"),
+    );
+    expect(sendBody.indexOf("await validateReceipt?.(receipt)")).toBeLessThan(
+      sendBody.indexOf("const completedAt = nowMs()"),
     );
     expect(source).toMatch(
       /await Promise\.all\([\s\S]*?validateReceipt\?\.[\s\S]*?\);\n {4}const elapsedMs = nowMs\(\) - startedAt;/,
