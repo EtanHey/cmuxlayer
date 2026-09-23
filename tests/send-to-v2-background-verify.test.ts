@@ -441,6 +441,52 @@ describe("send_to v2 background verify", () => {
     });
   });
 
+  it("shows a capped queued turn in wait_for and list_agents without claiming delivery", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.cli = "cursor";
+    client.title = "cmuxlayerCursor";
+    client.cursorFollowUpBox = true;
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "cursor" });
+
+    const sent = parseResult(await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "held behind a long tool call",
+      press_enter: true,
+    }));
+    expect(sent).toMatchObject({
+      delivery_state: "queued_followup",
+      queued_behind_turn: true,
+      queued_wait_ms: expect.any(Number),
+    });
+    const waiting = server._registeredTools.wait_for.handler(
+      { delivery_id: sent.delivery_id, timeout_ms: 300_000 },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(120_100);
+    const waited = parseResult(await waiting);
+    expect(waited).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "queued_followup",
+      terminal: false,
+      delivered: false,
+      attention_code: "queued_timeout",
+      needs_attention: true,
+      queued_wait_ms: expect.any(Number),
+      target_observation_age_ms: expect.any(Number),
+    });
+    expect(waited.queued_wait_ms).toBeGreaterThanOrEqual(120_000);
+    const listed = parseResult(await callTool(server, "list_agents", { detail: "full" }));
+    expect(listed.deliveries).toContainEqual(expect.objectContaining({
+      delivery_id: sent.delivery_id,
+      attention_code: "queued_timeout",
+      queued_behind_turn: true,
+      queued_wait_ms: expect.any(Number),
+      target_observation_age_ms: expect.any(Number),
+    }));
+    expect(client.sendKeyCalls).not.toContain("escape");
+  });
+
   it("returns duplicate_of for an identical send while queued_followup is in flight", async () => {
     const client = new FakeAgentSurfaceClient();
     client.cli = "cursor";

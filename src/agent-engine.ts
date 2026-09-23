@@ -323,6 +323,16 @@ export interface AgentDeliveryReceipt {
   next_attempt_at?: string | null;
   /** The receiving TUI visibly accepted this into its own queue; never replay it. */
   composer_accepted?: boolean;
+  /** First TUI queue acceptance, independent of earlier transport attempts. */
+  queue_accepted_at?: string | null;
+  /** Persisted once so a long working turn produces only one escalation. */
+  queue_hang_escalated_at?: string | null;
+  attention_code?: "queued_timeout";
+  /** Live snapshot age, never persisted as a clock that could reset the cap. */
+  queued_wait_ms?: number;
+  target_state?: string;
+  target_observed_at?: string | null;
+  target_observation_age_ms?: number | null;
   /** Hard deadline for background verify; ISO timestamp. */
   verify_deadline_at?: string | null;
   /**
@@ -370,6 +380,8 @@ function snapshotDeliveryReceipt(
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
 export const DEFAULT_DELIVERY_QUEUE_DEADLINE_MS = 10 * 60 * 1000;
+/** Sender attention cap for a message accepted into a TUI queue behind a turn. */
+export const DEFAULT_DELIVERY_QUEUE_HANG_CAP_MS = 2 * 60 * 1000;
 export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
 // Two 5-second sweeps can coincide with a transient Codex compaction pause.
 const DELIVERY_QUEUED_IDLE_MIN_MS = 15_000;
@@ -836,6 +848,7 @@ export interface AgentEngineOptions {
   /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
   deliveryVerifyDeadlineMs?: number;
   deliveryQueueDeadlineMs?: number;
+  deliveryQueueHangCapMs?: number;
   /**
    * Local evidence-ticket directory. Omitted/null disables tickets so bare
    * construction never writes ~/.cmuxlayer/tickets or calls gh. Production
@@ -1866,6 +1879,7 @@ export class AgentEngine {
   private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
   private deliveryQueueDeadlineMs: number;
+  private deliveryQueueHangCapMs: number;
   private deliveryTicketDir: string | null;
   private deliveryIssueFiler: DeliveryIssueFiler | null = null;
   private haltNow: () => number;
@@ -1903,6 +1917,10 @@ export class AgentEngine {
     this.deliveryQueueDeadlineMs = Math.max(
       1,
       opts?.deliveryQueueDeadlineMs ?? DEFAULT_DELIVERY_QUEUE_DEADLINE_MS,
+    );
+    this.deliveryQueueHangCapMs = Math.max(
+      1,
+      opts?.deliveryQueueHangCapMs ?? DEFAULT_DELIVERY_QUEUE_HANG_CAP_MS,
     );
     this.lifecycleLockAcquireTimeoutMs = Math.max(
       0,
@@ -7790,6 +7808,10 @@ export class AgentEngine {
             next_attempt_at: null,
             ...(candidate as AgentDeliveryReceipt),
           };
+          if (receipt.composer_accepted === true && !receipt.queue_accepted_at) {
+            receipt.queue_accepted_at = receipt.created_at;
+            repairedReceipts = true;
+          }
           if (
             receipt.delivery_state === "queued" &&
             receipt.submission_started_at &&
@@ -7958,6 +7980,8 @@ export class AgentEngine {
       submission_started_at: existing?.submission_started_at ?? acceptedAt,
       next_attempt_at: null,
       composer_accepted: true,
+      queue_accepted_at: existing?.queue_accepted_at ?? acceptedAt,
+      queue_hang_escalated_at: existing?.queue_hang_escalated_at ?? null,
       verify_deadline_at: queuedFollowup
         ? null
         : (existing?.verify_deadline_at ??
@@ -7970,7 +7994,7 @@ export class AgentEngine {
       this.deliveryReceipts.delete(receipt.delivery_id);
       throw error;
     }
-    return snapshotDeliveryReceipt(receipt);
+    return this.snapshotDeliveryReceiptWithQueueStatus(receipt);
   }
 
   resolveDelivery(
@@ -8004,11 +8028,50 @@ export class AgentEngine {
 
   getDeliveryReceipt(deliveryId: string): AgentDeliveryReceipt | null {
     const receipt = this.deliveryReceipts.get(deliveryId);
-    return receipt ? snapshotDeliveryReceipt(receipt) : null;
+    return receipt ? this.snapshotDeliveryReceiptWithQueueStatus(receipt) : null;
   }
 
   listDeliveryReceipts(): AgentDeliveryReceipt[] {
-    return [...this.deliveryReceipts.values()].map(snapshotDeliveryReceipt);
+    return [...this.deliveryReceipts.values()].map((receipt) =>
+      this.snapshotDeliveryReceiptWithQueueStatus(receipt),
+    );
+  }
+
+  private snapshotDeliveryReceiptWithQueueStatus(
+    receipt: AgentDeliveryReceipt,
+  ): AgentDeliveryReceipt {
+    if (!receipt.composer_accepted || receipt.terminal ||
+      (receipt.delivery_state !== "queued" &&
+        receipt.delivery_state !== "queued_followup")) {
+      return snapshotDeliveryReceipt(receipt);
+    }
+    const acceptedAt = Date.parse(receipt.queue_accepted_at ?? receipt.created_at);
+    const queuedWaitMs = Number.isFinite(acceptedAt)
+      ? Math.max(0, Date.now() - acceptedAt)
+      : 0;
+    if (!receipt.queue_hang_escalated_at &&
+      queuedWaitMs >= this.deliveryQueueHangCapMs) {
+      receipt.queue_hang_escalated_at = new Date().toISOString();
+      receipt.attention_code = "queued_timeout";
+      receipt.needs_attention = true;
+      receipt.attention_reason =
+        `queued_timeout: delivery ${receipt.delivery_id} has waited ` +
+        `${Math.floor(queuedWaitMs / 1000)}s behind the target turn; ` +
+        "inspect the target before deciding whether to intervene";
+      this.persistDeliveryReceipts();
+    }
+    const agent = this.getAgentState(receipt.agent_id);
+    const lastObservedAt = receipt.verify_last_attempt_at ?? agent?.updated_at ?? null;
+    const observedMs = lastObservedAt ? Date.parse(lastObservedAt) : NaN;
+    return {
+      ...snapshotDeliveryReceipt(receipt),
+      queued_wait_ms: queuedWaitMs,
+      target_state: agent?.state ?? "unknown",
+      target_observed_at: lastObservedAt,
+      target_observation_age_ms: Number.isFinite(observedMs)
+        ? Math.max(0, Date.now() - observedMs)
+        : null,
+    };
   }
 
   findOpenDuplicate(input: {
@@ -8080,7 +8143,7 @@ export class AgentEngine {
     if (!existing) {
       throw new Error(`Delivery not found: ${deliveryId}`);
     }
-    if (existing.terminal) {
+    if (existing.terminal || existing.attention_code === "queued_timeout") {
       return existing;
     }
     return new Promise<AgentDeliveryReceipt & { timed_out?: boolean }>(
@@ -8099,7 +8162,7 @@ export class AgentEngine {
             reject(new Error(`Delivery not found: ${deliveryId}`));
             return;
           }
-          if (current.terminal) {
+          if (current.terminal || current.attention_code === "queued_timeout") {
             finish(current);
             return;
           }
@@ -8131,7 +8194,7 @@ export class AgentEngine {
           (receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true);
         if (!watching || receipt.terminal) continue;
-        const deadlineApplies = receipt.delivery_state !== "queued_followup";
+        const deadlineApplies = receipt.delivery_state === "pending_verify";
         const deadlineMs = receipt.verify_deadline_at
           ? Date.parse(receipt.verify_deadline_at)
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
@@ -8184,6 +8247,11 @@ export class AgentEngine {
           receipt.resolved_at = new Date().toISOString();
           receipt.submit_verified = observation.submit_verified ?? true;
           receipt.error = null;
+          if (receipt.attention_code === "queued_timeout") {
+            receipt.attention_code = undefined;
+            receipt.needs_attention = false;
+            receipt.attention_reason = null;
+          }
           receipt.verify_miss_count = 0;
           this.persistDeliveryReceipts();
           if (receipt.press_enter && receipt.submit_verified === true) {

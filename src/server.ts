@@ -1175,6 +1175,8 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
   "rpc_methods",
   "needs_attention",
   "attention_reason",
+  "attention_code",
+  "queued_wait_ms",
   "queued_behind_turn",
 ] as const;
 
@@ -1209,6 +1211,11 @@ export interface PublicDeliveryReceipt {
   duplicate_of?: string;
   needs_attention?: boolean;
   attention_reason?: string;
+  attention_code?: "queued_timeout";
+  queued_wait_ms?: number;
+  target_state?: string;
+  target_observed_at?: string | null;
+  target_observation_age_ms?: number | null;
   queued_behind_turn?: boolean;
   timings_ms?: DeliveryPhaseTimings;
   observation?: {
@@ -1401,6 +1408,11 @@ export function buildPublicDeliveryReceipt(input: {
   rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
   needs_attention?: boolean;
   attention_reason?: string | null;
+  attention_code?: "queued_timeout";
+  queued_wait_ms?: number;
+  target_state?: string;
+  target_observed_at?: string | null;
+  target_observation_age_ms?: number | null;
   queued_behind_turn?: boolean;
   timings_ms?: DeliveryPhaseTimings;
   observation?: PublicDeliveryReceipt["observation"];
@@ -1463,6 +1475,14 @@ export function buildPublicDeliveryReceipt(input: {
         }
       : {}),
     ...(input.queued_behind_turn === true ? { queued_behind_turn: true } : {}),
+    ...(input.attention_code ? { attention_code: input.attention_code } : {}),
+    ...(input.queued_wait_ms !== undefined
+      ? { queued_wait_ms: input.queued_wait_ms } : {}),
+    ...(input.target_state ? { target_state: input.target_state } : {}),
+    ...(input.target_observed_at !== undefined
+      ? { target_observed_at: input.target_observed_at } : {}),
+    ...(input.target_observation_age_ms !== undefined
+      ? { target_observation_age_ms: input.target_observation_age_ms } : {}),
     ...(input.timings_ms ? { timings_ms: { ...input.timings_ms } } : {}),
     ...(input.observation ? { observation: input.observation } : {}),
     ...(warning ? { WARNING: warning } : {}),
@@ -17275,7 +17295,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Wait for a send_to delivery_id to reach a terminal outcome",
+            "Wait for a send_to delivery_id to reach a terminal outcome or queued_timeout attention",
           ),
         ids: z
           .array(z.string())
@@ -17368,6 +17388,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 rpc_methods: receipt.rpc_methods ?? [],
                 needs_attention: receipt.needs_attention,
                 attention_reason: receipt.attention_reason,
+                attention_code: receipt.attention_code,
+                queued_wait_ms: receipt.queued_wait_ms,
+                target_state: receipt.target_state,
+                target_observed_at: receipt.target_observed_at,
+                target_observation_age_ms: receipt.target_observation_age_ms,
               }),
               agent_id: receipt.agent_id,
               ...(receipt.needs_attention === true
@@ -17869,6 +17894,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         ? {
                             needs_attention: true,
                             attention_reason: receipt.attention_reason,
+                          }
+                        : {}),
+                      ...(receipt.queued_wait_ms !== undefined
+                        ? {
+                            queued_behind_turn: true,
+                            queued_wait_ms: receipt.queued_wait_ms,
+                            ...(receipt.attention_code
+                              ? { attention_code: receipt.attention_code } : {}),
+                            target_state: receipt.target_state,
+                            target_observed_at: receipt.target_observed_at,
+                            target_observation_age_ms: receipt.target_observation_age_ms,
                           }
                         : {}),
                     })),
@@ -18993,7 +19029,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     retry_count: delivery.retry_count,
                     rpc_methods: delivery.rpc_methods,
                     submit_dispatched: delivery.submit_dispatched,
-                    queued_behind_turn: delivery.queued_behind_turn,
+                    queued_behind_turn: delivery.queued_behind_turn ||
+                      accepted?.composer_accepted === true,
+                    queued_wait_ms: accepted?.queued_wait_ms,
                   }),
                   accepted: true,
                 });
@@ -19414,7 +19452,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             retry_count: delivery.retry_count,
             rpc_methods: delivery.rpc_methods,
             submit_dispatched: delivery.submit_dispatched,
-            queued_behind_turn: delivery.queued_behind_turn,
+            queued_behind_turn: delivery.queued_behind_turn ||
+              receipt?.composer_accepted === true,
+            queued_wait_ms: receipt?.queued_wait_ms,
             timings_ms: timings,
           });
           failedReceiptPayload = { ...publicReceipt };

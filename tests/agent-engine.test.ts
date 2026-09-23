@@ -15526,6 +15526,89 @@ Session ID: ${sessionId}`,
       }
     });
 
+    it.each(["queued", "queued_followup"] as const)(
+      "alerts a sender once when a %s delivery stays behind a working turn beyond 120 seconds",
+      async (deliveryState) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date("2026-09-23T12:00:00.000Z"));
+        try {
+          stateMgr.writeState(makeRecord({
+            agent_id: "long-tool-call",
+            state: "working",
+            surface_id: "surface:42",
+          }));
+          liveSurfaces = [makeSurface("surface:42")];
+          await engine.getRegistry().reconstitute();
+          const submitter = vi.fn();
+          engine.setDeliverySubmitter(submitter);
+          const accepted = engine.acceptComposerQueue({
+            delivery_id: `long-tool-call-${deliveryState}`,
+            agent_id: "long-tool-call",
+            text: "follow up after your tool call",
+            press_enter: true,
+            source_event: "send_to",
+            retry_count: 0,
+            delivery_state: deliveryState,
+          });
+          expect(accepted).toMatchObject({
+            delivery_state: deliveryState,
+            terminal: false,
+            queued_wait_ms: 0,
+          });
+          const persisted = vi.spyOn(engine as any, "persistDeliveryReceipts");
+          const waiting = engine.waitForDelivery(accepted.delivery_id, 300_000);
+          await vi.advanceTimersByTimeAsync(120_100);
+          expect(await waiting).toMatchObject({
+            delivery_state: deliveryState,
+            terminal: false,
+            attention_code: "queued_timeout",
+            queued_wait_ms: 120_000,
+            target_state: "working",
+          });
+          expect(engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({
+            needs_attention: true,
+            attention_code: "queued_timeout",
+            queue_hang_escalated_at: expect.any(String),
+          });
+          const escalationAt = engine.getDeliveryReceipt(accepted.delivery_id)?.queue_hang_escalated_at;
+          expect(persisted).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(120_000);
+          await engine.drainDeliveryQueue();
+          expect(submitter).not.toHaveBeenCalled();
+          expect(engine.getDeliveryReceipt(accepted.delivery_id)?.queue_hang_escalated_at).toBe(escalationAt);
+          expect(persisted).toHaveBeenCalledTimes(1);
+
+          engine.setDeliveryVerifier(async () => ({ outcome: "delivered", submit_verified: true }));
+          await engine.verifyPendingDeliveries();
+          expect(engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({
+            delivery_state: "submitted",
+            terminal: true,
+            submit_verified: true,
+            needs_attention: false,
+            queue_hang_escalated_at: escalationAt,
+          });
+
+          const restartedState = new StateManager(TEST_DIR);
+          const restarted = new AgentEngine(
+            restartedState,
+            new AgentRegistry(restartedState, async () => []),
+            mockClient,
+          );
+          try {
+            expect(restarted.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({
+              terminal: true,
+              delivery_state: "submitted",
+              queue_hang_escalated_at: escalationAt,
+            });
+          } finally {
+            restarted.dispose();
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("makes a hung queued submission terminal-uncertain without replay", async () => {
       stateMgr.writeState(
         makeRecord({
