@@ -3553,13 +3553,41 @@ function screenShowsQueuedAgentInput(
 function countVisibleExactQueuedRows(
   screenText: string,
   authoredText: string,
-): number {
-  return normalizeTerminalText(screenText)
-    .split("\n")
-    .filter((line) => {
-      const row = /^↳ (.*)$/.exec(stripCodexQueueGutter(line).trimStart());
-      return row !== null && row[1] === authoredText;
-    }).length;
+): number | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let cursor = lines.length - 1;
+  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
+  if (cursor < 0) return null;
+  cursor -= 1;
+  while (cursor >= 0 && (!stripCodexQueueGutter(lines[cursor] ?? "").trim() || /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(stripCodexQueueGutter(lines[cursor] ?? "")))) cursor -= 1;
+  const queueRow = (index: number): RegExpExecArray | null => /^↳ (.*)$/.exec(stripCodexQueueGutter(lines[index] ?? "").trimStart());
+  const queueHeadingStart = (index: number): number => {
+    let wrappedHeading = "";
+    for (let rows = 0; index >= 0 && rows < 4; rows += 1, index -= 1) {
+      const row = stripCodexQueueGutter(lines[index] ?? "").trim().replace(/^•\s*/, "");
+      if (!row) break;
+      wrappedHeading = `${row} ${wrappedHeading}`.replace(/\s+/g, " ").trim();
+      if (/^messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?$/i.test(wrappedHeading)) return index;
+    }
+    return -1;
+  };
+  let count: number | null = null;
+  while (cursor >= 0) {
+    const blockEnd = cursor;
+    let blockCount = 0;
+    let row: RegExpExecArray | null;
+    while (cursor >= 0 && (row = queueRow(cursor))) {
+      if (row[1] === authoredText) blockCount += 1;
+      cursor -= 1;
+    }
+    if (cursor === blockEnd) return count;
+    while (cursor >= 0 && !stripCodexQueueGutter(lines[cursor] ?? "").trim()) cursor -= 1;
+    const headingStart = queueHeadingStart(cursor);
+    if (headingStart < 0) return count;
+    count = (count ?? 0) + blockCount;
+    cursor = headingStart - 1;
+  }
+  return count;
 }
 
 function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {

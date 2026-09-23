@@ -165,7 +165,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
-  it("lets key Return act on an exact engine-owned Codex queue", async () => {
+  it("lets key Return act on an owned Codex queue below scrollback with a wrapped heading", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screen = "OpenAI Codex\n› Ask Codex to do anything";
     const exec = makeLifecycleExec(() => screen);
@@ -186,7 +186,10 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       });
       screen = [
         "OpenAI Codex",
-        "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+        "Previous answer quoted a queue marker:",
+        "  ↳ queued request",
+        "• Messages to be submitted after next tool call (press esc to interrupt and send",
+        "  immediately)",
         "  ↳ queued request",
         "› Ask Codex to do anything",
       ].join("\n");
@@ -218,6 +221,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     ["has extra space after the queue marker", "queued request", ["  ↳  queued request"]],
     ["is ambiguously wrapped", "queued request continued", ["  ↳ queued request", "  │ continued"]],
     ["differs only by authored trailing space", "queued request ", ["  ↳ queued request"]],
+    ["duplicates the visible text within a queue block", "queued request", ["  ↳ queued request", "  ↳ queued request"]],
     ["duplicates the visible text across queue blocks", "queued request", [
       "  ↳ queued request",
       "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
