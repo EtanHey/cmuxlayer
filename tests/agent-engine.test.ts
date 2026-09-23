@@ -8708,6 +8708,58 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("settles the live Claude Opus 5.5 1M banner as the requested registry model", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-opus-1m",
+          state: "booting",
+          surface_id: "surface:opus-1m",
+          cli: "claude",
+          model: "claude-opus-5-5[1m]",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:opus-1m")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:opus-1m",
+        text: [
+          "Claude Code",
+          "🤖 Opus 5.5 (1M context)",
+          "❯",
+          "⏵⏵ bypass permissions on",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-opus-1m")).toMatchObject({
+        state: "ready",
+        model: "claude-opus-5-5[1m]",
+        parsed_model: "Opus 5.5",
+        model_mismatch: false,
+      });
+    });
+
+    it("compares Claude ID and display aliases without hiding a real model drift", () => {
+      expect(
+        computeModelMismatch(
+          "claude-opus-5-5[1m]",
+          "Opus 5.5 (1M context)",
+        ),
+      ).toBe(false);
+      expect(
+        computeModelMismatch("claude-opus-5-5[1m]", "Sonnet 5.5 (1M context)"),
+      ).toBe(true);
+      expect(
+        computeModelMismatch("claude-opus-5-5[1m]", "Opus 5.4 (1M context)"),
+      ).toBe(true);
+      expect(
+        computeModelMismatch("claude-opus-5-5[1m]", "Opus 5.5 (200K context)"),
+      ).toBe(true);
+    });
+
     it("leaves a fresh noninteractive boot record inside its boot window", async () => {
       stateMgr.writeState(
         makeRecord({

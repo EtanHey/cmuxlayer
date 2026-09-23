@@ -958,9 +958,29 @@ function toParsedScreenStatus(
   }
 }
 
+/** Compare Claude's launcher ID and pane label using their shared model parts. */
+function parseClaudeModelIdentity(model: string): {
+  family: string;
+  major: string | null;
+  minor: string | null;
+  context: string | null;
+} | null {
+  const match = model.match(
+    /^(?:claude[-\s]+)?(opus|sonnet|haiku)(?:[-\s]+(\d+)(?:[-.\s]+(\d+))?)?\s*(?:\[(\d+(?:\.\d+)?[km])\]|\((\d+(?:\.\d+)?[km])\s+context\))?$/i,
+  );
+  if (!match) return null;
+  return {
+    family: match[1].toLowerCase(),
+    major: match[2] ?? null,
+    minor: match[3] ?? null,
+    context: (match[4] ?? match[5] ?? null)?.toLowerCase() ?? null,
+  };
+}
+
 /**
  * Loosely compare the requested model with the model reported by the live CLI.
- * A missing side is unknown rather than a match.
+ * A missing side is unknown rather than a match. The pane can omit the context
+ * tier, so only an explicit disagreement on both sides proves tier drift.
  */
 export function computeModelMismatch(
   requestedModel: string,
@@ -969,6 +989,22 @@ export function computeModelMismatch(
   const requested = requestedModel.toLowerCase().trim();
   const parsed = parsedModel?.toLowerCase().trim();
   if (!requested || !parsed) return null;
+  const requestedClaude = parseClaudeModelIdentity(requested);
+  const parsedClaude = parseClaudeModelIdentity(parsed);
+  if (requestedClaude && parsedClaude) {
+    return (
+      requestedClaude.family !== parsedClaude.family ||
+      (requestedClaude.major !== null &&
+        parsedClaude.major !== null &&
+        requestedClaude.major !== parsedClaude.major) ||
+      (requestedClaude.minor !== null &&
+        parsedClaude.minor !== null &&
+        requestedClaude.minor !== parsedClaude.minor) ||
+      (requestedClaude.context !== null &&
+        parsedClaude.context !== null &&
+        requestedClaude.context !== parsedClaude.context)
+    );
+  }
   return !parsed.includes(requested) && !requested.includes(parsed);
 }
 
