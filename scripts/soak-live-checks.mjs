@@ -122,6 +122,16 @@ export function checkControlHealthSample(result, mcpPid, expectedMcpPid) {
   return failures;
 }
 
+export function healthSampleEntry(label, result, mcpPid, failures) {
+  const health = record(record(result).health);
+  const selected = record(health.selected_transport);
+  return { kind: "health", label, healthy: failures.length === 0,
+    control_health: result,
+    control_daemon_pid: health.current_process?.pid, mcp_server_pid: mcpPid, failures,
+    transport_mode: selected.transport_mode, transport_degraded: selected.transport_degraded,
+    warnings: health.warnings, error: record(result).error };
+}
+
 export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
   const full = record(fullRead);
   const parsedOnly = record(parsedOnlyRead);
@@ -156,19 +166,26 @@ export function checkSoakSession(session) {
   const value = record(session);
   const failures = [];
   if (!validProgress(value.cyclesCompleted, value.minCycles, value.elapsedMs, value.minDurationMs) ||
-    !Array.isArray(value.healthSamples)) failures.push("malformed_session");
+    !Array.isArray(value.healthSamples) || !Number.isFinite(value.startedAtMs) ||
+    !Number.isFinite(value.endedAtMs) || value.endedAtMs < value.startedAtMs ||
+    value.elapsedMs !== value.endedAtMs - value.startedAtMs) failures.push("malformed_session");
   if (!Number.isInteger(value.startPid) || value.startPid <= 0 ||
     value.endPid !== value.startPid) failures.push("server_pid_changed");
   if (value.cyclesCompleted < value.minCycles) failures.push("cycles_short");
   if (value.elapsedMs < value.minDurationMs) failures.push("duration_short");
   const samples = Array.isArray(value.healthSamples) ? value.healthSamples : [];
-  // Initial and final samples cover the endpoints; each elapsed full minute
-  // still needs a sample in the same uninterrupted session.
-  if (Number.isFinite(value.elapsedMs) && value.elapsedMs >= 0 &&
-    samples.length < Math.ceil(value.elapsedMs / 60_000) + 1) {
+  const validSamples = Array.from(samples).every((sample) => sample &&
+    Number.isFinite(sample.atMs) && typeof sample.healthy === "boolean" &&
+    ["start", "minute", "end"].includes(sample.label));
+  if (!validSamples) failures.push("malformed_session");
+  if (validSamples && (samples.length < 2 || samples[0].label !== "start" ||
+    samples[0].atMs < value.startedAtMs - 5_000 || samples[0].atMs > value.startedAtMs ||
+    samples.at(-1).label !== "end" || samples.at(-1).atMs < value.endedAtMs ||
+    samples.some((sample, index) => index > 0 &&
+      (sample.atMs < samples[index - 1].atMs || sample.atMs - samples[index - 1].atMs > 70_000)))) {
     failures.push("missing_control_samples");
   }
-  if (Array.from(samples).some((healthy) => healthy !== true)) failures.push("unhealthy_control_sample");
+  if (Array.from(samples).some((sample) => sample?.healthy !== true)) failures.push("unhealthy_control_sample");
   if (!Number.isFinite(value.rssStartKb) || value.rssStartKb <= 0 ||
     !Number.isFinite(value.rssEndKb) || value.rssEndKb <= 0) failures.push("server_rss_unavailable");
   else if (value.rssEndKb > value.rssStartKb * 2) failures.push("server_rss_over_2x");

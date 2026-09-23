@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkStateAgreement,
-  checkSoakSession, checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
+  checkSoakSession, checkToolFailure, hasReplyMarker, healthSampleEntry, nextSoakDelayMs, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
+
+const soakStart = 1_000_000;
+const healthyTimeline = (elapsedMs: number) => [
+  ...Array.from({ length: Math.ceil(elapsedMs / 60_000) }, (_, minute) => ({
+    atMs: soakStart + minute * 60_000, healthy: true, label: minute === 0 ? "start" : "minute" })),
+  { atMs: soakStart + elapsedMs, healthy: true, label: "end" },
+];
 
 describe("live soak invariant checkers", () => {
   it("rejects a pending boot or send receipt even when the response landed", () => {
@@ -94,9 +101,10 @@ describe("live soak invariant checkers", () => {
     { cycles: 80, elapsedMs: 75 * 60_000, rssEndKb: 190_000 },
   ])("accepts a healthy full soak with $cycles cycles after $elapsedMs ms", ({ cycles, elapsedMs, rssEndKb }) => {
     const minDurationMs = 60 * 60_000;
-    const session = { startPid: 123, endPid: 123, elapsedMs, minDurationMs,
+    const session = { startPid: 123, endPid: 123, startedAtMs: soakStart,
+      endedAtMs: soakStart + elapsedMs, elapsedMs, minDurationMs,
       minCycles: 40, cyclesCompleted: cycles,
-      healthSamples: Array.from({ length: Math.ceil(elapsedMs / 60_000) + 1 }, () => true),
+      healthSamples: healthyTimeline(elapsedMs),
       rssStartKb: 100_000, rssEndKb };
     expect(checkSoakSession(session)).toEqual([]);
     expect(shouldContinueSoak(cycles, 40, elapsedMs, minDurationMs)).toBe(false);
@@ -109,12 +117,14 @@ describe("live soak invariant checkers", () => {
   });
 
   it("checks one continuous healthy MCP process and bounded RSS growth", () => {
-    const healthy = { startPid: 123, endPid: 123, elapsedMs: 60 * 60_000,
+    const healthy = { startPid: 123, endPid: 123, startedAtMs: soakStart,
+      endedAtMs: soakStart + 60 * 60_000, elapsedMs: 60 * 60_000,
       minDurationMs: 60 * 60_000, minCycles: 40, cyclesCompleted: 40,
-      healthSamples: Array.from({ length: 61 }, () => true), rssStartKb: 100_000, rssEndKb: 150_000 };
+      healthSamples: healthyTimeline(60 * 60_000), rssStartKb: 100_000, rssEndKb: 150_000 };
     expect(checkSoakSession(healthy)).toEqual([]);
     expect(checkSoakSession({ ...healthy, endPid: 124 })).toContain("server_pid_changed");
-    expect(checkSoakSession({ ...healthy, healthSamples: [...healthy.healthSamples.slice(0, 60), false] }))
+    expect(checkSoakSession({ ...healthy, healthSamples: [...healthy.healthSamples.slice(0, 60),
+      { ...healthy.healthSamples[60], healthy: false }] }))
       .toContain("unhealthy_control_sample");
     expect(checkSoakSession({ ...healthy, healthSamples: healthy.healthSamples.slice(0, 60) }))
       .toContain("missing_control_samples");
@@ -123,9 +133,10 @@ describe("live soak invariant checkers", () => {
   });
 
   it("rejects missing or non-finite soak counters and missing health samples", () => {
-    const valid = { startPid: 123, endPid: 123, elapsedMs: 60_000,
+    const valid = { startPid: 123, endPid: 123, startedAtMs: soakStart,
+      endedAtMs: soakStart + 60_000, elapsedMs: 60_000,
       minDurationMs: 60_000, minCycles: 1, cyclesCompleted: 1,
-      healthSamples: [true, true], rssStartKb: 100, rssEndKb: 100 };
+      healthSamples: healthyTimeline(60_000), rssStartKb: 100, rssEndKb: 100 };
     for (const key of ["cyclesCompleted", "minCycles", "elapsedMs", "minDurationMs"] as const) {
       expect(checkSoakSession({ ...valid, [key]: undefined })).toContain("malformed_session");
       expect(checkSoakSession({ ...valid, [key]: Number.NaN })).toContain("malformed_session");
@@ -134,15 +145,34 @@ describe("live soak invariant checkers", () => {
   });
 
   it("requires an endpoint health sample after a partial final minute", () => {
-    const session = { startPid: 123, endPid: 123, elapsedMs: 60_001,
+    const session = { startPid: 123, endPid: 123, startedAtMs: soakStart,
+      endedAtMs: soakStart + 60_001, elapsedMs: 60_001,
       minDurationMs: 60_000, minCycles: 1, cyclesCompleted: 1,
-      healthSamples: [true, true], rssStartKb: 100, rssEndKb: 100 };
+      healthSamples: healthyTimeline(60_001).slice(0, -1), rssStartKb: 100, rssEndKb: 100 };
     expect(checkSoakSession(session)).toContain("missing_control_samples");
-    expect(checkSoakSession({ ...session, healthSamples: [true, true, true] })).toEqual([]);
+    expect(checkSoakSession({ ...session, healthSamples: healthyTimeline(60_001) })).toEqual([]);
+  });
+
+  it("accepts timestamped healthy coverage across a partial final minute", () => {
+    const elapsedMs = 60 * 60_000 + 500;
+    const startedAtMs = 1_000_000;
+    const healthSamples = Array.from({ length: 60 }, (_, minute) =>
+      ({ atMs: startedAtMs + minute * 60_000, healthy: true,
+        label: minute === 0 ? "start" : "minute" }));
+    healthSamples.push({ atMs: startedAtMs + elapsedMs, healthy: true, label: "end" });
+    const session = { startPid: 123, endPid: 123, startedAtMs,
+      endedAtMs: startedAtMs + elapsedMs, elapsedMs, minDurationMs: 60 * 60_000,
+      minCycles: 40, cyclesCompleted: 40, healthSamples,
+      rssStartKb: 100_000, rssEndKb: 150_000 };
+    expect(checkSoakSession(session)).toEqual([]);
+    const withGap = { ...session, healthSamples: healthSamples.map((sample, index) =>
+      index === 30 ? { ...sample, atMs: sample.atMs + 30_000 } : sample) };
+    expect(checkSoakSession(withGap)).toContain("missing_control_samples");
   });
 
   it("rejects missing health results inside a sparse sample array", () => {
-    const session = { startPid: 123, endPid: 123, elapsedMs: 60 * 60_000,
+    const session = { startPid: 123, endPid: 123, startedAtMs: soakStart,
+      endedAtMs: soakStart + 60 * 60_000, elapsedMs: 60 * 60_000,
       minDurationMs: 60 * 60_000, minCycles: 40, cyclesCompleted: 40,
       healthSamples: new Array(61), rssStartKb: 100, rssEndKb: 100 };
     expect(checkSoakSession(session)).toContain("unhealthy_control_sample");
@@ -156,6 +186,18 @@ describe("live soak invariant checkers", () => {
     expect(checkControlHealthSample({ ...health, health: { ...health.health,
       selected_transport: { transport_mode: "cli", transport_degraded: true } } }, 123, 123))
       .toContain("control_transport_unhealthy");
+  });
+
+  it("keeps the complete control health result in a serialized JSONL sample", () => {
+    const result = { ok: true, isError: false, health: {
+      current_process: { pid: 999, rss_kb: 12_345 }, warnings: [],
+      selected_transport: { transport_mode: "socket", transport_degraded: false },
+      diagnostic: { reconnects: 0, last_probe_ms: 17 },
+    }, request_id: "health-minute-1" };
+    const entry = JSON.parse(JSON.stringify(healthSampleEntry("minute:1", result, 123, [])));
+    expect(entry.kind).toBe("health");
+    expect(entry.healthy).toBe(true);
+    expect(entry.control_health).toEqual(result);
   });
 
   it("rejects incomplete or non-boolean control transport status", () => {
