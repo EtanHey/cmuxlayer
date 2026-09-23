@@ -21,6 +21,7 @@
 // send_input is KEPT as the fallback path — this channel is additive (belt-and-suspenders) until
 // proven in production.
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
@@ -34,6 +35,10 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 export interface InboxMessage {
   id: string;
@@ -143,6 +148,86 @@ export function heartbeatPath(agentId: string, opts?: InboxOpts): string {
  */
 export function inboxTailPidPath(agentId: string, opts?: InboxOpts): string {
   return join(agentDir(agentId, opts), "inbox-tail.pid");
+}
+
+export type InboxTailReapResult =
+  | { tail_reaped: true }
+  | { tail_reaped: "absent" }
+  | {
+      tail_reaped: false;
+      tail_error:
+        | "tail_invalid"
+        | "tail_read_failed"
+        | "tail_gone"
+        | "tail_lookup_failed"
+        | "tail_mismatch"
+        | "tail_signal_failed"
+        | "tail_still_running";
+    };
+
+async function processCommand(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ps",
+      ["-p", String(pid), "-o", "command="],
+      { encoding: "utf8", timeout: 1_000, maxBuffer: 8_192 },
+    );
+    return stdout.trim();
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 1) return null;
+    throw error;
+  }
+}
+
+/** Stop only the supervisor whose PID and random process-title nonce were recorded. */
+export async function reapInboxTail(
+  agentId: string,
+  opts?: InboxOpts,
+): Promise<InboxTailReapResult> {
+  let record: string;
+  try {
+    record = readFileSync(inboxTailPidPath(agentId, opts), "utf8");
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") {
+      return { tail_reaped: "absent" };
+    }
+    return { tail_reaped: false, tail_error: "tail_read_failed" };
+  }
+  if (record.length > 256) return { tail_reaped: false, tail_error: "tail_invalid" };
+  const match = /^([1-9][0-9]*) ([A-Za-z0-9-]{8,128})\n?$/.exec(record);
+  const pid = Number(match?.[1]);
+  if (!match || !Number.isSafeInteger(pid) || pid <= 1) {
+    return { tail_reaped: false, tail_error: "tail_invalid" };
+  }
+  const marker = `cmuxlayer-inbox-tail:${match[2]}`;
+  const belongsToTail = (command: string | null) =>
+    command === marker || command?.startsWith(`${marker} `) === true;
+  let command: string | null;
+  try {
+    command = await processCommand(pid);
+  } catch {
+    return { tail_reaped: false, tail_error: "tail_lookup_failed" };
+  }
+  if (command === null) return { tail_reaped: false, tail_error: "tail_gone" };
+  if (!belongsToTail(command)) {
+    return { tail_reaped: false, tail_error: "tail_mismatch" };
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return { tail_reaped: false, tail_error: "tail_signal_failed" };
+  }
+  for (let attempt = 0; attempt < 40; attempt++) {
+    await sleep(25);
+    try {
+      if (!belongsToTail(await processCommand(pid))) {
+        return { tail_reaped: true };
+      }
+    } catch {
+      return { tail_reaped: false, tail_error: "tail_lookup_failed" };
+    }
+  }
+  return { tail_reaped: false, tail_error: "tail_still_running" };
 }
 
 function channelMarkerDir(opts?: InboxOpts): string {

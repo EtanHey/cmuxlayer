@@ -196,6 +196,7 @@ import {
   inboxPath,
   monitorAlive,
   pendingDispatches,
+  reapInboxTail,
   recommendedMonitorCommand,
   replayUndelivered,
   writeHeartbeat,
@@ -18486,6 +18487,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ),
           });
           pruneChildReportWatchesFor(args.agent_id);
+          const tailOutcome = await reapInboxTail(args.agent_id, inboxOpts);
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({
             event: "stop_agent",
@@ -18498,6 +18500,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const data = {
             agent_id: args.agent_id,
             state: state?.state ?? "done",
+            ...tailOutcome,
           };
           return okFormatted(formatOk("stop_agent", data), data);
         } catch (e) {
@@ -20054,6 +20057,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ),
               });
               pruneChildReportWatchesFor(agentId);
+              await reapInboxTail(agentId, inboxOpts);
               killed.push(agentId);
               appendCloseEvent({
                 event: "kill",
