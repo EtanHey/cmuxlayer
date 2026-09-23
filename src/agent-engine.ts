@@ -289,7 +289,8 @@ export type AgentDeliveryState =
   | "rescued"
   | "failed"
   | "pending_verify"
-  | "failed_confirmed";
+  | "failed_confirmed"
+  | "stalled_queue";
 
 export interface AgentDeliveryReceipt {
   delivery_id: string;
@@ -337,6 +338,8 @@ export interface AgentDeliveryReceipt {
   ticket_escalation_declined_reason?: string | null;
   /** Consecutive verifier observations that the target agent is missing. */
   verify_miss_count?: number;
+  /** Consecutive reads with this queued payload still visible on an idle target. */
+  queue_idle_observations?: number;
   /** Last time background verify actually read the target surface. */
   verify_last_attempt_at?: string | null;
   /** A nonterminal retry stall that now requires a human to inspect the pane. */
@@ -7711,6 +7714,29 @@ export class AgentEngine {
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
+        if (observation.reason === "queued_idle") {
+          receipt.queue_idle_observations =
+            (receipt.queue_idle_observations ?? 0) + 1;
+          if (receipt.queue_idle_observations >= 2) {
+            receipt.delivery_state = "stalled_queue";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.submit_verified = false;
+            receipt.error =
+              "Target is idle but the message remains queued. Inspect the queued " +
+              "message on the target pane; use Escape there to release it, then " +
+              "verify delivery before retrying.";
+            receipt.needs_attention = true;
+            receipt.attention_reason = receipt.error;
+            this.persistDeliveryReceipts();
+            this.appendDeliveryReceiptEventBestEffort(receipt);
+            continue;
+          }
+          this.persistDeliveryReceipts();
+        } else if ((receipt.queue_idle_observations ?? 0) > 0) {
+          receipt.queue_idle_observations = 0;
+          this.persistDeliveryReceipts();
+        }
         if (observation.reason === "target_gone") {
           receipt.verify_miss_count = (receipt.verify_miss_count ?? 0) + 1;
           this.persistDeliveryReceipts();
@@ -9976,7 +10002,8 @@ export class AgentEngine {
    *
    * The persisted ref is metadata only for UUID-backed records: refs can be
    * recycled after a surface closes. A known UUID therefore must be observed
-   * exactly once in a complete current topology before any read or mutation.
+   * exactly once in a current topology before any read or mutation. An
+   * incomplete observation may prove presence, but never absence.
    * UUID-less legacy records retain compatibility only when an owned ref is
    * proven by a complete fresh topology with no UUID identity coverage.
    */
@@ -10100,8 +10127,8 @@ export class AgentEngine {
 
   /**
    * Stop/close must remain usable in socketless CLI mode. When observer
-   * identity is unavailable, require a complete fresh topology to prove the
-   * record's exact stable UUID instead of trusting its mutable surface ref.
+   * identity is unavailable, require a fresh exact UUID match instead of
+   * trusting its mutable surface ref.
    * This fallback is deliberately scoped to teardown; other terminal I/O
    * keeps the observer-ownership gate.
    */
@@ -10151,11 +10178,11 @@ export class AgentEngine {
       topology?.complete !== true ||
       !binding ||
       binding.provenance !== "uuid" ||
-      topology.surfaceIdByRef.get(binding.surfaceRef)?.trim().toLowerCase() !==
+      topology?.surfaceIdByRef.get(binding.surfaceRef)?.trim().toLowerCase() !==
         agent.surface_uuid.trim().toLowerCase()
     ) {
       throw new Error(
-        `Observer identity is unavailable and fresh complete topology did not ` +
+        `Observer identity is unavailable and fresh topology did not ` +
           `prove stable surface UUID ${agent.surface_uuid} for agent ` +
           `"${agent.agent_id}"; refusing teardown through mutable ref ` +
           `${agent.surface_id}.`,
@@ -10553,6 +10580,7 @@ export class AgentEngine {
     opts?: {
       userInitiated?: boolean;
       beforeSurfaceMutation?: (route: AgentRoute) => Promise<void>;
+      allowUnknownPidOwnedSurfaceClose?: boolean;
     },
   ): Promise<void> {
     let agent = this.registry.get(agentId);
@@ -10560,6 +10588,9 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
     const canonicalAgentId = agent.agent_id;
+    const ownedBeforeRouteResolution =
+      this.registry.isObserverOwnershipEnforced() &&
+      this.registry.canControlSurface(agent);
 
     const userInitiated = opts?.userInitiated ?? true;
 
@@ -10676,16 +10707,29 @@ export class AgentEngine {
     };
 
     let forceSignalAccepted = force === true && !agent.pid;
+    let unknownPidOwnedClose = false;
     if (force && agent.pid) {
       const processIdentity = agentProcessLiveness(agent);
       if (processIdentity === "gone") {
         forceSignalAccepted = true;
       } else if (processIdentity === "unknown") {
-        rollbackUnacceptedStopIntent();
-        throw new Error(
-          `Force stop refused for ${agent.agent_id}: recorded pid ${agent.pid} ` +
-            `identity is unknown; refusing SIGKILL.`,
-        );
+        unknownPidOwnedClose =
+          opts?.allowUnknownPidOwnedSurfaceClose === true &&
+          ownedBeforeRouteResolution &&
+          this.registry.canControlSurface(agent) &&
+          Boolean(route.surface_uuid) &&
+          route.surface_uuid?.trim().toLowerCase() ===
+            agent.surface_uuid?.trim().toLowerCase();
+        if (!unknownPidOwnedClose) {
+          rollbackUnacceptedStopIntent();
+          throw new Error(
+            `Force stop refused for ${agent.agent_id}: recorded pid ${agent.pid} ` +
+              `identity is unknown; refusing SIGKILL.`,
+          );
+        }
+        // The owned UUID route may be closed without signalling an unproven
+        // PID. Require both its disappearance and confirmed process absence
+        // before reporting the agent stopped.
       } else {
         try {
           process.kill(agent.pid, "SIGKILL");
@@ -10769,6 +10813,7 @@ export class AgentEngine {
       try {
         await this.client.closeSurface(route.surface_id, {
           workspace: route.workspace_id ?? undefined,
+          ...this.stableSurfaceWriteOptions(route.surface_uuid),
           collapsePane: stopClosePolicy.collapsePane,
           beforeMutation: assertCloseRouteCurrent,
         });
@@ -10804,6 +10849,10 @@ export class AgentEngine {
         // Preserve the post-condition error for the caller.
       }
       throw new Error(error);
+    }
+
+    if (unknownPidOwnedClose) {
+      forceSignalAccepted = true;
     }
 
     if (force && !forceSignalAccepted) {

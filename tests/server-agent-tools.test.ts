@@ -13176,6 +13176,309 @@ codex>
     },
   );
 
+  it("close_surface accepts a unique stable UUID when another workspace read fails", async () => {
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:230", id: "11111111-2222-4333-8444-555555555555", workspace_ref: "workspace:1" },
+      { ref: "surface:other", id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", workspace_ref: "workspace:bad" },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      skipAgentLifecycle: true,
+    });
+    await registeredTestTool(server, "list_surfaces").handler({}, {} as any);
+    const originalListPanes = routeClient.client.listPanes.getMockImplementation()!;
+    routeClient.client.listPanes.mockImplementation(async (opts) => {
+      if (opts?.workspace === "workspace:bad") throw new Error("window.list timed out");
+      return originalListPanes(opts);
+    });
+
+    const result = await registeredTestTool(server, "close_surface").handler(
+      { surface: "surface:230" },
+      {} as any,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(routeClient.client.closeSurface).toHaveBeenCalledWith(
+      "surface:230",
+      expect.objectContaining({ workspace: "workspace:1" }),
+    );
+  });
+
+  it("refuses raw force close of a managed ref when topology fails", async () => {
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:230", workspace_ref: "workspace:1" },
+    ]);
+    (routeClient.client as any).listWindows = vi.fn().mockResolvedValue({
+      windows: [{ ref: "window:bad", workspace_count: 1 }],
+    });
+    routeClient.client.listWorkspaces.mockRejectedValue(new Error("window.list timed out"));
+    const record = makeServerAgentRecord({
+      agent_id: "x1-managed-ref",
+      surface_id: "surface:230",
+      surface_uuid: null,
+      surface_observer_id: null,
+      workspace_id: "workspace:1",
+      state: "done",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      surfaceObserverEpochProvider: () => null,
+      surfaceObserverOwnerIdProvider: () => null,
+    });
+    const result = await registeredTestTool(server, "close_surface").handler(
+      { scope: "surface", surface: "surface:230", force: true }, {} as any,
+    );
+    expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+  });
+
+  it("does not close an anonymous raw ref when every window read fails", async () => {
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:230", workspace_ref: "workspace:1" },
+    ]);
+    (routeClient.client as any).listWindows = vi.fn().mockResolvedValue({
+      windows: [{ ref: "window:bad", workspace_count: 1 }],
+    });
+    routeClient.client.listWorkspaces.mockRejectedValue(
+      new Error("window.list timed out"),
+    );
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await registeredTestTool(server, "close_surface").handler(
+      { surface: "surface:230", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error).toMatch(/topology|window\.list/i);
+    expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+  });
+
+  it("does not close an anonymous raw ref when window enumeration fails", async () => {
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:230", workspace_ref: "workspace:1" },
+    ]);
+    (routeClient.client as any).listWindows = vi.fn().mockRejectedValue(
+      new Error("window.list timed out"),
+    );
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await registeredTestTool(server, "close_surface").handler(
+      { surface: "surface:230", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect((routeClient.client as any).listWindows).toHaveBeenCalledTimes(2);
+    expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+  });
+
+  it("close_surface force closes an owned UUID surface when recorded pid identity is unknown", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const witness = {
+      ref: "surface:witness",
+      id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      workspace_ref: "workspace:1",
+    };
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:389", id: stableUuid, workspace_ref: "workspace:1" },
+      witness,
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-0e6715bd",
+      surface_id: "surface:389",
+      surface_uuid: stableUuid,
+      surface_observer_id: "cmux:/tmp/current.sock",
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "claude",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      pid: 16431,
+      pid_registered_at: undefined,
+      task_done_detected_at: null,
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    let surfaceClosed = false;
+    routeClient.client.closeSurface.mockImplementation(async (surface) => {
+      expect(surface).toBe("surface:389");
+      surfaceClosed = true;
+      routeClient.setLiveSurfaces([witness]);
+    });
+    const realKill = process.kill.bind(process);
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, signal) => {
+      if (pid !== 16431) return realKill(pid, signal);
+      signals.push(signal ?? 0);
+      if (signal === "SIGKILL") throw new Error("unknown pid must not receive SIGKILL");
+      if (surfaceClosed) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      return true;
+    }) as typeof process.kill);
+
+    try {
+      const directStop = await registeredTestTool(server, "stop_agent").handler(
+        { agent_id: record.agent_id, force: true },
+        {} as any,
+      );
+      expect(directStop.isError).toBe(true);
+      expect(parseToolResult(directStop).error).toMatch(/identity is unknown/i);
+      expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+
+      const result = await registeredTestTool(server, "close_surface").handler(
+        { scope: "agent", agent_id: record.agent_id, force: true },
+        {} as any,
+      );
+
+      expect(result.isError).toBeFalsy();
+      expect(parseToolResult(result)).toMatchObject({
+        agent_stopped: true,
+        surface_closed: true,
+        surface: "surface:389",
+      });
+      expect(routeClient.client.closeSurface).toHaveBeenCalledWith(
+        "surface:389",
+        expect.objectContaining({ workspace: "workspace:1" }),
+      );
+      expect(signals).not.toContain("SIGKILL");
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("close_surface force keeps the observer guard for an unowned UUID surface", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:389", id: stableUuid, workspace_ref: "workspace:1" },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-foreign-389",
+      surface_id: "surface:389",
+      surface_uuid: stableUuid,
+      surface_observer_id: "cmux:/tmp/foreign.sock",
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "claude",
+      pid: 16431,
+      pid_registered_at: undefined,
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const realKill = process.kill.bind(process);
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, signal) =>
+      pid === 16431 ? true : realKill(pid, signal)
+    ) as typeof process.kill);
+    try {
+      const result = await registeredTestTool(server, "close_surface").handler(
+        { scope: "agent", agent_id: record.agent_id, force: true },
+        {} as any,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(parseToolResult(result)).toMatchObject({
+        agent_stopped: false,
+        surface_closed: false,
+      });
+      expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("close_surface reports a closed UUID surface without claiming an unproven process stopped", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:389", id: stableUuid, workspace_ref: "workspace:1" },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-unknown-process",
+      surface_id: "surface:389",
+      surface_uuid: stableUuid,
+      surface_observer_id: "cmux:/tmp/current.sock",
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "claude",
+      pid: 16431,
+      pid_registered_at: undefined,
+    });
+    const priorTimeout = process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS;
+    process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS = "100";
+    try {
+      const server = await createUuidRouteServer(routeClient, record);
+      routeClient.client.closeSurface.mockImplementation(async () => {
+        routeClient.setLiveSurfaces([]);
+      });
+      const realKill = process.kill.bind(process);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, signal) =>
+        pid === 16431 ? true : realKill(pid, signal)
+      ) as typeof process.kill);
+      try {
+        const result = await registeredTestTool(server, "close_surface").handler(
+          { scope: "agent", agent_id: record.agent_id, force: true },
+          {} as any,
+        );
+
+        expect(result.isError).toBe(true);
+        expect(parseToolResult(result)).toMatchObject({
+          agent_stopped: false,
+          surface_closed: true,
+          remedy: expect.stringMatching(/verify.*pid/i),
+        });
+        expect(routeClient.client.closeSurface).toHaveBeenCalledTimes(1);
+      } finally {
+        killSpy.mockRestore();
+      }
+    } finally {
+      if (priorTimeout === undefined) {
+        delete process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS;
+      } else {
+        process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS = priorTimeout;
+      }
+    }
+  });
+
+  it("send_to preserves a re-resolve error before any terminal mutation", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:agent", id: stableUuid, workspace_ref: "workspace:1" },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "re-resolve-timeout",
+      surface_id: "surface:agent",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const engine = testLifecycleEngine(server) as any;
+    const originalResolve = engine.resolveAgentIoRoute.bind(engine);
+    let reads = 0;
+    vi.spyOn(engine, "resolveAgentIoRoute").mockImplementation(async (agentId: string) => {
+      if (++reads > 1) throw new Error("window.list timed out");
+      return originalResolve(agentId);
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      { agent_id: record.agent_id, text: "retry me", press_enter: false },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error).toMatch(/window\.list timed out/);
+    expect(parseToolResult(result).error).not.toMatch(/surface route changed/);
+    expect(parseToolResult(result)).toMatchObject({ typed: false, retry_safe: true });
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
   it("records managed send failures against the stable UUID instead of its mutable ref", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const otherUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -13279,8 +13582,10 @@ codex>
 
     expect(result.isError).toBe(true);
     expect(parseToolResult(result).error).toMatch(
-      /surface route changed.*terminal delivery/i,
+      /stable surface UUID .* not live or uniquely resolvable/i,
     );
+    expect(parseToolResult(result).error).not.toMatch(/surface route changed/i);
+    expect(parseToolResult(result)).toMatchObject({ typed: true, retry_safe: false });
     expect(routeClient.sendCalls).toEqual([
       { surface: "surface:delivery-old", text: "one guarded chunk" },
     ]);

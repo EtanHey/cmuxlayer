@@ -432,6 +432,12 @@ type ToolReturn = {
   isError?: boolean;
 };
 
+// Only the internal scope=agent close delegate can request this teardown path.
+// A remote JSON tool caller cannot supply a symbol property.
+const OWNED_AGENT_CLOSE_ON_UNKNOWN_PID = Symbol(
+  "owned-agent-close-on-unknown-pid",
+);
+
 const TRANSPORT_PROVENANCE_TOOLS = new Set([
   "spawn_agent",
   "send_to",
@@ -820,6 +826,7 @@ const DeliveryOutputShape = {
       "failed",
       "pending_verify",
       "failed_confirmed",
+      "stalled_queue",
     ])
     .optional(),
   delivery_state: z
@@ -832,6 +839,7 @@ const DeliveryOutputShape = {
       "failed",
       "pending_verify",
       "failed_confirmed",
+      "stalled_queue",
     ])
     .optional(),
   terminal: z.boolean().optional(),
@@ -1179,7 +1187,8 @@ type PublicDeliveryState =
   | "rescued"
   | "failed"
   | "pending_verify"
-  | "failed_confirmed";
+  | "failed_confirmed"
+  | "stalled_queue";
 
 export interface PublicDeliveryReceipt {
   delivered: boolean;
@@ -1403,7 +1412,8 @@ export function buildPublicDeliveryReceipt(input: {
     input.delivery_state === "rescued" ||
     input.delivery_state === "failed" ||
     input.delivery_state === "pending_verify" ||
-    input.delivery_state === "failed_confirmed"
+    input.delivery_state === "failed_confirmed" ||
+    input.delivery_state === "stalled_queue"
       ? input.delivery_state
       : input.delivery_state === "submitted" && input.submit_verified === true
         ? "submitted"
@@ -1413,7 +1423,8 @@ export function buildPublicDeliveryReceipt(input: {
     evidencedState === "submitted" ||
     evidencedState === "rescued" ||
     evidencedState === "failed" ||
-    evidencedState === "failed_confirmed";
+    evidencedState === "failed_confirmed" ||
+    evidencedState === "stalled_queue";
   const warning =
     input.WARNING ??
     defaultNonDeliveryWarning(
@@ -1482,6 +1493,10 @@ function defaultNonDeliveryWarning(
       );
     case "failed":
     case "failed_confirmed":
+    case "stalled_queue":
+      if (state === "stalled_queue") {
+        return "STALLED QUEUE — the target is idle but still shows the queued message. Inspect its pane and use Escape to release it, then verify delivery before retrying.";
+      }
       if (typed || rpcMethods.includes("surface.send_text")) {
         return submitDispatched || rpcMethods.includes("surface.send_key")
           ? `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}) after ` +
@@ -3467,6 +3482,7 @@ function screenShowsFreshCursorResponseAfterSubmittedInput(
 function screenShowsQueuedAgentInput(
   screenText: string,
   submittedText: string,
+  opts: { exact?: boolean } = {},
 ): boolean {
   const lines = normalizeTerminalText(screenText).split("\n");
   if (inferComposerCli(screenText) !== "codex") {
@@ -3497,12 +3513,14 @@ function screenShowsQueuedAgentInput(
 
   const queuedItemRows: string[] = [];
   let foundQueuedItem = false;
+  let exactQueuedItemText: string | null = null;
   while (index >= 0) {
     const rawLine = lines[index] ?? "";
     const activeLine = stripCodexQueueGutter(rawLine).trim();
     const itemMatch = /^↳(?:\s+(.*)|\s*$)/.exec(activeLine);
     if (itemMatch) {
       queuedItemRows.unshift(itemMatch[1] ?? "");
+      exactQueuedItemText = /^↳ (.*)$/.exec(activeLine)?.[1] ?? null;
       foundQueuedItem = true;
       index -= 1;
       break;
@@ -3546,11 +3564,63 @@ function screenShowsQueuedAgentInput(
     return false;
   }
 
+  if (opts.exact) {
+    // A wrapped or partially rendered item cannot prove ownership. Preserve
+    // authored spaces; only CR line endings and terminal right padding vary.
+    if (queuedItemRows.length !== 1 || exactQueuedItemText === null) {
+      return false;
+    }
+    const stripRightPadding = (text: string): string =>
+      normalizeTerminalText(text).replace(/[ \t]+$/, "");
+    const visible = stripRightPadding(exactQueuedItemText);
+    return visible.length > 0 && visible === submittedText;
+  }
+
   const visiblePrefix = compactQueueCorrelationText(
     queuedItemRows.join(" ").replace(/(?:…|\.\.\.)+\s*$/, ""),
   );
   const submitted = compactQueueCorrelationText(submittedText.trim());
   return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
+}
+
+function countVisibleExactQueuedRows(
+  screenText: string,
+  authoredText: string,
+): number | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let cursor = lines.length - 1;
+  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
+  if (cursor < 0) return null;
+  cursor -= 1;
+  while (cursor >= 0 && (!stripCodexQueueGutter(lines[cursor] ?? "").trim() || /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(stripCodexQueueGutter(lines[cursor] ?? "")))) cursor -= 1;
+  const queueRow = (index: number): RegExpExecArray | null => /^↳ (.*)$/.exec(stripCodexQueueGutter(lines[index] ?? "").trimStart());
+  const queueHeadingStart = (index: number): number => {
+    let wrappedHeading = "";
+    for (let rows = 0; index >= 0 && rows < 4; rows += 1, index -= 1) {
+      const row = stripCodexQueueGutter(lines[index] ?? "").trim().replace(/^•\s*/, "");
+      if (!row) break;
+      wrappedHeading = `${row} ${wrappedHeading}`.replace(/\s+/g, " ").trim();
+      if (/^messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?$/i.test(wrappedHeading)) return index;
+    }
+    return -1;
+  };
+  let count: number | null = null;
+  while (cursor >= 0) {
+    const blockEnd = cursor;
+    let blockCount = 0;
+    let row: RegExpExecArray | null;
+    while (cursor >= 0 && (row = queueRow(cursor))) {
+      if (row[1] === authoredText) blockCount += 1;
+      cursor -= 1;
+    }
+    if (cursor === blockEnd) return count;
+    while (cursor >= 0 && !stripCodexQueueGutter(lines[cursor] ?? "").trim()) cursor -= 1;
+    const headingStart = queueHeadingStart(cursor);
+    if (headingStart < 0) return count;
+    count = (count ?? 0) + blockCount;
+    cursor = headingStart - 1;
+  }
+  return count;
 }
 
 function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {
@@ -6885,16 +6955,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
       const key = normalizeKeyName(opts.key);
-      const targetCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli;
+      const targetAgent = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+      const targetCli = targetAgent?.cli;
       const submitAttempted = isSubmitKey(key);
       const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
       const submitBaseline = submitAttempted && !opts.engineSubmitProof
         ? await readParsedSurface(opts.surface, opts.workspace) : null;
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
+      const eligibleQueuedReceipts = callerSubmit && targetAgent && submitBaseline &&
+        targetCli === "codex"
+        ? context.lifecycleSweepEngine?.listDeliveryReceipts().filter((receipt) =>
+            receipt.agent_id === targetAgent.agent_id &&
+            receipt.delivery_state === "queued" &&
+            receipt.composer_accepted === true &&
+            receipt.press_enter
+          ) ?? []
+        : [];
+      const ownedQueuedReceipt = submitBaseline
+        ? eligibleQueuedReceipts.find((receipt) => {
+            const visibleCount = countVisibleExactQueuedRows(
+              submitBaseline.text,
+              receipt.text,
+            );
+            const ownedCount = eligibleQueuedReceipts.filter(
+              (candidate) => candidate.text === receipt.text,
+            ).length;
+            return visibleCount === 1 && visibleCount <= ownedCount &&
+              screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true });
+          })
+        : undefined;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
           (targetCli && ["claude", "codex", "cursor"].includes(targetCli) &&
             submitBaseline.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(submitBaseline.text) &&
-            extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null))) {
+            extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null &&
+            !ownedQueuedReceipt))) {
         typedDraftOwners.delete(ownerKey);
         throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
       }
@@ -6903,13 +6997,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !isPickerOrMenuScreen(submitBaseline.text)) {
         const owner = typedDraftOwners.get(ownerKey);
         const caller = resolveCurrentCallerAgent()?.agent_id;
-        const ownedText = caller && owner?.caller === caller && owner.fp === draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000 ? owner.text : "";
-        if (composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
+        const ownedText = caller && owner?.caller === caller && owner.fp === draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000 ? owner.text : (ownedQueuedReceipt?.text ?? "");
+        const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
+        const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
+        if ((!ownedQueuedReceipt || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
           typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
-        const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
-        if (rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
+        if (!ownedQueuedReceipt && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
         if (!composerHoldsForeignDraft(submitBaseline.text, "", { cli: targetCli })) typedDraftOwners.delete(ownerKey);
@@ -9278,10 +9373,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
    * Old/ref-only cmux clients retain compatibility, but once UUID evidence has
    * been captured the route always fails closed if that UUID is absent.
    */
+  const agentScopedSurfaceClose = Symbol("agent-scoped-surface-close");
   const resolveRawSurfaceMutationRoute = async (
     requestedSurface: string,
     requestedWorkspace: string | undefined,
     operation: string,
+    trustedAgentScopedClose = false,
   ): Promise<RawSurfaceMutationRoute> => {
     const explicitWorkspace = requestedWorkspace
       ? normalizeWorkspaceRefAlias(requestedWorkspace)
@@ -9313,7 +9410,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const registryUuid =
       registryUuids.size === 1 ? [...registryUuids][0] : null;
     const expectedUuid = capturedUuid ?? registryUuid;
+    // A failed topology read from a UUID-capable connector is not evidence
+    // that an anonymous raw ref is safe to close.
+    const refOnlyConnector =
+      (client as typeof client & { surfaceIdentityMode?: string })
+        .surfaceIdentityMode === "ref_only";
     const topologyObserverEpoch = context.surfaceObserverEpoch;
+    // Only the internal agent-scoped delegate has an explicit managed ID.
+    // A raw caller cannot borrow a registry record's mutable ref as proof.
+    const allowRefOnlyClose = refOnlyConnector ||
+      (!topologyObserverEpoch && trustedAgentScopedClose);
     const topology = await collectSurfaceTopology();
     const withSurfaceRemap = (
       route: Omit<RawSurfaceMutationRoute, "remapped_from" | "remapped_to">,
@@ -9354,8 +9460,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : `${requestedSurface} is stale; no live managed agent maps this ref`;
       throw new Error(diagnostic ? `${occupancy} (${diagnostic})` : occupancy);
     };
+    const refuseUnverifiedClose = (): never => {
+      throw new Error(
+        `Cannot verify current surface topology for ${requestedSurface}; ` +
+          `refusing close_surface. Retry after window/workspace enumeration recovers ` +
+          `or address the surface by its stable UUID.`,
+      );
+    };
 
-    if (topology?.complete === true) {
+    if (topology) {
       const uuidTargetRef = findSurfaceRefByUuid(topology, requestedSurface);
       captureSurfaceIdentities(topology.surfaceIdByRef, topologyObserverEpoch);
       const currentUuidAtRequestedRef =
@@ -9391,16 +9504,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const workspace = observedWorkspace ?? explicitWorkspace;
         const assertCurrent = async (): Promise<void> => {
           const current = await collectSurfaceTopology();
-          const currentRefForUuid =
-            current?.complete === true
-              ? findSurfaceRefByUuid(current, stableUuid)
-              : null;
+          const currentRefForUuid = current
+            ? findSurfaceRefByUuid(current, stableUuid)
+            : null;
           const currentWorkspace = currentRefForUuid
             ? current?.workspaceBySurface.get(currentRefForUuid)
             : null;
           if (
             !current ||
-            current.complete !== true ||
             currentRefForUuid !== currentRef ||
             (currentWorkspace ?? null) !== (workspace ?? null)
           ) {
@@ -9417,6 +9528,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stableSurfaceIdentity: stableUuid,
           assertCurrent,
         });
+      }
+
+      if (topology.complete !== true) {
+        if (topology.surfaceIdByRef.size > 0 || topology.surfaceRefById.size > 0) {
+          throwStaleSurfaceRef("Fresh topology was incomplete and did not prove a stable UUID");
+        }
+        if (operation === "close_surface" && !allowRefOnlyClose) {
+          refuseUnverifiedClose();
+        }
+        // Legacy/mock connectors expose no stable identity. Retain their
+        // ref-only I/O fallback; a partial UUID-backed observation never gets it.
+        return {
+          surface: requestedSurface,
+          workspace: explicitWorkspace,
+          title: null,
+          stableSurfaceIdentity: null,
+          assertCurrent: async () => {},
+        };
       }
 
       if (
@@ -9459,6 +9588,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         `Stable surface UUID ${expectedUuid} captured for ${requestedSurface} ` +
           `could not be resolved in fresh topology; refusing ${operation}.`,
       );
+    }
+
+    if (operation === "close_surface" && !allowRefOnlyClose) {
+      refuseUnverifiedClose();
     }
 
     // Compatibility for pre-UUID/mock connectors that cannot produce a
@@ -12194,7 +12327,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const result = await lifecycleEngine.runLifecycleMutation(
             () =>
               handler(
-                { agent_id: args.agent_id, force: args.force },
+                {
+                  agent_id: args.agent_id,
+                  force: args.force,
+                  [OWNED_AGENT_CLOSE_ON_UNKNOWN_PID]: args.force === true,
+                },
                 {},
               ),
             { label: "close-agent" },
@@ -12214,21 +12351,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } = rawStopContent;
           if (!agentStopped) {
             // The stop itself failed: keep its verbatim ok:false/error and add
-            // the surface half, which was never attempted.
+            // the independently observed surface half. Stop may have closed
+            // the exact UUID route before its process post-condition failed.
             const reason =
               typeof rawStopContent.error === "string"
                 ? rawStopContent.error
                 : "Agent stop could not establish a safe terminal I/O route";
-            const remedy =
-              "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
+            const boundUuid = boundAgent?.surface_uuid;
+            const topology = boundUuid
+              ? await collectSurfaceTopology().catch(() => null)
+              : null;
+            const surfaceClosed = Boolean(
+              boundUuid &&
+                topology?.complete === true &&
+                !findSurfaceRefByUuid(topology, boundUuid),
+            );
+            const remedy = surfaceClosed
+              ? "The exact surface is gone, but the recorded PID was not proven stopped. Verify that PID before clearing the agent."
+              : "Refresh live topology with list_agents, verify the agent's current surface, then retry close_surface with force:true.";
             return err(
               new Error(`close_surface scope=agent refused: ${reason}`),
               {
                 ...rawStopContent,
                 scope: "agent",
                 agent_stopped: false,
-                surface_closed: false,
-                surface_close_skipped: "agent_stop_failed",
+                surface: boundSurface,
+                surface_closed: surfaceClosed,
+                ...(!surfaceClosed
+                  ? { surface_close_skipped: "agent_stop_failed" }
+                  : {}),
                 reason,
                 remedy,
                 WARNING: remedy,
@@ -12348,6 +12499,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // process check protects this record; it does not authorize
               // tearing down a surface another nonterminal record owns.
               force: args.force ?? false,
+              // A managed agent ID was resolved before stop_agent. This
+              // internal-only symbol allows its ref-only close when no stable
+              // identity exists; raw callers cannot supply it through MCP.
+              [agentScopedSurfaceClose]: true,
             },
             {},
           );
@@ -12430,6 +12585,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.surface,
           args.workspace,
           "close_surface",
+          (args as Record<PropertyKey, unknown>)[agentScopedSurfaceClose] === true,
         );
         await assertSurfaceMutationAllowed(
           "close_surface",
@@ -14318,10 +14474,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           current = await timeDeliveryPhase(args.timings, "enumerate", () =>
             engine.resolveAgentIoRoute(args.agent_id),
           );
-        } catch {
+        } catch (error) {
           throw new Error(
-            `Agent "${args.agent_id}" surface route changed during terminal ` +
-              `delivery; refusing to continue on another surface.`,
+            `Agent "${args.agent_id}" route re-resolution failed before terminal ` +
+              `delivery: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
           );
         }
         if (
@@ -14906,7 +15063,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
-          return { outcome: "pending" as const };
+          return {
+            outcome: "pending" as const,
+            ...(queued &&
+              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.control_state === "ready" &&
+              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.status === "idle"
+              ? { reason: "queued_idle" }
+              : {}),
+          };
         }
         const composerCleared = composer !== null && composer.trim() === "";
         const correlationTail = receipt.text
@@ -18265,6 +18429,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await engine.stopAgent(args.agent_id, args.force, {
+            allowUnknownPidOwnedSurfaceClose:
+              (args as typeof args & {
+                [OWNED_AGENT_CLOSE_ON_UNKNOWN_PID]?: boolean;
+              })[OWNED_AGENT_CLOSE_ON_UNKNOWN_PID] === true,
             beforeSurfaceMutation: (route) =>
               assertSurfaceMutationAllowed(
                 "stop_agent",
@@ -19093,6 +19261,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 rpc_methods: errorRpcMethods,
                 timings_ms: timings,
               }),
+              retry_safe:
+                errorRpcMethods.length === 0 &&
+                !errorTyped &&
+                !errorSubmitDispatched,
             };
             throw error;
           }
