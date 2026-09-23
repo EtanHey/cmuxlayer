@@ -185,6 +185,30 @@ describe("daemon-first MCP entry", () => {
     }
   }, 12_000);
 
+  it("REG1b passes the probed instance env into the no-cmux fallback", async () => {
+    const env = {
+      CMUX_SOCKET_PATH: "/tmp/reg1b-instance-a.sock",
+      CMUX_SOCKET_CAPABILITY: "instance-a-token",
+    };
+    const opts = createEntryOptions({
+      env,
+      probeDaemon: vi.fn().mockResolvedValue(false),
+      probeCmuxSocket: vi.fn().mockResolvedValue({
+        usable: false,
+        socketPath: env.CMUX_SOCKET_PATH,
+      }),
+    });
+
+    const result = await runDaemonFirstEntry(opts);
+
+    expect(result.mode).toBe("in-process");
+    expect(opts.startInProcess).toHaveBeenCalledWith(
+      expect.objectContaining({ env }),
+    );
+    expect(opts.spawnDaemon).not.toHaveBeenCalled();
+    expect(opts.runProxy).not.toHaveBeenCalled();
+  });
+
   it("falls back to in-process mode with a loud warning when daemon start fails", async () => {
     const logger = { error: vi.fn() };
     const opts = createEntryOptions({

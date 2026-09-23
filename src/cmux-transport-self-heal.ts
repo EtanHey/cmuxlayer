@@ -33,9 +33,12 @@ export const DEFAULT_IRRECOVERABLE_MIN_DURATION_MS = 60_000;
 const UPGRADE_FAILURE_LOG_INTERVAL_MS = 30_000;
 const DENIAL_PROGRESS_LOG_INTERVAL_MS = 30_000;
 
-export function cliEnvForSocketPath(socketPath: string): NodeJS.ProcessEnv {
+export function cliEnvForSocketPath(
+  socketPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
   return {
-    ...process.env,
+    ...env,
     CMUX_SOCKET_PATH: socketPath,
   };
 }
@@ -642,7 +645,12 @@ export class CmuxSelfHealingClient {
 
   private pinCliToSocket(socket: CmuxSocketClient): void {
     try {
-      this.opts.cli.setEnv(cliEnvForSocketPath(socket.currentSocketPath()));
+      this.opts.cli.setEnv(
+        cliEnvForSocketPath(
+          socket.currentSocketPath(),
+          this.opts.factoryOpts?.env,
+        ),
+      );
     } catch {
       // Keep the socket transport active; CLI pinning will be retried after any
       // downgrade/upgrade that has a resolved socket path.

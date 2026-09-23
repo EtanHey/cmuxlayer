@@ -76,10 +76,12 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 function instancePin(
-  opts?: Pick<CreateCmuxClientOptions, "socketPath">,
+  opts?: Pick<CreateCmuxClientOptions, "socketPath" | "env">,
 ): string | undefined {
   if (opts?.socketPath) return opts.socketPath;
-  const fromEnv = (process.env.CMUX_SOCKET_PATH ?? "").trim();
+  const fromEnv = (
+    (opts?.env ? opts.env.CMUX_SOCKET_PATH : process.env.CMUX_SOCKET_PATH) ?? ""
+  ).trim();
   return fromEnv.length > 0 ? fromEnv : undefined;
 }
 
@@ -91,13 +93,24 @@ function instancePin(
 export async function createCmuxClient(
   opts?: CreateCmuxClientOptions,
 ): Promise<CmuxClient | CmuxSocketClient> {
-  opts = { ...opts, capability: opts?.capability ?? process.env.CMUX_SOCKET_CAPABILITY };
+  opts = {
+    ...opts,
+    capability:
+      opts?.capability ??
+      (opts?.env
+        ? opts.env.CMUX_SOCKET_CAPABILITY
+        : process.env.CMUX_SOCKET_CAPABILITY),
+  };
   const logger = opts?.logger ?? console;
   const pin = instancePin(opts);
   const cliFallback = new CmuxClient({
     exec: opts?.exec,
     bin: opts?.bin,
-    ...(pin ? { env: cliEnvForSocketPath(pin) } : {}),
+    ...(pin
+      ? { env: cliEnvForSocketPath(pin, opts?.env) }
+      : opts?.env
+        ? { env: opts.env }
+        : {}),
   });
 
   const candidates = candidateSocketPathsForOpts(opts);
