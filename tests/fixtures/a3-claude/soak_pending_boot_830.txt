@@ -1,0 +1,7 @@
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Opus 5.5 (1M context) with high effort · Claude Max
+  ▝▝ ▝▝    ~/project
+
+❯ Reply exactly SOAK_OK_29 then stop. ; cmuxlayer contract for capture-agent: Read and
+  follow /home/capture-user/.cmux/agents/capture-agent/contract.md
+  ⎇ main | 🔧 13

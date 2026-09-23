@@ -1646,6 +1646,56 @@ TASK_DONE
     expect(parsed.model).toBe("gpt-5.5 xhigh");
   });
 
+  it("keeps an explicit Codex header authoritative over a dot action glyph", () => {
+    const parsed = parseScreen("OpenAI Codex\nModel: gpt-5.5\n· Searching…\n›");
+
+    expect(parsed.agent_type).toBe("codex");
+  });
+
+  it("keeps an explicit Codex header authoritative over a Claude mention and dot glyph", () => {
+    const parsed = parseScreen(
+      "OpenAI Codex\nModel: gpt-5.5\n· Searching…\nRead the Claude Code notes\n›",
+    );
+
+    expect(parsed.agent_type).toBe("codex");
+  });
+
+  it.each([
+    ["  gpt-6-sol", "a model list"],
+    ["  gpt-5.5 xhigh · 42% left · ~/Gits/cmuxlayer", "a quoted Codex footer"],
+    ["The pane header reads OpenAI Codex, Model: gpt-5.5 high.", "Codex prose"],
+  ])("keeps a working Claude pane when its reply contains %s (%s)", (reply) => {
+    const parsed = parseScreen(
+      `⏺ Comparing models:\n${reply}\n\n✻ Pondering… (12s · ↓ 1.2k tokens · esc to interrupt)\n\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)`,
+    );
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("working");
+  });
+
+  it("lets the bottom-most harness chrome win when both are visible", () => {
+    const parsed = parseScreen(
+      "OpenAI Codex\nModel: gpt-5.5\nClaude Code v2.0\n✻ Pondering…\n❯",
+    );
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("working");
+  });
+
+  it("ignores an indented Codex footer quoted below Claude chrome", () => {
+    const parsed = parseScreen(
+      "Claude Code v2.0\n✻ Pondering…\n  gpt-5.5 xhigh · ~/Gits/cmuxlayer\n❯",
+    );
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("working");
+  });
+
+  it("uses Codex chrome below stale Claude chrome", () => {
+    const parsed = parseScreen(
+      "Claude Code v2.0\n›\ngpt-5.5 xhigh · 42% left · ~/Gits/cmuxlayer",
+    );
+    expect(parsed.agent_type).toBe("codex");
+  });
+
   it("does not classify ordinary prose mentioning OpenAI Codex as a Codex pane", () => {
     const parsed = parseScreen(`
 Claude Code
