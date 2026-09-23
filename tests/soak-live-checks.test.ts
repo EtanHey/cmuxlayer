@@ -53,6 +53,10 @@ describe("live soak invariant checkers", () => {
     expect(checkStopWait(done)).toEqual([]);
     expect(checkStopWait({ ...done, error: null })).toEqual([]);
     expect(checkStopWait({ ...done, error: "transport failed" })).toEqual(["wait_failed"]);
+    const alreadyDone = { ...done, error: "Agent has already completed", source: "immediate" };
+    expect(checkToolFailure(alreadyDone, { acceptTerminalDone: true })).toEqual([]);
+    expect(checkStopWait(alreadyDone)).toEqual([]);
+    expect(checkStopWait({ ...alreadyDone, source: "poll" })).toEqual(["wait_failed"]);
   });
 
   it("distinguishes a failed created seat from a spawn with missing identity", () => {
@@ -100,6 +104,8 @@ describe("live soak invariant checkers", () => {
     expect(replyMarkerEvidence({ content: `⏺ Bash(command)\n⎿ ${marker}` }, marker))
       .toMatchObject({ found: false, origin: "tool_output" });
     expect(replyMarkerEvidence({ content: `⏺ Bash(command)\n⎿ output\n⏺ ${marker}` }, marker))
+      .toMatchObject({ found: true, origin: "authored_reply" });
+    expect(replyMarkerEvidence({ content: "⏺ Bash(SOAK_OK_1)" }, "Bash(SOAK_OK_1)"))
       .toMatchObject({ found: false, origin: "tool_output" });
     expect(replyMarkerEvidence({ content: marker }, marker))
       .toMatchObject({ found: false, origin: "unattributed_raw" });
@@ -125,6 +131,9 @@ describe("live soak invariant checkers", () => {
     const replyFrame = `Claude Code v2.0\n⏺ Bash(command)\n⎿ output\n\n⏺ Completed the check.\n⏺ ${marker}\nCLAUDE_COUNTER: 1\n❯ `;
     expect(replyMarkerEvidence({ parsed: parseScreen(replyFrame), content: replyFrame }, marker))
       .toMatchObject({ found: true, origin: "authored_reply" });
+    const immediateReplyFrame = `Claude Code v2.0\n⏺ Bash(command)\n⎿ output\n\n⏺ ${marker}\nCLAUDE_COUNTER: 1\n❯ `;
+    expect(replyMarkerEvidence({ parsed: parseScreen(immediateReplyFrame), content: immediateReplyFrame }, marker))
+      .toMatchObject({ found: true, origin: "authored_reply", source: "parsed_response" });
   });
 
   it("fails closed on malformed receipt, state, tool, and reply inputs", () => {

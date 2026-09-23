@@ -48,7 +48,8 @@ export function isExpectedStopCompletion(result) {
   const value = record(result);
   return value.ok === true && value.isError === false && value.matched === false &&
     value.state === "done" && (value.error == null ||
-      value.error === "Agent entered terminal state: done");
+      value.error === "Agent entered terminal state: done" ||
+      (value.error === "Agent has already completed" && value.source === "immediate"));
 }
 
 export function checkStopWait(result) {
@@ -127,12 +128,12 @@ export function replyMarkerEvidence(screen, marker) {
       } else if (/^\s*(?:⎿|Result:|Output:)/.test(line)) {
         inToolOutput = true;
         inPrompt = false;
-      } else if (/^\s*[⏺•]\s+(?:mcp__\S+|Read\(|Bash\(|Task\()/.test(line)) {
+      } else if (/^\s*[⏺•]\s+(?:mcp__\S+|[A-Z]\w*\()/.test(line)) {
         inToolOutput = true;
         inPrompt = false;
       } else if (/^[⏺•]\s+/.test(line)) {
         inPrompt = false;
-        if (!line.includes(marker)) inToolOutput = false;
+        inToolOutput = false;
       }
       if (!line.includes(marker)) continue;
       const authoredLine = exactReplyLine(line) && (source === "parsed_response" ||
