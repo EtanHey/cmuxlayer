@@ -56,6 +56,12 @@ describe("parseScreen", () => {
     expect(parsed.status).toBe("working");
   });
 
+  it("keeps an active Codex queued follow-up busy despite its footer", () => {
+    const parsed = parseScreen(readFixture("painpoints/codex-pr343-live-queued-followup.txt"));
+    expect(parsed.status).toBe("working");
+    expect(parsed.control_state).toBe("busy");
+  });
+
   it("keeps quoted chevron output in a clean Claude pane ready", () => {
     const parsed = parseScreen("Claude Code\n» quoted output\n  bypass permissions on");
     expect(parsed.status).toBe("idle");
