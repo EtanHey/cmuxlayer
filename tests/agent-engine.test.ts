@@ -22,6 +22,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseScreen } from "../src/screen-parser.js";
+import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import {
   AgentEngine,
   RetryableDeliveryError,
@@ -370,6 +371,21 @@ describe("AgentEngine", () => {
       observed_value: "idle",
       liveness_source: `screen:${surfaceUuid}`,
       liveness: { value: true, source: "screen" },
+    });
+
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+      surface: worker.surface_id,
+      text: "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
+      lines: 5,
+      scrollback_used: false,
+    });
+    now = 3_000;
+    await watchEngine.runSweep();
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      observed_value: "working",
     });
     watchEngine.dispose();
   });
@@ -7087,6 +7103,36 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    it("keeps a completed worker done when its live screen returns to ready", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "done-but-ready",
+            state: "done",
+            surface_id: "surface:done-but-ready",
+            cli: "claude",
+            role: "worker",
+            task_done_detected_at: "2026-09-23T00:00:00.000Z",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:done-but-ready")];
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen("Claude Code\n❯ ")),
+        );
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("done-but-ready", "done", 500);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await pending;
+        expect(result.matched).toBe(true);
+        expect(result.state).toBe("done");
+        const ready = await engine.waitFor("done-but-ready", "ready", 500);
+        expect(ready.matched).toBe(false);
+        expect(ready.state).toBe("done");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
     it("returns immediately if agent is already in target state", async () => {
       stateMgr.writeState(
         makeRecord({ agent_id: "agent-ready", state: "ready" }),
@@ -11454,6 +11500,287 @@ Session ID: ${sessionId}`,
       expect(
         messages.some((message) => message.task.includes(healthy.agent_id)),
       ).toBe(false);
+    });
+
+    it.each([
+      {
+        name: "new background-terminal output",
+        first: "Waiting for background terminal (4m 02s • esc to interrupt)\n  Test files 12/20 passed",
+        second: "Waiting for background terminal (4m 03s • esc to interrupt)\n  Test files 13/20 passed",
+      },
+      {
+        name: "advancing token count during a background-terminal wait",
+        first: "Waiting for background terminal (4m 02s • esc to interrupt)\n  🤖  97,000 tokens",
+        second: "Waiting for background terminal (4m 02s • esc to interrupt)\n  🤖  126,000 tokens",
+      },
+      {
+        name: "background child CPU activity",
+        first: "Waiting for background terminal (4m 02s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        second: "Waiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        cpuProgress: true,
+      },
+      {
+        name: "new background child CPU activity",
+        first: "Waiting for background terminal (4m 02s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        second: "Waiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        cpuProgress: true,
+        replacementCpu: true,
+      },
+    ])("does not report a live worker wedged with $name", async ({ first, second, cpuProgress, replacementCpu }) => {
+      let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
+      let cpuSample = 0;
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltWedgedDwellMs: 1_000,
+          haltWedgedSweeps: 1,
+          haltProcessSnapshot: () =>
+            `12345 1 0:00.00 codex\n${replacementCpu ? 12346 + cpuSample : 12346} 12345 0:0${cpuSample++}.00 tail -n0 -F /tmp/probe.log`,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "background-progress-parent",
+        surface_id: "surface:background-progress-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "background-progress-child",
+        surface_id: "surface:background-progress-child",
+        state: "working",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        pid: cpuProgress ? 12345 : null,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+
+      const prefix = "OpenAI Codex\nModel: gpt-5.6\n";
+      await (engine as any).maybeEscalateLiveHalt(child, prefix + first);
+      nowMs += 1_001;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        prefix + second,
+      );
+
+      expect(engine.getAgentState(child.agent_id)?.halt_episode_type).toBeNull();
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_wedged",
+        ),
+      ).toEqual([]);
+    });
+
+    it("still reports an editor-blocked background terminal after a long advancing wait", async () => {
+      let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltWedgedDwellMs: 1_000,
+          haltWedgedSweeps: 1,
+          haltProcessSnapshot: () => "12345 1 0:00.00 codex\n12346 12345 0:01.00 unrelated-worker",
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "editor-wedge-parent",
+        surface_id: "surface:editor-wedge-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "editor-wedge-child",
+        surface_id: "surface:editor-wedge-child",
+        state: "working",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        pid: 12345,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\n✻ Working",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const screen = (elapsed: string) =>
+        `OpenAI Codex\nModel: gpt-5.6\nWaiting for background terminal (${elapsed} • esc to interrupt)\n└ git rebase --continue\n  git commit -e`;
+      await (engine as any).maybeEscalateLiveHalt(child, screen("52m 00s"));
+      nowMs += 1_001;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 01s"),
+      );
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 02s"),
+      );
+
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_wedged",
+        ),
+      ).toHaveLength(1);
+    });
+
+    it("does not count unrelated child CPU as progress for the waiting command", async () => {
+      let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
+      let cpuSample = 0;
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltWedgedDwellMs: 1_000,
+          haltWedgedSweeps: 1,
+          haltProcessSnapshot: () =>
+            `12345 1 0:00.00 codex\n12346 12345 0:00.00 tail -n0 -F /tmp/probe.log\n12347 12345 0:0${cpuSample++}.00 unrelated-worker`,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "sibling-cpu-parent",
+        surface_id: "surface:sibling-cpu-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "sibling-cpu-child",
+        surface_id: "surface:sibling-cpu-child",
+        state: "working",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+        pid: 12345,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\n✻ Working",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const screen = (elapsed: string) =>
+        `OpenAI Codex\nModel: gpt-5.6\nWaiting for background terminal (${elapsed} • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log`;
+      await (engine as any).maybeEscalateLiveHalt(child, screen("52m 00s"));
+      nowMs += 1_001;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 01s"),
+      );
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 02s"),
+      );
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_wedged",
+        ),
+      ).toHaveLength(1);
+    });
+
+    it("samples process CPU asynchronously once across waiting agents in a sweep", async () => {
+      vi.useRealTimers();
+      let eventLoopTicked = false;
+      const sample = vi.fn(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        return "12345 1 0:00.00 codex\n12346 12345 0:01.00 tail -n0 -F /tmp/probe.log\n22345 1 0:00.00 codex\n22346 22345 0:01.00 tail -n0 -F /tmp/probe.log";
+      });
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        { haltProcessSnapshot: sample as any },
+      );
+      const first = makeRecord({ agent_id: "cpu-sweep-first", pid: 12345 });
+      const second = makeRecord({ agent_id: "cpu-sweep-second", pid: 22345 });
+      const screen = "OpenAI Codex\nWaiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log";
+      const tick = setTimeout(() => { eventLoopTicked = true; }, 0);
+      const results = await Promise.all([
+        (engine as any).backgroundChildUsedCpu(first, screen, { sweep: true }),
+        (engine as any).backgroundChildUsedCpu(second, screen, { sweep: true }),
+      ]);
+      clearTimeout(tick);
+      expect(eventLoopTicked).toBe(true);
+      expect(sample).toHaveBeenCalledTimes(1);
+      expect(results).toEqual([false, false]);
+    });
+
+    it("shares one nonblocking process sample across a sweep with two waiting workers", async () => {
+      vi.useRealTimers();
+      let eventLoopTicked = false;
+      const sample = vi.fn(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        return "12345 1 0:00.00 codex\n12346 12345 0:01.00 tail -n0 -F /tmp/probe.log\n22345 1 0:00.00 codex\n22346 22345 0:01.00 tail -n0 -F /tmp/probe.log";
+      });
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        { sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR }, haltProcessSnapshot: sample },
+      );
+      const parent = makeRecord({ agent_id: "cpu-sweep-parent", surface_id: "surface:cpu-sweep-parent", role: "orchestrator" });
+      const first = makeRecord({ agent_id: "cpu-sweep-first", surface_id: "surface:cpu-sweep-first", parent_agent_id: parent.agent_id, pid: 12345 });
+      const second = makeRecord({ agent_id: "cpu-sweep-second", surface_id: "surface:cpu-sweep-second", parent_agent_id: parent.agent_id, pid: 22345 });
+      for (const record of [parent, first, second]) stateMgr.writeState(record);
+      liveSurfaces = [parent, first, second].map((record) => makeSurface(record.surface_id));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async (surface: string) => ({
+        surface,
+        text: surface === parent.surface_id
+          ? "Claude Code\n✻ Working"
+          : "OpenAI Codex\nWaiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        lines: 80,
+        scrollback_used: false,
+      }));
+      await engine.getRegistry().reconstitute();
+      const tick = setTimeout(() => { eventLoopTicked = true; }, 0);
+      await engine.runSweep();
+      clearTimeout(tick);
+      expect(eventLoopTicked).toBe(true);
+      expect(sample).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops background CPU snapshots when an agent is removed", () => {
+      const snapshots = (engine as any).backgroundChildCpuTimes as Map<string, Map<number, string>>;
+      snapshots.set("removed-agent", new Map([[12346, "0:01.00"]]));
+      (engine as any).clearAgentLifecycleMemory("removed-agent");
+      expect(snapshots.has("removed-agent")).toBe(false);
     });
 
     it("keeps halt unblock calls served and send_to payloads valid", async () => {

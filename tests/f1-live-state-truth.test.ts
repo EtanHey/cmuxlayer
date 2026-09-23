@@ -7,10 +7,11 @@
  * record whose `state` is a lie and asserts the consumer believes the screen.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../src/server.js";
+import { createServer, createServerContext } from "../src/server.js";
+import type { CmuxServerContext } from "../src/server.js";
 import { runWithCallerContext } from "../src/caller-context.js";
 import type { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
@@ -130,16 +131,21 @@ class LiveSurfaceClient {
   }
 
   async renameTab() {}
+  async clearProgress() {}
+  async setStatus() {}
+  async clearStatus() {}
 }
 
 function createLiveServer(client: LiveSurfaceClient) {
-  return createServer({
+  const context = createServerContext({
     client: client as any,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
     surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
+  const server = createServer({ context });
+  return { context, server };
 }
 
 function makeAgent(
@@ -183,24 +189,22 @@ function registerAgent(server: any, record: AgentRecord): AgentRecord {
   return record;
 }
 
-function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
-  if (engine && typeof engine.dispose === "function") engine.dispose();
-}
-
 describe("F1 — live state, not the stale registry record", () => {
   let server: any;
   let client: LiveSurfaceClient;
+  let context: CmuxServerContext;
 
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     client = new LiveSurfaceClient();
-    server = createLiveServer(client);
+    ({ context, server } = createLiveServer(client));
   });
 
-  afterEach(() => {
-    disposeServer(server);
+  afterEach(async () => {
+    await context.lifecycleStartPromise;
+    await server.close();
+    context.dispose();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -257,11 +261,123 @@ describe("F1 — live state, not the stale registry record", () => {
     // unverified submit path: that is the same receipt lie with the sign
     // flipped -- a false `ok` instead of a false `failed`.
     expect(parsed.submit_verified, JSON.stringify(parsed)).toBe(true);
-    // NOTE: `markAgentWorking` still only transitions from `idle`
-    // (agent-engine.ts:8339), so a verified send does not yet correct a
-    // poisoned `done` record. Widening that precondition would erase
-    // done-detection whenever a lead pings a finished worker, so it is a
-    // separate state-machine decision, not part of this gate fix.
+    // R1: a verified submit only ARMS reopening. A later screen-confirmed
+    // working observation commits it; a ready prompt can also mean finished.
+  });
+
+  it("R1 reopens a stale-done record only after verified send_to and a working sweep", async () => {
+    const engine = server._registeredTools["interact"]._engine;
+    await context.lifecycleStartPromise;
+    (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
+    await engine.runSweep(); // Finish startup's terminal purge before seeding the live record.
+    const agentId = "cmuxlayerCodex-r1-reopen";
+    registerAgent(server, makeAgent({
+      agent_id: agentId,
+      surface_id: client.idleSurface,
+      state: "done",
+      task_done_detected_at: "2026-08-18T13:41:00.000Z",
+    }));
+    const stateMgr = engine["stateMgr"] as StateManager;
+
+    const delivery = parseResult(await callTool(server, "send_to", {
+      mode: "agent", agent_id: agentId, text: "New task", press_enter: true,
+    }));
+    expect(delivery.submit_verified).toBe(true);
+    expect(stateMgr.readState(agentId)?.state).toBe("done");
+
+    client.screens[client.idleSurface] = WORKING_CODEX_SCREEN;
+    await engine.runSweep();
+    expect(stateMgr.readState(agentId)).toMatchObject({
+      state: "working",
+      task_done_detected_at: null,
+      reopened_at: expect.any(String),
+      reopen_count: 1,
+    });
+    expect(engine.getAgentState(agentId)?.state).toBe("working");
+  });
+
+  it("R1 detects existing TASK_DONE evidence again after reopened work returns to idle", async () => {
+    const engine = server._registeredTools["interact"]._engine;
+    await context.lifecycleStartPromise;
+    (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
+    await engine.runSweep();
+    const agentId = "cmuxlayerCodex-r1-roundtrip";
+    const reportPath = join(TEST_DIR, "roundtrip-report.md");
+    writeFileSync(reportPath, "Previous task complete\nDONE_R1_ROUNDTRIP\n");
+    registerAgent(server, makeAgent({
+      agent_id: agentId,
+      surface_id: client.idleSurface,
+      state: "done",
+      report_path: reportPath,
+      done_marker: "DONE_R1_ROUNDTRIP",
+      task_done_detected_at: "2026-08-18T13:41:00.000Z",
+    }));
+    const stateMgr = engine["stateMgr"] as StateManager;
+
+    const delivery = parseResult(await callTool(server, "send_to", {
+      mode: "agent", agent_id: agentId, text: "New task", press_enter: true,
+    }));
+    expect(delivery.submit_verified).toBe(true);
+    client.screens[client.idleSurface] = WORKING_CODEX_SCREEN;
+    await engine.runSweep();
+    expect(stateMgr.readState(agentId)?.state).toBe("working");
+    await engine.runSweep();
+    expect(stateMgr.readState(agentId)?.state).toBe("working");
+
+    client.screens[client.idleSurface] = `${IDLE_CODEX_SCREEN}\nTASK_DONE`;
+    await engine.runSweep();
+    const candidate = stateMgr.readState(agentId);
+    expect(candidate?.task_done_candidate_at).toEqual(expect.any(String));
+    stateMgr.updateRecord(agentId, {
+      task_done_candidate_at: "2026-08-18T13:41:00.000Z",
+    });
+    await engine.runSweep();
+    expect(stateMgr.readState(agentId)).toMatchObject({
+      state: "done",
+      task_done_detected_at: expect.any(String),
+      reopen_count: 1,
+    });
+  });
+
+  it("R1 never reopens error, user-killed, or missing-surface records", async () => {
+    const engine = server._registeredTools["interact"]._engine;
+    await context.lifecycleStartPromise;
+    (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
+    await engine.runSweep();
+    const stateMgr = engine["stateMgr"] as StateManager;
+    const records = [
+      makeAgent({ agent_id: "r1-error", surface_id: client.workingSurface, state: "error" }),
+      makeAgent({ agent_id: "r1-killed", surface_id: client.workingSurface, state: "done", user_killed: true }),
+      makeAgent({ agent_id: "r1-gone", surface_id: "surface:gone", state: "done" }),
+    ];
+    for (const record of records) {
+      registerAgent(server, record);
+      (engine as any).markAgentWorking(record.agent_id, { verifiedDelivery: true });
+    }
+    await engine.runSweep();
+    expect(stateMgr.readState("r1-error")?.state).toBe("error");
+    expect(stateMgr.readState("r1-killed")?.state).toBe("done");
+    expect(stateMgr.readState("r1-gone")?.state).toBe("done");
+  });
+
+  it("R1 leaves a done record alone when the screen works without verified send_to", async () => {
+    const engine = server._registeredTools["interact"]._engine;
+    await context.lifecycleStartPromise;
+    (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
+    await engine.runSweep();
+    const agentId = "cmuxlayerCodex-r1-unverified";
+    registerAgent(server, makeAgent({
+      agent_id: agentId,
+      surface_id: client.idleSurface,
+      state: "done",
+      task_done_detected_at: "2026-08-18T13:41:00.000Z",
+    }));
+    client.screens[client.idleSurface] = WORKING_CODEX_SCREEN;
+    await engine.runSweep();
+    expect((engine["stateMgr"] as StateManager).readState(agentId)).toMatchObject({
+      state: "done",
+      task_done_detected_at: "2026-08-18T13:41:00.000Z",
+    });
   });
 
   it("P1 D8 submits to a screen-idle agent even when its registry record says working", async () => {
