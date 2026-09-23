@@ -5674,11 +5674,10 @@ export class AgentEngine {
     operation: "agent-placement" | "crash-recovery",
   ): Promise<boolean> {
     try {
-      let surfaceRef = surface.surface;
-      let workspace = surface.actual_workspace ?? surface.workspace;
-      let cleanupEpoch = surface.observerEpoch;
-
-      if (!this.isSurfaceObserverEpochCurrent(cleanupEpoch)) {
+      const sameObserverEpoch = this.isSurfaceObserverEpochCurrent(
+        surface.observerEpoch,
+      );
+      if (!sameObserverEpoch) {
         const currentObserverId = this.registry.getObserverId();
         if (
           !surface.surface_id ||
@@ -5688,21 +5687,23 @@ export class AgentEngine {
           await this.logUnboundSurfaceCleanupWarning(
             `${operation}: refusing cleanup of unbound ${surface.surface} ` +
               `(${surface.surface_id ?? "UUID unknown"}); surface observer ` +
-              `ownership changed`,
+              `ownership changed (orphan-risk)`,
           );
           return false;
         }
+      }
 
+      const cleanupEpoch = sameObserverEpoch
+        ? surface.observerEpoch
+        : this.captureSurfaceObserverEpoch();
+
+      const resolveCleanupBinding = async () => {
         const topology = await this.collectObservedSurfaceTopology();
         if (
           topology?.complete !== true ||
           topology.workspaceBySurface.size === 0
         ) {
-          await this.logUnboundSurfaceCleanupWarning(
-            `${operation}: could not prove unbound surface ${surface.surface_id} ` +
-              `for cleanup after reconnect`,
-          );
-          return false;
+          return null;
         }
         const binding = resolveAgentSurfaceBinding(
           {
@@ -5711,26 +5712,41 @@ export class AgentEngine {
           },
           topology,
         );
-        if (!binding || binding.provenance !== "uuid") {
-          await this.logUnboundSurfaceCleanupWarning(
-            `${operation}: stable surface ${surface.surface_id} was not uniquely ` +
-              `resolvable for cleanup`,
-          );
-          return false;
-        }
-        surfaceRef = binding.surfaceRef;
-        workspace = binding.workspaceId ?? workspace;
-        cleanupEpoch = this.captureSurfaceObserverEpoch();
+        return binding?.provenance === "uuid" ? binding : null;
+      };
+      const binding = await resolveCleanupBinding();
+      if (!binding) {
+        await this.logUnboundSurfaceCleanupWarning(
+          `${operation}: orphan-risk: unbound surface ${surface.surface_id ?? "UUID unknown"} ` +
+            `was not uniquely resolvable for cleanup`,
+        );
+        return false;
       }
 
-      await this.client.closeSurface(surfaceRef, {
-        workspace,
+      this.assertSurfaceObserverEpochCurrent(
+        cleanupEpoch,
+        `${operation} cleanup`,
+      );
+      await this.client.closeSurface(binding.surfaceUuid, {
+        workspace:
+          binding.workspaceId ?? surface.actual_workspace ?? surface.workspace,
         collapsePane: false,
+        ...this.stableSurfaceWriteOptions(surface.surface_id),
         beforeMutation: async () => {
           this.assertSurfaceObserverEpochCurrent(
             cleanupEpoch,
             `${operation} cleanup`,
           );
+          const currentBinding = await resolveCleanupBinding();
+          if (
+            !currentBinding ||
+            currentBinding.surfaceRef !== binding.surfaceRef ||
+            currentBinding.workspaceId !== binding.workspaceId
+          ) {
+            throw new Error(
+              `orphan-risk: unbound surface ${surface.surface_id} changed binding before cleanup`,
+            );
+          }
         },
       });
       return true;
