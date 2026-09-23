@@ -7030,21 +7030,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const pending = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
-      if (
-        pending &&
-        pending.parsed.control_state === "ready" &&
+      // The parser correctly calls a non-empty Claude composer dirty. This
+      // boot's exact pointer is the one exception: durable boot ownership and
+      // an exact composer match let us submit it before the caller's followup.
+      const pendingHoldsOwnedPointer = pending &&
         screenShowsCompletePendingInput(pending.text, pointer) &&
         !composerHoldsForeignDraft(pending.text, pointer, {
           cli: "claude",
           exact: true,
-        })
+        });
+      if (
+        pendingHoldsOwnedPointer &&
+        (pending.parsed.control_state === "ready" ||
+          pending.parsed.control_state === "composer_dirty")
       ) {
         const assertOwnedPointerBeforeReturn = async () => {
           await opts.beforeMutation?.();
           const current = await readParsedSurface(opts.surface, opts.workspace, {
             throwOnSurfaceGone: true,
           });
-          if (!current || current.parsed.control_state !== "ready") {
+          if (!current || (current.parsed.control_state !== "ready" &&
+            current.parsed.control_state !== "composer_dirty")) {
             throw new DeliverySafetyGateError(
               "draft_ownership_unverified", current?.parsed ?? pending.parsed,
             );

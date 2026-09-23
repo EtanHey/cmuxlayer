@@ -462,6 +462,35 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   }, 15_000);
 
+  it("keeps a foreign Claude draft blocked while boot recovery is pending", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n❯ ";
+    const exec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const boot = engine.stateMgr.updateRecord(agentId, {
+        boot_prompt_pending: true, prompt_delivered: false, submit_verified: null,
+      });
+      engine.getRegistry().set(agentId, boot);
+      const pointer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      screenText = `Claude Code\nWorking\n❯ ${pointer} human edit`;
+      exec.mockClear();
+
+      const result = parseToolResult(await server._registeredTools.send_to.handler({
+        agent_id: agentId, text: "followup", press_enter: true,
+      }, {}));
+      expect(result.error_code, JSON.stringify(result)).toBe("blocked_by_foreign_draft");
+      expect(result.submit_dispatched).toBe(false);
+      expect(exec.mock.calls.some(([, args]: [string, string[]]) =>
+        args.includes("send-key") && args.includes("return"))).toBe(false);
+      expect(engine.stateMgr.readState(agentId)?.boot_prompt_pending).toBe(true);
+    } finally { context.dispose(); }
+  }, 15_000);
+
   it("does not retry an ambiguously acknowledged boot recovery Return", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let composer = "";
