@@ -29,6 +29,8 @@ const ESSENTIAL_FIELDS = [
   "boot_prompt_delivered",
   "boot_prompt_receipt",
   "boot_prompt_submit_verified",
+  "update_menu_skipped",
+  "update_menu_text_hash",
   "readiness_recovered",
   "readiness_cleared",
   // P11/U10: the engine-issued coordination contract is ESSENTIAL, not verbose

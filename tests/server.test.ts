@@ -9692,7 +9692,11 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent deliberately skips the reconstructed Codex update menu before submitting once", async () => {
+  it.each([
+    ["ready composer", "ready"],
+    ["menu persists", "menu"],
+    ["surface UUID changes", "changed_uuid"],
+  ] as const)("spawn_agent skips the reconstructed Codex update menu only when %s follows", async (_name, outcome) => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-state");
@@ -9728,6 +9732,7 @@ describe("tool handler integration", () => {
     let readsAfterFirstLaunch = 0;
     let updateMenuSeen = false;
     let selectedSkipObserved = false;
+    let surfaceUuidChanged = false;
     let surfaceCreated = false;
     const stableSurfaceId = "11111111-2222-4333-8444-555555555555";
     const sentTexts: string[] = [];
@@ -9771,7 +9776,9 @@ describe("tool handler integration", () => {
             ...spawnUpdatePaneSurfaces(),
             surfaces: [{
               ...spawnUpdatePaneSurfaces().surfaces[0],
-              id: stableSurfaceId,
+              id: surfaceUuidChanged
+                ? "99999999-8888-4777-8666-555555555555"
+                : stableSurfaceId,
             }],
           }),
           stderr: "",
@@ -9799,6 +9806,9 @@ describe("tool handler integration", () => {
         }
         if (updateMenuSeen && !updateAccepted) {
           updateMenuKeys.push(key);
+          if (outcome === "changed_uuid" && key === "down") {
+            surfaceUuidChanged = true;
+          }
           if (updateMenuKeys.join(",") === "down,down,return" && selectedSkipObserved) {
             updateAccepted = true;
           }
@@ -9846,7 +9856,11 @@ describe("tool handler integration", () => {
             }
           }
         } else if (launcherSends === 1 && updateAccepted && !promptSent) {
-          text = fixture.screens.ready;
+          text = outcome === "menu"
+            ? fixture.screens.interactive_update
+                .replace("› 1. Update now", "  1. Update now")
+                .replace("  3. Skip until next version", "› 3. Skip until next version")
+            : fixture.screens.ready;
         } else if (promptSent) {
           text = bootPromptSubmitted
             ? codexSubmittedFrame(pendingBootText)
@@ -9908,6 +9922,14 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       if (!parsed.ok) {
         expect(parsed.error_code).toBe("blocked_by_update_menu");
+      }
+      if (outcome !== "ready") {
+        expect(parsed.ok).toBe(false);
+        expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
+        expect(updateMenuKeys.filter((key) => key === "return")).toHaveLength(
+          outcome === "menu" ? 1 : 0,
+        );
+        return;
       }
       expect(parsed.ok).toBe(true);
       expect(parsed.update_menu_skipped).toBe(true);
