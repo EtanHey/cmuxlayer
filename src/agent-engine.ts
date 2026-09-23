@@ -6059,15 +6059,7 @@ export class AgentEngine {
         isLiveActive(resolveLiveAgentState(agent, parseScreen(sweepScreenText)))
       ) {
         if (!this.assertSweepInputCurrent(sweepCtx)) return;
-        const reopenedAt = new Date().toISOString();
-        agent = this.stateMgr.transition(agent.agent_id, "working", {
-          task_done_candidate_at: null,
-          task_done_detected_at: null,
-          reopen_pending_at: null,
-          reopened_at: reopenedAt,
-          reopen_count: (agent.reopen_count ?? 0) + 1,
-          halt_last_active_at: reopenedAt,
-        });
+        agent = this.stateMgr.reopenAfterVerifiedDelivery(agent.agent_id);
         this.registry.set(agent.agent_id, agent);
       }
       let haltScreenText = taskDoneResult.screenText;

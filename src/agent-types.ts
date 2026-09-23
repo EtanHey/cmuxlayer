@@ -510,7 +510,7 @@ export const VALID_TRANSITIONS: Record<AgentState, AgentState[]> = {
   ready: ["working", "done", "error"],
   working: ["idle", "done", "error"],
   idle: ["working", "done", "error"],
-  done: ["working"],
+  done: [],
   error: ["creating"],
 };
 

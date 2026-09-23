@@ -127,6 +127,37 @@ describe("AgentRegistry", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
+  it("R1 discovery cannot reopen done without verified delivery", async () => {
+    const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+    const agentId = `auto-codex-${surfaceUuid}`;
+    stateMgr.writeState(makeRecord({
+      agent_id: agentId,
+      surface_id: "surface:r1-auto",
+      surface_uuid: surfaceUuid,
+      state: "done",
+      task_summary: "(auto-discovered)",
+      task_done_detected_at: "2026-08-18T13:41:00.000Z",
+    }));
+    const registry = new AgentRegistry(
+      stateMgr,
+      async () => [{ ...makeSurface("surface:r1-auto"), id: surfaceUuid }],
+    );
+    await registry.reconstitute();
+    await registry.listMerged({
+      scan: vi.fn().mockResolvedValue([makeDiscovered({
+        surface_id: "surface:r1-auto",
+        surface_uuid: surfaceUuid,
+        surface_title: "cmuxlayerCodex",
+        cli: "codex",
+        parsed_status: "working",
+      })]),
+    } as any);
+    expect(stateMgr.readState(agentId)).toMatchObject({
+      state: "done",
+      task_done_detected_at: "2026-08-18T13:41:00.000Z",
+    });
+  });
+
   it("fails closed when the observer socket path is not a live socket node", () => {
     expect(
       deriveSurfaceObserverId(
