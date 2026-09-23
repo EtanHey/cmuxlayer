@@ -26,6 +26,9 @@ lead inbox, and exact-seat cleanup. The lead ID is used
 only to inspect halt notices; soak seats have no parent, so their report notices
 do not route to the lead. Preserve failing
 receipts for the owning lane; inspect `summary.violations` before claiming green.
+If an agent-scoped close fails, the runner retries once by agent ID without
+force. It records `cleanup_leak` with the saved identities for human cleanup;
+it never force-closes a saved surface ref that another seat may now own.
 The JSONL includes full `control_health` samples at start, every 60 seconds, and
 end. The summary records elapsed duration, unchanged server PID, healthy/total
 samples, and server RSS at start/end; any unhealthy sample or RSS growth above
