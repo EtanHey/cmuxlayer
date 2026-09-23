@@ -11,7 +11,7 @@ import {
   checkToolFailure, hasReplyMarker, healthSampleEntry,
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
-import { runSoakCycles, soakSessionRecord, startSoakHealthClock } from "./soak-live-timeline.mjs";
+import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
 
 const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -109,17 +109,16 @@ async function main() {
     stderr: "inherit" });
   const healthSamples = [];
   let healthClock;
-  let healthInFlight = null;
   let startedAtMs = 0;
   let startPid = null;
   let rssStartKb = null;
   let connected = false;
-  const call = async (name, args, cycle) => {
+  const call = async (name, args, cycle, timeoutMs = Math.max(opts.timeoutMs + 15_000, 120_000)) => {
     const start = performance.now();
     let result;
     try {
       result = payload(await client.callTool({ name, arguments: args }, undefined,
-        { timeout: Math.max(opts.timeoutMs + 15_000, 120_000) }));
+        { timeout: timeoutMs }));
     } catch (error) {
       result = { ok: false, isError: true, error: String(error) };
     }
@@ -137,23 +136,25 @@ async function main() {
     check("tool_refusal", checkToolFailure(result), { cycle, tool: name });
     return result;
   };
-  const sampleHealth = async (label) => {
-    if (healthInFlight) {
-      healthSamples.push(false);
-      log({ kind: "health", label, healthy: false, control_health: null,
-        reason: "previous_sample_in_flight" });
-      return;
-    }
-    const pending = (async () => {
-      const result = await call("control_health", { detail: "full" }, `health:${label}`);
+  const sampleHealth = async (label, atMs = Date.now()) => {
+    const sample = { atMs, label, healthy: false };
+    healthSamples.push(sample);
+    try {
+      let result;
+      try {
+        result = await withHealthTimeout(() =>
+          call("control_health", { detail: "full" }, `health:${label}`, 20_000),
+        setTimeout, clearTimeout);
+      } catch (error) {
+        result = { ok: false, isError: true, error: String(error) };
+      }
       const failures = checkControlHealthSample(result, transport.pid, startPid);
-      const healthy = failures.length === 0;
-      healthSamples.push(healthy);
+      sample.healthy = failures.length === 0;
       check("control_health", failures, { label });
-      log(healthSampleEntry(label, result, transport.pid, failures));
-    })();
-    healthInFlight = pending;
-    try { await pending; } finally { healthInFlight = null; }
+      log({ ...healthSampleEntry(label, result, transport.pid, failures), sample_started_at_ms: atMs });
+    } catch (error) {
+      check("health", ["health_sample_exception"], { label, error: String(error) });
+    }
   };
   const indexEntry = (agentId) => {
     const path = join(stateDir, "surface-session-index.json");
@@ -300,7 +301,8 @@ async function main() {
     rssStartKb = serverRssKb(startPid);
     log({ kind: "start", options: opts });
     healthClock = await startSoakHealthClock({ sampleHealth, now: Date.now,
-      schedule: setTimeout, cancel: clearTimeout,
+      schedule: setTimeout, cancel: clearTimeout, minDurationMs: opts.durationMinutes * 60_000,
+      minimumCyclesComplete: () => summary.cycles_completed >= opts.cycles,
       onError: (error) => check("health", ["health_sample_exception"], { error: String(error) }) });
     startedAtMs = healthClock.startedAtMs;
     await runSoakCycles({ completed: () => summary.cycles_completed, minCycles: opts.cycles,
@@ -310,6 +312,7 @@ async function main() {
         const batchSize = Math.min(opts.concurrency, opts.cycles - first);
         await Promise.all(Array.from({ length: batchSize },
           (_, offset) => runCycle(first + offset + 1)));
+        healthClock.refresh();
       } });
   } catch (error) {
     check("harness", ["harness_exception"], { error: String(error) });
@@ -320,20 +323,19 @@ async function main() {
     }
     try { inboxCheck("final"); }
     catch (error) { check("lead_inbox", ["inbox_unreadable"], { error: String(error) }); }
-    if (healthClock) await healthClock.stop().catch((error) =>
-      check("health", ["health_sample_exception"], { error: String(error) }));
-    if (healthInFlight) await healthInFlight.catch(() => {});
+    if (healthClock) healthClock.stop();
+    const endedAtMs = Date.now();
     if (connected) await sampleHealth("end").catch((error) =>
       check("health", ["health_sample_exception"], { error: String(error) }));
     const endPid = transport.pid;
     const rssEndKb = serverRssKb(endPid);
-    const sessionRecord = soakSessionRecord({ startPid, endPid, startedAtMs, now: Date.now,
+    const sessionRecord = soakSessionRecord({ startPid, endPid, startedAtMs, endedAtMs,
       minCycles: opts.cycles, minDurationMs: opts.durationMinutes * 60_000,
       cyclesCompleted: summary.cycles_completed, healthSamples, rssStartKb, rssEndKb });
     const elapsedMs = sessionRecord.elapsedMs;
     summary.session = { duration_ms: elapsedMs, server_pid_start: startPid,
       server_pid_end: endPid, server_pid_unchanged: startPid === endPid,
-      health_samples_ok: healthSamples.filter(Boolean).length,
+      health_samples_ok: healthSamples.filter((sample) => sample.healthy).length,
       health_samples_total: healthSamples.length, rss_start_kb: rssStartKb, rss_end_kb: rssEndKb };
     check("soak_session", checkSoakSession(sessionRecord), { session: summary.session });
     await client.close().catch(() => {});

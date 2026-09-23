@@ -36,9 +36,12 @@ receipts for the owning lane; inspect `summary.violations` before claiming green
 If an agent-scoped close fails, the runner retries once by agent ID without
 force. It records `cleanup_leak` with the saved identities for human cleanup;
 it never force-closes a saved surface ref that another seat may now own.
-The JSONL includes full `control_health` samples at start, every 60 seconds, and
-end. The summary records elapsed duration, unchanged server PID, healthy/total
-samples, and server RSS at start/end; any unhealthy sample or RSS growth above
-2x fails the run. The server process must not reconnect or respawn during the
-full run. The MCP stdio PID is tracked separately from the control daemon PID
-returned by `control_health`.
+The JSONL includes full `control_health` samples at start, at intervals no
+longer than 70 seconds, and at the endpoint. Each request has a 20-second
+deadline; a timeout is an unhealthy sample and fails the run. The runner
+checks timestamp gaps rather than a minute-based sample count and does not
+catch up missed ticks during cleanup. The summary records elapsed duration,
+unchanged server PID, healthy/total samples, and server RSS at start/end; any
+unhealthy sample or RSS growth above 2x fails the run. The server process must
+not reconnect or respawn during the full run. The MCP stdio PID is tracked
+separately from the control daemon PID returned by `control_health`.
