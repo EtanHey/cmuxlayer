@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
 import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+
+let sequence = 0;
 
 /** Replace one JSON file atomically without sharing a temp path with other writers. */
 export function atomicWriteJson(path: string, value: unknown, space?: number): void {
-  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const tmp = `${path}.${process.pid}.${++sequence}.tmp`;
   try {
     writeFileSync(tmp, JSON.stringify(value, null, space), "utf-8");
     renameSync(tmp, path);
