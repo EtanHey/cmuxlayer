@@ -7709,6 +7709,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: opts.surface,
         workspace: opts.workspace,
       };
+      let selectingUpdateMenu = false;
       try {
         target = opts.resolveRoute ? await opts.resolveRoute() : target;
         lastSurface = target.surface;
@@ -7744,41 +7745,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             !opts.stableSurfaceIdentity || !opts.resolveRoute ||
             !opts.assertStableSurfaceIdentity
           ) throw blocked();
-          try {
-            await withSurfaceWrite(target.surface, async () => {
-              const assertRoute = async () => {
-                await opts.assertStableSurfaceIdentity!();
-                const current = await opts.resolveRoute!();
-                if (current.surface !== target.surface ||
-                    (current.workspace ?? null) !== (target.workspace ?? null)) {
-                  throw blocked();
-                }
-              };
-              await assertRoute();
-              const confirmed = await client.readScreen(target.surface, {
-                workspace: target.workspace, lines: 80, scrollback: false,
-              });
-              if (confirmed.text !== screen.text) throw blocked();
-              for (let index = 0; index < plan.downCount; index += 1) {
-                await assertRoute();
-                await client.sendKey(target.surface, "down", { workspace: target.workspace });
+          selectingUpdateMenu = true;
+          await withSurfaceWrite(target.surface, async () => {
+            const assertRoute = async () => {
+              await opts.assertStableSurfaceIdentity!();
+              const current = await opts.resolveRoute!();
+              if (current.surface !== target.surface ||
+                  (current.workspace ?? null) !== (target.workspace ?? null)) {
+                throw blocked();
               }
-              await assertRoute();
-              const selected = await client.readScreen(target.surface, {
-                workspace: target.workspace, lines: 80, scrollback: false,
-              });
-              if (codexUpdateSkipPlan(selected.text)?.downCount !== 0) throw blocked();
-              await assertRoute();
-              await client.sendKey(target.surface, "return", { workspace: target.workspace });
-            }, {
-              toolName: "boot_prompt",
-              workspace: target.workspace,
-              stableSurfaceIdentity: opts.stableSurfaceIdentity,
-              observePtyWrite: true,
+            };
+            await assertRoute();
+            const confirmed = await client.readScreen(target.surface, {
+              workspace: target.workspace, lines: 80, scrollback: false,
             });
-          } catch {
-            throw blocked();
-          }
+            if (confirmed.text !== screen.text) throw blocked();
+            for (let index = 0; index < plan.downCount; index += 1) {
+              await assertRoute();
+              await client.sendKey(target.surface, "down", { workspace: target.workspace });
+            }
+            await assertRoute();
+            const selected = await client.readScreen(target.surface, {
+              workspace: target.workspace, lines: 80, scrollback: false,
+            });
+            if (codexUpdateSkipPlan(selected.text)?.downCount !== 0) throw blocked();
+            await assertRoute();
+            await client.sendKey(target.surface, "return", { workspace: target.workspace });
+          }, {
+            toolName: "boot_prompt",
+            workspace: target.workspace,
+            stableSurfaceIdentity: opts.stableSurfaceIdentity,
+            observePtyWrite: true,
+          });
+          selectingUpdateMenu = false;
           updateMenuTextHash = plan.textHash;
           deadline = Math.max(deadline, Date.now() + BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS);
           consecutiveMatches.clear();
@@ -7904,6 +7903,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         queuedObservation = frameQueuedObservation;
       } catch (error) {
+        if (selectingUpdateMenu) {
+          if (isSurfaceGoneReadFailure(error, target.surface)) {
+            throw new SurfaceGoneError(target.surface, error);
+          }
+          throw error;
+        }
         if (
           error instanceof BootPromptTimeoutError ||
           error instanceof LauncherReadinessError ||
@@ -8815,6 +8820,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }),
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
             prompt_warning: promptWarning,
+            ...(readiness.updateMenuTextHash ? {
+              update_menu_skipped: true,
+              update_menu_text_hash: readiness.updateMenuTextHash,
+            } : {}),
           }, rawPrompt);
         }
       }
