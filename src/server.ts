@@ -1624,6 +1624,7 @@ class SubmitVerificationError extends Error {
 class AmbiguousBootRecoveryReturnError extends Error {
   constructor(
     readonly pointer: string,
+    readonly bootInstanceId: string,
     cause: unknown,
   ) {
     super(
@@ -1657,13 +1658,16 @@ class DeliverySafetyGateError extends Error {
       | "blocked_by_foreign_draft"
       | "owned_boot_contract_pending"
       | "nothing_owned_to_submit"
-      | "draft_ownership_unverified",
+      | "draft_ownership_unverified"
+      | "boot_instance_changed",
     readonly screen: ParsedScreenResult,
     readonly draftText?: string,
   ) {
     super(
       error_code === "draft_ownership_unverified"
         ? "Cannot verify composer ownership from the current frame. Return was not sent; read the pane and retry when its composer is observable."
+        : error_code === "boot_instance_changed"
+        ? "Managed boot instance changed before recovered Return; no key was sent. Re-read the agent before retrying."
         : error_code === "nothing_owned_to_submit"
         ? "No owned text to submit: this composer could be showing an empty-input hint. Return was not sent."
         : error_code === "blocked_by_permission_prompt"
@@ -1965,7 +1969,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           ...error.receipt,
           error_code: error.error_code,
           screen: error.screen,
-          ...(["nothing_owned_to_submit", "draft_ownership_unverified"].includes(error.error_code)
+          ...(["nothing_owned_to_submit", "draft_ownership_unverified", "boot_instance_changed"].includes(error.error_code)
             ? { key_dispatched: false, submit_dispatched: false }
             : {}),
         }
@@ -6995,6 +6999,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         pendingBootAgent.agent_id,
         coordinationContractPath(pendingBootAgent.agent_id, inboxOpts),
       );
+      const persistedBoot = stateMgr.readState(pendingBootAgent.agent_id);
+      if (!persistedBoot || persistedBoot.boot_prompt_pending !== true ||
+        persistedBoot.prompt_delivered === true) {
+        throw new Error("Managed boot changed before pointer recovery; no Return was sent");
+      }
+      // Older in-flight boot records may predate the instance marker. Stamp
+      // one before the first await, so a later boot cannot inherit this Return.
+      const boundBoot = persistedBoot.boot_instance_id
+        ? persistedBoot
+        : stateMgr.updateRecord(persistedBoot.agent_id, {
+            boot_prompt_pending: true,
+          });
+      const recoveryBootInstanceId = boundBoot.boot_instance_id;
+      if (!recoveryBootInstanceId) {
+        throw new Error("Cannot bind recovered Return to a managed boot instance");
+      }
+      if (boundBoot !== persistedBoot) {
+        context.lifecycleSweepEngine?.getRegistry().set(boundBoot.agent_id, boundBoot);
+      }
       const pending = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
@@ -7015,6 +7038,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!current || current.parsed.control_state !== "ready") {
             throw new DeliverySafetyGateError(
               "draft_ownership_unverified", current?.parsed ?? pending.parsed,
+            );
+          }
+          const recordAtReturn = stateMgr.readState(pendingBootAgent.agent_id);
+          if (!recordAtReturn ||
+            recordAtReturn.boot_instance_id !== recoveryBootInstanceId ||
+            recordAtReturn.boot_prompt_pending !== true ||
+            recordAtReturn.prompt_delivered === true) {
+            throw new DeliverySafetyGateError(
+              "boot_instance_changed", current.parsed,
             );
           }
           if (
@@ -7045,7 +7077,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // have landed while its acknowledgement was lost. Only the latter
           // is uncertain; never issue another Return or type the followup.
           if (!returnDispatchStarted) throw error;
-          throw new AmbiguousBootRecoveryReturnError(pointer, error);
+          throw new AmbiguousBootRecoveryReturnError(pointer, recoveryBootInstanceId, error);
         }
         if (method) rpcMethods.add(method);
         const verification = await verifySubmitAfterEnter({
@@ -7068,6 +7100,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
         if (verification.submit_verified !== true) {
           throw new DeliverySafetyGateError("owned_boot_contract_pending", pending.parsed, pointer);
+        }
+        const recordAfterReturn = stateMgr.readState(pendingBootAgent.agent_id);
+        if (!recordAfterReturn ||
+          recordAfterReturn.boot_instance_id !== recoveryBootInstanceId ||
+          recordAfterReturn.boot_prompt_pending !== true ||
+          recordAfterReturn.prompt_delivered === true) {
+          throw new AmbiguousBootRecoveryReturnError(
+            pointer, recoveryBootInstanceId,
+            new Error("Managed boot changed after recovered Return"),
+          );
         }
         let updated = stateMgr.updateRecord(pendingBootAgent.agent_id, {
           boot_prompt_pending: false,
@@ -14737,6 +14779,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
     engine.setDeliveryVerifier(
       async (receipt: AgentDeliveryReceipt, snapshot) => {
+        if (receipt.boot_recovery &&
+          stateMgr.readState(receipt.agent_id)?.boot_instance_id !== receipt.boot_instance_id) {
+          return { outcome: "pending" as const, reason: "boot_instance_changed" };
+        }
         const agent = engine.getAgentState(receipt.agent_id);
         if (!agent) {
           return { outcome: "pending" as const, reason: "target_gone" };
@@ -18847,10 +18893,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // The caller's followup was never typed. Track the boot pointer
               // itself so passive verification cannot falsely complete that
               // followup, and do not put it on the retryable delivery queue.
-              const pendingBoot = stateMgr.updateRecord(agentId, {
-                boot_prompt_pending: true,
-              });
-              engine.getRegistry().set(agentId, pendingBoot);
               const receipt = engine.acceptPendingVerify({
                 delivery_id: deliveryId,
                 agent_id: agentId,
@@ -18860,7 +18902,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 retry_count: 0,
                 typed: true,
                 boot_recovery: true,
-                boot_instance_id: pendingBoot.boot_instance_id,
+                boot_instance_id: error.bootInstanceId,
               });
               return err(error, {
                 agent_id: agentId,
