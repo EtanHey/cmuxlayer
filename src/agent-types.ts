@@ -346,6 +346,7 @@ export interface ControlHealthTelemetryEvent {
 export interface SweepPhaseTelemetryEvent {
   ts: string;
   event_type: "sweep_phase";
+  process_id?: number;
   sweep_id: number;
   phase: string;
   stage: "started" | "completed" | "failed";
@@ -354,6 +355,7 @@ export interface SweepPhaseTelemetryEvent {
   agent_count: number;
   lock_held: boolean;
   durations_ms?: Record<string, number>;
+  failed_phase?: string;
 }
 
 export interface AgentCliExitEvent {

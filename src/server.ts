@@ -18119,7 +18119,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               for (let attempt = 0; attempt < 2; attempt += 1) {
                 discovery.invalidate();
                 const revision = engine.lifecycleLockRevision();
-                const observed = await withUnlocked(() => discovery.scan(true));
+                let observed: DiscoveredAgent[];
+                try {
+                  observed = await withUnlocked(() => discovery.scan(true));
+                } catch (error) {
+                  if (error instanceof SurfaceBindingChangedDuringDiscoveryError) {
+                    // The lock was lent while discovery read the pane. Discard
+                    // that scan and retry from the current surface binding.
+                    continue;
+                  }
+                  throw error;
+                }
                 if (engine.lifecycleLockRevision() === revision + 1) {
                   discovered = observed;
                   break;
