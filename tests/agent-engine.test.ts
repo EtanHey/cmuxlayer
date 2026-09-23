@@ -1009,6 +1009,7 @@ describe("AgentEngine", () => {
 
     it("cleans the created surface when initial state persistence fails before commit", async () => {
       vi.spyOn(stateMgr, "writeState").mockImplementationOnce(() => {
+        liveSurfaces = [{ ...makeSpawnSurface(), workspace_ref: "ws:1" }];
         throw new Error("state disk unavailable");
       });
 
@@ -1033,10 +1034,136 @@ describe("AgentEngine", () => {
       expect(mockClient.send).not.toHaveBeenCalled();
     });
 
+    it("closes the created UUID at its current ref after the original ref is reused", async () => {
+      vi.spyOn(stateMgr, "writeState").mockImplementationOnce(() => {
+        liveSurfaces = [
+          {
+            ...makeSurface("surface:new"),
+            id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            workspace_ref: "ws:1",
+          },
+          {
+            ...makeSurface("surface:renumbered"),
+            id: SPAWN_SURFACE_UUID,
+            workspace_ref: "ws:2",
+          },
+        ];
+        throw new Error("state disk unavailable");
+      });
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Fail after surface renumbering",
+        }),
+      ).rejects.toThrow("state disk unavailable");
+
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:renumbered",
+        expect.objectContaining({
+          workspace: "ws:2",
+          collapsePane: false,
+        }),
+      );
+      expect(mockClient.closeSurface).not.toHaveBeenCalledWith(
+        "surface:new",
+        expect.anything(),
+      );
+    });
+
+    it("refuses cleanup when the UUID moves after resolution but before close I/O", async () => {
+      let closed = false;
+      vi.spyOn(stateMgr, "writeState").mockImplementationOnce(() => {
+        liveSurfaces = [{ ...makeSpawnSurface(), workspace_ref: "ws:1" }];
+        throw new Error("state disk unavailable");
+      });
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_ref: string, opts: { beforeMutation?: () => Promise<void> }) => {
+          liveSurfaces = [
+            {
+              ...makeSurface("surface:new"),
+              id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              workspace_ref: "ws:1",
+            },
+            {
+              ...makeSurface("surface:renumbered"),
+              id: SPAWN_SURFACE_UUID,
+              workspace_ref: "ws:1",
+            },
+          ];
+          await opts.beforeMutation?.();
+          closed = true;
+        },
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Fail before mutable close",
+        }),
+      ).rejects.toThrow("state disk unavailable");
+
+      expect(closed).toBe(false);
+      expect(mockClient.log).toHaveBeenCalledWith(
+        expect.stringMatching(/orphan-risk.*changed binding before cleanup/i),
+        expect.objectContaining({ level: "warning", source: "cmuxlayer" }),
+      );
+    });
+
+    it.each([
+      {
+        name: "missing UUID",
+        surfaces: [
+          {
+            ...makeSurface("surface:new"),
+            id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            workspace_ref: "ws:1",
+          },
+        ],
+      },
+      {
+        name: "ambiguous UUID",
+        surfaces: [
+          {
+            ...makeSurface("surface:new"),
+            id: SPAWN_SURFACE_UUID,
+            workspace_ref: "ws:1",
+          },
+          {
+            ...makeSurface("surface:duplicate"),
+            id: SPAWN_SURFACE_UUID,
+            workspace_ref: "ws:1",
+          },
+        ],
+      },
+    ])("records orphan-risk and closes nothing for $name at cleanup", async ({ surfaces }) => {
+      vi.spyOn(stateMgr, "writeState").mockImplementationOnce(() => {
+        liveSurfaces = surfaces;
+        throw new Error("state disk unavailable");
+      });
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Fail with unprovable surface binding",
+        }),
+      ).rejects.toThrow("state disk unavailable");
+
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(mockClient.log).toHaveBeenCalledWith(
+        expect.stringMatching(/orphan[-_ ]risk.*unbound surface/i),
+        expect.objectContaining({ level: "warning", source: "cmuxlayer" }),
+      );
+    });
+
     it("closes and errors an unlaunched durable binding when initial persistence fails after commit", async () => {
       const writeState = stateMgr.writeState.bind(stateMgr);
       vi.spyOn(stateMgr, "writeState").mockImplementationOnce((record) => {
         writeState(record);
+        liveSurfaces = [{ ...makeSpawnSurface(), workspace_ref: "ws:1" }];
         throw new Error("post-commit telemetry failed");
       });
 
@@ -1203,7 +1330,7 @@ describe("AgentEngine", () => {
       );
     });
 
-    it("blocks and cleans up when cmux returns a spawned surface in a different workspace than requested", async () => {
+    it("blocks without closing an unproven surface in a different workspace", async () => {
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         panes: [
           {
@@ -1242,13 +1369,10 @@ describe("AgentEngine", () => {
       ).rejects.toThrow(
         "Spawn placement blocked: requested workspace:intended but cmux returned workspace:wrong for surface surface:new",
       );
-      expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        "surface:new",
-        expect.objectContaining({
-          workspace: "workspace:wrong",
-          collapsePane: false,
-          beforeMutation: expect.any(Function),
-        }),
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(mockClient.log).toHaveBeenCalledWith(
+        expect.stringMatching(/orphan-risk.*unbound surface.*UUID unknown/i),
+        expect.objectContaining({ level: "warning", source: "cmuxlayer" }),
       );
       expect(stateMgr.listStates()).toHaveLength(0);
       expect(mockClient.renameTab).not.toHaveBeenCalled();

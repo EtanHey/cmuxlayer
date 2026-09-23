@@ -537,6 +537,7 @@ describe("workspace spawn tools", () => {
     let surfaceIndex = 0;
     const surfaceWorkspace = new Map<string, string>();
     const surfacePane = new Map<string, string>();
+    const surfaceUuid = new Map<string, string>();
     const client = makeWorkspaceClient();
     client.listWorkspaces.mockResolvedValue({
       workspaces: [
@@ -570,6 +571,9 @@ describe("workspace spawn tools", () => {
           surface_refs: [...surfacePane.entries()]
             .filter(([, candidate]) => candidate === pane)
             .map(([surface]) => surface),
+          surface_ids: [...surfacePane.entries()]
+            .filter(([, candidate]) => candidate === pane)
+            .map(([surface]) => surfaceUuid.get(surface)!),
         })),
       };
     });
@@ -590,6 +594,7 @@ describe("workspace spawn tools", () => {
             )
             .map(([surface], index) => ({
               ref: surface,
+              id: surfaceUuid.get(surface),
               title:
                 surface === "surface:1" ? "cmuxlayerClaude" : "cmuxlayerCodex",
               type: "terminal" as const,
@@ -607,9 +612,12 @@ describe("workspace spawn tools", () => {
         surfaceIndex > 1 ? "workspace:B" : opts.workspace;
       surfaceWorkspace.set(surface, actualWorkspace ?? "workspace:B");
       surfacePane.set(surface, pane);
+      const surfaceId = `11111111-2222-4333-8444-${String(surfaceIndex).padStart(12, "0")}`;
+      surfaceUuid.set(surface, surfaceId);
       return {
         workspace: actualWorkspace,
         surface,
+        surface_id: surfaceId,
         pane,
         title: "",
         type: "terminal",
