@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
-  checkToolFailure, hasReplyMarker, healthSampleEntry,
+  checkReplyVisibility, checkSpawnIdentity, checkToolFailure, checkStopWait, healthSampleEntry, replyMarkerEvidence,
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
@@ -16,6 +16,8 @@ import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeo
 const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const object = (value) => value && typeof value === "object" ? value : {};
+const boundedScreenContent = (value) => typeof value === "string"
+  ? value.split("\n").slice(-8).map((line) => line.slice(0, 160)).join("\n") : null;
 
 function options(argv) {
   const opts = { cycles: 40, concurrency: 2, timeoutMs: 90_000, durationMinutes: 60,
@@ -132,8 +134,13 @@ async function main() {
       boot_prompt_receipt: result.boot_prompt_receipt,
       parsed: name === "read_screen" ? result.parsed : undefined,
       screen_preview: name === "read_screen" ? result.screen_preview : undefined,
+      snapshot_hash: name === "read_screen" ? result.snapshot_hash : undefined,
+      column: name === "read_screen" ? result.column : undefined,
+      column_count: name === "read_screen" ? result.column_count : undefined,
       warning: result.WARNING, error: result.error, error_code: result.error_code });
-    check("tool_refusal", checkToolFailure(result), { cycle, tool: name });
+    check("tool_refusal", checkToolFailure(result,
+      { acceptTerminalDone: name === "wait_for" && args.target_state === "idle" }),
+    { cycle, tool: name });
     return result;
   };
   const sampleHealth = async (label, atMs = Date.now()) => {
@@ -174,10 +181,24 @@ async function main() {
     const listed = await call("list_agents", { agent_ids: [agentId], max_age_ms: 0 }, cycle);
     const row = object(listed.agents?.find((item) => item.agent_id === agentId));
     const sweepStartedAt = Date.now();
-    const screen = await call("read_screen", { surface, workspace: WORKSPACE, lines: 100 }, cycle);
+    const screen = await call("read_screen", { surface, workspace: WORKSPACE,
+      lines: 100, raw: true }, cycle);
     const parsedOnly = await call("read_screen", { surface, workspace: WORKSPACE,
       lines: 100, parsed_only: true }, cycle);
-    check("parsed_read_agreement", checkParsedReadAgreement(screen, parsedOnly, Date.now() - sweepStartedAt),
+    const sweepMs = Date.now() - sweepStartedAt;
+    const parityFailures = checkParsedReadAgreement(screen, parsedOnly, sweepMs);
+    log({ kind: "parsed_snapshot_pair", cycle, agent_id: agentId, surface,
+      full_hash: screen.snapshot_hash ?? null, parsed_only_hash: parsedOnly.snapshot_hash ?? null,
+      same_snapshot: screen.snapshot_hash != null && screen.snapshot_hash === parsedOnly.snapshot_hash,
+      sweep_ms: sweepMs });
+    if (parityFailures.length) {
+      log({ kind: "parsed_mismatch_evidence", cycle, agent_id: agentId, surface,
+        failures: parityFailures, full_hash: screen.snapshot_hash ?? null,
+        parsed_only_hash: parsedOnly.snapshot_hash ?? null,
+        full_parsed: screen.parsed ?? null, parsed_only_parsed: parsedOnly.parsed ?? null,
+        bounded_content: boundedScreenContent(screen.content) });
+    }
+    check("parsed_read_agreement", parityFailures,
       { cycle, agent_id: agentId, surface });
     if (listed.ok && screen.ok) {
       check("registry_presence", row.agent_id === agentId ? [] : ["agent_missing_from_registry"],
@@ -193,15 +214,20 @@ async function main() {
     const deadline = Date.now() + opts.timeoutMs;
     do {
       screen = await observe(cycle, agentId, surface);
-      if (hasReplyMarker(screen, marker)) {
-        check("reply_visible", [], { cycle, agent_id: agentId, marker });
+      const fullEvidence = replyMarkerEvidence(screen, marker);
+      log({ kind: "reply_evidence", cycle, agent_id: agentId, marker, read: "full", ...fullEvidence });
+      if (fullEvidence.found) {
+        check("reply_visible", checkReplyVisibility(screen, marker, fullEvidence),
+        { cycle, agent_id: agentId, marker, origin: fullEvidence.origin });
         return true;
       }
       const raw = await call("read_screen", { surface, workspace: WORKSPACE,
         raw: true, scrollback: true, lines: 100 }, cycle);
-      if (hasReplyMarker(raw, marker)) {
-        check("reply_visible", ["reply_missing_from_parsed_or_preview"],
-          { cycle, agent_id: agentId, marker });
+      const rawEvidence = replyMarkerEvidence(raw, marker);
+      log({ kind: "reply_evidence", cycle, agent_id: agentId, marker, read: "scrollback", ...rawEvidence });
+      if (rawEvidence.found) {
+        check("reply_visible", checkReplyVisibility(raw, marker, rawEvidence),
+        { cycle, agent_id: agentId, marker, origin: rawEvidence.origin });
         return true;
       }
       await sleep(1000);
@@ -258,15 +284,15 @@ async function main() {
         submit_verified: spawn.boot_prompt_submit_verified,
         delivery_state: spawn.boot_prompt_receipt?.delivery_state,
       }), { cycle, agent_id: agentId });
-      if (!agentId || !surface || !spawn.ok) {
-        check("spawn_identity", ["spawn_missing_identity"], { cycle, cli });
+      const spawnFailures = checkSpawnIdentity(spawn);
+      if (spawnFailures.length) {
+        check("spawn_identity", spawnFailures, { cycle, cli });
         return;
       }
       await observe(cycle, agentId, surface);
       const firstWait = await call("wait_for", { agent_id: agentId,
         target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
-      check("wait_for", firstWait.ok && firstWait.matched === true
-        ? [] : ["wait_failed"], { cycle, agent_id: agentId });
+      check("wait_for", checkStopWait(firstWait), { cycle, agent_id: agentId });
       const firstLanded = await readReply(cycle, agentId, surface, first);
       check("spawn_receipt_after_reply", checkReceipt(spawn.boot_prompt_receipt ?? {
         submit_verified: spawn.boot_prompt_submit_verified }, firstLanded), { cycle, agent_id: agentId });
@@ -276,8 +302,7 @@ async function main() {
       await observe(cycle, agentId, surface);
       const secondWait = await call("wait_for", { agent_id: agentId,
         target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
-      check("wait_for", secondWait.ok && secondWait.matched === true
-        ? [] : ["wait_failed"], { cycle, agent_id: agentId });
+      check("wait_for", checkStopWait(secondWait), { cycle, agent_id: agentId });
       const secondLanded = await readReply(cycle, agentId, surface, second);
       check("send_receipt_after_reply", checkReceipt(send, secondLanded), { cycle, agent_id: agentId });
     } catch (error) {
