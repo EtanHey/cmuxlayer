@@ -1621,6 +1621,18 @@ class SubmitVerificationError extends Error {
   }
 }
 
+class AmbiguousBootRecoveryReturnError extends Error {
+  constructor(
+    readonly pointer: string,
+    cause: unknown,
+  ) {
+    super(
+      `Recovered boot Return acknowledgement is uncertain: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    this.name = "AmbiguousBootRecoveryReturnError";
+  }
+}
+
 const submitVerificationFailurePayload = (error: SubmitVerificationError) => ({
   ...error.receipt,
   submit_verification_reason: error.reason,
@@ -7019,10 +7031,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
         };
-        const method = await sendKeyWithRetry(
-          opts.surface, "return", opts.workspace, assertOwnedPointerBeforeReturn,
-          1,
-        );
+        let returnDispatchStarted = false;
+        let method: DeliveryRpcMethod | null;
+        try {
+          method = await sendKeyWithRetry(
+            opts.surface, "return", opts.workspace, async () => {
+              await assertOwnedPointerBeforeReturn();
+              returnDispatchStarted = true;
+            }, 1,
+          );
+        } catch (error) {
+          // The ownership guard failed before mutation, or the one Return may
+          // have landed while its acknowledgement was lost. Only the latter
+          // is uncertain; never issue another Return or type the followup.
+          if (!returnDispatchStarted) throw error;
+          throw new AmbiguousBootRecoveryReturnError(pointer, error);
+        }
         if (method) rpcMethods.add(method);
         const verification = await verifySubmitAfterEnter({
           surface: opts.surface,
@@ -18819,6 +18843,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               timings,
             });
           } catch (error) {
+            if (error instanceof AmbiguousBootRecoveryReturnError) {
+              // The caller's followup was never typed. Track the boot pointer
+              // itself so passive verification cannot falsely complete that
+              // followup, and do not put it on the retryable delivery queue.
+              const receipt = engine.acceptPendingVerify({
+                delivery_id: deliveryId,
+                agent_id: agentId,
+                text: error.pointer,
+                press_enter: true,
+                source_event: "boot_prompt",
+                retry_count: 0,
+                typed: true,
+              });
+              return err(error, {
+                agent_id: agentId,
+                ...buildPublicDeliveryReceipt({
+                  delivery_state: "pending_verify",
+                  delivery_id: receipt.delivery_id,
+                  typed: true,
+                  submit_attempted: true,
+                  submit_verified: null,
+                  retry_count: 0,
+                  timings_ms: timings,
+                  WARNING:
+                    "Recovered boot Return may have landed, but its acknowledgement was lost. " +
+                    "The followup was not typed. No Return will be retried automatically; " +
+                    "inspect the pane or wait_for({delivery_id}) before sending again.",
+                }),
+              });
+            }
             // AIDEV-NOTE (F1): a RetryableDeliveryError is, by name and by the
             // drain loop's own handling, NOT a terminal outcome -- the engine
             // backs it off and tries again. Flattening it into a terminal

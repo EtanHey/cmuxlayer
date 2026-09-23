@@ -494,10 +494,20 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       active = true;
 
       const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: true }, {}));
+      expect(result.delivery_state).toBe("pending_verify");
+      expect(result.submit_verified).toBeNull();
+      expect(result.terminal).toBe(false);
+      expect(result.WARNING).toContain("Return may have landed");
+      expect(result.WARNING).toContain("followup was not typed");
       expect(returnAttempts).toBe(1);
       expect(followupWrites).toEqual([]);
       expect(result.ok).toBe(false);
       expect(result.submit_verified).not.toBe(true);
+      const receipt = engine.getDeliveryReceipt(result.delivery_id);
+      expect(receipt?.delivery_state).toBe("pending_verify");
+      expect(receipt?.terminal).toBe(false);
+      expect(receipt?.text).toBe(composer);
+      expect(receipt?.source_event).toBe("boot_prompt");
       expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
     } finally { context.dispose(); }
   }, 15_000);
