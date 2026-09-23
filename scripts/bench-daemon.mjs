@@ -920,6 +920,13 @@ async function startClients(label, count, env) {
   return clients;
 }
 
+async function stopBaselineClientsBeforeDaemon(clients) {
+  await Promise.all(clients.map((client) => client.close()));
+  if (clients.some((client) => client.alive)) {
+    throw new Error("in-process baseline client survived before daemon phase");
+  }
+}
+
 function summarizeReadDiagnostics(samples, slowestLimit = 12) {
   const ordered = [...samples].sort(
     (a, b) => a.round_index - b.round_index || a.client_index - b.client_index,
@@ -1908,6 +1915,9 @@ async function main() {
       baselineClients.map((client) => client.pid).filter(Boolean),
     );
 
+    await stopBaselineClientsBeforeDaemon(baselineClients);
+    baselineClients = [];
+
     daemon = spawn(process.execPath, [distDaemon], {
       cwd: repoRoot,
       env: {
@@ -2301,6 +2311,7 @@ export {
   measureFakeCmuxPing,
   measureLatency,
   startFakeCmuxSocket,
+  stopBaselineClientsBeforeDaemon,
   summarizeReadDiagnostics,
   summarizeSendSampleDiagnostics,
   writeFakeCmux,
