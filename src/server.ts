@@ -18126,9 +18126,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 }
               }
               if (!discovered) {
-                throw new Error(
-                  "list_agents discovery changed during lifecycle I/O; retry the request",
-                );
+                // Continuous unrelated lifecycle traffic must not turn a
+                // status request into an error. One final scan under the lock
+                // guarantees progress after the bounded unlocked attempts.
+                discovery.invalidate();
+                discovered = await discovery.scan(true);
               }
               const observedAtMs = Date.now();
               registry.repairFromDiscovery(discovered, {

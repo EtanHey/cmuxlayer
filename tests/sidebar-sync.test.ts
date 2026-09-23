@@ -802,7 +802,7 @@ describe("Sidebar Sync", () => {
     }
   });
 
-  it("yields the remaining sweep phases to a queued interactive waiter", async () => {
+  it("hands the lock to a queued interactive waiter and resumes the sweep", async () => {
     const registry = engine.getRegistry();
     let releaseReconcile: (() => void) | undefined;
     const reconcileStarted = new Promise<void>((resolve) => {
@@ -831,7 +831,7 @@ describe("Sidebar Sync", () => {
     await Promise.all([sweep, waiter]);
 
     expect(waiterRan).toBe(true);
-    expect(evict).not.toHaveBeenCalled();
+    expect(evict).toHaveBeenCalled();
     expect(engine.lifecycleLockState().sweep_yielded).toBe(1);
   });
 
@@ -949,6 +949,7 @@ describe("Sidebar Sync", () => {
 
     const sweep = engine.runSweep();
     await readStarted;
+    await new Promise((resolve) => setTimeout(resolve, 300));
     const inProgress = stateMgr.getEventLog().readEntries().filter(
       (entry) => "event_type" in entry && entry.event_type === "sweep_phase" && "phase" in entry && entry.phase === "sidebar_ms",
     );
@@ -958,7 +959,7 @@ describe("Sidebar Sync", () => {
       expect.objectContaining({
         stage: "started",
         agent_count: 1,
-        lock_held: true,
+        lock_held: false,
       }),
     ]);
     const completed = stateMgr.getEventLog().readEntries().filter(
@@ -968,6 +969,9 @@ describe("Sidebar Sync", () => {
       expect.objectContaining({ stage: "started" }),
       expect.objectContaining({ stage: "completed", duration_ms: expect.any(Number) }),
     ]);
+    expect(stateMgr.getEventLog().readEntries()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: "sweep_phase", phase: "summary", durations_ms: expect.objectContaining({ sidebar_ms: expect.any(Number) }) }),
+    ]));
   });
 
   it("does not hold the lifecycle lock during one blocked screen read", async () => {
@@ -1039,7 +1043,50 @@ describe("Sidebar Sync", () => {
 
     expect(stateMgr.readState("b-stopped-agent")?.state).toBe("done");
     expect(mockClient.setStatuses).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a-reading-agent",
+      expect.stringContaining("state=working"),
+      expect.anything(),
+    );
+    expect(mockClient.setStatus).not.toHaveBeenCalledWith(
+      "b-stopped-agent",
+      expect.anything(),
+      expect.anything(),
+    );
   });
+
+  it("keeps publishing twelve agents during unrelated lifecycle refreshes", async () => {
+    for (let index = 0; index < 12; index += 1) {
+      const agentId = `steady-agent-${index}`;
+      const record = makeRecord({ agent_id: agentId, surface_id: `surface:${agentId}`, workspace_id: "workspace:test" });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+      liveSurfaces.push(makeSurface(record.surface_id));
+    }
+    let refreshOnRead = false;
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      if (refreshOnRead) {
+        refreshOnRead = false;
+        await engine.runLifecycleMutation(async () => {}, { label: "lifecycle-refresh-managed-metadata" });
+      }
+      return { surface, text: "Working (1m 02s • esc to interrupt)", lines: 20, scrollback_used: false };
+    });
+    for (let sweepIndex = 0; sweepIndex < 5; sweepIndex += 1) {
+      const priorVersion = stateMgr.readState("steady-agent-11")?.version ?? 0;
+      const priorPublications = publishedFleetPublications.length;
+      mockClient.setStatuses.mockClear();
+      refreshOnRead = true;
+      await engine.runSweep();
+      if (sweepIndex === 0) {
+        const updates = mockClient.setStatuses.mock.calls.flatMap(([batch]) => batch);
+        expect(updates).toEqual(expect.arrayContaining([
+          expect.objectContaining({ key: "steady-agent-11" }),
+        ]));
+      }
+      expect(stateMgr.readState("steady-agent-11")?.version, `sweep ${sweepIndex} skipped the later row`).toBeGreaterThan(priorVersion);
+      expect(publishedFleetPublications.length, `sweep ${sweepIndex} skipped publication`).toBeGreaterThan(priorPublications);
+    }
+  }, 20_000);
 
   it("does not hold the lifecycle lock during topology enumeration", async () => {
     stateMgr.writeState(makeRecord({
@@ -1073,7 +1120,7 @@ describe("Sidebar Sync", () => {
     releaseTopology();
     await Promise.all([sweep, waiter]);
     expect(ranBeforeTopologyCompleted).toBe(true);
-    expect(reconcile).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalled();
     expect(stateMgr.readState("topology-race-agent")?.task_summary).toBe("newer lifecycle mutation");
   });
 
@@ -2424,7 +2471,7 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
     expect(mockClient.setStatuses).toHaveBeenCalledTimes(2);
-  });
+  }, 20_000);
 
   it("discriminates health by state instead of marking every missing-session row unhealthy", async () => {
     stateMgr.writeState(

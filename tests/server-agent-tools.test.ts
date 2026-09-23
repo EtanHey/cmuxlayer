@@ -8657,6 +8657,38 @@ describe("agent lifecycle tool handlers", () => {
     expect(engine.getAgentState("list-slow-agent")?.task_summary).toBe("newer lifecycle state");
   });
 
+  it("list_agents returns a fresh result despite concurrent no-op lifecycle acquisitions", async () => {
+    const stableUuid = "61111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([{
+      ref: "surface:list-busy",
+      id: stableUuid,
+      workspace_ref: "workspace:1",
+    }]);
+    const record = makeServerAgentRecord({
+      agent_id: "list-busy-agent",
+      surface_id: "surface:list-busy",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "working",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const engine = testLifecycleEngine(server);
+    let reads = 0;
+    routeClient.client.readScreen.mockImplementation(async (surface: string) => {
+      reads += 1;
+      if (reads <= 2) {
+        await engine.runLifecycleMutation(async () => {}, { label: "unrelated-refresh" });
+      }
+      return { surface, text: "OpenAI Codex\nWorking", lines: 20, scrollback_used: false };
+    });
+    const result = await registeredTestTool(server, "list_agents").handler({ max_age_ms: 0 }, {});
+    expect(result.isError).not.toBe(true);
+    expect(parseToolResult(result).agents).toEqual(
+      expect.arrayContaining([expect.objectContaining({ agent_id: "list-busy-agent" })]),
+    );
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+
   it("list_agents keeps a corrupt legacy repo visible and raw-resumable", async () => {
     const routeClient = makeUuidRouteClient([
       {

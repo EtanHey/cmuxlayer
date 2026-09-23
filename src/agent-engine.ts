@@ -1067,7 +1067,6 @@ interface SweepAgentContext {
   sweep?: boolean;
   withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>;
   invalidated?: boolean;
-  sweepValidity?: { current: boolean };
   screen?: Promise<CmuxReadScreenResult>;
   route?: Promise<AgentRoute>;
   surfaceTopology?: SurfaceTopologySnapshot | null;
@@ -4246,7 +4245,6 @@ export class AgentEngine {
           ? route.surface_uuid
           : route.surface_id;
       const versionBeforeRead = this.stateMgr.readState(agent.agent_id)?.version;
-      const acquisitionBeforeRead = this.lifecycleLockAcquisitionSeq;
       const read = () =>
         this.client.readScreen(readTarget, {
           lines: BOOT_SESSION_CAPTURE_LINES,
@@ -4259,26 +4257,20 @@ export class AgentEngine {
         if (
           error instanceof LifecycleLockReacquireError ||
           (ctx.sweep &&
-            (this.lifecycleLockAcquisitionSeq !==
-              acquisitionBeforeRead + (ctx.withUnlocked ? 1 : 0) ||
-              this.stateMgr.readState(agent.agent_id)?.version !==
-                versionBeforeRead))
+            this.stateMgr.readState(agent.agent_id)?.version !==
+              versionBeforeRead)
         ) {
           ctx.invalidated = true;
-          if (ctx.sweepValidity) ctx.sweepValidity.current = false;
         }
         throw error;
       }
       if (
         ctx.sweep &&
-        (this.lifecycleLockAcquisitionSeq !==
-          acquisitionBeforeRead + (ctx.withUnlocked ? 1 : 0) ||
-          this.stateMgr.readState(agent.agent_id)?.version !==
+        (this.stateMgr.readState(agent.agent_id)?.version !==
             versionBeforeRead ||
           !this.assertSweepInputCurrent(ctx))
       ) {
         ctx.invalidated = true;
-        if (ctx.sweepValidity) ctx.sweepValidity.current = false;
         throw new Error(
           `Agent ${agent.agent_id} changed during sweep screen read`,
         );
@@ -6214,7 +6206,7 @@ export class AgentEngine {
     const topology = ctx.surfaceTopology ?? null;
     const transport = getTransportHealth(this.client);
     const reason =
-      ctx.invalidated || ctx.sweepValidity?.current === false
+      ctx.invalidated
         ? "agent_changed_during_read"
         : topology?.complete !== true || topology.surfaces.length === 0
         ? "topology_incomplete"
@@ -6325,9 +6317,17 @@ export class AgentEngine {
       snapshot: SidebarStatusSnapshot;
     }> = [];
     const fleetCandidates: FleetSidebarCandidate[] = [];
+    const rowVersions = new Map<string, Pick<AgentRecord, "version" | "surface_id" | "surface_uuid">>();
 
     for (const registryAgent of agents) {
       if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
+        continue;
+      }
+      // Direct lifecycle writers can replace this row after list() returns.
+      if (
+        sweepContext.sweep &&
+        this.registry.get(registryAgent.agent_id)?.version !== registryAgent.version
+      ) {
         continue;
       }
       if (opts.firstConnect && TERMINAL_STATES.has(registryAgent.state)) {
@@ -6613,6 +6613,12 @@ export class AgentEngine {
       if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
         continue;
       }
+      if (
+        sweepContext.sweep &&
+        this.registry.get(agent.agent_id)?.version !== agent.version
+      ) {
+        continue;
+      }
       const { agent_id: agentId, state } = agent;
       const boundSurfaceRef = surfaceBinding.surfaceRef;
       const boundWorkspaceId =
@@ -6825,16 +6831,23 @@ export class AgentEngine {
         const heartbeat = this.stateMgr.updateRecord(agentId, {});
         this.registry.set(agentId, heartbeat);
       }
+      const completedRow = this.registry.get(agentId);
+      if (completedRow) {
+        rowVersions.set(agentId, {
+          version: completedRow.version,
+          surface_id: completedRow.surface_id,
+          surface_uuid: completedRow.surface_uuid,
+        });
+      }
       if (sweepContext.sweep) {
-        // A sidebar pass can spend seconds on each agent's screen and route.
-        // Finish this agent under the lock, then let a queued lifecycle caller
-        // proceed; the next sweep will rebuild the full sidebar from fresh rows.
-        if (this.lifecycleLockQueueDepth > 0) return;
         // Resolved I/O promises otherwise chain through microtasks for the
         // whole fleet, delaying inbound socket reads and timers until the sweep
         // ends. One event-loop turn between agents admits client requests.
-        await scheduler.yield();
-        if (this.lifecycleLockQueueDepth > 0) return;
+        if (this.lifecycleLockQueueDepth > 0 && sweepContext.withUnlocked) {
+          await sweepContext.withUnlocked(() => scheduler.yield());
+        } else {
+          await scheduler.yield();
+        }
       }
     }
 
@@ -6842,18 +6855,29 @@ export class AgentEngine {
       return;
     }
 
+    const rowIsCurrent = (agentId: string): boolean => {
+      if (!sweepContext.sweep) return true;
+      const snapshot = rowVersions.get(agentId);
+      if (!snapshot) return false;
+      const registryRow = this.registry.get(agentId);
+      return Boolean(registryRow &&
+        registryRow.version === snapshot.version &&
+        registryRow.surface_id === snapshot.surface_id &&
+        registryRow.surface_uuid === snapshot.surface_uuid);
+    };
+    const currentStatusUpdates = statusUpdates.filter((update) => rowIsCurrent(update.key));
     const appliedStatusKeys = await this.publishSweepStatus(
       sweepContext,
-      statusUpdates,
+      currentStatusUpdates,
     );
     if (
-      statusUpdates.length > 0 &&
+      currentStatusUpdates.length > 0 &&
       !this.assertSweepInputCurrent(sweepContext)
     ) {
       return;
     }
     for (const pending of pendingStatusSnapshots) {
-      if (appliedStatusKeys.has(pending.agentId)) {
+      if (appliedStatusKeys.has(pending.agentId) && rowIsCurrent(pending.agentId)) {
         this.sidebarSnapshot.set(pending.agentId, pending.snapshot);
       }
     }
@@ -6891,7 +6915,8 @@ export class AgentEngine {
         : observedUuidCoverage === "legacy"
           ? undefined
           : null;
-    const snapshot = buildFleetSidebarSnapshot(fleetCandidates, {
+    const currentFleetCandidates = fleetCandidates.filter((candidate) => rowIsCurrent(candidate.agentId));
+    const snapshot = buildFleetSidebarSnapshot(currentFleetCandidates, {
       liveSurfaceRefs: new Set(observedLiveSurfaceRefs ?? []),
       ...(observedLiveSurfaceUuids
         ? { liveSurfaceUuids: new Set(observedLiveSurfaceUuids) }
@@ -6902,7 +6927,7 @@ export class AgentEngine {
       ? "unknown"
       : snapshot.seatCount > 0
         ? "populated"
-        : fleetCandidates.length > 0
+        : currentFleetCandidates.length > 0
           ? "unknown"
           : opts.firstConnect
             ? "unknown"
@@ -8841,6 +8866,7 @@ export class AgentEngine {
     const timings: Record<string, number> = {};
     const sweepStartedAt = Date.now();
     const sweepId = ++this.sweepTelemetrySeq;
+    const slowPhaseThresholdMs = 250;
     const time = async <T>(
       name: string,
       operation: () => Promise<T>,
@@ -8850,7 +8876,7 @@ export class AgentEngine {
       const startedAtIso = new Date(startedAt).toISOString();
       const agentCount = this.registry.list().length;
       const lockHeld =
-        lockHeldOverride ?? this.lifecycleLockHolder === "sweep";
+        lockHeldOverride ?? (name !== "sidebar_ms" && this.lifecycleLockHolder === "sweep");
       const appendPhase = (
         stage: "started" | "completed" | "failed",
         durationMs: number | null,
@@ -8871,73 +8897,51 @@ export class AgentEngine {
           // Telemetry must not block reconciliation when the log is unavailable.
         }
       };
-      appendPhase("started", null);
+      // Delay the durable in-progress breadcrumb until the phase is actually
+      // slow. Fast phases need only the one sweep summary row.
+      const slowStartTimer = setTimeout(
+        () => appendPhase("started", null),
+        slowPhaseThresholdMs,
+      );
+      slowStartTimer.unref?.();
       try {
         const result = await operation();
-        appendPhase("completed", Date.now() - startedAt);
+        const durationMs = Date.now() - startedAt;
+        if (durationMs >= slowPhaseThresholdMs) {
+          appendPhase("completed", durationMs);
+        }
         return result;
       } catch (error) {
         appendPhase("failed", Date.now() - startedAt);
         throw error;
       } finally {
+        clearTimeout(slowStartTimer);
         timings[name] = Date.now() - startedAt;
       }
     };
     try {
       const skipAccounting: SweepMutationSkipAccounting = { counted: false };
       this.currentSweepScreenSignatures = new Map();
-      const sweepValidity = { current: true };
-      const sweepWithUnlocked = async <T>(operation: () => Promise<T>): Promise<T> => {
-        // Spawn/stop can write records without taking the lifecycle lock. A
-        // different agent may change while this sweep reads one screen, so a
-        // per-screen version check alone cannot protect the sidebar batch.
-        const before = new Map(
-          this.registry.list().map((record) => [
-            record.agent_id,
-            { record, version: record.version },
-          ]),
-        );
-        try {
-          return await withUnlocked(operation);
-        } finally {
-          const after = this.registry.list();
-          if (
-            after.length !== before.size ||
-            after.some((record) => {
-              const prior = before.get(record.agent_id);
-              return !prior || prior.record !== record || prior.version !== record.version;
-            })
-          ) {
-            sweepValidity.current = false;
-          }
-        }
-      };
-      const topologyAcquisition = this.lifecycleLockAcquisitionSeq;
       const surfaceTopology = await time(
         "topology_ms",
-        () => sweepWithUnlocked(() => this.collectObservedSurfaceTopology()),
+        () => withUnlocked(() => this.collectObservedSurfaceTopology()),
         false,
       );
-      // Any lifecycle mutation that ran while topology I/O was outside the
-      // lock makes this snapshot stale for destructive reconciliation.
-      if (
-        this.lifecycleLockAcquisitionSeq !== topologyAcquisition + 1 ||
-        !sweepValidity.current
-      ) {
-        this.sweepYielded += 1;
-        return;
-      }
       this.sweepTopologyGeneration += 1;
       if (surfaceTopology) {
         surfaceTopology.generation = this.sweepTopologyGeneration;
       }
       const sweepCtx: SweepAgentContext = {
         sweep: true,
-        withUnlocked: sweepWithUnlocked,
-        sweepValidity,
+        withUnlocked,
         surfaceTopology,
         topologyGeneration: surfaceTopology?.generation,
         skipAccounting,
+      };
+      const yieldToWaiters = async (): Promise<void> => {
+        if (this.shouldYieldSweep()) {
+          await withUnlocked(() => scheduler.yield());
+        }
       };
       const transportHealth = getTransportHealth(this.client);
       const topologyIsAuthoritative =
@@ -8966,11 +8970,11 @@ export class AgentEngine {
       await time("close_forensics_ms", () =>
         this.runCloseForensicsBestEffort(sweepCtx),
       );
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       await time("channel_markers_ms", () =>
         this.reapChannelMarkersBestEffort(),
       );
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       if (mutationsAreSafe) {
         const observed = {
           ...surfacelessConfirmation,
@@ -8981,13 +8985,13 @@ export class AgentEngine {
             this.registry.reconcile(observed),
           );
         }
-        if (this.shouldYieldSweep()) return;
+        await yieldToWaiters();
         if (this.assertSweepInputCurrent(sweepCtx)) {
           await time("evict_ms", () =>
             this.evictSurfacelessForSweep(sweepCtx, observed),
           );
         }
-        if (this.shouldYieldSweep()) return;
+        await yieldToWaiters();
         if (this.assertSweepInputCurrent(sweepCtx)) {
           await time("startup_purge_ms", () =>
             this.purgeStartupTerminalAgents(sweepCtx),
@@ -9001,12 +9005,12 @@ export class AgentEngine {
       // Retry after the one-shot startup purge has retained marked rows, but
       // before normal terminal cleanup can act on a closed pane.
       await time("transcript_ms", () => this.retryDeferredTranscriptCaptures());
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       await time("watches_ms", async () => {
         await this.retryClosedChildReportWatchPrune();
-        await this.sweepWatchesBestEffort(sweepWithUnlocked, sweepCtx);
+        await this.sweepWatchesBestEffort(withUnlocked, sweepCtx);
       });
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
         await time("terminal_purge_ms", () =>
           this.purgeTerminalForSweep(sweepCtx, {
@@ -9015,9 +9019,9 @@ export class AgentEngine {
           }),
         );
       }
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       await time("monitors_ms", () => this.sweepMonitorRegistryBestEffort());
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
         await time("placements_ms", () =>
           this.reconcileRolePlacements("idle", {
@@ -9026,7 +9030,7 @@ export class AgentEngine {
           }),
         );
       }
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       if (!mutationsAreSafe) {
         await time("sidebar_ms", () =>
           this.syncSidebar({}, null, undefined, sweepCtx),
@@ -9041,11 +9045,27 @@ export class AgentEngine {
           ),
         );
       }
-      if (this.shouldYieldSweep()) return;
+      await yieldToWaiters();
       await time("outbox_ms", () => this.drainOutboxBestEffort());
     } finally {
       this.sweepBackgroundProcessSnapshot = null;
       timings.total_ms = Date.now() - sweepStartedAt;
+      try {
+        this.stateMgr.getEventLog().appendSweepPhase({
+          ts: new Date().toISOString(),
+          event_type: "sweep_phase",
+          sweep_id: sweepId,
+          phase: "summary",
+          stage: "completed",
+          started_at: new Date(sweepStartedAt).toISOString(),
+          duration_ms: timings.total_ms,
+          agent_count: this.registry.list().length,
+          lock_held: false,
+          durations_ms: timings,
+        });
+      } catch {
+        // Telemetry is best-effort and cannot fail the sweep.
+      }
       this.sweepDebugLog(
         `[cmuxlayer] sweep timing ${Object.entries(timings)
           .map(([name, value]) => `${name}=${value}`)
@@ -9210,7 +9230,6 @@ export class AgentEngine {
   private watchAgentObservation = async (
     agentId: string,
     withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>,
-    sweepContext?: SweepAgentContext,
   ): Promise<WatchAgentObservation> => {
     const agent =
       this.registry.get(agentId) ?? this.readPersistedAgentRecord(agentId);
@@ -9232,11 +9251,9 @@ export class AgentEngine {
       attempt++
     ) {
       const versionBeforeRead = this.stateMgr.readState(agent.agent_id)?.version;
-      const acquisitionBeforeRead = this.lifecycleLockAcquisitionSeq;
       const observationStale = () =>
         withUnlocked &&
-        (this.lifecycleLockAcquisitionSeq !== acquisitionBeforeRead + 1 ||
-          this.stateMgr.readState(agent.agent_id)?.version !== versionBeforeRead);
+        this.stateMgr.readState(agent.agent_id)?.version !== versionBeforeRead;
       try {
         const read = () => this.client.readScreen(agent.surface_id, {
           ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
@@ -9244,7 +9261,6 @@ export class AgentEngine {
         });
         const screen = withUnlocked ? await withUnlocked(read) : await read();
         if (observationStale()) {
-          if (sweepContext?.sweepValidity) sweepContext.sweepValidity.current = false;
           throw new Error("watch agent changed during unlocked screen read");
         }
         screenText = screen.text;
@@ -9252,7 +9268,6 @@ export class AgentEngine {
         break;
       } catch (error) {
         if (error instanceof LifecycleLockReacquireError || observationStale()) {
-          if (sweepContext?.sweepValidity) sweepContext.sweepValidity.current = false;
           throw error;
         }
         readError = error;
@@ -9339,7 +9354,7 @@ export class AgentEngine {
         registryPath: this.watchRegistryPath,
         now: this.watchRegistryNow,
         agentObservation: (agentId) =>
-          this.watchAgentObservation(agentId, withUnlocked, sweepContext),
+          this.watchAgentObservation(agentId, withUnlocked),
         notify: this.watchNotify,
         onNotificationExhausted: ({ notification, attempts, reason }) => {
           this.sweepDebugLog(
