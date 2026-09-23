@@ -15092,13 +15092,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
+        // Compaction can temporarily render Codex's ready footer while the
+        // queued message still belongs to the active turn's next tool call.
+        const compactingCodexQueue =
+          cli === "codex" &&
+          /(?:^|\n)\s*[•·]\s*Context compacted\s*[·•]\s*\d+s\b/i.test(
+            resolvedSnapshot.text.slice(-4096),
+          );
+        const parsed = resolvedSnapshot.parsed as ParsedScreenResult | undefined;
+        const queuedReady = parsed?.control_state === "ready" && parsed.status === "idle";
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
           return {
             outcome: "pending" as const,
-            ...(queued &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.control_state === "ready" &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.status === "idle"
-              ? { reason: "queued_idle" }
+            ...(queued
+              ? {
+                  reason: compactingCodexQueue
+                    ? queuedReady
+                      ? "queued_compaction_idle"
+                      : "queued_compaction_busy"
+                    : queuedReady
+                      ? "queued_idle"
+                      : undefined,
+                }
               : {}),
           };
         }
