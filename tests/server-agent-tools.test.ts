@@ -725,6 +725,14 @@ describe("lifecycle dependency seams", () => {
 });
 
 describe("lean spawn tool responses", () => {
+  it("documents that the spawn timeout override also bounds pane placement", () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawnTool = (server as any)._registeredTools.spawn_agent;
+    expect(spawnTool.description).toMatch(/boot_prompt_timeout_ms.*pane placement/i);
+    expect(spawnTool.inputSchema.shape.boot_prompt_timeout_ms.description)
+      .toMatch(/pane placement/i);
+  });
+
   it("documents every false coordination-footer outcome", () => {
     const server = createLifecycleServer(makeLifecycleExec());
     const registered = server as unknown as {

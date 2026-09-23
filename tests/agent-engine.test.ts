@@ -2130,6 +2130,79 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
     });
 
+    it("retries a right split after a definite pre-mutation rejection", async () => {
+      const workspace = "workspace:rejected-split";
+      const lead = makeSurface("surface:lead");
+      let visible = false;
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+        workspace_ref: workspace,
+        window_ref: "window:rejected-split",
+        panes: [
+          { ref: "pane:lead", index: 0, focused: true, surface_count: 1,
+            surface_refs: [lead.ref], pixel_frame: { x: 0, y: 0, width: 500, height: 900 } },
+          ...(visible ? [{ ref: "pane:worker", index: 1, focused: false,
+            surface_count: 1, surface_refs: ["surface:worker"],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 } }] : []),
+        ],
+      }));
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => ({ workspace_ref: workspace,
+          window_ref: "window:rejected-split", pane_ref: pane,
+          surfaces: pane === "pane:lead" ? [lead] : [makeSurface("surface:worker")] }),
+      );
+      (mockClient.newSplit as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(Object.assign(new Error("pane not found"), { code: "not_found" }))
+        .mockImplementationOnce(async () => {
+          visible = true;
+          return { workspace, surface: "surface:worker", pane: "pane:worker",
+            title: "", type: "terminal" };
+        });
+      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+        model: "gpt-5.4", prompt: "Worker", role: "worker",
+        placement: "right", workspace, boot_prompt_timeout_ms: 100 });
+      await expect(spawn()).rejects.toThrow("pane not found");
+      await expect(spawn()).resolves.toBeDefined();
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(2);
+    });
+
+    it("closes a late right-pane surface after the placement deadline", async () => {
+      const workspace = "workspace:late-right-surface";
+      const lead = makeSurface("surface:lead");
+      const worker = makeSurface("surface:existing-worker");
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: workspace, window_ref: "window:late-right-surface",
+        panes: [
+          { ref: "pane:lead", index: 0, focused: true, surface_count: 1,
+            surface_refs: [lead.ref], pixel_frame: { x: 0, y: 0, width: 500, height: 900 } },
+          { ref: "pane:worker", index: 1, focused: false, surface_count: 1,
+            surface_refs: [worker.ref], pixel_frame: { x: 500, y: 0, width: 500, height: 900 } },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => ({ workspace_ref: workspace,
+          window_ref: "window:late-right-surface", pane_ref: pane,
+          surfaces: pane === "pane:lead" ? [lead] : [worker] }),
+      );
+      let release!: (value: CmuxNewSplitResult) => void;
+      let started!: () => void;
+      const called = new Promise<void>((resolve) => { started = resolve; });
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise<CmuxNewSplitResult>((resolve) => { release = resolve; started(); }),
+      );
+      const spawn = engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+        model: "gpt-5.4", prompt: "Worker", role: "worker",
+        placement: "right", workspace, boot_prompt_timeout_ms: 100 });
+      await called;
+      await expect(spawn).rejects.toMatchObject({ code: "placement_timeout" });
+      release({ workspace, surface: "surface:late", pane: "pane:worker",
+        title: "", type: "terminal" });
+      await vi.waitFor(() => expect(mockClient.closeSurface).toHaveBeenCalledTimes(1));
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:late",
+        expect.objectContaining({ workspace }),
+      );
+    });
+
     it("docks the first worker into the rightmost sparse non-lead pane when user panes already exist", async () => {
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         panes: [
