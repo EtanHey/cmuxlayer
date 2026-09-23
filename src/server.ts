@@ -1150,7 +1150,7 @@ type BroadcastReceipt = {
   skipped?: string;
 };
 
-type DeliveryStatus = "delivering" | "delivered" | "failed";
+type DeliveryStatus = "delivering" | "delivered" | "failed" | "pending_verify";
 
 export const DELIVERY_RECEIPT_VOCABULARY = [
   "delivered",
@@ -1622,9 +1622,11 @@ class SubmitVerificationError extends Error {
 }
 
 class AmbiguousBootRecoveryReturnError extends Error {
+  receipt?: PublicDeliveryReceipt;
   constructor(
     readonly pointer: string,
     readonly bootInstanceId: string,
+    readonly agentId: string,
     cause: unknown,
   ) {
     super(
@@ -2033,6 +2035,10 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           ),
         }
       : {};
+  const ambiguousBootRecoveryExtra =
+    error instanceof AmbiguousBootRecoveryReturnError
+      ? { agent_id: error.agentId, ...error.receipt }
+      : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -2064,6 +2070,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...readinessExtra,
     ...deliveryRpcExtra,
     ...deliveryMutationExtra,
+    ...ambiguousBootRecoveryExtra,
     ...extra,
     ...createdIdentityFromError(error),
   };
@@ -3719,12 +3726,13 @@ function composeBootDeliveryText(
   if (!hasInlinePrompt(injectedPrompt)) return callerDeliveryText;
   if (!hasInlinePrompt(callerDeliveryText)) return injectedPrompt;
   // Claude can treat a paragraph break in a pasted boot payload as a submit
-  // boundary. Keep two single-line pointers in one composer message so the
-  // brief cannot run while the engine-issued contract remains unsent.
+  // boundary. Keep the brief and pointer in one composer message so the
+  // brief cannot run while the engine-issued contract remains unsent. A
+  // multi-line brief without a paragraph break has the same boundary risk.
   if (
     cli === "claude" &&
-    !/[\r\n]/.test(callerDeliveryText) &&
-    !/[\r\n]/.test(injectedPrompt)
+    !/\r?\n\s*\r?\n/.test(callerDeliveryText) &&
+    !/\r?\n\s*\r?\n/.test(injectedPrompt)
   ) {
     return `${callerDeliveryText} ; ${injectedPrompt}`;
   }
@@ -5436,7 +5444,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const snapshotDelivery = (record: DeliveryRecord) => {
     const warning = defaultNonDeliveryWarning(
-      record.status === "failed" ? "failed" : undefined,
+      record.status === "failed" || record.status === "pending_verify"
+        ? record.status : undefined,
       record.rpc_methods,
       record.typed,
       record.submit_dispatched,
@@ -7077,7 +7086,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // have landed while its acknowledgement was lost. Only the latter
           // is uncertain; never issue another Return or type the followup.
           if (!returnDispatchStarted) throw error;
-          throw new AmbiguousBootRecoveryReturnError(pointer, recoveryBootInstanceId, error);
+          throw new AmbiguousBootRecoveryReturnError(pointer, recoveryBootInstanceId, pendingBootAgent.agent_id, error);
         }
         // The recovery Return was acknowledged, even though this call has not
         // typed the caller's followup and submission verification can fail.
@@ -7110,7 +7119,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           recordAfterReturn.boot_prompt_pending !== true ||
           recordAfterReturn.prompt_delivered === true) {
           throw new AmbiguousBootRecoveryReturnError(
-            pointer, recoveryBootInstanceId,
+            pointer, recoveryBootInstanceId, pendingBootAgent.agent_id,
             new Error("Managed boot changed after recovered Return"),
           );
         }
@@ -7433,6 +7442,37 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       return { ...receipt, bytes };
     } catch (error) {
+      if (error instanceof AmbiguousBootRecoveryReturnError) {
+        // Every managed caller of this dispatch boundary needs the same
+        // pointer receipt. The caller's followup was never typed and must not
+        // replace this pending boot recovery with a terminal failed receipt.
+        const receipt = context.lifecycleSweepEngine?.acceptPendingVerify({
+          delivery_id: opts.delivery_id ?? randomUUID(),
+          agent_id: error.agentId,
+          text: error.pointer,
+          press_enter: true,
+          source_event: "boot_prompt",
+          retry_count: 0,
+          typed: true,
+          boot_recovery: true,
+          boot_instance_id: error.bootInstanceId,
+        });
+        if (receipt) {
+          error.receipt = buildPublicDeliveryReceipt({
+            delivery_state: "pending_verify",
+            delivery_id: receipt.delivery_id,
+            typed: true,
+            submit_attempted: true,
+            submit_verified: null,
+            retry_count: 0,
+            timings_ms: opts.timings,
+            WARNING:
+              "Recovered boot Return may have landed, but its acknowledgement was lost. " +
+              "The followup was not typed. No Return will be retried automatically; " +
+              "inspect the pane or wait_for({delivery_id}) before sending again.",
+          });
+        }
+      }
       throw preserveDeliveryEvidenceOnError(
         error,
         rpcMethods,
@@ -9057,6 +9097,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         record.typed = errorTyped;
         record.submit_dispatched = errorSubmitDispatched;
+        if (error instanceof AmbiguousBootRecoveryReturnError) {
+          // The shared dispatch boundary already stored the boot pointer's
+          // passive-verification receipt. Do not terminalize the background
+          // lifecycle receipt for a Return that may have landed.
+          record.submit_verified = null;
+          finishDelivery(record, "pending_verify", error.message);
+          return;
+        }
         if (error instanceof SubmitVerificationError) {
           record.submit_verified = false;
           record.submit_verification_reason = error.reason;
@@ -12870,7 +12918,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sent: boolean;
           reason: string;
           error_code?: string;
-          delivery?: "submitted" | "queued";
+          delivery?: "submitted" | "queued" | "pending_verify";
           delivery_id?: string;
         } = { attempted: false, sent: false, reason: "" };
         const acceptedRecord =
@@ -12976,12 +13024,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ? `busy agent — queued inbox pointer for verified lifecycle delivery to ${record.surface_id}`
                   : `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
             } catch (e) {
-              if (e instanceof DeliverySafetyGateError) {
-                nudge.error_code = e.error_code;
+              if (e instanceof AmbiguousBootRecoveryReturnError && e.receipt?.delivery_id) {
+                nudge.delivery = "pending_verify";
+                nudge.delivery_id = e.receipt.delivery_id;
+                nudge.reason = e.receipt.WARNING ?? e.message;
+              } else {
+                if (e instanceof DeliverySafetyGateError) {
+                  nudge.error_code = e.error_code;
+                }
+                nudge.reason = `nudge failed (dispatch still durable in inbox file): ${
+                  e instanceof Error ? e.message : String(e)
+                }`;
               }
-              nudge.reason = `nudge failed (dispatch still durable in inbox file): ${
-                e instanceof Error ? e.message : String(e)
-              }`;
             }
           }
         }
@@ -14342,14 +14396,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     lifecycleAgentInputDeliverer = deliverAgentInput;
     engine.setDeliverySubmitter((receipt) =>
       withTransportRetryTracking(async () => {
-        const delivery = await deliverAgentInput({
-          agent_id: receipt.agent_id,
-          text: receipt.text,
-          press_enter: receipt.press_enter,
-          allow_busy: false,
-          source_event: receipt.source_event,
-          delivery_id: receipt.delivery_id,
-        });
+        let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
+        try {
+          delivery = await deliverAgentInput({
+            agent_id: receipt.agent_id,
+            text: receipt.text,
+            press_enter: receipt.press_enter,
+            allow_busy: false,
+            source_event: receipt.source_event,
+            delivery_id: receipt.delivery_id,
+          });
+        } catch (error) {
+          if (error instanceof AmbiguousBootRecoveryReturnError && error.receipt) {
+            // acceptPendingVerify replaced this queued followup with the boot
+            // pointer receipt. The drain must not append a failed transition
+            // for the old followup after the uncertain Return.
+            return { retry_count: 0, submit_verified: null,
+              typed: true, submit_dispatched: false,
+              delivery: "pending_verify" as const };
+          }
+          throw error;
+        }
         return {
           retry_count: delivery.retry_count,
           submit_verified: delivery.submit_verified,
@@ -14404,6 +14471,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery_id: deliveryId,
         });
       } catch (error) {
+        if (error instanceof AmbiguousBootRecoveryReturnError && error.receipt?.delivery_id) {
+          return { delivery: "pending_verify", delivery_id: error.receipt.delivery_id };
+        }
         if (
           error instanceof RetryableDeliveryError ||
           (error instanceof Error && /\bis busy\b/.test(error.message))
@@ -18674,6 +18744,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   accepted: true,
                 });
               } catch (error) {
+                if (error instanceof AmbiguousBootRecoveryReturnError && error.receipt) {
+                  mutableReceipts.push({
+                    ...resolutionMetadata,
+                    agent_id: agent.agent_id,
+                    ...error.receipt,
+                    accepted: false,
+                    error: error.message,
+                  });
+                  continue;
+                }
                 const errorRpcMethods = deliveryRpcMethodsFromError(error);
                 const errorTyped = deliveryTypedFromError(error);
                 const errorSubmitDispatched =
@@ -18767,6 +18847,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const queuedCount = receipts.filter(
               (receipt) => receipt.delivery_state === "queued",
             ).length;
+            const pendingVerifyCount = receipts.filter(
+              (receipt) => receipt.delivery_state === "pending_verify",
+            ).length;
             const failedCount = receipts.filter(
               (receipt) =>
                 receipt.delivery_state === "failed" ||
@@ -18781,6 +18864,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               resolved_target_count: resolvedTargets.length,
               submitted_count: submittedCount,
               queued_count: queuedCount,
+              pending_verify_count: pendingVerifyCount,
               delivered_count: submittedCount,
               failed_count: failedCount,
               skipped_count: skippedCount,
@@ -18795,7 +18879,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             }
             return okFormatted(
-              `send_to targeting: ${submittedCount} submitted, ${queuedCount} queued, ${failedCount} failed, ${skippedCount} skipped`,
+              `send_to targeting: ${submittedCount} submitted, ${queuedCount} queued${pendingVerifyCount ? `, ${pendingVerifyCount} pending verify` : ""}, ${failedCount} failed, ${skippedCount} skipped`,
               data,
             );
           }
@@ -18893,36 +18977,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           } catch (error) {
             if (error instanceof AmbiguousBootRecoveryReturnError) {
-              // The caller's followup was never typed. Track the boot pointer
-              // itself so passive verification cannot falsely complete that
-              // followup, and do not put it on the retryable delivery queue.
-              const receipt = engine.acceptPendingVerify({
-                delivery_id: deliveryId,
-                agent_id: agentId,
-                text: error.pointer,
-                press_enter: true,
-                source_event: "boot_prompt",
-                retry_count: 0,
-                typed: true,
-                boot_recovery: true,
-                boot_instance_id: error.bootInstanceId,
-              });
-              return err(error, {
-                agent_id: agentId,
-                ...buildPublicDeliveryReceipt({
-                  delivery_state: "pending_verify",
-                  delivery_id: receipt.delivery_id,
-                  typed: true,
-                  submit_attempted: true,
-                  submit_verified: null,
-                  retry_count: 0,
-                  timings_ms: timings,
-                  WARNING:
-                    "Recovered boot Return may have landed, but its acknowledgement was lost. " +
-                    "The followup was not typed. No Return will be retried automatically; " +
-                    "inspect the pane or wait_for({delivery_id}) before sending again.",
-                }),
-              });
+              return err(error, { agent_id: agentId });
             }
             // AIDEV-NOTE (F1): a RetryableDeliveryError is, by name and by the
             // drain loop's own handling, NOT a terminal outcome -- the engine

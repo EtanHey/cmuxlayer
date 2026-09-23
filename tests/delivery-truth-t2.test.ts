@@ -614,6 +614,93 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     }
   }, 15_000);
 
+  it.each(["interact", "targeting", "surface", "background", "queued_nudge"] as const)("tracks a %s recovery Return when its acknowledgement is lost", async (mode) => {
+    vi.stubEnv("CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", "100");
+    const { createServer, createServerContext } = await loadServerModule();
+    let composer = "";
+    let active = false;
+    let returnAttempts = 0;
+    const followupWrites: string[] = [];
+    const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("send-key") && args.includes("return")) {
+        returnAttempts += 1;
+        throw new Error("lost ack");
+      }
+      if (active && args.includes("send")) {
+        followupWrites.push(String(args.at(-1)));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
+      engine.getRegistry().set(agentId, record);
+      const ready = engine.stateMgr.transition(agentId, "ready");
+      engine.getRegistry().set(agentId, ready);
+      composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      active = true;
+
+      let result: any;
+      if (mode === "queued_nudge") {
+        const queued = engine.queueDelivery({ agent_id: agentId, text: "later", press_enter: true,
+          source_event: "dispatch_nudge" });
+        await engine.drainDeliveryQueue();
+        result = { delivery_id: queued.delivery_id };
+      } else {
+        result = parseToolResult(mode === "interact"
+          ? await server._registeredTools.interact.handler({ agent: agentId, action: "send", text: "later" }, {})
+          : mode === "targeting"
+            ? await server._registeredTools.send_to.handler({ text: "later", press_enter: true,
+                targeting: { agent_ids: [agentId] } }, {})
+            : mode === "surface"
+              ? await server._registeredTools.send_input.handler({ surface: "surface:new", text: "later",
+                  press_enter: true }, {})
+            : await server._registeredTools.send_input.handler({ surface: "surface:new", text: "later",
+                press_enter: true, background: true }, {}));
+      }
+      let pending = engine.listDeliveryReceipts().filter((receipt: any) => receipt.boot_recovery && receipt.agent_id === agentId);
+      for (let attempt = 0; mode === "background" && pending.length === 0 && attempt < 50; attempt += 1) {
+        await new Promise((done) => setTimeout(done, 10));
+        pending = engine.listDeliveryReceipts().filter((receipt: any) => receipt.boot_recovery && receipt.agent_id === agentId);
+      }
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({ delivery_state: "pending_verify", terminal: false,
+        text: composer, boot_instance_id: engine.stateMgr.readState(agentId)?.boot_instance_id });
+      if (mode === "interact" || mode === "surface") {
+        expect(result.ok).toBe(false);
+        expect(result.delivery_state).toBe("pending_verify");
+      } else if (mode === "targeting") {
+        expect(result.pending_verify_count).toBe(1);
+        expect(result.receipts).toEqual([expect.objectContaining({
+          agent_id: agentId, delivery_state: "pending_verify", submit_attempted: true,
+          terminal: false, accepted: false,
+        })]);
+      } else if (mode === "background") {
+        const delivery = parseToolResult(await server._registeredTools.read_screen.handler({ surface: "surface:new" }, {}));
+        expect(delivery.delivery?.status).toBe("pending_verify");
+      } else {
+        expect(pending[0].delivery_id).toBe(result.delivery_id);
+      }
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+      composer = ""; // The recovery Return landed despite the lost acknowledgement.
+      await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(pending[0].delivery_id)?.delivery_state).toBe("submitted");
+      expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(false);
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+    } finally {
+      context.dispose();
+      vi.unstubAllEnvs();
+    }
+  }, 15_000);
+
   it("keeps a newer boot pending when a recovered Return loses its ack during restart", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let composer = "";
@@ -1855,6 +1942,14 @@ describe("boot-submit readiness and attributable evidence", () => {
     expect(delivered).toContain(brief);
     expect(delivered).toContain(pointer);
     expect(delivered).not.toMatch(/[\r\n]/);
+  });
+
+  it("keeps a two-line Claude brief and contract pointer in one submit", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const brief = "Line one\nLine two";
+    const pointer = "cmuxlayer contract for agent-1: Read and follow /tmp/contract.md";
+    expect(__submitEvidenceTestHooks.composeBootDeliveryText(brief, pointer, "claude"))
+      .toBe(`${brief} ; ${pointer}`);
   });
 
   it("delivers an injected-only boot contract without a leading paragraph break", async () => {
