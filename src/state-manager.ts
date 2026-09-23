@@ -360,13 +360,41 @@ export class StateManager {
       Pick<AgentRecord, "error" | "pid" | "cli_session_id" | "cli_session_path">
     >,
   ): AgentRecord {
+    return this.transitionRecord(agentId, toState, extra, false);
+  }
+
+  /** The only persisted done→working path; a verified delivery must have armed it. */
+  reopenAfterVerifiedDelivery(agentId: string): AgentRecord {
+    return this.transitionRecord(agentId, "working", undefined, true);
+  }
+
+  private transitionRecord(
+    agentId: string,
+    toState: AgentState,
+    extra: Partial<
+      Pick<AgentRecord, "error" | "pid" | "cli_session_id" | "cli_session_path">
+    > | undefined,
+    verifiedReopen: boolean,
+  ): AgentRecord {
     const dirName = this.resolveStateDir(agentId);
     const current = dirName ? this.readStateFromDir(dirName) : null;
     if (!current) {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    assertValidTransition(current.state, toState);
+    if (verifiedReopen) {
+      if (
+        current.state !== "done" ||
+        toState !== "working" ||
+        !current.reopen_pending_at ||
+        current.user_killed === true
+      ) {
+        throw new Error(`Agent ${agentId} has no verified done→working delivery`);
+      }
+    } else {
+      assertValidTransition(current.state, toState);
+    }
+    const reopenedAt = verifiedReopen ? new Date().toISOString() : null;
 
     const updated: AgentRecord = {
       ...current,
@@ -381,6 +409,14 @@ export class StateManager {
       ...(extra?.cli_session_path !== undefined
         ? { cli_session_path: extra.cli_session_path }
         : {}),
+      ...(verifiedReopen ? {
+        task_done_candidate_at: null,
+        task_done_detected_at: null,
+        reopen_pending_at: null,
+        reopened_at: reopenedAt,
+        reopen_count: (current.reopen_count ?? 0) + 1,
+        halt_last_active_at: reopenedAt,
+      } : {}),
     };
 
     const agentDir = join(this.baseDir, dirName!);

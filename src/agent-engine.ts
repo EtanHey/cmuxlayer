@@ -6052,6 +6052,17 @@ export class AgentEngine {
         this.clearAgentLifecycleMemory(initialAgentId);
         continue;
       }
+      if (
+        agent.state === "done" &&
+        agent.user_killed !== true &&
+        agent.reopen_pending_at &&
+        sweepScreenText !== undefined &&
+        isLiveActive(resolveLiveAgentState(agent, parseScreen(sweepScreenText)))
+      ) {
+        if (!this.assertSweepInputCurrent(sweepCtx)) return;
+        agent = this.stateMgr.reopenAfterVerifiedDelivery(agent.agent_id);
+        this.registry.set(agent.agent_id, agent);
+      }
       let haltScreenText = taskDoneResult.screenText;
       if (haltScreenText === undefined) {
         try {
@@ -9850,9 +9861,23 @@ export class AgentEngine {
     return this.persistPausedState(agent, paused, new Date().toISOString());
   }
 
-  markAgentWorking(agentId: string): AgentRecord | null {
+  markAgentWorking(
+    agentId: string,
+    opts: { verifiedDelivery?: boolean } = {},
+  ): AgentRecord | null {
     const current =
       this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    if (
+      current?.state === "done" &&
+      current.user_killed !== true &&
+      opts.verifiedDelivery === true
+    ) {
+      const armed = this.stateMgr.updateRecord(agentId, {
+        reopen_pending_at: new Date().toISOString(),
+      });
+      this.registry.set(agentId, armed);
+      return armed;
+    }
     if (!current || current.state !== "idle") {
       return current;
     }

@@ -14136,7 +14136,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             timings: args.timings,
           });
           if (args.press_enter && delivery.submit_verified === true) {
-            engine.markAgentWorking(args.agent_id);
+            engine.markAgentWorking(args.agent_id, {
+              verifiedDelivery: args.source_event === "send_to",
+            });
           }
           return { ...delivery, queued_behind_turn: queuedBehindTurn };
         },
