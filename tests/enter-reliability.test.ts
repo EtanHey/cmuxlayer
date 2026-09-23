@@ -1388,14 +1388,23 @@ describe("enter reliability", () => {
       });
       const parsed = parseResult(result);
 
-      expect(parsed.timings_ms).toEqual({
+      expect(parsed.timings_ms).toMatchObject({
         route: expect.any(Number),
         lock: expect.any(Number),
         lock_hold: expect.any(Number),
         enumerate: expect.any(Number),
         type: expect.any(Number),
         verify: expect.any(Number),
+        enumerate_topology_rpc: expect.any(Number),
+        enumerate_scan_target_list: expect.any(Number),
+        enumerate_screen_read: expect.any(Number),
+        enumerate_rpc_count: expect.any(Number),
+        event_loop_delay_max: expect.any(Number),
+        event_loop_delay_mean: expect.any(Number),
       });
+      if (target.mode !== "surface") {
+        expect(parsed.timings_ms.enumerate_rpc_count).toBeGreaterThan(0);
+      }
     },
   );
 

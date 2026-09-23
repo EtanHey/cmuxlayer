@@ -422,6 +422,32 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("does not consume another writer's fixed temp files for cursor and ref-map", async () => {
+    const cursorPath = join(stateDir, "close-forensics-cursor.json");
+    const refMapPath = join(stateDir, "close-forensics-surface-ref-map.json");
+    for (const path of [cursorPath, refMapPath]) {
+      writeFileSync(`${path}.tmp`, "other-process-pending-write", "utf-8");
+    }
+    writeFileSync(
+      eventsPath,
+      JSON.stringify(surfaceClosed({ seq: 1, surface_id: "S1" })) + "\n",
+      "utf-8",
+    );
+
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr: new StateManager(stateDir),
+      eventsPath,
+      now,
+      listSurfacesForRefMap: async () => [{ id: "S1", ref: "surface:42" }],
+    });
+    expect((await runner()).emitted).toBe(1);
+    for (const path of [cursorPath, refMapPath]) {
+      expect(readFileSync(`${path}.tmp`, "utf-8")).toBe("other-process-pending-write");
+    }
+    expect(readFileSync(refMapPath, "utf-8")).toBe('{"S1":"surface:42"}');
+    expect(readFileSync(cursorPath, "utf-8")).toContain('"last_seq":1');
+  });
+
   it("ingests from a real events file, writes to the event log, and persists the cursor", async () => {
     writeFileSync(
       eventsPath,

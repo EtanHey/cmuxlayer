@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import {
   chmod,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -920,6 +921,13 @@ async function startClients(label, count, env) {
   return clients;
 }
 
+async function stopBaselineClientsBeforeDaemon(clients) {
+  await Promise.all(clients.map((client) => client.close()));
+  if (clients.some((client) => client.alive)) {
+    throw new Error("in-process baseline client survived before daemon phase");
+  }
+}
+
 function summarizeReadDiagnostics(samples, slowestLimit = 12) {
   const ordered = [...samples].sort(
     (a, b) => a.round_index - b.round_index || a.client_index - b.client_index,
@@ -1280,6 +1288,7 @@ function summarizeSendSampleDiagnostics(samples, field) {
       const receipt = send.receipt ?? {};
       return {
         sample_index: index,
+        round_index: Math.floor(index / clientCount),
         elapsed_ms: send.elapsed_ms,
         tool_elapsed_ms: send.tool_elapsed_ms,
         proof_elapsed_ms: send.proof_elapsed_ms,
@@ -1303,6 +1312,7 @@ function summarizeSendSampleDiagnostics(samples, field) {
     })
     .sort((a, b) => a.elapsed_ms - b.elapsed_ms);
   return {
+    all: [...ranked].sort((a, b) => a.sample_index - b.sample_index),
     fastest: ranked.slice(0, 6),
     slowest: ranked.slice(-12).reverse(),
   };
@@ -1873,6 +1883,10 @@ async function main() {
   const baseEnv = {
     ...process.env,
     HOME: join(tempRoot, "home"),
+    // A worker running the benchmark inside a real cmux pane must not send
+    // its live socket capability to the isolated fake socket.
+    CMUX_SOCKET_CAPABILITY: "",
+    CMUX_SOCKET: "",
     CMUX_AGENT_ID: "",
     CMUX_SURFACE_ID: "",
     CMUX_WORKSPACE_ID: "",
@@ -1907,6 +1921,9 @@ async function main() {
     const baselineRssMb = await totalRssMb(
       baselineClients.map((client) => client.pid).filter(Boolean),
     );
+
+    await stopBaselineClientsBeforeDaemon(baselineClients);
+    baselineClients = [];
 
     daemon = spawn(process.execPath, [distDaemon], {
       cwd: repoRoot,
@@ -1945,6 +1962,19 @@ async function main() {
       "daemon",
       fakeSocketTrace,
     );
+    // Later lifecycle stages can fail independently. Keep the read samples
+    // already measured so a failed run can still explain a tail spike.
+    if (process.env.CMUXLAYER_BENCH_JSON_PATH) {
+      const partialPath = join(
+        dirname(resolve(process.env.CMUXLAYER_BENCH_JSON_PATH)),
+        "read-screen-partial.json",
+      );
+      await mkdir(dirname(partialPath), { recursive: true });
+      await writeFile(partialPath, JSON.stringify({
+        baseline: baselineLatency.read_screen_diagnostics,
+        daemon: daemonLatency.read_screen_diagnostics,
+      }, null, 2));
+    }
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
@@ -2292,6 +2322,19 @@ async function main() {
     await new Promise((resolvePromise) =>
       fakeCmuxSocketServer.close(resolvePromise),
     );
+    // Preserve the isolated daemon's phase breadcrumbs even when a benchmark
+    // stage throws; the scratch state is removed immediately below.
+    if (process.env.CMUXLAYER_BENCH_JSON_PATH) {
+      const eventsPath = join(tempRoot, "state", "events.jsonl");
+      if (existsSync(eventsPath)) {
+        const artifactPath = join(
+          dirname(resolve(process.env.CMUXLAYER_BENCH_JSON_PATH)),
+          "events.jsonl",
+        );
+        await mkdir(dirname(artifactPath), { recursive: true });
+        await copyFile(eventsPath, artifactPath);
+      }
+    }
     await rm(tempRoot, { recursive: true, force: true });
     await rm(socketRoot, { recursive: true, force: true });
   }
@@ -2301,6 +2344,7 @@ export {
   measureFakeCmuxPing,
   measureLatency,
   startFakeCmuxSocket,
+  stopBaselineClientsBeforeDaemon,
   summarizeReadDiagnostics,
   summarizeSendSampleDiagnostics,
   writeFakeCmux,

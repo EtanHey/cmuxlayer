@@ -6,10 +6,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { AgentEngine } from "../src/agent-engine.js";
 import { AgentDiscovery } from "../src/agent-discovery.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { armWatch, readWatchRegistry } from "../src/watch-spec.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../src/agent-health-input.js";
 import {
@@ -800,7 +802,7 @@ describe("Sidebar Sync", () => {
     }
   });
 
-  it("yields the remaining sweep phases to a queued interactive waiter", async () => {
+  it("hands the lock to a queued interactive waiter and resumes the sweep", async () => {
     const registry = engine.getRegistry();
     let releaseReconcile: (() => void) | undefined;
     const reconcileStarted = new Promise<void>((resolve) => {
@@ -829,8 +831,370 @@ describe("Sidebar Sync", () => {
     await Promise.all([sweep, waiter]);
 
     expect(waiterRan).toBe(true);
-    expect(evict).not.toHaveBeenCalled();
+    expect(evict).toHaveBeenCalled();
     expect(engine.lifecycleLockState().sweep_yielded).toBe(1);
+  });
+
+  it("bounds an interactive lock wait during a 23-agent slow-screen sweep", async () => {
+    const agentCount = 23;
+    const readDelayMs = 100;
+    for (let index = 0; index < agentCount; index += 1) {
+      const surfaceId = `surface:slow-${index}`;
+      stateMgr.writeState(makeRecord({
+        agent_id: `slow-agent-${index}`,
+        surface_id: surfaceId,
+        workspace_id: "workspace:test",
+      }));
+      liveSurfaces.push(makeSurface(surfaceId));
+    }
+    let signalFirstRead!: () => void;
+    const firstRead = new Promise<void>((resolve) => { signalFirstRead = resolve; });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      signalFirstRead();
+      await new Promise((resolve) => setTimeout(resolve, readDelayMs));
+      return { surface, text: "Working (1m 02s • esc to interrupt)", lines: 20, scrollback_used: false };
+    });
+
+    const sweep = engine.runSweep();
+    await firstRead;
+    const startedAt = performance.now();
+    const waiter = engine.runLifecycleMutation(async () => {
+      const updated = stateMgr.updateRecord("slow-agent-21", {
+        task_summary: "interactive update",
+      });
+      engine.getRegistry().set(updated.agent_id, updated);
+      stateMgr.removeState("slow-agent-22");
+      engine.getRegistry().remove("slow-agent-22");
+      liveSurfaces = liveSurfaces.filter((surface) => surface.ref !== "surface:slow-22");
+    }, { label: "interactive-test" });
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const acquiredWithinBudget = await Promise.race([
+      waiter.then(() => true),
+      new Promise<false>((resolve) => {
+        budgetTimer = setTimeout(() => resolve(false), 2_000);
+      }),
+    ]);
+    if (budgetTimer) clearTimeout(budgetTimer);
+    await Promise.all([sweep, waiter]);
+    expect(acquiredWithinBudget, `interactive waiter took ${Math.round(performance.now() - startedAt)}ms while ${agentCount} screens each took ${readDelayMs}ms`).toBe(true);
+    expect(stateMgr.readState("slow-agent-21")?.task_summary).toBe("interactive update");
+    expect(stateMgr.readState("slow-agent-22")).toBeNull();
+    mockClient.readScreen.mockImplementation(async (surface: string) => ({
+      surface,
+      text: "Working (1m 02s • esc to interrupt)",
+      lines: 20,
+      scrollback_used: false,
+    }));
+    await engine.runSweep();
+    expect(stateMgr.readState("slow-agent-21")?.task_summary).toBe("interactive update");
+    expect(stateMgr.readState("slow-agent-22")).toBeNull();
+    expect(engine.getRegistry().get("slow-agent-22")).toBeNull();
+  }, 20_000);
+
+  it("lets a client screen read run during per-agent sweep work", async () => {
+    for (let index = 0; index < 23; index += 1) {
+      const surfaceId = `surface:cpu-${index}`;
+      stateMgr.writeState(makeRecord({
+        agent_id: `cpu-agent-${index}`,
+        surface_id: surfaceId,
+        workspace_id: "workspace:test",
+      }));
+      liveSurfaces.push(makeSurface(surfaceId));
+    }
+    let signalFirstRead!: () => void;
+    const firstRead = new Promise<void>((resolve) => { signalFirstRead = resolve; });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      signalFirstRead();
+      const until = performance.now() + 15;
+      while (performance.now() < until) { /* model synchronous parse/transport work */ }
+      return { surface, text: "Working (1m 02s • esc to interrupt)", lines: 20, scrollback_used: false };
+    });
+    const delay = monitorEventLoopDelay({ resolution: 10 });
+    delay.enable();
+    try {
+      const sweep = engine.runSweep();
+      await firstRead;
+      const startedAt = performance.now();
+      const clientRead = new Promise<number>((resolve) => {
+        setTimeout(() => {
+          void mockClient.readScreen("surface:operator").then(() => resolve(performance.now() - startedAt));
+        }, 0);
+      });
+      const latencyMs = await clientRead;
+      await sweep;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(latencyMs, `client read waited ${Math.round(latencyMs)}ms during the sweep; event-loop max ${Math.round(delay.max / 1e6)}ms`).toBeLessThan(1_000);
+      expect(delay.max / 1e6).toBeLessThan(1_500);
+    } finally {
+      delay.disable();
+    }
+  }, 20_000);
+
+  it("persists the in-progress sweep phase before slow I/O", async () => {
+    stateMgr.writeState(makeRecord({
+      agent_id: "slow-phase-agent",
+      surface_id: "surface:phase",
+      workspace_id: "workspace:test",
+    }));
+    liveSurfaces = [makeSurface("surface:phase")];
+    let releaseRead!: () => void;
+    const readHeld = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let signalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      signalRead();
+      await readHeld;
+      return { surface, text: "Working", lines: 20, scrollback_used: false };
+    });
+
+    const sweep = engine.runSweep();
+    await readStarted;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const inProgress = stateMgr.getEventLog().readEntries().filter(
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" && "phase" in entry && entry.phase === "sidebar_ms",
+    );
+    releaseRead();
+    await sweep;
+    expect(inProgress).toEqual([
+      expect.objectContaining({
+        stage: "started",
+        agent_count: 1,
+        lock_held: false,
+      }),
+    ]);
+    const completed = stateMgr.getEventLog().readEntries().filter(
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" && "phase" in entry && entry.phase === "sidebar_ms",
+    );
+    expect(completed).toEqual([
+      expect.objectContaining({ stage: "started" }),
+      expect.objectContaining({ stage: "completed", duration_ms: expect.any(Number) }),
+    ]);
+    expect(stateMgr.getEventLog().readEntries()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: "sweep_phase", phase: "summary", durations_ms: expect.objectContaining({ sidebar_ms: expect.any(Number) }) }),
+    ]));
+  });
+
+  it("records a failed sweep summary with the failing phase", async () => {
+    vi.spyOn(engine as any, "collectObservedSurfaceTopology").mockRejectedValueOnce(
+      new Error("topology scan failed"),
+    );
+
+    await expect(engine.runSweep()).rejects.toThrow("topology scan failed");
+    const summary = stateMgr.getEventLog().readEntries().find(
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" &&
+        "phase" in entry && entry.phase === "summary",
+    );
+    expect(summary).toMatchObject({
+      stage: "failed",
+      failed_phase: "topology_ms",
+    });
+  });
+
+  it("does not hold the lifecycle lock during one blocked screen read", async () => {
+    stateMgr.writeState(makeRecord({
+      agent_id: "blocked-read-agent",
+      surface_id: "surface:blocked-read",
+      workspace_id: "workspace:test",
+    }));
+    liveSurfaces = [makeSurface("surface:blocked-read")];
+    let releaseRead!: () => void;
+    const readHeld = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let signalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      signalRead();
+      await readHeld;
+      return { surface, text: "Working", lines: 20, scrollback_used: false };
+    });
+
+    const sweep = engine.runSweep();
+    await readStarted;
+    let waiterRan = false;
+    const waiter = engine.runLifecycleMutation(async () => {
+      waiterRan = true;
+      const updated = stateMgr.updateRecord("blocked-read-agent", {
+        task_summary: "new interactive state",
+      });
+      engine.getRegistry().set(updated.agent_id, updated);
+    }, { label: "interactive-test" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const ranBeforeReadCompleted = waiterRan;
+    releaseRead();
+    await Promise.all([sweep, waiter]);
+    expect(ranBeforeReadCompleted).toBe(true);
+    expect(stateMgr.readState("blocked-read-agent")?.task_summary).toBe("new interactive state");
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale two-agent sidebar snapshot after a direct stop write during another agent's unlocked read", async () => {
+    for (const agentId of ["b-stopped-agent", "a-reading-agent"]) {
+      const surfaceId = `surface:${agentId}`;
+      const record = makeRecord({
+        agent_id: agentId,
+        surface_id: surfaceId,
+        workspace_id: "workspace:test",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+      liveSurfaces.push(makeSurface(surfaceId));
+    }
+    let releaseRead!: () => void;
+    const readHeld = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let signalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      if (surface === "surface:a-reading-agent") {
+        signalRead();
+        await readHeld;
+      }
+      return { surface, text: "Working (1m 02s • esc to interrupt)", lines: 20, scrollback_used: false };
+    });
+
+    const sweep = engine.runSweep();
+    await readStarted;
+    const stopped = stateMgr.updateRecord("b-stopped-agent", { state: "done" });
+    engine.getRegistry().set(stopped.agent_id, stopped);
+    releaseRead();
+    await sweep;
+
+    expect(stateMgr.readState("b-stopped-agent")?.state).toBe("done");
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a-reading-agent",
+      expect.stringContaining("state=working"),
+      expect.anything(),
+    );
+    expect(mockClient.setStatus).not.toHaveBeenCalledWith(
+      "b-stopped-agent",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("keeps publishing twelve agents during unrelated lifecycle refreshes", async () => {
+    for (let index = 0; index < 12; index += 1) {
+      const agentId = `steady-agent-${index}`;
+      const record = makeRecord({ agent_id: agentId, surface_id: `surface:${agentId}`, workspace_id: "workspace:test" });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+      liveSurfaces.push(makeSurface(record.surface_id));
+    }
+    let refreshOnRead = false;
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      if (refreshOnRead) {
+        refreshOnRead = false;
+        await engine.runLifecycleMutation(async () => {}, { label: "lifecycle-refresh-managed-metadata" });
+      }
+      return { surface, text: "Working (1m 02s • esc to interrupt)", lines: 20, scrollback_used: false };
+    });
+    for (let sweepIndex = 0; sweepIndex < 5; sweepIndex += 1) {
+      const priorVersion = stateMgr.readState("steady-agent-11")?.version ?? 0;
+      const priorPublications = publishedFleetPublications.length;
+      mockClient.setStatuses.mockClear();
+      refreshOnRead = true;
+      await engine.runSweep();
+      if (sweepIndex === 0) {
+        const updates = mockClient.setStatuses.mock.calls.flatMap(([batch]) => batch);
+        expect(updates).toEqual(expect.arrayContaining([
+          expect.objectContaining({ key: "steady-agent-11" }),
+        ]));
+      }
+      expect(stateMgr.readState("steady-agent-11")?.version, `sweep ${sweepIndex} skipped the later row`).toBeGreaterThan(priorVersion);
+      expect(publishedFleetPublications.length, `sweep ${sweepIndex} skipped publication`).toBeGreaterThan(priorPublications);
+    }
+  }, 20_000);
+
+  it("does not hold the lifecycle lock during topology enumeration", async () => {
+    stateMgr.writeState(makeRecord({
+      agent_id: "topology-race-agent",
+      surface_id: "surface:topology-race",
+      workspace_id: "workspace:test",
+    }));
+    liveSurfaces = [makeSurface("surface:topology-race")];
+    const reconcile = vi.spyOn(engine.getRegistry(), "reconcile");
+    let releaseTopology!: () => void;
+    const topologyHeld = new Promise<void>((resolve) => { releaseTopology = resolve; });
+    let signalTopology!: () => void;
+    const topologyStarted = new Promise<void>((resolve) => { signalTopology = resolve; });
+    mockClient.listWorkspaces.mockImplementation(async () => {
+      signalTopology();
+      await topologyHeld;
+      return { workspaces: [makeWorkspace("workspace:test")] };
+    });
+    const sweep = engine.runSweep();
+    await topologyStarted;
+    let waiterRan = false;
+    const waiter = engine.runLifecycleMutation(async () => {
+      waiterRan = true;
+      const updated = stateMgr.updateRecord("topology-race-agent", {
+        task_summary: "newer lifecycle mutation",
+      });
+      engine.getRegistry().set(updated.agent_id, updated);
+    }, { label: "interactive-test" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const ranBeforeTopologyCompleted = waiterRan;
+    releaseTopology();
+    await Promise.all([sweep, waiter]);
+    expect(ranBeforeTopologyCompleted).toBe(true);
+    expect(reconcile).toHaveBeenCalled();
+    expect(stateMgr.readState("topology-race-agent")?.task_summary).toBe("newer lifecycle mutation");
+  });
+
+  it("does not hold the lifecycle lock during a blocked watch screen read", async () => {
+    const watchRegistryPath = join(TEST_DIR, "sweep-watches.json");
+    const watchAgent = makeRecord({
+      agent_id: "watch-agent",
+      surface_id: "surface:watch-agent",
+      workspace_id: "workspace:test",
+    });
+    stateMgr.writeState(watchAgent);
+    engine.getRegistry().set(watchAgent.agent_id, watchAgent);
+    liveSurfaces = [makeSurface(watchAgent.surface_id)];
+    const notify = vi.fn(async () => {});
+    engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      watchRegistryPath,
+      watchRegistryNow: () => 0,
+      watchNotify: notify,
+    });
+    await armWatch({
+      owner: "lead",
+      target: watchAgent.agent_id,
+      predicate: "done",
+      deadline: 60_000,
+    }, {
+      registryPath: watchRegistryPath,
+      now: () => 0,
+      agentObservation: async () => ({ exists: true, state: "working", source: "fixture" }),
+    });
+    let releaseRead!: () => void;
+    const readHeld = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let signalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      signalRead();
+      await readHeld;
+      return { surface, text: "Working", lines: 20, scrollback_used: false };
+    });
+
+    const sweep = engine.runSweep();
+    await readStarted;
+    let waiterRan = false;
+    const waiter = engine.runLifecycleMutation(async () => {
+      waiterRan = true;
+      const updated = stateMgr.updateRecord(watchAgent.agent_id, {
+        task_summary: "newer watch target state",
+      });
+      engine.getRegistry().set(updated.agent_id, updated);
+    }, { label: "interactive-test" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const ranBeforeReadCompleted = waiterRan;
+    releaseRead();
+    await Promise.all([sweep, waiter]);
+    expect(ranBeforeReadCompleted).toBe(true);
+    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]?.state).toBe("armed");
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it("does not expose a sweep snapshot to concurrent terminal routing", async () => {
@@ -2123,7 +2487,7 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
     expect(mockClient.setStatuses).toHaveBeenCalledTimes(2);
-  });
+  }, 20_000);
 
   it("discriminates health by state instead of marking every missing-session row unhealthy", async () => {
     stateMgr.writeState(

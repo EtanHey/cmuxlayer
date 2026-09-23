@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   mkdirSync,
+  readdirSync,
   rmSync,
   existsSync,
   readFileSync,
@@ -8,6 +9,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import {
   classifySurfaceSessionRoute,
   StateManager,
@@ -52,6 +54,45 @@ describe("StateManager", () => {
   });
 
   describe("writeState", () => {
+    it("keeps concurrent process writes atomic without orphaned temp files", async () => {
+      const record = makeRecord({ cli_session_id: "session-concurrent" });
+      const moduleUrl = new URL("../src/state-manager.ts", import.meta.url).href;
+      const script = `
+        import { StateManager } from ${JSON.stringify(moduleUrl)};
+        const manager = new StateManager(process.env.STATE_BASE_DIR);
+        const record = JSON.parse(process.env.STATE_RECORD);
+        for (let i = 0; i < 150; i++) {
+          manager.writeState({ ...record, task_summary: process.env.WRITER_ID + ':' + i });
+        }
+      `;
+      const writers = Array.from({ length: 3 }, (_, writerId) =>
+        new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+          const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              STATE_BASE_DIR: TEST_DIR,
+              STATE_RECORD: JSON.stringify(record),
+              WRITER_ID: String(writerId),
+            },
+          });
+          let stderr = "";
+          child.stderr.setEncoding("utf-8");
+          child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+          child.on("error", reject);
+          child.on("close", (code) => resolve({ code, stderr }));
+        }),
+      );
+
+      const results = await Promise.all(writers);
+      expect(results).toEqual(results.map(() => ({ code: 0, stderr: "" })));
+      const stateDir = join(TEST_DIR, record.agent_id);
+      expect(JSON.parse(readFileSync(join(stateDir, "state.json"), "utf-8")).agent_id).toBe(record.agent_id);
+      expect(JSON.parse(readFileSync(join(TEST_DIR, "surface-session-index.json"), "utf-8")).by_agent_id[record.agent_id]).toBeDefined();
+      expect(readdirSync(stateDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+      expect(readdirSync(TEST_DIR).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    }, 30_000);
+
     it("creates agent directory and state.json", () => {
       const mgr = new StateManager(TEST_DIR);
       const record = makeRecord();

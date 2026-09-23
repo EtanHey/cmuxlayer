@@ -7,9 +7,7 @@
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
-  writeFileSync,
   readFileSync,
-  renameSync,
   readdirSync,
   rmSync,
   existsSync,
@@ -17,6 +15,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { EventLog } from "./event-log.js";
+import { atomicWriteJson } from "./atomic-json-write.js";
 import {
   assertValidTransition,
   isFailedSpawnTombstone,
@@ -120,9 +119,7 @@ export class SurfaceSessionIndex {
 
   private writeIndex(index: SurfaceSessionIndexFile): void {
     mkdirSync(this.baseDir, { recursive: true });
-    const tmpFile = join(this.baseDir, "surface-session-index.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(index, null, 2), "utf-8");
-    renameSync(tmpFile, this.indexPath);
+    atomicWriteJson(this.indexPath, index, 2);
   }
 
   persist(input: {
@@ -285,10 +282,7 @@ export class StateManager {
     mkdirSync(agentDir, { recursive: true });
 
     const stateFile = this.stateFilePath(record.agent_id);
-    const tmpFile = join(agentDir, "state.json.tmp");
-
-    writeFileSync(tmpFile, JSON.stringify(record, null, 2), "utf-8");
-    renameSync(tmpFile, stateFile);
+    atomicWriteJson(stateFile, record, 2);
     this.surfaceSessionIndex.persistRecord(record);
 
     this.eventLog.append({
@@ -421,11 +415,8 @@ export class StateManager {
       } : {}),
     };
 
-    const agentDir = join(this.baseDir, dirName!);
     const stateFile = this.stateFilePath(dirName!);
-    const tmpFile = join(agentDir, "state.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
-    renameSync(tmpFile, stateFile);
+    atomicWriteJson(stateFile, updated, 2);
     this.surfaceSessionIndex.persistRecord(updated);
 
     const transition: StateTransition = {
@@ -465,10 +456,7 @@ export class StateManager {
       version: current.version + 1,
       updated_at: new Date().toISOString(),
     };
-    const agentDir = join(this.baseDir, dirName!);
-    const tmpFile = join(agentDir, "state.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
-    renameSync(tmpFile, this.stateFilePath(dirName!));
+    atomicWriteJson(this.stateFilePath(dirName!), updated, 2);
     this.surfaceSessionIndex.persistRecord(updated);
     this.eventLog.append({
       ts: updated.updated_at,
@@ -504,11 +492,8 @@ export class StateManager {
       updated_at: new Date().toISOString(),
     };
 
-    const agentDir = join(this.baseDir, dirName!);
     const stateFile = this.stateFilePath(dirName!);
-    const tmpFile = join(agentDir, "state.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
-    renameSync(tmpFile, stateFile);
+    atomicWriteJson(stateFile, updated, 2);
     this.surfaceSessionIndex.persistRecord(updated);
 
     this.eventLog.append({
@@ -554,11 +539,8 @@ export class StateManager {
       transcript_session_capture_deferred: deferred,
       transcript_session_capture_attempts: normalizedAttempts,
     };
-    const agentDir = join(this.baseDir, dirName!);
     const stateFile = this.stateFilePath(dirName!);
-    const tmpFile = join(agentDir, "state.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
-    renameSync(tmpFile, stateFile);
+    atomicWriteJson(stateFile, updated, 2);
     this.surfaceSessionIndex.persistRecord(updated);
     return updated;
   }
@@ -589,11 +571,8 @@ export class StateManager {
       updated_at: new Date().toISOString(),
     };
 
-    const agentDir = join(this.baseDir, dirName!);
     const stateFile = this.stateFilePath(dirName!);
-    const tmpFile = join(agentDir, "state.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
-    renameSync(tmpFile, stateFile);
+    atomicWriteJson(stateFile, updated, 2);
     this.surfaceSessionIndex.persistRecord(updated);
 
     this.eventLog.append({
@@ -638,9 +617,7 @@ export class StateManager {
     const newAgentDir = join(this.baseDir, newAgentId);
     mkdirSync(newAgentDir, { recursive: true });
     const stateFile = this.stateFilePath(newAgentId);
-    const tmpFile = join(newAgentDir, "state.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
-    renameSync(tmpFile, stateFile);
+    atomicWriteJson(stateFile, updated, 2);
     this.surfaceSessionIndex.persistRecord(updated);
     this.surfaceSessionIndex.removeAgent(agentId);
 

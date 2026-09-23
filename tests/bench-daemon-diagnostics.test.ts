@@ -52,6 +52,13 @@ describe("P2 benchmark read diagnostics", () => {
       rpc_methods: ["surface.send_text", "surface.send_key"],
       timings_ms: { type: 388, lock_hold: 393 },
     });
+    const all = summarizeSendSampleDiagnostics(Array.from({ length: 96 }, (_, index) => ({
+      first: { ...sample.second, elapsed_ms: 100 + index },
+    })), "first").all;
+    expect(all).toHaveLength(96);
+    expect(all[0]).toMatchObject({ sample_index: 0, round_index: 0 });
+    expect(all[8]).toMatchObject({ sample_index: 8, round_index: 1 });
+    expect(all[95]).toMatchObject({ sample_index: 95, round_index: 11 });
   });
 
   it("records fake socket service and state read time for a screen read", async () => {

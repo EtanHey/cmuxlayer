@@ -26,6 +26,7 @@ import type {
   EventLogEntry,
   ResolvedPromptEvent,
   StateTransition,
+  SweepPhaseTelemetryEvent,
 } from "./agent-types.js";
 
 export const DEFAULT_EVENT_LOG_MAX_READ_BYTES = 1024 * 1024;
@@ -73,6 +74,10 @@ export class EventLog {
   }
 
   appendControlHealth(event: ControlHealthTelemetryEvent): void {
+    this.appendEntry(event);
+  }
+
+  appendSweepPhase(event: SweepPhaseTelemetryEvent): void {
     this.appendEntry(event);
   }
 
