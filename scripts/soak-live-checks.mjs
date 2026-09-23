@@ -56,6 +56,15 @@ export function checkClose(close, defaultListed, explicitRow, indexEntry, surfac
   return failures;
 }
 
+export async function attemptAgentClose(call, agentId, cycle) {
+  if (!agentId) return { close: null, leaked: true };
+  let close = await call("close_surface", { scope: "agent", agent_id: agentId, force: true }, cycle);
+  if (close.ok !== true || close.agent_stopped !== true || close.surface_closed !== true) {
+    close = await call("close_surface", { scope: "agent", agent_id: agentId, force: false }, cycle);
+  }
+  return { close, leaked: close.ok !== true || close.agent_stopped !== true || close.surface_closed !== true };
+}
+
 export function hasReplyMarker(screen, marker) {
   const value = record(screen);
   const response = record(value.parsed).response;

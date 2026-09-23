@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
-  checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
+  attemptAgentClose, checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
   checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak,
 } from "./soak-live-checks.mjs";
 
@@ -211,15 +211,7 @@ async function main() {
     return false;
   };
   const closeOwned = async (cycle, agentId, surface) => {
-    const close = agentId
-      ? await call("close_surface", { scope: "agent", agent_id: agentId, force: true }, cycle)
-      : surface
-        ? await call("close_surface", { scope: "surface", surface, workspace: WORKSPACE, force: true }, cycle)
-        : null;
-    if (agentId && close?.ok !== true && surface) {
-      // Keep the agent-close failure visible, then try exact-surface cleanup.
-      await call("close_surface", { scope: "surface", surface, workspace: WORKSPACE, force: true }, cycle);
-    }
+    const { close, leaked } = await attemptAgentClose(call, agentId, cycle);
     if (agentId) {
       let listed, explicit, surfaces;
       let index = null;
@@ -237,15 +229,17 @@ async function main() {
       const failures = checkClose(close,
         listed.agents?.some((item) => item.agent_id === agentId),
         explicit.agents?.find((item) => item.agent_id === agentId), index, surface, surfaces.surfaces);
-      check("cleanup", failures, { cycle, agent_id: agentId });
+      if (leaked) failures.push("cleanup_leak");
+      check("cleanup", failures, { cycle, agent_id: agentId, surface,
+        surface_uuid: explicit.agents?.find((item) => item.agent_id === agentId)?.surface_uuid ?? index?.surface_uuid ?? null });
       inboxCheck(cycle);
-      return !listed.agents?.some((item) => item.agent_id === agentId) &&
+      return !leaked && !listed.agents?.some((item) => item.agent_id === agentId) &&
         !surfaces.surfaces?.some((item) => [surface, index?.surface_id].includes(item.ref ?? item.id));
     } else if (surface) {
-      check("cleanup", close?.surface_closed === true ? [] : ["surface_close_unverified"], { cycle, surface });
+      check("cleanup", ["cleanup_leak"], { cycle, agent_id: null, surface, surface_uuid: null });
     }
     inboxCheck(cycle);
-    return close?.surface_closed === true;
+    return false;
   };
   const runCycle = async (cycle) => {
     const cli = cycle % 2 === 0 ? "codex" : "claude";
@@ -290,10 +284,13 @@ async function main() {
     } catch (error) {
       check("cycle_exception", ["cycle_exception"], { cycle, error: String(error) });
     } finally {
-      let closed = false;
-      try { if (agentId || surface) closed = await closeOwned(cycle, agentId, surface); }
+      try {
+        if (agentId || surface) {
+          await closeOwned(cycle, agentId, surface);
+          if (agentId) active.delete(agentId); // A recorded leak is not retried by raw ref later.
+        }
+      }
       catch (error) { check("cleanup", ["cleanup_exception"], { cycle, error: String(error) }); }
-      if (agentId && closed) active.delete(agentId);
       summary.cycles_completed += 1;
       log({ kind: "cycle_done", cycle, cli });
     }

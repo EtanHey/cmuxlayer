@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkStateAgreement,
+import { attemptAgentClose, checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkStateAgreement,
   checkSoakSession, checkToolFailure, hasReplyMarker, nextSoakDelayMs, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
 
 describe("live soak invariant checkers", () => {
@@ -85,5 +85,20 @@ describe("live soak invariant checkers", () => {
     ]);
     expect(checkParsedReadAgreement(full, { ...full, parsed: { ...full.parsed, token_count: 191_000 } }, 200)).toEqual([]);
     expect(checkParsedReadAgreement(full, full, 2_001)).toContain("parsed_sweep_window_exceeded");
+  });
+
+  it("records a leak without closing a ref now owned by another seat", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const call = async (_tool: string, args: Record<string, unknown>) => {
+      calls.push(args);
+      return { ok: false };
+    };
+    expect(await attemptAgentClose(call, "soak-agent", 1)).toMatchObject({ leaked: true });
+    expect(calls).toEqual([
+      { scope: "agent", agent_id: "soak-agent", force: true },
+      { scope: "agent", agent_id: "soak-agent", force: false },
+    ]);
+    expect(await attemptAgentClose(call, null, 1)).toMatchObject({ leaked: true });
+    expect(calls).toHaveLength(2); // A saved surface ref may now belong to another seat.
   });
 });
