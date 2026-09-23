@@ -1,0 +1,12 @@
+▝▜██████▀  Opus 5.5 (1M context) with high effort · Claude Max
+  ▝▝ ▝▝    ~/Gits/cmuxlayer
+
+❯ Reply exactly SOAK_OK_1 then stop. ; cmuxlayer contract for capture-agent: Read and
+  follow /home/capture-user/.cmux/agents/capture-agent/contract.md
+
+∴ The user's instruction to reply exactly "SOAK_OK_1" and stop seems clear enough, though there's
+  also a contract mentioned that I should consider — I need to figure out whether reading that
+  contract matters or if I should just follow the direct instruction as given.
+
+❯
+  ⎇ main | 🔧 13

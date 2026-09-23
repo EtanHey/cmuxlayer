@@ -1646,6 +1646,20 @@ TASK_DONE
     expect(parsed.model).toBe("gpt-5.5 xhigh");
   });
 
+  it("keeps an explicit Codex header authoritative over a dot action glyph", () => {
+    const parsed = parseScreen("OpenAI Codex\nModel: gpt-5.5\n· Searching…\n›");
+
+    expect(parsed.agent_type).toBe("codex");
+  });
+
+  it("keeps an explicit Codex header authoritative over a Claude mention and dot glyph", () => {
+    const parsed = parseScreen(
+      "OpenAI Codex\nModel: gpt-5.5\n· Searching…\nRead the Claude Code notes\n›",
+    );
+
+    expect(parsed.agent_type).toBe("codex");
+  });
+
   it("does not classify ordinary prose mentioning OpenAI Codex as a Codex pane", () => {
     const parsed = parseScreen(`
 Claude Code

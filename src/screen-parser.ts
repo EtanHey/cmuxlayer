@@ -210,7 +210,7 @@ const PICKER_NUMBERED_OPTION_RE =
 const PICKER_SELECTED_NUMBERED_OPTION_RE =
   /^\s*[>❯›]\s*(?:[☐☑◉○●◯✓✔]\s*)?\d+\.\s+\S.+$/;
 const PICKER_NAVIGATION_FOOTER_RE =
-  /(?:Enter to (?:select|confirm).{0,60}(?:↑\/↓|↑↓).{0,30}navigate|(?:↑\/↓|↑↓)\s+to navigate|Press enter to confirm or esc to go back|Press up to edit queued messages)/i;
+  /(?:Enter to (?:select|confirm).{0,60}(?:↑\/↓|↑↓).{0,30}navigate|(?:↑\/↓|↑↓)\s+to navigate|Press enter to confirm or esc to go back|Press up to edit queued messages|Esc to cancel\s*[·•]\s*Tab to amend)/i;
 const CLAUDE_PICKER_HEADER_RE = /^\s*[☐☑]\s+\S.+$/;
 const CODEX_UPDATE_MENU_WINDOW_LINES = 12;
 const BINARY_CONFIRM_FOOTER_RE = /^\s*\[(?:y\/n|yes\/no)\]\s*$/i;
@@ -239,14 +239,12 @@ const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const CODEX_CURRENT_ACTION_RE =
   /^(?:Ran|Explored|Updated Plan|Waited for|Read|Edited|Searched|Called|Running|Writing)\b/i;
-const CLAUDE_GLYPH_ACTION_RE =
-  /^\s*[⏺●⬢⬡]\s+((?:mcp__\S+|(?:Bash|Read|Edit|Write|Search|Glob|Grep|Task|WebFetch|WebSearch|NotebookEdit)\([^\n]*\)|(?:Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)(?:…|\.{3}|\s+(?:\/|~\/|\.\/|\.\.\/)\S+).*))$/i;
-const CLAUDE_GLYPH_TOOL_CALL_RE = /^[⏺●]\s+(?:mcp__\S+|[A-Za-z_][\w.:-]*\()/i;
 const CLAUDE_INDENTED_ACTIVITY_RE =
   /^\s{2,}((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
-const CLAUDE_ACTIVE_BANNER_RE = /^\s*[✻✢✳✶]\s+.*(?:working|thinking|esc to interrupt)/i;
-const CLAUDE_ACTIVE_SPINNER_RE =
-  /^\s*[✻✢✳✶]\s+(.+?)(?:…|\.{3})\s*\((?=[^)\n]*(?:\b\d+(?:\.\d+)?[hms]\b|[↑↓]\s*\d|think|thought))[^)\n]+\)\s*$/i;
+const CLAUDE_BRANCH_TOOL_FOOTER_RE =
+  /^\s*⎇\s+[^|\n]{1,80}\s+\|\s+🔧\s+\d+\s*$/;
+const CLAUDE_FINISHED_BANNER_RE =
+  /^\s*[·✢✳✶✻✽]\s+.+(?:\s|·)done(?:\s|$)/i;
 const CODEX_UPDATE_MENU_RE =
   /(?:^|\n)\s*(?:[✨\u2728]\s*)?Update available!(?:\s+[^\n]+)?\s*(?:\n|$)/i;
 const CODEX_UPDATE_MENU_SKIP_RE =
@@ -267,8 +265,6 @@ const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
 const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
-const CLAUDE_WORKING_LINE_RE =
-  /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
 // Claude's context-limit/auto-compact banner wording is not stable. A pane
 // sitting at one of these blockers must not become "working" merely because
 // the same line also contains a busy-looking marker.
@@ -353,8 +349,186 @@ function normalizeText(text: string): string {
   // the parser's many regexes see untrusted screen text.
   return normalized
     .split("\n")
-    .map((line) => line.slice(0, MAX_SCREEN_LINE_WIDTH))
+    .map((line) =>
+      line.slice(0, MAX_SCREEN_LINE_WIDTH)
+        .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, " "),
+    )
     .join("\n");
+}
+
+type ClaudeGlyphKind = "action" | "reply" | "call" | "chrome" | "unknown";
+
+interface ClaudeGlyphLine {
+  kind: ClaudeGlyphKind;
+  lineIndex: number;
+  position: number;
+  value: string;
+  evidence: string;
+}
+
+interface ClaudeFrame {
+  lines: string[];
+  glyphs: ClaudeGlyphLine[];
+  readyIndex: number;
+  latestUserPromptIndex: number;
+  active: ClaudeGlyphLine | null;
+}
+
+// All Claude glyph decisions go through this function. A timed spinner is
+// activity even when Claude also renders a ready-looking empty composer.
+function classifyClaudeGlyphLine(
+  line: string,
+  lineIndex: number,
+  position: number,
+): ClaudeGlyphLine | null {
+  const spinner = line.match(
+    /^\s*[·✢✳✶✻✽]\s+(.+?)(?:…|\.{3})\s*\((?=[^)\n]*(?:\b\d+(?:\.\d+)?[hms]\b|[↑↓]\s*\d|think|thought))[^)\n]+\)\s*$/i,
+  );
+  if (spinner) {
+    return {
+      kind: "action",
+      lineIndex,
+      position,
+      value: spinner[1].trim(),
+      evidence: "timed_spinner",
+    };
+  }
+  const status = line.match(
+    /^\s*[·✢✳✶✻✽]\s+((?:Thinking|Working)(?:…|\.{3}|\s*\([^\n)]*esc to interrupt\))?)\s*$/i,
+  );
+  if (status) {
+    return {
+      kind: "action",
+      lineIndex,
+      position,
+      value: status[1].trim(),
+      evidence: "status_banner",
+    };
+  }
+
+  const untimed = line.match(/^\s*[·✢✳✶✻✽]\s*(.*)$/);
+  if (untimed) {
+    const value = untimed[1].trim();
+    if (CLAUDE_FINISHED_BANNER_RE.test(line)) {
+      return { kind: "chrome", lineIndex, position, value, evidence: "finished_banner" };
+    }
+    const ellipsized = value.match(/^(.+?)(?:…|\.{3})$/);
+    return {
+      kind: ellipsized ? "action" : "unknown",
+      lineIndex,
+      position,
+      value: ellipsized?.[1]?.trim() ?? value,
+      evidence: ellipsized ? "untimed_spinner" : "unresolved_spinner",
+    };
+  }
+
+  const headed = line.match(/^\s*[⏺●⬢⬡]\s+(.+)$/);
+  if (!headed) return null;
+  const value = headed[1].trim();
+  const entry = (kind: ClaudeGlyphKind, evidence: string): ClaudeGlyphLine => ({
+    kind,
+    lineIndex,
+    position,
+    value,
+    evidence,
+  });
+
+  if (
+    /^Completed(?: successfully)?$/i.test(value) ||
+    /^Ran \d+ stop hooks\b/i.test(value) ||
+    /^Token usage:/i.test(value)
+  ) {
+    return entry("chrome", "completion_or_hook_chrome");
+  }
+  if (/^(?:mcp__[\w.:-]+|[A-Za-z_][\w.:-]*)\(/.test(value)) {
+    return entry("call", "immediate_call_parenthesis");
+  }
+
+  const progress = value.match(
+    /^(?:Thinking|Working|Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving|Fetching)\b/i,
+  );
+  if (!progress) return entry("reply", "prose");
+  if (/^(?:Thinking|Working)\b(?:…|\.{3}|\s*\()/i.test(value)) {
+    return entry("action", "explicit_progress");
+  }
+  if (
+    /\bhttps?:\/\/\S+|\b[\w.-]+\.[A-Za-z0-9]{1,8}\b|(?:^|\s)(?:\/|~\/|\.\/|\.\.\/)\S+/.test(value)
+  ) {
+    return entry("action", "url_or_path_target");
+  }
+  if (
+    /^Running\s+(?:npm|npx|pnpm|bun|yarn|git|node|python3?|pytest|cargo|make|cmake|go|swift|bash|sh)\b(?:\s+\S+)?/i.test(value)
+  ) {
+    return entry("action", "command_target");
+  }
+  if (
+    /^(?:Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving|Fetching)(?:…|\.{3})/i.test(value)
+  ) {
+    return entry("action", "ellipsized_progress");
+  }
+  if (/^[^:]+:\s+\S/.test(value)) {
+    return entry("reply", "sentence_with_colon");
+  }
+  return entry("unknown", "unresolved_progress_verb");
+}
+
+function analyzeClaudeFrame(text: string): ClaudeFrame {
+  const lines = text.split("\n");
+  const glyphs: ClaudeGlyphLine[] = [];
+  let position = 0;
+  let readyIndex = -1;
+  let latestUserPromptIndex = -1;
+  let finishedIndex = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (BARE_READY_PROMPT_RE.test(line) || /^\s*(?:>>>|\$)\s*$/.test(line)) {
+      readyIndex = index;
+    }
+    if (/^❯[ \t]+\S/.test(line)) latestUserPromptIndex = index;
+    if (CLAUDE_FINISHED_BANNER_RE.test(line)) finishedIndex = index;
+    const glyph = classifyClaudeGlyphLine(line, index, position);
+    if (glyph) glyphs.push(glyph);
+    position += line.length + 1;
+  }
+
+  const latestReply = glyphs
+    .filter(
+      (glyph) =>
+        glyph.kind === "reply" && glyph.lineIndex > latestUserPromptIndex,
+    )
+    .at(-1);
+  let active: ClaudeGlyphLine | null = null;
+  for (let index = glyphs.length - 1; index >= 0; index -= 1) {
+    const glyph = glyphs[index];
+    if (
+      glyph.lineIndex <= finishedIndex ||
+      glyph.lineIndex <= latestUserPromptIndex
+    ) break;
+    if (
+      glyph.kind !== "action" &&
+      glyph.kind !== "call" &&
+      glyph.kind !== "unknown"
+    ) continue;
+    if (
+      latestReply &&
+      latestReply.lineIndex > glyph.lineIndex &&
+      readyIndex > latestReply.lineIndex
+    ) break;
+    if (
+      glyph.evidence !== "timed_spinner" &&
+      glyph.kind !== "unknown" &&
+      readyIndex > glyph.lineIndex
+    ) {
+      const hasResult = lines
+        .slice(glyph.lineIndex + 1, readyIndex)
+        .some((row) => /^\s*⎿/.test(row));
+      if (hasResult) break;
+    }
+    active = glyph;
+    break;
+  }
+
+  return { lines, glyphs, readyIndex, latestUserPromptIndex, active };
 }
 
 function hasCodexUpdateMenuMarkers(normalized: string): boolean {
@@ -454,6 +628,14 @@ function isCursorAgentScreen(text: string): boolean {
 }
 
 function detectAgentType(text: string): ParsedScreenAgentType {
+  // A Codex header or boot-panel model is explicit harness identity. Dot
+  // action glyphs and incidental Claude mentions cannot override it.
+  if (
+    CODEX_HEADER_RE.test(text) ||
+    (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text))
+  ) {
+    return "codex";
+  }
   const claudeMarkers = [
     "CLAUDE_COUNTER",
     "bypass permissions on",
@@ -469,15 +651,17 @@ function detectAgentType(text: string): ParsedScreenAgentType {
     HEADER_MODEL_RE.test(text) ||
     MODEL_COST_RE.test(text) ||
     CLAUDE_DONE_LINE_RE.test(text) ||
-    CLAUDE_WORKING_LINE_RE.test(text)
+    text.split("\n").some((line, index) =>
+      ["timed_spinner", "untimed_spinner", "status_banner"].includes(
+        classifyClaudeGlyphLine(line, index, 0)?.evidence ?? "",
+      ),
+    )
   ) {
     return "claude";
   }
 
   if (
-    CODEX_HEADER_RE.test(text) ||
     text.split("\n").some((line) => CODEX_READY_PLACEHOLDER_RE.test(line)) ||
-    (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text)) ||
     hasActiveCodexUpdateMenuScreen(text) ||
     CODEX_WORKING_RE.test(text) ||
     CODEX_RESUME_RE.test(text)
@@ -560,7 +744,9 @@ function isUnsafeDoneSignalContext(lines: string[], index: number): boolean {
 
   if (
     CODEX_WORKING_RE.test(immediateText) ||
-    CLAUDE_WORKING_LINE_RE.test(immediateText) ||
+    immediateTail.some((line, index) =>
+      classifyClaudeGlyphLine(line, index, 0)?.kind === "action",
+    ) ||
     THINKING_RE.test(immediateText) ||
     CURSOR_HEX_RUNNING_RE.test(immediateText) ||
     GEMINI_WORKING_RE.test(immediateText)
@@ -659,7 +845,7 @@ function extractClaudeResponseTail(text: string): string | null {
   for (let i = counterIndex - 1; i >= 0; i--) {
     const line = lines[i];
     if (
-      CLAUDE_WORKING_LINE_RE.test(line) ||
+      classifyClaudeGlyphLine(line, i, 0)?.kind === "action" ||
       CLAUDE_DONE_LINE_RE.test(line) ||
       CLAUDE_COUNTER_RE.test(line) ||
       /^❯(?:\s|$)/.test(line)
@@ -694,57 +880,36 @@ function extractClaudeResponseTail(text: string): string | null {
 }
 
 function extractClaudeReadyResponseTail(
-  text: string,
+  frame: ClaudeFrame,
 ): { response: string; position: number } | null {
-  const lines = text.split("\n");
-  let promptIndex = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (BARE_READY_PROMPT_RE.test(lines[index] ?? "")) {
-      promptIndex = index;
-      break;
-    }
-  }
-  if (promptIndex < 0) return null;
+  const reply = frame.glyphs
+    .filter((glyph) =>
+      glyph.lineIndex < frame.readyIndex && glyph.kind !== "chrome",
+    )
+    .at(-1);
+  if (!reply || reply.kind !== "reply") return null;
 
-  // Claude renders an ordinary completed reply as a glyph-headed block above
-  // its ready composer. The last glyph must be a reply, not an older tool call.
-  for (let index = promptIndex - 1; index >= 0; index -= 1) {
-    const line = lines[index] ?? "";
-    const reply = line.match(/^[⏺●]\s+(.+)$/);
-    if (!reply) continue;
-    if (
-      CLAUDE_GLYPH_ACTION_RE.test(line) ||
-      CLAUDE_GLYPH_TOOL_CALL_RE.test(line) ||
-      CLAUDE_DONE_LINE_RE.test(line) ||
-      CLAUDE_WORKING_LINE_RE.test(line)
-    ) return null;
-
-    const candidateLines = trimBlankEdges([
-      reply[1],
-      ...lines.slice(index + 1, promptIndex).filter((row) =>
-        !RULE_LINE_RE.test(row.trim()) &&
-        footerTokenCount(row) === null &&
-        !/^\s*Token usage:\s*total=/i.test(row) &&
-        !MODEL_COST_RE.test(row) &&
-        !/bypass permissions on/i.test(row) &&
-        !/^\s*⎇\s/.test(row),
-      ),
-    ]);
-    const response = candidateLines.join("\n");
-    return response
-      ? {
-          response,
-          position: lines.slice(0, index).reduce((n, row) => n + row.length + 1, 0),
-        }
-      : null;
-  }
-  return null;
+  const candidateLines = trimBlankEdges([
+    reply.value,
+    ...frame.lines.slice(reply.lineIndex + 1, frame.readyIndex).filter((row) =>
+      !RULE_LINE_RE.test(row.trim()) &&
+      !CLAUDE_FINISHED_BANNER_RE.test(row) &&
+      footerTokenCount(row) === null &&
+      !/^\s*Token usage:\s*total=/i.test(row) &&
+      !MODEL_COST_RE.test(row) &&
+      !/bypass permissions on/i.test(row) &&
+      !/^\s*⎇\s/.test(row),
+    ),
+  ]);
+  const response = candidateLines.join("\n");
+  return response ? { response, position: reply.position } : null;
 }
 
 function parseResponse(
   text: string,
   agentType: ParsedScreenAgentType,
   status: ParsedScreenStatus,
+  claudeFrame?: ClaudeFrame,
 ): string | null {
   const candidates: { response: string; position: number }[] = [];
   for (const match of text.matchAll(RESPONSE_BLOCKS_RE)) {
@@ -759,8 +924,8 @@ function parseResponse(
       candidates.push({ response: counterResponse, position: lastCounter.index });
     }
   }
-  if (agentType === "claude" && status === "idle") {
-    const readyReply = extractClaudeReadyResponseTail(text);
+  if (agentType === "claude" && status === "idle" && claudeFrame) {
+    const readyReply = extractClaudeReadyResponseTail(claudeFrame);
     if (readyReply) candidates.push(readyReply);
   }
   // A submitted question starts a new turn. No earlier response source may
@@ -1098,8 +1263,16 @@ function hasRawApprovalChooser(text: string): boolean {
     }
   }
   if (selectedIndex < 0) return false;
+  let optionStartIndex = selectedIndex;
+  while (
+    optionStartIndex > 0 &&
+    selectedIndex - optionStartIndex < PROMPT_BLOCK_WINDOW_LINES &&
+    PICKER_NUMBERED_OPTION_RE.test(lines[optionStartIndex - 1] ?? "")
+  ) {
+    optionStartIndex -= 1;
+  }
   const optionTexts = lines
-    .slice(selectedIndex, selectedIndex + PROMPT_BLOCK_WINDOW_LINES + 1)
+    .slice(optionStartIndex, selectedIndex + PROMPT_BLOCK_WINDOW_LINES + 1)
     .map(structuredOptionText)
     .filter((option): option is string => option !== null);
   return (
@@ -1240,6 +1413,7 @@ export function isPromptResolutionAuditSafe(
 export function hasVisibleAgentProgress(
   text: string,
   cli?: CliType,
+  claudeFrame?: ClaudeFrame,
 ): boolean {
   const normalized = normalizeText(text);
   if (
@@ -1248,21 +1422,20 @@ export function hasVisibleAgentProgress(
   ) {
     return false;
   }
-  if (TERMINAL_ACTIVITY_LINE_RE.test(normalized)) return true;
   const agentType = cli ?? detectAgentType(normalized);
+  if (agentType === "claude") {
+    const frame = claudeFrame ?? analyzeClaudeFrame(normalized);
+    return frame.active !== null || frame.lines.some((line, index) =>
+      index > frame.readyIndex && TERMINAL_ACTIVITY_LINE_RE.test(line),
+    );
+  }
+  if (TERMINAL_ACTIVITY_LINE_RE.test(normalized)) return true;
   if (THINKING_RE.test(normalized)) return true;
   if (agentType === "codex" && CODEX_WORKING_RE.test(normalized)) return true;
   if (
     agentType === "cursor" &&
     (CURSOR_HEX_RUNNING_RE.test(normalized) ||
       CURSOR_BRAILLE_WORKING_RE.test(normalized))
-  ) {
-    return true;
-  }
-  if (
-    agentType === "claude" &&
-    (CLAUDE_WORKING_LINE_RE.test(normalized) ||
-      latestClaudeSpinnerAction(normalized) !== null)
   ) {
     return true;
   }
@@ -1276,11 +1449,13 @@ export function hasVisibleAgentProgress(
 function hasActiveAgentWork(
   text: string,
   agentType: ParsedScreenAgentType,
+  claudeFrame?: ClaudeFrame,
 ): boolean {
   if (hasApprovalPromptBlock(text)) return false;
-  return (
-    hasVisibleAgentProgress(text, agentType === "unknown" ? undefined : agentType) ||
-    (agentType === "claude" && hasInFlightClaudeTool(text))
+  return hasVisibleAgentProgress(
+    text,
+    agentType === "unknown" ? undefined : agentType,
+    claudeFrame,
   );
 }
 
@@ -1367,7 +1542,8 @@ function parseErrors(text: string): string[] {
     .slice(harnessErrorIndex + 1)
     .some(
       (line) =>
-        ACTION_BLOCK_LINE_RE.test(line) || CLAUDE_WORKING_LINE_RE.test(line),
+        ACTION_BLOCK_LINE_RE.test(line) ||
+        ["action", "call"].includes(classifyClaudeGlyphLine(line, 0, 0)?.kind ?? ""),
     );
   if (harnessErrorLine && !recoveredAfterHarnessError) {
     const summary = harnessErrorLine
@@ -1582,37 +1758,21 @@ function parseCodexActions(text: string): string[] {
   return Array.from(text.matchAll(CODEX_ACTION_RE), (match) => match[1].trim());
 }
 
-function latestClaudeSpinnerAction(text: string): string | null {
-  const lines = text.split("\n").slice(-16);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const action = lines[index]?.match(CLAUDE_ACTIVE_SPINNER_RE)?.[1]?.trim();
-    if (action) return action;
-  }
-  return null;
-}
-
-function hasInFlightClaudeTool(text: string): boolean {
-  const lines = text.split("\n").slice(-16);
-  let actionIndex = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (CLAUDE_GLYPH_ACTION_RE.test(lines[index] ?? "")) {
-      actionIndex = index;
-      break;
-    }
-  }
-  if (actionIndex < 0) return false;
-
-  return !lines.slice(actionIndex + 1).some((line) =>
-    /^\s*(?:❯|>>>|\$|>)\s*$/.test(line) ||
-    CLAUDE_DONE_LINE_RE.test(line) ||
-    CLAUDE_COUNTER_RE.test(line),
-  );
-}
-
 function parseCurrentAction(
   text: string,
   agentType: ParsedScreenAgentType,
+  status: ParsedScreenStatus,
+  claudeFrame?: ClaudeFrame,
 ): string | null {
+  if (agentType === "claude") {
+    if (status !== "working" && status !== "thinking") return null;
+    if (claudeFrame?.active?.evidence === "status_banner") {
+      const next = claudeFrame.lines[claudeFrame.active.lineIndex + 1];
+      const activity = next?.match(CLAUDE_INDENTED_ACTIVITY_RE)?.[1]?.trim();
+      if (activity) return activity;
+    }
+    if (claudeFrame?.active) return claudeFrame.active.value;
+  }
   const codexAction = parseCodexActions(text)
     .filter((action) => CODEX_CURRENT_ACTION_RE.test(action))
     .at(-1);
@@ -1620,25 +1780,15 @@ function parseCurrentAction(
     return codexAction;
   }
 
-  if (agentType === "claude") {
-    const spinnerAction = latestClaudeSpinnerAction(text);
-    if (spinnerAction) return spinnerAction;
-  }
-
   const lines = text.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const glyphAction = lines[index]
-      ?.match(CLAUDE_GLYPH_ACTION_RE)?.[1]
-      ?.trim();
-    if (glyphAction) return glyphAction;
-
     const indentedActivity = lines[index]
       ?.match(CLAUDE_INDENTED_ACTIVITY_RE)?.[1]
       ?.trim();
     if (!indentedActivity) continue;
     const nearbyBanner = lines
       .slice(Math.max(0, index - 2), index)
-      .some((line) => CLAUDE_ACTIVE_BANNER_RE.test(line));
+      .some((line) => classifyClaudeGlyphLine(line, 0, 0)?.evidence === "timed_spinner");
     if (nearbyBanner) return indentedActivity;
   }
   return null;
@@ -1772,6 +1922,7 @@ function inferStatus(
   doneSignal: string | null,
   errors: string[],
   agentType: ParsedScreenAgentType,
+  claudeFrame?: ClaudeFrame,
 ): ParsedScreenStatus {
   const lines = text
     .split("\n")
@@ -1805,7 +1956,12 @@ function inferStatus(
     return "draft_pending";
   }
 
-  if (hasActiveAgentWork(text, agentType)) {
+  if (hasActiveAgentWork(text, agentType, claudeFrame)) {
+    if (agentType === "claude") {
+      return /^Thinking\b/i.test(claudeFrame?.active?.value ?? "")
+        ? "thinking"
+        : "working";
+    }
     return THINKING_RE.test(text) ? "thinking" : "working";
   }
 
@@ -1818,6 +1974,7 @@ function inferStatus(
   }
 
   if (
+    errors.length === 0 &&
     hasPendingComposerLine(text, agentType) &&
     !hasOsShellPrompt(text) &&
     hasPendingComposerDraft(text, agentType)
@@ -1842,19 +1999,8 @@ function inferStatus(
     return "done";
   }
 
-  // AIDEV-NOTE: do NOT add "bypass permissions on" here — it is a PERSISTENT
-  // status-bar footer shown in both ready AND working states, so it made a
-  // ready claude composer parse as "working", wedging spawn_agent at "booting"
-  // until wait_for(ready) timed out (~15s). "esc to interrupt" + the
-  // CLAUDE_WORKING_LINE_RE above are the real working signals.
-  const workingMarkers = [" /loop"];
-  if (
-    workingMarkers.some((marker) =>
-      joined.toLowerCase().includes(marker.toLowerCase()),
-    )
-  ) {
-    return "working";
-  }
+  // AIDEV-NOTE: persistent footer text and historical transcript content
+  // cannot establish current Claude activity. The glyph frame above does.
 
   if (
     agentType === "gemini" &&
@@ -1909,6 +2055,7 @@ function hasPendingComposerDraft(
       (row) =>
         /^\s{2,}\S/.test(row) ||
         RULE_LINE_RE.test(row.trim()) ||
+        (agentType === "claude" && CLAUDE_BRANCH_TOOL_FOOTER_RE.test(row)) ||
         (agentType === "codex" && CODEX_MODEL_FOOTER_RE.test(row)) ||
         /bypass permissions on|\/ commands · @ files|% left/i.test(row),
     );
@@ -1919,6 +2066,7 @@ function hasPendingComposerDraft(
 export function parseScreen(text: string): ParsedScreenResult {
   const normalized = normalizeText(text);
   const agentType = detectAgentType(normalized);
+  const claudeFrame = agentType === "claude" ? analyzeClaudeFrame(normalized) : undefined;
   let doneSignal = parseDoneSignal(normalized);
   if (agentType === "cursor" && doneSignal === null) {
     doneSignal = parseCursorDoneSignal(normalized);
@@ -1961,7 +2109,7 @@ export function parseScreen(text: string): ParsedScreenResult {
     actions.push(...parseCodexActions(normalized));
   }
 
-  const status = inferStatus(normalized, doneSignal, errors, agentType);
+  const status = inferStatus(normalized, doneSignal, errors, agentType, claudeFrame);
   const cliUpdateState = parseCliUpdateState(normalized, agentType);
   const honesty = pauseHonestyFields("inferred");
   const result: ParsedScreenResult = {
@@ -1972,8 +2120,8 @@ export function parseScreen(text: string): ParsedScreenResult {
     context_pct: contextPct,
     context_window: contextWindow,
     done_signal: doneSignal,
-    response: parseResponse(normalized, agentType, status),
-    current_action: parseCurrentAction(normalized, agentType),
+    response: parseResponse(normalized, agentType, status, claudeFrame),
+    current_action: parseCurrentAction(normalized, agentType, status, claudeFrame),
     errors,
     model,
     cost,
