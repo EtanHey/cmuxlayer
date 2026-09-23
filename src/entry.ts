@@ -75,6 +75,7 @@ async function probeEntryCmuxSocket(
 ): Promise<SocketProbeResult> {
   const candidates = candidateSocketPathsForOpts({
     socketPath: env.CMUX_SOCKET_PATH?.trim() || undefined,
+    env,
   });
   let lastResult: SocketProbeResult = {
     usable: false,
@@ -400,8 +401,12 @@ export async function startInProcessRuntime(
 
   ensureNodeMaxOldSpaceEnv();
   installHeapGuard();
-  const client = await createCmuxClient();
   const runtimeEnv = opts.env ?? process.env;
+  const client = await createCmuxClient({
+    socketPath: runtimeEnv.CMUX_SOCKET_PATH?.trim() || undefined,
+    capability: runtimeEnv.CMUX_SOCKET_CAPABILITY,
+    env: runtimeEnv,
+  });
   const explicitStateDir = runtimeEnv.CMUXLAYER_STATE_DIR?.trim();
   const rawReportWatchDeadlineMs =
     runtimeEnv.CMUXLAYER_REPORT_WATCH_DEADLINE_MS?.trim();
@@ -540,7 +545,7 @@ export async function runDaemonFirstEntry(
     logger.error(`[cmuxlayer] WARNING: ${warning}`);
     return {
       mode: "in-process",
-      server: await startInProcess({ fallbackWarnings: [warning] }),
+      server: await startInProcess({ fallbackWarnings: [warning], env }),
       fallbackWarnings: [warning],
     };
   };
@@ -576,10 +581,12 @@ export async function runDaemonFirstEntry(
   }
 
   const cmuxProbe = await probeCmuxSocket();
-  if (cmuxProbe.denied_reason === "access-control") {
+  if (!cmuxProbe.usable) {
     return fallback(
-      `daemon autostart suppressed because this proxy is denied by cmux at ${cmuxProbe.socketPath}; ` +
-        "daemon must be spawned from inside a cmux pane",
+      cmuxProbe.denied_reason === "access-control"
+        ? `daemon autostart suppressed because this proxy is denied by cmux at ${cmuxProbe.socketPath}; ` +
+            "daemon must be spawned from inside a cmux pane"
+        : `cmux is unavailable at ${cmuxProbe.socketPath}; daemon autostart suppressed until a cmux pane can own it`,
     );
   }
 
