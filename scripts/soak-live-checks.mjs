@@ -132,9 +132,10 @@ export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
   }
   const a = record(full.parsed);
   const b = record(parsedOnly.parsed);
+  const validTokenCount = (count) => count === null || (Number.isFinite(count) && count >= 0);
   if (![a, b].every((parsed) => screenStatuses.has(parsed.status) &&
     controlStates.has(parsed.control_state) &&
-    Number.isFinite(parsed.token_count) && parsed.token_count >= 0)) {
+    validTokenCount(parsed.token_count))) {
     return ["parsed_read_unavailable"];
   }
   const failures = [];
@@ -143,7 +144,7 @@ export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
   if (a.control_state !== b.control_state) failures.push("parsed_control_state_mismatch");
   const countA = a.token_count;
   const countB = b.token_count;
-  if (Number.isFinite(countA) && Number.isFinite(countB)) {
+  if (countA !== null && countB !== null) {
     if (Math.abs(countA - countB) > Math.max(512, Math.max(countA, countB) * 0.02)) {
       failures.push("parsed_token_count_drift");
     }

@@ -160,3 +160,17 @@ describe("live soak invariant checkers", () => {
     expect(checkParsedReadAgreement(unknown, unknown, 100)).toContain("parsed_read_unavailable");
   });
 });
+
+it("matches valid null token counts before usage metadata appears", () => {
+  const read = { ok: true, isError: false, parsed: {
+    status: "working", control_state: "busy", token_count: null,
+  } };
+  expect(checkParsedReadAgreement(read, read, 100)).toEqual([]);
+  const withCount = { ...read, parsed: { ...read.parsed, token_count: 42 } };
+  expect(checkParsedReadAgreement(read, withCount, 100)).toContain("parsed_token_count_drift");
+  expect(checkParsedReadAgreement(withCount, read, 100)).toContain("parsed_token_count_drift");
+  for (const token_count of [undefined, Number.NaN, -1]) {
+    const malformed = { ...read, parsed: { ...read.parsed, token_count } };
+    expect(checkParsedReadAgreement(malformed, malformed, 100)).toContain("parsed_read_unavailable");
+  }
+});
