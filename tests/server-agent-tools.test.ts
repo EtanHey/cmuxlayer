@@ -13205,6 +13205,35 @@ codex>
     );
   });
 
+  it("refuses raw force close of a managed ref when topology fails", async () => {
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:230", workspace_ref: "workspace:1" },
+    ]);
+    (routeClient.client as any).listWindows = vi.fn().mockResolvedValue({
+      windows: [{ ref: "window:bad", workspace_count: 1 }],
+    });
+    routeClient.client.listWorkspaces.mockRejectedValue(new Error("window.list timed out"));
+    const record = makeServerAgentRecord({
+      agent_id: "x1-managed-ref",
+      surface_id: "surface:230",
+      surface_uuid: null,
+      surface_observer_id: null,
+      workspace_id: "workspace:1",
+      state: "done",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      surfaceObserverEpochProvider: () => null,
+      surfaceObserverOwnerIdProvider: () => null,
+    });
+    const result = await registeredTestTool(server, "close_surface").handler(
+      { scope: "surface", surface: "surface:230", force: true }, {} as any,
+    );
+    expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+  });
+
   it("does not close an anonymous raw ref when every window read fails", async () => {
     const routeClient = makeUuidRouteClient([
       { ref: "surface:230", workspace_ref: "workspace:1" },

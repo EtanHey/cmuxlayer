@@ -692,9 +692,14 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
     // wrong, and independent of which scope was used. Driven through
     // scope:"surface" because that is where the record marking lives;
     // scope:"agent" routes into the same code.
-    const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN });
-    const server = makeServer(exec);
-    const record = seedAgent(server, { state: "working" });
+    // A raw surface close must use a proven stable binding.
+    const exec = makeExec({ screen: () => IDLE_CLAUDE_SCREEN, witnessSurface: true });
+    const server = makeServer(exec, true);
+    const record = seedAgent(server, {
+      state: "working",
+      surface_uuid: SURFACE_UUID,
+      surface_observer_id: "cmux:test",
+    });
 
     const closeRes = (await getTool(server, "close_surface").handler(
       { scope: "surface", surface: SURFACE, force: true },

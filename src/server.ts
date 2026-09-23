@@ -9097,15 +9097,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       (client as typeof client & { surfaceIdentityMode?: string })
         .surfaceIdentityMode === "ref_only";
     const topologyObserverEpoch = context.surfaceObserverEpoch;
-    const managedRefOnlyBinding = !topologyObserverEpoch &&
-      stateMgr.listStates().filter((record) =>
-        record.surface_id === requestedSurface && !record.surface_uuid
-      ).length === 1;
-    // Preserve the pre-UUID managed close contract only when no stable
-    // observer exists. An anonymous raw ref cannot use this exception.
+    // Only the internal agent-scoped delegate has an explicit managed ID.
+    // A raw caller cannot borrow a registry record's mutable ref as proof.
     const allowRefOnlyClose = refOnlyConnector ||
-      (!topologyObserverEpoch &&
-        (trustedAgentScopedClose || managedRefOnlyBinding));
+      (!topologyObserverEpoch && trustedAgentScopedClose);
     const topology = await collectSurfaceTopology();
     const withSurfaceRemap = (
       route: Omit<RawSurfaceMutationRoute, "remapped_from" | "remapped_to">,
