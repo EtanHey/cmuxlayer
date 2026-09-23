@@ -39,6 +39,91 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("treats the finished 0.4.81 Claude proof pane as ready and extracts its reply", () => {
+    // Reconstructed from the installed read_screen preview and the proof
+    // worker's final transcript; the old surface ref is now stale.
+    const parsed = parseScreen(readFixture("live/claude-0481-finished-exit-zero.txt"));
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.response).toBe(
+      [
+        "The probe ran and exited with code 0, and the report is written.",
+        "",
+        "1. Probe output: PROBE_FINISHED after about 36.75 seconds.",
+        "2. Model: Opus 5.5 (1M context).",
+        "3. Mailbox: the engine mailbox tail is running.",
+        "4. Report: written to /Users/etanheyman/.cmux/agents/cmuxlayerClaude-50bf0ce5/report.md.",
+        "   Its last line is DONE_CMUXLAYERCLAUDE_50BF0CE5.",
+        "",
+        "I changed no source, spawned no agents, used no browser or GUI, sent no messages and ran",
+        "no tests. I'm making no claim about the release or delivery; the parent checks those",
+        "receipts.",
+        "",
+        "PROBE_FINISHED",
+      ].join("\n"),
+    );
+  });
+
+  it("does not present a successful Claude tool result as an assistant reply", () => {
+    const parsed = parseScreen(`Claude Code
+⏺ Bash(node -e 'process.exit(0)')
+  ⎿  Exit code 0
+     tool output only
+❯
+  bypass permissions on`);
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.response).toBeNull();
+  });
+
+  it("does not present an unlisted MCP call and its output as a Claude reply", () => {
+    const parsed = parseScreen(`Claude Code
+⏺ mcp__server__lookup({"key":"probe"})
+  ⎿  {"private":"tool output"}
+❯`);
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.response).toBeNull();
+  });
+
+  it("prefers a newer Claude ready reply over a stale counter response", () => {
+    const parsed = parseScreen(`Claude Code
+⏺ Old reply
+CLAUDE_COUNTER: 91
+❯
+⏺ New reply from the latest turn
+PROBE_FINISHED
+❯`);
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.response).toBe("New reply from the latest turn\nPROBE_FINISHED");
+  });
+
+  it("bounds a counter fallback to the latest Claude turn without a surviving spinner", () => {
+    const parsed = parseScreen(`Claude Code
+Old reply
+CLAUDE_COUNTER: 1
+❯ question
+New reply
+CLAUDE_COUNTER: 2`);
+
+    expect(parsed.done_signal).toBe("CLAUDE_COUNTER:2");
+    expect(parsed.response).toBe("New reply");
+  });
+
+  it("keeps a nonzero terminal exit visible as an error", () => {
+    const parsed = parseScreen("Claude Code\n⏺ Bash(false)\n  ⎿  Exit code 1\n❯");
+
+    expect(parsed.errors).toContain("exit_code:1");
+    expect(parsed.status).toBe("frozen");
+  });
+
   it("keeps a current Codex draft dirty despite older working output", () => {
     const parsed = parseScreen("Codex\nWorking (0m 12s · esc to interrupt)\n› Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer");
     expect(parsed.status).toBe("draft_pending");
