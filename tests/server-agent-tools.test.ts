@@ -13283,6 +13283,167 @@ codex>
     expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
   });
 
+  it("close_surface force closes an owned UUID surface when recorded pid identity is unknown", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const witness = {
+      ref: "surface:witness",
+      id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      workspace_ref: "workspace:1",
+    };
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:389", id: stableUuid, workspace_ref: "workspace:1" },
+      witness,
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-0e6715bd",
+      surface_id: "surface:389",
+      surface_uuid: stableUuid,
+      surface_observer_id: "cmux:/tmp/current.sock",
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "claude",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      pid: 16431,
+      pid_registered_at: undefined,
+      task_done_detected_at: null,
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    let surfaceClosed = false;
+    routeClient.client.closeSurface.mockImplementation(async (surface) => {
+      expect(surface).toBe("surface:389");
+      surfaceClosed = true;
+      routeClient.setLiveSurfaces([witness]);
+    });
+    const realKill = process.kill.bind(process);
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, signal) => {
+      if (pid !== 16431) return realKill(pid, signal);
+      signals.push(signal ?? 0);
+      if (signal === "SIGKILL") throw new Error("unknown pid must not receive SIGKILL");
+      if (surfaceClosed) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      return true;
+    }) as typeof process.kill);
+
+    try {
+      const directStop = await registeredTestTool(server, "stop_agent").handler(
+        { agent_id: record.agent_id, force: true },
+        {} as any,
+      );
+      expect(directStop.isError).toBe(true);
+      expect(parseToolResult(directStop).error).toMatch(/identity is unknown/i);
+      expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+
+      const result = await registeredTestTool(server, "close_surface").handler(
+        { scope: "agent", agent_id: record.agent_id, force: true },
+        {} as any,
+      );
+
+      expect(result.isError).toBeFalsy();
+      expect(parseToolResult(result)).toMatchObject({
+        agent_stopped: true,
+        surface_closed: true,
+        surface: "surface:389",
+      });
+      expect(routeClient.client.closeSurface).toHaveBeenCalledWith(
+        "surface:389",
+        expect.objectContaining({ workspace: "workspace:1" }),
+      );
+      expect(signals).not.toContain("SIGKILL");
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("close_surface force keeps the observer guard for an unowned UUID surface", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:389", id: stableUuid, workspace_ref: "workspace:1" },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-foreign-389",
+      surface_id: "surface:389",
+      surface_uuid: stableUuid,
+      surface_observer_id: "cmux:/tmp/foreign.sock",
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "claude",
+      pid: 16431,
+      pid_registered_at: undefined,
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const realKill = process.kill.bind(process);
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, signal) =>
+      pid === 16431 ? true : realKill(pid, signal)
+    ) as typeof process.kill);
+    try {
+      const result = await registeredTestTool(server, "close_surface").handler(
+        { scope: "agent", agent_id: record.agent_id, force: true },
+        {} as any,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(parseToolResult(result)).toMatchObject({
+        agent_stopped: false,
+        surface_closed: false,
+      });
+      expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("close_surface reports a closed UUID surface without claiming an unproven process stopped", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:389", id: stableUuid, workspace_ref: "workspace:1" },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-unknown-process",
+      surface_id: "surface:389",
+      surface_uuid: stableUuid,
+      surface_observer_id: "cmux:/tmp/current.sock",
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "claude",
+      pid: 16431,
+      pid_registered_at: undefined,
+    });
+    const priorTimeout = process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS;
+    process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS = "100";
+    try {
+      const server = await createUuidRouteServer(routeClient, record);
+      routeClient.client.closeSurface.mockImplementation(async () => {
+        routeClient.setLiveSurfaces([]);
+      });
+      const realKill = process.kill.bind(process);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, signal) =>
+        pid === 16431 ? true : realKill(pid, signal)
+      ) as typeof process.kill);
+      try {
+        const result = await registeredTestTool(server, "close_surface").handler(
+          { scope: "agent", agent_id: record.agent_id, force: true },
+          {} as any,
+        );
+
+        expect(result.isError).toBe(true);
+        expect(parseToolResult(result)).toMatchObject({
+          agent_stopped: false,
+          surface_closed: true,
+          remedy: expect.stringMatching(/verify.*pid/i),
+        });
+        expect(routeClient.client.closeSurface).toHaveBeenCalledTimes(1);
+      } finally {
+        killSpy.mockRestore();
+      }
+    } finally {
+      if (priorTimeout === undefined) {
+        delete process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS;
+      } else {
+        process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS = priorTimeout;
+      }
+    }
+  });
+
   it("send_to preserves a re-resolve error before any terminal mutation", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([
