@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   createServer as createServerImpl,
   createServerContext as createServerContextImpl,
@@ -9691,12 +9692,12 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent refuses the Codex update menu without pressing a pre-prompt Return", async () => {
+  it("spawn_agent deliberately skips the reconstructed Codex update menu before submitting once", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-state");
     const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu.md");
-    const prompt = "boot after accepting update";
+    const prompt = "boot after skipping update";
     const fixture = JSON.parse(
       readFileSync(
         new URL(
@@ -9725,9 +9726,9 @@ describe("tool handler integration", () => {
     let pendingBootText = "";
     let bootPromptSubmitted = false;
     let readsAfterFirstLaunch = 0;
-    let updateReads = 0;
     let updateMenuSeen = false;
     let surfaceCreated = false;
+    const stableSurfaceId = "11111111-2222-4333-8444-555555555555";
     const sentTexts: string[] = [];
     const sentKeys: string[] = [];
     const updateMenuKeys: string[] = [];
@@ -9765,7 +9766,13 @@ describe("tool handler integration", () => {
       }
       if (args.includes("list-pane-surfaces")) {
         return {
-          stdout: JSON.stringify(spawnUpdatePaneSurfaces()),
+          stdout: JSON.stringify({
+            ...spawnUpdatePaneSurfaces(),
+            surfaces: [{
+              ...spawnUpdatePaneSurfaces().surfaces[0],
+              id: stableSurfaceId,
+            }],
+          }),
           stderr: "",
         };
       }
@@ -9775,6 +9782,7 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             workspace: "workspace:1",
             surface: "surface:2",
+            surface_id: stableSurfaceId,
             pane: "pane:1",
             title: "New",
             type: "terminal",
@@ -9790,10 +9798,7 @@ describe("tool handler integration", () => {
         }
         if (updateMenuSeen && !updateAccepted) {
           updateMenuKeys.push(key);
-          if (
-            key === "return" &&
-            !updateMenuKeys.slice(0, -1).includes("down")
-          ) {
+          if (updateMenuKeys.join(",") === "down,down,return") {
             updateAccepted = true;
           }
         }
@@ -9832,13 +9837,7 @@ describe("tool handler integration", () => {
             updateMenuSeen = true;
             text = fixture.screens.interactive_update;
           }
-        } else if (launcherSends === 1 && updateAccepted) {
-          updateReads += 1;
-          text =
-            updateReads === 1
-              ? fixture.screens.updating
-              : fixture.screens.update_complete;
-        } else if (launcherSends >= 2 && !promptSent) {
+        } else if (launcherSends === 1 && updateAccepted && !promptSent) {
           text = fixture.screens.ready;
         } else if (promptSent) {
           text = bootPromptSubmitted
@@ -9899,12 +9898,22 @@ describe("tool handler integration", () => {
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
-      expect(parsed.ok).toBe(false);
-      expect(parsed.error_code).toBe("blocked_by_update_menu");
-      expect(updateAccepted).toBe(false);
-      expect(updateMenuKeys).toEqual([]);
+      if (!parsed.ok) {
+        expect(parsed.error_code).toBe("blocked_by_update_menu");
+      }
+      expect(parsed.ok).toBe(true);
+      expect(parsed.update_menu_skipped).toBe(true);
+      expect(parsed.update_menu_text_hash).toBe(
+        createHash("sha256")
+          .update(fixture.screens.interactive_update)
+          .digest("hex"),
+      );
+      expect(updateAccepted).toBe(true);
+      expect(updateMenuKeys).toEqual(["down", "down", "return"]);
       expect(launcherSends).toBe(1);
-      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
+      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
+      expect(bootPromptSubmitted).toBe(true);
+      expect(sentKeys.filter((key) => key === "return")).toHaveLength(3);
     } finally {
       if (previousAllowModel === undefined) {
         delete process.env.REPOGOLEM_ALLOW_MODEL;
