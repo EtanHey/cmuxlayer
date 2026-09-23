@@ -8609,6 +8609,54 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("list_agents leaves the lifecycle lock free during fresh screen discovery", async () => {
+    const stableUuid = "51111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([{
+      ref: "surface:list-slow",
+      id: stableUuid,
+      workspace_ref: "workspace:1",
+    }]);
+    const record = makeServerAgentRecord({
+      agent_id: "list-slow-agent",
+      surface_id: "surface:list-slow",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "working",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    let releaseRead!: () => void;
+    const readHeld = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let signalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    routeClient.client.readScreen.mockImplementation(async (surface: string) => {
+      signalRead();
+      await readHeld;
+      return { surface, text: "OpenAI Codex\nWorking", lines: 20, scrollback_used: false };
+    });
+
+    const engine = testLifecycleEngine(server);
+    const list = registeredTestTool(server, "list_agents").handler({ max_age_ms: 0 }, {});
+    await readStarted;
+    let waiterRan = false;
+    const waiter = engine.runLifecycleMutation(
+      async () => {
+        waiterRan = true;
+        const updated = engine.stateMgr.updateRecord("list-slow-agent", {
+          task_summary: "newer lifecycle state",
+        });
+        engine.getRegistry().set(updated.agent_id, updated);
+      },
+      { label: "interactive-test" },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const ranBeforeReadCompleted = waiterRan;
+    releaseRead();
+    await Promise.all([list, waiter]);
+    expect(ranBeforeReadCompleted).toBe(true);
+    expect(routeClient.client.readScreen.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(engine.getAgentState("list-slow-agent")?.task_summary).toBe("newer lifecycle state");
+  });
+
   it("list_agents keeps a corrupt legacy repo visible and raw-resumable", async () => {
     const routeClient = makeUuidRouteClient([
       {

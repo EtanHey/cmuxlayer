@@ -5,6 +5,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { scheduler } from "node:timers/promises";
 import {
   existsSync,
   mkdirSync,
@@ -1064,6 +1065,9 @@ type SweepTimingInput = number | Partial<SweepTimingOptions>;
 
 interface SweepAgentContext {
   sweep?: boolean;
+  withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>;
+  invalidated?: boolean;
+  sweepValidity?: { current: boolean };
   screen?: Promise<CmuxReadScreenResult>;
   route?: Promise<AgentRoute>;
   surfaceTopology?: SurfaceTopologySnapshot | null;
@@ -1077,6 +1081,12 @@ interface SweepMutationSkipAccounting {
 }
 
 class PlacementSurfaceBindingError extends Error {}
+
+class LifecycleLockReacquireError extends Error {
+  constructor(cause: unknown) {
+    super("sweep could not reacquire lifecycle lock after I/O", { cause });
+  }
+}
 
 class PlacementTimeoutError extends PlacementSurfaceBindingError {
   readonly code = "placement_timeout";
@@ -1852,6 +1862,7 @@ export class AgentEngine {
   private sweepSkippedMutations = 0;
   private sweepSkippedReason: string | null = null;
   private sweepYielded = 0;
+  private sweepTelemetrySeq = 0;
   private sweepTopologyGeneration = 0;
   private lifecycleLockTimeouts = 0;
   private lifecycleLockLastTimeout: LifecycleLockTimeoutRecord | null = null;
@@ -4234,10 +4245,44 @@ export class AgentEngine {
         this.client.supportsStableSurfaceReads && route.surface_uuid
           ? route.surface_uuid
           : route.surface_id;
-      const screen = await this.client.readScreen(readTarget, {
-        lines: BOOT_SESSION_CAPTURE_LINES,
-        workspace: route.workspace_id ?? undefined,
-      });
+      const versionBeforeRead = this.stateMgr.readState(agent.agent_id)?.version;
+      const acquisitionBeforeRead = this.lifecycleLockAcquisitionSeq;
+      const read = () =>
+        this.client.readScreen(readTarget, {
+          lines: BOOT_SESSION_CAPTURE_LINES,
+          workspace: route.workspace_id ?? undefined,
+        });
+      let screen: CmuxReadScreenResult;
+      try {
+        screen = ctx.withUnlocked ? await ctx.withUnlocked(read) : await read();
+      } catch (error) {
+        if (
+          error instanceof LifecycleLockReacquireError ||
+          (ctx.sweep &&
+            (this.lifecycleLockAcquisitionSeq !==
+              acquisitionBeforeRead + (ctx.withUnlocked ? 1 : 0) ||
+              this.stateMgr.readState(agent.agent_id)?.version !==
+                versionBeforeRead))
+        ) {
+          ctx.invalidated = true;
+          if (ctx.sweepValidity) ctx.sweepValidity.current = false;
+        }
+        throw error;
+      }
+      if (
+        ctx.sweep &&
+        (this.lifecycleLockAcquisitionSeq !==
+          acquisitionBeforeRead + (ctx.withUnlocked ? 1 : 0) ||
+          this.stateMgr.readState(agent.agent_id)?.version !==
+            versionBeforeRead ||
+          !this.assertSweepInputCurrent(ctx))
+      ) {
+        ctx.invalidated = true;
+        if (ctx.sweepValidity) ctx.sweepValidity.current = false;
+        throw new Error(
+          `Agent ${agent.agent_id} changed during sweep screen read`,
+        );
+      }
       const observedSurface = screen.surface?.trim();
       ctx.observedSurfaceRef = observedSurface || null;
       if (!this.client.supportsStableSurfaceReads) {
@@ -6169,7 +6214,9 @@ export class AgentEngine {
     const topology = ctx.surfaceTopology ?? null;
     const transport = getTransportHealth(this.client);
     const reason =
-      topology?.complete !== true || topology.surfaces.length === 0
+      ctx.invalidated || ctx.sweepValidity?.current === false
+        ? "agent_changed_during_read"
+        : topology?.complete !== true || topology.surfaces.length === 0
         ? "topology_incomplete"
         : !this.isSweepTopologyObserverCurrent(topology)
           ? "epoch_changed"
@@ -6777,6 +6824,17 @@ export class AgentEngine {
         if (!this.assertSweepInputCurrent(sweepCtx)) return;
         const heartbeat = this.stateMgr.updateRecord(agentId, {});
         this.registry.set(agentId, heartbeat);
+      }
+      if (sweepContext.sweep) {
+        // A sidebar pass can spend seconds on each agent's screen and route.
+        // Finish this agent under the lock, then let a queued lifecycle caller
+        // proceed; the next sweep will rebuild the full sidebar from fresh rows.
+        if (this.lifecycleLockQueueDepth > 0) return;
+        // Resolved I/O promises otherwise chain through microtasks for the
+        // whole fleet, delaying inbound socket reads and timers until the sweep
+        // ends. One event-loop turn between agents admits client requests.
+        await scheduler.yield();
+        if (this.lifecycleLockQueueDepth > 0) return;
       }
     }
 
@@ -7563,88 +7621,107 @@ export class AgentEngine {
    * by a hold guard if the operation never settles at all.
    */
   async runLifecycleMutation<T>(
-    operation: () => Promise<T>,
+    operation: (
+      withUnlocked: <U>(work: () => Promise<U>) => Promise<U>,
+    ) => Promise<T>,
     opts?: { label?: string },
   ): Promise<T> {
     const label = opts?.label ?? "lifecycle-mutation";
-    const previous = this.lifecycleMutationTail;
-    let released = false;
-    let resolveTail!: () => void;
-    const tail = new Promise<void>((resolve) => {
-      resolveTail = resolve;
-    });
-    const release = () => {
-      if (released) return;
-      released = true;
-      resolveTail();
-    };
-    this.lifecycleMutationTail = tail;
-
-    const waitStartedAt = Date.now();
-    this.lifecycleLockQueueDepth += 1;
-    const benchmarkSweepStatePath =
-      process.env.CMUXLAYER_BENCH_SWEEP_HOLD_STATE?.trim() ?? "";
-    if (benchmarkSweepStatePath && label === "close-agent") {
-      try {
-        const benchmarkState = JSON.parse(
-          readFileSync(benchmarkSweepStatePath, "utf8"),
-        ) as Record<string, unknown>;
-        if (benchmarkState.state === "held") {
-          writeFileSync(
-            benchmarkSweepStatePath,
-            JSON.stringify({ ...benchmarkState, waiter: label }),
-          );
-        }
-      } catch {
-        // Benchmark-only evidence may race its own atomic state transitions.
-      }
-    }
-    try {
-      await this.awaitLifecycleLock(previous, label, waitStartedAt);
-    } catch (error) {
-      // #530 review P1-1: resolving our own slot HERE broke mutual exclusion —
-      // the next caller chained off an already-resolved promise and ran
-      // concurrently with the live holder (proven: a concurrent list-agents
-      // evict racing a sweep writeState resurrected a durably deleted agent
-      // dir). Chain the abandoned slot behind `previous` instead, so the queue
-      // still advances but only once the real holder is done. The hold guard
-      // is now the ONLY liveness path past a holder that never settles.
-      void previous.then(release, release);
-      throw error;
-    } finally {
-      this.lifecycleLockQueueDepth = Math.max(
-        0,
-        this.lifecycleLockQueueDepth - 1,
-      );
-    }
-
-    const acquisitionId = ++this.lifecycleLockAcquisitionSeq;
-    this.lifecycleLockHolder = label;
-    this.lifecycleLockAcquisitionId = acquisitionId;
-    this.lifecycleLockAcquiredAtMs = Date.now();
-    const holdGuard =
-      this.lifecycleLockHoldTimeoutMs > 0
-        ? setTimeout(() => {
-            if (released) return;
-            this.lifecycleLockForcedReleases += 1;
-            console.error(
-              `[cmuxlayer] lifecycle lock force-released after ${this.lifecycleLockHoldTimeoutMs}ms; holder="${label}" never settled`,
+    let releaseHeld: (() => void) | null = null;
+    const acquire = async (): Promise<void> => {
+      const previous = this.lifecycleMutationTail;
+      let released = false;
+      let resolveTail!: () => void;
+      const tail = new Promise<void>((resolve) => {
+        resolveTail = resolve;
+      });
+      const release = () => {
+        if (released) return;
+        released = true;
+        resolveTail();
+      };
+      this.lifecycleMutationTail = tail;
+      const waitStartedAt = Date.now();
+      this.lifecycleLockQueueDepth += 1;
+      const benchmarkSweepStatePath =
+        process.env.CMUXLAYER_BENCH_SWEEP_HOLD_STATE?.trim() ?? "";
+      if (benchmarkSweepStatePath && label === "close-agent") {
+        try {
+          const benchmarkState = JSON.parse(
+            readFileSync(benchmarkSweepStatePath, "utf8"),
+          ) as Record<string, unknown>;
+          if (benchmarkState.state === "held") {
+            writeFileSync(
+              benchmarkSweepStatePath,
+              JSON.stringify({ ...benchmarkState, waiter: label }),
             );
-            release();
-          }, this.lifecycleLockHoldTimeoutMs)
-        : null;
-    holdGuard?.unref?.();
-
-    try {
-      return await operation();
-    } finally {
-      if (holdGuard) clearTimeout(holdGuard);
-      if (this.lifecycleLockAcquisitionId === acquisitionId) {
-        this.lifecycleLockHolder = null;
-        this.lifecycleLockAcquisitionId = null;
-        this.lifecycleLockAcquiredAtMs = null;
+          }
+        } catch {
+          // Benchmark-only evidence may race its own atomic state transitions.
+        }
       }
-      release();
+      try {
+        await this.awaitLifecycleLock(previous, label, waitStartedAt);
+      } catch (error) {
+        // A timed-out slot must remain chained behind its live predecessor.
+        void previous.then(release, release);
+        throw error;
+      } finally {
+        this.lifecycleLockQueueDepth = Math.max(
+          0,
+          this.lifecycleLockQueueDepth - 1,
+        );
+      }
+
+      const acquisitionId = ++this.lifecycleLockAcquisitionSeq;
+      this.lifecycleLockHolder = label;
+      this.lifecycleLockAcquisitionId = acquisitionId;
+      this.lifecycleLockAcquiredAtMs = Date.now();
+      const holdGuard =
+        this.lifecycleLockHoldTimeoutMs > 0
+          ? setTimeout(() => {
+              if (released) return;
+              this.lifecycleLockForcedReleases += 1;
+              console.error(
+                `[cmuxlayer] lifecycle lock force-released after ${this.lifecycleLockHoldTimeoutMs}ms; holder="${label}" never settled`,
+              );
+              release();
+            }, this.lifecycleLockHoldTimeoutMs)
+          : null;
+      holdGuard?.unref?.();
+      releaseHeld = () => {
+        if (holdGuard) clearTimeout(holdGuard);
+        if (this.lifecycleLockAcquisitionId === acquisitionId) {
+          this.lifecycleLockHolder = null;
+          this.lifecycleLockAcquisitionId = null;
+          this.lifecycleLockAcquiredAtMs = null;
+        }
+        release();
+        releaseHeld = null;
+      };
+    };
+
+    await acquire();
+    const withUnlocked = async <U>(work: () => Promise<U>): Promise<U> => {
+      if (!releaseHeld) throw new Error("lifecycle lock is not held");
+      releaseHeld();
+      try {
+        return await work();
+      } finally {
+        // Enqueue only after the I/O finishes: callers arriving during it must
+        // be able to acquire the genuinely free lock without waiting on this read.
+        try {
+          await acquire();
+        } catch (error) {
+          throw new LifecycleLockReacquireError(error);
+        }
+      }
+    };
+    try {
+      return await operation(withUnlocked);
+    } finally {
+      const release = releaseHeld as (() => void) | null;
+      release?.();
     }
   }
 
@@ -7714,10 +7791,15 @@ export class AgentEngine {
     };
   }
 
+  /** Internal revision for rejecting I/O snapshots after the lock was lent. */
+  lifecycleLockRevision(): number {
+    return this.lifecycleLockAcquisitionSeq;
+  }
+
   async runSweep(): Promise<void> {
-    await this.runLifecycleMutation(async () => {
+    await this.runLifecycleMutation(async (withUnlocked) => {
       await this.holdBenchmarkSweepIfArmed();
-      await this.runSweepOnce();
+      await this.runSweepOnce(withUnlocked);
     }, {
       label: "sweep",
     });
@@ -8752,14 +8834,51 @@ export class AgentEngine {
     timer.unref?.();
   }
 
-  private async runSweepOnce(): Promise<void> {
+  private async runSweepOnce(
+    withUnlocked: <T>(operation: () => Promise<T>) => Promise<T>,
+  ): Promise<void> {
     this.sweepBackgroundProcessSnapshot = null;
     const timings: Record<string, number> = {};
     const sweepStartedAt = Date.now();
-    const time = async <T>(name: string, operation: () => Promise<T>) => {
+    const sweepId = ++this.sweepTelemetrySeq;
+    const time = async <T>(
+      name: string,
+      operation: () => Promise<T>,
+      lockHeldOverride?: boolean,
+    ) => {
       const startedAt = Date.now();
+      const startedAtIso = new Date(startedAt).toISOString();
+      const agentCount = this.registry.list().length;
+      const lockHeld =
+        lockHeldOverride ?? this.lifecycleLockHolder === "sweep";
+      const appendPhase = (
+        stage: "started" | "completed" | "failed",
+        durationMs: number | null,
+      ) => {
+        try {
+          this.stateMgr.getEventLog().appendSweepPhase({
+            ts: new Date().toISOString(),
+            event_type: "sweep_phase",
+            sweep_id: sweepId,
+            phase: name,
+            stage,
+            started_at: startedAtIso,
+            duration_ms: durationMs,
+            agent_count: agentCount,
+            lock_held: lockHeld,
+          });
+        } catch {
+          // Telemetry must not block reconciliation when the log is unavailable.
+        }
+      };
+      appendPhase("started", null);
       try {
-        return await operation();
+        const result = await operation();
+        appendPhase("completed", Date.now() - startedAt);
+        return result;
+      } catch (error) {
+        appendPhase("failed", Date.now() - startedAt);
+        throw error;
       } finally {
         timings[name] = Date.now() - startedAt;
       }
@@ -8767,15 +8886,26 @@ export class AgentEngine {
     try {
       const skipAccounting: SweepMutationSkipAccounting = { counted: false };
       this.currentSweepScreenSignatures = new Map();
-      const surfaceTopology = await time("topology_ms", () =>
-        this.collectObservedSurfaceTopology(),
+      const topologyAcquisition = this.lifecycleLockAcquisitionSeq;
+      const surfaceTopology = await time(
+        "topology_ms",
+        () => withUnlocked(() => this.collectObservedSurfaceTopology()),
+        false,
       );
+      // Any lifecycle mutation that ran while topology I/O was outside the
+      // lock makes this snapshot stale for destructive reconciliation.
+      if (this.lifecycleLockAcquisitionSeq !== topologyAcquisition + 1) {
+        this.sweepYielded += 1;
+        return;
+      }
       this.sweepTopologyGeneration += 1;
       if (surfaceTopology) {
         surfaceTopology.generation = this.sweepTopologyGeneration;
       }
       const sweepCtx: SweepAgentContext = {
         sweep: true,
+        withUnlocked,
+        sweepValidity: { current: true },
         surfaceTopology,
         topologyGeneration: surfaceTopology?.generation,
         skipAccounting,
@@ -8845,7 +8975,7 @@ export class AgentEngine {
       if (this.shouldYieldSweep()) return;
       await time("watches_ms", async () => {
         await this.retryClosedChildReportWatchPrune();
-        await this.sweepWatchesBestEffort();
+        await this.sweepWatchesBestEffort(withUnlocked, sweepCtx);
       });
       if (this.shouldYieldSweep()) return;
       if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
@@ -9050,6 +9180,8 @@ export class AgentEngine {
    */
   private watchAgentObservation = async (
     agentId: string,
+    withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>,
+    sweepContext?: SweepAgentContext,
   ): Promise<WatchAgentObservation> => {
     const agent =
       this.registry.get(agentId) ?? this.readPersistedAgentRecord(agentId);
@@ -9070,15 +9202,30 @@ export class AgentEngine {
       attempt < WATCH_OBSERVATION_READ_ATTEMPTS;
       attempt++
     ) {
+      const versionBeforeRead = this.stateMgr.readState(agent.agent_id)?.version;
+      const acquisitionBeforeRead = this.lifecycleLockAcquisitionSeq;
+      const observationStale = () =>
+        withUnlocked &&
+        (this.lifecycleLockAcquisitionSeq !== acquisitionBeforeRead + 1 ||
+          this.stateMgr.readState(agent.agent_id)?.version !== versionBeforeRead);
       try {
-        const screen = await this.client.readScreen(agent.surface_id, {
+        const read = () => this.client.readScreen(agent.surface_id, {
           ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
           lines: 30,
         });
+        const screen = withUnlocked ? await withUnlocked(read) : await read();
+        if (observationStale()) {
+          if (sweepContext?.sweepValidity) sweepContext.sweepValidity.current = false;
+          throw new Error("watch agent changed during unlocked screen read");
+        }
         screenText = screen.text;
         readError = null;
         break;
       } catch (error) {
+        if (error instanceof LifecycleLockReacquireError || observationStale()) {
+          if (sweepContext?.sweepValidity) sweepContext.sweepValidity.current = false;
+          throw error;
+        }
         readError = error;
       }
     }
@@ -9152,14 +9299,18 @@ export class AgentEngine {
     };
   };
 
-  private async sweepWatchesBestEffort(): Promise<void> {
+  private async sweepWatchesBestEffort(
+    withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>,
+    sweepContext?: SweepAgentContext,
+  ): Promise<void> {
     if (!this.watchRegistryPath || this.watchSweepInFlight) return;
     this.watchSweepInFlight = true;
     try {
       await sweepWatches({
         registryPath: this.watchRegistryPath,
         now: this.watchRegistryNow,
-        agentObservation: this.watchAgentObservation,
+        agentObservation: (agentId) =>
+          this.watchAgentObservation(agentId, withUnlocked, sweepContext),
         notify: this.watchNotify,
         onNotificationExhausted: ({ notification, attempts, reason }) => {
           this.sweepDebugLog(

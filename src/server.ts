@@ -18114,9 +18114,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return renderListAgentsResponse(cached);
           }
           const live = await engine.runLifecycleMutation(
-            async () => {
-              discovery.invalidate();
-              const discovered = await discovery.scan(true);
+            async (withUnlocked) => {
+              let discovered: DiscoveredAgent[] | null = null;
+              for (let attempt = 0; attempt < 2; attempt += 1) {
+                discovery.invalidate();
+                const revision = engine.lifecycleLockRevision();
+                const observed = await withUnlocked(() => discovery.scan(true));
+                if (engine.lifecycleLockRevision() === revision + 1) {
+                  discovered = observed;
+                  break;
+                }
+              }
+              if (!discovered) {
+                throw new Error(
+                  "list_agents discovery changed during lifecycle I/O; retry the request",
+                );
+              }
               const observedAtMs = Date.now();
               registry.repairFromDiscovery(discovered, {
                 seatRegistry,

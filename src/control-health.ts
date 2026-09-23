@@ -522,6 +522,9 @@ function describeClient(client: unknown): ControlHealth["selected_transport"] {
   };
 }
 
+/** Keep a recent lock failure actionable; retain older failures in history only. */
+const LIFECYCLE_LOCK_TIMEOUT_WARNING_AGE_MS = 5 * 60_000;
+
 function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   const warnings: string[] = [];
   // #529: never let a dead daemon or a wedged lifecycle lock stay silent.
@@ -533,9 +536,12 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   }
   if (lifecycle?.lifecycle_lock?.last_timeout) {
     const timeout = lifecycle.lifecycle_lock.last_timeout;
-    warnings.push(
-      `lifecycle lock acquire timed out for "${timeout.waiter}" after ${timeout.waited_ms}ms (holder "${timeout.holder ?? "unknown"}").`,
-    );
+    const ageMs = Date.parse(health.generated_at) - Date.parse(timeout.at);
+    if (!Number.isFinite(ageMs) || ageMs < LIFECYCLE_LOCK_TIMEOUT_WARNING_AGE_MS) {
+      warnings.push(
+        `lifecycle lock acquire timed out for "${timeout.waiter}" after ${timeout.waited_ms}ms (holder "${timeout.holder ?? "unknown"}").`,
+      );
+    }
   }
   if (
     lifecycle?.lifecycle_lock &&
