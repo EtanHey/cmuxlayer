@@ -11473,7 +11473,14 @@ Session ID: ${sessionId}`,
         second: "Waiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
         cpuProgress: true,
       },
-    ])("does not report a live worker wedged with $name", async ({ first, second, cpuProgress }) => {
+      {
+        name: "new background child CPU activity",
+        first: "Waiting for background terminal (4m 02s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        second: "Waiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        cpuProgress: true,
+        replacementCpu: true,
+      },
+    ])("does not report a live worker wedged with $name", async ({ first, second, cpuProgress, replacementCpu }) => {
       let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
       let cpuSample = 0;
       engine.dispose();
@@ -11488,7 +11495,7 @@ Session ID: ${sessionId}`,
           haltWedgedDwellMs: 1_000,
           haltWedgedSweeps: 1,
           haltProcessSnapshot: () =>
-            `12345 1 0:00.00 codex\n12346 12345 0:0${cpuSample++}.00 tail -n0 -F /tmp/probe.log`,
+            `12345 1 0:00.00 codex\n${replacementCpu ? 12346 + cpuSample : 12346} 12345 0:0${cpuSample++}.00 tail -n0 -F /tmp/probe.log`,
         },
       );
       const parent = makeRecord({
@@ -11658,6 +11665,76 @@ Session ID: ${sessionId}`,
           (message) => message.tag === "agent_halt_wedged",
         ),
       ).toHaveLength(1);
+    });
+
+    it("samples process CPU asynchronously once across waiting agents in a sweep", async () => {
+      vi.useRealTimers();
+      let eventLoopTicked = false;
+      const sample = vi.fn(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        return "12345 1 0:00.00 codex\n12346 12345 0:01.00 tail -n0 -F /tmp/probe.log\n22345 1 0:00.00 codex\n22346 22345 0:01.00 tail -n0 -F /tmp/probe.log";
+      });
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        { haltProcessSnapshot: sample as any },
+      );
+      const first = makeRecord({ agent_id: "cpu-sweep-first", pid: 12345 });
+      const second = makeRecord({ agent_id: "cpu-sweep-second", pid: 22345 });
+      const screen = "OpenAI Codex\nWaiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log";
+      const tick = setTimeout(() => { eventLoopTicked = true; }, 0);
+      const results = await Promise.all([
+        (engine as any).backgroundChildUsedCpu(first, screen, { sweep: true }),
+        (engine as any).backgroundChildUsedCpu(second, screen, { sweep: true }),
+      ]);
+      clearTimeout(tick);
+      expect(eventLoopTicked).toBe(true);
+      expect(sample).toHaveBeenCalledTimes(1);
+      expect(results).toEqual([false, false]);
+    });
+
+    it("shares one nonblocking process sample across a sweep with two waiting workers", async () => {
+      vi.useRealTimers();
+      let eventLoopTicked = false;
+      const sample = vi.fn(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        return "12345 1 0:00.00 codex\n12346 12345 0:01.00 tail -n0 -F /tmp/probe.log\n22345 1 0:00.00 codex\n22346 22345 0:01.00 tail -n0 -F /tmp/probe.log";
+      });
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        { sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR }, haltProcessSnapshot: sample },
+      );
+      const parent = makeRecord({ agent_id: "cpu-sweep-parent", surface_id: "surface:cpu-sweep-parent", role: "orchestrator" });
+      const first = makeRecord({ agent_id: "cpu-sweep-first", surface_id: "surface:cpu-sweep-first", parent_agent_id: parent.agent_id, pid: 12345 });
+      const second = makeRecord({ agent_id: "cpu-sweep-second", surface_id: "surface:cpu-sweep-second", parent_agent_id: parent.agent_id, pid: 22345 });
+      for (const record of [parent, first, second]) stateMgr.writeState(record);
+      liveSurfaces = [parent, first, second].map((record) => makeSurface(record.surface_id));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async (surface: string) => ({
+        surface,
+        text: surface === parent.surface_id
+          ? "Claude Code\n✻ Working"
+          : "OpenAI Codex\nWaiting for background terminal (4m 03s • esc to interrupt)\n└ tail -n0 -F /tmp/probe.log",
+        lines: 80,
+        scrollback_used: false,
+      }));
+      await engine.getRegistry().reconstitute();
+      const tick = setTimeout(() => { eventLoopTicked = true; }, 0);
+      await engine.runSweep();
+      clearTimeout(tick);
+      expect(eventLoopTicked).toBe(true);
+      expect(sample).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops background CPU snapshots when an agent is removed", () => {
+      const snapshots = (engine as any).backgroundChildCpuTimes as Map<string, Map<number, string>>;
+      snapshots.set("removed-agent", new Map([[12346, "0:01.00"]]));
+      (engine as any).clearAgentLifecycleMemory("removed-agent");
+      expect(snapshots.has("removed-agent")).toBe(false);
     });
 
     it("keeps halt unblock calls served and send_to payloads valid", async () => {
