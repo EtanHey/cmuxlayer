@@ -1027,6 +1027,46 @@ describe("control health", () => {
     );
   });
 
+  it("ages a lock timeout out of warnings while retaining its history", async () => {
+    const timeoutAt = "2026-09-23T11:52:12.000Z";
+    const lock = {
+      holder: null,
+      held_for_ms: null,
+      queue_depth: 0,
+      acquire_timeout_ms: 45_000,
+      hold_timeout_ms: 120_000,
+      forced_releases: 0,
+      sweep_skipped_mutations: 0,
+      timeouts: 4,
+      last_timeout: {
+        holder: "sweep",
+        waiter: "lifecycle-refresh-managed-metadata",
+        waited_ms: 45_002,
+        held_for_ms: 74_073,
+        queue_depth: 4,
+        at: timeoutAt,
+      },
+    };
+    const collectAt = (now: string) => collectControlHealth({
+      homeDir: TEST_ROOT,
+      tmpDir: TEST_ROOT,
+      execFile: async () => ({ stdout: "" }),
+      now: () => new Date(now),
+      lifecycleLock: lock,
+    });
+
+    const recent = await collectAt("2026-09-23T11:54:24.000Z");
+    expect(recent.warnings).toContainEqual(
+      expect.stringContaining("lifecycle lock acquire timed out"),
+    );
+    const expired = await collectAt("2026-09-23T11:57:13.000Z");
+    expect(expired.warnings).not.toContainEqual(
+      expect.stringContaining("lifecycle lock acquire timed out"),
+    );
+    expect(expired.daemon_lifecycle.lifecycle_lock?.timeouts).toBe(4);
+    expect(expired.daemon_lifecycle.lifecycle_lock?.last_timeout?.at).toBe(timeoutAt);
+  });
+
   it("periodically appends control health snapshots without tool invocation", async () => {
     vi.useFakeTimers();
     rmSync(TEST_ROOT, { recursive: true, force: true });

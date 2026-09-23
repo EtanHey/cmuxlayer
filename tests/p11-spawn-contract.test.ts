@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { spawn as nodeSpawn } from "node:child_process";
+import { execFileSync, spawn as nodeSpawn } from "node:child_process";
 import { once } from "node:events";
 import {
   createServer,
@@ -815,9 +815,259 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
 
     expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+    expect(closeResult.structuredContent).toMatchObject({ tail_reaped: "absent" });
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toEqual([]);
+  });
+
+  it("reaps the exact recorded inbox tail when close_surface closes its agent", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "closed-tail-child";
+    const nonce = `t1-${Date.now()}-${process.pid}`;
+    const marker = `cmuxlayer-inbox-tail:${nonce}`;
+    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], {
+      stdio: "ignore",
+    });
+    try {
+      await once(tail, "spawn");
+      const pid = tail.pid;
+      expect(pid).toBeDefined();
+      await vi.waitFor(() =>
+        expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker),
+      );
+      const record: AgentRecord = {
+        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        agent_id: agentId,
+        surface_id: "surface:already-gone",
+        state: "done",
+        user_killed: false,
+      };
+      const agentDir = join(inboxDir, agentId);
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "inbox-tail.pid"), `${pid} ${nonce}\n`, "utf8");
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+
+      const closeResult = await server._registeredTools.close_surface.handler(
+        { scope: "agent", agent_id: agentId, force: true },
+        {} as never,
+      );
+
+      expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+      expect(closeResult.structuredContent).toMatchObject({ tail_reaped: true });
+      await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
+    } finally {
+      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+    }
+  });
+
+  for (const route of ["stop_agent", "close_surface", "kill"] as const) {
+    it(`reaps the canonical inbox tail when ${route} receives an alias`, async () => {
+      await server._registeredTools.list_agents.handler({}, {} as never);
+      const engine = server._registeredTools.interact._engine;
+      const alias = `tail-alias-${route}`;
+      const canonical = `tail-canonical-${route}`;
+      const nonce = `t1b-alias-${route.replaceAll("_", "-")}-${Date.now()}-${process.pid}`;
+      const marker = `cmuxlayer-inbox-tail:${nonce}`;
+      const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], { stdio: "ignore" });
+      try {
+        await once(tail, "spawn");
+        await vi.waitFor(() => expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker));
+        const record: AgentRecord = {
+          ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+          agent_id: alias,
+          surface_id: "surface:already-gone",
+          state: "done",
+          user_killed: false,
+        };
+        engine.stateMgr.writeState(record);
+        engine.getRegistry().set(alias, record);
+        const renamed = engine.stateMgr.renameState(alias, canonical);
+        engine.getRegistry().rename(alias, canonical, renamed);
+        mkdirSync(join(inboxDir, canonical), { recursive: true });
+        writeFileSync(join(inboxDir, canonical, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
+
+        const result = route === "stop_agent"
+          ? await server._registeredTools.stop_agent.handler({ agent_id: alias, force: true }, {} as never)
+          : route === "close_surface"
+            ? await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: alias, force: true }, {} as never)
+            : await server._registeredTools.kill.handler({ target: alias, force: true }, {} as never);
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        if (route !== "kill") expect(result.structuredContent).toMatchObject({ tail_reaped: true });
+        await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
+      } finally {
+        if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+      }
+    });
+  }
+
+  for (const route of ["stop_agent", "close_surface", "kill"] as const) {
+    it(`reaps a dead agent's tail after ${route} reports a stop postcondition failure`, async () => {
+      await server._registeredTools.list_agents.handler({}, {} as never);
+      const engine = server._registeredTools.interact._engine;
+      const agentId = `failed-stop-tail-${route}`;
+      const nonce = `t1b-failed-${route.replaceAll("_", "-")}-${Date.now()}-${process.pid}`;
+      const marker = `cmuxlayer-inbox-tail:${nonce}`;
+      const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], { stdio: "ignore" });
+      const agent = nodeSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+      try {
+        await Promise.all([once(tail, "spawn"), once(agent, "spawn")]);
+        await vi.waitFor(() => expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker));
+        const record: AgentRecord = {
+          ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+          agent_id: agentId,
+          pid: agent.pid ?? null,
+          surface_id: "surface:still-live",
+          state: "working",
+        };
+        engine.stateMgr.writeState(record);
+        engine.getRegistry().set(agentId, record);
+        mkdirSync(join(inboxDir, agentId), { recursive: true });
+        writeFileSync(join(inboxDir, agentId, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
+        vi.spyOn(engine, "stopAgent").mockImplementationOnce(async () => {
+          agent.kill("SIGTERM");
+          await once(agent, "exit");
+          throw new Error("Stop post-condition failed: surface still live");
+        });
+
+        const result = route === "stop_agent"
+          ? await server._registeredTools.stop_agent.handler({ agent_id: agentId, force: true }, {} as never)
+          : route === "close_surface"
+            ? await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: agentId, force: true }, {} as never)
+            : await server._registeredTools.kill.handler({ target: agentId, force: true }, {} as never);
+        expect(result.isError, JSON.stringify(result)).toBe(true);
+        if (route !== "kill") expect(result.structuredContent).toMatchObject({ tail_reaped: true });
+        await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
+      } finally {
+        vi.restoreAllMocks();
+        if (agent.exitCode === null && agent.signalCode === null) agent.kill("SIGTERM");
+        if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+      }
+    });
+  }
+
+  it("keeps the inbox tail when a failed stop cannot prove the agent process exited", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "unproven-stop-tail";
+    const nonce = `t1b-unproven-${Date.now()}-${process.pid}`;
+    const marker = `cmuxlayer-inbox-tail:${nonce}`;
+    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], { stdio: "ignore" });
+    const agent = nodeSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    try {
+      await Promise.all([once(tail, "spawn"), once(agent, "spawn")]);
+      await vi.waitFor(() => expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker));
+      const record: AgentRecord = {
+        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        agent_id: agentId,
+        pid: agent.pid ?? null,
+        state: "working",
+      };
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+      mkdirSync(join(inboxDir, agentId), { recursive: true });
+      writeFileSync(join(inboxDir, agentId, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
+      vi.spyOn(engine, "stopAgent").mockRejectedValueOnce(new Error("Stop post-condition failed"));
+
+      const result = await server._registeredTools.stop_agent.handler({ agent_id: agentId, force: true }, {} as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).not.toHaveProperty("tail_reaped");
+      expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker);
+    } finally {
+      vi.restoreAllMocks();
+      if (agent.exitCode === null && agent.signalCode === null) agent.kill("SIGTERM");
+      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+    }
+  });
+
+  it("refuses to signal a reused tail PID whose process title has another nonce", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "mismatched-tail-child";
+    const liveNonce = `t1-live-${Date.now()}-${process.pid}`;
+    const recordedNonce = `t1-stale-${Date.now()}-${process.pid}`;
+    const marker = `cmuxlayer-inbox-tail:${liveNonce}`;
+    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], {
+      stdio: "ignore",
+    });
+    try {
+      await once(tail, "spawn");
+      const pid = tail.pid;
+      expect(pid).toBeDefined();
+      await vi.waitFor(() =>
+        expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker),
+      );
+      const record: AgentRecord = {
+        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        agent_id: agentId,
+        surface_id: "surface:already-gone",
+        state: "done",
+        user_killed: false,
+      };
+      const agentDir = join(inboxDir, agentId);
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "inbox-tail.pid"), `${pid} ${recordedNonce}\n`, "utf8");
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+
+      const closeResult = await server._registeredTools.close_surface.handler(
+        { scope: "agent", agent_id: agentId, force: true },
+        {} as never,
+      );
+
+      expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+      expect(closeResult.structuredContent).toMatchObject({
+        tail_reaped: false,
+        tail_error: "tail_mismatch",
+      });
+      expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker);
+    } finally {
+      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+    }
+  });
+
+  it("reaps the recorded inbox tail through the kill agent path", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "killed-tail-child";
+    const nonce = `t1-kill-${Date.now()}-${process.pid}`;
+    const marker = `cmuxlayer-inbox-tail:${nonce}`;
+    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], {
+      stdio: "ignore",
+    });
+    try {
+      await once(tail, "spawn");
+      const pid = tail.pid;
+      expect(pid).toBeDefined();
+      await vi.waitFor(() =>
+        expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker),
+      );
+      const record: AgentRecord = {
+        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        agent_id: agentId,
+        surface_id: "surface:already-gone",
+        state: "done",
+        user_killed: false,
+      };
+      const agentDir = join(inboxDir, agentId);
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "inbox-tail.pid"), `${pid} ${nonce}\n`, "utf8");
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+
+      const result = await server._registeredTools.kill.handler(
+        { target: agentId, force: true },
+        {} as never,
+      );
+
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ killed: [agentId] });
+      await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
+    } finally {
+      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+    }
   });
 
   it("drops watches owned by a closed agent before close_surface returns", async () => {
@@ -4212,6 +4462,106 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     const detail = state.structuredContent ?? JSON.parse(state.content[0].text);
     expect(detail.report_path).toBe(override);
+  });
+
+  it("W5 refuses a shared collab as a worker report target before launch", async () => {
+    const collab = join(inboxDir, "shared-collab.md");
+    await server.close();
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentRecord().surface_uuid!);
+    server = createServer(withTestSurfaceObserver({
+      exec, stateDir: STATE_DIR, disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir, watchRegistryPath,
+    }));
+    const parent = { ...parentRecord(), collab_path: collab };
+    const engine = server._registeredTools.interact._engine;
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+
+    const result = await spawn({ parent_agent_id: parent.agent_id, report_path: collab });
+    expect(result.ok).toBe(false);
+    expect(result.error_code, JSON.stringify(result)).toBe("shared_collab_report_path");
+    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches).toHaveLength(0);
+  });
+
+  it("W5 never sends a shared collab content watch into the worker pane as a report", async () => {
+    const collab = join(inboxDir, "shared-collab.md");
+    writeFileSync(collab, "initial\n");
+    await server.close();
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentRecord().surface_uuid!);
+    let watchNow = 1_000;
+    server = createServer(withTestSurfaceObserver({
+      exec, stateDir: STATE_DIR, disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir, watchRegistryPath,
+      watchRegistryNow: () => watchNow,
+    }));
+    const engine = server._registeredTools.interact._engine;
+    const parent = { ...parentRecord(), collab_path: collab };
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id });
+    expect(child.ok, JSON.stringify(child)).toBe(true);
+    expect(child.report_path).not.toBe(collab);
+    const refused = await server._registeredTools.arm_watch.handler({
+      owner: child.agent_id, target: collab,
+      change: "content", deadline: 100_000,
+    }, {} as never);
+    const refusal = refused.structuredContent ?? JSON.parse(refused.content[0].text);
+    expect(refusal.error_code).toBe("shared_collab_watch_target");
+    const marker = await server._registeredTools.arm_watch.handler({
+      owner: child.agent_id, target: collab,
+      marker: "W5_DONE", deadline: 100_000,
+    }, {} as never);
+    expect((marker.structuredContent ?? JSON.parse(marker.content[0].text)).ok).toBe(true);
+    await armWatch({
+      owner: child.agent_id, provenance: "public", target: collab,
+      change: "content", deadline: 100_000,
+    }, { registryPath: watchRegistryPath, now: () => watchNow });
+
+    const before = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    for (let index = 0; index < 3; index++) {
+      appendFileSync(collab, `other agent ${index}\n`);
+      watchNow += 100;
+      await engine.sweepWatchesBestEffort();
+    }
+    const calls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
+    expect(calls.some(([, args]: [string, string[]]) =>
+      args.some((arg) => arg.includes("[report] changed") && arg.includes(collab)),
+    )).toBe(false);
+    const legacyCollabWatch = readWatchRegistry({ registryPath: watchRegistryPath })
+      .watches.find((watch) => watch.target === collab && watch.change === "content");
+    expect(legacyCollabWatch).toMatchObject({
+      state: "fired", notification_exhausted_reason: "shared_collab_watch_target",
+    });
+
+    const foreignReport = join(inboxDir, "other-worker-report.md");
+    writeFileSync(foreignReport, "before\n");
+    await engine.armWatch({
+      owner: parent.agent_id, provenance: "engine",
+      subject_agent_id: child.agent_id, target: foreignReport,
+      change: "content", deadline: 100_000,
+    });
+    const beforeForeign = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(foreignReport, "after\n");
+    watchNow += 100;
+    await engine.sweepWatchesBestEffort();
+    const foreignCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforeForeign);
+    expect(foreignCalls.some(([, args]: [string, string[]]) =>
+      args.some((arg) => arg.includes("[report] changed") && arg.includes(foreignReport)),
+    )).toBe(false);
+    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
+      (watch) => watch.target === foreignReport,
+    )).toMatchObject({
+      state: "failed", notification_exhausted_reason: "report_target_mismatch",
+    });
+
+    const beforeReport = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(child.report_path, "worker's own update\n");
+    watchNow += 1_000;
+    await engine.sweepWatchesBestEffort();
+    const reportCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforeReport);
+    expect(reportCalls.some(([, args]: [string, string[]]) =>
+      args.some((arg) => arg.includes("[report] changed") && arg.includes(child.report_path)),
+    )).toBe(true);
   });
 
   it("never repurposes or lifecycle-deletes a public aliased watch when a child adopts its report path", async () => {

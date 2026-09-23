@@ -37,7 +37,7 @@ export interface DiscoveredAgent {
 export interface DiscoveryDeps {
   /** Resolve the cmux topology identity that produced a discovery snapshot. */
   observerIdProvider?: () => string | null | undefined;
-  listSurfaces: () => Promise<CmuxSurface[]>;
+  listSurfaces: (onRpc?: (method: string, elapsedMs: number) => void) => Promise<CmuxSurface[]>;
   managedIdentityProvider?: (
     surface: Pick<CmuxSurface, "ref" | "id">,
   ) => { repo: string; cli: CliType; role?: AgentRole | null } | null;
@@ -156,14 +156,24 @@ export class AgentDiscovery {
     return this.deps.observerIdProvider?.()?.trim() || null;
   }
 
-  private async scanSurface(surface: CmuxSurface): Promise<DiscoveredAgent> {
+  private async scanSurface(
+    surface: CmuxSurface,
+    onRpc?: (method: string, elapsedMs: number) => void,
+  ): Promise<DiscoveredAgent> {
     const workspaceId =
       typeof surface.workspace_ref === "string" ? surface.workspace_ref : null;
     try {
-      const screen = await this.deps.readScreen(surface.ref, {
+      const read = () => this.deps.readScreen(surface.ref, {
         lines: 30,
         workspace: workspaceId ?? undefined,
       });
+      const screen = onRpc
+        ? await (async () => {
+            const startedAt = performance.now();
+            try { return await read(); }
+            finally { onRpc("readScreen", Math.max(0, performance.now() - startedAt)); }
+          })()
+        : await read();
       const parsed = parseScreen(screen.text);
       const managedIdentity = this.deps.managedIdentityProvider?.(surface);
       // Registry state owns managed identity. Launcher-title parsing remains a
@@ -241,7 +251,13 @@ export class AgentDiscovery {
   async scanTarget(target: {
     surface_id: string;
     surface_uuid?: string | null;
-  }): Promise<DiscoveredAgent | null> {
+  }, onRpc?: (method: string, elapsedMs: number) => void): Promise<DiscoveredAgent | null> {
+    const timedList = async (): Promise<CmuxSurface[]> => {
+      if (!onRpc) return this.deps.listSurfaces();
+      const startedAt = performance.now();
+      try { return await this.deps.listSurfaces(onRpc); }
+      finally { onRpc?.("listSurfaces", Math.max(0, performance.now() - startedAt)); }
+    };
     const observerId = this.getObserverId();
     const uuidKey = (value: string | null | undefined): string | null =>
       value?.trim().toLowerCase() || null;
@@ -251,13 +267,13 @@ export class AgentDiscovery {
         ? uuidKey(surface.id) === expectedUuid
         : surface.ref === target.surface_id;
 
-    const initialMatches = (await this.deps.listSurfaces())
+    const initialMatches = (await timedList())
       .filter((surface) => surface.type === "terminal")
       .filter(matchesTarget);
     if (initialMatches.length !== 1) return null;
 
     const initial = initialMatches[0];
-    const result = await this.scanSurface(initial);
+    const result = await this.scanSurface(initial, onRpc);
     const completedObserverId = this.getObserverId();
     if (completedObserverId !== observerId) {
       throw new Error(
@@ -265,7 +281,7 @@ export class AgentDiscovery {
       );
     }
 
-    const completedMatches = (await this.deps.listSurfaces())
+    const completedMatches = (await timedList())
       .filter((surface) => surface.type === "terminal")
       .filter(matchesTarget);
     const completed = completedMatches[0];

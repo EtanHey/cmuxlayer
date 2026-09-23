@@ -54,6 +54,9 @@ export interface WatchRecord extends WatchSpec {
   target_kind: "file" | "agent";
   watermark?: number;
   fingerprint?: string;
+  /** Latest undelivered report revision while a write burst settles. */
+  pending_content_fingerprint?: string;
+  pending_content_at_ms?: number;
   missing_since_at_ms?: number;
   armed_at_ms: number;
   last_heartbeat_at_ms: number;
@@ -67,6 +70,7 @@ export interface WatchRecord extends WatchSpec {
   notification_attempts?: number;
   notification_next_attempt_at_ms?: number;
   notification_delivered_at_ms?: number;
+  last_content_delivered_at_ms?: number;
   deadline_notified_at_ms?: number;
   notification_exhausted_at_ms?: number;
   notification_exhausted_reason?: string;
@@ -106,6 +110,7 @@ export type WatchNotificationReason =
 export interface WatchNotification {
   watch_id: string;
   owner: string;
+  provenance?: WatchProvenance;
   subject_agent_id?: string;
   notify?: boolean;
   target: string;
@@ -183,7 +188,8 @@ export interface WatchSweepResult {
 }
 
 export type WatchArmErrorCode =
-  "invalid_watch_spec" | "watch_target_missing" | "watch_deadline_elapsed";
+  "invalid_watch_spec" | "watch_target_missing" | "watch_deadline_elapsed" |
+  "shared_collab_watch_target";
 
 export class WatchArmError extends Error {
   readonly code: WatchArmErrorCode;
@@ -206,6 +212,7 @@ const NOTIFY_RETRY_BASE_MS = 1_000;
 const NOTIFY_RETRY_MAX_MS = 60_000;
 const NOTIFY_RETRY_LIMIT = 8;
 const FILE_MISSING_DEBOUNCE_MS = 2_000;
+const REPORT_CONTENT_QUIET_MS = 1_000;
 
 interface WatchRegistryState {
   version: unknown;
@@ -1083,6 +1090,7 @@ function notificationFor(
   return {
     watch_id: record.watch_id,
     owner: record.owner,
+    ...(record.provenance ? { provenance: record.provenance } : {}),
     ...(record.subject_agent_id
       ? { subject_agent_id: record.subject_agent_id }
       : {}),
@@ -1273,6 +1281,34 @@ export async function sweepWatches(
             ? contentFingerprint(record.target, opts.contentFingerprintIo)
             : countMarker(record.target, record.marker!)
           : (agentObservation?.state ?? "unknown");
+      if (
+        record.provenance === "engine" &&
+        record.change === "content" &&
+        typeof observedValue === "string" &&
+        record.last_content_delivered_at_ms !== undefined &&
+        observedValue !== storedContentDigest(record.fingerprint)
+      ) {
+        const pendingChanged =
+          observedValue !== record.pending_content_fingerprint;
+        const pendingAt = pendingChanged
+          ? observedAt
+          : (record.pending_content_at_ms ?? observedAt);
+        if (
+          observedAt - pendingAt < REPORT_CONTENT_QUIET_MS ||
+          observedAt - record.last_content_delivered_at_ms < REPORT_CONTENT_QUIET_MS
+        ) {
+          result.armed.push(record.watch_id);
+          return {
+            ...record,
+            ...heartbeat,
+            ...(!pendingChanged ? {} : rolledEngineContentDeadline(
+              record, "target_changed", observedAt,
+            )),
+            pending_content_fingerprint: observedValue,
+            pending_content_at_ms: pendingAt,
+          };
+        }
+      }
       const matched =
         record.target_kind === "file"
           ? record.change === "content"
@@ -1367,6 +1403,13 @@ export async function sweepWatches(
         ...heartbeat,
         missing_since_at_ms: undefined,
         observed_value: observedValue,
+        ...(record.change === "content" &&
+          observedValue === storedContentDigest(record.fingerprint)
+          ? {
+              pending_content_fingerprint: undefined,
+              pending_content_at_ms: undefined,
+            }
+          : {}),
         ...(record.change === "content" && typeof observedValue === "string"
           ? { fingerprint: observedValue }
           : {}),
@@ -1458,6 +1501,19 @@ export async function sweepWatches(
             record.change === "content" &&
             typeof notification.observed_value === "string"
           ) {
+            if (terminalFailureReason === "shared_collab_watch_target" ||
+                terminalFailureReason === "report_target_mismatch") {
+              return {
+                ...record,
+                // A public watch with no child subject is inert after this
+                // typed refusal. Keep it out of the closed-child prune queue.
+                state: record.subject_agent_id ? "failed" as const : "fired" as const,
+                notification_pending: false,
+                notification_next_attempt_at_ms: undefined,
+                notification_exhausted_at_ms: observedAt,
+                notification_exhausted_reason: terminalFailureReason,
+              };
+            }
             const {
               terminal_reason: _terminalReason,
               terminal_at_ms: _terminalAt,
@@ -1477,6 +1533,8 @@ export async function sweepWatches(
               notification_pending: false,
               notification_exhausted_at_ms: observedAt,
               notification_exhausted_reason: terminalFailureReason,
+              pending_content_fingerprint: undefined,
+              pending_content_at_ms: undefined,
             };
           }
           return {
@@ -1512,6 +1570,9 @@ export async function sweepWatches(
               notification_pending: false,
               notification_attempts: 0,
               notification_delivered_at_ms: observedAt,
+              last_content_delivered_at_ms: observedAt,
+              pending_content_fingerprint: undefined,
+              pending_content_at_ms: undefined,
             };
           }
           return {

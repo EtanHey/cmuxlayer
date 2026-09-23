@@ -8,6 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
 import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
@@ -34,7 +35,7 @@ import {
 import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
-import { agentProcessMayBeAlive } from "./process-liveness.js";
+import { agentProcessLiveness, agentProcessMayBeAlive } from "./process-liveness.js";
 import {
   currentCliFallbackCount,
   currentCliFallbackSources,
@@ -196,6 +197,7 @@ import {
   inboxPath,
   monitorAlive,
   pendingDispatches,
+  reapInboxTail,
   recommendedMonitorCommand,
   replayUndelivered,
   writeHeartbeat,
@@ -287,6 +289,7 @@ import {
   type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
   type SurfaceTopology,
+  type TopologyRpcObserver,
 } from "./surface-topology.js";
 import {
   formatMcpProfileEnv,
@@ -1339,10 +1342,24 @@ const preserveDeliveryEvidenceOnError = (
 
 type DeliveryPhase =
   "route" | "lock" | "lock_hold" | "enumerate" | "type" | "verify";
-type DeliveryPhaseTimings = Record<DeliveryPhase, number>;
+type DeliveryPhaseTimings = Record<DeliveryPhase, number> & {
+  // RPC durations are summed; concurrent topology calls can exceed wall time.
+  // Target-list time wraps those topology calls and must not be added to them.
+  enumerate_topology_rpc: number;
+  enumerate_scan_target_list: number;
+  enumerate_screen_read: number;
+  enumerate_rpc_count: number;
+  event_loop_delay_max: number;
+  event_loop_delay_mean: number;
+};
 
 function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
-  return { route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0 };
+  return {
+    route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0,
+    enumerate_topology_rpc: 0, enumerate_scan_target_list: 0,
+    enumerate_screen_read: 0, enumerate_rpc_count: 0,
+    event_loop_delay_max: 0, event_loop_delay_mean: 0,
+  };
 }
 
 function withSurfaceDeliveryTimings(
@@ -4594,10 +4611,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
   const client = withSurfaceTopologyMutationInvalidation(context.client);
-  const listAllWorkspaces = async () => {
+  const listAllWorkspaces = async (onRpc?: TopologyRpcObserver) => {
     const listed = await enumerateAllWindowWorkspacesWithRetry(
       client,
       () => context.surfaceObserverEpoch,
+      onRpc,
     );
     if (!listed.complete) {
       throw new SurfaceEnumerationError(
@@ -11981,10 +11999,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ),
           codexFill,
         );
+        // The lean and parsed-only variants are separate reads. A caller may
+        // compare parsed fields only when these hashes identify the same frame.
+        const snapshot_hash = createHash("sha256").update(result.text).digest("hex");
 
         if (args.parsed_only) {
           const data = {
             surface: result.surface,
+            snapshot_hash,
             title,
             column,
             column_count,
@@ -12013,6 +12035,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             .join("\n");
           const data = {
             surface: result.surface,
+            snapshot_hash,
             title,
             column,
             column_count,
@@ -12044,6 +12067,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : cleanScreenText(result.text, 12) || null;
         const data = {
           surface: result.surface,
+          snapshot_hash,
           title,
           column,
           column_count,
@@ -13355,8 +13379,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let registry: AgentRegistry | null = null;
     let lastLifecycleSurfaces: CmuxSurface[] | null = null;
     let lastLifecycleSurfaceObserverEpoch: string | null = null;
-    const readLifecycleSurfaces = async () => {
-      const workspaces = await listAllWorkspaces();
+    const readLifecycleSurfaces = async (onRpc?: TopologyRpcObserver) => {
+      const timedRpc = async <T>(method: string, call: () => Promise<T>): Promise<T> => {
+        if (!onRpc) return call();
+        const startedAt = performance.now();
+        try { return await call(); }
+        finally { onRpc?.(method, Math.max(0, performance.now() - startedAt)); }
+      };
+      const workspaces = await listAllWorkspaces(onRpc);
       const workspaceList = requireSurfaceEnumerationArray<CmuxWorkspace>(
         workspaces.workspaces,
         "workspaces.workspaces",
@@ -13364,7 +13394,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const panesByWorkspace = await Promise.all(
         workspaceList.map(async (ws) => ({
           ref: ws.ref,
-          panes: await client.listPanes({ workspace: ws.ref }),
+          panes: await timedRpc("listPanes", () => client.listPanes({ workspace: ws.ref })),
         })),
       );
       const surfaceGroupsByWorkspace = await Promise.all(
@@ -13375,7 +13405,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           const rawGroups = await Promise.all(
             paneList.map((p) =>
-              client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
+              timedRpc("listPaneSurfaces", () =>
+                client.listPaneSurfaces({ workspace: ref, pane: p.ref })),
             ),
           );
           const groups = partitionPaneSurfacesByMembership(
@@ -13397,7 +13428,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const surfaceGroups = surfaceGroupsByWorkspace.flat();
       return enrichSurfaceIdsFromPanes(panesByWorkspace, surfaceGroups);
     };
-    const surfaceProvider = async () => {
+    const surfaceProvider = async (onRpc?: TopologyRpcObserver) => {
       const observerEpoch = context.surfaceObserverEpoch;
       if (
         lastLifecycleSurfaces &&
@@ -13407,7 +13438,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastLifecycleSurfaceObserverEpoch = null;
       }
       try {
-        const surfaces = await readLifecycleSurfaces();
+        const surfaces = await readLifecycleSurfaces(onRpc);
         const completedObserverEpoch = context.surfaceObserverEpoch;
         if (completedObserverEpoch !== observerEpoch) {
           lastLifecycleSurfaces = null;
@@ -13822,6 +13853,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           watchRegistryPath,
           watchRegistryNow: opts?.watchRegistryNow,
           watchNotify: async (event) => {
+            // Persisted public watches can predate the arm-time guard. A
+            // shared collab revision is never a per-agent report event.
+            if (
+              event.target_kind === "file" &&
+              event.reason === "target_changed" &&
+              [...stateMgr.listStates(), ...registry.list()].some(
+                (agent) => agent.collab_path &&
+                  resolve(agent.collab_path) === resolve(event.target),
+              )
+            ) {
+              return {
+                delivered: false,
+                retryable: false,
+                reason: "shared_collab_watch_target",
+              };
+            }
+            if (event.provenance !== "public" && event.subject_agent_id) {
+              const subject = stateMgr.readState(event.subject_agent_id) ??
+                registry.get(event.subject_agent_id);
+              if (subject?.report_path &&
+                  resolve(subject.report_path) !== resolve(event.target)) {
+                return {
+                  delivered: false,
+                  retryable: false,
+                  reason: "report_target_mismatch",
+                };
+              }
+            }
             const externalNotifyOptedIn =
               event.notify === true && Boolean(opts?.watchNotify);
             const deliverExternalNotification = async (): Promise<boolean> => {
@@ -13954,7 +14013,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   event.reason === "target_changed"
                 ) {
                   return event.target_kind === "file"
-                    ? `[report] changed — read ${event.target}`
+                    ? event.provenance !== "public" && event.subject_agent_id
+                      ? `[report] changed — read ${event.target}`
+                      : `[watch] file changed — inspect ${event.target}`
                     : `[watch] agent predicate matched — inspect ${event.target}`;
                 }
                 if (event.reason === "target_missing") {
@@ -14086,6 +14147,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const publicSpec = { ...(args as WatchSpec) };
           delete (publicSpec as WatchSpec & { provenance?: unknown })
             .provenance;
+          if (
+            publicSpec.change === "content" &&
+            [...stateMgr.listStates(), ...registry.list()].some(
+              (agent) => agent.collab_path &&
+                resolve(agent.collab_path) === resolve(publicSpec.target),
+            )
+          ) {
+            throw new WatchArmError(
+              "shared_collab_watch_target",
+              publicSpec.target,
+              "A shared collab_path cannot be a content-change pane watch; use a marker watch for a specific handoff",
+            );
+          }
           const watch = await engine.armWatch({
             ...publicSpec,
             provenance: "public",
@@ -14298,12 +14372,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }) => {
       const routeStartedAt = Date.now();
       const enumerateStartedAt = args.timings?.enumerate ?? 0;
+      const onTopologyRpc: TopologyRpcObserver = (_method, elapsedMs) => {
+        if (!args.timings) return;
+        args.timings.enumerate_topology_rpc += elapsedMs;
+        args.timings.enumerate_rpc_count += 1;
+      };
+      const onTargetRpc: TopologyRpcObserver = (method, elapsedMs) => {
+        if (!args.timings) return;
+        if (method === "readScreen") {
+          args.timings.enumerate_screen_read += elapsedMs;
+          args.timings.enumerate_rpc_count += 1;
+        } else if (method === "listSurfaces") {
+          // Aggregate target-list time includes the topology RPCs below it.
+          args.timings.enumerate_scan_target_list += elapsedMs;
+        } else {
+          onTopologyRpc(method, elapsedMs);
+        }
+      };
       // Delivery already proves the UUID route from fresh topology and scans the
       // one target TUI before mutation. A fleet-wide managed-metadata refresh
       // here only queued the first send behind the startup sweep's lifecycle
       // lock, adding 11-15 seconds without strengthening the route proof.
       let route = await timeDeliveryPhase(args.timings, "enumerate", () =>
-        engine.resolveAgentIoRoute(args.agent_id),
+        engine.resolveAgentIoRoute(args.agent_id, undefined, onTopologyRpc),
       );
       const requiresMutableRefGuards = !route.surface_uuid;
       // Guard against stale surface refs before sending. Registry refs drift
@@ -14322,7 +14413,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const surfaces = await timeDeliveryPhase(
             args.timings,
             "enumerate",
-            surfaceProvider,
+            () => surfaceProvider(onTopologyRpc),
           );
           return surfaces.length > 0
             ? new Set(surfaces.map((surface) => surface.ref))
@@ -14350,7 +14441,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let reresolved: typeof route | null;
         try {
           reresolved = await timeDeliveryPhase(args.timings, "enumerate", () =>
-            engine.resolveAgentIoRoute(args.agent_id),
+            engine.resolveAgentIoRoute(args.agent_id, undefined, onTopologyRpc),
           );
         } catch {
           reresolved = null;
@@ -14378,7 +14469,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const freshOccupant = await timeDeliveryPhase(
           args.timings,
           "enumerate",
-          () => discovery.scanTarget(candidateRoute),
+          () => discovery.scanTarget(candidateRoute, onTargetRpc),
         );
         if (
           freshOccupant &&
@@ -14419,7 +14510,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const freshOccupant = await timeDeliveryPhase(
             args.timings,
             "enumerate",
-            () => discovery.scanTarget(route),
+            () => discovery.scanTarget(route, onTargetRpc),
           );
           if (isForeign(freshOccupant)) {
             throw new Error(
@@ -14496,7 +14587,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // landed, following a moved UUID would split one logical message across
       // terminals, so route changes fail closed instead.
       route = await timeDeliveryPhase(args.timings, "enumerate", () =>
-        engine.resolveAgentIoRoute(args.agent_id),
+        engine.resolveAgentIoRoute(args.agent_id, undefined, onTopologyRpc),
       );
       await assertAgentRouteHasTui(route);
       const deliveryRoute = route;
@@ -14512,7 +14603,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let current: typeof deliveryRoute;
         try {
           current = await timeDeliveryPhase(args.timings, "enumerate", () =>
-            engine.resolveAgentIoRoute(args.agent_id),
+            engine.resolveAgentIoRoute(args.agent_id, undefined, onTopologyRpc),
           );
         } catch (error) {
           throw new Error(
@@ -14787,6 +14878,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return `Report watch was not armed: ${childAgentId} is not a direct child of ${parentAgentId}`;
         }
         const reportPath = resolve(coordination.report_path);
+        if ([...stateMgr.listStates(), ...registry.list()].some(
+          (agent) => agent.collab_path &&
+            resolve(agent.collab_path) === reportPath,
+        )) {
+          return `Report watch was not armed: shared_collab_report_path (${reportPath})`;
+        }
         const legacyEngineReportPath = resolve(
           issueSpawnCoordination(childAgentId).report_path,
         );
@@ -15102,13 +15199,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
+        // Compaction can temporarily render Codex's ready footer while the
+        // queued message still belongs to the active turn's next tool call.
+        const compactingCodexQueue =
+          cli === "codex" &&
+          /(?:^|\n)\s*[•·]\s*Context compacted\s*[·•]\s*\d+s\b/i.test(
+            resolvedSnapshot.text.slice(-4096),
+          );
+        const parsed = resolvedSnapshot.parsed as ParsedScreenResult | undefined;
+        const queuedReady = parsed?.control_state === "ready" && parsed.status === "idle";
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
           return {
             outcome: "pending" as const,
-            ...(queued &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.control_state === "ready" &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.status === "idle"
-              ? { reason: "queued_idle" }
+            ...(queued
+              ? {
+                  reason: compactingCodexQueue
+                    ? queuedReady
+                      ? "queued_compaction_idle"
+                      : "queued_compaction_busy"
+                    : queuedReady
+                      ? "queued_idle"
+                      : undefined,
+                }
               : {}),
           };
         }
@@ -15377,6 +15489,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (args.collab_path && !isAbsolute(args.collab_path.trim())) {
             throw new Error("collab_path must be absolute");
+          }
+          if (
+            args.report_path &&
+            [args.collab_path, ...stateMgr.listStates().map((agent) => agent.collab_path)]
+              .some((path) => path && resolve(path) === resolve(args.report_path!.trim()))
+          ) {
+            return err(
+              new Error("report_path cannot target a shared collab_path"),
+              { error_code: "shared_collab_report_path" },
+            );
           }
           if (args.resume_agent_id) {
             const incompatible = [
@@ -18109,9 +18231,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return renderListAgentsResponse(cached);
           }
           const live = await engine.runLifecycleMutation(
-            async () => {
-              discovery.invalidate();
-              const discovered = await discovery.scan(true);
+            async (withUnlocked) => {
+              let discovered: DiscoveredAgent[] | null = null;
+              for (let attempt = 0; attempt < 2; attempt += 1) {
+                discovery.invalidate();
+                const revision = engine.lifecycleLockRevision();
+                let observed: DiscoveredAgent[];
+                try {
+                  observed = await withUnlocked(() => discovery.scan(true));
+                } catch (error) {
+                  if (error instanceof SurfaceBindingChangedDuringDiscoveryError) {
+                    // The lock was lent while discovery read the pane. Discard
+                    // that scan and retry from the current surface binding.
+                    continue;
+                  }
+                  throw error;
+                }
+                if (engine.lifecycleLockRevision() === revision + 1) {
+                  discovered = observed;
+                  break;
+                }
+              }
+              if (!discovered) {
+                // Continuous unrelated lifecycle traffic must not turn a
+                // status request into an error. One final scan under the lock
+                // guarantees progress after the bounded unlocked attempts.
+                discovery.invalidate();
+                discovered = await discovery.scan(true);
+              }
               const observedAtMs = Date.now();
               registry.repairFromDiscovery(discovered, {
                 seatRegistry,
@@ -18454,6 +18601,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // 16. stop_agent
+    const reapTailAfterConfirmedExit = async (
+      target: AgentRecord | null,
+    ) => {
+      // A missing PID is not proof that the agent has stopped. Keep the
+      // recorded tail until the process identity is known to be gone.
+      if (!target?.pid || agentProcessLiveness(target) !== "gone") return {};
+      return reapInboxTail(target.agent_id, inboxOpts);
+    };
     server.tool(
       "stop_agent",
       "Stop an agent gracefully (Ctrl+C) or forcefully (kill process).",
@@ -18467,6 +18622,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.destructive,
       async (args) => {
+        const target = engine.getAgentState(args.agent_id);
         try {
           await engine.stopAgent(args.agent_id, args.force, {
             allowUnknownPidOwnedSurfaceClose:
@@ -18480,6 +18636,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 route.workspace_id ?? undefined,
               ),
           });
+          const tailOutcome = await reapInboxTail(target?.agent_id ?? args.agent_id, inboxOpts);
           pruneChildReportWatchesFor(args.agent_id);
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({
@@ -18493,10 +18650,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const data = {
             agent_id: args.agent_id,
             state: state?.state ?? "done",
+            ...tailOutcome,
           };
           return okFormatted(formatOk("stop_agent", data), data);
         } catch (e) {
-          return err(e);
+          const tailOutcome = await reapTailAfterConfirmedExit(target).catch(() => ({}));
+          return err(e, tailOutcome);
         }
       },
     );
@@ -19201,6 +19360,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
+          // Observe the daemon scheduler during this send, not the benchmark
+          // runner's event loop. The histogram reports nanoseconds.
+          const eventLoopDelay = monitorEventLoopDelay({ resolution: 1 });
+          eventLoopDelay.enable();
+          let eventLoopDelayStopped = false;
+          const finishEventLoopDelay = () => {
+            if (eventLoopDelayStopped) return;
+            eventLoopDelayStopped = true;
+            eventLoopDelay.disable();
+            timings.event_loop_delay_max = Number.isFinite(eventLoopDelay.max)
+              ? eventLoopDelay.max / 1_000_000 : 0;
+            timings.event_loop_delay_mean = Number.isFinite(eventLoopDelay.mean)
+              ? eventLoopDelay.mean / 1_000_000 : 0;
+          };
           try {
             delivery = await deliverAgentInput({
               agent_id: agentId,
@@ -19212,6 +19385,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               timings,
             });
           } catch (error) {
+            // Failure receipts copy timings in this branch, before `finally`.
+            finishEventLoopDelay();
             if (error instanceof AmbiguousBootRecoveryReturnError) {
               return err(error, { agent_id: agentId });
             }
@@ -19307,6 +19482,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 !errorSubmitDispatched,
             };
             throw error;
+          } finally {
+            finishEventLoopDelay();
           }
           const receipt =
             delivery.delivery === "queued" ||
@@ -20038,8 +20215,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           // Kill each agent, collecting results
           for (const agentId of targetIds) {
+            const current = engine.getAgentState(agentId);
             try {
-              const current = engine.getAgentState(agentId);
               await engine.stopAgent(agentId, args.force, {
                 beforeSurfaceMutation: (route) =>
                   assertSurfaceMutationAllowed(
@@ -20048,6 +20225,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     route.workspace_id ?? undefined,
                   ),
               });
+              await reapInboxTail(current?.agent_id ?? agentId, inboxOpts);
               pruneChildReportWatchesFor(agentId);
               killed.push(agentId);
               appendCloseEvent({
@@ -20059,6 +20237,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 refused: false,
               });
             } catch (e) {
+              await reapTailAfterConfirmedExit(current).catch(() => ({}));
               errors.push(
                 `${agentId}: ${e instanceof Error ? e.message : String(e)}`,
               );
