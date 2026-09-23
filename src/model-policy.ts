@@ -1,6 +1,7 @@
 import type { CliType } from "./agent-types.js";
 
 export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
+const CLAUDE_UNGATED_LAUNCHER_ALIASES = new Set(["sonnet", "haiku"]);
 // Match the installed repoGolem launcher sourced by fresh interactive shells
 // (~/.config/ralphtools/golem-dispatch.zsh), not the potentially newer golems
 // checkout. Codex model validation is delegated to `codex debug models
@@ -139,7 +140,10 @@ function modelAliasUsesUngatedLauncherPath(
   alias: string,
 ): boolean {
   if (cli === "claude")
-    return alias === "sonnet" || modelMatchesDefault(cli, alias);
+    return (
+      CLAUDE_UNGATED_LAUNCHER_ALIASES.has(alias) ||
+      modelMatchesDefault(cli, alias)
+    );
   return cli === "gemini" || cli === "kiro";
 }
 
@@ -201,7 +205,11 @@ export function resolveLaunchModelFlag(
   }
 
   const alias = ownModelAlias(cli, normalizeModelKey(requested));
-  if (cli === "claude" && alias !== "sonnet" && !opts?.allowModelOverride) {
+  if (
+    cli === "claude" &&
+    !CLAUDE_UNGATED_LAUNCHER_ALIASES.has(alias ?? "") &&
+    !opts?.allowModelOverride
+  ) {
     return null;
   }
   return alias ?? null;

@@ -98,7 +98,28 @@ describe("model policy contract", () => {
     }
   });
 
-  it("advertises only Claude models reachable without the override gate", () => {
+  it("accepts Claude Haiku without the override gate and resolves its launcher flag", () => {
+    expect(resolveLaunchModelFlag("claude", "haiku")).toBe("haiku");
+    expect(resolveSpawnModelPolicy("claude", "haiku", {})).toMatchObject({
+      requested_model: "haiku",
+      effective_model: "haiku",
+      launcher_model: "haiku",
+      coerced: false,
+      override_allowed: false,
+    });
+  });
+
+  it("keeps the existing Claude Sonnet launcher flag", () => {
+    expect(resolveSpawnModelPolicy("claude", "sonnet", {})).toMatchObject({
+      requested_model: "sonnet",
+      effective_model: "sonnet",
+      launcher_model: "sonnet",
+      coerced: false,
+      override_allowed: false,
+    });
+  });
+
+  it("advertises Claude Haiku when rejecting an unsupported model", () => {
     let message = "";
     try {
       resolveSpawnModelPolicy("claude", "fable-5", {});
@@ -106,11 +127,7 @@ describe("model policy contract", () => {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toContain(
-      "Accepted models: claude-opus-5-5[1m], opus, sonnet.",
-    );
-    expect(message).not.toMatch(/haiku/);
-    expect(() => resolveSpawnModelPolicy("claude", "haiku", {})).toThrow(
-      /Unsupported model "haiku"/,
+      "Accepted models: claude-opus-5-5[1m], opus, sonnet, haiku.",
     );
 
     expect(
@@ -118,6 +135,30 @@ describe("model policy contract", () => {
         [MODEL_OVERRIDE_ENV]: "1",
       }).launcher_model,
     ).toBe("haiku");
+  });
+
+  it("keeps the other CLI model alias tables unchanged", () => {
+    expect(MODEL_POLICY_CONTRACT.cli.cursor.modelAliases).toEqual({});
+    expect(MODEL_POLICY_CONTRACT.cli.codex.modelAliases).toEqual({});
+    expect(MODEL_POLICY_CONTRACT.cli.gemini.modelAliases).toEqual({
+      pro: "pro",
+      "pro-high": "pro-high",
+      "pro-low": "pro-low",
+      flash: "flash",
+      "flash-high": "flash-high",
+      "flash-med": "flash-med",
+      "flash-medium": "flash-medium",
+      "flash-low": "flash-low",
+      "gemini-2.5-pro": "gemini-2.5-pro",
+      "gemini-2.5-flash": "gemini-2.5-flash",
+      "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
+      "gemini-3.1-pro": "gemini-3.1-pro",
+    });
+    expect(MODEL_POLICY_CONTRACT.cli.kiro.modelAliases).toEqual({
+      opus: "opus",
+      sonnet: "sonnet",
+      haiku: "haiku",
+    });
   });
 
 });
