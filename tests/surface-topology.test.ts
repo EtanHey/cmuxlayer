@@ -233,6 +233,21 @@ describe("collectSurfaceTopology", () => {
     expect(client.listWindows).toHaveBeenCalledTimes(2);
   });
 
+  it("reports each topology RPC even when the first enumeration retries", async () => {
+    const events: Array<{ method: string; elapsed_ms: number }> = [];
+    const client = {
+      listWindows: vi.fn().mockRejectedValueOnce(new Error("retry"))
+        .mockResolvedValueOnce({ windows: [{ ref: "window:ok", workspace_count: 1 }] }),
+      listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [workspace("workspace:ok")] }),
+    };
+    await enumerateAllWindowWorkspacesWithRetry(client, undefined,
+      (method: string, elapsed_ms: number) => events.push({ method, elapsed_ms }));
+    expect(events.map((event) => event.method)).toEqual([
+      "listWindows", "listWindows", "listWorkspaces",
+    ]);
+    expect(events.every((event) => event.elapsed_ms >= 0)).toBe(true);
+  });
+
   it("reuses one completed workspace map within a call and refreshes it across calls", async () => {
     let workspaceRef = "workspace:A";
     const client = {
