@@ -67,7 +67,7 @@ function instancePin(
 ): string | undefined {
   if (opts?.socketPath) return opts.socketPath;
   const fromEnv = (
-    opts?.env?.CMUX_SOCKET_PATH ?? process.env.CMUX_SOCKET_PATH ?? ""
+    (opts?.env ? opts.env.CMUX_SOCKET_PATH : process.env.CMUX_SOCKET_PATH) ?? ""
   ).trim();
   return fromEnv.length > 0 ? fromEnv : undefined;
 }
@@ -77,11 +77,19 @@ export function candidateSocketPathsForOpts(
 ): string[] {
   const pinned = instancePin(opts);
   if (pinned) return [pinned];
-  const bundleId = opts?.env?.CMUX_BUNDLE_ID ?? process.env.CMUX_BUNDLE_ID;
+  const bundleId = opts?.env
+    ? opts.env.CMUX_BUNDLE_ID
+    : process.env.CMUX_BUNDLE_ID;
   if (/(?:^|\.)nightly$/i.test(bundleId?.trim() ?? "")) {
-    return nightlySocketPathCandidates({ stateDir: opts?.socketStateDir });
+    return nightlySocketPathCandidates({
+      stateDir: opts?.socketStateDir,
+      env: opts?.env,
+    });
   }
-  return cmuxSocketPathCandidates({ stateDir: opts?.socketStateDir });
+  return cmuxSocketPathCandidates({
+    stateDir: opts?.socketStateDir,
+    env: opts?.env,
+  });
 }
 
 export async function probeUsableSocket(
