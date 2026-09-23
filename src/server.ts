@@ -34,7 +34,7 @@ import {
 import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
-import { agentProcessMayBeAlive } from "./process-liveness.js";
+import { agentProcessLiveness, agentProcessMayBeAlive } from "./process-liveness.js";
 import {
   currentCliFallbackCount,
   currentCliFallbackSources,
@@ -18460,6 +18460,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // 16. stop_agent
+    const reapTailAfterConfirmedExit = async (
+      target: AgentRecord | null,
+    ) => {
+      // A missing PID is not proof that the agent has stopped. Keep the
+      // recorded tail until the process identity is known to be gone.
+      if (!target?.pid || agentProcessLiveness(target) !== "gone") return {};
+      return reapInboxTail(target.agent_id, inboxOpts);
+    };
     server.tool(
       "stop_agent",
       "Stop an agent gracefully (Ctrl+C) or forcefully (kill process).",
@@ -18473,6 +18481,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.destructive,
       async (args) => {
+        const target = engine.getAgentState(args.agent_id);
         try {
           await engine.stopAgent(args.agent_id, args.force, {
             allowUnknownPidOwnedSurfaceClose:
@@ -18486,8 +18495,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 route.workspace_id ?? undefined,
               ),
           });
+          const tailOutcome = await reapInboxTail(target?.agent_id ?? args.agent_id, inboxOpts);
           pruneChildReportWatchesFor(args.agent_id);
-          const tailOutcome = await reapInboxTail(args.agent_id, inboxOpts);
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({
             event: "stop_agent",
@@ -18504,7 +18513,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           return okFormatted(formatOk("stop_agent", data), data);
         } catch (e) {
-          return err(e);
+          const tailOutcome = await reapTailAfterConfirmedExit(target).catch(() => ({}));
+          return err(e, tailOutcome);
         }
       },
     );
@@ -20046,8 +20056,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           // Kill each agent, collecting results
           for (const agentId of targetIds) {
+            const current = engine.getAgentState(agentId);
             try {
-              const current = engine.getAgentState(agentId);
               await engine.stopAgent(agentId, args.force, {
                 beforeSurfaceMutation: (route) =>
                   assertSurfaceMutationAllowed(
@@ -20056,8 +20066,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     route.workspace_id ?? undefined,
                   ),
               });
+              await reapInboxTail(current?.agent_id ?? agentId, inboxOpts);
               pruneChildReportWatchesFor(agentId);
-              await reapInboxTail(agentId, inboxOpts);
               killed.push(agentId);
               appendCloseEvent({
                 event: "kill",
@@ -20068,6 +20078,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 refused: false,
               });
             } catch (e) {
+              await reapTailAfterConfirmedExit(current).catch(() => ({}));
               errors.push(
                 `${agentId}: ${e instanceof Error ? e.message : String(e)}`,
               );

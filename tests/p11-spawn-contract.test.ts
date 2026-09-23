@@ -863,6 +863,125 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     }
   });
 
+  for (const route of ["stop_agent", "close_surface", "kill"] as const) {
+    it(`reaps the canonical inbox tail when ${route} receives an alias`, async () => {
+      await server._registeredTools.list_agents.handler({}, {} as never);
+      const engine = server._registeredTools.interact._engine;
+      const alias = `tail-alias-${route}`;
+      const canonical = `tail-canonical-${route}`;
+      const nonce = `t1b-alias-${route.replaceAll("_", "-")}-${Date.now()}-${process.pid}`;
+      const marker = `cmuxlayer-inbox-tail:${nonce}`;
+      const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], { stdio: "ignore" });
+      try {
+        await once(tail, "spawn");
+        await vi.waitFor(() => expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker));
+        const record: AgentRecord = {
+          ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+          agent_id: alias,
+          surface_id: "surface:already-gone",
+          state: "done",
+          user_killed: false,
+        };
+        engine.stateMgr.writeState(record);
+        engine.getRegistry().set(alias, record);
+        const renamed = engine.stateMgr.renameState(alias, canonical);
+        engine.getRegistry().rename(alias, canonical, renamed);
+        mkdirSync(join(inboxDir, canonical), { recursive: true });
+        writeFileSync(join(inboxDir, canonical, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
+
+        const result = route === "stop_agent"
+          ? await server._registeredTools.stop_agent.handler({ agent_id: alias, force: true }, {} as never)
+          : route === "close_surface"
+            ? await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: alias, force: true }, {} as never)
+            : await server._registeredTools.kill.handler({ target: alias, force: true }, {} as never);
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        if (route !== "kill") expect(result.structuredContent).toMatchObject({ tail_reaped: true });
+        await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
+      } finally {
+        if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+      }
+    });
+  }
+
+  for (const route of ["stop_agent", "close_surface", "kill"] as const) {
+    it(`reaps a dead agent's tail after ${route} reports a stop postcondition failure`, async () => {
+      await server._registeredTools.list_agents.handler({}, {} as never);
+      const engine = server._registeredTools.interact._engine;
+      const agentId = `failed-stop-tail-${route}`;
+      const nonce = `t1b-failed-${route.replaceAll("_", "-")}-${Date.now()}-${process.pid}`;
+      const marker = `cmuxlayer-inbox-tail:${nonce}`;
+      const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], { stdio: "ignore" });
+      const agent = nodeSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+      try {
+        await Promise.all([once(tail, "spawn"), once(agent, "spawn")]);
+        await vi.waitFor(() => expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker));
+        const record: AgentRecord = {
+          ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+          agent_id: agentId,
+          pid: agent.pid ?? null,
+          surface_id: "surface:still-live",
+          state: "working",
+        };
+        engine.stateMgr.writeState(record);
+        engine.getRegistry().set(agentId, record);
+        mkdirSync(join(inboxDir, agentId), { recursive: true });
+        writeFileSync(join(inboxDir, agentId, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
+        vi.spyOn(engine, "stopAgent").mockImplementationOnce(async () => {
+          agent.kill("SIGTERM");
+          await once(agent, "exit");
+          throw new Error("Stop post-condition failed: surface still live");
+        });
+
+        const result = route === "stop_agent"
+          ? await server._registeredTools.stop_agent.handler({ agent_id: agentId, force: true }, {} as never)
+          : route === "close_surface"
+            ? await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: agentId, force: true }, {} as never)
+            : await server._registeredTools.kill.handler({ target: agentId, force: true }, {} as never);
+        expect(result.isError, JSON.stringify(result)).toBe(true);
+        if (route !== "kill") expect(result.structuredContent).toMatchObject({ tail_reaped: true });
+        await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
+      } finally {
+        vi.restoreAllMocks();
+        if (agent.exitCode === null && agent.signalCode === null) agent.kill("SIGTERM");
+        if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+      }
+    });
+  }
+
+  it("keeps the inbox tail when a failed stop cannot prove the agent process exited", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "unproven-stop-tail";
+    const nonce = `t1b-unproven-${Date.now()}-${process.pid}`;
+    const marker = `cmuxlayer-inbox-tail:${nonce}`;
+    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], { stdio: "ignore" });
+    const agent = nodeSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    try {
+      await Promise.all([once(tail, "spawn"), once(agent, "spawn")]);
+      await vi.waitFor(() => expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker));
+      const record: AgentRecord = {
+        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        agent_id: agentId,
+        pid: agent.pid ?? null,
+        state: "working",
+      };
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+      mkdirSync(join(inboxDir, agentId), { recursive: true });
+      writeFileSync(join(inboxDir, agentId, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
+      vi.spyOn(engine, "stopAgent").mockRejectedValueOnce(new Error("Stop post-condition failed"));
+
+      const result = await server._registeredTools.stop_agent.handler({ agent_id: agentId, force: true }, {} as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).not.toHaveProperty("tail_reaped");
+      expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker);
+    } finally {
+      vi.restoreAllMocks();
+      if (agent.exitCode === null && agent.signalCode === null) agent.kill("SIGTERM");
+      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+    }
+  });
+
   it("refuses to signal a reused tail PID whose process title has another nonce", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
     const engine = server._registeredTools.interact._engine;
