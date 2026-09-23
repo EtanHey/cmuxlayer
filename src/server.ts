@@ -3449,6 +3449,7 @@ function screenShowsFreshCursorResponseAfterSubmittedInput(
 function screenShowsQueuedAgentInput(
   screenText: string,
   submittedText: string,
+  opts: { exact?: boolean } = {},
 ): boolean {
   const lines = normalizeTerminalText(screenText).split("\n");
   if (inferComposerCli(screenText) !== "codex") {
@@ -3479,12 +3480,14 @@ function screenShowsQueuedAgentInput(
 
   const queuedItemRows: string[] = [];
   let foundQueuedItem = false;
+  let exactQueuedItemText: string | null = null;
   while (index >= 0) {
     const rawLine = lines[index] ?? "";
     const activeLine = stripCodexQueueGutter(rawLine).trim();
     const itemMatch = /^↳(?:\s+(.*)|\s*$)/.exec(activeLine);
     if (itemMatch) {
       queuedItemRows.unshift(itemMatch[1] ?? "");
+      exactQueuedItemText = /^↳ (.*)$/.exec(activeLine)?.[1] ?? null;
       foundQueuedItem = true;
       index -= 1;
       break;
@@ -3528,11 +3531,63 @@ function screenShowsQueuedAgentInput(
     return false;
   }
 
+  if (opts.exact) {
+    // A wrapped or partially rendered item cannot prove ownership. Preserve
+    // authored spaces; only CR line endings and terminal right padding vary.
+    if (queuedItemRows.length !== 1 || exactQueuedItemText === null) {
+      return false;
+    }
+    const stripRightPadding = (text: string): string =>
+      normalizeTerminalText(text).replace(/[ \t]+$/, "");
+    const visible = stripRightPadding(exactQueuedItemText);
+    return visible.length > 0 && visible === submittedText;
+  }
+
   const visiblePrefix = compactQueueCorrelationText(
     queuedItemRows.join(" ").replace(/(?:…|\.\.\.)+\s*$/, ""),
   );
   const submitted = compactQueueCorrelationText(submittedText.trim());
   return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
+}
+
+function countVisibleExactQueuedRows(
+  screenText: string,
+  authoredText: string,
+): number | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let cursor = lines.length - 1;
+  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
+  if (cursor < 0) return null;
+  cursor -= 1;
+  while (cursor >= 0 && (!stripCodexQueueGutter(lines[cursor] ?? "").trim() || /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(stripCodexQueueGutter(lines[cursor] ?? "")))) cursor -= 1;
+  const queueRow = (index: number): RegExpExecArray | null => /^↳ (.*)$/.exec(stripCodexQueueGutter(lines[index] ?? "").trimStart());
+  const queueHeadingStart = (index: number): number => {
+    let wrappedHeading = "";
+    for (let rows = 0; index >= 0 && rows < 4; rows += 1, index -= 1) {
+      const row = stripCodexQueueGutter(lines[index] ?? "").trim().replace(/^•\s*/, "");
+      if (!row) break;
+      wrappedHeading = `${row} ${wrappedHeading}`.replace(/\s+/g, " ").trim();
+      if (/^messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?$/i.test(wrappedHeading)) return index;
+    }
+    return -1;
+  };
+  let count: number | null = null;
+  while (cursor >= 0) {
+    const blockEnd = cursor;
+    let blockCount = 0;
+    let row: RegExpExecArray | null;
+    while (cursor >= 0 && (row = queueRow(cursor))) {
+      if (row[1] === authoredText) blockCount += 1;
+      cursor -= 1;
+    }
+    if (cursor === blockEnd) return count;
+    while (cursor >= 0 && !stripCodexQueueGutter(lines[cursor] ?? "").trim()) cursor -= 1;
+    const headingStart = queueHeadingStart(cursor);
+    if (headingStart < 0) return count;
+    count = (count ?? 0) + blockCount;
+    cursor = headingStart - 1;
+  }
+  return count;
 }
 
 function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {
@@ -6851,15 +6906,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const submitBaseline = submitAttempted && !opts.engineSubmitProof
         ? await readParsedSurface(opts.surface, opts.workspace) : null;
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
-      const ownedQueuedReceipt = callerSubmit && targetAgent && submitBaseline &&
+      const eligibleQueuedReceipts = callerSubmit && targetAgent && submitBaseline &&
         targetCli === "codex"
-        ? context.lifecycleSweepEngine?.listDeliveryReceipts().find((receipt) =>
+        ? context.lifecycleSweepEngine?.listDeliveryReceipts().filter((receipt) =>
             receipt.agent_id === targetAgent.agent_id &&
             receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true &&
-            receipt.press_enter &&
-            screenShowsQueuedAgentInput(submitBaseline.text, receipt.text)
-          )
+            receipt.press_enter
+          ) ?? []
+        : [];
+      const ownedQueuedReceipt = submitBaseline
+        ? eligibleQueuedReceipts.find((receipt) => {
+            const visibleCount = countVisibleExactQueuedRows(
+              submitBaseline.text,
+              receipt.text,
+            );
+            const ownedCount = eligibleQueuedReceipts.filter(
+              (candidate) => candidate.text === receipt.text,
+            ).length;
+            return visibleCount === 1 && visibleCount <= ownedCount &&
+              screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true });
+          })
         : undefined;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
           (targetCli && ["claude", "codex", "cursor"].includes(targetCli) &&
