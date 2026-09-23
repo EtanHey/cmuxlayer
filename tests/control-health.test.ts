@@ -62,8 +62,9 @@ describe("control health", () => {
       homeDir: TEST_ROOT,
       tmpDir: TEST_ROOT,
     });
-    expect(health.current_process).toHaveProperty("nofile.soft", expect.any(Number));
-    expect(health.current_process).toHaveProperty("nofile.hard");
+    const { soft, hard } = health.current_process.nofile;
+    expect(typeof soft === "number" || soft === "unlimited").toBe(true);
+    expect(typeof hard === "number" || hard === "unlimited").toBe(true);
     expect(health.current_process).toHaveProperty("nofile.open_fds", expect.any(Number));
     expect(formatControlHealth(health)).toContain("open files:");
   });
@@ -84,6 +85,30 @@ describe("control health", () => {
     });
     expect(health.warnings).toContainEqual(expect.stringContaining("open files above 70%"));
     expect(formatControlHealth(health)).toContain("open files: 8 / soft 10 (hard 20)");
+  });
+
+  it("does not evaluate an open-fd ratio when the soft nofile limit is unlimited", async () => {
+    const health = await collectControlHealth({
+      homeDir: TEST_ROOT,
+      tmpDir: TEST_ROOT,
+      execFile: async (file) => ({
+        stdout: file === "/bin/sh" ? "unlimited\nunlimited\n" : "",
+      }),
+      readdir: async () => Array.from({ length: 8 }, (_, index) => String(index)),
+    });
+
+    expect(health.current_process.nofile).toEqual({
+      soft: "unlimited",
+      hard: "unlimited",
+      open_fds: 8,
+    });
+    expect(health.warnings).not.toContainEqual(
+      expect.stringContaining("open files above 70%"),
+    );
+    expect(formatControlHealth(health)).toContain(
+      "open files: 8 / soft unlimited (hard unlimited)",
+    );
+    expect(formatControlHealth(health)).not.toContain("NaN");
   });
 
   it("does not expose a pane capability in its structured or formatted snapshot", async () => {
