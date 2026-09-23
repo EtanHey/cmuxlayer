@@ -162,7 +162,26 @@ const TOKEN_USAGE_RE = /Token usage:\s*total=([0-9][0-9,]*)/i;
 // Invalid: "I only have 42 tokens" (prose sentence)
 // Pattern requires either: (1) line starts with optional whitespace + number, or
 // (2) at least 2 spaces before the number (right-aligned footer indicator)
-const TOKENS_RE = /(?:^\s*|.*\s{2,})([0-9][0-9,]*)\s+tokens\s*$/im;
+// Check the suffix and scan backward once. The old overlapping /.*\s{2,}/
+// regex took cubic time on long whitespace composer lines with no token count.
+function footerTokenCount(line: string): string | null {
+  const trimmed = line.trimEnd();
+  if (!trimmed.toLowerCase().endsWith("tokens")) return null;
+  let index = trimmed.length - "tokens".length;
+  if (index === 0 || !/\s/.test(trimmed[index - 1])) return null;
+  while (index > 0 && /\s/.test(trimmed[index - 1])) index -= 1;
+  const numberEnd = index;
+  while (index > 0 && /[0-9,]/.test(trimmed[index - 1])) index -= 1;
+  const count = trimmed.slice(index, numberEnd);
+  if (!/^[0-9][0-9,]*$/.test(count)) return null;
+  const prefix = trimmed.slice(0, index);
+  const rightAligned =
+    prefix.length >= 2 &&
+    /\s/.test(prefix[prefix.length - 1]) &&
+    /\s/.test(prefix[prefix.length - 2]);
+  return prefix.trim() === "" || rightAligned ? count : null;
+}
+const MAX_SCREEN_LINE_WIDTH = 1024;
 const MODEL_COST_RE = /🤖\s*([^|\n]+?)\s*\|\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)/i;
 const HEADER_MODEL_RE =
   /^\s*[▝▜▛▘▐].*?\b((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][^(\n·|]*)/m;
@@ -323,7 +342,13 @@ function stripAnsi(text: string): string {
 }
 
 function normalizeText(text: string): string {
-  return stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const normalized = stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  // Terminal width is far smaller than this. Bound every line before any of
+  // the parser's many regexes see untrusted screen text.
+  return normalized
+    .split("\n")
+    .map((line) => line.slice(0, MAX_SCREEN_LINE_WIDTH))
+    .join("\n");
 }
 
 function hasCodexUpdateMenuMarkers(normalized: string): boolean {
@@ -474,14 +499,15 @@ function parseTokenCount(text: string): number | null {
     return Number.parseInt(usageMatch[1].replaceAll(",", ""), 10);
   }
 
-  // AIDEV-NOTE: TOKENS_RE is a loose fallback ("N tokens") that can false-positive on prose.
+  // AIDEV-NOTE: This is a loose fallback ("N tokens") that can false-positive on prose.
   // Restrict it to the last 5 non-empty lines of the screen buffer where footer/status lines live.
   const lines = text.split("\n");
   const nonEmpty = lines.filter((l) => l.trim() !== "");
-  const tail = nonEmpty.slice(-5).join("\n");
-  const tokensMatch = tail.match(TOKENS_RE);
-  if (tokensMatch) {
-    return Number.parseInt(tokensMatch[1].replaceAll(",", ""), 10);
+  for (const line of nonEmpty.slice(-5)) {
+    const count = footerTokenCount(line);
+    if (count !== null) {
+      return Number.parseInt(count.replaceAll(",", ""), 10);
+    }
   }
 
   return null;
@@ -1607,7 +1633,7 @@ function isDoneSignalTailChromeLine(
   return (
     RULE_LINE_RE.test(line) ||
     TOKEN_USAGE_RE.test(line) ||
-    TOKENS_RE.test(line) ||
+    footerTokenCount(line) !== null ||
     /^🤖\s/.test(line) ||
     /^⎇\s/.test(line) ||
     /^\s*(?:❯|>>>|\$|>)\s*$/.test(line) ||
