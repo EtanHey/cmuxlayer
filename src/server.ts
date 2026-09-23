@@ -10,6 +10,7 @@ import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import { CmuxSocketError } from "./cmux-socket-error.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -33,7 +34,7 @@ import {
 import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
-import { agentProcessMayBeAlive } from "./process-liveness.js";
+import { agentProcessLiveness, agentProcessMayBeAlive } from "./process-liveness.js";
 import {
   currentCliFallbackCount,
   currentCliFallbackSources,
@@ -195,6 +196,7 @@ import {
   inboxPath,
   monitorAlive,
   pendingDispatches,
+  reapInboxTail,
   recommendedMonitorCommand,
   replayUndelivered,
   writeHeartbeat,
@@ -2005,6 +2007,28 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === PLACEMENT_WORKSPACE_UNRESOLVED
       ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
       : {};
+  const placementTimeoutExtra =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "placement_timeout"
+      ? { error_code: "placement_timeout", retryable: true }
+      : {};
+  const placementPendingExtra =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "placement_pending"
+      ? {
+          error_code: "placement_pending",
+          retryable: true,
+          ...("remainingMs" in error &&
+          typeof error.remainingMs === "number" &&
+          Number.isFinite(error.remainingMs)
+            ? { remaining_ms: error.remainingMs }
+            : {}),
+        }
+      : {};
   // #529: the bounded lifecycle timeouts carry a `code` that must reach the
   // tool payload, or automated callers see only free text and cannot tell a
   // bounded control-plane wait from any other failure. Both are retryable.
@@ -2021,6 +2045,10 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
             retryable: true,
           }
         : {};
+  const cmuxUnavailableExtra =
+    error instanceof CmuxSocketError && error.code === "cmux_unavailable"
+      ? { error_code: "cmux_unavailable", retryable: true }
+      : {};
   const readinessTimeout = findErrorInChain(
     error,
     (candidate): candidate is BootPromptTimeoutError | LauncherReadinessError =>
@@ -2081,7 +2109,10 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
+    ...placementTimeoutExtra,
+    ...placementPendingExtra,
     ...lifecycleTimeoutExtra,
+    ...cmuxUnavailableExtra,
     ...readinessExtra,
     ...deliveryRpcExtra,
     ...deliveryMutationExtra,
@@ -15062,13 +15093,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
+        // Compaction can temporarily render Codex's ready footer while the
+        // queued message still belongs to the active turn's next tool call.
+        const compactingCodexQueue =
+          cli === "codex" &&
+          /(?:^|\n)\s*[•·]\s*Context compacted\s*[·•]\s*\d+s\b/i.test(
+            resolvedSnapshot.text.slice(-4096),
+          );
+        const parsed = resolvedSnapshot.parsed as ParsedScreenResult | undefined;
+        const queuedReady = parsed?.control_state === "ready" && parsed.status === "idle";
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
           return {
             outcome: "pending" as const,
-            ...(queued &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.control_state === "ready" &&
-              (resolvedSnapshot.parsed as ParsedScreenResult | undefined)?.status === "idle"
-              ? { reason: "queued_idle" }
+            ...(queued
+              ? {
+                  reason: compactingCodexQueue
+                    ? queuedReady
+                      ? "queued_compaction_idle"
+                      : "queued_compaction_busy"
+                    : queuedReady
+                      ? "queued_idle"
+                      : undefined,
+                }
               : {}),
           };
         }
@@ -15137,7 +15183,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
+      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
       {
         version: z
           .literal(1)
@@ -15211,7 +15257,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .positive()
           .optional()
           .describe(
-            "Optional timeout override in milliseconds for initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (10s shell, 15s launch, 60s boot prompt).",
+            "Optional timeout override in milliseconds for pane placement, initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (45s placement, 10s shell, 15s launch, 60s boot prompt).",
           ),
         workspace: z
           .string()
@@ -18414,6 +18460,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // 16. stop_agent
+    const reapTailAfterConfirmedExit = async (
+      target: AgentRecord | null,
+    ) => {
+      // A missing PID is not proof that the agent has stopped. Keep the
+      // recorded tail until the process identity is known to be gone.
+      if (!target?.pid || agentProcessLiveness(target) !== "gone") return {};
+      return reapInboxTail(target.agent_id, inboxOpts);
+    };
     server.tool(
       "stop_agent",
       "Stop an agent gracefully (Ctrl+C) or forcefully (kill process).",
@@ -18427,6 +18481,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.destructive,
       async (args) => {
+        const target = engine.getAgentState(args.agent_id);
         try {
           await engine.stopAgent(args.agent_id, args.force, {
             allowUnknownPidOwnedSurfaceClose:
@@ -18440,6 +18495,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 route.workspace_id ?? undefined,
               ),
           });
+          const tailOutcome = await reapInboxTail(target?.agent_id ?? args.agent_id, inboxOpts);
           pruneChildReportWatchesFor(args.agent_id);
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({
@@ -18453,10 +18509,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const data = {
             agent_id: args.agent_id,
             state: state?.state ?? "done",
+            ...tailOutcome,
           };
           return okFormatted(formatOk("stop_agent", data), data);
         } catch (e) {
-          return err(e);
+          const tailOutcome = await reapTailAfterConfirmedExit(target).catch(() => ({}));
+          return err(e, tailOutcome);
         }
       },
     );
@@ -19998,8 +20056,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           // Kill each agent, collecting results
           for (const agentId of targetIds) {
+            const current = engine.getAgentState(agentId);
             try {
-              const current = engine.getAgentState(agentId);
               await engine.stopAgent(agentId, args.force, {
                 beforeSurfaceMutation: (route) =>
                   assertSurfaceMutationAllowed(
@@ -20008,6 +20066,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     route.workspace_id ?? undefined,
                   ),
               });
+              await reapInboxTail(current?.agent_id ?? agentId, inboxOpts);
               pruneChildReportWatchesFor(agentId);
               killed.push(agentId);
               appendCloseEvent({
@@ -20019,6 +20078,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 refused: false,
               });
             } catch (e) {
+              await reapTailAfterConfirmedExit(current).catch(() => ({}));
               errors.push(
                 `${agentId}: ${e instanceof Error ? e.message : String(e)}`,
               );

@@ -16,6 +16,7 @@ import {
   SURFACE_EVICTION_CONFIRMATION_MS,
 } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
+import { withFakeRightSplitClient } from "./helpers/fake-right-split-topology.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
 import { resetResumeArtifactResolver } from "../src/resume-verification.js";
@@ -297,6 +298,7 @@ describe("revive on purpose (#492)", () => {
     liveSurfaces = [{ ...makeSurface("surface:other"), workspace_ref: "ws:1" }];
     await runConfirmedSurfaceAbsenceSweep();
 
+    withFakeRightSplitClient(mockClient);
     const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
     expect(resumed.agent_id).toBe("cmuxlayerCodex-revive");
     expect(resumed.surface_id).toBe("surface:new");

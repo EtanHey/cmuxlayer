@@ -1205,6 +1205,36 @@ codex>
     expect(parsed.actions).toContain("recoverable_blocker:pr_loop");
   });
 
+  it("does not report a historical PR permission sentence as a blocker while Codex works", () => {
+    const parsed = parseScreen(`
+OpenAI Codex
+
+Earlier note: I cannot push a PR without explicit permission, so I am waiting for Etan.
+
+• PL1b's full local suite passed: 167 files, 4,135 passed.
+• Ran python3 -m pytest
+Working (3m 12s • esc to interrupt)
+
+› Ask Codex to do anything
+gpt-6-sol high · 8% used
+`);
+
+    expect(parsed.status).toBe("working");
+    expect(parsed.actions).not.toContain("recoverable_blocker:pr_loop");
+  });
+
+  it("keeps a parked PR blocker when the same pane also shows TASK_DONE", () => {
+    const parsed = parseScreen(`
+OpenAI Codex
+Model: gpt-5.5
+I cannot commit, push, or open a PR without explicit permission, so I am parked.
+TASK_DONE
+`);
+
+    expect(parsed.status).toBe("done");
+    expect(parsed.actions).toContain("recoverable_blocker:pr_loop");
+  });
+
   it("detects recoverable MCP restart and successor blockers", () => {
     const parsed = parseScreen(`
 OpenAI Codex
@@ -1233,11 +1263,16 @@ Token usage: total=356,835
 `);
 
     expect(parsed.agent_type).toBe("claude");
-    expect(parsed.model).toBe("Opus 4.6");
+    expect(parsed.model).toBe("Opus 4.6 (1M context)");
     expect(parsed.token_count).toBe(356835);
     // "(1M" detected in text → 1M window
     expect(parsed.context_window).toBe(1_000_000);
     expect(parsed.context_pct).toBe(36); // 356835/1000000
+  });
+
+  it("retains an explicit context tier in a Claude header", () => {
+    const parsed = parseScreen("Claude Code\n▝ Opus 5.5 (200K context)\n❯");
+    expect(parsed.model).toBe("Opus 5.5 (200K context)");
   });
 
   it("extracts model from narrow pane (keyword only)", () => {
@@ -1945,6 +1980,7 @@ Token usage: total=50,000
 🤖 Opus 4.6 (1M context)
 `);
 
+      expect(parsed.model).toBe("Opus 4.6 (1M context)");
       expect(parsed.context_window).toBe(1_000_000); // "(1M" detected
       expect(parsed.context_pct).toBe(5); // 50000/1000000
     });

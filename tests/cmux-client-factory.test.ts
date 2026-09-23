@@ -11,7 +11,10 @@ import * as net from "node:net";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createCmuxClient } from "../src/cmux-client-factory.js";
+import {
+  candidateSocketPathsForOpts,
+  createCmuxClient,
+} from "../src/cmux-client-factory.js";
 import { stateSocketPath } from "../src/cmux-socket-path.js";
 import { getTransportHealth } from "../src/cmux-transport-self-heal.js";
 
@@ -125,6 +128,85 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
       );
       if ("stop" in client && typeof client.stop === "function") client.stop();
     });
+
+    it("REG1b keeps injected capability and socket through CLI fallback", async () => {
+      savedEnv = process.env.CMUX_SOCKET_PATH;
+      const savedCapability = process.env.CMUX_SOCKET_CAPABILITY;
+      process.env.CMUX_SOCKET_PATH = "/tmp/reg1b-instance-b.sock";
+      process.env.CMUX_SOCKET_CAPABILITY = "instance-b-token";
+      const injectedEnv = {
+        CMUX_SOCKET_PATH: "/tmp/reg1b-instance-a.sock",
+        CMUX_SOCKET_CAPABILITY: "instance-a-token",
+      };
+      const exec = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+      try {
+        const client = await createCmuxClient({
+          socketPath: injectedEnv.CMUX_SOCKET_PATH,
+          capability: injectedEnv.CMUX_SOCKET_CAPABILITY,
+          env: injectedEnv,
+          exec,
+          pingRetryAttempts: 1,
+          reprobeIntervalMs: 60_000,
+        });
+        await client.listWorkspaces();
+        const cliEnv = exec.mock.calls[0]?.[2] as NodeJS.ProcessEnv;
+        expect(cliEnv?.CMUX_SOCKET_PATH).toBe(injectedEnv.CMUX_SOCKET_PATH);
+        expect(cliEnv?.CMUX_SOCKET_CAPABILITY).toBe(
+          injectedEnv.CMUX_SOCKET_CAPABILITY,
+        );
+        if ("stop" in client && typeof client.stop === "function") client.stop();
+      } finally {
+        if (savedCapability === undefined) {
+          delete process.env.CMUX_SOCKET_CAPABILITY;
+        } else {
+          process.env.CMUX_SOCKET_CAPABILITY = savedCapability;
+        }
+      }
+    });
+
+    it("REG1c discovers injected socket A instead of ambient socket B", () => {
+      savedEnv = process.env.CMUX_SOCKET_PATH;
+      process.env.CMUX_SOCKET_PATH = "/tmp/reg1c-instance-b.sock";
+      expect(
+        candidateSocketPathsForOpts({
+          env: { CMUX_SOCKET_PATH: "/tmp/reg1c-instance-a.sock" },
+        }),
+      ).toEqual(["/tmp/reg1c-instance-a.sock"]);
+    });
+
+    it.each([{}, { CMUX_SOCKET_PATH: "" }])(
+      "REG1d does not select a live ambient socket with injected env %j",
+      async (env) => {
+        const stateDir = mkdtempSync(join(tmpdir(), "cmux-reg1d-"));
+        const ambientSocket = join(stateDir, "ambient.sock");
+        track(await startPingServer(ambientSocket), ambientSocket);
+        savedEnv = process.env.CMUX_SOCKET_PATH;
+        process.env.CMUX_SOCKET_PATH = ambientSocket;
+        const exec = vi.fn().mockResolvedValue({
+          stdout: JSON.stringify({ workspaces: [] }),
+          stderr: "",
+        });
+        try {
+          const client = await createCmuxClient({
+            env,
+            socketStateDir: stateDir,
+            exec,
+            bin: "cmux",
+            pingRetryAttempts: 1,
+            reprobeIntervalMs: 60_000,
+          });
+          expect(getTransportHealth(client).mode).toBe("cli");
+          await client.listWorkspaces();
+          expect(exec.mock.calls[0]?.[2]?.CMUX_SOCKET_PATH).toBe(env.CMUX_SOCKET_PATH);
+          if ("stop" in client && typeof client.stop === "function") client.stop();
+        } finally {
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+    );
 
     it("pins the first degraded CLI call from CMUX_SOCKET_PATH", async () => {
       savedEnv = process.env.CMUX_SOCKET_PATH;

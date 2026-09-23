@@ -154,6 +154,7 @@ function makeLifecycleExec(opts?: {
   let bootPromptReturnFailures = 0;
   let promptReturns = 0;
   let currentSurface = "surface:new";
+  let splitColumnVisible = false;
   const listedSurface = () =>
     surfaceLive
       ? {
@@ -185,9 +186,11 @@ function makeLifecycleExec(opts?: {
           : `surface:new-${createdSurfaceCount}`;
       readyText = opts?.shellPrompt ?? "$ ";
       promptPending = false;
+      if (args.includes("new-split")) splitColumnVisible = true;
     }
     if (args.includes("close-surface") && !opts?.closeKeepsSurface) {
       surfaceLive = false;
+      splitColumnVisible = false;
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("send-key") && args.includes("return")) {
@@ -287,10 +290,18 @@ function makeLifecycleExec(opts?: {
               ref: listed.paneRef,
               index: 0,
               focused: true,
+              surface_count: splitColumnVisible ? 0 : 1,
+              surface_refs: splitColumnVisible ? [] : [listed.surfaceRef],
+              ...(splitColumnVisible ? {} : { selected_surface_ref: listed.surfaceRef }),
+            },
+            ...(splitColumnVisible ? [{
+              ref: "pane:observed-worker",
+              index: 1,
+              focused: false,
               surface_count: 1,
               surface_refs: [listed.surfaceRef],
               selected_surface_ref: listed.surfaceRef,
-            },
+            }] : []),
           ],
         }),
         stderr: "",
@@ -299,12 +310,31 @@ function makeLifecycleExec(opts?: {
 
     if (args.includes("list-pane-surfaces")) {
       const listed = listedSurface();
+      if (splitColumnVisible &&
+          (args.includes("pane:observed-worker") || !args.includes("--pane"))) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:observed-worker",
+            surfaces: splitColumnVisible ? [{
+              ...(opts?.surfaceUuid ? { id: opts.surfaceUuid } : {}),
+              ref: listed.surfaceRef,
+              title: listed.title,
+              type: "terminal",
+              index: 0,
+              selected: true,
+            }] : [],
+          }),
+          stderr: "",
+        };
+      }
       return {
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
           window_ref: "window:1",
           pane_ref: listed.paneRef,
-          surfaces: [
+          surfaces: splitColumnVisible ? [] : [
             {
               ...(opts?.surfaceUuid ? { id: opts.surfaceUuid } : {}),
               ref: listed.surfaceRef,
@@ -351,6 +381,54 @@ function makeLifecycleExec(opts?: {
       }),
       stderr: "",
     };
+  });
+}
+
+function exposeWorkerColumnInExec(exec: ExecFn): ExecFn {
+  let splitVisible = false;
+  return vi.fn(async (cmd: string, args: string[], env?: NodeJS.ProcessEnv) => {
+    const result = await exec(cmd, args, env);
+    if (args.includes("new-split")) {
+      splitVisible = true;
+      return {
+        ...result,
+        stdout: JSON.stringify({
+          ...JSON.parse(result.stdout),
+          pane: "pane:observed-worker",
+        }),
+      };
+    }
+    if (!splitVisible) return result;
+    if (args.includes("list-panes")) {
+      const snapshot = JSON.parse(result.stdout);
+      return {
+        ...result,
+        stdout: JSON.stringify({
+          ...snapshot,
+          panes: [
+            { ...snapshot.panes[0], surface_count: 0, surface_refs: [],
+              selected_surface_ref: undefined },
+            { ref: "pane:observed-worker", index: 1, focused: false,
+              surface_count: 1, surface_refs: ["surface:new"],
+              selected_surface_ref: "surface:new" },
+          ],
+        }),
+      };
+    }
+    if (args.includes("list-pane-surfaces")) {
+      const snapshot = JSON.parse(result.stdout);
+      return {
+        ...result,
+        stdout: JSON.stringify({
+          ...snapshot,
+          pane_ref: args.includes("pane:observed-worker")
+            ? "pane:observed-worker" : snapshot.pane_ref,
+          surfaces: args.includes("pane:observed-worker")
+            ? snapshot.surfaces : [],
+        }),
+      };
+    }
+    return result;
   });
 }
 
@@ -647,6 +725,14 @@ describe("lifecycle dependency seams", () => {
 });
 
 describe("lean spawn tool responses", () => {
+  it("documents that the spawn timeout override also bounds pane placement", () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawnTool = (server as any)._registeredTools.spawn_agent;
+    expect(spawnTool.description).toMatch(/boot_prompt_timeout_ms.*pane placement/i);
+    expect(spawnTool.inputSchema.shape.boot_prompt_timeout_ms.description)
+      .toMatch(/pane placement/i);
+  });
+
   it("documents every false coordination-footer outcome", () => {
     const server = createLifecycleServer(makeLifecycleExec());
     const registered = server as unknown as {
@@ -919,6 +1005,27 @@ describe("lean spawn tool responses", () => {
           args.includes("new-split") || args.includes("new-surface"),
       ),
     ).toBe(false);
+  });
+
+  it("spawn_agent exposes a pending placement as a typed retryable receipt", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const engine = (server as any)._registeredTools.interact._engine as AgentEngine;
+    vi.spyOn(engine, "spawnAgent").mockRejectedValueOnce(Object.assign(
+      new Error("Split outcome unknown; retry in 7777ms."),
+      { code: "placement_pending", remainingMs: 7777 },
+    ));
+    const spawn = (server as any)._registeredTools.spawn_agent;
+
+    const result = await spawn.handler({
+      version: 1, type: "agent", repo: "cmuxlayer", cli: "codex",
+      role: "implementor", placement: "right", prompt: "Worker",
+    }, {} as any);
+
+    expect(result.structuredContent).toMatchObject({
+      ok: false, error_code: "placement_pending",
+      retryable: true, remaining_ms: 7777,
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject(result.structuredContent);
   });
 
   it("rejects placement-only Claude as roleless", async () => {
@@ -1951,6 +2058,38 @@ function makeUuidRouteClient(initialSurfaces: UuidRouteSurface[]) {
 
 function makeCrossWindowUuidRouteClient(initialSurfaces: UuidRouteSurface[]) {
   const routeClient = makeUuidRouteClient(initialSurfaces);
+  const listPanes = routeClient.client.listPanes.getMockImplementation();
+  routeClient.client.listPanes.mockImplementation(async (opts) => {
+    const snapshot = await listPanes!(opts);
+    const leadPane = snapshot.panes[0];
+    if (!leadPane?.surface_refs.includes("surface:spawned")) return snapshot;
+    const spawnedIndex = leadPane.surface_refs.indexOf("surface:spawned");
+    const spawnedId = leadPane.surface_ids?.[spawnedIndex];
+    return {
+      ...snapshot,
+      panes: [
+        {
+          ...leadPane,
+          surface_count: leadPane.surface_count - 1,
+          surface_refs: leadPane.surface_refs.filter(
+            (ref: string) => ref !== "surface:spawned",
+          ),
+          surface_ids: leadPane.surface_ids?.filter(
+            (_id: string, index: number) => index !== spawnedIndex,
+          ),
+        },
+        {
+          ref: "pane:spawned",
+          index: 1,
+          focused: false,
+          surface_count: 1,
+          surface_refs: ["surface:spawned"],
+          ...(spawnedId ? { surface_ids: [spawnedId] } : {}),
+          selected_surface_ref: "surface:spawned",
+        },
+      ],
+    };
+  });
   const windows = ["window:A", "window:B"];
   const workspaceForWindow = new Map([
     ["window:A", "workspace:A"],
@@ -5842,6 +5981,7 @@ describe("agent lifecycle tool handlers", () => {
         stderr: "",
       };
     });
+    mockExec = exposeWorkerColumnInExec(mockExec);
     const server = createTrackedServer(
       {
         exec: mockExec,
@@ -6120,7 +6260,10 @@ describe("agent lifecycle tool handlers", () => {
 
   it("spawn_agent errors when launcher-line corruption recovery is exhausted", async () => {
     const command = "voicelayerCursor -s";
-    const baseExec = makeLifecycleExec({ closeKeepsSurface: true });
+    const baseExec = makeLifecycleExec({
+      closeKeepsSurface: true,
+      surfaceUuid: "11111111-2222-4333-8444-555555555555",
+    });
     let composer = "";
     let ctrlUCount = 0;
     let surfaceGone = false;
@@ -6166,9 +6309,10 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             workspace_ref: "workspace:1",
             window_ref: "window:1",
-            pane_ref: "pane:1",
-            surfaces: [{
-              id: "new-occupant-uuid",
+            pane_ref: args.includes("pane:observed-worker")
+              ? "pane:observed-worker" : "pane:1",
+            surfaces: args.includes("pane:1") ? [] : [{
+              id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
               ref: "surface:new",
               title: "unrelated occupant",
               type: "terminal",
@@ -6961,6 +7105,7 @@ describe("agent lifecycle tool handlers", () => {
         stderr: "",
       };
     });
+    mockExec = exposeWorkerColumnInExec(mockExec);
     const server = createTrackedServer(
       {
         exec: mockExec,
@@ -13192,6 +13337,7 @@ codex>
       if (opts?.workspace === "workspace:bad") throw new Error("window.list timed out");
       return originalListPanes(opts);
     });
+    routeClient.client.listPanes.mockClear();
 
     const result = await registeredTestTool(server, "close_surface").handler(
       { surface: "surface:230" },
@@ -13199,6 +13345,7 @@ codex>
     );
 
     expect(result.isError).toBeFalsy();
+    expect(routeClient.client.listPanes).toHaveBeenCalledWith({ workspace: "workspace:bad" });
     expect(routeClient.client.closeSurface).toHaveBeenCalledWith(
       "surface:230",
       expect.objectContaining({ workspace: "workspace:1" }),
@@ -13477,6 +13624,8 @@ codex>
     expect(parseToolResult(result).error).not.toMatch(/surface route changed/);
     expect(parseToolResult(result)).toMatchObject({ typed: false, retry_safe: true });
     expect(routeClient.sendCalls).toEqual([]);
+    expect(routeClient.pasteCalls).toEqual([]);
+    expect(routeClient.client.sendKey).not.toHaveBeenCalled();
   });
 
   it("records managed send failures against the stable UUID instead of its mutable ref", async () => {

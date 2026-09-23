@@ -260,6 +260,11 @@ export class CmuxClient {
         transportPhase: "response",
       });
     }
+    if (/\b(?:ENOENT|ECONNREFUSED|ENOTCONN|no such file or directory|connection refused|cmux socket unavailable|socket not found)\b/i.test(message)) {
+      return new CmuxSocketError(message, "cmux_unavailable", {
+        transportPhase: "connect",
+      });
+    }
     if (/\b(?:EPIPE|ECONNRESET|broken pipe|errno\s*32)\b/i.test(message)) {
       const stdout =
         "stdout" in error && typeof error.stdout === "string"

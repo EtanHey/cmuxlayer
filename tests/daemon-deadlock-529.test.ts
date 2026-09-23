@@ -509,6 +509,11 @@ describe("#529 bounded lifecycle lock", () => {
     expect(timeout.heldForMs).toBeGreaterThanOrEqual(0);
     expect(timeout.message).toContain("wedged-op");
 
+    // Wait for the hold guard itself. Starting a second 40ms acquire timer
+    // immediately after the first 40ms timeout races the 80ms hold timer.
+    await vi.waitFor(() => {
+      expect(engine.lifecycleLockState().forced_releases).toBe(1);
+    });
     // A wedged operation must not poison the tail: once the hold guard fires,
     // later callers get the lock instead of inheriting the deadlock.
     await expect(

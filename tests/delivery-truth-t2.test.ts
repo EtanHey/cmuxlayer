@@ -10,6 +10,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { CLI_READY_PATTERNS } from "../src/pattern-registry.js";
 import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
@@ -60,7 +61,7 @@ async function spawnReadyAgent(
 }
 
 function makeLifecycleExec(readScreenText: () => string, surfaceUuid?: string): ExecFn {
-  return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+  return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("list-windows")) {
       return {
         stdout: JSON.stringify({
@@ -146,7 +147,7 @@ function makeLifecycleExec(readScreenText: () => string, surfaceUuid?: string): 
       }),
       stderr: "",
     };
-  });
+  }));
 }
 
 const mutatedPane = (mockExec: any): boolean =>

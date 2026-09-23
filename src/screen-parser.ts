@@ -184,10 +184,10 @@ function footerTokenCount(line: string): string | null {
 const MAX_SCREEN_LINE_WIDTH = 1024;
 const MODEL_COST_RE = /🤖\s*([^|\n]+?)\s*\|\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)/i;
 const HEADER_MODEL_RE =
-  /^\s*[▝▜▛▘▐].*?\b((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][^(\n·|]*)/m;
+  /^\s*[▝▜▛▘▐].*?\b((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][^(\n·|]*(?:\(\d+(?:\.\d+)?[KM]\s+context\))?)/im;
 // Fallback: 🤖 + model name + version, without requiring cost or pipe
 const MODEL_EMOJI_RE =
-  /🤖\s*((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][0-9.]*)/i;
+  /🤖\s*((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][0-9.]*(?:\s+\(\d+(?:\.\d+)?[KM]\s+context\))?)/i;
 // Last resort: 🤖 + bare model family name (for narrow panes where version is cut off)
 const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
@@ -1560,9 +1560,16 @@ function uniqueActions(actions: string[]): string[] {
   return Array.from(new Set(actions));
 }
 
-function parseRecoverableBlockerActions(text: string): string[] {
+function parseRecoverableBlockerActions(
+  text: string,
+  status: ParsedScreenStatus,
+): string[] {
   const actions: string[] = [];
-  if (RECOVERABLE_PR_LOOP_BLOCKER_RE.test(text)) {
+  if (
+    status !== "working" &&
+    status !== "thinking" &&
+    RECOVERABLE_PR_LOOP_BLOCKER_RE.test(text)
+  ) {
     actions.push("recoverable_blocker:pr_loop");
   }
   if (RECOVERABLE_RESTART_BLOCKER_RE.test(text)) {
@@ -1868,12 +1875,12 @@ export function parseScreen(text: string): ParsedScreenResult {
     contextPct = Math.min(100, Math.round((tokenCount / contextWindow) * 100));
   }
 
-  const actions = parseRecoverableBlockerActions(normalized);
+  const status = inferStatus(normalized, doneSignal, errors, agentType);
+  const actions = parseRecoverableBlockerActions(normalized, status);
   if (agentType === "codex") {
     actions.push(...parseCodexActions(normalized));
   }
 
-  const status = inferStatus(normalized, doneSignal, errors, agentType);
   const cliUpdateState = parseCliUpdateState(normalized, agentType);
   const honesty = pauseHonestyFields("inferred");
   const result: ParsedScreenResult = {
