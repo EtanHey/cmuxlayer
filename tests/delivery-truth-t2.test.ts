@@ -569,6 +569,66 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   }, 15_000);
 
+  it("keeps a newer boot pending when a recovered Return loses its ack during restart", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let composer = "";
+    let active = false;
+    let returnAttempts = 0;
+    let agentId = "";
+    let engine: any;
+    let newerBootId: string | undefined;
+    const followupWrites: string[] = [];
+    const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("send-key") && args.includes("return")) {
+        returnAttempts += 1;
+        // The old boot's Return may have landed before the transport lost its
+        // ack; the same agent ID begins a newer boot during that await.
+        const restarted = engine.stateMgr.resetState(agentId, "booting", {
+          boot_prompt_pending: true,
+          prompt_delivered: false,
+          submit_verified: null,
+        }, "test_restart_during_return");
+        newerBootId = restarted.boot_instance_id;
+        engine.getRegistry().set(agentId, restarted);
+        throw new Error("connection closed");
+      }
+      if (active && args.includes("send")) {
+        followupWrites.push(String(args.at(-1)));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      agentId = await spawnReadyAgent(server);
+      engine = server._registeredTools.interact._engine;
+      const oldBoot = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, prompt_delivered: false, submit_verified: null });
+      engine.getRegistry().set(agentId, oldBoot);
+      composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      active = true;
+
+      const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: true }, {}));
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+      expect(result.delivery_state).toBe("pending_verify");
+      const receipt = engine.getDeliveryReceipt(result.delivery_id);
+      expect(newerBootId).not.toBe(oldBoot.boot_instance_id);
+      expect(receipt?.boot_instance_id).toBe(oldBoot.boot_instance_id);
+      expect(engine.getAgentState(agentId)?.boot_instance_id).toBe(newerBootId);
+      composer = "";
+      await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(result.delivery_id)?.delivery_state).toBe("pending_verify");
+      expect(engine.getAgentState(agentId)?.state).toBe("booting");
+      expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
+      expect(engine.getAgentState(agentId)?.prompt_delivered).toBe(false);
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+    } finally { context.dispose(); }
+  }, 15_000);
+
   it("does not submit a changed composer after observing its owned boot pointer", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let composer = "";
