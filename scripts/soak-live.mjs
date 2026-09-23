@@ -12,37 +12,13 @@ import {
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
+import { cycleAssignment, options } from "./soak-live-options.mjs";
 
 const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const object = (value) => value && typeof value === "object" ? value : {};
 const boundedScreenContent = (value) => typeof value === "string"
   ? value.split("\n").slice(-8).map((line) => line.slice(0, 160)).join("\n") : null;
-
-function options(argv) {
-  const opts = { cycles: 40, concurrency: 2, timeoutMs: 90_000, durationMinutes: 60,
-    agentId: process.env.GOLEM_SEAT || "", leadAgentId: "", entry: process.env.CMUXLAYER_SOAK_ENTRY || "cmuxlayer" };
-  for (let i = 0; i < argv.length; i += 2) {
-    const key = argv[i];
-    if (!["--cycles", "--concurrency", "--timeout-ms", "--duration-minutes", "--agent-id", "--lead-agent-id", "--entry"].includes(key)
-      || !argv[i + 1]) throw new Error(`unknown or incomplete argument: ${key}`);
-    const field = { "--cycles": "cycles", "--concurrency": "concurrency",
-      "--timeout-ms": "timeoutMs", "--duration-minutes": "durationMinutes",
-      "--agent-id": "agentId", "--lead-agent-id": "leadAgentId", "--entry": "entry" }[key];
-    opts[field] = ["cycles", "concurrency", "timeoutMs", "durationMinutes"].includes(field)
-      ? Number(argv[i + 1]) : argv[i + 1];
-  }
-  if (!/^[A-Za-z0-9_-]+$/.test(opts.agentId)) throw new Error("--agent-id is required");
-  if (!Number.isInteger(opts.cycles) || opts.cycles < 1 || opts.cycles > 40) throw new Error("cycles must be 1..40");
-  if (!Number.isInteger(opts.concurrency) || opts.concurrency < 1 || opts.concurrency > 2) throw new Error("concurrency must be 1..2");
-  if (!Number.isInteger(opts.timeoutMs) || opts.timeoutMs < 1000 || opts.timeoutMs > 300_000) {
-    throw new Error("timeout-ms must be 1000..300000");
-  }
-  if (!Number.isInteger(opts.durationMinutes) || opts.durationMinutes < 0 || opts.durationMinutes > 360) {
-    throw new Error("duration-minutes must be 0..360");
-  }
-  return opts;
-}
 
 function payload(result) {
   const structured = result?.structuredContent;
@@ -78,9 +54,15 @@ async function main() {
     mcp_entry: opts.entry, candidate_head: process.env.CMUXLAYER_SOAK_CANDIDATE_HEAD || null,
     workspace: WORKSPACE, cycles_requested: opts.cycles, duration_floor_minutes: opts.durationMinutes,
     concurrency: opts.concurrency, cycles_completed: 0, cli_counts: { claude: 0, codex: 0 },
+    models: { claude: opts.claudeModel ?? "launcher-default", codex: opts.codexModel },
+    codex_effort: opts.codexEffort,
+    pool: { size: opts.pool, spawned: 0, replacements: 0, blocked_slots: 0, cycles: 0 },
+    fresh: { every: opts.freshEvery, cycles: 0 },
     invariants: {}, tools: {}, violations: [] };
   const active = new Map();
   const spawnedIds = new Set();
+  const poolSeats = Array(opts.pool).fill(null);
+  const blockedPoolSlots = new Set();
   const stateDir = process.env.CMUXLAYER_STATE_DIR || join(homedir(), ".local", "state", "cmux-agents");
   const leadInbox = opts.leadAgentId
     ? join(homedir(), ".cmux", "agents", opts.leadAgentId, "inbox.jsonl") : null;
@@ -265,28 +247,113 @@ async function main() {
     inboxCheck(cycle);
     return close?.surface_closed === true;
   };
+  const spawnSeat = async (cycle, cli, marker) => {
+    const spawn = await call("spawn_agent", { repo: "cmuxlayer", workspace: WORKSPACE,
+      cli, ...(cli === "codex" ? { model: opts.codexModel, effort: opts.codexEffort }
+        : opts.claudeModel ? { model: opts.claudeModel } : {}),
+      role: "worker", authority: "worker", placement: "right", force_new: true,
+      mcp_profile: "sterile", prompt: `Reply exactly ${marker} then stop.` }, cycle);
+    const seat = { agentId: spawn.agent_id, surface: spawn.surface_id ?? spawn.surface,
+      surfaceUuid: spawn.surface_uuid ?? null, cli };
+    if (seat.agentId) {
+      active.set(seat.agentId, { surface: seat.surface, surfaceUuid: seat.surfaceUuid });
+      spawnedIds.add(seat.agentId);
+    }
+    check("spawn_receipt", checkReceipt(spawn.boot_prompt_receipt ?? {
+      submit_verified: spawn.boot_prompt_submit_verified,
+      delivery_state: spawn.boot_prompt_receipt?.delivery_state,
+    }), { cycle, agent_id: seat.agentId });
+    const failures = checkSpawnIdentity(spawn);
+    if (failures.length) check("spawn_identity", failures, { cycle, cli });
+    return { ...seat, spawn, valid: failures.length === 0 };
+  };
+  const closeSeat = async (cycle, seat) => {
+    if (!seat?.agentId && !seat?.surface) return true;
+    const closed = await closeOwned(cycle, seat.agentId, seat.surface, seat.surfaceUuid);
+    if (closed && seat.agentId) active.delete(seat.agentId);
+    return closed;
+  };
+  const bootPoolSeat = async (slot, cycle) => {
+    const cli = slot % 2 === 0 ? "claude" : "codex";
+    const marker = `SOAK_POOL_READY_${slot}_${summary.pool.spawned + 1}`;
+    const seat = await spawnSeat(cycle, cli, marker);
+    if (!seat.valid) {
+      if (!await closeSeat(cycle, seat)) blockedPoolSlots.add(slot);
+      return null;
+    }
+    summary.pool.spawned += 1;
+    try {
+      await observe(cycle, seat.agentId, seat.surface);
+      const waited = await call("wait_for", { agent_id: seat.agentId,
+        target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
+      const waitFailures = checkStopWait(waited);
+      check("wait_for", waitFailures, { cycle, agent_id: seat.agentId });
+      const landed = await readReply(cycle, seat.agentId, seat.surface, marker);
+      check("spawn_receipt_after_reply", checkReceipt(seat.spawn.boot_prompt_receipt ?? {
+        submit_verified: seat.spawn.boot_prompt_submit_verified }, landed), { cycle, agent_id: seat.agentId });
+      if (waitFailures.length || !landed) {
+        check("pool_seat", ["pool_seat_died"], { cycle, slot, agent_id: seat.agentId });
+        if (!await closeSeat(cycle, seat)) blockedPoolSlots.add(slot);
+        return null;
+      }
+      return seat;
+    } catch (error) {
+      if (!await closeSeat(cycle, seat)) blockedPoolSlots.add(slot);
+      throw error;
+    }
+  };
+  const livePoolSeat = async (slot, cycle) => {
+    if (blockedPoolSlots.has(slot)) {
+      check("pool_seat", ["pool_slot_blocked_by_cleanup_leak"], { cycle, slot });
+      return null;
+    }
+    let seat = poolSeats[slot];
+    if (seat) {
+      const listed = await call("list_agents", { agent_ids: [seat.agentId], max_age_ms: 0 }, cycle);
+      const row = listed.agents?.find((item) => item.agent_id === seat.agentId);
+      if (listed.ok && row && !["done", "error"].includes(row.state)) return seat;
+      check("pool_seat", ["pool_seat_died"], { cycle, slot, agent_id: seat.agentId,
+        state: row?.state ?? null });
+      if (!await closeSeat(cycle, seat)) {
+        blockedPoolSlots.add(slot);
+        return null;
+      }
+      summary.pool.replacements += 1;
+    }
+    seat = await bootPoolSeat(slot, cycle);
+    poolSeats[slot] = seat;
+    return seat;
+  };
   const runCycle = async (cycle) => {
-    const cli = cycle % 2 === 0 ? "codex" : "claude";
+    const assignment = cycleAssignment(cycle, opts.pool, opts.freshEvery);
+    const { cli } = assignment;
     summary.cli_counts[cli] += 1;
-    let agentId, surface, surfaceUuid;
+    summary[assignment.kind].cycles += 1;
+    let seat;
     try {
       const first = `SOAK_OK_${cycle}`;
       const second = `SOAK2_${cycle}`;
-      const spawn = await call("spawn_agent", { repo: "cmuxlayer", workspace: WORKSPACE,
-        cli, ...(cli === "codex" ? { model: "gpt-6-sol", effort: "low" } : {}),
-        role: "worker", authority: "worker", placement: "right", force_new: true,
-        mcp_profile: "sterile", prompt: `Reply exactly ${first} then stop.` }, cycle);
-      agentId = spawn.agent_id;
-      surface = spawn.surface_id ?? spawn.surface;
-      surfaceUuid = spawn.surface_uuid ?? null;
-      if (agentId) { active.set(agentId, { surface, surfaceUuid }); spawnedIds.add(agentId); }
-      check("spawn_receipt", checkReceipt(spawn.boot_prompt_receipt ?? {
-        submit_verified: spawn.boot_prompt_submit_verified,
-        delivery_state: spawn.boot_prompt_receipt?.delivery_state,
-      }), { cycle, agent_id: agentId });
-      const spawnFailures = checkSpawnIdentity(spawn);
-      if (spawnFailures.length) {
-        check("spawn_identity", spawnFailures, { cycle, cli });
+      seat = assignment.kind === "pool" ? await livePoolSeat(assignment.slot, cycle)
+        : await spawnSeat(cycle, cli, first);
+      if (!seat?.valid) return;
+      const { agentId, surface } = seat;
+      if (assignment.kind === "pool") {
+        const send = await call("send_to", { mode: "agent", agent_id: agentId,
+          text: `Reply exactly ${first} then stop.`, verbose: true }, cycle);
+        check("send_receipt", checkReceipt(send), { cycle, agent_id: agentId });
+        await observe(cycle, agentId, surface);
+        const waited = await call("wait_for", { agent_id: agentId,
+          target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
+        check("wait_for", checkStopWait(waited), { cycle, agent_id: agentId });
+        const landed = await readReply(cycle, agentId, surface, first);
+        check("send_receipt_after_reply", checkReceipt(send, landed), { cycle, agent_id: agentId });
+        if (!send.ok || !landed || checkStopWait(waited).length) {
+          check("pool_seat", ["pool_seat_died"], { cycle, slot: assignment.slot, agent_id: agentId });
+          if (await closeSeat(cycle, seat)) {
+            summary.pool.replacements += 1;
+            poolSeats[assignment.slot] = await bootPoolSeat(assignment.slot, cycle);
+          } else blockedPoolSlots.add(assignment.slot);
+        }
         return;
       }
       await observe(cycle, agentId, surface);
@@ -294,8 +361,8 @@ async function main() {
         target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
       check("wait_for", checkStopWait(firstWait), { cycle, agent_id: agentId });
       const firstLanded = await readReply(cycle, agentId, surface, first);
-      check("spawn_receipt_after_reply", checkReceipt(spawn.boot_prompt_receipt ?? {
-        submit_verified: spawn.boot_prompt_submit_verified }, firstLanded), { cycle, agent_id: agentId });
+      check("spawn_receipt_after_reply", checkReceipt(seat.spawn.boot_prompt_receipt ?? {
+        submit_verified: seat.spawn.boot_prompt_submit_verified }, firstLanded), { cycle, agent_id: agentId });
       const send = await call("send_to", { mode: "agent", agent_id: agentId,
         text: `Reply exactly ${second} then stop.`, verbose: true }, cycle);
       check("send_receipt", checkReceipt(send), { cycle, agent_id: agentId });
@@ -309,14 +376,19 @@ async function main() {
       check("cycle_exception", ["cycle_exception"], { cycle, error: String(error) });
     } finally {
       try {
-        if (agentId || surface) {
-          await closeOwned(cycle, agentId, surface, surfaceUuid);
-          if (agentId) active.delete(agentId); // A recorded leak is left for human cleanup.
+        if (assignment.kind === "fresh") await closeSeat(cycle, seat);
+        else if (seat && poolSeats[assignment.slot] === seat &&
+          summary.violations.some((item) => item.cycle === cycle && item.invariant === "cycle_exception")) {
+          check("pool_seat", ["pool_seat_died"], { cycle, slot: assignment.slot, agent_id: seat.agentId });
+          if (await closeSeat(cycle, seat)) {
+            summary.pool.replacements += 1;
+            poolSeats[assignment.slot] = await bootPoolSeat(assignment.slot, cycle);
+          } else blockedPoolSlots.add(assignment.slot);
         }
       }
       catch (error) { check("cleanup", ["cleanup_exception"], { cycle, error: String(error) }); }
       summary.cycles_completed += 1;
-      log({ kind: "cycle_done", cycle, cli });
+      log({ kind: "cycle_done", cycle, cli, assignment });
     }
   };
   try {
@@ -330,6 +402,10 @@ async function main() {
       minimumCyclesComplete: () => summary.cycles_completed >= opts.cycles,
       onError: (error) => check("health", ["health_sample_exception"], { error: String(error) }) });
     startedAtMs = healthClock.startedAtMs;
+    for (let slot = 0; slot < opts.pool; slot += 1) {
+      try { poolSeats[slot] = await bootPoolSeat(slot, `pool:${slot}`); }
+      catch (error) { check("pool_boot", ["pool_boot_exception"], { slot, error: String(error) }); }
+    }
     await runSoakCycles({ completed: () => summary.cycles_completed, minCycles: opts.cycles,
       minDurationMs: opts.durationMinutes * 60_000, now: Date.now, startedAtMs, sleep,
       currentPid: () => transport.pid, startPid, runBatch: async () => {
@@ -365,6 +441,7 @@ async function main() {
     check("soak_session", checkSoakSession(sessionRecord), { session: summary.session });
     await client.close().catch(() => {});
     summary.finished_at = new Date().toISOString();
+    summary.pool.blocked_slots = blockedPoolSlots.size;
     summary.tools = Object.fromEntries(Object.entries(summary.tools).map(([name, values]) =>
       [name, { calls: values.length, p50_ms: percentile(values, 50), p95_ms: percentile(values, 95) }]));
     summary.ok = summary.violations.length === 0 && summary.cycles_completed >= opts.cycles;
