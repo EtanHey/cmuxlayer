@@ -13,6 +13,7 @@ import {
   requireCanonicalRequestChangeReason,
   requireBaselineIncreaseReason,
   renderMarkdownComparison,
+  resultWithComparison,
   runBenchmark,
   validateBaseline,
 } from "../scripts/check-daemon-benchmark.mjs";
@@ -338,6 +339,294 @@ describe("daemon performance budget", () => {
           entry.operation === "list_surfaces" && entry.metric === "p50_ms",
       )?.margin_rule,
     ).toBe("measured (1 run)");
+  });
+
+  it("excuses only send latency matched by a simultaneous socket control stall", () => {
+    const pairedSamples = (fastSend: number, slowSend: number, slowControl: number) =>
+      Array.from({ length: 96 }, (_, sample_index) => {
+        const send_elapsed_ms = sample_index < 90 ? fastSend : slowSend;
+        const control_timer_overrun_ms = sample_index < 90 ? 1 : slowControl;
+        const send_started_at_ms = sample_index * 2_000;
+        const send_completed_at_ms = send_started_at_ms + send_elapsed_ms;
+        const control_timer_started_at_ms = send_started_at_ms;
+        const control_timer_due_at_ms = control_timer_started_at_ms + 1;
+        const control_timer_fired_at_ms = control_timer_due_at_ms + control_timer_overrun_ms;
+        return {
+          sample_index,
+          send_elapsed_ms,
+          send_started_at_ms,
+          send_completed_at_ms,
+          control_elapsed_ms: Math.max(0,
+            Math.min(control_timer_fired_at_ms, send_completed_at_ms) -
+            Math.max(control_timer_due_at_ms, send_started_at_ms)),
+          control_timer_started_at_ms,
+          control_timer_due_at_ms,
+          control_timer_fired_at_ms,
+          control_timer_overrun_ms,
+          control_hold_ms: 1,
+          control_transport: "socket",
+        };
+      });
+    const candidate = {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          sampled: {
+            p50_ms: 900,
+            p95_ms: 1_100,
+            lock_hold_ms: 20,
+            transport: "socket",
+            paired_control: {
+              kind: "fake_socket_timed_ping",
+              samples: pairedSamples(900, 1_100, 201),
+            },
+          },
+        },
+        send_to_agent_warm: {
+          ...result.latency.send_to_agent_warm,
+          p50_ms: 240,
+          p95_ms: 340,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(240, 340, 101),
+          },
+        },
+      },
+    };
+    const matched = compareBenchmark(baseline, candidate);
+    const first = matched.rows.find((entry) =>
+      entry.operation === "first_send_after_spawn" && entry.metric === "p95_ms",
+    );
+    const warm = matched.rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    );
+    expect(first).toMatchObject({ current: 900, raw_current: 1_100, passed: true });
+    expect(warm).toMatchObject({ current: 240, raw_current: 340, passed: true });
+
+    const sendOnly = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        first_send_after_spawn: {
+          ...candidate.latency.first_send_after_spawn,
+          sampled: {
+            ...candidate.latency.first_send_after_spawn.sampled,
+            paired_control: {
+              kind: "fake_socket_timed_ping",
+              samples: pairedSamples(900, 1_100, 1),
+            },
+          },
+        },
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(240, 340, 1),
+          },
+        },
+      },
+    };
+    const unpaired = compareBenchmark(baseline, sendOnly);
+    expect(unpaired.rows.find((entry) =>
+      entry.operation === "first_send_after_spawn" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 1_100, passed: false });
+    expect(unpaired.rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+    const malformed = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(240, 340, 101).slice(1),
+          },
+        },
+      },
+    };
+    const malformedComparison = compareBenchmark(baseline, malformed);
+    expect(malformedComparison.rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+    expect(malformedComparison.paired_control_evaluation.send_to_agent_warm).toMatchObject({
+      verdict_basis: "raw", valid_pairs: 0, invalid_pairs: 96,
+      invalid_reasons: { sample_count_mismatch: 96 },
+    });
+
+    // A timer delayed only after send completion is not simultaneous proof.
+    const postSend = pairedSamples(240, 340, 101).map((sample) =>
+      sample.sample_index < 90 ? sample : {
+        ...sample,
+        control_timer_started_at_ms: sample.send_completed_at_ms + 1,
+        control_timer_due_at_ms: sample.send_completed_at_ms + 2,
+        control_timer_fired_at_ms: sample.send_completed_at_ms + 103,
+        control_elapsed_ms: 0,
+      });
+    const postSendCandidate = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: { kind: "fake_socket_timed_ping", samples: postSend },
+        },
+      },
+    };
+    expect(compareBenchmark(baseline, postSendCandidate).rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+
+    // Receipt fields must prove the timer interval, not just claim an overlap.
+    const forged = pairedSamples(240, 340, 101).map((sample) =>
+      sample.sample_index < 90 ? sample : {
+        ...sample,
+        control_timer_overrun_ms: 1,
+      });
+    const forgedCandidate = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: { kind: "fake_socket_timed_ping", samples: forged },
+        },
+      },
+    };
+    expect(compareBenchmark(baseline, forgedCandidate).rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+
+    const oneForged = pairedSamples(240, 340, 101);
+    oneForged[95] = { ...oneForged[95], control_timer_overrun_ms: 1 };
+    const partlyInvalid = compareBenchmark(baseline, {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: { kind: "fake_socket_timed_ping", samples: oneForged },
+        },
+      },
+    });
+    expect(partlyInvalid.rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 240, raw_current: 340, passed: true });
+    expect(partlyInvalid.paired_control_evaluation.send_to_agent_warm).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 95, invalid_pairs: 1,
+      invalid_reasons: { timer_overrun_inconsistent: 1 },
+    });
+
+    const broadRegression = {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          p50_ms: 340,
+          paired_control: {
+            kind: "fake_socket_timed_ping",
+            samples: pairedSamples(340, 340, 101),
+          },
+        },
+      },
+    };
+    expect(compareBenchmark(baseline, broadRegression).rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 340, passed: false });
+  });
+
+  it("accepts early zero-overrun timer receipts from hosted artifact 10747588018", () => {
+    const hosted = JSON.parse(readFileSync(join(repoRoot, "tests/fixtures/p5-hosted-paired-10747588018.json"), "utf8"));
+    expect(hosted.source_artifact_id).toBe(10747588018);
+    expect(hosted.first.paired_control.samples.filter((sample) =>
+      sample.control_timer_fired_at_ms < sample.control_timer_due_at_ms)).toHaveLength(14);
+    expect(hosted.warm.paired_control.samples.filter((sample) =>
+      sample.control_timer_fired_at_ms < sample.control_timer_due_at_ms)).toHaveLength(37);
+    const candidate = {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          sampled: { ...result.latency.first_send_after_spawn.sampled, ...hosted.first },
+        },
+        send_to_agent_warm: { ...result.latency.send_to_agent_warm, ...hosted.warm },
+      },
+    };
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.paired_control_evaluation.first_send_after_spawn).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 96, invalid_pairs: 0, invalid_reasons: {},
+    });
+    expect(comparison.paired_control_evaluation.send_to_agent_warm).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 96, invalid_pairs: 0, invalid_reasons: {},
+    });
+    const markdown = renderMarkdownComparison(baseline, candidate, comparison);
+    expect(markdown).toContain("first_send_after_spawn: adjusted; 96 valid, 0 invalid");
+    expect(markdown).toContain("send_to_agent_warm: adjusted; 96 valid, 0 invalid");
+    expect(resultWithComparison(candidate, comparison).perf_budget.paired_control_evaluation)
+      .toEqual(comparison.paired_control_evaluation);
+
+    const tooEarly = structuredClone(candidate);
+    const sample = tooEarly.latency.first_send_after_spawn.sampled.paired_control.samples[0];
+    sample.control_timer_fired_at_ms = sample.control_timer_due_at_ms - 3;
+    const rejected = compareBenchmark(baseline, tooEarly);
+    expect(rejected.paired_control_evaluation.first_send_after_spawn).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 95, invalid_pairs: 1,
+      invalid_reasons: { timer_fired_too_early: 1 },
+    });
+    const forged = structuredClone(candidate);
+    forged.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_overrun_ms = 5;
+    expect(compareBenchmark(baseline, forged).paired_control_evaluation.first_send_after_spawn).toMatchObject({
+      valid_pairs: 95, invalid_pairs: 1,
+      invalid_reasons: { timer_overrun_inconsistent: 1 },
+    });
+    const tinyForged = structuredClone(candidate);
+    tinyForged.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_overrun_ms = 0.01;
+    expect(compareBenchmark(baseline, tinyForged).paired_control_evaluation.first_send_after_spawn)
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { timer_overrun_inconsistent: 1 } });
+    const beforeStart = structuredClone(candidate);
+    beforeStart.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_fired_at_ms =
+      beforeStart.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_started_at_ms - 0.1;
+    expect(compareBenchmark(baseline, beforeStart).paired_control_evaluation.first_send_after_spawn)
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { timer_timing_inconsistent: 1 } });
+    const forgedOverlap = structuredClone(candidate);
+    forgedOverlap.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_elapsed_ms = 0.01;
+    expect(compareBenchmark(baseline, forgedOverlap).paired_control_evaluation.first_send_after_spawn)
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { control_overlap_inconsistent: 1 } });
+  });
+
+  it("shows raw send and phase-local control timings for the slowest samples", () => {
+    const withDiagnostics = {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          sample_diagnostics: {
+            first_send_after_spawn: {
+              slowest: [{
+                sample_index: 7,
+                elapsed_ms: 150,
+                paired_control_ms: 2,
+                timings_ms: { route: 1, lock: 3, enumerate: 80, type: 55, verify: 4 },
+              }],
+            },
+          },
+        },
+      },
+    };
+    const markdown = renderMarkdownComparison(
+      baseline,
+      withDiagnostics,
+      compareBenchmark(baseline, withDiagnostics),
+    );
+    expect(markdown).toContain("Worst first_send_after_spawn samples");
+    expect(markdown).toContain("| Sample | Send | Control | Route | Lock | Enumerate | Type | Verify |");
+    expect(markdown).toContain("| 7 | 150 | 2 | 1 | 3 | 80 | 55 | 4 |");
   });
 
   it("rejects single-shot metadata for every canonical row", () => {
@@ -1045,8 +1334,12 @@ describe("daemon performance budget", () => {
     expect(source).toContain(
       "lock_hold_ms: lockHoldFromElapsed ? elapsedMs : 0",
     );
-    expect(source.indexOf("await validateReceipt?.(receipt)")).toBeLessThan(
-      source.indexOf("elapsed_ms: round(nowMs() - startedAt)"),
+    const sendBody = source.slice(
+      source.indexOf("const measureSend = async"),
+      source.indexOf("// The daemon sweep acknowledges"),
+    );
+    expect(sendBody.indexOf("await validateReceipt?.(receipt)")).toBeLessThan(
+      sendBody.indexOf("const completedAt = nowMs()"),
     );
     expect(source).toMatch(
       /await Promise\.all\([\s\S]*?validateReceipt\?\.[\s\S]*?\);\n {4}const elapsedMs = nowMs\(\) - startedAt;/,

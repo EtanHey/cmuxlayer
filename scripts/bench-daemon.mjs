@@ -28,6 +28,7 @@ const PARALLEL_STRESS_COUNT = 10;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
 const READ_SCREEN_P50_BUDGET_MS = 250;
+const PAIRED_CONTROL_HOLD_MS = 1;
 const LOCAL_HARD_GATES = process.env.CMUXLAYER_BENCH_LOCAL_GATE === "1";
 let JsonRpcLineBuffer;
 
@@ -47,6 +48,59 @@ const rounds = parsePositiveInt(
 
 function nowMs() {
   return Number(process.hrtime.bigint()) / 1_000_000;
+}
+
+function measureFakeCmuxPing(socketPath) {
+  const startedAt = nowMs();
+  return new Promise((resolvePromise, reject) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    let buffer = "";
+    const settle = (error, result) => {
+      if (settled) return;
+      settled = true;
+      socket.removeAllListeners();
+      socket.on("error", () => {});
+      socket.destroy();
+      if (error) reject(error);
+      else resolvePromise(result);
+    };
+    socket.setTimeout(30_000, () => settle(new Error("paired fake-socket ping timed out")));
+    socket.once("error", (error) => settle(error));
+    socket.once("connect", () => {
+      socket.write(`${JSON.stringify({ id: 1, method: "system.ping", params: { delay_ms: PAIRED_CONTROL_HOLD_MS } })}\n`);
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      const end = buffer.indexOf("\n");
+      if (end < 0) return;
+      try {
+        const response = JSON.parse(buffer.slice(0, end));
+        if (response.id !== 1 || response.ok !== true || response.result?.pong !== true) {
+          throw new Error("paired fake-socket ping returned an invalid receipt");
+        }
+        const timer = response.result;
+        if (
+          !Number.isFinite(timer.timer_started_at_ms) ||
+          !Number.isFinite(timer.timer_due_at_ms) ||
+          !Number.isFinite(timer.timer_fired_at_ms) ||
+          !Number.isFinite(timer.timer_overrun_ms)
+        ) {
+          throw new Error("paired fake-socket ping omitted timer proof");
+        }
+        settle(null, {
+          started_at_ms: startedAt,
+          total_ms: round(nowMs() - startedAt),
+          timer_started_at_ms: timer.timer_started_at_ms,
+          timer_due_at_ms: timer.timer_due_at_ms,
+          timer_fired_at_ms: timer.timer_fired_at_ms,
+          timer_overrun_ms: timer.timer_overrun_ms,
+        });
+      } catch (error) {
+        settle(error);
+      }
+    });
+  });
 }
 
 function percentile(samples, pct) {
@@ -598,6 +652,27 @@ async function handleFakeCmuxSocketLine(
   }
   const request = JSON.parse(line);
   const params = request.params ?? {};
+  // Keep the runner control independent of fake-state I/O and topology work.
+  // It measures only this event loop's timer overrun, with server timestamps.
+  if (request.method === "system.ping" && params.delay_ms === PAIRED_CONTROL_HOLD_MS) {
+    const timerStartedAt = nowMs();
+    const timerDueAt = timerStartedAt + PAIRED_CONTROL_HOLD_MS;
+    setTimeout(() => {
+      const timerFiredAt = nowMs();
+      socket.write(`${JSON.stringify({
+        id: request.id,
+        ok: true,
+        result: {
+          pong: true,
+          timer_started_at_ms: timerStartedAt,
+          timer_due_at_ms: timerDueAt,
+          timer_fired_at_ms: timerFiredAt,
+          timer_overrun_ms: Math.max(0, timerFiredAt - timerDueAt),
+        },
+      })}\n`);
+    }, PAIRED_CONTROL_HOLD_MS);
+    return;
+  }
   const requestStartedAt = nowMs();
   const state = await readFakeState(statePath);
   const stateReadMs = nowMs() - requestStartedAt;
@@ -844,6 +919,13 @@ async function startClients(label, count, env) {
   }
   await Promise.all(clients.map((client) => client.initialize()));
   return clients;
+}
+
+async function stopBaselineClientsBeforeDaemon(clients) {
+  await Promise.all(clients.map((client) => client.close()));
+  if (clients.some((client) => client.alive)) {
+    throw new Error("in-process baseline client survived before daemon phase");
+  }
 }
 
 function summarizeReadDiagnostics(samples, slowestLimit = 12) {
@@ -1218,6 +1300,7 @@ function summarizeSendSampleDiagnostics(samples, field) {
         submit_evidence: receipt.submit_evidence ?? null,
         delivery_state: receipt.delivery_state ?? null,
         timings_ms: receipt.timings_ms ?? null,
+        paired_control_ms: send.paired_control?.control_elapsed_ms ?? null,
         ...(field === "surface"
           ? {
               wait_for_delivery_state: send.wait_for?.delivery_state ?? null,
@@ -1233,10 +1316,23 @@ function summarizeSendSampleDiagnostics(samples, field) {
   };
 }
 
+function pairedControlSamples(samples, field) {
+  return {
+    kind: "fake_socket_timed_ping",
+    samples: samples.map((sample, sample_index) => ({
+      sample_index,
+      send_elapsed_ms: sample[field].elapsed_ms,
+      ...sample[field].paired_control,
+    })),
+  };
+}
+
 async function measureSpawnLifecycleOnce(
   client,
   sweepHoldState,
   sampleIndex,
+  fakeCmuxSocketPath,
+  pendingControls,
 ) {
   const spawnResult = toolData(
     await client.callTool(
@@ -1278,9 +1374,16 @@ async function measureSpawnLifecycleOnce(
       requireSubmitted = true,
       canonicalText,
       validateReceipt,
+      pairedControl = false,
     } = {},
   ) => {
     const startedAt = nowMs();
+    const controlPromise = pairedControl
+      ? measureFakeCmuxPing(fakeCmuxSocketPath).then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        )
+      : null;
     // Receipt diagnostics are benchmark instrumentation, not workload input.
     // Keep canonical request bytes/hashes based on args while opting into the
     // timing, terminal, and transport fields the benchmark validates below.
@@ -1293,10 +1396,13 @@ async function measureSpawnLifecycleOnce(
       requireTerminalSubmission(receipt, `${args.mode} send`);
     }
     await validateReceipt?.(receipt);
-    return {
-      elapsed_ms: round(nowMs() - startedAt),
+    const completedAt = nowMs();
+    const elapsedMs = round(completedAt - startedAt);
+    const proofElapsedMs = round(completedAt - startedAt - toolElapsedMs);
+    const sendSample = {
+      elapsed_ms: elapsedMs,
       tool_elapsed_ms: round(toolElapsedMs),
-      proof_elapsed_ms: round(nowMs() - startedAt - toolElapsedMs),
+      proof_elapsed_ms: proofElapsedMs,
       request_bytes: requestBytes("send_to", args),
       request_sha256: requestSha256("send_to", {
         ...args,
@@ -1315,6 +1421,34 @@ async function measureSpawnLifecycleOnce(
       transport: receipt.transport,
       receipt,
     };
+    if (controlPromise) {
+      // Resolve telemetry after the entire canonical lifecycle workload. A
+      // control never inserts a wait between first, warm, or surface sends.
+      pendingControls.push(controlPromise.then((outcome) => {
+        const control = outcome.value;
+        sendSample.paired_control = control ? {
+          control_elapsed_ms: round(Math.max(0,
+            Math.min(control.timer_fired_at_ms, completedAt) -
+            Math.max(control.timer_due_at_ms, startedAt))),
+          control_total_ms: control.total_ms,
+          control_hold_ms: PAIRED_CONTROL_HOLD_MS,
+          control_transport: "socket",
+          send_started_at_ms: startedAt,
+          send_completed_at_ms: completedAt,
+          control_timer_started_at_ms: control.timer_started_at_ms,
+          control_timer_due_at_ms: control.timer_due_at_ms,
+          control_timer_fired_at_ms: control.timer_fired_at_ms,
+          control_timer_overrun_ms: control.timer_overrun_ms,
+        } : {
+          control_elapsed_ms: null,
+          control_transport: "unavailable",
+          error: outcome.error instanceof Error
+            ? outcome.error.message
+            : String(outcome.error),
+        };
+      }));
+    }
+    return sendSample;
   };
 
   // The daemon sweep acknowledges this unique token only after it owns the
@@ -1329,7 +1463,7 @@ async function measureSpawnLifecycleOnce(
       text: "Read and follow docs.local/scratch/run5r3/bench-first-send.md",
       press_enter: true,
     },
-    { normalizeAgentId: true },
+    { normalizeAgentId: true, pairedControl: true },
   );
   await writeFile(
     sweepHoldState,
@@ -1343,7 +1477,7 @@ async function measureSpawnLifecycleOnce(
       text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
       press_enter: true,
     },
-    { normalizeAgentId: true },
+    { normalizeAgentId: true, pairedControl: true },
   );
   const surfaceArgs = {
     mode: "surface",
@@ -1555,29 +1689,37 @@ async function measureLiveListAgentsAcrossClients(clients) {
 async function measureSpawnLifecycleAcrossClients(
   clients,
   sweepHoldState,
+  fakeCmuxSocketPath,
 ) {
   const samples = [];
+  const pendingControls = [];
   for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
     for (const [clientIndex, client] of clients.entries()) {
       const sampleIndex = roundIndex * clients.length + clientIndex;
       samples.push(
-        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex),
+        await measureSpawnLifecycleOnce(client, sweepHoldState, sampleIndex, fakeCmuxSocketPath, pendingControls),
       );
     }
   }
+  await Promise.all(pendingControls);
   return {
     first: samples[0].first,
     second: samples[0].second,
     surface: samples[0].surface,
     spawn_close_sample: samples[0].spawn_close_during_sweep,
-    sampled: summarizeTimedSamples(samples.map((sample) => sample.first)),
-    send_to_agent_warm: summarizeTimedSamples(
-      samples.map((sample) => sample.second),
-    ),
+    sampled: {
+      ...summarizeTimedSamples(samples.map((sample) => sample.first)),
+      paired_control: pairedControlSamples(samples, "first"),
+    },
+    send_to_agent_warm: {
+      ...summarizeTimedSamples(samples.map((sample) => sample.second)),
+      paired_control: pairedControlSamples(samples, "second"),
+    },
     send_to_surface_warm: summarizeTimedSamples(
       samples.map((sample) => sample.surface),
     ),
     sample_diagnostics: {
+      first_send_after_spawn: summarizeSendSampleDiagnostics(samples, "first"),
       send_to_agent_warm: summarizeSendSampleDiagnostics(samples, "second"),
       send_to_surface_warm: summarizeSendSampleDiagnostics(samples, "surface"),
     },
@@ -1778,6 +1920,9 @@ async function main() {
       baselineClients.map((client) => client.pid).filter(Boolean),
     );
 
+    await stopBaselineClientsBeforeDaemon(baselineClients);
+    baselineClients = [];
+
     daemon = spawn(process.execPath, [distDaemon], {
       cwd: repoRoot,
       env: {
@@ -1831,6 +1976,7 @@ async function main() {
     const firstSendAfterSpawn = await measureSpawnLifecycleAcrossClients(
       daemonClients,
       sweepHoldState,
+      missingCmuxSocket,
     );
     const listAgents = await measureLiveListAgentsAcrossClients(daemonClients);
     const controlHealth = await measureWarmToolAcrossClients(
@@ -2193,8 +2339,10 @@ async function main() {
 }
 
 export {
+  measureFakeCmuxPing,
   measureLatency,
   startFakeCmuxSocket,
+  stopBaselineClientsBeforeDaemon,
   summarizeReadDiagnostics,
   summarizeSendSampleDiagnostics,
   writeFakeCmux,
