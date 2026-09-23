@@ -200,6 +200,8 @@ export interface ParsedScreenResult {
   current_action: string | null;
   errors: string[];
   model: string | null;
+  /** Effort shown by the current pane, when its visible chrome exposes it. */
+  parsed_effort?: string | null;
   cost: number | null;
   cli_update_state?: ParsedCliUpdateState;
   actions?: string[];

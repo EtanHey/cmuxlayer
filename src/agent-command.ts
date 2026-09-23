@@ -7,6 +7,7 @@ import {
   type SpawnPermissionMode,
 } from "./permission-mode.js";
 import { sanitizeRepoName, shellQuote } from "./shell-safe.js";
+import { CLAUDE_EFFORT_VALUES } from "./model-policy.js";
 
 export { sanitizeRepoName, shellQuote };
 
@@ -115,6 +116,8 @@ export function rawResumeSupported(cli: CliType): boolean {
 }
 
 export interface ResumeCommandOptions {
+  /** Recorded per-session Claude effort; never write a saved CLI setting. */
+  effort?: string | null;
   /**
    * Directory the resumed harness must run in. Honoured only by the raw-CLI
    * form: repoGolem launchers already cd themselves, and adding a cd would
@@ -131,6 +134,14 @@ export interface ResumeCommandOptions {
    * install said otherwise).
    */
   permissionMode?: SpawnPermissionMode;
+}
+
+function claudeEffortArg(effort: string | null | undefined, launcher: boolean): string {
+  if (!effort) return "";
+  if (!(CLAUDE_EFFORT_VALUES as readonly string[]).includes(effort)) {
+    throw new Error(`Invalid recorded Claude effort "${effort}"`);
+  }
+  return launcher ? ` -E ${effort}` : `--effort ${effort} `;
 }
 
 /**
@@ -162,7 +173,7 @@ export function buildResumeCommand(
   const skipArg = bypass ? " -s" : "";
   switch (cli) {
     case "claude":
-      return `${launcher}${skipArg} --resume ${sessionId}`;
+      return `${launcher}${skipArg}${claudeEffortArg(opts?.effort, true)} --resume ${sessionId}`;
     case "codex":
       return `${launcher}${
         bypass
@@ -210,7 +221,7 @@ export function buildRawResumeCommand(
   const skip = skipFlag ? `${skipFlag} ` : "";
   switch (cli) {
     case "claude":
-      return `${cd}${AGENT_ENV} claude ${skip}--resume ${sessionId}`;
+      return `${cd}${AGENT_ENV} claude ${skip}${claudeEffortArg(opts?.effort, false)}--resume ${sessionId}`;
     // Codex takes global options BEFORE the subcommand -- matching the
     // launcher form `<L> --dangerously-bypass-approvals-and-sandbox resume`.
     case "codex":

@@ -1593,6 +1593,21 @@ describe("lean spawn tool responses", () => {
     );
   });
 
+  it("pins Claude effort per session and reports its source", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const base = { repo: "cmuxlayer", cli: "claude", role: "implementor", authority: "lead" };
+    const explicit = await spawn.handler(spawn.inputSchema.parse({ ...base, effort: "medium" }), {} as any);
+    expect(explicit.structuredContent).toMatchObject({ ok: true, effort_applied: "medium", effort_source: "explicit" });
+    expect(exec).toHaveBeenCalledWith("cmux", expect.arrayContaining(["send", "cmuxlayerClaude -s -E medium"]));
+    const omitted = await spawn.handler(spawn.inputSchema.parse(base), {} as any);
+    expect(omitted.structuredContent).toMatchObject({ ok: true, effort_applied: "high", effort_source: "default" });
+    expect(exec).toHaveBeenCalledWith("cmux", expect.arrayContaining(["send", "cmuxlayerClaude -s -E high"]));
+    expect(exec.mock.calls.flatMap(([, args]) => args).join(" ")).not.toContain("/effort");
+    expect(exec.mock.calls.flatMap(([, args]) => args).join(" ")).not.toContain("settings.json");
+  });
+
   it("spawn_agent schema advertises the installed Codex effort set", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
@@ -1677,7 +1692,7 @@ describe("lean spawn tool responses", () => {
     ).toBe(false);
   });
 
-  it("spawn_agent rejects Codex effort for another CLI before creating a surface", async () => {
+  it("spawn_agent rejects Claude-only invalid effort before creating a surface", async () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -1686,14 +1701,14 @@ describe("lean spawn tool responses", () => {
       cli: "claude",
       role: "implementor",
       authority: "lead",
-      effort: "medium",
+      effort: "ultra",
     });
 
     const result = await spawn.handler(args, {} as any);
 
     expect(result.structuredContent).toMatchObject({ ok: false });
     expect(result.structuredContent.error).toContain(
-      'Codex effort "medium" cannot be used with cli "claude"',
+      'Invalid Claude effort "ultra"',
     );
     expect(
       mockExec.mock.calls.some(([, callArgs]) =>
@@ -4055,7 +4070,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.requested_model).toBe("");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", "brainlayerClaude -s"]),
+      expect.arrayContaining(["send", "brainlayerClaude -s -E high"]),
     );
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
@@ -10639,7 +10654,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agents[0]).toMatchObject({
       session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       resume_command:
-        "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "brainlayerClaude -s -E high --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
   });
 
@@ -10675,7 +10690,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.agents[0].resume_command).toBe(
-      "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --effort high --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 
@@ -17195,7 +17210,7 @@ codex>
     expect(agent).toMatchObject({
       session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       resume_command:
-        "voicelayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "voicelayerClaude -s -E high --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
   });
 });

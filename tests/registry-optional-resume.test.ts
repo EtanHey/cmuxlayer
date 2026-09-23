@@ -63,6 +63,12 @@ describe("raw resume commands carry a working directory", () => {
 });
 
 describe("buildResumeCommand falls back to the raw CLI, never a guessed launcher", () => {
+  it("keeps recorded Claude effort on launcher and raw resume without settings writes", () => {
+    expect(buildResumeCommand("claude", "brainlayer", SESSION, "brainlayerClaude", { effort: "medium" })).toBe(`brainlayerClaude -s -E medium --resume ${SESSION}`);
+    const raw = buildResumeCommand("claude", "brainlayer", SESSION, null, { cwd: "/srv/repos/brainlayer", effort: "high" });
+    expect(raw).toBe(`cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --effort high --resume ${SESSION}`);
+    expect(raw).not.toMatch(/\/effort|settings\.json/);
+  });
   it("keeps the launcher form when a launcher name is known", () => {
     expect(
       buildResumeCommand("claude", "brainlayer", SESSION, "brainlayerClaude", {
@@ -179,6 +185,10 @@ describe("resumeCommandForAgent (public agent payload)", () => {
     expect(
       resumeCommandForAgent({ ...base, launcher_name: "brainlayerClaude" }),
     ).toBe(`brainlayerClaude -s --resume ${SESSION}`);
+  });
+
+  it("uses the registry effort for the advertised resume command", () => {
+    expect(resumeCommandForAgent({ ...base, effort: "medium", launcher_name: "brainlayerClaude" })).toBe(`brainlayerClaude -s -E medium --resume ${SESSION}`);
   });
 });
 

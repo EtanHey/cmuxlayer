@@ -52,6 +52,7 @@ export function resumeInvocationForAgent(
     | "repo"
     | "cli_session_id"
     | "launcher_name"
+    | "effort"
     | "launch_cwd"
     | "worktree_path"
   >,
@@ -97,7 +98,7 @@ export function resumeInvocationForAgent(
       record.repo,
       record.cli_session_id,
       record.launcher_name,
-      { cwd },
+      { cwd, effort: record.cli === "claude" ? record.effort : null },
     );
   } catch (error) {
     return {
@@ -115,6 +116,7 @@ export function resumeCommandForAgent(
     | "repo"
     | "cli_session_id"
     | "launcher_name"
+    | "effort"
     | "launch_cwd"
     | "worktree_path"
   >,

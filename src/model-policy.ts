@@ -14,6 +14,9 @@ export const CODEX_EFFORT_VALUES = [
   "ultra",
 ] as const;
 export type CodexEffort = (typeof CODEX_EFFORT_VALUES)[number];
+export const CLAUDE_EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ClaudeEffort = (typeof CLAUDE_EFFORT_VALUES)[number];
+export type SpawnEffort = CodexEffort | ClaudeEffort;
 
 export interface CliModelPolicyContract {
   defaultModel: string;
@@ -158,9 +161,18 @@ function acceptedModelNames(
 export function resolveSpawnEffort(
   cli: CliType,
   effort?: string,
-): CodexEffort | null {
+): SpawnEffort | null {
   const requested = effort?.trim();
-  if (!requested) return null;
+  if (!requested) return cli === "claude" ? "high" : null;
+
+  if (cli === "claude") {
+    if (!(CLAUDE_EFFORT_VALUES as readonly string[]).includes(requested)) {
+      throw new Error(
+        `Invalid Claude effort "${requested}" (expected: ${CLAUDE_EFFORT_VALUES.join(", ")}). No agent was spawned.`,
+      );
+    }
+    return requested as ClaudeEffort;
+  }
 
   if (!(CODEX_EFFORT_VALUES as readonly string[]).includes(requested)) {
     throw new Error(

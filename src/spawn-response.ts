@@ -15,6 +15,8 @@ const ESSENTIAL_FIELDS = [
   "delivered_chars",
   "state",
   "model",
+  "effort_applied",
+  "effort_source",
   "requested_model",
   "role",
   "authority",

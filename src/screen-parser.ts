@@ -1844,6 +1844,11 @@ export function parseScreen(text: string): ParsedScreenResult {
   }
   const errors = parseErrors(normalized);
   const { model, cost } = parseModelAndCost(normalized, agentType);
+  const visibleEffort = agentType === "claude"
+    ? normalized.split("\n").filter(Boolean).slice(-8)
+        .map((line) => line.match(/^\s*[✻✢✳✶].*\bthinking(?: some more)? with (low|medium|high|xhigh|max) effort\b/i)?.[1]?.toLowerCase())
+        .find(Boolean) ?? null
+    : null;
   let tokenCount = parseTokenCount(normalized);
   if (agentType === "cursor") {
     const cursorTokens = parseCursorTokenCount(normalized);
@@ -1895,6 +1900,7 @@ export function parseScreen(text: string): ParsedScreenResult {
     current_action: parseCurrentAction(normalized, agentType),
     errors,
     model,
+    ...(visibleEffort ? { parsed_effort: visibleEffort } : {}),
     cost,
     paused: screenShowsPaused(normalized),
     paused_source: "inferred",

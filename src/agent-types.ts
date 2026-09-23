@@ -53,8 +53,9 @@ export interface AgentRecord {
   state: AgentState;
   repo: string;
   model: string;
-  /** Requested Codex reasoning effort; null/absent for other harnesses. */
+  /** Per-session effort pin for Codex and Claude. */
   effort?: string | null;
+  effort_source?: "explicit" | "default" | null;
   cli: CliType;
   cli_session_id: string | null;
   cli_session_path?: string | null;
@@ -162,7 +163,7 @@ export interface AgentRecord {
   prompt_delivered?: boolean;
   parsed_model?: string | null;
   model_mismatch?: boolean | null;
-  /** Codex effort observed in the live status line. */
+  /** Effort observed in the live status line when exposed by the harness. */
   parsed_effort?: string | null;
   effort_mismatch?: boolean | null;
   // File-backed goal contract for superseded/long-running collab tasks

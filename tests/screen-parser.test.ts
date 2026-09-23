@@ -319,6 +319,7 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.status).toBe("working");
     expect(parsed.current_action).toBe("Boondoggling");
+    expect(parsed.parsed_effort).toBe("high");
   });
 
   it("treats an in-flight Claude Bash tool block as working", () => {

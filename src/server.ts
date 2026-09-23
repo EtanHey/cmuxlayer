@@ -15222,7 +15222,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .enum(CODEX_EFFORT_VALUES)
           .optional()
           .describe(
-            "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. The installed launcher currently accepts: low, medium, high, xhigh, max, ultra. spawn_agent rejects other values before creating a worktree or surface. The live launcher defaults to HIGH when omitted (~/.config/ralphtools/golem-dispatch.zsh). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
+            "Optional per-session effort for Codex and Claude. Codex accepts low, medium, high, xhigh, max, ultra; Claude accepts low, medium, high, xhigh, max. Invalid values are rejected before worktree or surface creation. Claude defaults to an explicit HIGH pin when omitted. For Claude Opus reviewers, use MEDIUM for small or bounded reviews and HIGH for large or complex reviews (cross-cutting, lock/delivery protocol, recording safety, or over 300 lines). The launcher gets -E; fresh installs use claude --effort. This never changes saved Claude settings. For Codex implementation lanes, MEDIUM is the settled floor for well-specified work; choose higher effort when the task needs it.",
           ),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])

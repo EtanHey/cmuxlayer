@@ -207,6 +207,7 @@ import {
   resolveSpawnEffort,
   resolveSpawnModelPolicy,
   type CodexEffort,
+  type SpawnEffort,
   type SpawnModelPolicy,
 } from "./model-policy.js";
 import {
@@ -469,6 +470,8 @@ export interface SpawnAgentResult {
   workspace_id?: string;
   state: AgentState;
   model?: string;
+  effort_applied?: SpawnEffort;
+  effort_source?: "explicit" | "default";
   requested_model?: string;
   warnings?: string[];
   model_policy?: SpawnModelPolicy;
@@ -1533,7 +1536,7 @@ export function buildLaunchCommand(
     cwd?: string;
     envPrefix?: string;
     allowModelOverride?: boolean;
-    effort?: CodexEffort;
+    effort?: SpawnEffort;
     launchMode?: AgentLaunchMode;
     /** Worker-authority Codex launches use repoGolem's light worker prompt. */
     authority?: AgentAuthority;
@@ -1583,9 +1586,10 @@ export function buildLaunchCommand(
     const rawEnvPrefix =
       rawEnvParts.length > 0 ? `${rawEnvParts.join(" ")} ` : "";
     const skipFlag = rawSkipApprovalFlag(cli, opts?.permissionMode);
-    const rawEffortArg =
-      cli === "codex" && opts?.effort
-        ? ` -c model_reasoning_effort=${opts.effort}`
+    const rawEffortArg = cli === "codex" && opts?.effort
+      ? ` -c model_reasoning_effort=${opts.effort}`
+      : cli === "claude" && opts?.effort
+        ? ` --effort ${opts.effort}`
         : "";
     // Only pass a model the raw binary actually understands; launcher-only
     // vocabulary is dropped here and disclosed by describeModelPin instead.
@@ -1606,7 +1610,7 @@ export function buildLaunchCommand(
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${claudeModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${claudeModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "codex":
       return `${envPrefix}${launcherName ?? `${safeRepo}Codex`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "gemini":
@@ -4539,8 +4543,9 @@ export class AgentEngine {
       const screen = await this.readSweepScreen(agent, ctx);
       if (!this.assertSweepInputCurrent(ctx)) return agent;
       const parsed = parseScreen(screen.text);
-      const parsedEffort =
-        agent.cli === "codex" ? parseCodexEffort(parsed.model) : null;
+      const parsedEffort = agent.cli === "codex"
+        ? parseCodexEffort(parsed.model)
+        : agent.cli === "claude" ? parsed.parsed_effort ?? null : null;
       const settlement = {
         parsed_model: parsed.model,
         model_mismatch: computeModelMismatch(agent.model, parsed.model),
@@ -9550,7 +9555,8 @@ export class AgentEngine {
       boot_instance_id: randomUUID(),
       repo: spawnParams.repo,
       model: spawnParams.model ?? modelPolicy.effective_model,
-      effort: spawnParams.cli === "codex" ? (effort ?? "high") : null,
+      effort: spawnParams.cli === "codex" || spawnParams.cli === "claude" ? (effort ?? "high") : null,
+      effort_source: spawnParams.cli === "claude" ? (params.effort?.trim() ? "explicit" : "default") : null,
       cli: spawnParams.cli,
       cli_session_id: null,
       cli_session_path: null,
@@ -9763,6 +9769,7 @@ export class AgentEngine {
       workspace_id: surface.workspace,
       state: "booting",
       model: modelPolicy.effective_model,
+      ...(effort ? { effort_applied: effort, effort_source: params.effort?.trim() ? "explicit" as const : "default" as const } : {}),
       requested_model: modelPolicy.requested_model,
       warnings: [...launchWarnings],
       model_policy: modelPolicy,
@@ -9914,6 +9921,7 @@ export class AgentEngine {
         workspace_id: workspace,
         state: "booting",
         model: agent.model,
+        ...(agent.effort ? { effort_applied: agent.effort as SpawnEffort, effort_source: agent.effort_source ?? "default" } : {}),
         cwd: agent.launch_cwd ?? undefined,
       };
     } catch (error) {
