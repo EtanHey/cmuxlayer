@@ -3313,6 +3313,43 @@ describe("AgentRegistry", () => {
       });
     });
 
+    it("does not reconcile a nonempty Claude composer draft to ready", async () => {
+      const surface = {
+        ...makeSurface("surface:draft-pending"),
+        title: "cmuxlayerClaude",
+      };
+      const agentId = "auto-claude-surface-draft-pending";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: surface.ref,
+          repo: "cmuxlayer",
+          cli: "claude",
+          state: "ready",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [surface]);
+      await registry.reconstitute();
+      const discovery = new AgentDiscovery({
+        listSurfaces: async () => [surface],
+        readScreen: async () => ({
+          surface: surface.ref,
+          text: "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
+          lines: 5,
+          scrollback_used: false,
+        }),
+      });
+
+      const observed = await discovery.scan(true);
+      expect(observed[0]?.parsed_status).toBe("draft_pending");
+      const merged = await registry.listMerged(discovery, { discovered: observed });
+      expect(merged.find((agent) => agent.agent_id === agentId)?.state).toBe(
+        "working",
+      );
+      expect(stateMgr.readState(agentId)?.state).toBe("working");
+    });
+
     it("RC4: preserves live pending sibling seats on different surfaces during repair", async () => {
       const discovered = [
         makeDiscovered({

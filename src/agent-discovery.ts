@@ -91,6 +91,7 @@ export function discoveredStatusToAgentState(
   status: ParsedScreenStatus | null,
 ): AgentState {
   switch (status) {
+    case "draft_pending":
     case "thinking":
     case "working":
       return "working";

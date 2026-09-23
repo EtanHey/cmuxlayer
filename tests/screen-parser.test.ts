@@ -39,6 +39,88 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("keeps a current Codex draft dirty despite older working output", () => {
+    const parsed = parseScreen("Codex\nWorking (0m 12s · esc to interrupt)\n› Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("keeps a current Codex draft dirty despite older resume output", () => {
+    const parsed = parseScreen("Codex\nTo continue this session, run codex resume 1234\n» Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("keeps active Codex work active when a prompt-like line has no footer", () => {
+    const parsed = parseScreen("Working (15m 57s • esc to interrupt)\n› Explain this codebase");
+    expect(parsed.status).toBe("working");
+  });
+
+  it("keeps an active Codex queued follow-up busy despite its footer", () => {
+    const parsed = parseScreen(readFixture("painpoints/codex-pr343-live-queued-followup.txt"));
+    expect(parsed.status).toBe("working");
+    expect(parsed.control_state).toBe("busy");
+  });
+
+  it("keeps quoted chevron output in a clean Claude pane ready", () => {
+    const parsed = parseScreen("Claude Code\n» quoted output\n  bypass permissions on");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("keeps the Codex example prompt ready after dismissing a menu", () => {
+    const parsed = parseScreen(
+      "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
+    );
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.status).not.toBe("draft_pending");
+  });
+
+  it("ignores a stale Codex update menu above the recovered example prompt", () => {
+    const priorMenu = readFixture("painpoints/codex-update-menu.txt");
+    const parsed = parseScreen(
+      `${priorMenu}\ngpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename`,
+    );
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+  });
+
+  it.each(["»", "›"])("marks an unsent Codex %s composer above its unindented footer dirty", (prompt) => {
+    const parsed = parseScreen(`Codex\n${prompt} Keep this draft\ngpt-5.5 xhigh · ~/Gits/cmuxlayer`);
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("keeps a Codex draft dirty above its task-suffixed model footer", () => {
+    const parsed = parseScreen("Codex\n› Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer/.worktrees/lane-a-true-state · Read lane");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("marks a multiline Claude composer draft as pending instead of ready", () => {
+    const parsed = parseScreen(
+      "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
+    );
+    expect(parsed.status).not.toBe("idle");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("keeps a current Claude draft dirty despite an older Thinking marker", () => {
+    const parsed = parseScreen(
+      "Claude Code\n✻ Thinking…\n❯ Read and follow the lane brief\n  bypass permissions on",
+    );
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("returns the latest framed response in a screen window", () => {
+    expect(
+      parseScreen(
+        "Claude Code\n---RESPONSE_START---\nold\n---RESPONSE_END---\n---RESPONSE_START---\nlatest\n---RESPONSE_END---\n❯ ",
+      ).response,
+    ).toBe("latest");
+  });
+
   it("bounds parsing of whitespace-heavy draft and other long terminal lines", () => {
     // Run synchronously in a child so a backtracking parser cannot hang Vitest.
     const parserUrl = new URL("../src/screen-parser.ts", import.meta.url).href;

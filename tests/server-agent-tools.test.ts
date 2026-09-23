@@ -8640,6 +8640,7 @@ describe("agent lifecycle tool handlers", () => {
       ],
     });
     routeClient.client.send.mockClear();
+    routeClient.client.readScreen.mockClear();
     routeClient.sendCalls.length = 0;
 
     const result = await registeredTestTool(server, "send_to").handler(
@@ -8655,6 +8656,11 @@ describe("agent lifecycle tool handlers", () => {
     expect(routeClient.sendCalls).toEqual([
       { surface: "surface:199", text: "keep going" },
     ]);
+    const sendReadWindows = routeClient.client.readScreen.mock.calls.map(
+      ([, opts]) => opts?.lines,
+    );
+    expect(sendReadWindows.length).toBeGreaterThan(0);
+    expect(Math.max(...sendReadWindows)).toBeLessThanOrEqual(30);
     expect(testLifecycleEngine(server).getAgentState("brainClaude")?.repo).toBe(
       "brainlayer",
     );
@@ -9382,6 +9388,14 @@ describe("agent lifecycle tool handlers", () => {
       ok: true,
       rpc_methods: ["surface.send_text"],
     });
+  });
+
+  it("wait_for accepts condition as an alias for target_state", async () => {
+    const { server } = await createBroadcastServer([]);
+    const schema = registeredTestTool(server, "wait_for").inputSchema;
+    expect(
+      schema.parse({ agent_id: "agent-1", condition: "idle" }),
+    ).toMatchObject({ condition: "idle" });
   });
 
   it("send_to surface mode persists socket RPC provenance for wait_for", async () => {
