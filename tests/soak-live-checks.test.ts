@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkStateAgreement,
-  checkSoakSession, checkToolFailure, hasReplyMarker, healthSampleEntry, nextSoakDelayMs, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
+import { checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt,
+  checkReplyVisibility, checkSpawnIdentity, checkStateAgreement,
+  checkSoakSession, checkStopWait, checkToolFailure, hasReplyMarker, healthSampleEntry, nextSoakDelayMs,
+  replyMarkerEvidence, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
 
 const soakStart = 1_000_000;
+const snapshotHash = "a".repeat(64);
 const healthyTimeline = (elapsedMs: number) => [
   ...Array.from({ length: Math.ceil(elapsedMs / 60_000) }, (_, minute) => ({
     atMs: soakStart + minute * 60_000, healthy: true, label: minute === 0 ? "start" : "minute" })),
@@ -38,6 +41,28 @@ describe("live soak invariant checkers", () => {
     expect(checkToolFailure({ ok: false, error: "unrelated MCP error" })).toContain("tool_error");
   });
 
+  it("accepts a terminal done result for an instructed stop without hiding real wait errors", () => {
+    const done = { ok: true, isError: false, matched: false, state: "done",
+      error: "Agent entered terminal state: done" };
+    expect(checkToolFailure(done, { acceptTerminalDone: true })).toEqual([]);
+    expect(checkToolFailure({ ...done, state: "error" }, { acceptTerminalDone: true }))
+      .toContain("tool_error");
+    expect(checkToolFailure({ ...done, error: "transport failed" }, { acceptTerminalDone: true }))
+      .toContain("tool_error");
+    expect(checkStopWait(done)).toEqual([]);
+    expect(checkStopWait({ ...done, error: null })).toEqual([]);
+    expect(checkStopWait({ ...done, error: "transport failed" })).toEqual(["wait_failed"]);
+  });
+
+  it("distinguishes a failed created seat from a spawn with missing identity", () => {
+    expect(checkSpawnIdentity({ ok: false, agent_id: "agent-1", surface_id: "surface:1" }))
+      .toEqual(["spawn_failed"]);
+    expect(checkSpawnIdentity({ ok: false, agent_id: "agent-1" }))
+      .toEqual(["spawn_missing_identity"]);
+    expect(checkSpawnIdentity({ ok: true, agent_id: "agent-1", surface_id: "surface:1" }))
+      .toEqual([]);
+  });
+
   it("requires right-column placement and no registry or index ghost after close", () => {
     expect(checkPlacement({ column: 0, column_count: 2 })).toContain("wrong_column");
     expect(checkPlacement({ column: 1, column_count: 2 })).toEqual([]);
@@ -61,6 +86,34 @@ describe("live soak invariant checkers", () => {
     expect(hasReplyMarker({ parsed: { response: "SOAK_OK_1" } }, "SOAK_OK_1")).toBe(true);
     expect(hasReplyMarker({ screen_preview: "⏺ SOAK_OK_1" }, "SOAK_OK_1")).toBe(true);
     expect(hasReplyMarker({ screen_preview: "• SOAK_OK_1" }, "SOAK_OK_1")).toBe(true);
+    expect(hasReplyMarker({ content: "❯ Reply exactly\n  SOAK_OK_1\n  then stop.\n" }, "SOAK_OK_1"))
+      .toBe(false);
+  });
+
+  it("records bounded reply origin and excludes echoed prompts and tool output", () => {
+    const marker = "SOAK_OK_1";
+    const echoed = replyMarkerEvidence({ content: `❯ Reply exactly\n  ${marker}\n  then stop.` }, marker);
+    expect(echoed).toMatchObject({ found: false, origin: "echoed_prompt", source: "content" });
+    expect(echoed.context.length).toBeLessThanOrEqual(3);
+    expect(echoed.context.every((line: string) => line.length <= 160)).toBe(true);
+    expect(replyMarkerEvidence({ content: `⏺ Bash(command)\n⎿ ${marker}` }, marker))
+      .toMatchObject({ found: false, origin: "tool_output" });
+    expect(replyMarkerEvidence({ content: `⏺ Bash(command)\n⎿ output\n⏺ ${marker}` }, marker))
+      .toMatchObject({ found: false, origin: "tool_output" });
+    expect(replyMarkerEvidence({ content: marker }, marker))
+      .toMatchObject({ found: false, origin: "unattributed_raw" });
+    expect(replyMarkerEvidence({ content: `❯ Reply exactly ${marker}\n\n⏺ ${marker}` }, marker))
+      .toMatchObject({ found: true, origin: "authored_reply", source: "content" });
+    expect(replyMarkerEvidence({ content: `❯ Reply exactly ${marker}\n⏺ ${marker}` }, marker))
+      .toMatchObject({ found: true, origin: "authored_reply", source: "content" });
+    expect(replyMarkerEvidence({ parsed: { response: marker } }, marker))
+      .toMatchObject({ found: true, origin: "authored_reply", source: "parsed_response" });
+    expect(replyMarkerEvidence({ parsed: { response: `❯ Reply exactly\n  ${marker}\n  then stop.` } }, marker))
+      .toMatchObject({ found: false, origin: "echoed_prompt", source: "parsed_response" });
+    expect(checkReplyVisibility({ parsed: { response: "other answer" }, content: `⏺ ${marker}` }, marker))
+      .toEqual(["reply_missing_from_parsed_or_preview"]);
+    expect(checkReplyVisibility({ parsed: { response: marker }, content: `⏺ ${marker}` }, marker))
+      .toEqual([]);
   });
 
   it("fails closed on malformed receipt, state, tool, and reply inputs", () => {
@@ -109,7 +162,7 @@ describe("live soak invariant checkers", () => {
     expect(checkSoakSession(session)).toEqual([]);
     expect(shouldContinueSoak(cycles, 40, elapsedMs, minDurationMs)).toBe(false);
     expect(nextSoakDelayMs(cycles, 40, elapsedMs, minDurationMs)).toBe(0);
-    const read = (token_count: number | null) => ({ ok: true, isError: false,
+    const read = (token_count: number | null) => ({ ok: true, isError: false, snapshot_hash: snapshotHash,
       parsed: { status: "working", control_state: "busy", token_count } });
     expect(checkParsedReadAgreement(read(null), read(null), 100)).toEqual([]);
     expect(checkParsedReadAgreement(read(100), read(100), 100)).toEqual([]);
@@ -207,13 +260,28 @@ describe("live soak invariant checkers", () => {
   });
 
   it("catches a stale parsed_only read against the immediate full read", () => {
-    const full = { ok: true, isError: false, parsed: { status: "working", control_state: "busy", token_count: 190_479 } };
-    const stale = { ok: true, isError: false, parsed: { status: "idle", control_state: "ready", token_count: 79_126 } };
+    const full = { ok: true, isError: false, snapshot_hash: snapshotHash,
+      parsed: { status: "working", control_state: "busy", token_count: 190_479 } };
+    const stale = { ok: true, isError: false, snapshot_hash: snapshotHash,
+      parsed: { status: "idle", control_state: "ready", token_count: 79_126 } };
     expect(checkParsedReadAgreement(full, stale, 200)).toEqual([
       "parsed_status_mismatch", "parsed_control_state_mismatch", "parsed_token_count_drift",
     ]);
     expect(checkParsedReadAgreement(full, { ...full, parsed: { ...full.parsed, token_count: 191_000 } }, 200)).toEqual([]);
     expect(checkParsedReadAgreement(full, full, 2_001)).toContain("parsed_sweep_window_exceeded");
+  });
+
+  it("compares parsed fields only when both reads name the same screen snapshot", () => {
+    const full = { ok: true, isError: false, snapshot_hash: "a".repeat(64),
+      parsed: { status: "working", control_state: "busy", token_count: null } };
+    const changed = { ok: true, isError: false, snapshot_hash: "b".repeat(64),
+      parsed: { status: "idle", control_state: "ready", token_count: 100 } };
+    expect(checkParsedReadAgreement(full, changed, 150)).toEqual([]);
+    expect(checkParsedReadAgreement(full, { ...changed, snapshot_hash: full.snapshot_hash }, 150))
+      .toEqual(["parsed_status_mismatch", "parsed_control_state_mismatch", "parsed_token_count_drift"]);
+    expect(checkParsedReadAgreement(full, changed, 2_100)).toEqual(["parsed_sweep_window_exceeded"]);
+    expect(checkParsedReadAgreement(full, { ...changed, snapshot_hash: undefined }, 150))
+      .toEqual(["parsed_read_unavailable"]);
   });
 
   it("rejects malformed parsed reads and non-finite sweep duration", () => {
@@ -225,7 +293,7 @@ describe("live soak invariant checkers", () => {
 });
 
 it("matches valid null token counts before usage metadata appears", () => {
-  const read = { ok: true, isError: false, parsed: {
+  const read = { ok: true, isError: false, snapshot_hash: snapshotHash, parsed: {
     status: "working", control_state: "busy", token_count: null,
   } };
   expect(checkParsedReadAgreement(read, read, 100)).toEqual([]);

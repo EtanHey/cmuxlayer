@@ -23,6 +23,12 @@ export function checkReceipt(receipt, landed = false) {
   return failures;
 }
 
+export function checkSpawnIdentity(spawn) {
+  const value = record(spawn);
+  if (!value.agent_id || !(value.surface_id ?? value.surface)) return ["spawn_missing_identity"];
+  return value.ok === true ? [] : ["spawn_failed"];
+}
+
 export function checkStateAgreement(agent, screen) {
   const registry = record(agent).state;
   const parsed = record(screen);
@@ -38,8 +44,22 @@ export function checkStateAgreement(agent, screen) {
     ? ["stale_registry_state"] : [];
 }
 
-export function checkToolFailure(result) {
+export function isExpectedStopCompletion(result) {
   const value = record(result);
+  return value.ok === true && value.isError === false && value.matched === false &&
+    value.state === "done" && (value.error == null ||
+      value.error === "Agent entered terminal state: done");
+}
+
+export function checkStopWait(result) {
+  const value = record(result);
+  return (value.ok === true && value.isError === false && value.matched === true) ||
+    isExpectedStopCompletion(value) ? [] : ["wait_failed"];
+}
+
+export function checkToolFailure(result, opts = {}) {
+  const value = record(result);
+  if (opts.acceptTerminalDone === true && isExpectedStopCompletion(value)) return [];
   const message = `${value.error ?? ""} ${value.error_code ?? ""} ${value.text ?? ""}`;
   const failures = [];
   if (/too many in.flight/i.test(message)) failures.push("too_many_in_flight");
@@ -79,14 +99,68 @@ export function checkClose(close, defaultListed, explicitRow, indexEntry, surfac
   return failures;
 }
 
-export function hasReplyMarker(screen, marker) {
-  if (typeof marker !== "string" || !marker.trim()) return false;
+const boundedLine = (line) => line.slice(0, 160);
+
+export function replyMarkerEvidence(screen, marker) {
+  if (typeof marker !== "string" || !marker.trim()) {
+    return { found: false, origin: "none", source: null, line: null, context: [] };
+  }
   const value = record(screen);
   const response = record(value.parsed).response;
-  const replyLine = (line) => line.trim().replace(/^[⏺•]\s*/, "") === marker;
-  if (typeof response === "string" && response.split("\n").some(replyLine)) return true;
-  return [value.screen_preview, value.content].some((text) =>
-    typeof text === "string" && text.split("\n").some(replyLine));
+  const exactReplyLine = (line) => line.trim().replace(/^[⏺•]\s*/, "") === marker;
+  let firstRejected = null;
+  for (const source of ["parsed_response", "screen_preview", "content"]) {
+    const content = source === "parsed_response" ? response : value[source];
+    if (typeof content !== "string") continue;
+    const lines = content.split("\n");
+    let inPrompt = false;
+    let inToolOutput = false;
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const trimmed = line.trim();
+      if (!trimmed) {
+        inPrompt = false;
+        inToolOutput = false;
+        continue;
+      }
+      if (/^\s*[❯›>]\s*\S/.test(line)) {
+        inPrompt = true;
+        inToolOutput = false;
+      } else if (/^\s*(?:⎿|Result:|Output:)/.test(line)) {
+        inToolOutput = true;
+        inPrompt = false;
+      } else if (/^\s*[⏺•]\s+(?:mcp__\S+|Read\(|Bash\(|Task\()/.test(line)) {
+        inToolOutput = true;
+        inPrompt = false;
+      } else if (/^[⏺•]\s+/.test(line)) {
+        inPrompt = false;
+        if (!line.includes(marker)) inToolOutput = false;
+      }
+      if (!line.includes(marker)) continue;
+      const authoredLine = exactReplyLine(line) && (source === "parsed_response" ||
+        /^[⏺•]\s+/.test(line));
+      const origin = inPrompt ? "echoed_prompt" :
+        (inToolOutput || (source !== "parsed_response" && /^\s{2,}/.test(line)))
+        ? "tool_output" : authoredLine ? "authored_reply" : "unattributed_raw";
+      const evidence = { found: origin === "authored_reply", origin, source,
+        line: boundedLine(line),
+        context: lines.slice(Math.max(0, index - 1), index + 2).map(boundedLine) };
+      if (evidence.found) return evidence;
+      firstRejected ??= evidence;
+    }
+  }
+  return firstRejected ?? { found: false, origin: "none", source: null, line: null, context: [] };
+}
+
+export function hasReplyMarker(screen, marker) {
+  return replyMarkerEvidence(screen, marker).found;
+}
+
+export function checkReplyVisibility(screen, marker, evidence = replyMarkerEvidence(screen, marker)) {
+  if (!evidence.found) return ["missing_reply_marker"];
+  return evidence.source === "content" &&
+    !replyMarkerEvidence({ parsed: record(screen).parsed }, marker).found
+    ? ["reply_missing_from_parsed_or_preview"] : [];
 }
 
 export function shouldContinueSoak(cyclesCompleted, minCycles, elapsedMs, minDurationMs) {
@@ -137,7 +211,9 @@ export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
   const parsedOnly = record(parsedOnlyRead);
   if (full.ok !== true || parsedOnly.ok !== true || full.isError !== false ||
     parsedOnly.isError !== false || !full.parsed || !parsedOnly.parsed ||
-    !Number.isFinite(elapsedMs) || elapsedMs < 0) {
+    !Number.isFinite(elapsedMs) || elapsedMs < 0 ||
+    ![full.snapshot_hash, parsedOnly.snapshot_hash].every((hash) =>
+      typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash))) {
     return ["parsed_read_unavailable"];
   }
   const a = record(full.parsed);
@@ -150,6 +226,7 @@ export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
   }
   const failures = [];
   if (elapsedMs > 2_000) failures.push("parsed_sweep_window_exceeded");
+  if (full.snapshot_hash !== parsedOnly.snapshot_hash) return failures;
   if (a.status !== b.status) failures.push("parsed_status_mismatch");
   if (a.control_state !== b.control_state) failures.push("parsed_control_state_mismatch");
   const countA = a.token_count;

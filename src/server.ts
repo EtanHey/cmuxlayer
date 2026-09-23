@@ -11971,10 +11971,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ),
           codexFill,
         );
+        // The lean and parsed-only variants are separate reads. A caller may
+        // compare parsed fields only when these hashes identify the same frame.
+        const snapshot_hash = createHash("sha256").update(result.text).digest("hex");
 
         if (args.parsed_only) {
           const data = {
             surface: result.surface,
+            snapshot_hash,
             title,
             column,
             column_count,
@@ -12003,6 +12007,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             .join("\n");
           const data = {
             surface: result.surface,
+            snapshot_hash,
             title,
             column,
             column_count,
@@ -12034,6 +12039,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : cleanScreenText(result.text, 12) || null;
         const data = {
           surface: result.surface,
+          snapshot_hash,
           title,
           column,
           column_count,
