@@ -310,6 +310,12 @@ export interface AgentDeliveryReceipt {
   typed?: boolean;
   /** A submit key reached the target through either socket or CLI transport. */
   submit_dispatched?: boolean;
+  /** An uncertain recovered boot Return; passive confirmation completes boot. */
+  boot_recovery?: boolean;
+  /** The exact boot generation whose pointer the receipt verifies. */
+  boot_instance_id?: string;
+  /** Durable one-time completion after the matching boot state is repaired. */
+  boot_recovery_finalized_at?: string;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
@@ -7556,6 +7562,8 @@ export class AgentEngine {
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
     typed?: boolean;
     submit_dispatched?: boolean;
+    boot_recovery?: boolean;
+    boot_instance_id?: string;
     created_at?: string;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
@@ -7630,6 +7638,14 @@ export class AgentEngine {
     try {
       const snapshots = new Map<string, DeliveryVerifySnapshot | null>();
       for (const receipt of this.deliveryReceipts.values()) {
+        if (receipt.boot_recovery && !receipt.boot_recovery_finalized_at &&
+          receipt.delivery_state === "submitted" &&
+          receipt.submit_verified === true) {
+          // Repair a crash between persisting the confirmed receipt and the
+          // managed state transition. This is idempotent on later sweeps.
+          this.finalizeConfirmedBootRecovery(receipt);
+          continue;
+        }
         const watching =
           receipt.delivery_state === "pending_verify" ||
           receipt.delivery_state === "queued_followup" ||
@@ -7692,6 +7708,7 @@ export class AgentEngine {
           receipt.verify_miss_count = 0;
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
+          this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
         if (observation.reason === "target_gone") {
@@ -7726,6 +7743,32 @@ export class AgentEngine {
     } finally {
       this.deliveryVerifyInFlight = false;
     }
+  }
+
+  private finalizeConfirmedBootRecovery(receipt: AgentDeliveryReceipt): void {
+    if (!receipt.boot_recovery || receipt.boot_recovery_finalized_at ||
+      receipt.delivery_state !== "submitted" ||
+      receipt.submit_verified !== true || !receipt.boot_instance_id) return;
+    let agent = this.stateMgr.readState(receipt.agent_id);
+    if (!agent || agent.boot_instance_id !== receipt.boot_instance_id ||
+      !["booting", "ready", "working"].includes(agent.state)) return;
+    if (agent.boot_prompt_pending !== false || agent.prompt_delivered !== true ||
+      agent.submit_verified !== true) {
+      agent = this.stateMgr.updateRecord(agent.agent_id, {
+        boot_prompt_pending: false,
+        prompt_delivered: true,
+        submit_verified: true,
+      });
+    }
+    if (agent.state === "booting") {
+      agent = this.stateMgr.transition(agent.agent_id, "ready");
+    }
+    if (agent.state === "ready") {
+      agent = this.stateMgr.transition(agent.agent_id, "working");
+    }
+    this.registry.set(agent.agent_id, agent);
+    receipt.boot_recovery_finalized_at = new Date().toISOString();
+    this.persistDeliveryReceipts();
   }
 
   /** Bound one delivery-verify side quest to the verify timeout. */
@@ -8974,6 +9017,7 @@ export class AgentEngine {
       surface_provenance: "cmuxlayer_spawn",
       workspace_id: surface.workspace,
       state: "booting",
+      boot_instance_id: randomUUID(),
       repo: spawnParams.repo,
       model: spawnParams.model ?? modelPolicy.effective_model,
       effort: spawnParams.cli === "codex" ? (effort ?? "high") : null,
