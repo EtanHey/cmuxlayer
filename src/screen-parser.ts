@@ -240,8 +240,8 @@ const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const CODEX_CURRENT_ACTION_RE =
   /^(?:Ran|Explored|Updated Plan|Waited for|Read|Edited|Searched|Called|Running|Writing)\b/i;
 const CLAUDE_GLYPH_ACTION_RE =
-  /^\s*[⏺●⬢⬡]\s+((?:Bash|Read|Edit|Write|Search|Glob|Grep|Task|WebFetch|WebSearch|NotebookEdit|Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
-const CLAUDE_GLYPH_TOOL_CALL_RE = /^[⏺●]\s+(?:mcp__\S+|[A-Za-z_][\w.:-]*\s*\()/i;
+  /^\s*[⏺●⬢⬡]\s+((?:mcp__\S+|(?:Bash|Read|Edit|Write|Search|Glob|Grep|Task|WebFetch|WebSearch|NotebookEdit)\([^\n]*\)|(?:Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)(?:…|\.{3}|\s+(?:\/|~\/|\.\/|\.\.\/)\S+).*))$/i;
+const CLAUDE_GLYPH_TOOL_CALL_RE = /^[⏺●]\s+(?:mcp__\S+|[A-Za-z_][\w.:-]*\()/i;
 const CLAUDE_INDENTED_ACTIVITY_RE =
   /^\s{2,}((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
 const CLAUDE_ACTIVE_BANNER_RE = /^\s*[✻✢✳✶]\s+.*(?:working|thinking|esc to interrupt)/i;
@@ -724,6 +724,7 @@ function extractClaudeReadyResponseTail(
       ...lines.slice(index + 1, promptIndex).filter((row) =>
         !RULE_LINE_RE.test(row.trim()) &&
         footerTokenCount(row) === null &&
+        !/^\s*Token usage:\s*total=/i.test(row) &&
         !MODEL_COST_RE.test(row) &&
         !/bypass permissions on/i.test(row) &&
         !/^\s*⎇\s/.test(row),
