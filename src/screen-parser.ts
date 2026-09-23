@@ -178,7 +178,9 @@ const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const CODEX_READY_PLACEHOLDER_RE =
   /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/;
-const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/m;
+const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›»][ \t]+\S/m;
+const CODEX_MODEL_FOOTER_RE =
+  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s]+$/i;
 const isReadyComposerLine = (line: string): boolean =>
   BARE_READY_PROMPT_RE.test(line) || CODEX_READY_PLACEHOLDER_RE.test(line);
 const PICKER_BLOCK_WINDOW_LINES = 32;
@@ -1768,7 +1770,7 @@ function hasPendingComposerDraft(
   const tail = text.split("\n").slice(-16);
   for (let i = tail.length - 1; i >= 0; i -= 1) {
     const line = tail[i] ?? "";
-    const match = line.match(/^\s*[❯›]\s+(.+)$/);
+    const match = line.match(/^\s*[❯›»]\s+(.+)$/);
     if (!match) continue;
     const input = match[1]?.trim() ?? "";
     if (!input || CODEX_READY_PLACEHOLDER_RE.test(line)) return false;
@@ -1777,6 +1779,7 @@ function hasPendingComposerDraft(
       (row) =>
         /^\s{2,}\S/.test(row) ||
         RULE_LINE_RE.test(row.trim()) ||
+        (agentType === "codex" && CODEX_MODEL_FOOTER_RE.test(row)) ||
         /bypass permissions on|\/ commands · @ files|% left/i.test(row),
     );
   }
