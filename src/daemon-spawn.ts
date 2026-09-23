@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nofileExecSpec } from "./nofile-limit.js";
 import {
   daemonStderrExcerpt,
   recordDaemonExit,
@@ -114,7 +115,8 @@ export async function spawnDaemonProcess(
     }`.trim();
   }
   const captureStderr = opts.captureStderr !== false;
-  const child = spawn(process.execPath, [daemonScriptPath], {
+  const launch = nofileExecSpec(process.execPath, [daemonScriptPath]);
+  const child = spawn(launch.command, launch.args, {
     detached: true,
     env,
     stdio: ["ignore", "ignore", captureStderr ? "pipe" : "inherit"],

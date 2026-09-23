@@ -33,6 +33,7 @@ import {
 } from "./model-policy.js";
 import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
+import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { agentProcessLiveness, agentProcessMayBeAlive } from "./process-liveness.js";
 import {
@@ -14211,7 +14212,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await sendLauncherCommandToSurface({
         surface: route.surface,
         workspace: route.workspace,
-        command,
+        command: withRaisedNofileSoftLimit(command),
         timeout_ms: opts.timeout_ms,
         relaunch: true,
         assertSurfaceBindingCurrent,

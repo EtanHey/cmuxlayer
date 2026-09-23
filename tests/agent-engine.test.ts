@@ -22,6 +22,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseScreen } from "../src/screen-parser.js";
+import { withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import {
   AgentEngine,
@@ -471,6 +472,19 @@ describe("AgentEngine", () => {
       );
     });
 
+    it("raises the open-file soft limit in the managed seat shell before its launcher", async () => {
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        cli: "codex",
+        prompt: "Verify seat file-descriptor budget",
+      });
+      const command = (mockClient.send as ReturnType<typeof vi.fn>).mock.calls
+        .map((call) => String(call[1] ?? ""))
+        .find((text) => text.includes("brainlayerCodex"));
+      expect(command).toMatch(/ulimit -Sn/);
+      expect(command).toMatch(/brainlayerCodex -s/);
+    });
+
     it("refuses created-surface focus when the observer changes before focus mutation", async () => {
       engine.dispose();
       const ownerId = "cmux:/tmp/cmux.sock#socket=1:2:3:4";
@@ -838,7 +852,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe("brainlayerClaude -s -S");
+      expect(launchCmd).toBe(withRaisedNofileSoftLimit("brainlayerClaude -s -S"));
     });
 
     it("launches with the launcher name resolved by preflight", async () => {
@@ -860,7 +874,7 @@ describe("AgentEngine", () => {
 
       const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
-      expect(launchCmd).toBe("agenthtmlhostCursor -s");
+      expect(launchCmd).toBe(withRaisedNofileSoftLimit("agenthtmlhostCursor -s"));
       const state = resolvingEngine.getAgentState(result.agent_id);
       expect(state?.launcher_name).toBe("agenthtmlhostCursor");
       expect(state?.launch_cwd).toBe("/home/test-user/Gits/agent-html-host");
@@ -4818,7 +4832,7 @@ describe("AgentEngine", () => {
       expect(resumed.surface_id).toBe("surface:new");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        withRaisedNofileSoftLimit("brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e"),
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe(
@@ -4971,7 +4985,7 @@ describe("AgentEngine", () => {
       expect(resumed.agent_id).toBe("agent-stable-resume-raw");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        withRaisedNofileSoftLimit("cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e"),
         { workspace: "ws:1" },
       );
     });
@@ -13329,10 +13343,10 @@ Session ID: ${sessionId}`,
 
         const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(launchCmd).toBe(
+        expect(launchCmd).toBe(withRaisedNofileSoftLimit(
           `cd '${join(repoHome, "freshrepo")}' && ` +
             "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
-        );
+        ));
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBeNull();
         expect(state?.launch_cwd).toBe(join(repoHome, "freshrepo"));
@@ -13394,7 +13408,7 @@ Session ID: ${sessionId}`,
 
         const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(launchCmd).toBe("mmClaude -s");
+        expect(launchCmd).toBe(withRaisedNofileSoftLimit("mmClaude -s"));
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBe("mmClaude");
         expect(state?.launch_cwd).toBe(registeredRoot);

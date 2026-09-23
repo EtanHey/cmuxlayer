@@ -6,7 +6,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -55,6 +55,7 @@ export interface ControlHealthOptions {
   client?: unknown;
   execFile?: ControlHealthExecFile;
   readFile?: typeof readFile;
+  readdir?: (path: string) => Promise<string[]>;
   stat?: typeof stat;
   access?: typeof access;
   now?: () => Date;
@@ -162,6 +163,11 @@ export interface ControlHealth {
     spawner_ancestry?: {
       app_bundle_path: string | null;
       pid: number | null;
+    };
+    nofile: {
+      soft: number | "unlimited" | null;
+      hard: number | "unlimited" | null;
+      open_fds: number | null;
     };
   };
   selected_transport: {
@@ -524,6 +530,17 @@ function describeClient(client: unknown): ControlHealth["selected_transport"] {
 
 function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   const warnings: string[] = [];
+  const { soft, open_fds } = health.current_process.nofile;
+  if (
+    typeof soft === "number" &&
+    soft > 0 &&
+    open_fds !== null &&
+    open_fds / soft > 0.7
+  ) {
+    warnings.push(
+      `open files above 70% of soft nofile limit (${open_fds}/${soft}); process may hit EMFILE.`,
+    );
+  }
   // #529: never let a dead daemon or a wedged lifecycle lock stay silent.
   const lifecycle = health.daemon_lifecycle;
   if (lifecycle?.last_exit && lifecycle.last_exit.code !== 0) {
@@ -698,6 +715,7 @@ export async function collectControlHealth(
   const deps = {
     execFile: opts.execFile ?? defaultExecFile,
     readFile: opts.readFile ?? readFile,
+    readdir: opts.readdir ?? readdir,
     stat: opts.stat ?? stat,
     access: opts.access ?? access,
   };
@@ -718,6 +736,8 @@ export async function collectControlHealth(
     processList,
     processAncestry,
     ps,
+    nofileLimits,
+    fdEntries,
   ] = await Promise.all([
     Promise.all([
       readMarker(
@@ -764,7 +784,22 @@ export async function collectControlHealth(
         "-p",
         String(opts.pid ?? process.pid),
       ]),
-    ]);
+    runOptional(deps.execFile, "/bin/sh", ["-c", "ulimit -Sn; ulimit -Hn"]),
+    deps.readdir("/dev/fd").catch(() => null),
+  ]);
+
+  const [softText, hardText] = nofileLimits.stdout?.split(/\r?\n/) ?? [];
+  const parseNofileLimit = (
+    value: string | undefined,
+  ): number | "unlimited" | null => {
+    if (value === "unlimited") return "unlimited";
+    return value && /^\d+$/.test(value) ? Number(value) : null;
+  };
+  const nofile = {
+    soft: parseNofileLimit(softText),
+    hard: parseNofileLimit(hardText),
+    open_fds: fdEntries?.filter((entry) => /^\d+$/.test(entry)).length ?? null,
+  };
 
   const prodSocket = selectSocketPath(prodMarkers, prodDefaultSocket);
   const nightlySocket = selectSocketPath(nightlyMarkers, nightlyDefaultSocket);
@@ -792,6 +827,7 @@ export async function collectControlHealth(
       path_entries: pathEntries,
       cmux_resolution: cmuxResolution,
       spawner_ancestry: spawnerAncestry,
+      nofile,
       ...(ps.stdout ? { ps: ps.stdout } : {}),
       ...(ps.error ? { ps_error: ps.error } : {}),
     },
@@ -948,6 +984,9 @@ export function formatControlHealth(health: ControlHealth): string {
     }`,
     `env CMUX_SOCKET_PATH: ${health.current_process.env.CMUX_SOCKET_PATH ?? "unset"}`,
     `env CMUX_BUNDLED_CLI_PATH: ${health.current_process.env.CMUX_BUNDLED_CLI_PATH ?? "unset"}`,
+    `open files: ${health.current_process.nofile.open_fds ?? "unknown"} / ` +
+      `soft ${health.current_process.nofile.soft ?? "unknown"} ` +
+      `(hard ${health.current_process.nofile.hard ?? "unknown"})`,
     "cmux resolution:",
     ...health.current_process.cmux_resolution
       .slice(0, 5)

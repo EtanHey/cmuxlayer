@@ -15,6 +15,7 @@ import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { AgentEngine } from "../src/agent-engine.js";
+import { withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { dispatch, writeHeartbeat } from "../src/inbox.js";
 import type { FleetSidebarPublication } from "../src/fleet-sidebar.js";
 import {
@@ -9037,10 +9038,10 @@ describe("tool handler integration", () => {
           string
         >;
       };
-      const workerLauncherCommand = fixture.launcher_command.replace(
+      const workerLauncherCommand = withRaisedNofileSoftLimit(fixture.launcher_command.replace(
         " -s ",
         " -s --worker ",
-      );
+      ));
 
       let launcherSends = 0;
       let promptSent = false;
@@ -9373,7 +9374,7 @@ describe("tool handler integration", () => {
       corrupted_command: string;
       screen: string;
     };
-    const workerLauncherCommand = `${fixture.launcher_command} --worker`;
+    const workerLauncherCommand = withRaisedNofileSoftLimit(`${fixture.launcher_command} --worker`);
 
     let composer = "";
     let launcherSendAttempts = 0;
@@ -9552,7 +9553,7 @@ describe("tool handler integration", () => {
         pending_probe_screen: string;
       };
     };
-    const workerLauncherCommand = `${fixture.launcher_command} --worker`;
+    const workerLauncherCommand = withRaisedNofileSoftLimit(`${fixture.launcher_command} --worker`);
     const workerCorruptedCommand =
       workerLauncherCommand + workerLauncherCommand;
     const workerPendingProbeScreen = fixture.replay.pending_probe_screen.replace(

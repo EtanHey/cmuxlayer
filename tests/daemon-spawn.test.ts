@@ -1,10 +1,59 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { capturedDaemonStderr, spawnDaemonProcess } from "../src/daemon-spawn.js";
 
 describe("spawnDaemonProcess", () => {
+  it("raises a daemon child's inherited open-file soft limit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-daemon-nofile-"));
+    try {
+      const proofPath = join(root, "nofile-soft.txt");
+      const daemonScriptPath = join(root, "nofile-daemon.cjs");
+      writeFileSync(daemonScriptPath,
+        "const { execFileSync } = require('node:child_process');\n" +
+        "const { writeFileSync } = require('node:fs');\n" +
+        "writeFileSync(process.env.PROOF_PATH, execFileSync('/bin/sh', ['-c', 'ulimit -Sn'], { encoding: 'utf8' }));\n");
+      const hardText = execFileSync("/bin/sh", ["-c", "ulimit -Hn"], {
+        encoding: "utf8",
+      }).trim();
+      const hard = hardText === "unlimited" ? 65_536 : Number(hardText);
+      const parentScript = [
+        `import { spawnDaemonProcess } from ${JSON.stringify(new URL("../src/daemon-spawn.ts", import.meta.url).href)};`,
+        "const child = await spawnDaemonProcess({",
+        "  socketPath: process.env.TEST_SOCKET_PATH,",
+        "  env: { PROOF_PATH: process.env.PROOF_PATH },",
+        "  logger: { error() {} },",
+        "  daemonScriptPath: process.env.DAEMON_SCRIPT_PATH,",
+        "});",
+        "const keepAlive = setInterval(() => {}, 1000);",
+        "await new Promise((resolve) => child.once('close', resolve));",
+        "clearInterval(keepAlive);",
+      ].join("\n");
+      const parent = spawnSync("/bin/sh", [
+        "-c", 'ulimit -Sn 256; exec "$@"', "cmuxlayer-nofile-test",
+        process.execPath, "--import", "tsx", "--input-type=module", "-e", parentScript,
+      ], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          TEST_SOCKET_PATH: join(root, "daemon.sock"),
+          DAEMON_SCRIPT_PATH: daemonScriptPath,
+          PROOF_PATH: proofPath,
+        },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      expect(parent.status, parent.stderr).toBe(0);
+      const softText = readFileSync(proofPath, "utf8").trim();
+      expect(softText === "unlimited" || Number(softText) >= Math.min(65_536, hard))
+        .toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["test-pane-capability", "test-pane-capabilityt"])(
     "passes capability %s to a detached daemon without exposing it in diagnostics",
     async (token) => {

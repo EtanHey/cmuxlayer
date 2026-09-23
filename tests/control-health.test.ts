@@ -57,6 +57,35 @@ afterEach(() => {
 });
 
 describe("control health", () => {
+  it("reports this process's nofile soft/hard limits and bounded open-fd count", async () => {
+    const health = await collectControlHealth({
+      homeDir: TEST_ROOT,
+      tmpDir: TEST_ROOT,
+    });
+    expect(health.current_process).toHaveProperty("nofile.soft", expect.any(Number));
+    expect(health.current_process).toHaveProperty("nofile.hard");
+    expect(health.current_process).toHaveProperty("nofile.open_fds", expect.any(Number));
+    expect(formatControlHealth(health)).toContain("open files:");
+  });
+
+  it("warns only when open descriptors exceed 70% of the observed soft limit", async () => {
+    const health = await collectControlHealth({
+      homeDir: TEST_ROOT,
+      tmpDir: TEST_ROOT,
+      execFile: async (file) => ({
+        stdout: file === "/bin/sh" ? "10\n20\n" : "",
+      }),
+      readdir: async () => Array.from({ length: 8 }, (_, index) => String(index)),
+    });
+    expect(health.current_process.nofile).toEqual({
+      soft: 10,
+      hard: 20,
+      open_fds: 8,
+    });
+    expect(health.warnings).toContainEqual(expect.stringContaining("open files above 70%"));
+    expect(formatControlHealth(health)).toContain("open files: 8 / soft 10 (hard 20)");
+  });
+
   it("does not expose a pane capability in its structured or formatted snapshot", async () => {
     const token = "test-health-capability";
     const health = await collectControlHealth({
@@ -705,6 +734,7 @@ describe("control health", () => {
         cmux_resolution: [
           { path: "/Applications/cmux NIGHTLY.app/bin/cmux", exists: true },
         ],
+        nofile: { soft: 65_536, hard: "unlimited", open_fds: 8 },
       },
       selected_transport: {
         client_class: "CmuxSocketClient",
@@ -900,6 +930,7 @@ describe("control health", () => {
         env: { PATH: "/bin" },
         path_entries: ["/bin"],
         cmux_resolution: [],
+        nofile: { soft: 65_536, hard: "unlimited", open_fds: 8 },
       },
       selected_transport: {
         client_class: "CmuxClient",
@@ -1046,6 +1077,7 @@ describe("control health", () => {
           env: { PATH: "/bin" },
           path_entries: ["/bin"],
           cmux_resolution: [{ path: "/usr/local/bin/cmux", exists: true }],
+          nofile: { soft: 65_536, hard: "unlimited", open_fds: 8 },
         },
         selected_transport: {
           client_class: "CmuxSocketClient",
