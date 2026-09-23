@@ -5,7 +5,7 @@ import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeo
 const response = { ok: true, isError: false, health: { warnings: [],
   selected_transport: { transport_mode: "socket", transport_degraded: false } } };
 
-async function runCase(durationMs: number, sampleLatencyMs: number) {
+async function runCase(durationMs: number, sampleLatencyMs: number, cleanupMs = 0) {
   vi.useFakeTimers();
   vi.setSystemTime(1_000_000);
   const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
@@ -36,6 +36,7 @@ async function runCase(durationMs: number, sampleLatencyMs: number) {
   }
   expect(finished).toBe(true);
   await running;
+  await vi.advanceTimersByTimeAsync(cleanupMs);
   clock.stop();
   const endedAtMs = Date.now();
   const ending = sampleHealth("end");
@@ -67,6 +68,11 @@ describe("live soak health timeline", () => {
     const { session, samples } = await runCase(60 * 60_000 + 500, latency);
     expect(samples.some((sample) => !sample.healthy)).toBe(true);
     expect(checkSoakSession(session)).toContain("unhealthy_control_sample");
+  });
+
+  it("keeps healthy minute coverage through 90 seconds of final cleanup", async () => {
+    const { session } = await runCase(60 * 60_000, 5_000, 90_000);
+    expect(checkSoakSession(session)).toEqual([]);
   });
 
   it("keeps an endpoint request when a minute sample is still pending", async () => {

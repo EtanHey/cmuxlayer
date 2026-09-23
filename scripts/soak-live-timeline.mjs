@@ -12,8 +12,7 @@ export async function startSoakHealthClock({ sampleHealth, now, schedule, cancel
     const endpointMarginMs = 25_000; // Leaves room for the 20s bounded sample.
     const latestStartMs = startedAtMs + minDurationMs - endpointMarginMs;
     const nearEndpoint = minimumCyclesComplete();
-    if (nearEndpoint && lastSampleStartMs >= latestStartMs) return;
-    const dueMs = nearEndpoint
+    const dueMs = nearEndpoint && lastSampleStartMs < latestStartMs
       ? Math.min(lastSampleStartMs + 60_000, latestStartMs) : lastSampleStartMs + 60_000;
     timer = schedule(() => {
       timer = null;
