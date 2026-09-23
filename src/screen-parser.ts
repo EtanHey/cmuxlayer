@@ -250,6 +250,8 @@ const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const TERMINAL_ACTIVITY_LINE_RE =
   /^\s*(?:[•·]\s*)?(?:Working|Waiting for background terminal)\s*\((?:[0-9]+(?:\.[0-9]+)?[hms]\s*)+\s*[•·-]\s*esc to interrupt\)(?:\s*[•·].*)?\s*$/im;
+const CLAUDE_WORKING_LINE_RE =
+  /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const CODEX_CURRENT_ACTION_RE =
@@ -796,6 +798,7 @@ function isUnsafeDoneSignalContext(lines: string[], index: number): boolean {
 
   if (
     CODEX_WORKING_RE.test(immediateText) ||
+    CLAUDE_WORKING_LINE_RE.test(immediateText) ||
     immediateTail.some((line, index) =>
       classifyClaudeGlyphLine(line, index, 0)?.kind === "action",
     ) ||
@@ -1477,8 +1480,12 @@ export function hasVisibleAgentProgress(
   const agentType = cli ?? detectAgentType(normalized);
   if (agentType === "claude") {
     const frame = claudeFrame ?? analyzeClaudeFrame(normalized);
+    const latestReplyIndex = frame.glyphs
+      .filter((glyph) => glyph.kind === "reply")
+      .at(-1)?.lineIndex ?? -1;
+    const currentTurnStart = Math.max(frame.latestUserPromptIndex, latestReplyIndex);
     return frame.active !== null || frame.lines.some((line, index) =>
-      index > frame.readyIndex && TERMINAL_ACTIVITY_LINE_RE.test(line),
+      index > currentTurnStart && TERMINAL_ACTIVITY_LINE_RE.test(line),
     );
   }
   if (TERMINAL_ACTIVITY_LINE_RE.test(normalized)) return true;
