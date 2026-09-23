@@ -236,7 +236,7 @@ const CODEX_CHROME_FOOTER_RE =
 // Identity-only footer matcher. Composer/draft detection keeps its stricter
 // CODEX_MODEL_FOOTER_RE; live Codex chrome can append warning/task segments.
 const CODEX_BELOW_COMPOSER_FOOTER_RE =
-  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s·]+(?:[ \t]+·[ \t]+[^·\r\n]{1,240}){0,8}[ \t]*$/i;
+  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s·]+[ \t]*(?:·[^·\r\n]{0,240}){0,8}$/i;
 const CODEX_CHROME_BANNER_RE =
   /^\s*(?:[│┃║]\s*|>_\s*)?OpenAI Codex(?:\s*[│┃║])?\s*$/i;
 const CODEX_CHROME_MODEL_RE =
@@ -244,7 +244,8 @@ const CODEX_CHROME_MODEL_RE =
 const CLAUDE_CHROME_BANNER_RE = /^\s*Claude Code v\d+(?:\.\d+)*\b.*$/i;
 const CLAUDE_CHROME_BYPASS_RE = /^\s*⏵⏵\s*bypass permissions on\b/i;
 const CLAUDE_BELOW_COMPOSER_FOOTER_RE =
-  /^[ \t]*(?:\?[ \t]+for shortcuts\b|⏸[ \t]+plan mode on\b|⏵⏵[ \t]+accept edits on\b)/i;
+  /^[ \t]*(?:⏸[ \t]+plan mode on\b|⏵⏵[ \t]+accept edits on\b)/i;
+const CLAUDE_SHORTCUTS_FOOTER_RE = /^[ \t]*\?[ \t]+for shortcuts\b/i;
 const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const TERMINAL_ACTIVITY_LINE_RE =
@@ -654,6 +655,8 @@ function detectAgentType(text: string): ParsedScreenAgentType {
     }
   }
   let chrome: "claude" | "codex" | null = null;
+  const claudeComposer = composerIndex >= 0 &&
+    /^[ \t]*❯(?:[ \t]|$)/.test(lines[composerIndex]);
   let transcriptStarted = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -670,7 +673,8 @@ function detectAgentType(text: string): ParsedScreenAgentType {
     if (index <= composerIndex) continue;
     if (CLAUDE_COUNTER_RE.test(line) ||
       CLAUDE_CHROME_BYPASS_RE.test(line) ||
-      CLAUDE_BELOW_COMPOSER_FOOTER_RE.test(line)) {
+      CLAUDE_BELOW_COMPOSER_FOOTER_RE.test(line) ||
+      (claudeComposer && CLAUDE_SHORTCUTS_FOOTER_RE.test(line))) {
       chrome = "claude";
     }
     if (CODEX_CHROME_FOOTER_RE.test(line) ||

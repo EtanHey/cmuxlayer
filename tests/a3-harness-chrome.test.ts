@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { parseScreen } from "../src/screen-parser.js";
 
@@ -73,4 +74,33 @@ describe("A3 positional harness chrome", () => {
       expect(parsed.status).toBe("idle");
     },
   );
+
+  it("keeps the default Codex shortcuts footer on a Codex composer", () => {
+    const parsed = parseScreen(
+      "• Read the report\n› Ask Codex to do anything\n\n  ? for shortcuts   100% context left",
+    );
+    expect(parsed.agent_type).toBe("codex");
+  });
+
+  it("parses a hostile below-composer footer line in under 50ms CPU", () => {
+    const parserUrl = new URL("../src/screen-parser.ts", import.meta.url).href;
+    const code = `
+      import { parseScreen } from ${JSON.stringify(parserUrl)};
+      const hostile = "  gpt-6-sol high · ~/Gits/x" + (" · a" + " ".repeat(12)).repeat(17) + " ·";
+      const frame = "• Done.\\n\\n› Ask Codex to do anything\\n\\n" + hostile;
+      const start = process.cpuUsage();
+      parseScreen(frame);
+      const used = process.cpuUsage(start);
+      console.log(JSON.stringify({ length: hostile.length, cpu_ms: (used.user + used.system) / 1000 }));
+    `;
+    const result = spawnSync("bun", ["-e", code], {
+      encoding: "utf8",
+      timeout: 2_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    const timing = JSON.parse(result.stdout.trim()) as { length: number; cpu_ms: number };
+    expect(timing.length).toBeGreaterThanOrEqual(300);
+    expect(timing.cpu_ms).toBeLessThan(50);
+  });
 });
