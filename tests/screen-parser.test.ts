@@ -123,6 +123,33 @@ describe("parseScreen", () => {
     expect(parsed.response).toBeNull();
   });
 
+  it.each([
+    ["Reading stale-work.ts", "Reading the report is complete"],
+    ["Writing notes.md", "Writing the report is complete"],
+    ["Editing src/screen-parser.ts", "Editing the report is complete"],
+    ["Running build.sh", "Running the checks is complete"],
+    ["Searching tests/screen-parser.test.ts", "Searching the report is complete"],
+    ["Updating package.json", "Updating the report is complete"],
+  ])("keeps Claude target activity %s distinct from prose", (activity, prose) => {
+    const working = parseScreen(`Claude Code\n⏺ ${activity}`);
+    const ready = parseScreen(`Claude Code\n⏺ ${prose}\n❯`);
+
+    expect(working.status).toBe("working");
+    expect(working.current_action).toBe(activity);
+    expect(working.response).toBeNull();
+    expect(ready.status).toBe("idle");
+    expect(ready.current_action).toBeNull();
+    expect(ready.response).toBe(prose);
+  });
+
+  it.each(["Thinking", "Working"])("retains an explicit Claude %s glyph banner", (banner) => {
+    const parsed = parseScreen(`⏺ ${banner}`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(["thinking", "working"]).toContain(parsed.status);
+    expect(parsed.response).toBeNull();
+  });
+
   it("does not present an unlisted MCP call and its output as a Claude reply", () => {
     const parsed = parseScreen(`Claude Code
 ⏺ mcp__server__lookup({"key":"probe"})

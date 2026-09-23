@@ -239,8 +239,10 @@ const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const CODEX_CURRENT_ACTION_RE =
   /^(?:Ran|Explored|Updated Plan|Waited for|Read|Edited|Searched|Called|Running|Writing)\b/i;
+// A participle is progress only with a file/path-shaped target or ellipsis;
+// ordinary glyph-headed prose ("Reading the report") remains a reply.
 const CLAUDE_GLYPH_ACTION_RE =
-  /^\s*[⏺●⬢⬡]\s+((?:mcp__\S+|(?:Bash|Read|Edit|Write|Search|Glob|Grep|Task|WebFetch|WebSearch|NotebookEdit)\([^\n]*\)|(?:Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)(?:…|\.{3}|\s+(?:\/|~\/|\.\/|\.\.\/)\S+).*))$/i;
+  /^\s*[⏺●⬢⬡]\s+((?:mcp__\S+|(?:Bash|Read|Edit|Write|Search|Glob|Grep|Task|WebFetch|WebSearch|NotebookEdit)\([^\n]*\)|(?:Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)(?:…|\.{3}|\s+(?:(?:\/|~\/|\.\/|\.\.\/)\S+|[A-Za-z0-9_.-]+(?:\/\S+|\.[A-Za-z0-9_-]+))).*))$/i;
 const CLAUDE_GLYPH_TOOL_CALL_RE = /^[⏺●]\s+(?:mcp__\S+|[A-Za-z_][\w.:-]*\()/i;
 const CLAUDE_INDENTED_ACTIVITY_RE =
   /^\s{2,}((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
@@ -268,7 +270,7 @@ const GEMINI_MODEL_RE =
 const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
-  /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
+  /^\s*(?:[✻✢✳✶]\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)|[⏺●]\s+(?:Thinking|Working))\b/im;
 // Claude's context-limit/auto-compact banner wording is not stable. A pane
 // sitting at one of these blockers must not become "working" merely because
 // the same line also contains a busy-looking marker.
@@ -469,7 +471,10 @@ function detectAgentType(text: string): ParsedScreenAgentType {
     HEADER_MODEL_RE.test(text) ||
     MODEL_COST_RE.test(text) ||
     CLAUDE_DONE_LINE_RE.test(text) ||
-    CLAUDE_WORKING_LINE_RE.test(text)
+    CLAUDE_WORKING_LINE_RE.test(text) ||
+    text.split("\n").some((line) =>
+      /^\s*[⏺●]\s+/.test(line) && CLAUDE_GLYPH_ACTION_RE.test(line),
+    )
   ) {
     return "claude";
   }
@@ -675,9 +680,8 @@ function extractClaudeResponseTail(text: string): string | null {
       .filter(
         (line) =>
           !/^\s*(?:Token usage:|🤖\s|CLAUDE_COUNTER:)/.test(line) &&
-          !/^\s*(?:[⏺●✻✢✳✶]\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing))\b/.test(
-            line,
-          ) &&
+          !CLAUDE_GLYPH_ACTION_RE.test(line) &&
+          !CLAUDE_WORKING_LINE_RE.test(line) &&
           !/^\s{2,}(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/.test(
             line,
           ) &&
