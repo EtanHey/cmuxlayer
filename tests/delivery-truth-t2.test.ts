@@ -2217,6 +2217,27 @@ describe("boot-submit readiness and attributable evidence", () => {
     ).toBeGreaterThanOrEqual(2);
   });
 
+  it.each([
+    ["claude", "Claude Code", "❯\u00a0", "⏵⏵ bypass permissions on · 2 monitors"],
+    ["codex", ">_ OpenAI Codex", "› ", "gpt-5.6-sol high · ~/Gits/cmuxlayer"],
+  ] as const)("accepts an exact owned %s draft with soft-wrap continuation indent", async (cli, header, prompt, footer) => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const owned = `Read and follow /tmp/${"a".repeat(105)}.md`;
+    const screen = [header, `${prompt}${owned.slice(0, 70)}`, `  ${owned.slice(70)}`, footer].join("\n");
+    expect(__submitEvidenceTestHooks.screenShowsCompletePendingInput(screen, owned)).toBe(true);
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen, owned, cli)).toBe(true);
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen.replace("  ", "  HUMAN "), owned, cli)).toBe(false);
+  });
+
+  it("ignores Claude's shortcuts hint beneath an exact owned draft", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const owned = "Read and follow /tmp/brief.md";
+    const screen = ["Claude Code", `❯\u00a0${owned}`, "  ? for shortcuts"].join("\n");
+    expect(__submitEvidenceTestHooks.screenShowsCompletePendingInput(screen, owned)).toBe(true);
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen, owned, "claude")).toBe(true);
+    expect(__submitEvidenceTestHooks.screenShowsExactOwnedInput(screen.replace(owned, `${owned} HUMAN`), owned, "claude")).toBe(false);
+  });
+
   it("does not treat the combined Codex queue/context footer as composer content", async () => {
     const { __submitEvidenceTestHooks } = await loadServerModule();
     const screen = [
@@ -2433,10 +2454,10 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_receipt).toMatchObject({
-      terminal: false,
+      terminal: true,
       delivered: false,
-      delivery_state: "pending_verify",
-      submit_verified: null,
+      delivery_state: "failed_confirmed",
+      submit_verified: false,
       retry_count: 0,
     });
     expect(harness.returnPresses()).toBe(0);
@@ -2468,10 +2489,10 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_receipt).toMatchObject({
-      terminal: false,
+      terminal: true,
       delivered: false,
-      delivery_state: "pending_verify",
-      submit_verified: null,
+      delivery_state: "failed_confirmed",
+      submit_verified: false,
       retry_count: 0,
     });
     expect(harness.returnPresses()).toBe(0);

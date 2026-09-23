@@ -7,6 +7,7 @@ const FRESH_SPAWN_INFO_CODES = new Set([
 
 const ESSENTIAL_FIELDS = [
   "spawn_state",
+  "error_code",
   "next_action",
   "retry_count",
   "agent_id",

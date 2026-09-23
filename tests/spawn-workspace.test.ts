@@ -78,6 +78,8 @@ function makeWorkspaceClient() {
   const calls: string[] = [];
   const activeCli = new Map<string, "claude" | "codex">();
   const submitted = new Set<string>();
+  const pendingDraft = new Map<string, string>();
+  const submittedText = new Map<string, string>();
   const returnCount = new Map<string, number>();
   const client = {
     calls,
@@ -136,28 +138,38 @@ function makeWorkspaceClient() {
     newSurface: vi.fn(),
     focusSurface: vi.fn().mockResolvedValue(undefined),
     send: vi.fn().mockImplementation(async (surface: string, text: string) => {
-      if (/Codex/.test(text)) activeCli.set(surface, "codex");
-      if (/Claude/.test(text)) activeCli.set(surface, "claude");
+      if (/\b\w+(?:Codex|Claude)\b.*\s-s\b/.test(text)) {
+        activeCli.set(surface, /Codex/.test(text) ? "codex" : "claude");
+      } else {
+        pendingDraft.set(surface, text);
+      }
     }),
     pasteText: vi.fn().mockImplementation(async (surface: string, text: string) => {
-      if (/Codex/.test(text)) activeCli.set(surface, "codex");
-      if (/Claude/.test(text)) activeCli.set(surface, "claude");
+      pendingDraft.set(surface, text);
     }),
     sendKey: vi.fn().mockImplementation(async (surface: string, key: string) => {
       if (key === "return") {
         const count = (returnCount.get(surface) ?? 0) + 1;
         returnCount.set(surface, count);
-        if (count >= 2) submitted.add(surface);
+        if (pendingDraft.has(surface)) {
+          submittedText.set(surface, pendingDraft.get(surface)!);
+          pendingDraft.delete(surface);
+          submitted.add(surface);
+        }
       }
     }),
     readScreen: vi.fn().mockImplementation(async (surface: string) => {
       const cli = activeCli.get(surface) ?? "claude";
       return {
         surface,
-        text: submitted.has(surface)
+        text: pendingDraft.has(surface)
           ? cli === "codex"
-            ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
-            : "Claude Code\n✻ Working"
+            ? `OpenAI Codex\ncodex> ${pendingDraft.get(surface)}`
+            : `Claude Code\n❯ ${pendingDraft.get(surface)}`
+          : submitted.has(surface)
+          ? cli === "codex"
+            ? `OpenAI Codex\n${submittedText.get(surface)}\nWorking (1s • esc to interrupt)`
+            : `Claude Code\n${submittedText.get(surface)}\n✻ Working`
           : cli === "codex"
             ? "OpenAI Codex\ncodex> "
             : "Claude Code\nWhat can I help you with?\n>",
@@ -233,6 +245,9 @@ describe("workspace spawn tools", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.agents?.[0]?.boot_prompt_receipt?.submit_verified,
+      JSON.stringify({ agents: parsed.agents, sends: client.send.mock.calls,
+        pastes: client.pasteText.mock.calls })).toBe(true);
     expect(parsed.workspace).toBe("workspace:grid");
     expect(parsed.agents).toEqual([
       expect.objectContaining({

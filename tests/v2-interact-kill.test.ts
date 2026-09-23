@@ -38,6 +38,9 @@ function parseResult(result: any): any {
 function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
   let launchSent = false;
   let agentMessageSubmitted = false;
+  let pendingDraft = "";
+  let submittedText = "";
+  let pasteBuffer = "";
   let surfaceLive = true;
   const listedSurface = () =>
     surfaceLive
@@ -67,12 +70,26 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       surfaceLive = false;
       return { stdout: "{}", stderr: "" };
     }
+    if (args.includes("set-buffer")) {
+      pasteBuffer = String(args.at(-1) ?? "");
+    }
+    if (args.includes("paste-buffer")) {
+      pendingDraft = pasteBuffer;
+      agentMessageSubmitted = false;
+      pasteBuffer = "";
+    }
+    if (args.includes("send-key") && args.includes("return") && pendingDraft) {
+      submittedText = pendingDraft;
+      pendingDraft = "";
+      agentMessageSubmitted = true;
+    }
     if (args.includes("send")) {
       const text = String(args.at(-1) ?? "");
-      if (text.includes("Claude") || text.includes("Codex") || text.includes("Cursor")) {
+      if (!launchSent && (text.includes("Claude") || text.includes("Codex") || text.includes("Cursor"))) {
         launchSent = true;
       } else {
-        agentMessageSubmitted = true;
+        pendingDraft = text;
+        agentMessageSubmitted = false;
       }
     }
     if (args.includes("list-workspaces")) {
@@ -135,8 +152,10 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: agentMessageSubmitted
-            ? "Claude Code\n✻ Working\n"
+          text: pendingDraft
+            ? `Claude Code\n❯ ${pendingDraft}`
+            : agentMessageSubmitted
+            ? `Claude Code\n${submittedText}\n✻ Working\n`
             : launchSent
               ? "Claude Code\nWhat can I help you with?\n>"
               : "$ ",
@@ -380,11 +399,12 @@ describe("interact — runtime validation", () => {
 
   it("action=interrupt does not require extra fields", async () => {
     // Spawn an agent first so we can interrupt it
-    await callTool(server, "spawn_agent", {
+    const spawned = parseResult(await callTool(server, "spawn_agent", {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
-    });
+    }));
+    expect(spawned.boot_prompt_receipt?.submit_verified, JSON.stringify(spawned)).toBe(true);
     // Get the agent_id
     const listResult = await callTool(server, "list_agents", {});
     const agents = parseResult(listResult).agents;

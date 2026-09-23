@@ -30,9 +30,22 @@ function createAuditServer(exec: ExecFn, client?: Record<string, unknown>) {
 
 function makeSpawnReadyExec(): ExecFn {
   let launchSent = false;
+  let pendingBoot = "";
+  let submittedBoot = "";
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("new-split")) {
+      launchSent = false;
+      pendingBoot = "";
+      submittedBoot = "";
+    }
     if (args.includes("send")) {
-      launchSent = true;
+      const sent = String(args[args.length - 1] ?? "");
+      if (!launchSent) launchSent = true;
+      else pendingBoot = sent;
+    }
+    if (args.includes("send-key") && args.includes("return") && pendingBoot) {
+      submittedBoot = pendingBoot;
+      pendingBoot = "";
     }
     if (args.includes("list-workspaces")) {
       return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
@@ -44,7 +57,13 @@ function makeSpawnReadyExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: launchSent ? "What can I help you with?\n>" : "$ ",
+          text: !launchSent
+            ? "$ "
+            : submittedBoot
+              ? `Claude Code\n${submittedBoot}\n✻ Working`
+              : pendingBoot
+                ? `Claude Code\n❯ ${pendingBoot}`
+                : "Claude Code\nWhat can I help you with?\n❯",
           lines: 20,
           scrollback_used: false,
         }),

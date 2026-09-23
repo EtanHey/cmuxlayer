@@ -139,6 +139,7 @@ function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
   bootPromptFailure?: "return" | "surface-gone";
+  bootPromptVisibility?: "after-three-reads" | "foreign" | "never";
   requiredPromptReturns?: number;
   shellPrompt?: string;
   shellNeverReady?: boolean;
@@ -153,6 +154,7 @@ function makeLifecycleExec(opts?: {
   let createdSurfaceCount = 0;
   let bootPromptReturnFailures = 0;
   let promptReturns = 0;
+  let bootPromptReads = 0;
   let currentSurface = "surface:new";
   let splitColumnVisible = false;
   const listedSurface = () =>
@@ -238,6 +240,7 @@ function makeLifecycleExec(opts?: {
       ) {
         promptPending = true;
         promptReturns = 0;
+        bootPromptReads = 0;
         pendingText = text;
         if (activeCli === "codex") {
           readyText = [
@@ -354,6 +357,26 @@ function makeLifecycleExec(opts?: {
         throw Object.assign(new Error("surface disappeared"), {
           stderr: "not_found: Surface not found for the given surface_id",
         });
+      }
+      if (promptPending && opts?.bootPromptVisibility) {
+        bootPromptReads += 1;
+        const stale = opts.bootPromptVisibility === "never" ||
+          (opts.bootPromptVisibility === "after-three-reads" && bootPromptReads <= 3);
+        return {
+          stdout: JSON.stringify({
+            surface: currentSurface,
+            text: stale
+              ? "Claude Code\nWhat can I help you with?\n❯"
+              : opts.bootPromptVisibility === "foreign"
+                ? `${readyText} EXTRA HUMAN TEXT`
+                : opts.bootPromptVisibility === "after-three-reads"
+                  ? `${readyText.replace("❯ ", "❯\u00a0")}\n⎇ main | 🔧 13`
+                  : readyText,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
       }
       return {
         stdout: JSON.stringify({
@@ -4998,7 +5021,7 @@ describe("agent lifecycle tool handlers", () => {
       const parsed = parseToolResult(await resultPromise);
 
       expect(parsed.error).toBeUndefined();
-      expect(parsed).toMatchObject({ ok: true });
+      expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
       expect(
         exec.mock.calls.some(([, args]) => args.includes("close-surface")),
       ).toBe(false);
@@ -5077,7 +5100,7 @@ describe("agent lifecycle tool handlers", () => {
       await vi.advanceTimersByTimeAsync(3_000);
       const parsed = parseToolResult(await resultPromise);
 
-      expect(parsed).toMatchObject({ ok: true });
+      expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
       expect(
         exec.mock.calls.some(([, args]) => args.includes("close-surface")),
       ).toBe(false);
@@ -6006,7 +6029,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(parsed.workspace_id).toBe("workspace:voice");
     expect(launcherReturnCount).toBe(2);
     expect(promptDelivered).toBe(true);
@@ -6147,7 +6170,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBeGreaterThanOrEqual(1);
     expect(ctrlUCount).toBeLessThanOrEqual(2);
     expect(typedLaunches).toBeGreaterThanOrEqual(2);
@@ -6207,7 +6230,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBe(0);
     expect(launched).toBe(true);
   }, 10_000);
@@ -6254,7 +6277,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBe(0);
   }, 10_000);
 
@@ -6461,7 +6484,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBe(0);
   }, 10_000);
 
@@ -6519,7 +6542,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBeGreaterThanOrEqual(1);
     expect(ctrlUCount).toBeLessThanOrEqual(2);
     expect(typedLaunches).toBeGreaterThanOrEqual(2);
@@ -6580,7 +6603,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBeGreaterThanOrEqual(1);
     expect(ctrlUCount).toBeLessThanOrEqual(3);
     expect(typedLaunches).toBe(1);
@@ -6661,7 +6684,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBeGreaterThanOrEqual(1);
     expect(executed).toEqual([]);
     expect(launched).toBe(true);
@@ -6717,7 +6740,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(launched).toBe(true);
     expect(parsed.readiness_recovered).toBeUndefined();
     expect(parsed.readiness_cleared).toBeUndefined();
@@ -6779,7 +6802,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBeGreaterThanOrEqual(2);
     expect(typedLaunches).toBeGreaterThanOrEqual(2);
     expect(launched).toBe(true);
@@ -6846,7 +6869,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(ctrlUCount).toBeGreaterThanOrEqual(1);
     expect(ctrlCCount).toBeGreaterThanOrEqual(1);
     expect(launched).toBe(true);
@@ -7000,7 +7023,7 @@ describe("agent lifecycle tool handlers", () => {
       ),
     );
 
-    expect(reused.ok).toBe(true);
+    expect(reused).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(reused.surface_id).toBe("surface:new");
     expect(launched).toBe(true);
     expect(reused.readiness_recovered).toBeUndefined();
@@ -7130,7 +7153,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
+    expect(parsed).toMatchObject({ ok: false, spawn_state: "boot_unsubmitted" });
     expect(launcherReturnCount).toBe(1);
     expect(promptDelivered).toBe(true);
   });
@@ -7631,11 +7654,11 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed.workspace_id).toBe("workspace:1");
       expect(parsed.boot_prompt_receipt).toMatchObject({
         delivered: false,
-        terminal: false,
+        terminal: true,
         typed: true,
-        submit_attempted: true,
-        submit_verified: null,
-        delivery_state: "pending_verify",
+        submit_attempted: false,
+        submit_verified: false,
+        delivery_state: "failed_confirmed",
         retry_count: 0,
       });
     } finally {
@@ -7921,6 +7944,43 @@ describe("agent lifecycle tool handlers", () => {
       expect(state.state).not.toBe("error");
     }
   });
+
+  it("BD1 submits one Return when the owned boot draft appears after three stale reads", async () => {
+    const promptPath = join(TEST_DIR, "bd1-delayed.md");
+    writeFileSync(promptPath, "Reply exactly BD1_OK then stop.", "utf8");
+    const exec = makeLifecycleExec({ bootPromptVisibility: "after-three-reads" });
+    const server = createTrackedServer({ exec, stateDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(
+      { repo: "brainlayer", cli: "claude", boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 800 }, {} as any));
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true,
+      spawn_state: "started", boot_prompt_delivered: true,
+      boot_prompt_receipt: { delivery_state: "submitted", submit_verified: true } });
+    expect(exec.mock.calls.filter(([, args]) => args.includes("send-key") && args.includes("return"))).toHaveLength(2); // launcher and one boot submission
+  }, 20_000);
+
+  it.each(["foreign", "never"] as const)(
+    "BD1 fails a typed boot with %s composer without sending Return",
+    async (visibility) => {
+      const promptPath = join(TEST_DIR, `bd1-${visibility}.md`);
+      writeFileSync(promptPath, "Reply exactly BD1_OK then stop.", "utf8");
+      const exec = makeLifecycleExec({ bootPromptVisibility: visibility });
+      const server = createTrackedServer({ exec, stateDir: TEST_DIR,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(
+        { repo: "brainlayer", cli: "claude", boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 400 }, {} as any));
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false,
+        spawn_state: "boot_unsubmitted", error_code: "boot_unsubmitted",
+        agent_id: expect.any(String),
+        surface_id: expect.any(String), boot_prompt_receipt: {
+          typed: true, terminal: true, submit_dispatched: false,
+          submit_verified: false, delivery_state: "failed_confirmed" } });
+      expect(result.boot_prompt_receipt.WARNING).not.toMatch(/wait_for\(\{delivery_id\}\)/);
+      expect(exec.mock.calls.filter(([, args]) => args.includes("send-key") && args.includes("return"))).toHaveLength(1); // launcher only
+    }, 20_000,
+  );
 
   it.each([false, true])("spawn_agent keeps a live registered pane when queued with verbose=%s", async (verbose) => {
     const promptPath = join(TEST_DIR, "front-matter.md");
@@ -12528,6 +12588,7 @@ codex>
         role: "implementor",
         workspace: "workspace:B",
         force_new: true,
+        boot_prompt_timeout_ms: 100,
       },
       {} as any,
     );
@@ -12535,7 +12596,8 @@ codex>
 
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({
-      ok: true,
+      ok: false,
+      spawn_state: "boot_unsubmitted",
       workspace_id: "workspace:B",
       surface_id: "surface:spawned",
     });
@@ -12603,6 +12665,7 @@ codex>
             cli: "codex",
             role: "implementor",
             force_new: true,
+            boot_prompt_timeout_ms: 100,
           },
           {} as any,
         ),
@@ -12611,7 +12674,8 @@ codex>
 
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({
-      ok: true,
+      ok: false,
+      spawn_state: "boot_unsubmitted",
       workspace_id: "workspace:B",
       surface_id: "surface:spawned",
     });

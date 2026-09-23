@@ -48,6 +48,7 @@ class FakeAgentSurfaceClient {
   readonly workspace = "workspace:1";
   readonly pane = "pane:1";
   readonly surface = "surface:agent";
+  stableSurfaceIdentity: string | null = null;
   title = "brainlayerClaude";
   readonly sendCalls: string[] = [];
   readonly sendKeyCalls: string[] = [];
@@ -79,6 +80,7 @@ class FakeAgentSurfaceClient {
       surfaces: [
         {
           ref: this.surface,
+          ...(this.stableSurfaceIdentity ? { id: this.stableSurfaceIdentity } : {}),
           title: this.title,
           type: "terminal",
           workspace_ref: this.workspace,
@@ -144,6 +146,7 @@ class FakeAgentSurfaceClient {
       surfaces: [
         {
           ref: this.surface,
+          ...(this.stableSurfaceIdentity ? { id: this.stableSurfaceIdentity } : {}),
           title: this.title,
           type: "terminal",
           index: 0,
@@ -786,6 +789,60 @@ describe("send_to v2 background verify", () => {
       terminal: true,
       submit_verified: true,
     });
+  });
+
+  it("BD1 retries one Return for the exact pending send_to draft, then verifies delivery", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";
+    client.requiredReturns = 3;
+    server = createVerifyServer(client);
+    registerAgent(server, { surface_uuid: client.stableSurfaceIdentity });
+    const sent = parseResult(await callTool(server, "send_to", {
+      agent_id: "agent-1", text: "BD1 owned pending message", press_enter: true,
+    }));
+    expect(sent.delivery_state).toBe("pending_verify");
+    const engine = server._registeredTools.interact._engine;
+    await engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(3);
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_state: "submitted", terminal: true, submit_verified: true,
+    });
+    await engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(3);
+  });
+
+  it("BD1 never retries Return for a changed pending send_to draft", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";
+    server = createVerifyServer(client);
+    registerAgent(server, { surface_uuid: client.stableSurfaceIdentity });
+    const sent = parseResult(await callTool(server, "send_to", {
+      agent_id: "agent-1", text: "BD1 owned pending message", press_enter: true,
+    }));
+    const before = client.sendKeyCalls.length;
+    client.screenOverride = "Claude Code\n❯ BD1 owned pending message HUMAN EDIT\nCLAUDE_COUNTER:1";
+    await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls).toHaveLength(before);
+    expect(server._registeredTools.interact._engine.getDeliveryReceipt(sent.delivery_id)?.delivery_state).toBe("pending_verify");
+  });
+
+  it("BD1 refuses recovery when the surface ref now has a different UUID", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.stableSurfaceIdentity = "11111111-1111-4111-8111-111111111111";
+    server = createVerifyServer(client);
+    registerAgent(server, { surface_uuid: client.stableSurfaceIdentity });
+    const engine = server._registeredTools.interact._engine;
+    engine.acceptPendingVerify({
+      delivery_id: "bd1-recycled-ref", agent_id: "agent-1",
+      text: "BD1 owned pending message", press_enter: true,
+      source_event: "send_to", retry_count: 0,
+      typed: true, submit_dispatched: true,
+    });
+    client.screenOverride = "Claude Code\n❯ BD1 owned pending message\nCLAUDE_COUNTER:1";
+    client.stableSurfaceIdentity = "22222222-2222-4222-8222-222222222222";
+    await engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls).toEqual([]);
+    expect(engine.getDeliveryReceipt("bd1-recycled-ref")?.delivery_state).toBe("pending_verify");
   });
 
   it("registers the delivery before typing so concurrent identical sends return duplicate_of", async () => {

@@ -827,6 +827,50 @@ describe("enter reliability", () => {
     expect(finalScreen).toContain("Working");
   }, 10_000);
 
+  it("BD1 lets a surface-mode caller recover its exact pending delivery, but blocks edits", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    client.failScreenReadsAfterReturn = true;
+    server = createReliabilityServer(client);
+    const target = registerAgent(server, { cli: "claude", state: "ready" });
+    const asCaller = <T>(operation: () => T) =>
+      runWithCallerContext({ surfaceId: target.surface_id }, operation);
+    const initialPromise = asCaller(() => server._registeredTools.send_to.handler({
+      mode: "surface", surface: target.surface_id,
+      text: "BD1 caller owned surface draft", press_enter: true,
+    }, {} as any));
+    await vi.advanceTimersByTimeAsync(6_000);
+    const initial = parseResult(await initialPromise);
+    expect(initial.delivery_state).toBe("pending_verify");
+    client.failScreenReadsAfterReturn = false;
+    client.postReturnPendingScreenText =
+      "Claude Code\n❯\u00a0BD1 caller owned surface draft\n  ⎇ main | +1,-0";
+    const before = client.sendKeyCalls.filter((key) => key === "return").length;
+    const foreignPromise = runWithCallerContext({ surfaceId: "surface:other" }, () =>
+      server._registeredTools.send_to.handler({
+        mode: "key", surface: target.surface_id, text: "return",
+      }, {} as any));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(parseResult(await foreignPromise).error_code).toBe("blocked_by_foreign_draft");
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(before);
+    const recoveryPromise = asCaller(() => server._registeredTools.send_to.handler({
+      mode: "key", surface: target.surface_id, text: "return",
+    }, {} as any));
+    await vi.advanceTimersByTimeAsync(2_000);
+    const recovered = parseResult(await recoveryPromise);
+    expect(recovered.error_code).not.toBe("blocked_by_foreign_draft");
+    expect(recovered).toMatchObject({ ok: true, key_dispatched: true });
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(before + 1);
+    client.postReturnPendingScreenText =
+      "Claude Code\n❯\u00a0BD1 caller owned surface draft HUMAN EDIT\n  ⎇ main | +1,-0";
+    const editedPromise = asCaller(() => server._registeredTools.send_to.handler({
+      mode: "key", surface: target.surface_id, text: "return",
+    }, {} as any));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(parseResult(await editedPromise).error_code).toBe("blocked_by_foreign_draft");
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(before + 1);
+  }, 10_000);
+
   it("verifies a cleared idle composer without waiting for working status", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;

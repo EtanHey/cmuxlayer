@@ -660,9 +660,6 @@ const SEND_INPUT_RETRY_DELAY_MS = 25;
 const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
 const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
-// CLI fallback paste acknowledgement can precede the Claude composer repaint.
-// Keep a short budget for surfaces that never paint the owned payload.
-const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 250;
 function parsePositiveIntegerMs(
   value: string | undefined,
   fallback: number,
@@ -3078,7 +3075,7 @@ function currentComposerRegionStart(
   return 0;
 }
 
-function isComposerFooterOrChromeLine(line: string): boolean {
+function isComposerFooterOrChromeLine(line: string, cli?: CliType | null): boolean {
   const trimmed = line.trim();
   if (!trimmed) {
     return true;
@@ -3089,6 +3086,7 @@ function isComposerFooterOrChromeLine(line: string): boolean {
     /^⏵+.*\bbypass permissions on\b/i.test(trimmed) ||
     /^[✻✢✳✶]\s+Cogitated\s+for\s+\d+s\b/i.test(trimmed) ||
     /^CLAUDE_COUNTER:/i.test(trimmed) ||
+    (cli === "claude" && /^\? for shortcuts$/i.test(trimmed)) ||
     /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*/i.test(trimmed) ||
     /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?$/i.test(trimmed) ||
     /^\d+(?:\.\d+)?%\s+(?:context\s+)?left\b/i.test(trimmed) ||
@@ -3115,11 +3113,11 @@ function isEligibleBareReadyPromptLine(
   return cli === "claude" || cli === "gemini" || cli === "kiro";
 }
 
-function matchLegacyClaudePromptLine(
+function matchLegacyAnglePromptLine(
   cli: CliType | null,
   line: string,
 ): ComposerPromptLineMatch | null {
-  if (cli !== "claude") {
+  if (cli !== "claude" && cli !== "gemini" && cli !== "kiro") {
     return null;
   }
   const match = line.trimStart().match(/^>(?!>)\s?(.*)$/);
@@ -3181,7 +3179,7 @@ function extractComposerInputRegion(
   const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
-  while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
+  while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "", cli)) {
     end -= 1;
   }
 
@@ -3200,14 +3198,14 @@ function extractComposerInputRegion(
           .find((candidate) => candidate.trim());
         if (
           nextContentLine === undefined ||
-          isComposerFooterOrChromeLine(nextContentLine)
+          isComposerFooterOrChromeLine(nextContentLine, cli)
         ) {
           break;
         }
         inputLines.push("");
         continue;
       }
-      if (isComposerFooterOrChromeLine(line)) {
+      if (isComposerFooterOrChromeLine(line, cli)) {
         break;
       }
       inputLines.push(line);
@@ -3222,7 +3220,7 @@ function extractComposerInputRegion(
   }
 
   for (let index = end - 1; index >= start; index -= 1) {
-    const match = matchLegacyClaudePromptLine(cli, lines[index] ?? "");
+    const match = matchLegacyAnglePromptLine(cli, lines[index] ?? "");
     if (!match) {
       continue;
     }
@@ -3236,14 +3234,14 @@ function extractComposerInputRegion(
           .find((candidate) => candidate.trim());
         if (
           nextContentLine === undefined ||
-          isComposerFooterOrChromeLine(nextContentLine)
+          isComposerFooterOrChromeLine(nextContentLine, cli)
         ) {
           break;
         }
         inputLines.push("");
         continue;
       }
-      if (isComposerFooterOrChromeLine(line)) {
+      if (isComposerFooterOrChromeLine(line, cli)) {
         break;
       }
       inputLines.push(line);
@@ -3309,6 +3307,28 @@ function screenShowsCompletePendingInput(
   );
 }
 
+/** Only the owned draft may authorize Return; an added suffix is foreign. */
+function screenShowsExactOwnedInput(
+  screenText: string,
+  submittedText: string,
+  cli?: CliType | null,
+): boolean {
+  const composer = extractComposerInputRegion(screenText, submittedText, cli ?? undefined);
+  if (composer === null) return false;
+  return sameRenderedDraft(composer, submittedText);
+}
+
+/** Preserve real spaces; strip only the composer indent on soft-wrapped single-line payloads. */
+const sameRenderedDraft = (left: string, right: string): boolean => {
+  const normalize = (value: string) =>
+    normalizeTerminalText(value).replace(/\u00a0/g, " ").trimEnd();
+  const expected = normalize(right);
+  const observed = normalize(left);
+  return expected.includes("\n")
+    ? observed === expected
+    : observed.replace(/\n(?:[ \t]{2})?/g, "") === expected;
+};
+
 function screenContainsCompleteSubmittedText(
   screenText: string,
   submittedText: string,
@@ -3353,7 +3373,7 @@ function composerPromptLineInput(screenText: string, knownCli?: CliType, preserv
   for (let index = end - 1; index >= start; index -= 1) {
     const line = lines[index] ?? "";
     const match =
-      matchComposerPromptLine(line) ?? matchLegacyClaudePromptLine(cli, line);
+      matchComposerPromptLine(line) ?? matchLegacyAnglePromptLine(cli, line);
     if (match) {
       return preservePlaceholderText ? match.input : normalizeKnownPlaceholderComposerInput(cli, match.input.trim());
     }
@@ -3390,7 +3410,7 @@ function composerHoldsForeignDraft(
   const promptLine = composerPromptLineInput(screenText, options?.cli, true);
   if (options?.exact) {
     const region = extractComposerInputRegion(screenText, submittedText, options.cli);
-    return region !== null && region !== normalizeTerminalText(submittedText).trimEnd();
+    return region !== null && !sameRenderedDraft(region, submittedText);
   }
   if (promptLine === null || !promptLine.trim()) return false;
   // An empty first line may be a placeholder followed by real draft text.
@@ -3860,6 +3880,7 @@ export const __submitEvidenceTestHooks = {
   extractComposerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
+  screenShowsExactOwnedInput,
   composerHoldsForeignDraft,
   requiredBootReadyObservations,
   composeBootDeliveryText,
@@ -4271,7 +4292,7 @@ export async function awaitBoundedLifecycleStart(
 
 interface TypedDraftOwner {
   caller: string; text: string; at: number; ref: string; uuid: string | null;
-  workspace: string | null; fp: string; seen: boolean;
+  workspace: string | null; fp: string; seen: boolean; deliveryId?: string;
 }
 
 export interface CmuxServerContext {
@@ -6224,7 +6245,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const region = extractComposerInputRegion(text, token.text, record?.cli, true);
       // A truncated read without a composer anchor observes no draft state.
       if (region === null) continue;
-      const unchanged = region === normalizeTerminalText(token.text).trimEnd();
+      const unchanged = sameRenderedDraft(region, token.text);
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (draftTargetFingerprint(surface, uuid) !== token.fp || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
@@ -6390,35 +6411,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     text: string;
+    cli?: CliType;
     timeout_ms: number;
     beforeRead?: () => Promise<void>;
   }): Promise<{
     screenText: string;
     metrics: RawSubmitEvidenceMetrics;
   } | null> => {
-    // One slow CLI read can consume the old 250ms deadline while returning a
-    // pre-paste frame. Three bounded reads allow a stale frame and a repaint;
-    // short caller deadlines still get only one read.
-    const readLimit = opts.timeout_ms >= BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS
-      ? 3 : 1;
-    for (let read = 0; read < readLimit; read += 1) {
+    // A paste acknowledgement can precede the TUI repaint. Keep polling
+    // within the caller's boot deadline, without ever submitting an unowned
+    // composer or trusting a fixed number of stale reads.
+    const deadline = Date.now() + opts.timeout_ms;
+    do {
       await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
       if (
         snapshot &&
-        screenShowsCompletePendingInput(snapshot.text, opts.text)
+        screenShowsExactOwnedInput(snapshot.text, opts.text, opts.cli)
       ) {
         return {
           screenText: snapshot.text,
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
         };
       }
-      if (read + 1 < readLimit) {
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
-      }
-    }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remaining));
+    } while (Date.now() < deadline);
     return null;
   };
 
@@ -7049,13 +7070,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
         if ((!ownedQueuedReceipt || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
-          typedDraftOwners.delete(ownerKey);
+          if (!owner || owner.caller === caller) typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
         if (!ownedQueuedReceipt && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
         if (!composerHoldsForeignDraft(submitBaseline.text, "", { cli: targetCli })) typedDraftOwners.delete(ownerKey);
+        if (owner && caller && owner.caller === caller && owner.deliveryId &&
+          sameRenderedDraft(rawInput ?? "", owner.text)) {
+          context.lifecycleSweepEngine?.claimDeliveryRecoveryReturn(owner.deliveryId);
+        }
       }
       // Spend before dispatch, including ambiguous ACKs and verification.
       if (submitAttempted) typedDraftOwners.delete(ownerKey);
@@ -7362,14 +7387,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let submit_evidence: SubmitEvidence | null = null;
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
-    let ownedDraftPending = false;
     let retry_count = 0;
     let deliveryOutcome:
       | "submitted"
       | "queued"
       | "queued_followup"
       | "rescued"
-      | "pending_verify" = "submitted";
+      | "pending_verify"
+      | "failed_confirmed" = "submitted";
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
@@ -7379,11 +7404,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface: opts.surface,
               workspace: opts.workspace,
               text: submittedText,
-              timeout_ms: Math.min(
-                opts.submit_verify_timeout_ms ??
-                  SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
-                BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
-              ),
+              cli: targetCli,
+              timeout_ms: opts.submit_verify_timeout_ms ??
+                SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
               beforeRead: opts.beforeMutation,
             })
           : null;
@@ -7392,9 +7415,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         verifySubmit &&
         preReturnBootEvidence === null
       ) {
-        submit_verified = null;
+        submit_verified = opts.source_event === "boot_prompt" ? false : null;
         submit_verification_reason = null;
-        deliveryOutcome = "pending_verify";
+        deliveryOutcome = opts.source_event === "boot_prompt"
+          ? "failed_confirmed"
+          : "pending_verify";
       } else {
         if (
           verifySubmit &&
@@ -7466,8 +7491,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_verified = verification.submit_verified;
         submit_evidence = verification.submit_evidence;
         submit_verification_reason = verification.submit_verification_reason;
-        ownedDraftPending =
-          verification.submit_verification_reason === "input_still_pending";
         retry_count = verification.retry_count;
         deliveryOutcome = verification.delivery;
         if (
@@ -7495,7 +7518,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         source_agent: opts.source_agent ?? null,
         target_surface: opts.surface,
         bytes,
-        press_enter: opts.press_enter,
+        press_enter: opts.press_enter && deliveryOutcome !== "failed_confirmed",
         submit_verified,
         retry_count,
         ...(opts.delivery_id
@@ -7507,8 +7530,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ? ("queued" as const)
                   : deliveryOutcome === "queued_followup"
                     ? ("queued_followup" as const)
-                    : deliveryOutcome === "pending_verify"
-                      ? ("pending_verify" as const)
+                  : deliveryOutcome === "pending_verify"
+                    ? ("pending_verify" as const)
+                    : deliveryOutcome === "failed_confirmed"
+                      ? ("failed_confirmed" as const)
                       : deliveryOutcome === "rescued"
                         ? ("rescued" as const)
                         : submit_verified === false
@@ -7523,7 +7548,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     else if (
       textDispatched &&
       opts.press_enter &&
-      ownedDraftPending &&
+      deliveryOutcome === "pending_verify" &&
       targetCli === "claude" &&
       caller
     ) {
@@ -7537,6 +7562,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         workspace: opts.workspace ?? null,
         fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity),
         seen: true,
+        ...(opts.delivery_id ? { deliveryId: opts.delivery_id } : {}),
       });
     }
     const receipt = buildPublicDeliveryReceipt({
@@ -7548,6 +7574,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? "queued_followup"
             : deliveryOutcome === "pending_verify"
               ? "pending_verify"
+              : deliveryOutcome === "failed_confirmed"
+                ? "failed_confirmed"
               : deliveryOutcome === "rescued"
                 ? "rescued"
                 : submit_verified === true
@@ -7557,7 +7585,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : undefined,
       delivery_id: opts.delivery_id,
       typed: bytes > 0,
-      submit_attempted: Boolean(opts.press_enter),
+      submit_attempted:
+        Boolean(opts.press_enter) && deliveryOutcome !== "failed_confirmed",
       submit_dispatched: submitDispatched,
       submit_verified,
       submit_evidence,
@@ -7565,11 +7594,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       rpc_methods: [...rpcMethods],
       timings_ms: opts.timings,
       WARNING:
-        opts.press_enter &&
-        submit_verified === null &&
-        !verifySubmit
-          ? "NOT VERIFIED — Return was dispatched, but submission was not verified; this receipt confirms only that text was typed."
-          : undefined,
+        deliveryOutcome === "failed_confirmed" && !submitDispatched
+          ? "BOOT NOT SUBMITTED — exact owned payload was not observed before the boot deadline. No Return was dispatched; inspect the pane before any manual action."
+          : opts.press_enter && submit_verified === null && !verifySubmit
+            ? "NOT VERIFIED — Return was dispatched, but submission was not verified; this receipt confirms only that text was typed."
+            : undefined,
     });
 
     if (
@@ -7577,7 +7606,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       deliveryOutcome !== "queued" &&
       deliveryOutcome !== "queued_followup" &&
       deliveryOutcome !== "rescued" &&
-      deliveryOutcome !== "pending_verify"
+      deliveryOutcome !== "pending_verify" &&
+      deliveryOutcome !== "failed_confirmed"
     ) {
       const timeoutMs =
         opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
@@ -15107,7 +15137,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (!agent) {
           return { outcome: "pending" as const, reason: "target_gone" };
         }
-        const resolvedSnapshot =
+        let resolvedSnapshot =
           snapshot === undefined
             ? await readParsedSurface(
                 agent.surface_id,
@@ -15120,7 +15150,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             reason: "surface_read_unavailable",
           };
         }
-        const pending = screenShowsPendingInput(
+        let pending = screenShowsPendingInput(
           resolvedSnapshot.text,
           receipt.text,
         );
@@ -15132,7 +15162,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           receipt.text,
         );
-        const composer = extractComposerInputRegion(
+        let composer = extractComposerInputRegion(
           resolvedSnapshot.text,
           receipt.text,
         );
@@ -15164,6 +15194,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 }
               : {}),
           };
+        }
+        if (receipt.source_event === "send_to" && receipt.delivery_state === "pending_verify" &&
+          receipt.typed === true && receipt.submit_dispatched === true &&
+          !receipt.recovery_return_attempted_at && cli !== "cursor" &&
+          screenShowsExactOwnedInput(resolvedSnapshot.text, receipt.text, cli) &&
+          !!receipt.target_surface_uuid &&
+          receipt.target_surface_id === agent.surface_id &&
+          (receipt.target_surface_uuid ?? null) === (agent.surface_uuid ?? null)) {
+          await withSurfaceWrite(agent.surface_id, async () => {
+            const current = engine.getAgentState(receipt.agent_id);
+            if (!current || current.surface_id !== receipt.target_surface_id ||
+              (current.surface_uuid ?? null) !== (receipt.target_surface_uuid ?? null)) return;
+            const liveSurfaces = await client.listPaneSurfaces({ workspace: current.workspace_id ?? undefined });
+            if (!liveSurfaces.surfaces.some((surface) => surface.ref === current.surface_id &&
+              surface.id?.toLowerCase() === receipt.target_surface_uuid?.toLowerCase())) return;
+            const fresh = await readParsedSurface(current.surface_id, current.workspace_id ?? undefined);
+            if (!fresh || !screenShowsExactOwnedInput(fresh.text, receipt.text, current.cli) ||
+              fresh.parsed.control_state === "permission_prompt" ||
+              isPickerOrMenuScreen(fresh.text, current.cli)) return;
+            if (!engine.claimDeliveryRecoveryReturn(receipt.delivery_id)) return;
+            await sendKeyWithRetry(current.surface_id, "return", current.workspace_id ?? undefined,
+              undefined, 1);
+            resolvedSnapshot = await readParsedSurface(current.surface_id, current.workspace_id ?? undefined);
+          }, { toolName: "send_to_recovery", workspace: agent.workspace_id ?? undefined,
+            stableSurfaceIdentity: agent.surface_uuid ?? null });
+          if (!resolvedSnapshot?.text.trim()) return { outcome: "pending" as const };
+          pending = screenShowsPendingInput(resolvedSnapshot.text, receipt.text);
+          composer = extractComposerInputRegion(resolvedSnapshot.text, receipt.text);
         }
         const composerCleared = composer !== null && composer.trim() === "";
         const correlationTail = receipt.text
@@ -16406,6 +16464,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           };
           const responseData = {
+            ...(bootPromptDelivery?.delivery_state === "failed_confirmed" &&
+              bootPromptDelivery.submit_dispatched === false
+              ? { ok: false, error_code: "boot_unsubmitted" }
+              : {}),
             ...result,
             spawn_state:
               bootPromptDelivery && bootPromptDelivery.submit_verified !== true

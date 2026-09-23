@@ -313,6 +313,11 @@ export interface AgentDeliveryReceipt {
   typed?: boolean;
   /** A submit key reached the target through either socket or CLI transport. */
   submit_dispatched?: boolean;
+  /** Target identity captured before delivery; recovery may not follow a recycled route. */
+  target_surface_id?: string;
+  target_surface_uuid?: string | null;
+  /** Persisted before the only recovery Return, including ambiguous transport ACKs. */
+  recovery_return_attempted_at?: string;
   /** An uncertain recovered boot Return; passive confirmation completes boot. */
   boot_recovery?: boolean;
   /** The exact boot generation whose pointer the receipt verifies. */
@@ -8174,8 +8179,12 @@ export class AgentEngine {
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
     const existing = this.deliveryReceipts.get(input.delivery_id);
+    const target = this.getAgentState(input.agent_id);
     const receipt: AgentDeliveryReceipt = {
       ...input,
+      target_surface_id: existing?.target_surface_id ?? target?.surface_id,
+      target_surface_uuid: existing?.target_surface_uuid ?? target?.surface_uuid ?? null,
+      recovery_return_attempted_at: existing?.recovery_return_attempted_at,
       delivery_state: "pending_verify",
       terminal: false,
       created_at: input.created_at ?? existing?.created_at ?? now,
@@ -8196,6 +8205,19 @@ export class AgentEngine {
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     this.persistDeliveryReceipts();
     return snapshotDeliveryReceipt(receipt);
+  }
+
+  /** Claim at most one recovery Return for a still-pending, already typed delivery. */
+  claimDeliveryRecoveryReturn(deliveryId: string): boolean {
+    const receipt = this.deliveryReceipts.get(deliveryId);
+    if (!receipt || receipt.terminal || receipt.delivery_state !== "pending_verify" ||
+      receipt.source_event !== "send_to" || !receipt.press_enter ||
+      receipt.typed !== true || receipt.submit_dispatched !== true ||
+      receipt.recovery_return_attempted_at) return false;
+    receipt.recovery_return_attempted_at = new Date().toISOString();
+    receipt.retry_count += 1;
+    this.persistDeliveryReceipts();
+    return true;
   }
 
   async waitForDelivery(

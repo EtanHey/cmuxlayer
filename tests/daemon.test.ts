@@ -140,7 +140,25 @@ function createListSurfacesExec(): ExecFn {
 }
 
 function createLifecycleExec(): ExecFn {
+  let launcherSeen = false;
+  let pendingDraft = "";
+  let submittedText = "";
+  let submitted = false;
   return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("send")) {
+      const text = String(args.at(-1) ?? "");
+      if (!launcherSeen && /(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*\s-s\b/.test(text)) {
+        launcherSeen = true;
+      } else {
+        pendingDraft = text;
+        submitted = false;
+      }
+    }
+    if (args.includes("send-key") && args.includes("return") && pendingDraft) {
+      submittedText = pendingDraft;
+      pendingDraft = "";
+      submitted = true;
+    }
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -202,7 +220,8 @@ function createLifecycleExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: "codex> ",
+          text: pendingDraft ? `OpenAI Codex\ncodex> ${pendingDraft}`
+            : submitted ? `OpenAI Codex\n${submittedText}\nWorking (1s)\ncodex> ` : "codex> ",
           lines: 20,
           scrollback_used: false,
         }),
@@ -228,6 +247,9 @@ function createPlacementClient(
   calls: string[] = [],
 ) {
   let surfaceIndex = 0;
+  const pendingDraft = new Map<string, string>();
+  const submitted = new Set<string>();
+  const submittedText = new Map<string, string>();
   return {
     currentSocketPath: vi.fn(() => "/tmp/cmux-daemon-test.sock"),
     createWorkspace: vi.fn(),
@@ -271,14 +293,26 @@ function createPlacementClient(
       ),
     newSurface: vi.fn(),
     focusSurface: vi.fn().mockResolvedValue(undefined),
-    send: vi.fn().mockResolvedValue(undefined),
-    sendKey: vi.fn().mockResolvedValue(undefined),
-    readScreen: vi.fn().mockResolvedValue({
-      surface: "surface:caller",
-      text: "codex> ",
+    send: vi.fn().mockImplementation(async (surface: string, text: string) => {
+      if (!/(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*\s-s\b/.test(text)) {
+        pendingDraft.set(surface, text);
+      }
+    }),
+    sendKey: vi.fn().mockImplementation(async (surface: string, key: string) => {
+      if (key === "return" && pendingDraft.has(surface)) {
+        submittedText.set(surface, pendingDraft.get(surface)!);
+        pendingDraft.delete(surface);
+        submitted.add(surface);
+      }
+    }),
+    readScreen: vi.fn().mockImplementation(async (surface: string) => ({
+      surface,
+      text: pendingDraft.has(surface)
+        ? `OpenAI Codex\ncodex> ${pendingDraft.get(surface)}`
+        : submitted.has(surface) ? `OpenAI Codex\n${submittedText.get(surface)}\nWorking (1s)\ncodex> ` : "codex> ",
       lines: 20,
       scrollback_used: false,
-    }),
+    })),
     log: vi.fn().mockResolvedValue(undefined),
     setStatus: vi.fn().mockResolvedValue(undefined),
     clearStatus: vi.fn().mockResolvedValue(undefined),

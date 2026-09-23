@@ -4842,7 +4842,7 @@ describe("tool handler integration", () => {
             surface: "surface:1",
             text: promptSent
               ? promptSubmitted
-                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                ? "Gemini CLI\nWorking\nboot prompt\nResponse started"
                 : "Gemini CLI\n> boot prompt"
               : reads === 1
                 ? "Gemini CLI\nbooting\n>"
@@ -4879,11 +4879,11 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
     // Two readiness matches, launch-command preflight, boot-prompt preflight,
-    // complete composer observation, then post-submit verification.
+    // exact composer observation, then attributable post-submit verification.
     expect(readsWhenBootPromptSent).toBe(4);
-    expect(reads).toBe(7);
+    expect(reads, JSON.stringify(parsed)).toBe(6);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),

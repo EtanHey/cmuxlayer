@@ -207,6 +207,7 @@ function makeExec(
       if (
         text.trim() &&
         (text.includes("cmuxlayer contract for") ||
+          text.includes("cmuxlayer mailbox contract for") ||
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
@@ -4263,7 +4264,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
       // The spawn still succeeds -- a contract-file failure is not a spawn
       // failure.
-      expect(parsed.ok).toBe(true);
+      expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
       expect(parsed.contract_path).toBeUndefined();
       // No dangling pointer on the wire, and the mailbox contract still got
       // through: the worker loses the report half, not its inbox.
@@ -4284,7 +4285,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     process.env.CMUXLAYER_BOOT_CONTRACT = "inline";
     try {
       const parsed = await spawn();
-      expect(sentText(exec)).toContain("cmuxlayer mailbox contract for");
+      expect(sentText(exec), JSON.stringify(parsed)).toContain("cmuxlayer mailbox contract for");
       expect(parsed.contract_path).toBeUndefined();
       // Provenance follows the mode: inline cannot carry the report contract,
       // so the receipt must say so rather than claiming delivery.
