@@ -913,6 +913,9 @@ async function measureLatency(clients, phase, fakeSocketTrace) {
         const readReceipt = toolData(read, "read_screen");
         const receiptDecodeMs = nowMs() - receiptDecodeStartedAt;
         const elapsedMs = nowMs() - startedAt;
+        const recordedMcpMs = mcpStages
+          ? mcpStages.request_serialize + mcpStages.response_parse + mcpStages.mcp_wait
+          : Math.max(0, elapsedMs - receiptDecodeMs);
         readSamples.push(elapsedMs);
         readDiagnostics.push({
           round_index: roundIndex,
@@ -924,8 +927,9 @@ async function measureLatency(clients, phase, fakeSocketTrace) {
             request_serialize: mcpStages?.request_serialize ?? 0,
             response_parse: mcpStages?.response_parse ?? 0,
             // Includes daemon dispatch, cmux socket I/O, and process scheduling.
-            mcp_wait: mcpStages?.mcp_wait ?? round(elapsedMs),
+            mcp_wait: mcpStages?.mcp_wait ?? round(recordedMcpMs),
             receipt_decode: round(receiptDecodeMs),
+            caller_resume: round(Math.max(0, elapsedMs - recordedMcpMs - receiptDecodeMs)),
           },
         });
         readResult ??= read;
@@ -967,6 +971,7 @@ async function measureLatency(clients, phase, fakeSocketTrace) {
           response_parse: "benchmark MCP client JSON-RPC response parse",
           mcp_wait: "inclusive daemon, cmux socket, IPC, and scheduling wait",
           receipt_decode: "benchmark tool receipt decode",
+          caller_resume: "caller setup and promise continuation after MCP response",
           fake_socket_rounds: "same-round fake cmux socket service; not per-client attributable",
         },
         // The fake socket runs in the benchmark process. These per-round
