@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { EventLog } from "./event-log.js";
+import { atomicWriteJson } from "./atomic-json-write.js";
 import {
   assertValidTransition,
   isFailedSpawnTombstone,
@@ -119,9 +120,7 @@ export class SurfaceSessionIndex {
 
   private writeIndex(index: SurfaceSessionIndexFile): void {
     mkdirSync(this.baseDir, { recursive: true });
-    const tmpFile = join(this.baseDir, "surface-session-index.json.tmp");
-    writeFileSync(tmpFile, JSON.stringify(index, null, 2), "utf-8");
-    renameSync(tmpFile, this.indexPath);
+    atomicWriteJson(this.indexPath, index, 2);
   }
 
   persist(input: {
