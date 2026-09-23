@@ -483,6 +483,46 @@ export class StateManager {
     return updated;
   }
 
+  /** Settle a timed-out explicit resume when the same boot later proves ready. */
+  recoverTimedOutResumeBoot(
+    agentId: string,
+    bootInstanceId: string,
+    settlement: AgentRecordPatch,
+  ): AgentRecord {
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
+    if (!current || current.state !== "error" ||
+        current.error !== "Stuck booting — CLI never became interactive within the boot timeout" ||
+        current.boot_instance_id !== bootInstanceId ||
+        current.resume_boot_instance_id !== bootInstanceId) {
+      throw new Error(`Agent ${agentId} is not the timed-out resume boot ${bootInstanceId}`);
+    }
+    const updated: AgentRecord = {
+      ...current,
+      ...settlement,
+      state: "ready",
+      error: null,
+      version: current.version + 1,
+      updated_at: new Date().toISOString(),
+    };
+    const agentDir = join(this.baseDir, dirName!);
+    const tmpFile = join(agentDir, "state.json.tmp");
+    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
+    renameSync(tmpFile, this.stateFilePath(dirName!));
+    this.surfaceSessionIndex.persistRecord(updated);
+    this.eventLog.append({
+      ts: updated.updated_at,
+      agent_id: agentId,
+      event: "transition",
+      from_state: "error",
+      to_state: "ready",
+      surface_id: updated.surface_id,
+      source: "late_resume_boot_ready",
+      error: null,
+    });
+    return updated;
+  }
+
   /**
    * Update arbitrary non-state fields on an agent record without transition validation.
    */

@@ -155,6 +155,10 @@ export interface AgentRecord {
   boot_prompt_pending?: boolean;
   /** Changes on each managed boot, including resume under the same agent ID. */
   boot_instance_id?: string;
+  /** The boot instance created by an explicit resume, for chooser and late-ready guards. */
+  resume_boot_instance_id?: string | null;
+  /** At most one directory-chooser Return is allowed for this resume boot. */
+  resume_chooser_attempted_boot_instance_id?: string | null;
   // Spawn settlement evidence (PR #326): a managed agent must not report
   // ready without retaining what was actually observed about prompt delivery
   // and the model shown by the CLI.

@@ -160,7 +160,7 @@ function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string 
 function expectedResume(cli: CliType, path: LauncherPath, root: string): string {
   if (path === "registry") {
     return cli === "codex"
-      ? `${EXPECTED_LAUNCHER_NAME[cli]} --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`
+      ? `${EXPECTED_LAUNCHER_NAME[cli]} -w '${root}' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -C '${root}' resume ${SESSION}`
       : `${EXPECTED_LAUNCHER_NAME[cli]} -s --resume ${SESSION}`;
   }
   const cd = `cd '${root}' && `;
@@ -168,7 +168,7 @@ function expectedResume(cli: CliType, path: LauncherPath, root: string): string 
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions --resume ${SESSION}`;
     case "codex":
-      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -C '${root}' resume ${SESSION}`;
     case "cursor":
       return `${cd}cursor agent --force --resume ${SESSION}`;
     default:

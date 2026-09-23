@@ -25,7 +25,7 @@ describe("raw resume commands carry a working directory", () => {
       buildRawResumeCommand("codex", "brainlayer", SESSION, {
         cwd: "/srv/repos/brainlayer",
       }),
-    ).toBe(`cd '/srv/repos/brainlayer' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
+    ).toBe(`cd '/srv/repos/brainlayer' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -C '/srv/repos/brainlayer' resume ${SESSION}`);
     expect(
       buildRawResumeCommand("cursor", "brainlayer", SESSION, {
         cwd: "/srv/repos/brainlayer",
@@ -38,7 +38,7 @@ describe("raw resume commands carry a working directory", () => {
       buildRawResumeCommand("codex", "brainlayer", SESSION, {
         cwd: "/tmp/a b'c",
       }),
-    ).toBe(`cd '/tmp/a b'\\''c' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
+    ).toBe(`cd '/tmp/a b'\\''c' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -C '/tmp/a b'\\''c' resume ${SESSION}`);
   });
 
   it("lets an explicit cwd override the kiro ~/Gits assumption", () => {
@@ -172,6 +172,34 @@ describe("resumeCommandForAgent (public agent payload)", () => {
     ).toBe(
       "cd '/srv/repos/brainlayer/.worktrees/lane' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume " +
         SESSION,
+    );
+  });
+
+  it("pins a Codex launcher resume to the recorded worktree", () => {
+    const command = resumeCommandForAgent({
+      ...base,
+      cli: "codex",
+      launcher_name: "brainlayerCodex",
+      worktree_path: "/srv/repos/brainlayer/.worktrees/lane with space",
+    });
+    expect(command).toBe(
+      "brainlayerCodex -w '/srv/repos/brainlayer/.worktrees/lane with space' " +
+      "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust " +
+      "-C '/srv/repos/brainlayer/.worktrees/lane with space' resume " + SESSION,
+    );
+  });
+
+  it("pins a raw Codex resume to its recorded cwd and explicit CLI root", () => {
+    const command = resumeCommandForAgent({
+      ...base,
+      cli: "codex",
+      launcher_name: null,
+      launch_cwd: "/srv/repos/brainlayer with space",
+    });
+    expect(command).toBe(
+      "cd '/srv/repos/brainlayer with space' && codex " +
+      "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust " +
+      "-C '/srv/repos/brainlayer with space' resume " + SESSION,
     );
   });
 

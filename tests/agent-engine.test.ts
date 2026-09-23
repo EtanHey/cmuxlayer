@@ -73,6 +73,10 @@ const DEAD_CODEX_SHELL_SCREEN = (
     ),
   ) as { lines_80: string }
 ).lines_80;
+const CODEX_RESUME_CWD_CHOOSER_SCREEN = readFileSync(
+  new URL("./fixtures/live/codex-resume-working-directory.txt", import.meta.url),
+  "utf8",
+);
 
 function mockSpawnExit(code: number): {
   kill: ReturnType<typeof vi.fn>;
@@ -4826,6 +4830,39 @@ describe("AgentEngine", () => {
       );
     });
 
+    it("runs a Codex resume in the recorded worktree and reports that cwd", async () => {
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      const worktree = "/srv/repos/brainlayer/.worktrees/worker one";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-resume-worktree",
+        state: "done",
+        surface_id: "surface:old-worktree",
+        workspace_id: "ws:1",
+        repo: "brainlayer",
+        cli: "codex",
+        cli_session_id: sessionId,
+        launcher_name: "brainlayerCodex",
+        launch_cwd: "/srv/repos/brainlayer",
+        worktree_path: worktree,
+      }));
+      harnessHome.give("codex", sessionId);
+      await engine.getRegistry().reconstitute();
+
+      const resumed = await engine.resumeAgent("agent-resume-worktree");
+
+      expect(resumed.cwd).toBe(worktree);
+      expect(engine.getAgentState("agent-resume-worktree")).toMatchObject({
+        resume_boot_instance_id: expect.any(String),
+        resume_chooser_attempted_boot_instance_id: null,
+      });
+      expect(engine.getAgentState("agent-resume-worktree")?.resume_boot_instance_id)
+        .toBe(engine.getAgentState("agent-resume-worktree")?.boot_instance_id);
+      expect(mockClient.send).toHaveBeenCalledWith("surface:new",
+        `brainlayerCodex -w '${worktree}' --dangerously-bypass-approvals-and-sandbox ` +
+        `--dangerously-bypass-hook-trust -C '${worktree}' resume ${sessionId}`,
+        { workspace: "ws:1" });
+    });
+
     it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
       const agentId = "agent-live-pid-must-not-resume";
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
@@ -7096,7 +7133,7 @@ Session ID: ${sessionId}`,
         session_id: sessionId,
         resumable: true,
         resume_command:
-          "cmuxlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fec96-588d-7000-8000-000000000000",
+          `cmuxlayerCodex -w '${spawnedRecord!.launch_cwd}' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -C '${spawnedRecord!.launch_cwd}' resume 019fec96-588d-7000-8000-000000000000`,
       });
       vi.unstubAllEnvs();
     });
@@ -9823,6 +9860,171 @@ Session ID: ${sessionId}`,
         error: null,
         quality: "unknown",
       });
+    });
+
+    it("selects the exact Codex resume session directory once with a stable UUID route", async () => {
+      const uuid = "11111111-2222-4333-8444-555555555555";
+      const bootId = "resume-boot-one";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-resume-chooser",
+        state: "booting",
+        surface_id: "surface:resume-chooser",
+        surface_uuid: uuid,
+        workspace_id: "ws:1",
+        cli: "codex",
+        boot_instance_id: bootId,
+        resume_boot_instance_id: bootId,
+        worktree_path: "/Users/etanheyman/Gits/cmuxlayer/.worktrees/lane-g-claude-boot-submit",
+        updated_at: new Date().toISOString(),
+      }));
+      liveSurfaces = [{ ...makeSurface("surface:resume-chooser"), id: uuid, workspace_ref: "ws:1" }];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:resume-chooser", text: CODEX_RESUME_CWD_CHOOSER_SCREEN,
+        lines: 80, scrollback_used: false,
+      });
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_surface, _key, options) => options.beforeMutation(),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
+      expect(mockClient.sendKey).toHaveBeenCalledWith("surface:resume-chooser", "return",
+        expect.objectContaining({ workspace: "ws:1", beforeMutation: expect.any(Function) }));
+      expect(engine.getAgentState("agent-resume-chooser")?.resume_chooser_attempted_boot_instance_id)
+        .toBe(bootId);
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not submit or retry when the resume chooser changes inside the mutation guard", async () => {
+      const bootId = "resume-boot-changed";
+      const cwd = "/Users/etanheyman/Gits/cmuxlayer/.worktrees/lane-g-claude-boot-submit";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-resume-changed", state: "booting",
+        surface_id: "surface:resume-changed", workspace_id: "ws:1", cli: "codex",
+        boot_instance_id: bootId, resume_boot_instance_id: bootId, worktree_path: cwd,
+      }));
+      liveSurfaces = [makeSurface("surface:resume-changed")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ surface: "surface:resume-changed",
+          text: CODEX_RESUME_CWD_CHOOSER_SCREEN, lines: 80, scrollback_used: false })
+        .mockResolvedValue({ surface: "surface:resume-changed",
+          text: "Allow access?", lines: 80, scrollback_used: false });
+      let submitted = 0;
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_surface, _key, options) => {
+          await options.beforeMutation();
+          submitted += 1;
+        },
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(submitted).toBe(0);
+      expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
+      expect(engine.getAgentState("agent-resume-changed")?.resume_chooser_attempted_boot_instance_id)
+        .toBe(bootId);
+    });
+
+    it("does not submit a chooser Return after the recorded resume boot rotates", async () => {
+      const bootId = "resume-boot-original";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-resume-rotated", state: "booting",
+        surface_id: "surface:resume-rotated", workspace_id: "ws:1", cli: "codex",
+        boot_instance_id: bootId, resume_boot_instance_id: bootId,
+        worktree_path: "/Users/etanheyman/Gits/cmuxlayer/.worktrees/lane-g-claude-boot-submit",
+      }));
+      liveSurfaces = [makeSurface("surface:resume-rotated")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:resume-rotated", text: CODEX_RESUME_CWD_CHOOSER_SCREEN,
+        lines: 80, scrollback_used: false,
+      });
+      let submitted = 0;
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_surface, _key, options) => {
+          const newer = stateMgr.updateRecord("agent-resume-rotated", {
+            boot_instance_id: "resume-boot-newer",
+            resume_boot_instance_id: "resume-boot-newer",
+            resume_chooser_attempted_boot_instance_id: null,
+          });
+          engine.getRegistry().set("agent-resume-rotated", newer);
+          await options.beforeMutation();
+          submitted += 1;
+        },
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(submitted).toBe(0);
+      expect(engine.getAgentState("agent-resume-rotated")?.boot_instance_id)
+        .toBe("resume-boot-newer");
+    });
+
+    it("sends no key when an explicit Codex resume has no exact chooser", async () => {
+      const bootId = "resume-boot-ready";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-resume-no-chooser", state: "booting",
+        surface_id: "surface:no-chooser", workspace_id: "ws:1", cli: "codex",
+        boot_instance_id: bootId, resume_boot_instance_id: bootId,
+      }));
+      liveSurfaces = [makeSurface("surface:no-chooser")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:no-chooser", text: "codex> ", lines: 80, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(engine.getAgentState("agent-resume-no-chooser")?.state).toBe("ready");
+    });
+
+    it("recovers a timed-out exact resume boot only after two ready reads", async () => {
+      const bootId = "resume-boot-late";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-resume-late", state: "error",
+        error: "Stuck booting — CLI never became interactive within the boot timeout",
+        surface_id: "surface:resume-late", workspace_id: "ws:1", cli: "codex",
+        boot_instance_id: bootId, resume_boot_instance_id: bootId,
+      }));
+      liveSurfaces = [makeSurface("surface:resume-late")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:resume-late", text: "codex> ", lines: 80, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-resume-late")?.state).toBe("error");
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-resume-late")).toMatchObject({
+        state: "ready", error: null, boot_instance_id: bootId,
+      });
+    });
+
+    it("does not use an old resume marker to recover a newer timed-out boot", async () => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-resume-old-marker", state: "error",
+        error: "Stuck booting — CLI never became interactive within the boot timeout",
+        surface_id: "surface:resume-old-marker", workspace_id: "ws:1", cli: "codex",
+        boot_instance_id: "newer-boot", resume_boot_instance_id: "old-resume-boot",
+      }));
+      liveSurfaces = [makeSurface("surface:resume-old-marker")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:resume-old-marker", text: "codex> ",
+        lines: 80, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-resume-old-marker")?.state).toBe("error");
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
     it("reuses one tail read for boot capture, readiness, task done, and context checks in a sweep", async () => {

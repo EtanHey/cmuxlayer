@@ -156,6 +156,7 @@ export function buildResumeCommand(
   }
   const launcher = cleanLauncherName(cli, launcherName);
   if (!launcher) return buildRawResumeCommand(cli, repo, sessionId, opts);
+  const cwd = opts?.cwd?.trim();
   const bypass = bypassesApprovals(
     opts?.permissionMode ?? resolveSpawnPermissionMode(),
   );
@@ -164,11 +165,11 @@ export function buildResumeCommand(
     case "claude":
       return `${launcher}${skipArg} --resume ${sessionId}`;
     case "codex":
-      return `${launcher}${
+      return `${launcher}${cwd ? ` -w ${shellQuote(cwd)}` : ""}${
         bypass
           ? " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
           : ""
-      } resume ${sessionId}`;
+      }${cwd ? ` -C ${shellQuote(cwd)}` : ""} resume ${sessionId}`;
     case "gemini":
       return `${launcher}${skipArg} --resume ${sessionId}`;
     case "kiro":
@@ -214,7 +215,7 @@ export function buildRawResumeCommand(
     // Codex takes global options BEFORE the subcommand -- matching the
     // launcher form `<L> --dangerously-bypass-approvals-and-sandbox resume`.
     case "codex":
-      return `${cd}codex ${skip}resume ${sessionId}`;
+      return `${cd}codex ${skip}${cwd ? `-C ${shellQuote(cwd)} ` : ""}resume ${sessionId}`;
     // `cursor agent` exposes `--resume [chatId]`; it has no `--session` flag
     // (`error: unknown option '--session'`). Verified against `cursor agent --help`.
     case "cursor":

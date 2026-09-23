@@ -22,6 +22,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
+import { isSelectedCodexSessionDirectoryChooser } from "./codex-resume-chooser.js";
 import { initializeNewSurfaceRuntime } from "./surface-runtime.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import { buildTitle } from "./naming.js";
@@ -919,6 +920,8 @@ const STOP_POST_CONDITION_POLL_MS = 50;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS = 3;
 const BOOT_READY_TIMEOUT_MS = 45_000;
+const BOOT_READY_TIMEOUT_ERROR =
+  "Stuck booting — CLI never became interactive within the boot timeout";
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
 const CLI_EXIT_SHELL_CONFIRMATION_SWEEPS = 2;
@@ -4494,6 +4497,62 @@ export class AgentEngine {
     return this.maybeCaptureBootSessionId(agent, {});
   }
 
+  private async maybeContinueCodexResumeChooser(
+    agent: AgentRecord,
+    screenText: string,
+    ctx: SweepAgentContext,
+  ): Promise<AgentRecord> {
+    const bootId = agent.boot_instance_id;
+    const cwd = resumeCwdForAgent(agent);
+    if (agent.state !== "booting" || agent.cli !== "codex" || !bootId ||
+        agent.resume_boot_instance_id !== bootId ||
+        agent.resume_chooser_attempted_boot_instance_id === bootId || !cwd ||
+        !isSelectedCodexSessionDirectoryChooser(screenText, cwd)) return agent;
+    if (!this.assertSweepInputCurrent(ctx)) return agent;
+
+    try {
+      const route = await this.resolveAgentIoRoute(agent.agent_id);
+      if (!this.assertSweepInputCurrent(ctx)) return agent;
+      const assertChooserCurrent = async (): Promise<void> => {
+        if (!this.assertSweepInputCurrent(ctx)) {
+          throw new Error("Resume chooser sweep became stale");
+        }
+        await this.resolveUnchangedAgentIoRoute(agent.agent_id, route, "resume chooser");
+        const current = this.stateMgr.readState(agent.agent_id);
+        if (!current || current.state !== "booting" ||
+            current.boot_instance_id !== bootId ||
+            current.resume_boot_instance_id !== bootId ||
+            current.resume_chooser_attempted_boot_instance_id !== bootId) {
+          throw new Error("Resume chooser boot changed before Return");
+        }
+        const target = this.client.supportsStableSurfaceReads && route.surface_uuid
+          ? route.surface_uuid : route.surface_id;
+        const fresh = await this.client.readScreen(target, {
+          lines: BOOT_SESSION_CAPTURE_LINES,
+          workspace: route.workspace_id ?? undefined,
+        });
+        await this.resolveUnchangedAgentIoRoute(agent.agent_id, route, "resume chooser");
+        if (!this.assertSweepInputCurrent(ctx) ||
+            !isSelectedCodexSessionDirectoryChooser(fresh.text, cwd)) {
+          throw new Error("Resume chooser changed before Return");
+        }
+      };
+      const attempted = this.stateMgr.updateRecord(agent.agent_id, {
+        resume_chooser_attempted_boot_instance_id: bootId,
+      });
+      this.registry.set(agent.agent_id, attempted);
+      await this.client.sendKey(route.surface_id, "return", {
+        workspace: route.workspace_id ?? undefined,
+        ...this.stableSurfaceWriteOptions(route.surface_uuid),
+        beforeMutation: assertChooserCurrent,
+      });
+      return attempted;
+    } catch {
+      // A failed or ambiguous Return is never retried for the same boot.
+      return this.registry.get(agent.agent_id) ?? agent;
+    }
+  }
+
   private async captureCodexSpawnSessionId(agentId: string): Promise<void> {
     const deadline = Date.now() + this.spawnSessionCaptureTimeoutMs;
     while (true) {
@@ -4527,7 +4586,11 @@ export class AgentEngine {
     ctx: SweepAgentContext,
   ): Promise<AgentRecord> {
     if (!this.assertSweepInputCurrent(ctx)) return agent;
-    if (agent.state !== "booting") {
+    const lateResume = agent.state === "error" &&
+      agent.error === BOOT_READY_TIMEOUT_ERROR &&
+      Boolean(agent.boot_instance_id) &&
+      agent.resume_boot_instance_id === agent.boot_instance_id;
+    if (agent.state !== "booting" && !lateResume) {
       this.readyPatternMatches.delete(agent.agent_id);
       return agent;
     }
@@ -4538,6 +4601,11 @@ export class AgentEngine {
     try {
       const screen = await this.readSweepScreen(agent, ctx);
       if (!this.assertSweepInputCurrent(ctx)) return agent;
+      const resumeCwd = resumeCwdForAgent(agent);
+      if (!lateResume && agent.cli === "codex" && resumeCwd &&
+          isSelectedCodexSessionDirectoryChooser(screen.text, resumeCwd)) {
+        return this.maybeContinueCodexResumeChooser(agent, screen.text, ctx);
+      }
       const parsed = parseScreen(screen.text);
       const parsedEffort =
         agent.cli === "codex" ? parseCodexEffort(parsed.model) : null;
@@ -4613,8 +4681,7 @@ export class AgentEngine {
             failedSettlement.agent_id,
             "error",
             {
-              error:
-                "Stuck booting — CLI never became interactive within the boot timeout",
+              error: BOOT_READY_TIMEOUT_ERROR,
             },
           );
           this.registry.set(agent.agent_id, failed);
@@ -4625,11 +4692,11 @@ export class AgentEngine {
 
       const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
       this.readyPatternMatches.set(agent.agent_id, count);
-      if (count < Math.max(1, evidence.consecutive)) {
+      if (count < Math.max(lateResume ? 2 : 1, evidence.consecutive)) {
         return agent;
       }
 
-      const settled = this.stateMgr.updateRecord(agent.agent_id, {
+      const settlementPatch = {
         ...settlement,
         ...(agent.boot_prompt_pending && agent.prompt_delivered !== false
           ? {
@@ -4638,12 +4705,17 @@ export class AgentEngine {
               submit_verified: true,
             }
           : {}),
-      });
-      let updated = this.stateMgr.transition(settled.agent_id, "ready", {
-        error: agent.error?.startsWith("Post-spawn liveness failed:")
-          ? null
-          : agent.error,
-      });
+      };
+      const settled = lateResume ? null :
+        this.stateMgr.updateRecord(agent.agent_id, settlementPatch);
+      let updated = lateResume
+        ? this.stateMgr.recoverTimedOutResumeBoot(
+            agent.agent_id, agent.boot_instance_id!, settlementPatch)
+        : this.stateMgr.transition(settled!.agent_id, "ready", {
+            error: agent.error?.startsWith("Post-spawn liveness failed:")
+              ? null
+              : agent.error,
+          });
       if (
         updated.quality === "degraded" &&
         agent.error?.startsWith("Post-spawn liveness failed:")
@@ -9912,7 +9984,12 @@ export class AgentEngine {
         pid: null,
         cli_session_id: agent.cli_session_id,
       });
-      this.registry.set(agent.agent_id, booting);
+      const resumedBoot = this.stateMgr.updateRecord(agent.agent_id, {
+        resume_boot_instance_id: booting.boot_instance_id ?? null,
+        resume_chooser_attempted_boot_instance_id: null,
+      });
+      this.readyPatternMatches.delete(agent.agent_id);
+      this.registry.set(agent.agent_id, resumedBoot);
       await this.sendLaunchCommand(
         surface.surface,
         workspace,
@@ -9930,7 +10007,7 @@ export class AgentEngine {
         workspace_id: workspace,
         state: "booting",
         model: agent.model,
-        cwd: agent.launch_cwd ?? undefined,
+        cwd: resumeCwdForAgent(agent) ?? undefined,
       };
     } catch (error) {
       if (surface && !surfaceBound) {

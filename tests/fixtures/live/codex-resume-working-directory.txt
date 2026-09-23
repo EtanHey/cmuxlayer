@@ -1,0 +1,8 @@
+Working directory · resume
+Session = latest cwd recorded in the resumed session
+Current = your current working directory
+› 1. Use session directory (/Users/etanheyman/Gits/cmuxlayer/.worktrees/lane-g-claude-boot-submit)
+  2. Use current directory (/Users/etanheyman/Gits/cmuxlayer)
+  3. Always use session directory
+  4. Always use current directory
+enter continue · esc use session · ctrl+c quit
