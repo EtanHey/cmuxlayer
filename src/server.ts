@@ -897,7 +897,7 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       notified_agent_id: z.string().optional(),
       route: z.enum(["direct", "fallback"]).optional(),
       durable: z.boolean().optional(),
-      delivery: z.enum(["submitted", "queued", "refused"]).optional(),
+      delivery: z.enum(["submitted", "queued", "refused", "pending_verify"]).optional(),
       delivery_id: z.string().optional(),
       error_code: z.string().optional(),
     })
