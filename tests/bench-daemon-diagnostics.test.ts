@@ -29,6 +29,7 @@ describe("P2 benchmark read diagnostics", () => {
   it("retains the send type stage and payload shape for slow samples", () => {
     const sample = {
       second: {
+        started_at_epoch_ms: 1_790_000_000_000,
         elapsed_ms: 418.45,
         tool_elapsed_ms: 418.45,
         proof_elapsed_ms: 0,
@@ -47,6 +48,7 @@ describe("P2 benchmark read diagnostics", () => {
     };
     const diagnostic = summarizeSendSampleDiagnostics([sample], "second").slowest[0];
     expect(diagnostic).toMatchObject({
+      started_at_epoch_ms: 1_790_000_000_000,
       payload_bytes: 62,
       press_enter: true,
       rpc_methods: ["surface.send_text", "surface.send_key"],

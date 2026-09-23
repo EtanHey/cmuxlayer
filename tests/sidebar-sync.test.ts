@@ -987,7 +987,28 @@ describe("Sidebar Sync", () => {
     expect(summary).toMatchObject({
       stage: "failed",
       failed_phase: "topology_ms",
+      error_class: "Error",
+      error_message: "topology scan failed",
     });
+  });
+
+  it("records a bounded error on failed sidebar phase and summary rows", async () => {
+    const message = `sidebar failed ${"x".repeat(300)}`;
+    vi.spyOn(engine as any, "syncSidebar").mockRejectedValueOnce(new TypeError(message));
+
+    await expect(engine.runSweep()).rejects.toThrow(message);
+    const failures = stateMgr.getEventLog().readEntries().filter(
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" &&
+        "stage" in entry && entry.stage === "failed",
+    );
+    expect(failures).toHaveLength(2);
+    for (const row of failures) {
+      expect(row).toMatchObject({
+        error_class: "TypeError",
+        error_message: expect.stringContaining("sidebar failed"),
+      });
+      expect((row as { error_message: string }).error_message.length).toBeLessThanOrEqual(200);
+    }
   });
 
   it("does not hold the lifecycle lock during one blocked screen read", async () => {

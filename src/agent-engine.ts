@@ -8868,7 +8868,13 @@ export class AgentEngine {
     const sweepId = ++this.sweepTelemetrySeq;
     let sweepCompleted = false;
     let failedPhase: string | null = null;
+    let failedError: unknown;
     const slowPhaseThresholdMs = 250;
+    const errorDetails = (error: unknown) => ({
+      error_class: (error instanceof Error ? error.name || "Error" : typeof error).slice(0, 80),
+      error_message: (error instanceof Error ? error.message : String(error))
+        .replace(/[\r\n\t]/g, " ").slice(0, 200),
+    });
     const time = async <T>(
       name: string,
       operation: () => Promise<T>,
@@ -8882,6 +8888,7 @@ export class AgentEngine {
       const appendPhase = (
         stage: "started" | "completed" | "failed",
         durationMs: number | null,
+        error?: unknown,
       ) => {
         try {
           this.stateMgr.getEventLog().appendSweepPhase({
@@ -8895,6 +8902,7 @@ export class AgentEngine {
             duration_ms: durationMs,
             agent_count: agentCount,
             lock_held: lockHeld,
+            ...(stage === "failed" ? errorDetails(error) : {}),
           });
         } catch {
           // Telemetry must not block reconciliation when the log is unavailable.
@@ -8916,7 +8924,8 @@ export class AgentEngine {
         return result;
       } catch (error) {
         failedPhase = name;
-        appendPhase("failed", Date.now() - startedAt);
+        failedError = error;
+        appendPhase("failed", Date.now() - startedAt, error);
         throw error;
       } finally {
         clearTimeout(slowStartTimer);
@@ -9064,6 +9073,7 @@ export class AgentEngine {
           phase: "summary",
           stage: sweepCompleted ? "completed" : "failed",
           ...(!sweepCompleted ? { failed_phase: failedPhase ?? "unknown" } : {}),
+          ...(!sweepCompleted ? errorDetails(failedError) : {}),
           started_at: new Date(sweepStartedAt).toISOString(),
           duration_ms: timings.total_ms,
           agent_count: this.registry.list().length,

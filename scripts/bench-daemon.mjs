@@ -1206,6 +1206,7 @@ function summarizeSendSampleDiagnostics(samples, field) {
       const receipt = send.receipt ?? {};
       return {
         sample_index: index,
+        started_at_epoch_ms: send.started_at_epoch_ms ?? null,
         elapsed_ms: send.elapsed_ms,
         tool_elapsed_ms: send.tool_elapsed_ms,
         proof_elapsed_ms: send.proof_elapsed_ms,
@@ -1281,6 +1282,7 @@ async function measureSpawnLifecycleOnce(
     } = {},
   ) => {
     const startedAt = nowMs();
+    const startedAtEpochMs = Date.now();
     // Receipt diagnostics are benchmark instrumentation, not workload input.
     // Keep canonical request bytes/hashes based on args while opting into the
     // timing, terminal, and transport fields the benchmark validates below.
@@ -1294,6 +1296,7 @@ async function measureSpawnLifecycleOnce(
     }
     await validateReceipt?.(receipt);
     return {
+      started_at_epoch_ms: startedAtEpochMs,
       elapsed_ms: round(nowMs() - startedAt),
       tool_elapsed_ms: round(toolElapsedMs),
       proof_elapsed_ms: round(nowMs() - startedAt - toolElapsedMs),

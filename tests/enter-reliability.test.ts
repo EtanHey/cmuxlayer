@@ -1395,6 +1395,8 @@ describe("enter reliability", () => {
         enumerate: expect.any(Number),
         type: expect.any(Number),
         verify: expect.any(Number),
+        pre_delivery: expect.any(Number),
+        post_delivery: expect.any(Number),
       });
     },
   );

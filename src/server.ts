@@ -1338,11 +1338,15 @@ const preserveDeliveryEvidenceOnError = (
 };
 
 type DeliveryPhase =
-  "route" | "lock" | "lock_hold" | "enumerate" | "type" | "verify";
+  "route" | "lock" | "lock_hold" | "enumerate" | "type" | "verify" |
+  "pre_delivery" | "post_delivery";
 type DeliveryPhaseTimings = Record<DeliveryPhase, number>;
 
 function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
-  return { route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0 };
+  return {
+    route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0,
+    pre_delivery: 0, post_delivery: 0,
+  };
 }
 
 function withSurfaceDeliveryTimings(
@@ -19156,6 +19160,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           assertWorkerUpwardChannel(agentId);
           const timings = createDeliveryPhaseTimings();
+          const preDeliveryStartedAt = Date.now();
           const targetAgent =
             engine.getAgentState(agentId) ?? registry.get(agentId);
           assertInteractiveMultilineInputAllowed({
@@ -19204,6 +19209,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
           const livePaused = await observePausedTarget(targetAgent);
           if (livePaused.paused) {
+            addDeliveryPhaseTiming(timings, "pre_delivery", preDeliveryStartedAt);
             const receipt = engine.queueDelivery({
               delivery_id: deliveryId,
               agent_id: agentId,
@@ -19230,6 +19236,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               data,
             );
           }
+          addDeliveryPhaseTiming(timings, "pre_delivery", preDeliveryStartedAt);
           let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
           try {
             delivery = await deliverAgentInput({
@@ -19338,6 +19345,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
             throw error;
           }
+          const postDeliveryStartedAt = Date.now();
           const receipt =
             delivery.delivery === "queued" ||
             delivery.delivery === "queued_followup"
@@ -19430,10 +19438,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             timings_ms: timings,
           });
           failedReceiptPayload = { ...publicReceipt };
-          const evidence = await collectDeliveryEvidence(agentId);
+          let evidence: Awaited<ReturnType<typeof collectDeliveryEvidence>>;
+          try {
+            evidence = await collectDeliveryEvidence(agentId);
+          } finally {
+            addDeliveryPhaseTiming(timings, "post_delivery", postDeliveryStartedAt);
+            failedReceiptPayload.timings_ms = { ...timings };
+          }
           const data = {
             agent_id: agentId,
             ...publicReceipt,
+            timings_ms: { ...timings },
             ...evidence,
           };
           return okFormatted(formatOk("send_to", data), data);
