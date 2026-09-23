@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { options, cycleAssignment } from "../scripts/soak-live-options.mjs";
+import { options, cycleAssignment, isPoolSeatDead } from "../scripts/soak-live-options.mjs";
 
 describe("soak runner options", () => {
   const base = ["--agent-id", "scratch"];
@@ -44,5 +44,17 @@ describe("pool and fresh scheduling", () => {
       { kind: "pool", slot: 3, cli: "codex" },
       { kind: "fresh", cli: "codex" },
     ]);
+  });
+});
+
+describe("pool seat liveness", () => {
+  it("reuses a done seat after its exact-marker reply", () => {
+    expect(isPoolSeatDead({ state: "done" })).toBe(false);
+    expect(isPoolSeatDead({ state: "ready" })).toBe(false);
+  });
+
+  it("replaces only an error seat or a missing row", () => {
+    expect(isPoolSeatDead({ state: "error" })).toBe(true);
+    expect(isPoolSeatDead(null)).toBe(true);
   });
 });

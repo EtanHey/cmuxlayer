@@ -39,3 +39,7 @@ export function cycleAssignment(cycle, pool, freshEvery) {
   const slot = (poolCycle - 1) % pool;
   return { kind: "pool", slot, cli: slot % 2 === 0 ? "claude" : "codex" };
 }
+
+export function isPoolSeatDead(row) {
+  return !row || row.state === "error";
+}

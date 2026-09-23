@@ -12,7 +12,7 @@ import {
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
-import { cycleAssignment, options } from "./soak-live-options.mjs";
+import { cycleAssignment, isPoolSeatDead, options } from "./soak-live-options.mjs";
 
 const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -311,7 +311,7 @@ async function main() {
     if (seat) {
       const listed = await call("list_agents", { agent_ids: [seat.agentId], max_age_ms: 0 }, cycle);
       const row = listed.agents?.find((item) => item.agent_id === seat.agentId);
-      if (listed.ok && row && !["done", "error"].includes(row.state)) return seat;
+      if (!listed.ok || !isPoolSeatDead(row)) return seat;
       check("pool_seat", ["pool_seat_died"], { cycle, slot, agent_id: seat.agentId,
         state: row?.state ?? null });
       if (!await closeSeat(cycle, seat)) {
@@ -319,6 +319,7 @@ async function main() {
         return null;
       }
       summary.pool.replacements += 1;
+      poolSeats[slot] = null;
     }
     seat = await bootPoolSeat(slot, cycle);
     poolSeats[slot] = seat;
@@ -351,6 +352,7 @@ async function main() {
           check("pool_seat", ["pool_seat_died"], { cycle, slot: assignment.slot, agent_id: agentId });
           if (await closeSeat(cycle, seat)) {
             summary.pool.replacements += 1;
+            poolSeats[assignment.slot] = null;
             poolSeats[assignment.slot] = await bootPoolSeat(assignment.slot, cycle);
           } else blockedPoolSlots.add(assignment.slot);
         }
@@ -382,6 +384,7 @@ async function main() {
           check("pool_seat", ["pool_seat_died"], { cycle, slot: assignment.slot, agent_id: seat.agentId });
           if (await closeSeat(cycle, seat)) {
             summary.pool.replacements += 1;
+            poolSeats[assignment.slot] = null;
             poolSeats[assignment.slot] = await bootPoolSeat(assignment.slot, cycle);
           } else blockedPoolSlots.add(assignment.slot);
         }
