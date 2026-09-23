@@ -7747,6 +7747,11 @@ export class AgentEngine {
           receipt.error = null;
           receipt.verify_miss_count = 0;
           this.persistDeliveryReceipts();
+          if (receipt.press_enter && receipt.submit_verified === true) {
+            this.markAgentWorking(receipt.agent_id, {
+              verifiedDelivery: receipt.source_event === "send_to",
+            });
+          }
           this.appendDeliveryReceiptEventBestEffort(receipt);
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
