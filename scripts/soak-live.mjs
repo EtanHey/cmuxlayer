@@ -8,9 +8,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
-  checkToolFailure, hasReplyMarker, healthSampleEntry, nextSoakDelayMs, shouldContinueSoak,
+  checkToolFailure, hasReplyMarker, healthSampleEntry,
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
+import { runSoakCycles, soakSessionRecord, startSoakHealthClock } from "./soak-live-timeline.mjs";
 
 const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -107,7 +108,7 @@ async function main() {
     env: serverEnv,
     stderr: "inherit" });
   const healthSamples = [];
-  let healthTimer;
+  let healthClock;
   let healthInFlight = null;
   let startedAtMs = 0;
   let startPid = null;
@@ -295,24 +296,21 @@ async function main() {
   try {
     await client.connect(transport);
     connected = true;
-    startedAtMs = Date.now();
     startPid = transport.pid;
     rssStartKb = serverRssKb(startPid);
     log({ kind: "start", options: opts });
-    await sampleHealth("start");
-    healthTimer = setInterval(() => { void sampleHealth("minute").catch((error) =>
-      check("health", ["health_sample_exception"], { error: String(error) })); }, 60_000);
-    while (shouldContinueSoak(summary.cycles_completed, opts.cycles,
-      Date.now() - startedAtMs, opts.durationMinutes * 60_000)) {
-      if (transport.pid !== startPid) break;
-      const delayMs = nextSoakDelayMs(summary.cycles_completed, opts.cycles,
-        Date.now() - startedAtMs, opts.durationMinutes * 60_000);
-      if (delayMs > 0) { await sleep(delayMs); continue; }
-      const first = summary.cycles_completed;
-      const batchSize = Math.min(opts.concurrency, opts.cycles - first);
-      await Promise.all(Array.from({ length: batchSize },
-        (_, offset) => runCycle(first + offset + 1)));
-    }
+    healthClock = await startSoakHealthClock({ sampleHealth, now: Date.now,
+      schedule: setTimeout, cancel: clearTimeout,
+      onError: (error) => check("health", ["health_sample_exception"], { error: String(error) }) });
+    startedAtMs = healthClock.startedAtMs;
+    await runSoakCycles({ completed: () => summary.cycles_completed, minCycles: opts.cycles,
+      minDurationMs: opts.durationMinutes * 60_000, now: Date.now, startedAtMs, sleep,
+      currentPid: () => transport.pid, startPid, runBatch: async () => {
+        const first = summary.cycles_completed;
+        const batchSize = Math.min(opts.concurrency, opts.cycles - first);
+        await Promise.all(Array.from({ length: batchSize },
+          (_, offset) => runCycle(first + offset + 1)));
+      } });
   } catch (error) {
     check("harness", ["harness_exception"], { error: String(error) });
   } finally {
@@ -322,21 +320,22 @@ async function main() {
     }
     try { inboxCheck("final"); }
     catch (error) { check("lead_inbox", ["inbox_unreadable"], { error: String(error) }); }
-    if (healthTimer) clearInterval(healthTimer);
+    if (healthClock) await healthClock.stop().catch((error) =>
+      check("health", ["health_sample_exception"], { error: String(error) }));
     if (healthInFlight) await healthInFlight.catch(() => {});
     if (connected) await sampleHealth("end").catch((error) =>
       check("health", ["health_sample_exception"], { error: String(error) }));
     const endPid = transport.pid;
     const rssEndKb = serverRssKb(endPid);
-    const elapsedMs = startedAtMs ? Date.now() - startedAtMs : 0;
+    const sessionRecord = soakSessionRecord({ startPid, endPid, startedAtMs, now: Date.now,
+      minCycles: opts.cycles, minDurationMs: opts.durationMinutes * 60_000,
+      cyclesCompleted: summary.cycles_completed, healthSamples, rssStartKb, rssEndKb });
+    const elapsedMs = sessionRecord.elapsedMs;
     summary.session = { duration_ms: elapsedMs, server_pid_start: startPid,
       server_pid_end: endPid, server_pid_unchanged: startPid === endPid,
       health_samples_ok: healthSamples.filter(Boolean).length,
       health_samples_total: healthSamples.length, rss_start_kb: rssStartKb, rss_end_kb: rssEndKb };
-    check("soak_session", checkSoakSession({ startPid, endPid, elapsedMs,
-      minDurationMs: opts.durationMinutes * 60_000, minCycles: opts.cycles,
-      cyclesCompleted: summary.cycles_completed, healthSamples, rssStartKb, rssEndKb }),
-    { session: summary.session });
+    check("soak_session", checkSoakSession(sessionRecord), { session: summary.session });
     await client.close().catch(() => {});
     summary.finished_at = new Date().toISOString();
     summary.tools = Object.fromEntries(Object.entries(summary.tools).map(([name, values]) =>
