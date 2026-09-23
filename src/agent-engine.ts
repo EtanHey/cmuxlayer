@@ -25,6 +25,7 @@ import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { initializeNewSurfaceRuntime } from "./surface-runtime.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
+import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import { buildTitle } from "./naming.js";
 import {
   AGENT_ENV,
@@ -3700,6 +3701,7 @@ export class AgentEngine {
     timeoutMs?: number,
     bypassLaunchSender = false,
   ): Promise<void> {
+    command = withRaisedNofileSoftLimit(command);
     const expectedRoute = this.resolveAgentRoute(agentId);
     if (surface !== expectedRoute.surface_id) {
       throw new Error(

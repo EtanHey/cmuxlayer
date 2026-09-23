@@ -23,6 +23,7 @@ import {
   resolveRepoRootFromLauncherRegistry,
 } from "../src/launcher-registry.js";
 import { StateManager } from "../src/state-manager.js";
+import { RAISE_NOFILE_SOFT_LIMIT } from "../src/nofile-limit.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient, CmuxNewSplitResult } from "../src/cmux-client.js";
 import type { CliType } from "../src/agent-types.js";
@@ -33,6 +34,12 @@ const TEST_DIR = join(tmpdir(), "cmux-parity-registry-optional");
 const REPO = "parityrepo";
 const SESSION = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
 const SPAWN_SURFACE_UUID = "11111111-2222-4333-8444-555555555555";
+
+function withoutNofilePrelude(command: string): string {
+  const prelude = `${RAISE_NOFILE_SOFT_LIMIT}; `;
+  expect(command.startsWith(prelude)).toBe(true);
+  return command.slice(prelude.length);
+}
 
 type LauncherPath = "registry" | "raw";
 
@@ -289,7 +296,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
       // --- Launch command: launcher form vs raw form. ---
       const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
-      expect(launchCmd).toBe(expectedLaunch(cli, path, repoRoot));
+      expect(withoutNofilePrelude(launchCmd)).toBe(expectedLaunch(cli, path, repoRoot));
 
       // The tab title names the AGENT (#492), and must not vary by lane.
       expect(client.renameTab).toHaveBeenCalledWith(
@@ -322,7 +329,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
 
         const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
+        expect(withoutNofilePrelude(resumeCmd)).toBe(expectedResume(cli, path, repoRoot));
         // Whatever the lane, the resumed command names the captured session.
         expect(resumeCmd).toContain(SESSION);
       },
