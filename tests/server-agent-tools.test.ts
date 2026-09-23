@@ -1007,6 +1007,27 @@ describe("lean spawn tool responses", () => {
     ).toBe(false);
   });
 
+  it("spawn_agent exposes a pending placement as a typed retryable receipt", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const engine = (server as any)._registeredTools.interact._engine as AgentEngine;
+    vi.spyOn(engine, "spawnAgent").mockRejectedValueOnce(Object.assign(
+      new Error("Split outcome unknown; retry in 7777ms."),
+      { code: "placement_pending", remainingMs: 7777 },
+    ));
+    const spawn = (server as any)._registeredTools.spawn_agent;
+
+    const result = await spawn.handler({
+      version: 1, type: "agent", repo: "cmuxlayer", cli: "codex",
+      role: "implementor", placement: "right", prompt: "Worker",
+    }, {} as any);
+
+    expect(result.structuredContent).toMatchObject({
+      ok: false, error_code: "placement_pending",
+      retryable: true, remaining_ms: 7777,
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject(result.structuredContent);
+  });
+
   it("rejects placement-only Claude as roleless", async () => {
     const exec = makeLifecycleExec();
     const server = createLifecycleServer(exec);
