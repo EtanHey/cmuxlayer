@@ -5290,7 +5290,7 @@ export class AgentEngine {
         cleanupEpoch,
         `${operation} cleanup`,
       );
-      await this.client.closeSurface(binding.surfaceRef, {
+      await this.client.closeSurface(binding.surfaceUuid, {
         workspace:
           binding.workspaceId ?? surface.actual_workspace ?? surface.workspace,
         collapsePane: false,
