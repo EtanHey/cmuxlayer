@@ -9694,6 +9694,9 @@ describe("tool handler integration", () => {
 
   it.each([
     ["ready composer", "ready"],
+    ["ready composer after shell preamble", "preamble"],
+    ["ready composer after its surface route moves", "route_moved"],
+    ["second chooser above the menu", "second_menu"],
     ["menu persists", "menu"],
     ["surface UUID changes", "changed_uuid"],
   ] as const)("spawn_agent skips the reconstructed Codex update menu only when %s follows", async (_name, outcome) => {
@@ -9720,6 +9723,16 @@ describe("tool handler integration", () => {
         string
       >;
     };
+    const shellPreamble = [
+      "Last login: Wed Sep 23 12:00:00 on ttys001",
+      "etanheyman ~ $ REPOGOLEM_ALLOW_MODEL=1 cmuxlayerCodex -s -m gpt-5.5",
+      "",
+    ].join("\n");
+    const menuFrame = outcome === "preamble"
+      ? `${shellPreamble}${fixture.screens.interactive_update}\n  \n`
+      : outcome === "second_menu"
+        ? `${shellPreamble}Choose a profile:\n› 1. Primary\n  2. Secondary\n\n${fixture.screens.interactive_update}`
+        : fixture.screens.interactive_update;
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, prompt, "utf8");
@@ -9734,6 +9747,8 @@ describe("tool handler integration", () => {
     let selectedSkipObserved = false;
     let surfaceUuidChanged = false;
     let surfaceCreated = false;
+    let postSkipReadyReads = 0;
+    let routeMoved = false;
     const stableSurfaceId = "11111111-2222-4333-8444-555555555555";
     const sentTexts: string[] = [];
     const sentKeys: string[] = [];
@@ -9765,17 +9780,25 @@ describe("tool handler integration", () => {
         };
       }
       if (args.includes("list-panes")) {
+        if (outcome === "route_moved" && postSkipReadyReads >= 1) routeMoved = true;
+        const panes = spawnUpdatePanes(surfaceCreated);
+        if (routeMoved && surfaceCreated) {
+          panes.panes[0].surface_refs = ["surface:3"];
+          panes.panes[0].selected_surface_ref = "surface:3";
+        }
         return {
-          stdout: JSON.stringify(spawnUpdatePanes(surfaceCreated)),
+          stdout: JSON.stringify(panes),
           stderr: "",
         };
       }
       if (args.includes("list-pane-surfaces")) {
+        const surfaces = spawnUpdatePaneSurfaces();
         return {
           stdout: JSON.stringify({
-            ...spawnUpdatePaneSurfaces(),
+            ...surfaces,
             surfaces: [{
-              ...spawnUpdatePaneSurfaces().surfaces[0],
+              ...surfaces.surfaces[0],
+              ref: routeMoved ? "surface:3" : "surface:2",
               id: surfaceUuidChanged
                 ? "99999999-8888-4777-8666-555555555555"
                 : stableSurfaceId,
@@ -9847,15 +9870,16 @@ describe("tool handler integration", () => {
           } else {
             updateMenuSeen = true;
             text = updateMenuKeys.filter((key) => key === "down").length === 2
-              ? fixture.screens.interactive_update
+              ? menuFrame
                   .replace("› 1. Update now", "  1. Update now")
                   .replace("  3. Skip until next version", "› 3. Skip until next version")
-              : fixture.screens.interactive_update;
+              : menuFrame;
             if (text.includes("› 3. Skip until next version")) {
               selectedSkipObserved = true;
             }
           }
         } else if (launcherSends === 1 && updateAccepted && !promptSent) {
+          postSkipReadyReads += 1;
           text = outcome === "menu"
             ? fixture.screens.interactive_update
                 .replace("› 1. Update now", "  1. Update now")
@@ -9923,15 +9947,17 @@ describe("tool handler integration", () => {
       if (!parsed.ok) {
         expect(parsed.error_code).toBe("blocked_by_update_menu");
       }
-      if (outcome !== "ready") {
+      if (outcome !== "ready" && outcome !== "preamble" && outcome !== "route_moved") {
         expect(parsed.ok).toBe(false);
         expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(0);
         expect(updateMenuKeys.filter((key) => key === "return")).toHaveLength(
           outcome === "menu" ? 1 : 0,
         );
+        if (outcome === "second_menu") expect(updateMenuKeys).toEqual([]);
         return;
       }
       expect(parsed.ok).toBe(true);
+      expect(updateAccepted).toBe(true);
       expect(parsed.update_menu_skipped).toBe(true);
       expect(parsed.update_menu_text_hash).toBe(
         createHash("sha256")
