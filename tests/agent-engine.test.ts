@@ -1280,6 +1280,11 @@ describe("AgentEngine", () => {
       expect(stateMgr.listStates()).toHaveLength(0);
       expect(mockClient.renameTab).not.toHaveBeenCalled();
       expect(mockClient.send).not.toHaveBeenCalled();
+      await expect(engine.spawnAgent({
+        repo: "brainlayer", model: "gpt-5.4", cli: "codex",
+        prompt: "Retry placement", workspace: "workspace:intended",
+        boot_prompt_timeout_ms: 100,
+      })).rejects.toThrow("Spawn placement blocked");
     });
 
     it("inherits the workspace whose current directory matches the target repo", async () => {
@@ -2129,6 +2134,311 @@ describe("AgentEngine", () => {
       await vi.waitFor(() => expect(mockClient.closeSurface).toHaveBeenCalled());
       expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
     });
+
+    it.each([
+      { name: "confirmed cleanup", cleanupFails: false },
+      { name: "ambiguous cleanup", cleanupFails: true },
+    ])("recovers a later spawn after a timed-out split and $name", async ({ cleanupFails }) => {
+      const workspace = `workspace:late-split-${cleanupFails ? "ambiguous" : "closed"}`;
+      const lead = { ...makeSurface("surface:lead"),
+        id: "00000000-0000-4000-8000-000000000001" };
+      const late = { ...makeSurface("surface:late"),
+        id: "00000000-0000-4000-8000-000000000002" };
+      let rightVisible = false;
+      let lateVisible = false;
+      let replacementVisible = false;
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+        workspace_ref: workspace,
+        window_ref: "window:late-split",
+        panes: [
+          { ref: "pane:lead", index: 0, focused: true, surface_count: 1,
+            surface_refs: [lead.ref], surface_ids: [lead.id],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 } },
+          ...(rightVisible ? [{ ref: "pane:worker", index: 1, focused: false,
+            surface_count: Number(lateVisible) + Number(replacementVisible),
+            surface_refs: [
+              ...(lateVisible ? [late.ref] : []),
+              ...(replacementVisible ? ["surface:replacement"] : []),
+            ],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 } }] : []),
+        ],
+      }));
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:late-split",
+          pane_ref: pane,
+          surfaces: pane === "pane:lead" ? [lead] : [
+            ...(lateVisible ? [late] : []),
+            ...(replacementVisible ? [{ ...makeSurface("surface:replacement"),
+              id: SPAWN_SURFACE_UUID }] : []),
+          ],
+        }),
+      );
+      let releaseSplit!: (result: CmuxNewSplitResult) => void;
+      let splitStarted!: () => void;
+      const started = new Promise<void>((resolve) => { splitStarted = resolve; });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise<CmuxNewSplitResult>((resolve) => {
+          releaseSplit = resolve;
+          splitStarted();
+        }),
+      );
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        if (cleanupFails) throw new Error("close confirmation unavailable");
+        lateVisible = false;
+      });
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        replacementVisible = true;
+        return { workspace, surface: "surface:replacement",
+          surface_id: SPAWN_SURFACE_UUID, pane: "pane:worker",
+          title: "", type: "terminal" };
+      });
+      const spawn = (timeout = 100) => engine.spawnAgent({
+        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        prompt: "Worker", role: "worker", placement: "right",
+        workspace, boot_prompt_timeout_ms: timeout,
+      });
+
+      const first = spawn();
+      await started;
+      await expect(first).rejects.toMatchObject({ code: "placement_timeout" });
+      await expect(spawn()).rejects.toMatchObject({ code: "placement_timeout" });
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+
+      rightVisible = true;
+      lateVisible = true;
+      releaseSplit({ workspace, surface: late.ref, surface_id: late.id,
+        pane: "pane:worker", title: "", type: "terminal" });
+      await vi.waitFor(() => expect(mockClient.closeSurface).toHaveBeenCalledTimes(1));
+      const internalEngine = engine as unknown as {
+        pendingPlacementSplits: Map<string, { uncertain?: boolean }>;
+        placementSplitInFlight: Set<string>;
+      };
+      await vi.waitFor(() => {
+        expect(internalEngine.placementSplitInFlight.has(workspace)).toBe(false);
+        if (cleanupFails) {
+          expect(internalEngine.pendingPlacementSplits.get(workspace)?.uncertain).toBe(true);
+        } else {
+          expect(internalEngine.pendingPlacementSplits.has(workspace)).toBe(false);
+        }
+      });
+
+      await expect(spawn(500)).resolves.toBeDefined();
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+      expect(mockClient.newSurface).toHaveBeenCalledWith(expect.objectContaining({
+        pane: "pane:worker", workspace,
+      }));
+    });
+
+    it("retries uncertain placement after a failed topology read proves no right column", async () => {
+      const workspace = "workspace:uncertain-reobserve";
+      const internalEngine = engine as unknown as {
+        pendingPlacementSplits: Map<string, {
+          pane: string; surface: string; uncertain: boolean;
+        }>;
+      };
+      internalEngine.pendingPlacementSplits.set(workspace, {
+        pane: "pane:worker", surface: "surface:unknown", uncertain: true,
+      });
+      let observationReads = 0;
+      (mockClient.listPanes as ReturnType<typeof vi.fn>)
+        .mockImplementation(async () => {
+          if (observationReads++ === 0) throw new Error("window topology unavailable");
+          return { workspace_ref: workspace,
+          window_ref: "window:uncertain-reobserve",
+          panes: [{ ref: "pane:lead", index: 0, focused: true,
+            surface_count: 1, surface_refs: ["surface:lead"] }] };
+        });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => ({ workspace_ref: workspace,
+          window_ref: "window:uncertain-reobserve", pane_ref: pane,
+          surfaces: pane === "pane:lead" ? [makeSurface("surface:lead")] : [] }),
+      );
+      exposeWorkerColumnAfterSplit(mockClient);
+      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+        model: "gpt-5.4", prompt: "Worker", role: "worker",
+        placement: "right", workspace, boot_prompt_timeout_ms: 500 });
+
+      await expect(spawn()).rejects.toMatchObject({ code: "placement_timeout",
+        message: expect.stringMatching(/could not confirm split topology/i) });
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      await expect(spawn()).resolves.toBeDefined();
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      "success", "definite reject", "ambiguous reject", "wrong workspace",
+      "late result", "late result with failed close", "visibility timeout",
+      "typed topology failure",
+    ] as const)("does not latch a later spawn after right-split exit: %s", async (exit) => {
+      const workspace = `workspace:split-exit-${exit.replaceAll(" ", "-")}`;
+      const lead = makeSurface("surface:lead");
+      const firstSurface = makeSurface("surface:first");
+      let rightVisible = false;
+      let firstVisible = false;
+      let splitCalls = 0;
+      let failedTopology = false;
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        if (exit === "typed topology failure" && splitCalls === 1 && !failedTopology) {
+          failedTopology = true;
+          throw Object.assign(new Error("pane not found"), { code: "not_found" });
+        }
+        return {
+        workspace_ref: workspace, window_ref: "window:split-exit",
+        panes: [{ ref: "pane:lead", index: 0, focused: true,
+          surface_count: 1, surface_refs: [lead.ref],
+          pixel_frame: { x: 0, y: 0, width: 500, height: 900 } },
+        ...(rightVisible ? [{ ref: "pane:worker", index: 1, focused: false,
+          surface_count: Number(firstVisible),
+          surface_refs: firstVisible ? [firstSurface.ref] : [],
+          pixel_frame: { x: 500, y: 0, width: 500, height: 900 } }] : [])],
+        };
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane: string }) => ({ workspace_ref: workspace,
+          window_ref: "window:split-exit", pane_ref: pane,
+          surfaces: pane === "pane:lead" ? [lead] : firstVisible ? [firstSurface] : [] }),
+      );
+      let releaseLate!: (result: CmuxNewSplitResult) => void;
+      let lateStarted!: () => void;
+      const started = new Promise<void>((resolve) => { lateStarted = resolve; });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        splitCalls++;
+        if (splitCalls === 1 && exit === "definite reject") {
+          throw Object.assign(new Error("pane not found"), { code: "not_found" });
+        }
+        if (splitCalls === 1 && exit === "ambiguous reject") {
+          throw new Error("transport outcome unknown");
+        }
+        if (splitCalls === 1 && (exit === "late result" || exit === "late result with failed close")) {
+          return new Promise<CmuxNewSplitResult>((resolve) => {
+            releaseLate = resolve;
+            lateStarted();
+          });
+        }
+        if (splitCalls === 1 && exit === "wrong workspace") {
+          return { workspace: "workspace:wrong", surface: firstSurface.ref,
+            pane: "pane:worker", title: "", type: "terminal" };
+        }
+        if (splitCalls !== 1 || exit !== "visibility timeout") {
+          rightVisible = true;
+          firstVisible = true;
+        }
+        return { workspace, surface: firstSurface.ref, pane: "pane:worker",
+          title: "", type: "terminal" };
+      });
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        if (exit === "late result with failed close") throw new Error("close uncertain");
+        firstVisible = false;
+      });
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+        workspace, surface: "surface:replacement", pane: "pane:worker",
+        title: "", type: "terminal",
+      }));
+      const spawn = (timeout: number) => engine.spawnAgent({ repo: "brainlayer",
+        cli: "codex", model: "gpt-5.4", prompt: "Worker", role: "worker",
+        placement: "right", workspace, boot_prompt_timeout_ms: timeout });
+
+      const first = spawn(100);
+      if (exit === "late result" || exit === "late result with failed close") {
+        await started;
+        await expect(first).rejects.toMatchObject({ code: "placement_timeout" });
+        rightVisible = true;
+        firstVisible = true;
+        releaseLate({ workspace, surface: firstSurface.ref, pane: "pane:worker",
+          title: "", type: "terminal" });
+        await vi.waitFor(() => expect(mockClient.closeSurface).toHaveBeenCalledTimes(1));
+      } else if (exit === "success") {
+        await expect(first).resolves.toBeDefined();
+      } else {
+        await expect(first).rejects.toBeDefined();
+      }
+      if (exit === "ambiguous reject") {
+        await expect(spawn(500)).rejects.toMatchObject({
+          code: "placement_pending",
+          remainingMs: expect.any(Number),
+          message: expect.stringMatching(/\d+ms/),
+        });
+        expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+        return;
+      }
+      await vi.waitFor(() => expect(
+        (engine as unknown as { placementSplitInFlight: Set<string> })
+          .placementSplitInFlight.has(workspace),
+      ).toBe(false));
+      await expect(spawn(500)).resolves.toBeDefined();
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(
+        ["success", "late result", "late result with failed close", "typed topology failure"].includes(exit) ? 1 : 2,
+      );
+    });
+
+    it.each([
+      ["late landing", 100, 10_000],
+      ["window expiry", 100, 10_000],
+      ["default window expiry", undefined, 45_000],
+    ] as const)(
+      "settles an unknown-outcome split by %s without overlapping a second split",
+      async (resolution, timeoutMs, windowMs) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+          const workspace = `workspace:unknown-${resolution.replaceAll(" ", "-")}`;
+          const lead = makeSurface("surface:lead");
+          const right = makeSurface("surface:right");
+          let rightVisible = false;
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+            workspace_ref: workspace, window_ref: "window:unknown-split",
+            panes: [
+              { ref: "pane:lead", index: 0, focused: true, surface_count: 1,
+                surface_refs: [lead.ref], pixel_frame: { x: 0, y: 0, width: 500, height: 900 } },
+              ...(rightVisible ? [{ ref: "pane:worker", index: 1, focused: false,
+                surface_count: 1, surface_refs: [right.ref],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 } }] : []),
+            ],
+          }));
+          (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+            async ({ pane }: { pane: string }) => ({ workspace_ref: workspace,
+              window_ref: "window:unknown-split", pane_ref: pane,
+              surfaces: pane === "pane:lead" ? [lead] : [right] }),
+          );
+          (mockClient.newSplit as ReturnType<typeof vi.fn>)
+            .mockRejectedValueOnce(new Error("transport outcome unknown"))
+            .mockImplementationOnce(async () => {
+              rightVisible = true;
+              return { workspace, surface: right.ref, pane: "pane:worker",
+                title: "", type: "terminal" };
+            });
+          (mockClient.newSurface as ReturnType<typeof vi.fn>).mockResolvedValue({
+            workspace, surface: "surface:adopted", pane: "pane:worker",
+            title: "", type: "terminal",
+          });
+          const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+            model: "gpt-5.4", prompt: "Worker", role: "worker",
+            placement: "right", workspace, boot_prompt_timeout_ms: timeoutMs });
+
+          await expect(spawn()).rejects.toThrow("transport outcome unknown");
+          await expect(spawn()).rejects.toMatchObject({ code: "placement_pending" });
+          expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+          if (resolution === "late landing") {
+            rightVisible = true;
+            await expect(spawn()).resolves.toBeDefined();
+            expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+            expect(mockClient.newSurface).toHaveBeenCalledWith(expect.objectContaining({
+              pane: "pane:worker", workspace,
+            }));
+          } else {
+            vi.setSystemTime(Date.now() + windowMs - 1);
+            await expect(spawn()).rejects.toMatchObject({ code: "placement_pending" });
+            expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+            vi.setSystemTime(Date.now() + 2);
+            await expect(spawn()).resolves.toBeDefined();
+            expect(mockClient.newSplit).toHaveBeenCalledTimes(2);
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it("retries a right split after a definite pre-mutation rejection", async () => {
       const workspace = "workspace:rejected-split";

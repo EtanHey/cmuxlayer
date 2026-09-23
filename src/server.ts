@@ -2012,6 +2012,21 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === "placement_timeout"
       ? { error_code: "placement_timeout", retryable: true }
       : {};
+  const placementPendingExtra =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "placement_pending"
+      ? {
+          error_code: "placement_pending",
+          retryable: true,
+          ...("remainingMs" in error &&
+          typeof error.remainingMs === "number" &&
+          Number.isFinite(error.remainingMs)
+            ? { remaining_ms: error.remainingMs }
+            : {}),
+        }
+      : {};
   // #529: the bounded lifecycle timeouts carry a `code` that must reach the
   // tool payload, or automated callers see only free text and cannot tell a
   // bounded control-plane wait from any other failure. Both are retryable.
@@ -2089,6 +2104,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
     ...placementTimeoutExtra,
+    ...placementPendingExtra,
     ...lifecycleTimeoutExtra,
     ...readinessExtra,
     ...deliveryRpcExtra,
