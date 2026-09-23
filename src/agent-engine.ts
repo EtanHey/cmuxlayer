@@ -8886,15 +8886,44 @@ export class AgentEngine {
     try {
       const skipAccounting: SweepMutationSkipAccounting = { counted: false };
       this.currentSweepScreenSignatures = new Map();
+      const sweepValidity = { current: true };
+      const sweepWithUnlocked = async <T>(operation: () => Promise<T>): Promise<T> => {
+        // Spawn/stop can write records without taking the lifecycle lock. A
+        // different agent may change while this sweep reads one screen, so a
+        // per-screen version check alone cannot protect the sidebar batch.
+        const before = new Map(
+          this.registry.list().map((record) => [
+            record.agent_id,
+            { record, version: record.version },
+          ]),
+        );
+        try {
+          return await withUnlocked(operation);
+        } finally {
+          const after = this.registry.list();
+          if (
+            after.length !== before.size ||
+            after.some((record) => {
+              const prior = before.get(record.agent_id);
+              return !prior || prior.record !== record || prior.version !== record.version;
+            })
+          ) {
+            sweepValidity.current = false;
+          }
+        }
+      };
       const topologyAcquisition = this.lifecycleLockAcquisitionSeq;
       const surfaceTopology = await time(
         "topology_ms",
-        () => withUnlocked(() => this.collectObservedSurfaceTopology()),
+        () => sweepWithUnlocked(() => this.collectObservedSurfaceTopology()),
         false,
       );
       // Any lifecycle mutation that ran while topology I/O was outside the
       // lock makes this snapshot stale for destructive reconciliation.
-      if (this.lifecycleLockAcquisitionSeq !== topologyAcquisition + 1) {
+      if (
+        this.lifecycleLockAcquisitionSeq !== topologyAcquisition + 1 ||
+        !sweepValidity.current
+      ) {
         this.sweepYielded += 1;
         return;
       }
@@ -8904,8 +8933,8 @@ export class AgentEngine {
       }
       const sweepCtx: SweepAgentContext = {
         sweep: true,
-        withUnlocked,
-        sweepValidity: { current: true },
+        withUnlocked: sweepWithUnlocked,
+        sweepValidity,
         surfaceTopology,
         topologyGeneration: surfaceTopology?.generation,
         skipAccounting,
@@ -8975,7 +9004,7 @@ export class AgentEngine {
       if (this.shouldYieldSweep()) return;
       await time("watches_ms", async () => {
         await this.retryClosedChildReportWatchPrune();
-        await this.sweepWatchesBestEffort(withUnlocked, sweepCtx);
+        await this.sweepWatchesBestEffort(sweepWithUnlocked, sweepCtx);
       });
       if (this.shouldYieldSweep()) return;
       if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {

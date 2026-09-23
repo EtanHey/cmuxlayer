@@ -1006,6 +1006,41 @@ describe("Sidebar Sync", () => {
     expect(mockClient.setStatuses).not.toHaveBeenCalled();
   });
 
+  it("rejects a stale two-agent sidebar snapshot after a direct stop write during another agent's unlocked read", async () => {
+    for (const agentId of ["b-stopped-agent", "a-reading-agent"]) {
+      const surfaceId = `surface:${agentId}`;
+      const record = makeRecord({
+        agent_id: agentId,
+        surface_id: surfaceId,
+        workspace_id: "workspace:test",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+      liveSurfaces.push(makeSurface(surfaceId));
+    }
+    let releaseRead!: () => void;
+    const readHeld = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let signalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      if (surface === "surface:a-reading-agent") {
+        signalRead();
+        await readHeld;
+      }
+      return { surface, text: "Working (1m 02s • esc to interrupt)", lines: 20, scrollback_used: false };
+    });
+
+    const sweep = engine.runSweep();
+    await readStarted;
+    const stopped = stateMgr.updateRecord("b-stopped-agent", { state: "done" });
+    engine.getRegistry().set(stopped.agent_id, stopped);
+    releaseRead();
+    await sweep;
+
+    expect(stateMgr.readState("b-stopped-agent")?.state).toBe("done");
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+  });
+
   it("does not hold the lifecycle lock during topology enumeration", async () => {
     stateMgr.writeState(makeRecord({
       agent_id: "topology-race-agent",
