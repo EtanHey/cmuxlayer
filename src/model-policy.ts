@@ -139,7 +139,11 @@ function modelAliasUsesUngatedLauncherPath(
   alias: string,
 ): boolean {
   if (cli === "claude")
-    return alias === "sonnet" || modelMatchesDefault(cli, alias);
+    return (
+      alias === "sonnet" ||
+      alias === "haiku" ||
+      modelMatchesDefault(cli, alias)
+    );
   return cli === "gemini" || cli === "kiro";
 }
 
@@ -201,7 +205,12 @@ export function resolveLaunchModelFlag(
   }
 
   const alias = ownModelAlias(cli, normalizeModelKey(requested));
-  if (cli === "claude" && alias !== "sonnet" && !opts?.allowModelOverride) {
+  if (
+    cli === "claude" &&
+    alias !== "sonnet" &&
+    alias !== "haiku" &&
+    !opts?.allowModelOverride
+  ) {
     return null;
   }
   return alias ?? null;
