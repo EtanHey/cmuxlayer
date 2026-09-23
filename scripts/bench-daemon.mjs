@@ -1288,6 +1288,7 @@ function summarizeSendSampleDiagnostics(samples, field) {
       const receipt = send.receipt ?? {};
       return {
         sample_index: index,
+        round_index: Math.floor(index / clientCount),
         elapsed_ms: send.elapsed_ms,
         tool_elapsed_ms: send.tool_elapsed_ms,
         proof_elapsed_ms: send.proof_elapsed_ms,
@@ -1311,6 +1312,7 @@ function summarizeSendSampleDiagnostics(samples, field) {
     })
     .sort((a, b) => a.elapsed_ms - b.elapsed_ms);
   return {
+    all: [...ranked].sort((a, b) => a.sample_index - b.sample_index),
     fastest: ranked.slice(0, 6),
     slowest: ranked.slice(-12).reverse(),
   };

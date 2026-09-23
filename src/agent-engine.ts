@@ -254,6 +254,7 @@ import {
   type AllWindowWorkspaceEnumeration,
   type SurfaceObserverEpoch,
   type SurfaceObserverIdProvider,
+  type TopologyRpcObserver,
   type SurfaceTopologySnapshot,
 } from "./surface-topology.js";
 import {
@@ -6274,12 +6275,15 @@ export class AgentEngine {
     );
   }
 
-  private collectObservedSurfaceTopology(): Promise<SurfaceTopologySnapshot | null> {
+  private collectObservedSurfaceTopology(
+    onRpc?: TopologyRpcObserver,
+  ): Promise<SurfaceTopologySnapshot | null> {
     return collectSurfaceTopology(
       this.client,
       undefined,
       this.surfaceObserverEpochProvider(),
       this.surfaceObserverIdProvider(),
+      onRpc,
     );
   }
 
@@ -10732,6 +10736,7 @@ export class AgentEngine {
   async resolveAgentIoRoute(
     agentId: string,
     topologyOverride?: SurfaceTopologySnapshot | null,
+    onTopologyRpc?: TopologyRpcObserver,
   ): Promise<AgentRoute> {
     let agent = this.registry.get(agentId);
     if (!agent) {
@@ -10750,7 +10755,7 @@ export class AgentEngine {
 
       const topology =
         topologyOverride === undefined
-          ? await this.collectObservedSurfaceTopology()
+          ? await this.collectObservedSurfaceTopology(onTopologyRpc)
           : topologyOverride;
       if (topologyOverride !== undefined) {
         this.assertSurfaceObserverEpochCurrent(
@@ -10789,7 +10794,7 @@ export class AgentEngine {
 
     const topology =
       topologyOverride === undefined
-        ? await this.collectObservedSurfaceTopology()
+        ? await this.collectObservedSurfaceTopology(onTopologyRpc)
         : topologyOverride;
     if (topologyOverride !== undefined) {
       this.assertSurfaceObserverEpochCurrent(

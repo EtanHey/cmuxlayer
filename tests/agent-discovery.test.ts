@@ -175,6 +175,25 @@ describe("AgentDiscovery", () => {
     });
   });
 
+  it("reports both target lists and the screen read without changing route proof", async () => {
+    const events: Array<{ method: string; elapsed_ms: number }> = [];
+    const surface = { id: "11111111-2222-4333-8444-555555555555", ref: "surface:1",
+      title: "brainlayerCodex", type: "terminal" as const, index: 0, selected: true };
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [surface],
+      readScreen: async () => ({ surface: surface.ref, text: "codex> ", lines: 1,
+        scrollback_used: false }),
+    });
+    const found = await discovery.scanTarget({ surface_id: surface.ref,
+      surface_uuid: surface.id },
+    (method: string, elapsed_ms: number) => events.push({ method, elapsed_ms }));
+    expect(found?.surface_id).toBe(surface.ref);
+    expect(events.map((event) => event.method)).toEqual([
+      "listSurfaces", "readScreen", "listSurfaces",
+    ]);
+    expect(events.every((event) => event.elapsed_ms >= 0)).toBe(true);
+  });
+
   it("does not reuse a cached scan after the surface observer changes", async () => {
     let observerId = "cmux:/tmp/cmux-primary.sock";
     const listSurfaces = vi.fn(async () => [

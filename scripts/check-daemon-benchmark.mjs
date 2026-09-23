@@ -246,8 +246,8 @@ function percentile(values, percentage) {
 }
 
 // Only attested timer overrun intersecting this send can lower its latency.
-function pairedSampleInvalidReason(sample, index) {
-  if (sample?.sample_index !== index) return "sample_index_mismatch";
+function pairedSampleInvalidReason(sample, index, sampleIndexOffset = 0) {
+  if (sample?.sample_index !== index + sampleIndexOffset) return "sample_index_mismatch";
   if (!Number.isFinite(sample.send_elapsed_ms) || sample.send_elapsed_ms < 0 ||
       !Number.isFinite(sample.send_started_at_ms) ||
       !Number.isFinite(sample.send_completed_at_ms) ||
@@ -287,7 +287,7 @@ function pairedSampleInvalidReason(sample, index) {
   return null;
 }
 
-function pairedSendMetrics(measurement, expectedSamples) {
+function pairedSendMetrics(measurement, expectedSamples, sampleIndexOffset = 0) {
   const rawMetrics = { p50_ms: measurement?.p50_ms, p95_ms: measurement?.p95_ms };
   const rawEvaluation = (reason) => ({
     ...rawMetrics,
@@ -313,7 +313,8 @@ function pairedSendMetrics(measurement, expectedSamples) {
       Math.abs(rounded(percentile(raw, 95)) - measurement.p95_ms) > 0.01) {
     return rawEvaluation("raw_summary_inconsistent");
   }
-  const reasons = samples.map(pairedSampleInvalidReason);
+  const reasons = samples.map((sample, index) =>
+    pairedSampleInvalidReason(sample, index, sampleIndexOffset));
   const invalidReasons = {};
   for (const reason of reasons) {
     if (reason) invalidReasons[reason] = (invalidReasons[reason] ?? 0) + 1;
@@ -344,6 +345,34 @@ function pairedSendMetrics(measurement, expectedSamples) {
     valid_pairs: validControls.length,
     invalid_pairs: expectedSamples - validControls.length,
     invalid_reasons: invalidReasons,
+  };
+}
+
+const FIRST_SEND_COLD_ALERT_MS = 150;
+
+function firstSendRounds(measurement, expectedSamples, clients) {
+  const samples = measurement?.paired_control?.samples;
+  if (!Number.isSafeInteger(clients) || clients < 1 ||
+      !Number.isSafeInteger(expectedSamples) || expectedSamples <= clients ||
+      measurement?.paired_control?.kind !== "fake_socket_timed_ping" ||
+      !Array.isArray(samples) || samples.length !== expectedSamples ||
+      samples.some((sample, index) => sample?.sample_index !== index ||
+        pairedSampleInvalidReason(sample, index) !== null)) return null;
+  const all = samples.map((sample) => sample.send_elapsed_ms);
+  if (rounded(percentile(all, 50)) !== measurement.p50_ms ||
+      rounded(percentile(all, 95)) !== measurement.p95_ms) return null;
+  const subset = (selected) => ({
+    ...measurement,
+    p50_ms: rounded(percentile(selected.map((sample) => sample.send_elapsed_ms), 50)),
+    p95_ms: rounded(percentile(selected.map((sample) => sample.send_elapsed_ms), 95)),
+    paired_control: { ...measurement.paired_control, samples: selected },
+  });
+  return {
+    cold: subset(samples.slice(0, clients)),
+    steady: subset(samples.slice(clients)),
+    cold_max_ms: rounded(Math.max(...all.slice(0, clients))),
+    cold_samples: clients,
+    steady_samples: expectedSamples - clients,
   };
 }
 
@@ -604,6 +633,9 @@ function row(
     raw_current: metadata.raw_current,
     control_median_ms: metadata.control_median_ms,
     verdict_basis: metadata.verdict_basis,
+    sample_count: metadata.sample_count,
+    informational: metadata.informational === true,
+    alert: metadata.alert === true,
     passed,
   };
 }
@@ -641,14 +673,24 @@ export function compareBenchmark(
   const ratio = baseline.regression_ratio;
   const rows = [];
   const pairedControlEvaluation = {};
+  const firstSend = firstSendRounds(
+    result?.latency?.first_send_after_spawn?.sampled,
+    (baseline.replay.row_metadata.first_send_after_spawn.samples_per_run * expectedRounds) /
+      baseline.replay.rounds,
+    baseline.replay.clients,
+  );
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay.row_metadata[operation];
     const paired = ["first_send_after_spawn", "send_to_agent_warm"].includes(operation)
       ? pairedSendMetrics(
           operation === "first_send_after_spawn"
-            ? result?.latency?.first_send_after_spawn?.sampled
+            ? firstSend?.steady ?? result?.latency?.first_send_after_spawn?.sampled
             : result?.latency?.send_to_agent_warm,
-          (metadata.samples_per_run * expectedRounds) / baseline.replay.rounds,
+          operation === "first_send_after_spawn" && firstSend
+            ? firstSend.steady_samples
+            : (metadata.samples_per_run * expectedRounds) / baseline.replay.rounds,
+          operation === "first_send_after_spawn" && firstSend
+            ? firstSend.cold_samples : 0,
         )
       : null;
     if (paired) {
@@ -679,7 +721,9 @@ export function compareBenchmark(
           operation,
           metric,
           baseline.measurements[operation][metric],
-          paired?.verdict_basis === "adjusted" ? paired[metric] : rawCurrent,
+          operation === "first_send_after_spawn" && firstSend
+            ? paired?.verdict_basis === "adjusted" ? paired[metric] : firstSend.steady[metric]
+            : paired?.verdict_basis === "adjusted" ? paired[metric] : rawCurrent,
           performanceCeiling(
             baseline.measurements[operation][metric],
             ratio,
@@ -697,10 +741,26 @@ export function compareBenchmark(
               verdict_basis: paired.verdict_basis,
               ...(paired.verdict_basis === "adjusted" ? { raw_current: rawCurrent } : {}),
               control_median_ms: paired.control_median_ms,
+              ...(operation === "first_send_after_spawn" && firstSend
+                ? { sample_count: firstSend.steady_samples,
+                    raw_current: firstSend.steady[metric] } : {}),
             } : {}),
           },
         ),
       );
+    }
+  }
+  if (firstSend) {
+    for (const [metric, currentValue] of [
+      ["p50_ms", firstSend.cold.p50_ms],
+      ["p95_ms", firstSend.cold.p95_ms],
+      ["max_ms", firstSend.cold_max_ms],
+    ]) {
+      rows.push({ ...row("first_send_after_spawn_cold", metric, null, currentValue,
+        FIRST_SEND_COLD_ALERT_MS, "ms", current.first_send_after_spawn.transport,
+        { sampling: "round_0", sample_count: firstSend.cold_samples,
+          informational: true, alert: currentValue > FIRST_SEND_COLD_ALERT_MS,
+          margin_rule: "provisional cold alert" }), passed: true });
     }
   }
   for (const operation of baseline.replay.operations) {
@@ -867,13 +927,18 @@ export function compareBenchmark(
   if (result?.verdict !== "GREEN")
     failures.push("benchmark intrinsic gates returned RED");
   return { passed: failures.length === 0, rows, failures,
+    first_send_rounds: firstSend ? { cold_samples: firstSend.cold_samples,
+      steady_samples: firstSend.steady_samples, excluded_rounds: [0],
+      cold_alert_ms: FIRST_SEND_COLD_ALERT_MS } : null,
     paired_control_evaluation: pairedControlEvaluation };
 }
 
 export function resultWithComparison(result, comparison) {
   return {
     ...result,
-    perf_budget: { paired_control_evaluation: comparison.paired_control_evaluation },
+    perf_budget: { paired_control_evaluation: comparison.paired_control_evaluation,
+      first_send_rounds: comparison.first_send_rounds,
+      rows: comparison.rows.filter((entry) => entry.operation.startsWith("first_send_after_spawn")) },
   };
 }
 
@@ -887,7 +952,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "|---|:---:|:---:|:---:|---:|---:|---:|---:|:---:|",
   ];
   const tableRow = (entry) =>
-    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)}${entry.raw_current === undefined ? "" : ` (raw ${formatted(entry.raw_current, entry.unit)})`} | ${formatted(entry.ceiling, entry.unit)} | ${entry.passed ? "PASS" : "FAIL"} |`;
+    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)}${entry.raw_current === undefined ? "" : ` (raw ${formatted(entry.raw_current, entry.unit)})`} | ${formatted(entry.ceiling, entry.unit)} | ${entry.informational ? entry.alert ? "ALERT (info)" : "INFO" : entry.passed ? "PASS" : "FAIL"} |`;
   const changed = comparison.rows.filter(
     (entry) => !entry.passed || entry.current !== entry.baseline,
   );
