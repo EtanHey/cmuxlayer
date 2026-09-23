@@ -2495,6 +2495,20 @@ describe("tool handler integration", () => {
     const rawParsed =
       rawResult.structuredContent ?? JSON.parse(rawResult.content[0].text);
     expect(rawParsed.content).toContain("hello");
+    const parsedOnlyResult = await tool.handler(
+      { surface: "surface:1", parsed_only: true },
+      {} as any,
+    );
+    const parsedOnly = parsedOnlyResult.structuredContent ?? JSON.parse(parsedOnlyResult.content[0].text);
+    expect(parsed.snapshot_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(rawParsed.snapshot_hash).toBe(parsed.snapshot_hash);
+    expect(parsedOnly.snapshot_hash).toBe(parsed.snapshot_hash);
+    mockExec.mockResolvedValue({
+      stdout: JSON.stringify({ surface_ref: "surface:1", text: "different frame", lines: 20 }),
+      stderr: "",
+    });
+    const changedResult = await tool.handler({ surface: "surface:1", parsed_only: true }, {} as any);
+    expect(changedResult.structuredContent.snapshot_hash).not.toBe(parsed.snapshot_hash);
   });
 
   it("read_screen parses a response outside the requested eight-line preview", async () => {
