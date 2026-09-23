@@ -34,6 +34,9 @@ export const CANONICAL_OPERATIONS = [
 ];
 export const BENCHMARK_HISTORY_LIMIT = 50;
 const REQUIRED_REGRESSION_RATIO = 1.25;
+// performance.now() and setTimeout(1) can differ slightly at sub-ms resolution.
+// An early fire never creates overrun; a fire more than 2ms early is untrusted.
+const TIMER_EARLY_EPSILON_MS = 2;
 
 function finite(value, path) {
   if (!Number.isFinite(value))
@@ -242,64 +245,105 @@ function percentile(values, percentage) {
   return sorted[Math.ceil((percentage / 100) * sorted.length) - 1];
 }
 
-// Discount only fake-socket timer overrun that actually overlaps this send.
-// Connection, fake-state I/O, and timer delay after the send do not qualify.
+// Only attested timer overrun intersecting this send can lower its latency.
+function pairedSampleInvalidReason(sample, index) {
+  if (sample?.sample_index !== index) return "sample_index_mismatch";
+  if (!Number.isFinite(sample.send_elapsed_ms) || sample.send_elapsed_ms < 0 ||
+      !Number.isFinite(sample.send_started_at_ms) ||
+      !Number.isFinite(sample.send_completed_at_ms) ||
+      sample.send_completed_at_ms < sample.send_started_at_ms ||
+      Math.abs(sample.send_completed_at_ms - sample.send_started_at_ms - sample.send_elapsed_ms) > 0.01) {
+    return "send_timing_inconsistent";
+  }
+  if (sample.control_hold_ms !== 1 || sample.control_transport !== "socket") {
+    return "control_identity_invalid";
+  }
+  if (![sample.control_timer_started_at_ms, sample.control_timer_due_at_ms,
+    sample.control_timer_fired_at_ms, sample.control_timer_overrun_ms,
+    sample.control_elapsed_ms].every(Number.isFinite) ||
+    Math.abs(sample.control_timer_due_at_ms - sample.control_timer_started_at_ms - 1) > 0.000001) {
+    return "timer_timing_inconsistent";
+  }
+  if (sample.control_timer_fired_at_ms < sample.control_timer_due_at_ms - TIMER_EARLY_EPSILON_MS) {
+    return "timer_fired_too_early";
+  }
+  if (sample.control_timer_fired_at_ms < sample.control_timer_started_at_ms) {
+    return "timer_timing_inconsistent";
+  }
+  const actualOverrun = Math.max(0, sample.control_timer_fired_at_ms - sample.control_timer_due_at_ms);
+  if (sample.control_timer_overrun_ms < 0 ||
+      (actualOverrun === 0 && sample.control_timer_overrun_ms !== 0) ||
+      Math.abs(sample.control_timer_overrun_ms - actualOverrun) > 0.000001) {
+    return "timer_overrun_inconsistent";
+  }
+  const overlap = Math.max(0,
+    Math.min(sample.control_timer_fired_at_ms, sample.send_completed_at_ms) -
+    Math.max(sample.control_timer_due_at_ms, sample.send_started_at_ms));
+  if (sample.control_elapsed_ms < 0 ||
+      (overlap === 0 && sample.control_elapsed_ms !== 0) ||
+      Math.abs(sample.control_elapsed_ms - overlap) > 0.01) {
+    return "control_overlap_inconsistent";
+  }
+  return null;
+}
+
 function pairedSendMetrics(measurement, expectedSamples) {
+  const rawMetrics = { p50_ms: measurement?.p50_ms, p95_ms: measurement?.p95_ms };
+  const rawEvaluation = (reason) => ({
+    ...rawMetrics,
+    control_median_ms: null,
+    verdict_basis: "raw",
+    valid_pairs: 0,
+    invalid_pairs: expectedSamples,
+    invalid_reasons: { [reason]: expectedSamples },
+  });
   const control = measurement?.paired_control;
   const samples = control?.samples;
-  if (
-    control?.kind !== "fake_socket_timed_ping" ||
-    !Number.isFinite(measurement?.p50_ms) ||
-    !Number.isFinite(measurement?.p95_ms) ||
-    !Number.isSafeInteger(expectedSamples) ||
-    expectedSamples < 1 ||
-    !Array.isArray(samples) ||
-    samples.length !== expectedSamples ||
-    samples.some((sample, index) => {
-      if (
-        sample?.sample_index !== index ||
-        !Number.isFinite(sample.send_elapsed_ms) ||
-        sample.send_elapsed_ms < 0 ||
-        sample.control_hold_ms !== 1 ||
-        sample.control_transport !== "socket" ||
-        !Number.isFinite(sample.send_started_at_ms) ||
-        !Number.isFinite(sample.send_completed_at_ms) ||
-        !Number.isFinite(sample.control_timer_started_at_ms) ||
-        !Number.isFinite(sample.control_timer_due_at_ms) ||
-        !Number.isFinite(sample.control_timer_fired_at_ms) ||
-        !Number.isFinite(sample.control_timer_overrun_ms) ||
-        !Number.isFinite(sample.control_elapsed_ms)
-      ) return true;
-      const overlap = Math.max(0,
-        Math.min(sample.control_timer_fired_at_ms, sample.send_completed_at_ms) -
-        Math.max(sample.control_timer_due_at_ms, sample.send_started_at_ms));
-      return sample.send_completed_at_ms < sample.send_started_at_ms ||
-        Math.abs(sample.send_completed_at_ms - sample.send_started_at_ms - sample.send_elapsed_ms) > 0.05 ||
-        Math.abs(sample.control_timer_due_at_ms - sample.control_timer_started_at_ms - 1) > 0.05 ||
-        sample.control_timer_fired_at_ms < sample.control_timer_due_at_ms ||
-        Math.abs(sample.control_timer_fired_at_ms - sample.control_timer_due_at_ms - sample.control_timer_overrun_ms) > 0.05 ||
-        sample.control_elapsed_ms < 0 ||
-        Math.abs(sample.control_elapsed_ms - overlap) > 0.05;
-    })
-  ) return null;
-  const raw = samples.map((sample) => sample.send_elapsed_ms);
-  if (
-    Math.abs(rounded(percentile(raw, 50)) - measurement.p50_ms) > 0.01 ||
-    Math.abs(rounded(percentile(raw, 95)) - measurement.p95_ms) > 0.01
-  ) return null;
-  const controlMedian = percentile(
-    samples.map((sample) => sample.control_elapsed_ms),
-    50,
-  );
+  if (!Number.isSafeInteger(expectedSamples) || expectedSamples < 1) {
+    return rawEvaluation("expected_sample_count_invalid");
+  }
+  if (control?.kind !== "fake_socket_timed_ping") return rawEvaluation("control_kind_invalid");
+  if (!Array.isArray(samples) || samples.length !== expectedSamples) {
+    return rawEvaluation("sample_count_mismatch");
+  }
+  const raw = samples.map((sample) => sample?.send_elapsed_ms);
+  if (raw.some((value) => !Number.isFinite(value) || value < 0) ||
+      !Number.isFinite(measurement?.p50_ms) || !Number.isFinite(measurement?.p95_ms) ||
+      Math.abs(rounded(percentile(raw, 50)) - measurement.p50_ms) > 0.01 ||
+      Math.abs(rounded(percentile(raw, 95)) - measurement.p95_ms) > 0.01) {
+    return rawEvaluation("raw_summary_inconsistent");
+  }
+  const reasons = samples.map(pairedSampleInvalidReason);
+  const invalidReasons = {};
+  for (const reason of reasons) {
+    if (reason) invalidReasons[reason] = (invalidReasons[reason] ?? 0) + 1;
+  }
+  const validControls = samples.flatMap((sample, index) =>
+    reasons[index] ? [] : [sample.control_elapsed_ms]);
+  if (validControls.length === 0) return {
+    ...rawMetrics,
+    control_median_ms: null,
+    verdict_basis: "raw",
+    valid_pairs: 0,
+    invalid_pairs: expectedSamples,
+    invalid_reasons: invalidReasons,
+  };
+  const controlMedian = percentile(validControls, 50);
   const sendMedian = percentile(raw, 50);
-  const adjusted = samples.map((sample) => sample.send_elapsed_ms - Math.min(
-    Math.max(0, sample.control_elapsed_ms - controlMedian),
-    Math.max(0, sample.send_elapsed_ms - sendMedian),
-  ));
+  const adjusted = samples.map((sample, index) => reasons[index]
+    ? sample.send_elapsed_ms
+    : sample.send_elapsed_ms - Math.min(
+        Math.max(0, sample.control_elapsed_ms - controlMedian),
+        Math.max(0, sample.send_elapsed_ms - sendMedian),
+      ));
   return {
     p50_ms: rounded(percentile(adjusted, 50)),
     p95_ms: rounded(percentile(adjusted, 95)),
     control_median_ms: rounded(controlMedian),
+    verdict_basis: "adjusted",
+    valid_pairs: validControls.length,
+    invalid_pairs: expectedSamples - validControls.length,
+    invalid_reasons: invalidReasons,
   };
 }
 
@@ -559,6 +603,7 @@ function row(
     margin_rule: metadata.margin_rule,
     raw_current: metadata.raw_current,
     control_median_ms: metadata.control_median_ms,
+    verdict_basis: metadata.verdict_basis,
     passed,
   };
 }
@@ -595,6 +640,7 @@ export function compareBenchmark(
   const current = currentMetrics(result);
   const ratio = baseline.regression_ratio;
   const rows = [];
+  const pairedControlEvaluation = {};
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay.row_metadata[operation];
     const paired = ["first_send_after_spawn", "send_to_agent_warm"].includes(operation)
@@ -605,6 +651,15 @@ export function compareBenchmark(
           (metadata.samples_per_run * expectedRounds) / baseline.replay.rounds,
         )
       : null;
+    if (paired) {
+      pairedControlEvaluation[operation] = {
+        verdict_basis: paired.verdict_basis,
+        valid_pairs: paired.valid_pairs,
+        invalid_pairs: paired.invalid_pairs,
+        invalid_reasons: paired.invalid_reasons,
+        control_median_ms: paired.control_median_ms,
+      };
+    }
     const marginMs = operationMargin(
       baseline,
       operation,
@@ -624,7 +679,7 @@ export function compareBenchmark(
           operation,
           metric,
           baseline.measurements[operation][metric],
-          paired?.[metric] ?? rawCurrent,
+          paired?.verdict_basis === "adjusted" ? paired[metric] : rawCurrent,
           performanceCeiling(
             baseline.measurements[operation][metric],
             ratio,
@@ -639,7 +694,8 @@ export function compareBenchmark(
             margin_rule: marginRule,
             history_degraded: historyDegraded,
             ...(paired ? {
-              raw_current: rawCurrent,
+              verdict_basis: paired.verdict_basis,
+              ...(paired.verdict_basis === "adjusted" ? { raw_current: rawCurrent } : {}),
               control_median_ms: paired.control_median_ms,
             } : {}),
           },
@@ -810,7 +866,15 @@ export function compareBenchmark(
   }
   if (result?.verdict !== "GREEN")
     failures.push("benchmark intrinsic gates returned RED");
-  return { passed: failures.length === 0, rows, failures };
+  return { passed: failures.length === 0, rows, failures,
+    paired_control_evaluation: pairedControlEvaluation };
+}
+
+export function resultWithComparison(result, comparison) {
+  return {
+    ...result,
+    perf_budget: { paired_control_evaluation: comparison.paired_control_evaluation },
+  };
 }
 
 function formatted(value, unit) {
@@ -833,7 +897,15 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     `## Daemon performance budget: ${comparison.passed ? "GREEN" : "RED"}`,
     "",
     `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot or untrusted-history rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
-    "First-send and warm-agent p50/p95 may subtract only the part of a paired 1ms fake-socket timer's overrun that overlaps the measured send and exceeds the run's median overlap. Current shows the adjusted value with raw latency alongside it. Missing, stale, or malformed timer proof leaves raw latency in force.",
+    "First-send and warm-agent p50/p95 may subtract only the part of a paired 1ms fake-socket timer's overrun that overlaps the measured send and exceeds the run's median overlap. A timer firing up to 2ms early is valid zero-overrun proof. Invalid pairs use raw send latency individually. Current shows the adjusted value with raw latency alongside it when paired proof is in use.",
+    "",
+    "Paired control evaluation (verdict basis; invalid receipts retain raw latency):",
+    ...["first_send_after_spawn", "send_to_agent_warm"].map((operation) => {
+      const evaluation = comparison.paired_control_evaluation?.[operation];
+      const reasons = Object.entries(evaluation?.invalid_reasons ?? {})
+        .map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
+      return `- ${operation}: ${evaluation?.verdict_basis ?? "raw"}; ${evaluation?.valid_pairs ?? 0} valid, ${evaluation?.invalid_pairs ?? "unknown"} invalid; reasons: ${reasons}`;
+    }),
     "",
     ...tableHeader,
     ...changed.map(tableRow),
@@ -968,6 +1040,8 @@ async function main() {
     historyDegraded: historyState.degraded,
     historyDegradedReason: historyState.reason,
   });
+  await writeFile(runResult.resultPath,
+    `${JSON.stringify(resultWithComparison(runResult.result, comparison), null, 2)}\n`);
   const markdown = renderMarkdownComparison(
     baseline,
     runResult.result,

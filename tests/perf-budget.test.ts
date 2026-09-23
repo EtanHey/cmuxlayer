@@ -13,6 +13,7 @@ import {
   requireCanonicalRequestChangeReason,
   requireBaselineIncreaseReason,
   renderMarkdownComparison,
+  resultWithComparison,
   runBenchmark,
   validateBaseline,
 } from "../scripts/check-daemon-benchmark.mjs";
@@ -447,9 +448,14 @@ describe("daemon performance budget", () => {
         },
       },
     };
-    expect(compareBenchmark(baseline, malformed).rows.find((entry) =>
+    const malformedComparison = compareBenchmark(baseline, malformed);
+    expect(malformedComparison.rows.find((entry) =>
       entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
     )).toMatchObject({ current: 340, passed: false });
+    expect(malformedComparison.paired_control_evaluation.send_to_agent_warm).toMatchObject({
+      verdict_basis: "raw", valid_pairs: 0, invalid_pairs: 96,
+      invalid_reasons: { sample_count_mismatch: 96 },
+    });
 
     // A timer delayed only after send completion is not simultaneous proof.
     const postSend = pairedSamples(240, 340, 101).map((sample) =>
@@ -494,6 +500,26 @@ describe("daemon performance budget", () => {
       entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
     )).toMatchObject({ current: 340, passed: false });
 
+    const oneForged = pairedSamples(240, 340, 101);
+    oneForged[95] = { ...oneForged[95], control_timer_overrun_ms: 1 };
+    const partlyInvalid = compareBenchmark(baseline, {
+      ...candidate,
+      latency: {
+        ...candidate.latency,
+        send_to_agent_warm: {
+          ...candidate.latency.send_to_agent_warm,
+          paired_control: { kind: "fake_socket_timed_ping", samples: oneForged },
+        },
+      },
+    });
+    expect(partlyInvalid.rows.find((entry) =>
+      entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
+    )).toMatchObject({ current: 240, raw_current: 340, passed: true });
+    expect(partlyInvalid.paired_control_evaluation.send_to_agent_warm).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 95, invalid_pairs: 1,
+      invalid_reasons: { timer_overrun_inconsistent: 1 },
+    });
+
     const broadRegression = {
       ...candidate,
       latency: {
@@ -511,6 +537,66 @@ describe("daemon performance budget", () => {
     expect(compareBenchmark(baseline, broadRegression).rows.find((entry) =>
       entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
     )).toMatchObject({ current: 340, passed: false });
+  });
+
+  it("accepts early zero-overrun timer receipts from hosted artifact 10747588018", () => {
+    const hosted = JSON.parse(readFileSync(join(repoRoot, "tests/fixtures/p5-hosted-paired-10747588018.json"), "utf8"));
+    expect(hosted.source_artifact_id).toBe(10747588018);
+    expect(hosted.first.paired_control.samples.filter((sample) =>
+      sample.control_timer_fired_at_ms < sample.control_timer_due_at_ms)).toHaveLength(14);
+    expect(hosted.warm.paired_control.samples.filter((sample) =>
+      sample.control_timer_fired_at_ms < sample.control_timer_due_at_ms)).toHaveLength(37);
+    const candidate = {
+      ...result,
+      latency: {
+        ...result.latency,
+        first_send_after_spawn: {
+          ...result.latency.first_send_after_spawn,
+          sampled: { ...result.latency.first_send_after_spawn.sampled, ...hosted.first },
+        },
+        send_to_agent_warm: { ...result.latency.send_to_agent_warm, ...hosted.warm },
+      },
+    };
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.paired_control_evaluation.first_send_after_spawn).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 96, invalid_pairs: 0, invalid_reasons: {},
+    });
+    expect(comparison.paired_control_evaluation.send_to_agent_warm).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 96, invalid_pairs: 0, invalid_reasons: {},
+    });
+    const markdown = renderMarkdownComparison(baseline, candidate, comparison);
+    expect(markdown).toContain("first_send_after_spawn: adjusted; 96 valid, 0 invalid");
+    expect(markdown).toContain("send_to_agent_warm: adjusted; 96 valid, 0 invalid");
+    expect(resultWithComparison(candidate, comparison).perf_budget.paired_control_evaluation)
+      .toEqual(comparison.paired_control_evaluation);
+
+    const tooEarly = structuredClone(candidate);
+    const sample = tooEarly.latency.first_send_after_spawn.sampled.paired_control.samples[0];
+    sample.control_timer_fired_at_ms = sample.control_timer_due_at_ms - 3;
+    const rejected = compareBenchmark(baseline, tooEarly);
+    expect(rejected.paired_control_evaluation.first_send_after_spawn).toMatchObject({
+      verdict_basis: "adjusted", valid_pairs: 95, invalid_pairs: 1,
+      invalid_reasons: { timer_fired_too_early: 1 },
+    });
+    const forged = structuredClone(candidate);
+    forged.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_overrun_ms = 5;
+    expect(compareBenchmark(baseline, forged).paired_control_evaluation.first_send_after_spawn).toMatchObject({
+      valid_pairs: 95, invalid_pairs: 1,
+      invalid_reasons: { timer_overrun_inconsistent: 1 },
+    });
+    const tinyForged = structuredClone(candidate);
+    tinyForged.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_overrun_ms = 0.01;
+    expect(compareBenchmark(baseline, tinyForged).paired_control_evaluation.first_send_after_spawn)
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { timer_overrun_inconsistent: 1 } });
+    const beforeStart = structuredClone(candidate);
+    beforeStart.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_fired_at_ms =
+      beforeStart.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_timer_started_at_ms - 0.1;
+    expect(compareBenchmark(baseline, beforeStart).paired_control_evaluation.first_send_after_spawn)
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { timer_timing_inconsistent: 1 } });
+    const forgedOverlap = structuredClone(candidate);
+    forgedOverlap.latency.first_send_after_spawn.sampled.paired_control.samples[0].control_elapsed_ms = 0.01;
+    expect(compareBenchmark(baseline, forgedOverlap).paired_control_evaluation.first_send_after_spawn)
+      .toMatchObject({ valid_pairs: 95, invalid_reasons: { control_overlap_inconsistent: 1 } });
   });
 
   it("shows raw send and phase-local control timings for the slowest samples", () => {
