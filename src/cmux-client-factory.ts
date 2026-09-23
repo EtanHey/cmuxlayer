@@ -22,8 +22,6 @@ import {
 } from "./cmux-transport-self-heal.js";
 
 export interface CreateCmuxClientOptions extends SocketProbeOptions {
-  /** Environment of the MCP process that selected this cmux instance. */
-  env?: NodeJS.ProcessEnv;
   /** CLI exec function (for testing) */
   exec?: ExecFn;
   /** CLI binary name */
@@ -82,7 +80,7 @@ function instancePin(
 ): string | undefined {
   if (opts?.socketPath) return opts.socketPath;
   const fromEnv = (
-    opts?.env?.CMUX_SOCKET_PATH ?? process.env.CMUX_SOCKET_PATH ?? ""
+    (opts?.env ? opts.env.CMUX_SOCKET_PATH : process.env.CMUX_SOCKET_PATH) ?? ""
   ).trim();
   return fromEnv.length > 0 ? fromEnv : undefined;
 }
@@ -99,8 +97,9 @@ export async function createCmuxClient(
     ...opts,
     capability:
       opts?.capability ??
-      opts?.env?.CMUX_SOCKET_CAPABILITY ??
-      process.env.CMUX_SOCKET_CAPABILITY,
+      (opts?.env
+        ? opts.env.CMUX_SOCKET_CAPABILITY
+        : process.env.CMUX_SOCKET_CAPABILITY),
   };
   const logger = opts?.logger ?? console;
   const pin = instancePin(opts);
