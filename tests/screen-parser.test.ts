@@ -38,6 +38,12 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("keeps quoted chevron output in a clean Claude pane ready", () => {
+    const parsed = parseScreen("Claude Code\n» quoted output\n  bypass permissions on");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("ready");
+  });
+
   it("keeps the Codex example prompt ready after dismissing a menu", () => {
     const parsed = parseScreen(
       "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
@@ -53,6 +59,18 @@ describe("parseScreen", () => {
     );
     expect(parsed.control_state).toBe("ready");
     expect(parsed.errors).not.toContain("interactive_prompt");
+  });
+
+  it.each(["»", "›"])("marks an unsent Codex %s composer above its unindented footer dirty", (prompt) => {
+    const parsed = parseScreen(`Codex\n${prompt} Keep this draft\ngpt-5.5 xhigh · ~/Gits/cmuxlayer`);
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
+  it("keeps a Codex draft dirty above its task-suffixed model footer", () => {
+    const parsed = parseScreen("Codex\n› Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer/.worktrees/lane-a-true-state · Read lane");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
   });
 
   it("marks a multiline Claude composer draft as pending instead of ready", () => {
