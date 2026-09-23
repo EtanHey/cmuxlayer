@@ -71,6 +71,7 @@ export const SURFACE_TOPOLOGY_CLIENT_METHODS = Object.freeze(
 );
 
 export type SurfaceObserverIdProvider = () => string | null | undefined;
+export type TopologyRpcObserver = (method: string, elapsedMs: number) => void;
 
 /**
  * `undefined` means observer scoping is intentionally disabled for a legacy
@@ -215,23 +216,35 @@ export function isSurfaceObserverEpochCurrent(
 export async function enumerateAllWindowWorkspaces(
   client: Pick<SurfaceTopologyClient, "listWindows" | "listWorkspaces">,
   observerEpochProvider?: SurfaceObserverIdProvider,
-  opts: { cache?: boolean } = {},
+  opts: { cache?: boolean; onRpc?: TopologyRpcObserver } = {},
 ): Promise<AllWindowWorkspaceEnumeration> {
+  const timedRpc = async <T>(method: string, call: () => Promise<T>): Promise<T> => {
+    if (!opts.onRpc) return call();
+    const startedAt = performance.now();
+    try { return await call(); }
+    finally { opts.onRpc?.(method, Math.max(0, performance.now() - startedAt)); }
+  };
+  const sharedWait = (pending: Promise<AllWindowWorkspaceEnumeration>) => {
+    if (!opts.onRpc) return pending;
+    const startedAt = performance.now();
+    return pending.finally(() => opts.onRpc?.(
+      "listWorkspaces(shared)", Math.max(0, performance.now() - startedAt)));
+  };
   const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
   const cacheKey = client as object;
   if (observerEpoch && opts.cache !== false) {
     const callCached =
       currentWorkspaceEnumerationCallScope()?.cache.get(cacheKey);
     if (callCached?.observerEpoch === observerEpoch) {
-      return callCached.pending;
+      return sharedWait(callCached.pending);
     }
     const cached = workspaceEnumerationCache.get(cacheKey);
-    if (cached?.observerEpoch === observerEpoch) return cached.pending;
+    if (cached?.observerEpoch === observerEpoch) return sharedWait(cached.pending);
   }
 
   const enumerate = async (): Promise<AllWindowWorkspaceEnumeration> => {
     if (!client.listWindows) {
-      const listed = await client.listWorkspaces();
+      const listed = await timedRpc("listWorkspaces", () => client.listWorkspaces());
       return {
         workspaces: listed.workspaces,
         complete: Array.isArray(listed.workspaces),
@@ -239,14 +252,14 @@ export async function enumerateAllWindowWorkspaces(
       };
     }
 
-    const listedWindows = await client.listWindows();
+    const listedWindows = await timedRpc("listWindows", () => client.listWindows!());
     if (
       listedWindows == null ||
       !Object.prototype.hasOwnProperty.call(listedWindows, "windows")
     ) {
       // Legacy/test doubles may expose the optional method without supporting
       // it. Production socket clients convert method_not_found to CLI first.
-      const listed = await client.listWorkspaces();
+      const listed = await timedRpc("listWorkspaces", () => client.listWorkspaces());
       return {
         workspaces: listed.workspaces,
         complete: Array.isArray(listed.workspaces),
@@ -265,7 +278,8 @@ export async function enumerateAllWindowWorkspaces(
           return [] as CmuxWorkspace[];
         }
         try {
-          const listed = await client.listWorkspaces({ window: windowTarget });
+          const listed = await timedRpc("listWorkspaces", () =>
+            client.listWorkspaces({ window: windowTarget }));
           if (!Array.isArray(listed.workspaces)) {
             throw new Error(
               `Malformed cmux workspace enumeration for ${windowTarget}`,
@@ -337,10 +351,12 @@ export async function enumerateAllWindowWorkspaces(
 export async function enumerateAllWindowWorkspacesWithRetry(
   client: Pick<SurfaceTopologyClient, "listWindows" | "listWorkspaces">,
   observerEpochProvider?: SurfaceObserverIdProvider,
+  onRpc?: TopologyRpcObserver,
 ): Promise<AllWindowWorkspaceEnumeration> {
   const first = await enumerateAllWindowWorkspaces(
     client,
     observerEpochProvider,
+    { onRpc },
   ).catch(() => null);
   if (first?.complete) return first;
   invalidateSurfaceTopologyCallScope(client as object);
@@ -350,7 +366,7 @@ export async function enumerateAllWindowWorkspacesWithRetry(
   const retried = await enumerateAllWindowWorkspaces(
     client,
     observerEpochProvider,
-    { cache: false },
+    { cache: false, onRpc },
   );
   const completedObserverEpoch = captureSurfaceObserverEpoch(
     observerEpochProvider,
@@ -588,7 +604,14 @@ export async function collectSurfaceTopology(
   observerEpochProvider?: SurfaceObserverIdProvider,
   observerIdProvider:
     SurfaceObserverIdProvider | undefined = observerEpochProvider,
+  onRpc?: TopologyRpcObserver,
 ): Promise<SurfaceTopologySnapshot | null> {
+  const timedRpc = async <T>(method: string, call: () => Promise<T>): Promise<T> => {
+    if (!onRpc) return call();
+    const startedAt = performance.now();
+    try { return await call(); }
+    finally { onRpc?.(method, Math.max(0, performance.now() - startedAt)); }
+  };
   const observerEpoch = captureSurfaceObserverEpoch(observerEpochProvider);
   const observerId = captureSurfaceObserverEpoch(observerIdProvider);
   if (observerEpoch === null || observerId === null) {
@@ -604,6 +627,7 @@ export async function collectSurfaceTopology(
       const listed = await enumerateAllWindowWorkspacesWithRetry(
         client,
         observerEpochProvider,
+        onRpc,
       );
       workspaceEnumerationComplete = listed.complete;
       workspaceRefs = listed.workspaces.map((ws) => ws.ref);
@@ -627,7 +651,7 @@ export async function collectSurfaceTopology(
 
   for (const workspaceRef of workspaceRefs) {
     try {
-      const panes = await client.listPanes({ workspace: workspaceRef });
+      const panes = await timedRpc("listPanes", () => client.listPanes({ workspace: workspaceRef }));
       if (!Array.isArray(panes.panes)) {
         snapshot.complete = false;
         continue;
@@ -647,10 +671,10 @@ export async function collectSurfaceTopology(
       const rawGroups: CmuxPaneSurfaces[] = [];
       for (const pane of panes.panes) {
         try {
-          const group = await client.listPaneSurfaces({
+          const group = await timedRpc("listPaneSurfaces", () => client.listPaneSurfaces({
             workspace: workspaceRef,
             pane: pane.ref,
-          });
+          }));
           rawGroups.push({
             ...group,
             workspace_ref: group.workspace_ref ?? workspaceRef,
