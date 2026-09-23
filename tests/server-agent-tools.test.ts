@@ -13192,6 +13192,7 @@ codex>
       if (opts?.workspace === "workspace:bad") throw new Error("window.list timed out");
       return originalListPanes(opts);
     });
+    routeClient.client.listPanes.mockClear();
 
     const result = await registeredTestTool(server, "close_surface").handler(
       { surface: "surface:230" },
@@ -13199,6 +13200,7 @@ codex>
     );
 
     expect(result.isError).toBeFalsy();
+    expect(routeClient.client.listPanes).toHaveBeenCalledWith({ workspace: "workspace:bad" });
     expect(routeClient.client.closeSurface).toHaveBeenCalledWith(
       "surface:230",
       expect.objectContaining({ workspace: "workspace:1" }),
@@ -13477,6 +13479,8 @@ codex>
     expect(parseToolResult(result).error).not.toMatch(/surface route changed/);
     expect(parseToolResult(result)).toMatchObject({ typed: false, retry_safe: true });
     expect(routeClient.sendCalls).toEqual([]);
+    expect(routeClient.pasteCalls).toEqual([]);
+    expect(routeClient.client.sendKey).not.toHaveBeenCalled();
   });
 
   it("records managed send failures against the stable UUID instead of its mutable ref", async () => {
