@@ -19,8 +19,8 @@ import {
 } from "../src/version.js";
 
 describe("release version", () => {
-  it("reports v0.4.86 from package metadata", () => {
-    expect(readVersion()).toBe("0.4.86");
+  it("reports v0.4.87 from package metadata", () => {
+    expect(readVersion()).toBe("0.4.87");
   });
 });
 
