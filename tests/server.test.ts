@@ -4297,8 +4297,9 @@ describe("tool handler integration", () => {
       expect(promptSubmitted, JSON.stringify(parsed)).toBe(true);
       if (residue) {
         expect(parsed.ok).toBe(false);
-        expect(JSON.stringify(parsed)).toContain(residue);
-        expect(JSON.stringify(parsed)).toMatch(/composer/i);
+        expect(parsed.error_code).toBe("boot_composer_residue");
+        expect(parsed.composer_residue).toBe(residue);
+        expect(parsed.submit_dispatched).toBe(true);
       } else {
         expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
         expect(parsed.boot_prompt_submit_verified).toBe(true);
@@ -4306,7 +4307,8 @@ describe("tool handler integration", () => {
     }, 15_000);
   }
 
-  it("#801 gate-1: send_command waits for agy's slow repaint of the pasted boot payload before Return", async () => {
+  for (const paintRead of [5, 14] as const) {
+  it(`#801 gate-1: send_command on agy with the paste painted at read ${paintRead} (${paintRead === 5 ? "inside" : "after"} the observe window)`, async () => {
     // Live gate 1 (surface:947): agy rendered the paste after the 250 ms
     // observation window, so Return was never pressed (pending_verify).
     const promptPath = join(CHANNEL_TEST_DIR, "agy-slow-boot.md");
@@ -4326,7 +4328,9 @@ describe("tool handler integration", () => {
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         if (promptSent) readsSinceSend += 1;
-        const rendered = promptSent && readsSinceSend >= 5;
+        // Read 14 is the first read after the agy observe window (13 reads at
+        // 250 ms over 3000 ms): the reviewer's F2 probe.
+        const rendered = promptSent && readsSinceSend >= paintRead;
         const text = promptSubmitted
           ? [...banner, rule, "> boot prompt", "", "  Done.", "", rule, ">", rule, footer]
           : [...banner, rule, rendered ? "> boot prompt" : ">", rule, rendered ? "                                                  Gemini 3.1 Pro · high" : footer];
@@ -4361,10 +4365,19 @@ describe("tool handler integration", () => {
     );
 
     const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(promptSubmitted, JSON.stringify(parsed.boot_prompt_receipt)).toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    if (paintRead === 5) {
+      expect(promptSubmitted, JSON.stringify(parsed.boot_prompt_receipt)).toBe(true);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.boot_prompt_submit_verified).toBe(true);
+    } else {
+      // Review F2: Return was never pressed, so this is pending_verify, never a
+      // "was submitted but left residue" claim about an unsubmitted payload.
+      expect(promptSubmitted).toBe(false);
+      expect(JSON.stringify(parsed)).not.toMatch(/left residue|boot_composer_residue/);
+      expect(parsed.boot_prompt_receipt?.submit_dispatched).toBe(false);
+    }
   }, 20_000);
+  }
 
   it("send_command verifies a cleared stable Claude boot prompt without a working marker", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "slow-claude.md");
@@ -5020,10 +5033,9 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     // Two readiness matches, launch-command preflight, boot-prompt preflight,
-    // complete composer observation, post-submit verification, then the
-    // gemini composer-residue read (#801).
+    // complete composer observation, then post-submit verification.
     expect(readsWhenBootPromptSent).toBe(4);
-    expect(reads).toBe(8);
+    expect(reads).toBe(7);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),

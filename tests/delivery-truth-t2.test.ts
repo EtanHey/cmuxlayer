@@ -2233,6 +2233,32 @@ describe("boot-submit readiness and attributable evidence", () => {
       .toBe(`${brief} ; ${pointer}`);
   });
 
+  it("#801 review F7: send_to's draft gates read an Antigravity composer", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const rule = "─".repeat(60);
+    const agy = (composer: string[], footerLeft = "") => [
+      "      ▄▀▀▄        Antigravity CLI 1.2.10",
+      "    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)",
+      "",
+      rule,
+      ...composer,
+      rule,
+      `${footerLeft.padEnd(50)}Gemini 3.1 Pro · high`,
+    ].join("\n");
+    const empty = agy([">"], "? for shortcuts");
+    const foreign = agy([">", "  someone else's unsent draft"]);
+    const mine = agy(["> relay this to the lead"]);
+    const gate = __submitEvidenceTestHooks.composerHoldsForeignDraft;
+    // default (non-exact) gate used by send_to
+    expect(gate(empty, "relay this to the lead")).toBe(false);
+    expect(gate(foreign, "relay this to the lead")).toBe(true);
+    expect(gate(mine, "relay this to the lead")).toBe(false);
+    // exact gate
+    expect(gate(empty, "", { exact: true })).toBe(false);
+    expect(gate(foreign, "relay this to the lead", { exact: true })).toBe(true);
+    expect(gate(mine, "relay this to the lead", { exact: true })).toBe(false);
+  });
+
   it("#801 keeps a Gemini (Antigravity) brief and contract pointer in one submit", async () => {
     // agy submits at a paragraph break like Claude: on surface:918 the brief ran
     // and the pointer sat unsent in the composer for the whole run.

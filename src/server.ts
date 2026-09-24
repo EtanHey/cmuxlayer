@@ -70,6 +70,7 @@ import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
   COORDINATION_CONTRACT_POINTER_NOT_VERIFIED,
   COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE,
+  COORDINATION_CONTRACT_SKIPPED_STERILE_NO_FILE,
   COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
@@ -1802,12 +1803,17 @@ class BootPromptDeliveryError extends Error {
 
 /** #801: a submitted boot prompt left text behind in the composer. */
 class BootComposerResidueError extends BootPromptDeliveryError {
+  readonly error_code = "boot_composer_residue";
+
   constructor(
     message: string,
     delivered_chars: number,
     readonly composer_residue: string,
+    evidence: DeliveryErrorEvidence,
+    /** The part before the residue was submitted and verified. */
+    readonly submit_verified: boolean,
   ) {
-    super(message, delivered_chars);
+    super(message, delivered_chars, undefined, evidence);
     this.name = "BootComposerResidueError";
   }
 }
@@ -3479,6 +3485,15 @@ function composerHoldsForeignDraft(
   if (options?.exact) {
     const region = extractComposerInputRegion(screenText, submittedText, options.cli);
     return region !== null && region !== normalizeTerminalText(submittedText).trimEnd();
+  }
+  // Antigravity has no prompt prefix (a bare `>` under a rule), so the prefix
+  // reader sees nothing; read its composer structurally (#809 review F7).
+  if (isAntigravityScreen(normalizeTerminalText(screenText))) {
+    const compactAgyDraft = (antigravityComposerDraft(normalizeTerminalText(screenText)) ?? "")
+      .replace(/\s+/g, "");
+    if (!compactAgyDraft) return false;
+    const compactAgyPayload = submittedText.replace(/\s+/g, "");
+    return compactAgyPayload.length === 0 || !compactAgyPayload.includes(compactAgyDraft);
   }
   if (promptLine === null || !promptLine.trim()) return false;
   // An empty first line may be a placeholder followed by real draft text.
@@ -8824,11 +8839,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stableSurfaceIdentity: opts.stableSurfaceIdentity,
         },
       );
-      await rejectBootComposerResidue(
-        readiness.cli,
-        deliveryRoute,
-        chunks.reduce((sum, chunk) => sum + chunk.length, 0),
-      );
+      // Review F2 on #809: only a dispatched Return can leave residue; an
+      // unsubmitted payload stays a pending_verify receipt.
+      if (delivery.submit_dispatched === true) {
+        await rejectBootComposerResidue(
+          readiness.cli,
+          deliveryRoute,
+          chunks.reduce((sum, chunk) => sum + chunk.length, 0),
+          delivery,
+        );
+      }
       return fingerprintPromptReceipt({
         ...delivery,
         prompt_warning: promptWarning,
@@ -8919,6 +8939,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     cli: CliType,
     route: { surface: string; workspace?: string },
     deliveredChars: number,
+    delivery: {
+      rpc_methods: DeliveryRpcMethod[];
+      submit_verified?: boolean | null;
+    },
   ): Promise<void> => {
     if (cli !== "gemini") return;
     let previous: string | null = null;
@@ -8935,6 +8959,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "It was NOT sent; the agent never saw it (#801).",
           deliveredChars,
           draft,
+          {
+            rpc_methods: [...delivery.rpc_methods],
+            typed: true,
+            submit_dispatched: true,
+          },
+          delivery.submit_verified === true,
         );
       }
       previous = draft;
@@ -11965,6 +11995,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             error_code: e.error_code,
             last_10_lines: e.last_10_lines,
             recovery: e.recovery,
+          });
+        }
+        if (e instanceof BootComposerResidueError) {
+          return err(e, {
+            delivered_chars: e.delivered_chars,
+            error_code: e.error_code,
+            composer_residue: e.composer_residue,
+            typed: e.typed,
+            submit_dispatched: e.submit_dispatched,
+            rpc_methods: e.rpc_methods,
           });
         }
         if (e instanceof BootPromptDeliveryError) {
@@ -16376,7 +16416,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           result.contract_path = bootContract.contract_path ?? undefined;
           result.coordination_footer_delivered = false;
           result.coordination_footer_note = skipContractPointer
-            ? COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE
+            ? bootContract.contract_path
+              ? COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE
+              : COORDINATION_CONTRACT_SKIPPED_STERILE_NO_FILE
             : bootContract.contract_path
               ? COORDINATION_CONTRACT_POINTER_NOT_VERIFIED
               : COORDINATION_FOOTER_NOT_DELIVERED;
@@ -16520,17 +16562,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 result.surface_id,
               );
               const agentId = record?.agent_id ?? result.agent_id;
-              const updated = stateMgr.updateRecord(agentId, {
-                // A readiness timeout happens before delivery. Preserve the
-                // pending marker so a later idle CLI cannot be mistaken for a
-                // successfully tasked agent by the lifecycle sweep.
-                boot_prompt_pending:
-                  e instanceof BootPromptTimeoutError ||
-                  e instanceof BootPromptDeliveryError,
-                prompt_delivered: false,
-                submit_verified:
-                  e instanceof BootPromptDeliveryError ? false : null,
-              });
+              const updated = stateMgr.updateRecord(
+                agentId,
+                e instanceof BootComposerResidueError
+                  ? {
+                    // The brief itself was submitted and is running; only the
+                    // residue was left behind (#801 review F1).
+                    boot_prompt_pending: false,
+                    prompt_delivered: true,
+                    submit_verified: e.submit_verified,
+                  }
+                  : {
+                    // A readiness timeout happens before delivery. Preserve the
+                    // pending marker so a later idle CLI cannot be mistaken for a
+                    // successfully tasked agent by the lifecycle sweep.
+                    boot_prompt_pending:
+                      e instanceof BootPromptTimeoutError ||
+                      e instanceof BootPromptDeliveryError,
+                    prompt_delivered: false,
+                    submit_verified:
+                      e instanceof BootPromptDeliveryError ? false : null,
+                  },
+              );
               registry.set(agentId, updated);
               result.agent_id = updated.agent_id;
               return updated;
@@ -16585,6 +16638,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 error_code: e.error_code,
                 last_10_lines: e.last_10_lines,
                 recovery: e.recovery,
+              });
+            }
+            if (e instanceof BootComposerResidueError) {
+              await refreshManagedMetadataBestEffort(result.agent_id);
+              await lifecycleSeatManifestPublisher({ agentId: result.agent_id });
+              return err(e, {
+                ...extra,
+                error_code: e.error_code,
+                composer_residue: e.composer_residue,
+                delivered_chars: e.delivered_chars,
+                typed: e.typed,
+                submit_dispatched: e.submit_dispatched,
+                rpc_methods: e.rpc_methods,
+                boot_prompt_submit_verified: e.submit_verified,
+                report_path: result.report_path,
+                done_marker: result.done_marker,
+                contract_path: result.contract_path,
+                next_action:
+                  "Return WAS dispatched: the brief was submitted and the agent is working on it, " +
+                  "but the text in composer_residue stayed unsent in its composer. Do not re-spawn. " +
+                  "If the residue is the contract pointer, relay contract_path, report_path and done_marker " +
+                  "to the agent yourself; otherwise send the residue with send_to once the draft is cleared.",
               });
             }
             if (e instanceof BootPromptDeliveryError) {

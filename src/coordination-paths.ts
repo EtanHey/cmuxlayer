@@ -358,7 +358,11 @@ export const COORDINATION_CONTRACT_POINTER_NOT_VERIFIED =
  * written, so the receipt keeps report_path/done_marker for the LEAD.
  */
 export const COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE =
-  "skipped_sterile_profile: mcp_profile sterile skips the contract pointer (#782), so nothing but the caller's brief was typed. The contract file at contract_path, report_path and done_marker are still issued; the LEAD relays whatever the worker needs.";
+  "skipped_sterile_profile: mcp_profile sterile skips the contract pointer (#782), so nothing but the caller's brief was typed. The contract file at contract_path, report_path and done_marker are still issued, and the parent's report watch on report_path stays armed; the LEAD relays whatever the worker needs.";
+
+/** Sterile skip when no contract file exists (inline mode or a failed write). */
+export const COORDINATION_CONTRACT_SKIPPED_STERILE_NO_FILE =
+  "skipped_sterile_profile: mcp_profile sterile skips the boot contract (#782), so nothing but the caller's brief was typed. No contract file was written (inline contract mode or a write failure); report_path and done_marker are still issued, and the parent's report watch on report_path stays armed; the LEAD relays them.";
 
 /**
  * Resume provenance (#462 item 2). The contract file is refreshed on resume --
