@@ -1,6 +1,5 @@
 node_modules/
 dist/
-bun.lock
 docs.local/
 
 # Local MCP config — may contain secrets (cyberMaster H4 2026-04-23)
