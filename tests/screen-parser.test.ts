@@ -46,6 +46,15 @@ describe("parseScreen", () => {
     expect(parsed.status).not.toBe("draft_pending");
   });
 
+  it("ignores a stale Codex update menu above the recovered example prompt", () => {
+    const priorMenu = readFixture("painpoints/codex-update-menu.txt");
+    const parsed = parseScreen(
+      `${priorMenu}\ngpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename`,
+    );
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+  });
+
   it("marks a multiline Claude composer draft as pending instead of ready", () => {
     const parsed = parseScreen(
       "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
