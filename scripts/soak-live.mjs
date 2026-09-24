@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
-  checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt, checkSoakSession, checkStateAgreement,
+  checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkPrematureIdle, checkReceipt, checkSoakSession, checkStateAgreement,
   checkReplyVisibility, checkSpawnIdentity, checkToolFailure, checkStopWait, healthSampleEntry, replyMarkerEvidence,
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
@@ -183,20 +183,31 @@ async function main() {
     check("parsed_read_agreement", parityFailures,
       { cycle, agent_id: agentId, surface });
     if (listed.ok && screen.ok) {
+      log({ kind: "state_agreement_evidence", cycle, agent_id: agentId,
+        registry_state: row.state ?? null, screen_status: screen.parsed?.status ?? null,
+        control_state: screen.parsed?.control_state ?? null });
       check("registry_presence", row.agent_id === agentId ? [] : ["agent_missing_from_registry"],
         { cycle, agent_id: agentId });
-      check("state_agreement", checkStateAgreement(row, screen.parsed), { cycle, agent_id: agentId });
+      check("state_agreement", checkStateAgreement(row, screen.parsed),
+        { cycle, agent_id: agentId, registry_state: row.state });
       check("placement", checkPlacement(screen), { cycle, agent_id: agentId });
     } else check("observation", ["observation_failed"], { cycle, agent_id: agentId });
     inboxCheck(cycle);
     return screen;
   };
-  const readReply = async (cycle, agentId, surface, marker) => {
+  const readReply = async (cycle, agentId, surface, marker, waited) => {
     let screen;
+    let firstObservation = true;
     const deadline = Date.now() + opts.timeoutMs;
     do {
       screen = await observe(cycle, agentId, surface);
       const fullEvidence = replyMarkerEvidence(screen, marker);
+      if (firstObservation) {
+        check("no_false_idle", checkPrematureIdle(waited, screen, fullEvidence),
+          { cycle, agent_id: agentId, marker, wait_state: waited?.state,
+            screen_status: screen.parsed?.status, control_state: screen.parsed?.control_state });
+        firstObservation = false;
+      }
       log({ kind: "reply_evidence", cycle, agent_id: agentId, marker, read: "full", ...fullEvidence });
       if (fullEvidence.found) {
         check("reply_visible", checkReplyVisibility(screen, marker, fullEvidence),
@@ -288,7 +299,7 @@ async function main() {
         target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
       const waitFailures = checkStopWait(waited);
       check("wait_for", waitFailures, { cycle, agent_id: seat.agentId });
-      const landed = await readReply(cycle, seat.agentId, seat.surface, marker);
+      const landed = await readReply(cycle, seat.agentId, seat.surface, marker, waited);
       check("spawn_receipt_after_reply", checkReceipt(seat.spawn.boot_prompt_receipt ?? {
         submit_verified: seat.spawn.boot_prompt_submit_verified }, landed), { cycle, agent_id: seat.agentId });
       if (waitFailures.length || !landed) {
@@ -346,7 +357,7 @@ async function main() {
         const waited = await call("wait_for", { agent_id: agentId,
           target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
         check("wait_for", checkStopWait(waited), { cycle, agent_id: agentId });
-        const landed = await readReply(cycle, agentId, surface, first);
+        const landed = await readReply(cycle, agentId, surface, first, waited);
         check("send_receipt_after_reply", checkReceipt(send, landed), { cycle, agent_id: agentId });
         if (!send.ok || !landed || checkStopWait(waited).length) {
           check("pool_seat", ["pool_seat_died"], { cycle, slot: assignment.slot, agent_id: agentId });
@@ -362,7 +373,7 @@ async function main() {
       const firstWait = await call("wait_for", { agent_id: agentId,
         target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
       check("wait_for", checkStopWait(firstWait), { cycle, agent_id: agentId });
-      const firstLanded = await readReply(cycle, agentId, surface, first);
+      const firstLanded = await readReply(cycle, agentId, surface, first, firstWait);
       check("spawn_receipt_after_reply", checkReceipt(seat.spawn.boot_prompt_receipt ?? {
         submit_verified: seat.spawn.boot_prompt_submit_verified }, firstLanded), { cycle, agent_id: agentId });
       const send = await call("send_to", { mode: "agent", agent_id: agentId,
@@ -372,7 +383,7 @@ async function main() {
       const secondWait = await call("wait_for", { agent_id: agentId,
         target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
       check("wait_for", checkStopWait(secondWait), { cycle, agent_id: agentId });
-      const secondLanded = await readReply(cycle, agentId, surface, second);
+      const secondLanded = await readReply(cycle, agentId, surface, second, secondWait);
       check("send_receipt_after_reply", checkReceipt(send, secondLanded), { cycle, agent_id: agentId });
     } catch (error) {
       check("cycle_exception", ["cycle_exception"], { cycle, error: String(error) });

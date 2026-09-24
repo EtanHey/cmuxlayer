@@ -58,6 +58,14 @@ export function checkStopWait(result) {
     isExpectedStopCompletion(value) ? [] : ["wait_failed"];
 }
 
+export function checkPrematureIdle(waitResult, nextScreen, replyEvidence) {
+  const wait = record(waitResult);
+  const parsed = record(record(nextScreen).parsed);
+  const busy = ["working", "thinking"].includes(parsed.status) || parsed.control_state === "busy";
+  return wait.matched === true && ["idle", "ready"].includes(wait.state) &&
+    busy && record(replyEvidence).found !== true ? ["premature_idle"] : [];
+}
+
 export function checkToolFailure(result, opts = {}) {
   const value = record(result);
   if (opts.acceptTerminalDone === true && isExpectedStopCompletion(value)) return [];

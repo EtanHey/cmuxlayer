@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseScreen } from "../src/screen-parser.js";
 import { checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkReceipt,
-  checkReplyVisibility, checkSpawnIdentity, checkStateAgreement,
+  checkPrematureIdle, checkReplyVisibility, checkSpawnIdentity, checkStateAgreement,
   checkSoakSession, checkStopWait, checkToolFailure, hasReplyMarker, healthSampleEntry, nextSoakDelayMs,
   replyMarkerEvidence, shouldContinueSoak } from "../scripts/soak-live-checks.mjs";
 
@@ -14,6 +14,17 @@ const healthyTimeline = (elapsedMs: number) => [
 ];
 
 describe("live soak invariant checkers", () => {
+  it("flags a matched idle wait when the next observation is busy without a reply", () => {
+    const wait = { ok: true, matched: true, state: "idle" };
+    const busy = { parsed: { status: "working", control_state: "busy" } };
+    expect(checkPrematureIdle(wait, busy, { found: false })).toEqual(["premature_idle"]);
+    expect(checkPrematureIdle(wait, busy, { found: true })).toEqual([]);
+    expect(checkPrematureIdle({ ...wait, matched: false }, busy, { found: false })).toEqual([]);
+    expect(checkPrematureIdle({ ...wait, state: "done" }, busy, { found: false })).toEqual([]);
+    expect(checkPrematureIdle(wait, { parsed: { status: "idle", control_state: "ready" } },
+      { found: false })).toEqual([]);
+  });
+
   it("rejects a pending boot or send receipt even when the response landed", () => {
     expect(checkReceipt({ submit_verified: null, delivery_state: "pending_verify" }, true)).toContain("landed_with_unverified_receipt");
     expect(checkReceipt({ submit_verified: true, delivery_state: "submitted" }, true)).toEqual([]);
