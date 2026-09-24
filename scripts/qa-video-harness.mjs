@@ -54,6 +54,10 @@ const DEFAULTS = {
   serverArgs: [],
   skipPreflight: false,
   keepWindow: false,
+  run9BootCount: 0,
+  run9Label: "",
+  run9Version: "",
+  finalOutput: "",
 };
 
 function usage() {
@@ -76,6 +80,10 @@ Options:
   --server-arg <arg>        Repeatable MCP server arg
   --skip-preflight          Skip the recorder self-test before a full run (NOT recommended)
   --keep-window             Leave the isolated window open for inspection
+  --run9-boot-count <n>     Run the Run 9 fresh-boot clip probe n times
+  --run9-label <label>      Clip label shown in the probe window (BEFORE/AFTER)
+  --run9-version <version>  Runtime version shown in the probe window
+  --final-output <path>     Transcode video.mov to this H.264 MP4 before exit
   --help
 `);
 }
@@ -132,6 +140,18 @@ export function parseArgs(argv) {
       case "--keep-window":
         options.keepWindow = true;
         break;
+      case "--run9-boot-count":
+        options.run9BootCount = Number(argv[++index]);
+        break;
+      case "--run9-label":
+        options.run9Label = argv[++index];
+        break;
+      case "--run9-version":
+        options.run9Version = argv[++index];
+        break;
+      case "--final-output":
+        options.finalOutput = resolve(argv[++index]);
+        break;
       default:
         throw new Error(`Unknown argument: ${arg}`);
     }
@@ -148,6 +168,12 @@ export function parseArgs(argv) {
     if (!Number.isSafeInteger(options[key]) || options[key] <= 0) {
       throw new Error(`--${key} must be a positive integer`);
     }
+  }
+  if (!Number.isSafeInteger(options.run9BootCount) || options.run9BootCount < 0) {
+    throw new Error("--run9-boot-count must be a non-negative integer");
+  }
+  if (options.run9BootCount > 0 && (!options.run9Label || !options.run9Version)) {
+    throw new Error("Run 9 probes require --run9-label and --run9-version");
   }
   if (!["claude", "codex", "cursor", "gemini", "kiro"].includes(options.cli)) {
     throw new Error("--cli must be one of: claude, codex, cursor, gemini, kiro");
@@ -959,6 +985,12 @@ async function createProbeWindow(runId) {
   const listing = await cmux(["workspace", "list", "--window", windowId, "--json"], { json: true });
   const workspace = listing.workspaces?.[0];
   if (!workspace?.ref) throw new Error("probe window has no workspace");
+  const surfaces = await cmux(
+    ["list-pane-surfaces", "--workspace", workspace.ref, "--window", windowId, "--json"],
+    { json: true },
+  );
+  const baseSurfaceRef = surfaces.surfaces?.[0]?.ref ?? null;
+  if (!baseSurfaceRef) throw new Error("probe window has no base terminal surface");
   // The title is the harness's only handle on this window from outside cmux, so
   // it has to be unique and it has to be set on the window itself, not just the
   // workspace (System Events reads the window title).
@@ -972,6 +1004,7 @@ async function createProbeWindow(runId) {
     windowId,
     windowRef: listing.window_ref ?? null,
     workspaceRef: workspace.ref,
+    baseSurfaceRef,
     title,
     preExisting: before,
   };
@@ -1013,7 +1046,76 @@ const BUSY_PROMPT =
   "Do exactly this and nothing else: count slowly from 1 to 60, printing one number per line, waiting about two seconds between each line. Do not stop early.";
 const FAST_PROMPT = "Reply with the single word ACKNOWLEDGED and then stop. Do nothing else.";
 
+async function printRun9Banner(probeWindow, lines) {
+  const escaped = lines.map((line) => String(line).replaceAll("'", "'\\''"));
+  const command = `clear; printf '%s\\n' ${escaped.map((line) => `'${line}'`).join(" ")}`;
+  await cmux(["send", "--surface", probeWindow.baseSurfaceRef, `${command}\n`]);
+}
+
+async function runRun9BootProbes({ client, log, options, probeWindow }) {
+  const label = options.run9Label.toUpperCase();
+  const health = await log.enterStep({ id: "run9-health", title: "record runtime health", issues: ["D137"] });
+  await log.call(health, client, "control_health", { detail: "terse" }, { timeoutMs: 60_000, mark: "health" });
+
+  for (let index = 1; index <= options.run9BootCount; index += 1) {
+    await printRun9Banner(probeWindow, [
+      `RUN 9 ${label} · cmuxlayer ${options.run9Version}`,
+      `FRESH LUNA BOOT ${index}/${options.run9BootCount}`,
+      label === "BEFORE" ? "WATCH FOR THE STRAY EMPTY COMPOSER LINE" : "PROMPT MUST START ON COMPOSER LINE 1",
+    ]);
+    await sleep(1_000);
+    const step = await log.enterStep({
+      id: `run9-${label.toLowerCase()}-boot-${index}`,
+      title: `Run 9 ${label} fresh boot ${index}/${options.run9BootCount}`,
+      issues: ["D137"],
+    });
+    const spawn = await log.call(step, client, "spawn_agent", {
+      repo: "cmuxlayer",
+      cli: "codex",
+      role: "worker",
+      authority: "worker",
+      placement: "right",
+      workspace: probeWindow.workspaceRef,
+      model: "gpt-5.6-luna",
+      effort: "low",
+      focus: false,
+      force_new: true,
+      auto_archive_on_done: false,
+      title: `run9-${label.toLowerCase()}-${index}-of-${options.run9BootCount}`,
+      prompt: `RUN9 ${label} BOOT ${index}/${options.run9BootCount}. Reply only READY.`,
+    }, { timeoutMs: options.agentReadyTimeoutMs, mark: "spawn" });
+    const agentId = agentIdOf(spawn);
+    const surfaceId = surfaceIdOf(spawn);
+    step.context = { agentId, surfaceId, model: "gpt-5.6-luna", effort: "low" };
+    await sleep(3_000);
+    await log.mark(step, "visible");
+    if (surfaceId) {
+      await log.call(step, client, "read_screen", {
+        surface: surfaceId,
+        workspace: probeWindow.workspaceRef,
+        lines: 50,
+        raw: true,
+        scrollback: true,
+      }, { timeoutMs: 60_000, mark: "screen" });
+    }
+    await sleep(2_000);
+    if (agentId) {
+      await log.call(step, client, "close_surface", {
+        scope: "agent",
+        agent_id: agentId,
+        workspace: probeWindow.workspaceRef,
+        force: true,
+      }, { timeoutMs: 60_000, mark: "close" });
+    }
+    await sleep(1_000);
+  }
+}
+
 async function runFullProbes({ client, log, options, probeWindow }) {
+  if (options.run9BootCount > 0) {
+    await runRun9BootProbes({ client, log, options, probeWindow });
+    return;
+  }
   const spec = (id) => PROBE_SPECS.find((entry) => entry.id === id);
 
   // --- Agent A: the busy agent used by probes 1, 4 and 5. ---
@@ -1429,6 +1531,18 @@ async function main() {
   }
 
   const result = await runOnce(options, { runId: baseRunId, root: baseRoot });
+  if (options.finalOutput) {
+    await mkdir(dirname(options.finalOutput), { recursive: true });
+    await execFileAsync("ffmpeg", [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-i", join(result.root, "video.mov"),
+      "-vf", "scale='min(1280,iw)':-2",
+      "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an",
+      options.finalOutput,
+    ]);
+    process.stdout.write(`[qa-video] final mp4: ${options.finalOutput}\n`);
+  }
   const prunedRuns = options.root
     ? []
     : await pruneRunDirectories(join(REPO_ROOT, "results", "qa-video"), {
