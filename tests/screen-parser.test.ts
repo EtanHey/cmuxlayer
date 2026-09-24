@@ -82,6 +82,47 @@ describe("parseScreen", () => {
     expect(parsed.response).toBeNull();
   });
 
+  it("reads a Claude reply beginning with a tool verb as prose", () => {
+    const parsed = parseScreen("Claude Code\n⏺ Read the report: all checks passed.\n❯");
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.response).toBe("Read the report: all checks passed.");
+    expect(parsed.current_action).toBeNull();
+  });
+
+  it.each([
+    "Summary (short): The probe finished",
+    "Read (the report) before closing this turn",
+  ])("keeps Claude prose with a spaced parenthesis as a reply: %s", (reply) => {
+    const parsed = parseScreen(`Claude Code\n⏺ ${reply}\n❯`);
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.response).toBe(reply);
+    expect(parsed.current_action).toBeNull();
+  });
+
+  it("drops token usage chrome after a Claude ready reply", () => {
+    const parsed = parseScreen("Claude Code\n⏺ Answer complete\nToken usage: total=42\n❯");
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.response).toBe("Answer complete");
+  });
+
+  it("keeps a completed Claude Read call out of the reply", () => {
+    const parsed = parseScreen("Claude Code\n⏺ Read(/tmp/report.txt)\n  ⎿  tool output only\n❯");
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.response).toBeNull();
+  });
+
+  it("keeps a Claude path activity line classified as work", () => {
+    const parsed = parseScreen("Claude Code\n⏺ Reading /tmp/report.txt");
+
+    expect(parsed.status).toBe("working");
+    expect(parsed.current_action).toBe("Reading /tmp/report.txt");
+    expect(parsed.response).toBeNull();
+  });
+
   it("does not present an unlisted MCP call and its output as a Claude reply", () => {
     const parsed = parseScreen(`Claude Code
 ⏺ mcp__server__lookup({"key":"probe"})
