@@ -612,6 +612,27 @@ describe("daemon performance budget", () => {
       entry.metric === "p95_ms")).toMatchObject({ passed: false, sample_count: 88 });
   });
 
+  it("fails a hosted warm-send run shifted +60ms on every sample", () => {
+    const hosted = JSON.parse(readFileSync(join(repoRoot, "tests/fixtures/p5-hosted-paired-10747588018.json"), "utf8"));
+    const warmRows = (warm: typeof hosted.warm) => compareBenchmark(hostedBaseline, {
+      ...result,
+      latency: { ...result.latency, send_to_agent_warm: { ...result.latency.send_to_agent_warm, ...warm } },
+    }).rows.filter((entry) => entry.operation === "send_to_agent_warm" && entry.metric !== "request_bytes");
+    expect(warmRows(hosted.warm).every((entry) => entry.passed)).toBe(true);
+
+    const shifted = structuredClone(hosted.warm);
+    for (const sample of shifted.paired_control.samples) {
+      sample.send_elapsed_ms += 60;
+      sample.send_completed_at_ms += 60;
+    }
+    const elapsed = shifted.paired_control.samples.map((sample: { send_elapsed_ms: number }) =>
+      sample.send_elapsed_ms).sort((a: number, b: number) => a - b);
+    shifted.p50_ms = Math.round(elapsed[Math.ceil(elapsed.length * 0.5) - 1] * 100) / 100;
+    shifted.p95_ms = Math.round(elapsed[Math.ceil(elapsed.length * 0.95) - 1] * 100) / 100;
+    expect(warmRows(shifted).find((entry) => entry.metric === "p50_ms"))
+      .toMatchObject({ current: 159.23, ceiling: 151.92, passed: false });
+  });
+
   it("reports a cold-start alert without turning it into a blocking verdict", () => {
     const hosted = structuredClone(p6Hosted.fail_747.sampled);
     const cold = hosted.paired_control.samples[0];
