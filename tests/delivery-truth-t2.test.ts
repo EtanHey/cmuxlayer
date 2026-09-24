@@ -445,6 +445,13 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "Reply exactly SOAK2_1 then stop.", press_enter: true }, {}));
       expect(result.ok, JSON.stringify(result)).toBe(true);
       expect(submitted).toEqual([pointer, "Reply exactly SOAK2_1 then stop."]);
+      // A completed boot no longer owns another copy of this deterministic
+      // pointer, even if the composer text happens to match it exactly.
+      composer = pointer;
+      exec.mockClear();
+      const completed = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: true }, {}));
+      expect(completed.error_code, JSON.stringify({ completed, submitted })).toBe("blocked_by_foreign_draft");
+      expect(submitted).toHaveLength(2);
       composer = `${pointer} human edit`;
       const changed = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "next", press_enter: true }, {}));
       expect(changed.error_code).toBe("blocked_by_foreign_draft");
