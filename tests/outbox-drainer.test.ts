@@ -93,8 +93,8 @@ describe("parseOutboxEntries", () => {
 });
 
 describe("default paths", () => {
-  it("outbox lives in ~/.golems-zikaron/outbox.md", () => {
-    expect(defaultOutboxPath()).toMatch(/\.golems-zikaron\/outbox\.md$/);
+  it("outbox lives in the fleet coordination dir (generic default under test)", () => {
+    expect(defaultOutboxPath()).toMatch(/\.local\/state\/cmuxlayer\/outbox\.md$/);
   });
   it("state sidecar sits next to the outbox file", () => {
     expect(defaultStatePath("/x/y/outbox.md")).toBe(

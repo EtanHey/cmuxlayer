@@ -17,6 +17,16 @@ process.env.CMUXLAYER_SEAT_REGISTRY_PATH = join(
   "no-seat-registry-on-this-machine.yaml",
 );
 
+// AIDEV-NOTE: same rule for the fleet config (~/.config/cmuxlayer/fleet.json):
+// a test must never inherit the host fleet's coordination dir, notify URL, or
+// doctor checks. Pin an empty config: generic defaults, legacy guard quiet.
+process.env.CMUXLAYER_FLEET_CONFIG = join(
+  __dirname,
+  "fixtures",
+  "fleet",
+  "generic-fleet.json",
+);
+
 // AIDEV-NOTE: 63 test files build fixtures at a FIXED name under os.tmpdir()
 // (`cmux-agents-test-engine`, `cmux-agents-test-registry`, …) and rmSync that
 // path in afterEach. Two suite runs on one machine — two worktrees, or a fleet

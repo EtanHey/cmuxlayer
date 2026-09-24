@@ -73,6 +73,10 @@ import {
   type DaemonSocketProbe,
 } from "./daemon-lifecycle-state.js";
 import { loadCmuxlayerConfigFile } from "./config-file.js";
+import {
+  legacyCoordinationWarning,
+  loadFleetConfig,
+} from "./fleet-config.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
@@ -1366,6 +1370,9 @@ export async function runDaemon(
     process.env.CMUXLAYER_INBOX_BASE_DIR?.trim() || undefined;
   const testProcess =
     process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const fleet = loadFleetConfig();
+  const legacyWarning = testProcess ? null : legacyCoordinationWarning(fleet);
+  if (legacyWarning) (opts.logger ?? console).error(legacyWarning);
   let exitStarted = false;
   const exitAfterShutdown = (
     reason: DaemonShutdownReason,

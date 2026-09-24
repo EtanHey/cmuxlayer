@@ -6,6 +6,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { loadFleetConfig } from "./fleet-config.js";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { httpDeliver } from "./outbox-drainer.js";
@@ -193,7 +194,7 @@ const DEFAULT_SWEEPER_ID = "agent-engine";
 const DEFAULT_REAP_AFTER_MS = 24 * 60 * 60 * 1_000;
 
 export function defaultMonitorRegistryPath(): string {
-  return join(homedir(), ".golems-zikaron", "monitor-registry.json");
+  return join(loadFleetConfig().coordinationDir, "monitor-registry.json");
 }
 
 function nowIso(now?: () => number): string {

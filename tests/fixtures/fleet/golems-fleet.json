@@ -1,0 +1,9 @@
+{
+  "coordinationDir": "~/.golems-zikaron",
+  "outbox": true,
+  "outboxTitle": "golems outbox",
+  "seatRegistryPath": "~/.golems/config.yaml",
+  "notifyUrl": "http://127.0.0.1:3847/notify",
+  "mcpLauncher": "~/.golems/bin/cmuxlayer-mcp",
+  "sleepGuardLabel": "com.golems.cmux-caffeinate"
+}
