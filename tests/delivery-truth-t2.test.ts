@@ -1584,11 +1584,18 @@ describe("boot-submit readiness and attributable evidence", () => {
   it("keeps a single-line Claude brief and engine contract pointer in one submit", async () => {
     const { __submitEvidenceTestHooks } = await loadServerModule();
     const brief = "Reply exactly SOAK_OK_1 then stop.";
-    const pointer = "cmuxlayer contract for cmuxlayerClaude-160e1e30: Read and follow /Users/etanheyman/.cmux/agents/cmuxlayerClaude-160e1e30/contract.md";
+    const pointer = "cmuxlayer contract for cmuxlayerClaude-160e1e30: Read and follow /tmp/contract.md";
     const delivered = __submitEvidenceTestHooks.composeBootDeliveryText(brief, pointer, "claude");
     expect(delivered).toContain(brief);
     expect(delivered).toContain(pointer);
     expect(delivered).not.toMatch(/[\r\n]/);
+  });
+
+  it("delivers an injected-only boot contract without a leading paragraph break", async () => {
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const pointer = "cmuxlayer contract for agent-1: Read and follow /tmp/contract.md";
+    expect(__submitEvidenceTestHooks.composeBootDeliveryText("", pointer, "codex")).toBe(pointer);
+    expect(__submitEvidenceTestHooks.composeBootDeliveryText("", pointer, "claude")).toBe(pointer);
   });
 
   it("requires multiple boot observations for a modern Codex ready composer without changing the global registry", async () => {
