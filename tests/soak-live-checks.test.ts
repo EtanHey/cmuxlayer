@@ -160,3 +160,10 @@ describe("live soak invariant checkers", () => {
     expect(checkParsedReadAgreement(unknown, unknown, 100)).toContain("parsed_read_unavailable");
   });
 });
+
+it("matches valid null token counts before usage metadata appears", () => {
+  const read = { ok: true, isError: false, parsed: {
+    status: "working", control_state: "busy", token_count: null,
+  } };
+  expect(checkParsedReadAgreement(read, read, 100)).toEqual([]);
+});
