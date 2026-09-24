@@ -248,6 +248,31 @@ describe("collectSurfaceTopology", () => {
     expect(events.every((event) => event.elapsed_ms >= 0)).toBe(true);
   });
 
+  it("reports a shared in-flight enumeration wait to the second caller", async () => {
+    let finish: (value: { workspaces: CmuxWorkspace[] }) => void = () => {};
+    const pending = new Promise<{ workspaces: CmuxWorkspace[] }>((resolve) => {
+      finish = resolve;
+    });
+    const client = { listWorkspaces: vi.fn(() => pending) };
+    const firstEvents: string[] = [];
+    const secondEvents: Array<{ method: string; elapsedMs: number }> = [];
+    const observerEpoch = () => "observer@shared:1";
+
+    const first = enumerateAllWindowWorkspaces(client, observerEpoch, {
+      onRpc: (method) => firstEvents.push(method),
+    });
+    const second = enumerateAllWindowWorkspaces(client, observerEpoch, {
+      onRpc: (method, elapsedMs) => secondEvents.push({ method, elapsedMs }),
+    });
+    finish({ workspaces: [workspace("workspace:shared")] });
+    await Promise.all([first, second]);
+
+    expect(client.listWorkspaces).toHaveBeenCalledTimes(1);
+    expect(firstEvents).toEqual(["listWorkspaces"]);
+    expect(secondEvents).toEqual([{ method: "listWorkspaces(shared)", elapsedMs: expect.any(Number) }]);
+    expect(secondEvents[0].elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
   it("reuses one completed workspace map within a call and refreshes it across calls", async () => {
     let workspaceRef = "workspace:A";
     const client = {
