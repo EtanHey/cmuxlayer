@@ -313,7 +313,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
 
   it.each([
     // Captured read-only from surface:1144, 2026-09-15; Codex footer below composer wins over quoted Claude text.
-    { cli: "codex", live: true, frame: readFileSync(new URL("../docs/fixtures/issue-645-codex-frame.txt", import.meta.url), "utf8") },
+    { cli: "codex", live: true, frame: readFileSync(new URL("./fixtures/issue-645/codex-frame.txt", import.meta.url), "utf8") },
     { cli: "codex", frame: "› Ask Codex to do anything" },
     { cli: "codex", frame: "› Ask Codex to do anything\n\n  esc again to edit previous message" },
     { cli: "claude", frame: "Claude Code\n❯ Press up to edit queued messages" },
