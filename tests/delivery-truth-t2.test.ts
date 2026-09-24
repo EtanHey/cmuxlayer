@@ -466,6 +466,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     const { createServer, createServerContext } = await loadServerModule();
     let composer = "";
     let active = false;
+    let restartDuringReturn: (() => void) | null = null;
     let returnAttempts = 0;
     const followupWrites: string[] = [];
     const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
@@ -473,6 +474,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (active && args.includes("send-key") && args.includes("return")) {
         returnAttempts += 1;
+        restartDuringReturn?.();
         // The pane may have accepted Return; the transport lost its ack and
         // the screen still shows the old composer until the next repaint.
         throw new Error("connection closed");
@@ -492,6 +494,14 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       engine.getRegistry().set(agentId, record);
       composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
       active = true;
+      restartDuringReturn = () => {
+        const nextBoot = engine.stateMgr.resetState(agentId, "booting", {
+          boot_prompt_pending: true,
+          prompt_delivered: false,
+          submit_verified: null,
+        }, "reviewer-race");
+        engine.getRegistry().set(agentId, nextBoot);
+      };
 
       const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: true }, {}));
       expect(result.delivery_state).toBe("pending_verify");
@@ -509,6 +519,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       expect(receipt?.text).toBe(composer);
       expect(receipt?.source_event).toBe("boot_prompt");
       expect(receipt?.boot_recovery).toBe(true);
+      expect(receipt?.boot_instance_id).toBe(record.boot_instance_id);
       expect(receipt?.boot_instance_id).toBe(engine.stateMgr.readState(agentId)?.boot_instance_id);
       expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
       composer = ""; // Return landed despite its lost acknowledgement.
