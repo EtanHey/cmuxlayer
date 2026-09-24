@@ -215,3 +215,50 @@ note naming both paths, so a moved checkout is never repointed silently.
 You can also just edit the files by hand — they are plain shell and are meant to
 be readable. The full behaviour of both lanes is in
 [registry-optional-spawn.md](registry-optional-spawn.md).
+
+## Fleet config
+
+A fresh install needs no fleet config. Every setting below has a generic
+default, and the features it would switch on stay off.
+
+An operator running a fleet of agents can put its fleet-specific settings in one
+JSON file:
+
+- `$CMUXLAYER_FLEET_CONFIG`, when that is set (the file must exist);
+- otherwise `~/.config/cmuxlayer/fleet.json`, if it exists.
+
+Path values may be absolute or start with `~/`. Unknown keys, wrong types and
+invalid JSON are rejected with the file path in the error. `cmuxlayer doctor`
+reports the problem instead of failing.
+
+| Key | Without a fleet config | What it does |
+|---|---|---|
+| `coordinationDir` | `~/.local/state/cmuxlayer` | Holds `monitor-registry.json`, `watch-specs.json` and `outbox.md`. |
+| `outbox` | `false` | Drains `<coordinationDir>/outbox.md` to `notifyUrl` after each sweep. |
+| `outboxTitle` | `cmuxlayer outbox` | Notification title for drained outbox entries. |
+| `notifyUrl` | unset: notifications are skipped | HTTP listener for monitor, watch and outbox notifications. An unreachable listener is logged once, then retried at most once a minute; it never throws. |
+| `seatRegistryPath` | `~/.config/cmuxlayer/seats.yaml` (a missing file means no seat registry) | The seat registry. `CMUXLAYER_SEAT_REGISTRY_PATH` still takes precedence. |
+| `mcpLauncher` | unset: `doctor` skips its launcher checks | The MCP launcher shim that `doctor` expects `.mcp.json` entries to reference. |
+| `sleepGuardLabel` | unset: `doctor` skips the sleep-guard check | launchd label of an optional sleep guard. `doctor` reports it as info, never as a failure. |
+
+Example:
+
+```json
+{
+  "coordinationDir": "~/.my-fleet",
+  "outbox": true,
+  "notifyUrl": "http://127.0.0.1:3847/notify",
+  "mcpLauncher": "~/.my-fleet/bin/cmuxlayer-mcp"
+}
+```
+
+**Upgrading from a release that hardcoded `~/.golems-zikaron`.** Those releases
+kept monitors, watches and the outbox in `~/.golems-zikaron`. Without a fleet
+config, this release uses the generic `coordinationDir` and does **not** read
+that directory. Nothing is silently orphaned:
+
+- `cmuxlayer doctor` lists the legacy files it finds;
+- the daemon logs one line at startup naming them.
+
+To keep using them, set `"coordinationDir": "~/.golems-zikaron"` in the fleet
+config **before** upgrading.
