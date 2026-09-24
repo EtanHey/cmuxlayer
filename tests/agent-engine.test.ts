@@ -11540,6 +11540,7 @@ Session ID: ${sessionId}`,
           haltNow: () => nowMs,
           haltWedgedDwellMs: 1_000,
           haltWedgedSweeps: 1,
+          haltBackgroundCpuProgress: () => true,
         },
       );
       const parent = makeRecord({
@@ -11557,6 +11558,7 @@ Session ID: ${sessionId}`,
         parent_agent_id: parent.agent_id,
         spawn_depth: 1,
         halt_escalation: true,
+        pid: 12345,
       });
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
