@@ -61,7 +61,8 @@ export function checkStopWait(result) {
 export function checkPrematureIdle(waitResult, nextScreen, replyEvidence) {
   const wait = record(waitResult);
   const parsed = record(record(nextScreen).parsed);
-  const busy = ["working", "thinking"].includes(parsed.status) || parsed.control_state === "busy";
+  const busy = ["working", "thinking", "draft_pending"].includes(parsed.status) ||
+    ["busy", "composer_dirty"].includes(parsed.control_state);
   return wait.matched === true && ["idle", "ready"].includes(wait.state) &&
     busy && record(replyEvidence).found !== true ? ["premature_idle"] : [];
 }

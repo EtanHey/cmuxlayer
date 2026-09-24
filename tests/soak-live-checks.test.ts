@@ -18,6 +18,11 @@ describe("live soak invariant checkers", () => {
     const wait = { ok: true, matched: true, state: "idle" };
     const busy = { parsed: { status: "working", control_state: "busy" } };
     expect(checkPrematureIdle(wait, busy, { found: false })).toEqual(["premature_idle"]);
+    expect(checkPrematureIdle({ ...wait, state: "ready" }, busy, { found: false }))
+      .toEqual(["premature_idle"]);
+    expect(checkPrematureIdle({ ...wait, state: "ready" },
+      { parsed: { status: "draft_pending", control_state: "composer_dirty" } },
+      { found: false })).toEqual(["premature_idle"]);
     expect(checkPrematureIdle(wait, busy, { found: true })).toEqual([]);
     expect(checkPrematureIdle({ ...wait, matched: false }, busy, { found: false })).toEqual([]);
     expect(checkPrematureIdle({ ...wait, state: "done" }, busy, { found: false })).toEqual([]);

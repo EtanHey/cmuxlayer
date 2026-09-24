@@ -202,7 +202,7 @@ async function main() {
     do {
       screen = await observe(cycle, agentId, surface);
       const fullEvidence = replyMarkerEvidence(screen, marker);
-      if (firstObservation) {
+      if (firstObservation && screen.ok) {
         check("no_false_idle", checkPrematureIdle(waited, screen, fullEvidence),
           { cycle, agent_id: agentId, marker, wait_state: waited?.state,
             screen_status: screen.parsed?.status, control_state: screen.parsed?.control_state });
