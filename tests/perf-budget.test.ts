@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import * as checkerModule from "../scripts/check-daemon-benchmark.mjs";
 import {
   baselineContentSha256,
@@ -971,6 +972,11 @@ describe("daemon performance budget", () => {
     expect(source).toContain('HOME: join(tempRoot, "home")');
     expect(source).toContain('CMUXLAYER_STATE_DIR: join(tempRoot, "state")');
     expect(source).toContain('CMUXLAYER_INBOX_BASE_DIR: join(tempRoot, "inbox")');
+    expect(source).toContain('const surfaces = state.closed === false ? [...baseSurfaces, spawned] : baseSurfaces');
+    expect(source).toContain('spawnSequence: (state.spawnSequence ?? 0) + 1');
+    expect(source).toContain('surface_id: spawnedSurfaceId((state.spawnSequence ?? 0) + 1)');
+    expect(source).toContain('/^cmuxlayerCodex-[a-z0-9]{8}$/.test(spawnResult.agent_id)');
+    expect(source).toContain('request_bytes: requestBytes("close_surface", closeArgs)');
     expect(source).toContain('sampling: "sampled"');
     expect(source).toContain("samples_per_run");
     expect(source).toContain("for (const [clientIndex, client] of clients.entries())");
@@ -1067,6 +1073,30 @@ describe("daemon performance budget", () => {
     expect(source).not.toContain("firstSendAfterSpawn.first,\n");
     expect(source).not.toContain("firstSendAfterSpawn.second,\n");
     expect(source).not.toContain("firstSendAfterSpawn.surface,\n");
+  });
+
+  it("keeps spawned-agent request byte accounting at the attested payload shape", () => {
+    const bytes = (name: string, args: Record<string, unknown>) =>
+      Buffer.byteLength(serializeMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }));
+    const agent_id = "cmuxlayerCodex-00000000";
+    expect(bytes("send_to", {
+      mode: "agent", agent_id,
+      text: "Read and follow docs.local/scratch/run5r3/bench-first-send.md",
+      press_enter: true,
+    })).toBe(231);
+    expect(bytes("send_to", {
+      mode: "agent", agent_id,
+      text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
+      press_enter: true,
+    })).toBe(232);
+    expect(bytes("close_surface", {
+      scope: "agent", agent_id, force: true,
+    })).toBe(161);
   });
 
   it("keeps the executable benchmark parseable by Node", () => {
