@@ -5,7 +5,6 @@ exclude_patterns = [
   "dist/**",
   "site/.next/**",
   "site/out/**",
-  "landing/**",
   "docs.local/**",
   ".worktrees/**",
   "benchmarks/**",

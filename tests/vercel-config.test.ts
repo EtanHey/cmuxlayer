@@ -9,17 +9,17 @@ describe("Vercel configuration ownership", () => {
     expect(existsSync(join(root, "vercel.json"))).toBe(false);
   });
 
-  it("checks the static artifact that GitHub Pages actually deploys", () => {
+  it("keeps one website: site/ on Vercel, no landing/ or GitHub Pages deploy (#804)", () => {
     const root = join(import.meta.dirname, "..");
-    const ci = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
-    const pages = readFileSync(
-      join(root, ".github", "workflows", "pages.yml"),
-      "utf8",
-    );
+    expect(existsSync(join(root, "landing"))).toBe(false);
+    expect(existsSync(join(root, ".github", "workflows", "pages.yml"))).toBe(false);
 
-    expect(pages).toMatch(/path:\s*landing\b/);
-    expect(ci).toContain("run: test -s landing/index.html");
-    expect(ci).toContain("uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa");
-    expect(ci).toMatch(/Package exact GitHub Pages artifact[\s\S]*?path:\s*landing\b/);
+    const ci = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+    expect(ci).not.toMatch(/upload-pages-artifact|landing\b/);
+    // build-site stays a required check on the Next.js site.
+    const buildSite = ci.match(/\n  build-site:\n[\s\S]*?(?=\n  [a-z][\w-]*:\n)/)?.[0] ?? "";
+    expect(buildSite).toMatch(/working-directory:\s*site\b/);
+    expect(buildSite).toContain("- run: npm ci");
+    expect(buildSite).toContain("- run: npm run build");
   });
 });
