@@ -23,3 +23,7 @@ collab/
 .cmux/worktrees/
 results/qa-video/
 results-qa-video-run.log
+
+# The repo root uses bun.lock only (#826); keep the old lockfiles out.
+/package-lock.json
+/pnpm-lock.yaml
