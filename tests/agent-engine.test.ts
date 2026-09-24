@@ -8090,6 +8090,266 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    for (const t of [500, 1_000, 3_000]) it(`XPROBE-U genuinely idle claude with a failing probe matches idle, t=${t}`, async () => {
+      vi.useFakeTimers();
+      try {
+        const id = `xu${t}`;
+        stateMgr.writeState(makeRecord({ agent_id: id, state: "working", surface_id: `surface:${id}`, cli: "claude", role: "worker" }));
+        liveSurfaces = [makeSurface(`surface:${id}`)];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: `surface:${id}`, text: "Claude Code\n❯", lines: 80, scrollback_used: false });
+        engine.setFreshLiveStateProbe(async () => null);
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor(id, "idle", t);
+        await vi.advanceTimersByTimeAsync(t + 1_500);
+        expect(await pending).toMatchObject({ matched: true, state: "idle" });
+      } finally { vi.useRealTimers(); }
+    });
+    it("reports the record state when a final spinner read contradicts a resting timeout probe", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(makeRecord({
+          agent_id: "timeout-spinner-state", state: "booting",
+          surface_id: "surface:timeout-spinner-state", cli: "claude", role: "worker",
+        }));
+        liveSurfaces = [makeSurface("surface:timeout-spinner-state")];
+        const resting = (agent: AgentRecord) =>
+          resolveLiveAgentState(agent, parseScreen("Claude Code\n❯"));
+        engine.setFreshLiveStateProbe(async (agent) => resting(agent));
+        engine.setLiveStateResolver(resting);
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:timeout-spinner-state",
+          text: "Claude Code\n✻ Swirling… (3s · esc to interrupt)\n❯",
+          lines: 80, scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("timeout-spinner-state", "ready", 500);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(await pending).toMatchObject({
+          matched: false, state: "booting", source: "timeout",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    for (const target of ["idle", "ready"] as const) {
+      for (const timeout of [500, 2_500]) {
+        it(`XPROBE-S does not match ${target} at ${timeout}ms when the screen turns active after a resting live probe`, async () => {
+          vi.useFakeTimers();
+          try {
+            stateMgr.writeState(makeRecord({
+              agent_id: "rest-then-active", state: target === "idle" ? "working" : "booting",
+              surface_id: "surface:rest-then-active", cli: "claude", role: "worker",
+            }));
+            liveSurfaces = [makeSurface("surface:rest-then-active")];
+            engine.setFreshLiveStateProbe(async (agent) =>
+              resolveLiveAgentState(agent, parseScreen("Claude Code\n❯")));
+            (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+              surface: "surface:rest-then-active",
+              text: "Claude Code\n✻ Swirling… (3s · esc to interrupt)\n❯",
+              lines: 80, scrollback_used: false,
+            });
+            await engine.getRegistry().reconstitute();
+            const pending = engine.waitFor("rest-then-active", target, timeout);
+            await vi.advanceTimersByTimeAsync(timeout + 500);
+            expect(await pending).toMatchObject({ matched: false });
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+      }
+    }
+    const GEM_IDLE = "Gemini CLI\n> run the task\n✦ Thinking...\n✦ SOAK_OK_4\n> ";
+    it("PROBE-K gemini idle with stale Thinking in scrollback: boot sweep reaches ready", async () => {
+      vi.useFakeTimers();
+      try {
+        const t0 = new Date("2026-09-24T01:00:00.000Z");
+        vi.setSystemTime(t0);
+        stateMgr.writeState(makeRecord({ agent_id: "pk", state: "booting", surface_id: "surface:pk", cli: "gemini", role: "worker", updated_at: t0.toISOString() }));
+        liveSurfaces = [makeSurface("surface:pk")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:pk", text: GEM_IDLE, lines: 80, scrollback_used: false });
+        await engine.getRegistry().reconstitute();
+        for (let i = 0; i < 3; i++) await engine.runSweep();
+        vi.setSystemTime(new Date(t0.getTime() + 46_000));
+        await engine.runSweep();
+        const s2 = engine.getAgentState("pk");
+        expect(s2?.state).toBe("ready");
+      } finally { vi.useRealTimers(); }
+    });
+    it("PROBE-L gemini idle with stale Thinking: wait_for idle (no probe) matches", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(makeRecord({ agent_id: "pl", state: "working", surface_id: "surface:pl", cli: "gemini", role: "worker" }));
+        liveSurfaces = [makeSurface("surface:pl")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:pl", text: GEM_IDLE, lines: 80, scrollback_used: false });
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("pl", "idle", 8_000);
+        await vi.advanceTimersByTimeAsync(9_500);
+        const r = await pending;
+        expect(r.matched).toBe(true);
+      } finally { vi.useRealTimers(); }
+    });
+    for (const cli of ["claude", "gemini"] as const) {
+      it(`PROBE-J booting ${cli} already working on its boot prompt: sweep outcome`, async () => {
+        vi.useFakeTimers();
+        try {
+          const t0 = new Date("2026-09-24T01:00:00.000Z");
+          vi.setSystemTime(t0);
+          const text = cli === "claude"
+            ? "Claude Code\n> task\n✻ Swirling… (3s · esc to interrupt)\n❯"
+            : "Gemini CLI\n✦ Thinking...\n> ";
+          stateMgr.writeState(makeRecord({ agent_id: `pj-${cli}`, state: "booting", surface_id: "surface:pj", cli, role: "worker",
+            updated_at: t0.toISOString(), boot_prompt_pending: true, prompt_delivered: true }));
+          liveSurfaces = [makeSurface("surface:pj")];
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:pj", text, lines: 80, scrollback_used: false });
+          await engine.getRegistry().reconstitute();
+          await engine.runSweep();
+          vi.setSystemTime(new Date(t0.getTime() + 46_000));
+          await engine.runSweep();
+          const s2 = engine.getAgentState(`pj-${cli}`);
+          expect(s2?.state).not.toBe("error");
+        } finally { vi.useRealTimers(); }
+      });
+    }
+    async function probeWait(opts: {
+      id: string;
+      state: AgentRecord["state"];
+      frames: (elapsedMs: number) => string;
+      target: "idle" | "ready";
+      timeout: number;
+      probe?: boolean;
+    }) {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(makeRecord({
+          agent_id: opts.id, state: opts.state, surface_id: `surface:${opts.id}`,
+          cli: "claude", role: "worker",
+        }));
+        liveSurfaces = [makeSurface(`surface:${opts.id}`)];
+        const t0 = Date.now();
+        const screen = () => opts.frames(Date.now() - t0);
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+          surface: `surface:${opts.id}`, text: screen(), lines: 80, scrollback_used: false,
+        }));
+        if (opts.probe !== false) {
+          engine.setFreshLiveStateProbe(async (agent) =>
+            resolveLiveAgentState(agent, parseScreen(screen())),
+          );
+        }
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor(opts.id, opts.target, opts.timeout);
+        await vi.advanceTimersByTimeAsync(opts.timeout + 1_500);
+        const r = await pending;
+        return r;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+    const IDLE = "Claude Code\n❯";
+    for (const t of [500, 1_000, 1_500]) {
+      it(`PROBE-M genuinely idle pane, short timeout ${t}`, async () => {
+        const r = await probeWait({ id: `pm${t}`, state: "idle", frames: () => IDLE, target: "idle", timeout: t });
+        expect(r.matched).toBe(true);
+      });
+      it(`PROBE-M2 record working, stable idle, short timeout ${t}`, async () => {
+        const r = await probeWait({ id: `pmw${t}`, state: "working", frames: () => IDLE, target: "idle", timeout: t });
+        expect(r.matched).toBe(true);
+      });
+    }
+    it("PROBE-A stable idle, record working -> prompt match", async () => {
+      const r = await probeWait({ id: "pa", state: "working", frames: () => IDLE, target: "idle", timeout: 10_000 });
+      expect(r.matched).toBe(true);
+      expect(r.elapsed).toBeLessThanOrEqual(2_000);
+    });
+    it("PROBE-B stable idle, record idle -> prompt match", async () => {
+      const r = await probeWait({ id: "pb", state: "idle", frames: () => IDLE, target: "idle", timeout: 10_000 });
+      expect(r.matched).toBe(true);
+      expect(r.elapsed).toBeLessThanOrEqual(2_000);
+    });
+    it("PROBE-B2 stable idle, record idle, NO probe -> prompt match", async () => {
+      const r = await probeWait({ id: "pb2", state: "idle", frames: () => IDLE, target: "idle", timeout: 10_000, probe: false });
+      expect(r.matched).toBe(true);
+      expect(r.elapsed).toBeLessThanOrEqual(2_000);
+    });
+    it("PROBE-B3 stable idle, record working, NO probe -> match", async () => {
+      const r = await probeWait({ id: "pb3", state: "working", frames: () => IDLE, target: "idle", timeout: 10_000, probe: false });
+      expect(r.matched).toBe(true);
+    });
+    for (const spin of ["✻ Swirling… (3s · esc to interrupt)", "· Swirling… (1s)", "✶ Thinking… (2s · ↓ 12 tokens)", "✳ Pondering… (esc to interrupt)"]) {
+      it(`PROBE-C constant spinner never idle: ${spin}`, async () => {
+        const r = await probeWait({ id: "pc", state: "working", frames: () => `Claude Code\n${spin}\n❯`, target: "idle", timeout: 5_000 });
+        expect(r.matched).toBe(false);
+      });
+      it(`PROBE-C-noprobe constant spinner never idle: ${spin}`, async () => {
+        const r = await probeWait({ id: "pcn", state: "working", frames: () => `Claude Code\n${spin}\n❯`, target: "idle", timeout: 5_000, probe: false });
+        expect(r.matched).toBe(false);
+      });
+    }
+    it("PROBE-E stable ready from booting", async () => {
+      const r = await probeWait({ id: "pe", state: "booting", frames: () => IDLE, target: "ready", timeout: 10_000 });
+      expect(r.matched).toBe(true);
+    });
+    it("PROBE-F transient ready frame between spinners must not match ready", async () => {
+      const r = await probeWait({ id: "pf", state: "booting", target: "ready", timeout: 5_000,
+        frames: (t) => (t >= 900 && t < 1_100) ? IDLE : "Claude Code\n✻ Swirling… (3s · esc to interrupt)\n❯" });
+      expect(r.matched).toBe(false);
+    });
+    it("PROBE-G transient idle frame at 1s tick between spinners (non-forced tick) must not match", async () => {
+      const r = await probeWait({ id: "pg", state: "working", target: "idle", timeout: 6_000,
+        frames: (t) => (t >= 900 && t < 1_100) || (t >= 2_900 && t < 3_100) ? IDLE : "Claude Code\n✻ Swirling… (3s · esc to interrupt)\n❯" });
+      expect(r.matched).toBe(false);
+    });
+    it("PROBE-H idle arrives late then stable: matched within ~2 ticks of arrival", async () => {
+      const r = await probeWait({ id: "ph", state: "working", target: "idle", timeout: 20_000,
+        frames: (t) => t >= 4_500 ? IDLE : "Claude Code\n✻ Swirling… (3s · esc to interrupt)\n❯" });
+      expect(r.matched).toBe(true);
+      expect(r.elapsed).toBeLessThanOrEqual(7_000);
+    });
+    it("does not match a single idle frame between working Claude frames", async () => {
+      vi.useFakeTimers();
+      try {
+        const agentId = "claude-transient-idle";
+        stateMgr.writeState(makeRecord({
+          agent_id: agentId,
+          state: "working",
+          surface_id: "surface:transient-idle",
+          cli: "claude",
+          role: "worker",
+        }));
+        liveSurfaces = [makeSurface("surface:transient-idle")];
+        let screenText = "Claude Code\n· Swirling… (1s)\n❯";
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+          surface: "surface:transient-idle",
+          text: screenText,
+          lines: 80,
+          scrollback_used: false,
+        }));
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen(screenText)),
+        );
+        await engine.getRegistry().reconstitute();
+
+        let settled = false;
+        const pending = engine.waitFor(agentId, "idle", 5_000);
+        void pending.then(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(0);
+        screenText = "Claude Code\n❯";
+        await vi.advanceTimersByTimeAsync(1_100);
+        expect(settled).toBe(false);
+        expect(engine.getAgentState(agentId)?.state).toBe("working");
+
+        screenText = "Claude Code\n· Swirling… (2s)\n❯";
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(settled).toBe(false);
+        screenText = "Claude Code\n❯";
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(await pending).toMatchObject({ matched: true, state: "idle" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps a completed worker done when its live screen returns to ready", async () => {
       vi.useFakeTimers();
       try {
@@ -8553,15 +8813,15 @@ Session ID: ${sessionId}`,
         });
         await engine.getRegistry().reconstitute();
 
-        const firstWait = engine.waitFor("kiro-wait-timeout", "ready", 1_500);
-        await vi.advanceTimersByTimeAsync(2_000);
+        const firstWait = engine.waitFor("kiro-wait-timeout", "ready", 500);
+        await vi.advanceTimersByTimeAsync(1_500);
         expect(await firstWait).toMatchObject({
           matched: false,
           source: "timeout",
         });
 
-        const secondWait = engine.waitFor("kiro-wait-timeout", "ready", 1_500);
-        await vi.advanceTimersByTimeAsync(2_000);
+        const secondWait = engine.waitFor("kiro-wait-timeout", "ready", 500);
+        await vi.advanceTimersByTimeAsync(1_500);
         const secondResult = await secondWait;
 
         expect(secondResult.matched).toBe(false);

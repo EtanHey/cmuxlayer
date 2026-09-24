@@ -390,7 +390,7 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.error).toContain("state disk unavailable");
   });
 
-  it("matches a ready target from gated final screen evidence", async () => {
+  it("does not match ready from one final resting observation", async () => {
     vi.useFakeTimers();
     engine.dispose();
     buildEngine(
@@ -423,9 +423,9 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     await vi.advanceTimersByTimeAsync(1_500);
     const result = await pending;
 
-    expect(result.matched).toBe(true);
+    expect(result.matched).toBe(false);
     expect(result.state).toBe("ready");
-    expect(result.source).toBe("screen");
+    expect(result.source).toBe("timeout");
     expect(result.agent?.state).toBe("ready");
   });
 
@@ -454,7 +454,7 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
       "idle",
       5_000,
     );
-    await vi.advanceTimersByTimeAsync(2_500);
+    await vi.advanceTimersByTimeAsync(3_500);
     const result = await pending;
 
     expect(result.matched).toBe(true);
@@ -463,7 +463,7 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.agent?.state).toBe("ready");
   });
 
-  it("matches final resting evidence instead of timing out beside an idle observation", async () => {
+  it("times out when final idle evidence contradicts the live working probe", async () => {
     vi.useFakeTimers();
     engine.dispose();
     buildEngine(
@@ -486,8 +486,8 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     );
     await engine.getRegistry().reconstitute();
     engine.setLiveStateResolver(workingScreenProbe);
-    // The live resolver remains stale-working even after the final direct
-    // screen read sees rest. The screen-backed transition must win.
+    // The live resolver and fresh probe still say working at timeout. A lone
+    // final resting read cannot confirm idle across poll ticks.
     const freshProbe = vi.fn(async (agent: AgentRecord) =>
       workingScreenProbe(agent),
     );
@@ -501,11 +501,9 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     await vi.advanceTimersByTimeAsync(1_500);
     const result = await pending;
 
-    expect(result.matched).toBe(true);
-    expect(result.state).toBe("idle");
-    expect(result.source).toBe("screen");
-    expect(result.agent?.state).toBe("idle");
-    expect(result.error).toBeUndefined();
+    expect(result.matched).toBe(false);
+    expect(result.source).toBe("timeout");
+    expect(result.error).toContain("Timed out");
   });
 });
 
