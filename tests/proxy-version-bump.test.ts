@@ -81,11 +81,16 @@ class FakeDaemon {
       const messages = (this.messages[connectionIndex] = []);
       let buffer = "";
       // #824: a proxy that reconnects drops this connection, possibly before
-      // a reply below is written. Record the resulting EPIPE instead of
-      // letting it escape as an uncaught exception.
+      // a reply below is written. That write fails with EPIPE (or
+      // ECONNRESET): record it instead of letting it escape as an uncaught
+      // exception. Any other socket error is a real failure and is rethrown.
       socket.on("error", (error) => {
         this.socketErrors.push(error);
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EPIPE" && code !== "ECONNRESET") throw error;
       });
+      // Belt-and-braces only: the fake can read a frame before it has seen
+      // the peer's FIN, so this guard does not prevent the EPIPE above.
       const reply = (message: JSONRPCMessage) => {
         if (socket.destroyed || !socket.writable) return;
         socket.write(serializeMessage(message));
@@ -207,6 +212,12 @@ describe("proxy version-bump auto-reconnect", () => {
     }
 
     expect(uncaught).toEqual([]);
+    // Prove the race was exercised: the reply really hit the closed peer.
+    const codes = daemon.socketErrors.map(
+      (error) => (error as NodeJS.ErrnoException).code,
+    );
+    expect(codes.length).toBeGreaterThan(0);
+    expect(codes.every((code) => code === "EPIPE" || code === "ECONNRESET")).toBe(true);
   });
 
   it("reconnects to the daemon when an installed-version bump is detected", async () => {
