@@ -598,6 +598,113 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   }, 15_000);
 
+  it.each(["snapshot_read", "verifier_result"] as const)(
+    "keeps a newer boot isolated when the old receipt verifies during %s",
+    async (rotationWindow) => {
+      const { createServer, createServerContext } = await loadServerModule();
+      let screenText = "Claude Code\n❯ ";
+      let rotateDuringRead = false;
+      let countVerificationReads = false;
+      let loseRecoveryAck = false;
+      let verificationReads = 0;
+      const followupWrites: string[] = [];
+      let agentId = "";
+      let engine: any;
+      let newerBootId: string | undefined;
+      const rotateBoot = () => {
+        const newer = engine.stateMgr.resetState(agentId, "booting", {
+          boot_prompt_pending: true, prompt_delivered: false, submit_verified: null,
+        }, `test_restart_during_${rotationWindow}`);
+        newerBootId = newer.boot_instance_id;
+        engine.getRegistry().set(agentId, newer);
+        screenText = "Claude Code\n❯ ";
+      };
+      const base = makeLifecycleExec(() => screenText);
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (countVerificationReads && args.includes("read-screen")) verificationReads += 1;
+        if (loseRecoveryAck && args.includes("send-key") && args.includes("return")) {
+          throw new Error("lost ack");
+        }
+        if (loseRecoveryAck && args.includes("send")) {
+          followupWrites.push(String(args.at(-1)));
+        }
+        if (rotateDuringRead && args.includes("read-screen")) {
+          rotateDuringRead = false;
+          await Promise.resolve();
+          rotateBoot();
+        }
+        return base(cmd, args);
+      });
+      const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      try {
+        const server = createServer({ context, inboxBaseDir: testDir }) as any;
+        agentId = await spawnReadyAgent(server);
+        engine = server._registeredTools.interact._engine;
+        const boot = engine.stateMgr.updateRecord(agentId, {
+          boot_prompt_pending: true, prompt_delivered: false, submit_verified: null,
+        });
+        engine.getRegistry().set(agentId, boot);
+        const pointer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+        screenText = `Claude Code\n❯ ${pointer}`;
+        const receipt = engine.acceptPendingVerify({
+          delivery_id: `boot-rotation-${rotationWindow}`, agent_id: agentId,
+          text: pointer, press_enter: true, source_event: "boot_prompt",
+          retry_count: 0, typed: true, boot_recovery: true,
+          boot_instance_id: boot.boot_instance_id,
+        });
+        if (rotationWindow === "snapshot_read") {
+          rotateDuringRead = true;
+        } else {
+          // Keep createServer's snapshot reader and verifier; inject the
+          // generation change at the engine's verifier-result boundary.
+          const productionVerifier = engine.deliveryVerifier;
+          engine.setDeliveryVerifier(async (currentReceipt: any, snapshot: any) => {
+            const observation = await productionVerifier(currentReceipt, snapshot);
+            if (currentReceipt.delivery_id === receipt.delivery_id &&
+              observation.outcome === "delivered") rotateBoot();
+            return observation;
+          });
+          screenText = "Claude Code\n❯ ";
+        }
+
+        countVerificationReads = true;
+        await engine.verifyPendingDeliveries();
+        countVerificationReads = false;
+        expect(newerBootId).toBeDefined();
+        expect(newerBootId).not.toBe(boot.boot_instance_id);
+        const currentBoot = engine.stateMgr.readState(agentId);
+        const currentRegistry = engine.getAgentState(agentId);
+        expect(currentBoot).toMatchObject({ boot_instance_id: newerBootId,
+          state: "booting", boot_prompt_pending: true, prompt_delivered: false,
+          submit_verified: null });
+        expect(currentRegistry).toMatchObject({ boot_instance_id: newerBootId,
+          state: "booting", boot_prompt_pending: true, prompt_delivered: false,
+          submit_verified: null });
+        if (rotationWindow === "snapshot_read") expect(verificationReads).toBe(1);
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe(
+          rotationWindow === "snapshot_read" ? "pending_verify" : "submitted",
+        );
+        if (rotationWindow === "verifier_result") {
+          // The old receipt may truthfully describe the old boot; it must not
+          // swallow this newer boot's pointer or let its followup through.
+          screenText = `Claude Code\nWorking\n❯ ${pointer}`;
+          loseRecoveryAck = true;
+          const later = parseToolResult(await server._registeredTools.send_to.handler({
+            agent_id: agentId, text: "new boot followup", press_enter: true,
+          }, {}));
+          expect(later.delivery_state).toBe("pending_verify");
+          expect(followupWrites).toEqual([]);
+          expect(engine.getDeliveryReceipt(later.delivery_id)).toMatchObject({
+            boot_recovery: true, boot_instance_id: newerBootId,
+            delivery_state: "pending_verify",
+          });
+        }
+      } finally { context.dispose(); }
+    },
+    15_000,
+  );
+
   it("reports an acknowledged recovery Return when verification fails before a followup", async () => {
     vi.stubEnv("CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", "100");
     const { createServer, createServerContext } = await loadServerModule();
