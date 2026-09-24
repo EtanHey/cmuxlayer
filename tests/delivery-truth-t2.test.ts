@@ -614,6 +614,96 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     }
   }, 15_000);
 
+  it("reports an interact recovery Return when verification fails before a followup", async () => {
+    vi.stubEnv("CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", "100");
+    const { createServer, createServerContext } = await loadServerModule();
+    let composer = "";
+    let active = false;
+    let returnAttempts = 0;
+    const followupWrites: string[] = [];
+    const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("send-key") && args.includes("return")) {
+        returnAttempts += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (active && args.includes("send")) {
+        followupWrites.push(String(args.at(-1)));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
+      engine.getRegistry().set(agentId, record);
+      const ready = engine.stateMgr.transition(agentId, "ready");
+      engine.getRegistry().set(agentId, ready);
+      composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      active = true;
+
+      const result = parseToolResult(await server._registeredTools.interact.handler({ agent: agentId, action: "send", text: "later" }, {}));
+      console.log("REVIEW_INTERACT_RECEIPT", JSON.stringify(result));
+      expect(result.error_code).toBe("owned_boot_contract_pending");
+      expect(result.typed).toBe(false);
+      expect(result.submit_attempted).toBe(true);
+      expect(result.submit_dispatched).toBe(true);
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+    } finally {
+      context.dispose();
+      vi.unstubAllEnvs();
+    }
+  }, 15_000);
+
+  it("tracks an interact recovery Return when its acknowledgement is lost", async () => {
+    vi.stubEnv("CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", "100");
+    const { createServer, createServerContext } = await loadServerModule();
+    let composer = "";
+    let active = false;
+    let returnAttempts = 0;
+    const followupWrites: string[] = [];
+    const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("send-key") && args.includes("return")) {
+        returnAttempts += 1;
+        throw new Error("lost ack");
+      }
+      if (active && args.includes("send")) {
+        followupWrites.push(String(args.at(-1)));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
+      engine.getRegistry().set(agentId, record);
+      const ready = engine.stateMgr.transition(agentId, "ready");
+      engine.getRegistry().set(agentId, ready);
+      composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      active = true;
+
+      const result = parseToolResult(await server._registeredTools.interact.handler({ agent: agentId, action: "send", text: "later" }, {}));
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/acknowledgement is uncertain/);
+      expect(engine.listDeliveryReceipts().filter((receipt: any) => receipt.boot_recovery && receipt.agent_id === agentId)).toHaveLength(1);
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+    } finally {
+      context.dispose();
+      vi.unstubAllEnvs();
+    }
+  }, 15_000);
+
   it("keeps a newer boot pending when a recovered Return loses its ack during restart", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let composer = "";
