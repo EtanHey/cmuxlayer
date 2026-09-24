@@ -852,6 +852,29 @@ describe("enter reliability", () => {
     expect(events[0]?.retry_count).toBe(0);
   });
 
+  it.each(["agent", "surface"] as const)(
+    "keeps a ready Codex %s send on the short screen-read path",
+    async (mode) => {
+      const client = new FakeClaudeSurfaceClient();
+      client.cli = "codex";
+      client.requiredReturns = 2;
+      client.completionMode = "idle";
+      server = createReliabilityServer(client);
+      registerAgent(server, { cli: "codex" });
+
+      const result = await callTool(server, "send_to", {
+        ...(mode === "agent"
+          ? { agent_id: "agent-1" }
+          : { mode: "surface", surface: client.surface, workspace: client.workspace }),
+        text: "Read and follow docs.local/scratch/run5r3/bench-second-send.md",
+        press_enter: true,
+      });
+      const parsed = parseResult(result);
+      console.log("SEND_READ_COUNT", mode, client.screenReads.length, parsed.retry_count, parsed.timings_ms);
+      expect(parsed.submit_verified).toBe(true);
+    },
+  );
+
   it.each([
     ["Cursor queued composer", "cursor"],
     ["generic slow-clearing agent composer", "claude"],
