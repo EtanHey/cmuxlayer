@@ -37,15 +37,12 @@
   },
   "files": [
     "dist",
-    "assets/sidebars/fleet.swift",
     "assets/hooks",
-    "scripts/install-fleet-sidebar.mjs",
-    "scripts/install-fleet-sidebar-dev.mjs",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "dev": "CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH=$HOME/.config/cmux/sidebars/fleet-dev.swift tsx src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "daemon": "node dist/daemon.js",
@@ -61,8 +58,6 @@
     "pre-pr:live": "bun run live:harness",
     "live:worker-placement": "tsx scripts/run-live-worker-placement-repro.ts",
     "live:id-churn": "tsx scripts/run-live-id-churn-probe.ts",
-    "install:fleet-sidebar": "node scripts/install-fleet-sidebar.mjs",
-    "install:fleet-sidebar:dev": "node scripts/install-fleet-sidebar-dev.mjs",
     "bench:daemon": "node scripts/bench-daemon.mjs",
     "bench:daemon:check": "bun run build && node scripts/check-daemon-benchmark.mjs",
     "bench:daemon:check:fast": "CMUXLAYER_BENCH_ROUNDS=3 CMUXLAYER_BENCH_LOCAL_GATE=1 bun run bench:daemon:check",

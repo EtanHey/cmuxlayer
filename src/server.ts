@@ -318,7 +318,6 @@ import {
   isBrokenPipeError,
   SurfaceWriteLivenessTracker,
 } from "./surface-write-liveness.js";
-import type { FleetSidebarPublisherLike } from "./fleet-sidebar.js";
 
 const DUPLICATE_WATCH_OWNER_RANK = {
   INTERACTIVE: 0,
@@ -4289,8 +4288,6 @@ export interface CreateServerOptions {
   seatManifestWriter?: SeatManifestWriter;
   /** Override the manifest timestamp source for deterministic tests. */
   seatManifestNow?: () => string;
-  /** Publish the opt-in generated fleet.swift from reconciled lifecycle state. */
-  fleetSidebarPublisher?: FleetSidebarPublisherLike;
   /** Background send_to verify deadline; defaults to 10 minutes. */
   deliveryVerifyDeadlineMs?: number;
   /**
@@ -13385,7 +13382,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
           inboxOpts,
         );
-        context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
         const monitor_state = inboxMonitorState(
           args.agent_id,
           INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,
@@ -14314,7 +14310,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : null,
           seatRegistry,
           seatRegistryPath: opts?.seatRegistryPath,
-          fleetSidebarPublisher: opts?.fleetSidebarPublisher,
           deliveryVerifyDeadlineMs: opts?.deliveryVerifyDeadlineMs,
           deliveryTicketDir:
             opts?.deliveryTicketDir ??
@@ -15307,8 +15302,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
             inboxOpts,
           );
-          context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
-
           const parent =
             registry.get(intendedParentId) ??
             stateMgr.readState(intendedParentId);

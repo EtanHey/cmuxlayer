@@ -41,29 +41,6 @@ not assume a fixed repository layout. See
 [docs/guides/registry-optional-spawn.md](docs/guides/registry-optional-spawn.md) for how each
 lane behaves.
 
-### Optional fleet sidebar
-
-Install the optional lane-grouped fleet view with:
-
-```bash
-bun run install:fleet-sidebar
-```
-
-cmuxLayer refreshes `~/.config/cmux/sidebars/fleet.swift` from its reconciled
-live-agent snapshot. It does not change cmux settings or replace the stock
-sidebar. Activate it from the sidebar toggle by choosing `fleet`.
-
-Development and screenshot QA use a separate picker entry:
-
-```bash
-bun run install:fleet-sidebar:dev
-bun run dev
-```
-
-Those commands publish only
-`~/.config/cmux/sidebars/fleet-dev.swift`; choose `fleet-dev` in cmux while
-testing. Runtime tests must inject a temporary publisher `outputPath`.
-
 Add to your MCP config:
 
 **Codex CLI / T3 Code**

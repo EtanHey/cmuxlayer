@@ -65,7 +65,7 @@ Commands (bun, as in CI):
 - cmux transport: `cmux-*.ts` (persistent socket, CLI fallback, version compatibility).
 - Monitors and inbox: `watch-spec.ts`, `monitor-registry.ts`, `inbox.ts`, `outbox-drainer.ts`.
 - Screen parsing: `screen-parser.ts`, `pattern-registry.ts`, `harness-session.ts`.
-- CLI and setup: `index.ts`, `init-*.ts`, `doctor.ts`; sidebar: `fleet-sidebar*.ts`.
+- CLI and setup: `index.ts`, `init-*.ts`, `doctor.ts`.
 
 Rules that tests and hooks enforce:
 

@@ -1,6 +1,6 @@
 /**
- * TDD tests for Task 17 — Sidebar Sync.
- * Tests syncSidebar(), runSweep(), and lifecycle log events.
+ * TDD tests for Task 17 — agent reconcile (formerly "Sidebar Sync").
+ * Tests reconcileAgents(), runSweep(), cmux status pills, and lifecycle log events.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -21,10 +21,6 @@ import {
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
-import {
-  renderFleetSidebar,
-  type FleetSidebarPublication,
-} from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
 const ORIGINAL_PROMPT_AUTO_RESOLVE =
@@ -167,13 +163,27 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
   };
 }
 
-describe("Sidebar Sync", () => {
+/** Every cmux status pill the engine pushed, single or batched. */
+function pushedStatuses(client: MockClient): Array<{
+  key: string;
+  value: string;
+  surface?: string;
+  workspace?: string;
+}> {
+  return [
+    ...(client.setStatus as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([key, value, opts]) => ({ key, value, ...(opts ?? {}) }),
+    ),
+    ...client.setStatuses.mock.calls.flatMap(([batch]) => batch),
+  ];
+}
+
+describe("Agent reconcile", () => {
   let stateMgr: StateManager;
   let mockClient: MockClient;
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
   let inboxOpts: { baseDir: string };
-  let publishedFleetPublications: FleetSidebarPublication[];
   let sweepDebugLogs: string[];
 
   beforeEach(() => {
@@ -243,7 +253,6 @@ describe("Sidebar Sync", () => {
         };
       },
     );
-    publishedFleetPublications = [];
     sweepDebugLogs = [];
     inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
@@ -253,15 +262,6 @@ describe("Sidebar Sync", () => {
       sessionIdentityResolver: () => null,
       sweepDebugLog: (message) => sweepDebugLogs.push(message),
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: (publication) => {
-          if (!("snapshot" in publication)) {
-            throw new Error("engine must publish an explicit fleet state");
-          }
-          publishedFleetPublications.push(publication);
-        },
-        dispose: () => {},
-      },
     });
   });
 
@@ -378,39 +378,25 @@ describe("Sidebar Sync", () => {
     await engine.getRegistry().reconstitute();
     await engine.runSweep();
 
-    const publication = publishedFleetPublications.at(-1)!;
-    expect(publication.state).toBe("populated");
-    expect(publication.snapshot.seatCount).toBe(3);
-    const seats = publication.snapshot.lanes.flatMap((lane) => lane.seats);
-    expect(seats).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          agentId: workingBinding.agent_id,
-          surfaceUuid: workingBinding.surface_uuid,
-          surfaceRef: workingBinding.expected_surface_ref,
-          name: "cmuxlayerCodex [surface:595]",
-          screenState: workingBinding.expected_state,
-        }),
-        expect.objectContaining({
-          agentId: idleBinding.agent_id,
-          surfaceUuid: idleBinding.surface_uuid,
-          surfaceRef: idleBinding.expected_surface_ref,
-          name: "cmuxlayerCodex [surface:594]",
-          screenState: idleBinding.expected_state,
-        }),
-        expect.objectContaining({
-          agentId: neverActiveBinding.agent_id,
-          surfaceUuid: neverActiveBinding.surface_uuid,
-          surfaceRef: neverActiveBinding.expected_surface_ref,
-          name: "skillcreatorCodex [surface:591]",
-          screenState: neverActiveBinding.expected_state,
-        }),
-      ]),
+    for (const binding of [workingBinding, idleBinding, neverActiveBinding]) {
+      expect(engine.getAgentState(binding.agent_id)).toMatchObject({
+        surface_id: binding.expected_surface_ref,
+        surface_uuid: binding.surface_uuid,
+      });
+    }
+    const statuses = pushedStatuses(mockClient);
+    expect(statuses).toEqual(
+      expect.arrayContaining(
+        [workingBinding, idleBinding, neverActiveBinding].map((binding) =>
+          expect.objectContaining({
+            key: binding.agent_id,
+            surface: binding.expected_surface_ref,
+          }),
+        ),
+      ),
     );
-    expect(seats).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ agentId: ghostBinding.agent_id }),
-      ]),
+    expect(statuses.map((status) => status.key)).not.toContain(
+      ghostBinding.agent_id,
     );
     expect(mockClient.readScreen).toHaveBeenCalledWith(
       workingBinding.expected_surface_ref,
@@ -419,16 +405,6 @@ describe("Sidebar Sync", () => {
     expect(mockClient.readScreen).toHaveBeenCalledWith(
       idleBinding.expected_surface_ref,
       expect.objectContaining({ workspace: ROUND5_SEAT_BINDING.workspace }),
-    );
-    const rendered = renderFleetSidebar(publication.snapshot, {
-      state: publication.state,
-      observedLiveSurfaceRefs: publication.observedLiveSurfaceRefs,
-    });
-    expect(rendered).toContain(
-      'cmux("surface.focus", surface_id: seat.surfaceUuid)',
-    );
-    expect(rendered).toContain(
-      `"surfaceUuid": "${neverActiveBinding.surface_uuid}"`,
     );
   });
 
@@ -525,10 +501,6 @@ describe("Sidebar Sync", () => {
       sessionIdentityResolver: () => null,
       sweepDebugLog: (message) => sweepDebugLogs.push(message),
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: () => {},
-        dispose: () => {},
-      },
     });
     stateMgr.writeState(
       makeRecord({
@@ -582,7 +554,7 @@ describe("Sidebar Sync", () => {
     expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
   });
 
-  it("stops sidebar updates when the observer epoch changes during an earlier agent read", async () => {
+  it("stops status updates when the observer epoch changes during an earlier agent read", async () => {
     engine.dispose();
     (
       mockClient as unknown as Record<string, unknown>
@@ -599,14 +571,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: (publication) => {
-          if ("snapshot" in publication) {
-            publishedFleetPublications.push(publication);
-          }
-        },
-        dispose: () => {},
-      },
     });
     const first = makeRecord({
       agent_id: "epoch-read-agent-1",
@@ -684,13 +648,9 @@ describe("Sidebar Sync", () => {
       expect.anything(),
       expect.anything(),
     );
-    const publishedAgentIds = publishedFleetPublications.flatMap(
-      (publication) =>
-        publication.snapshot.lanes.flatMap((lane) =>
-          lane.seats.map((seat) => seat.agentId),
-        ),
+    expect(pushedStatuses(mockClient).map((status) => status.key)).not.toContain(
+      second.agent_id,
     );
-    expect(publishedAgentIds).not.toContain(second.agent_id);
     expect(engine.lifecycleLockState().sweep_skipped_mutations).toBe(1);
   });
 
@@ -738,10 +698,6 @@ describe("Sidebar Sync", () => {
       sessionIdentityResolver: () => null,
       sweepDebugLog: (message) => sweepDebugLogs.push(message),
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: () => {},
-        dispose: () => {},
-      },
     });
     await registry.reconstitute();
     clientTopologyEnumerations = 0;
@@ -758,7 +714,7 @@ describe("Sidebar Sync", () => {
     });
     expect(mockClient.readScreen).toHaveBeenCalledTimes(3);
     expect(sweepDebugLogs.at(-1)).toMatch(
-      /sweep timing topology_ms=\d+.*sidebar_ms=\d+.*total_ms=\d+/,
+      /sweep timing topology_ms=\d+.*reconcile_ms=\d+.*total_ms=\d+/,
     );
   });
 
@@ -951,7 +907,7 @@ describe("Sidebar Sync", () => {
     await readStarted;
     await new Promise((resolve) => setTimeout(resolve, 300));
     const inProgress = stateMgr.getEventLog().readEntries().filter(
-      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" && "phase" in entry && entry.phase === "sidebar_ms",
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" && "phase" in entry && entry.phase === "reconcile_ms",
     );
     releaseRead();
     await sweep;
@@ -963,14 +919,14 @@ describe("Sidebar Sync", () => {
       }),
     ]);
     const completed = stateMgr.getEventLog().readEntries().filter(
-      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" && "phase" in entry && entry.phase === "sidebar_ms",
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" && "phase" in entry && entry.phase === "reconcile_ms",
     );
     expect(completed).toEqual([
       expect.objectContaining({ stage: "started" }),
       expect.objectContaining({ stage: "completed", duration_ms: expect.any(Number) }),
     ]);
     expect(stateMgr.getEventLog().readEntries()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ event_type: "sweep_phase", phase: "summary", durations_ms: expect.objectContaining({ sidebar_ms: expect.any(Number) }) }),
+      expect.objectContaining({ event_type: "sweep_phase", phase: "summary", durations_ms: expect.objectContaining({ reconcile_ms: expect.any(Number) }) }),
     ]));
   });
 
@@ -1071,7 +1027,7 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("keeps publishing twelve agents during unrelated lifecycle refreshes", async () => {
+  it("keeps reconciling twelve agents during unrelated lifecycle refreshes", async () => {
     for (let index = 0; index < 12; index += 1) {
       const agentId = `steady-agent-${index}`;
       const record = makeRecord({ agent_id: agentId, surface_id: `surface:${agentId}`, workspace_id: "workspace:test" });
@@ -1089,7 +1045,6 @@ describe("Sidebar Sync", () => {
     });
     for (let sweepIndex = 0; sweepIndex < 5; sweepIndex += 1) {
       const priorVersion = stateMgr.readState("steady-agent-11")?.version ?? 0;
-      const priorPublications = publishedFleetPublications.length;
       mockClient.setStatuses.mockClear();
       refreshOnRead = true;
       await engine.runSweep();
@@ -1100,7 +1055,6 @@ describe("Sidebar Sync", () => {
         ]));
       }
       expect(stateMgr.readState("steady-agent-11")?.version, `sweep ${sweepIndex} skipped the later row`).toBeGreaterThan(priorVersion);
-      expect(publishedFleetPublications.length, `sweep ${sweepIndex} skipped publication`).toBeGreaterThan(priorPublications);
     }
   }, 20_000);
 
@@ -1256,7 +1210,7 @@ describe("Sidebar Sync", () => {
     expect(concurrentRoute.surface_id).toBe("surface:new");
   });
 
-  it("publishes the canonical observed UUID when persisted casing differs", async () => {
+  it("binds the canonical observed UUID when persisted casing differs", async () => {
     const observedUuid = "078D1A5B-A3F4-40A5-8A59-A6C840BAF832";
     const persistedUuid = observedUuid.toLowerCase();
     stateMgr.writeState(
@@ -1283,28 +1237,19 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(publishedFleetPublications.at(-1)).toMatchObject({
-      state: "populated",
-      observedLiveSurfaceRefs: ["surface:case"],
-      observedLiveSurfaceUuids: [observedUuid],
-      snapshot: {
-        seatCount: 1,
-        lanes: [
-          {
-            seats: [
-              {
-                agentId: "case-normalized-seat",
-                surfaceRef: "surface:case",
-                surfaceUuid: observedUuid,
-              },
-            ],
-          },
-        ],
-      },
+    expect(engine.getAgentState("case-normalized-seat")).toMatchObject({
+      surface_id: "surface:case",
+      surface_uuid: observedUuid,
     });
+    expect(pushedStatuses(mockClient)).toEqual([
+      expect.objectContaining({
+        key: "case-normalized-seat",
+        surface: "surface:case",
+      }),
+    ]);
   });
 
-  it("publishes no mixed row when the stable UUID moves during the screen read", async () => {
+  it("pushes no mixed status row when the stable UUID moves during the screen read", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     stateMgr.writeState(
       makeRecord({
@@ -1368,8 +1313,7 @@ describe("Sidebar Sync", () => {
       "surface:new",
       expect.anything(),
     );
-    expect(mockClient.setStatus).not.toHaveBeenCalled();
-    expect(publishedFleetPublications.at(-1)?.snapshot.seatCount).toBe(0);
+    expect(pushedStatuses(mockClient)).toEqual([]);
   });
 
   it("quarantines a foreign ref-only row instead of reading its recycled surface", async () => {
@@ -1383,15 +1327,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: (publication) => {
-          if (!("snapshot" in publication)) {
-            throw new Error("engine must publish an explicit fleet state");
-          }
-          publishedFleetPublications.push(publication);
-        },
-        dispose: () => {},
-      },
     });
     stateMgr.writeState(
       makeRecord({
@@ -1421,94 +1356,10 @@ describe("Sidebar Sync", () => {
       surface_observer_id: "cmux:/tmp/prod.sock",
       workspace_id: "workspace:prod",
     });
-    expect(publishedFleetPublications.at(-1)).toMatchObject({
-      state: "empty",
-      snapshot: { seatCount: 0 },
-    });
+    expect(pushedStatuses(mockClient)).toEqual([]);
   });
 
-  it("publishes screen current-action fallback with truthful state and lane identity", async () => {
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: "auto-voicelayer-worker",
-        surface_id: "surface:42",
-        workspace_id: "workspace:voice",
-        repo: "misc",
-        seat_lane: "voicelayer",
-        seat_id: "transcription-worker",
-        state: "idle",
-        task_summary: " ",
-      }),
-    );
-    liveSurfaces = [makeSurface("surface:42")];
-    mockClient.listWorkspaces.mockResolvedValue({
-      workspaces: [makeWorkspace("workspace:voice")],
-    });
-    mockClient.listPanes.mockResolvedValue({
-      workspace_ref: "workspace:voice",
-      window_ref: "window:1",
-      panes: [
-        {
-          ref: "pane:1",
-          index: 0,
-          focused: true,
-          surface_count: 1,
-          surface_refs: ["surface:42"],
-        },
-      ],
-    });
-    mockClient.listPaneSurfaces.mockResolvedValue({
-      workspace_ref: "workspace:voice",
-      window_ref: "window:1",
-      pane_ref: "pane:1",
-      surfaces: [
-        {
-          ...makeSurface("surface:42"),
-          title: "voicelayerCodex [surface:42]",
-        },
-      ],
-    });
-    mockClient.readScreen.mockResolvedValue({
-      surface: "surface:42",
-      text: "✻ Working (1m 2s • esc to interrupt)\n  Reading src/transcribe.ts",
-      lines: 20,
-      scrollback_used: false,
-    });
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    expect(publishedFleetPublications).toHaveLength(1);
-    expect(publishedFleetPublications[0]).toMatchObject({
-      state: "populated",
-      observedLiveSurfaceRefs: ["surface:42"],
-      snapshot: {
-        seatCount: 1,
-        activeCount: 1,
-        lanes: [
-          {
-            key: "voicelayer",
-            liveCount: 1,
-            activeCount: 1,
-            collapsed: false,
-            seats: [
-              {
-                agentId: "auto-voicelayer-worker",
-                surfaceRef: "surface:42",
-                name: "voicelayerCodex [surface:42]",
-                screenState: "working",
-                status: "Reading src/transcribe.ts",
-                healthVisible: false,
-                health: "",
-              },
-            ],
-          },
-        ],
-      },
-    });
-  });
-
-  it("discovers and publishes live seats exactly once during idempotent startup", async () => {
+  it("discovers and reconciles live seats exactly once during idempotent startup", async () => {
     const transcriptResolver = vi.fn(() => null);
     engine.dispose();
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -1516,15 +1367,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: transcriptResolver,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: (publication) => {
-          if (!("snapshot" in publication)) {
-            throw new Error("engine must publish an explicit fleet state");
-          }
-          publishedFleetPublications.push(publication);
-        },
-        dispose: () => {},
-      },
     });
     liveSurfaces = [
       {
@@ -1572,29 +1414,18 @@ describe("Sidebar Sync", () => {
 
     expect(scan).toHaveBeenCalledTimes(1);
     expect(transcriptResolver).not.toHaveBeenCalled();
-    expect(publishedFleetPublications).toHaveLength(2);
-    expect(publishedFleetPublications[0]).toMatchObject({
-      state: "discovering",
-      observedLiveSurfaceRefs: null,
-    });
-    expect(publishedFleetPublications.at(-1)).toMatchObject({
-      state: "populated",
-      observedLiveSurfaceRefs: ["surface:42"],
-      snapshot: {
-        seatCount: 1,
-        lanes: [
-          {
-            key: "cmuxlayer",
-            seats: [
-              {
-                surfaceRef: "surface:42",
-                screenState: "working",
-              },
-            ],
-          },
-        ],
-      },
-    });
+    expect(engine.getRegistry().list()).toEqual([
+      expect.objectContaining({
+        agent_id: "auto-codex-surface-42",
+        surface_id: "surface:42",
+      }),
+    ]);
+    expect(pushedStatuses(mockClient)).toEqual([
+      expect.objectContaining({
+        key: "auto-codex-surface-42",
+        surface: "surface:42",
+      }),
+    ]);
 
     await engine.runSweep();
 
@@ -1636,10 +1467,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: deferredTranscriptResolver,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: () => {},
-        dispose: () => {},
-      },
     });
     mockClient.readScreen
       .mockResolvedValueOnce({
@@ -1679,10 +1506,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: deferredTranscriptResolver,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: () => {},
-        dispose: () => {},
-      },
     });
     const restartedDiscovery = new AgentDiscovery({
       listSurfaces: async () => liveSurfaces,
@@ -1779,10 +1602,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: deferredTranscriptResolver,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: () => {},
-        dispose: () => {},
-      },
     });
     const discovery = new AgentDiscovery({
       listSurfaces: async () => liveSurfaces,
@@ -1835,10 +1654,6 @@ describe("Sidebar Sync", () => {
         spawnPreflight: async () => {},
         sessionIdentityResolver: deferredTranscriptResolver,
         inboxOpts,
-        fleetSidebarPublisher: {
-          publish: () => {},
-          dispose: () => {},
-        },
       });
     };
     const discovery = new AgentDiscovery({
@@ -1905,10 +1720,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: deferredTranscriptResolver,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: () => {},
-        dispose: () => {},
-      },
     });
     const discovery = new AgentDiscovery({
       listSurfaces: async () => liveSurfaces,
@@ -1929,23 +1740,6 @@ describe("Sidebar Sync", () => {
     expect(engine.getAgentState("gemini-stale-deferred-capture")).toBeNull();
   });
 
-  it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {
-    const discovery = new AgentDiscovery({
-      listSurfaces: async () => [],
-      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
-    });
-
-    await engine.initialize(discovery);
-
-    expect(publishedFleetPublications).toEqual([
-      expect.objectContaining({ state: "discovering" }),
-      expect.objectContaining({
-        state: "unknown",
-        observedLiveSurfaceRefs: [],
-      }),
-    ]);
-  });
-
   it("keeps placement unavailable when first-connect discovery fails", async () => {
     mockClient.listWorkspaces.mockRejectedValue(
       new Error("cmux socket unavailable"),
@@ -1960,10 +1754,6 @@ describe("Sidebar Sync", () => {
     await expect(engine.initialize(discovery)).rejects.toThrow(
       /cmux socket unavailable/,
     );
-
-    expect(publishedFleetPublications).toEqual([
-      expect.objectContaining({ state: "discovering" }),
-    ]);
   });
 
   it("suppresses terminal lifecycle and status side effects on first connect", async () => {
@@ -2037,26 +1827,17 @@ describe("Sidebar Sync", () => {
 
     await engine.initialize(discovery);
 
-    expect(publishedFleetPublications.at(-1)).toMatchObject({
-      state: "populated",
-      snapshot: {
-        seatCount: 1,
-        lanes: [
-          {
-            seats: [
-              {
-                agentId: "auto-codex-surface-42",
-                surfaceRef: "surface:42",
-              },
-            ],
-          },
-        ],
-      },
-    });
+    expect(pushedStatuses(mockClient)).toEqual([
+      expect.objectContaining({
+        key: "auto-codex-surface-42",
+        surface: "surface:42",
+      }),
+    ]);
   });
 
-  it("preserves the last generated fleet when topology enumeration is unknown", async () => {
-    stateMgr.writeState(makeRecord());
+  it("preserves registry seats and pushes no status when topology enumeration is unknown", async () => {
+    const record = makeRecord();
+    stateMgr.writeState(record);
     liveSurfaces = [makeSurface("surface:42")];
     mockClient.listWorkspaces.mockRejectedValue(
       new Error("socket unavailable"),
@@ -2066,28 +1847,21 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     expect(mockClient.readScreen).not.toHaveBeenCalled();
-    expect(publishedFleetPublications).toEqual([
-      expect.objectContaining({
-        state: "unknown",
-        observedLiveSurfaceRefs: null,
-      }),
-    ]);
+    expect(pushedStatuses(mockClient)).toEqual([]);
+    expect(engine.getAgentState(record.agent_id)).not.toBeNull();
   });
 
-  it("preserves the last generated fleet when topology is empty but registry seats remain", async () => {
-    stateMgr.writeState(makeRecord());
+  it("preserves registry seats and pushes no status when topology is empty", async () => {
+    const record = makeRecord();
+    stateMgr.writeState(record);
     liveSurfaces = [makeSurface("surface:42")];
     mockClient.listWorkspaces.mockResolvedValue({ workspaces: [] });
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
 
-    expect(publishedFleetPublications).toEqual([
-      expect.objectContaining({
-        state: "unknown",
-        observedLiveSurfaceRefs: null,
-      }),
-    ]);
+    expect(pushedStatuses(mockClient)).toEqual([]);
+    expect(engine.getAgentState(record.agent_id)).not.toBeNull();
   });
 
   it("auto-evicts a registry ghost on the next authoritative normal sweep", async () => {
@@ -2138,10 +1912,7 @@ describe("Sidebar Sync", () => {
       error: "Surface surface:ghost disappeared",
     });
     expect(
-      publishedFleetPublications
-        .at(-1)
-        ?.snapshot.lanes.flatMap((lane) => lane.seats)
-        .map((seat) => seat.surfaceRef),
+      pushedStatuses(mockClient).map((status) => status.surface),
     ).not.toContain("surface:ghost");
 
     await vi.advanceTimersByTimeAsync(5_001);
@@ -2277,49 +2048,11 @@ describe("Sidebar Sync", () => {
       surface_id: "surface:possibly-live",
       state: "working",
     });
-    expect(publishedFleetPublications.at(-1)).toMatchObject({
-      state: "unknown",
-      observedLiveSurfaceRefs: null,
-    });
   }, 10_000);
 
-  it("publishes authoritative empty when only unrelated terminals remain", async () => {
-    liveSurfaces = [makeSurface("surface:notes")];
-    mockClient.listWorkspaces.mockResolvedValue({
-      workspaces: [makeWorkspace("workspace:notes")],
-    });
-    mockClient.listPanes.mockResolvedValue({
-      workspace_ref: "workspace:notes",
-      window_ref: "window:1",
-      panes: [
-        {
-          ref: "pane:1",
-          index: 0,
-          focused: true,
-          surface_count: 1,
-          surface_refs: ["surface:notes"],
-        },
-      ],
-    });
-    mockClient.listPaneSurfaces.mockResolvedValue({
-      workspace_ref: "workspace:notes",
-      window_ref: "window:1",
-      pane_ref: "pane:1",
-      surfaces: liveSurfaces,
-    });
-
-    await engine.runSweep();
-
-    expect(publishedFleetPublications).toEqual([
-      expect.objectContaining({
-        state: "empty",
-        observedLiveSurfaceRefs: ["surface:notes"],
-      }),
-    ]);
-  });
-
-  it("preserves the last generated fleet when topology enumeration is partial", async () => {
-    stateMgr.writeState(makeRecord());
+  it("preserves registry seats and pushes no status when topology enumeration is partial", async () => {
+    const record = makeRecord();
+    stateMgr.writeState(record);
     liveSurfaces = [makeSurface("surface:42")];
     mockClient.listWorkspaces.mockResolvedValue({
       workspaces: [makeWorkspace("workspace:coach")],
@@ -2343,78 +2076,8 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(publishedFleetPublications).toEqual([
-      expect.objectContaining({
-        state: "unknown",
-        observedLiveSurfaceRefs: null,
-      }),
-    ]);
-  });
-
-  it("marks a registry-working screen stalled after de-chromed output stops progressing", async () => {
-    vi.useFakeTimers();
-    const startedAt = new Date("2026-07-14T16:00:00.000Z");
-    vi.setSystemTime(startedAt);
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: "no-transcript-progress",
-        surface_id: "surface:no-progress",
-        workspace_id: "workspace:cmuxlayer",
-        repo: "cmuxlayer",
-        launcher_name: "cmuxlayerCodex",
-        state: "working",
-        cli_session_id: null,
-        cli_session_path: null,
-      }),
-    );
-    liveSurfaces = [
-      {
-        ...makeSurface("surface:no-progress"),
-        title: "cmuxlayerCodex [surface:no-progress]",
-        workspace_ref: "workspace:cmuxlayer",
-      },
-    ];
-    mockClient.readScreen.mockResolvedValue({
-      surface: "surface:no-progress",
-      text: "Claude Code\n✻ Baking… (1s · ↑ 4)\n🤖 Opus 4.8 | ⏱️ 1s\n⏵⏵ bypass permissions on",
-      lines: 4,
-      scrollback_used: false,
-    });
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    expect(
-      publishedFleetPublications
-        .at(-1)
-        ?.snapshot.lanes.flatMap((lane) => lane.seats),
-    ).toEqual([
-      expect.objectContaining({
-        agentId: "no-transcript-progress",
-        screenState: "working",
-      }),
-    ]);
-
-    vi.setSystemTime(startedAt.getTime() + 120_001);
-    mockClient.readScreen.mockResolvedValue({
-      surface: "surface:no-progress",
-      text: "Claude Code\n✻ Baking… (2m 1s · ↑ 99)\n🤖 Opus 4.8 | ⏱️ 2m\n⏵⏵ bypass permissions on",
-      lines: 4,
-      scrollback_used: false,
-    });
-
-    await engine.runSweep();
-
-    expect(
-      publishedFleetPublications
-        .at(-1)
-        ?.snapshot.lanes.flatMap((lane) => lane.seats),
-    ).toEqual([
-      expect.objectContaining({
-        agentId: "no-transcript-progress",
-        screenState: "stalled",
-      }),
-    ]);
+    expect(pushedStatuses(mockClient)).toEqual([]);
+    expect(engine.getAgentState(record.agent_id)).not.toBeNull();
   });
 
   afterEach(() => {
@@ -2620,10 +2283,6 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts,
-      fleetSidebarPublisher: {
-        publish: () => {},
-        dispose: () => {},
-      },
     });
     const discovery = new AgentDiscovery({
       listSurfaces: async () => liveSurfaces,
@@ -2709,7 +2368,6 @@ describe("Sidebar Sync", () => {
         sessionIdentityResolver: () => null,
         inboxOpts,
         haltAwaitingInputDwellMs: 0,
-        fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
       },
     );
     stateMgr.writeState(
@@ -3125,7 +2783,6 @@ describe("Sidebar Sync", () => {
         haltAwaitingInputDwellMs: 0,
         haltWedgedDwellMs: 0,
         haltWedgedSweeps: 1,
-        fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
       },
     );
     stateMgr.writeState(
@@ -4418,7 +4075,6 @@ describe("Sidebar Sync", () => {
         ),
       ]),
     );
-    expect(publishedFleetPublications.at(-1)?.snapshot.seatCount).toBe(2);
 
     mockClient.setStatus.mockClear();
     await expect(engine.runSweep()).resolves.toBeUndefined();

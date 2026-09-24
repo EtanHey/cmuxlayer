@@ -46,7 +46,7 @@ function suiteJobs(): Job[] {
 
 /**
  * AIDEV-NOTE: publish.yml ran the suite on setup-node alone for 105 releases.
- * The suite spawns `bun` (tests/fleet-sidebar.test.ts) and release.sh shells out
+ * The suite spawns `bun` (tests/screen-parser.test.ts) and release.sh shells out
  * to `bun run`, so a bun-less runner fails on missing toolchain rather than on
  * anything about the code. Nobody read the log, so cmuxlayer never reached npm.
  *

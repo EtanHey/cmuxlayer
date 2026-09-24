@@ -73,7 +73,6 @@ import {
   type DaemonSocketProbe,
 } from "./daemon-lifecycle-state.js";
 import { loadCmuxlayerConfigFile } from "./config-file.js";
-import { FleetSidebarPublisher } from "./fleet-sidebar.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
@@ -720,7 +719,6 @@ export class CmuxLayerDaemon {
       watchRegistryPath: this.opts.watchRegistryPath,
       watchRegistryNow: this.opts.watchRegistryNow,
       watchNotify: this.opts.watchNotify,
-      fleetSidebarPublisher: this.opts.fleetSidebarPublisher,
     });
     try {
       await (context.lifecycleStartPromise ?? Promise.resolve());
@@ -1395,9 +1393,6 @@ export async function runDaemon(
     watchNotify:
       opts.watchNotify ??
       (testProcess ? async () => undefined : httpNotifyWatch),
-    fleetSidebarPublisher:
-      opts.fleetSidebarPublisher ??
-      (testProcess ? undefined : new FleetSidebarPublisher()),
     monitorOwnerPtyDeadNotify:
       opts.monitorOwnerPtyDeadNotify ??
       (testProcess
