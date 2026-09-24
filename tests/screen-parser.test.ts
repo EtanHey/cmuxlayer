@@ -63,6 +63,14 @@ describe("parseScreen", () => {
     expect(parsed.control_state).toBe("composer_dirty");
   });
 
+  it("keeps a current Claude draft dirty despite an older Thinking marker", () => {
+    const parsed = parseScreen(
+      "Claude Code\n✻ Thinking…\n❯ Read and follow the lane brief\n  bypass permissions on",
+    );
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
   it("returns the latest framed response in a screen window", () => {
     expect(
       parseScreen(
