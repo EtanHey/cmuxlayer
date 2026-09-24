@@ -2903,8 +2903,15 @@ export class AgentEngine {
         lines: BOOT_SESSION_CAPTURE_LINES,
       });
       const evidence = this.readReadyEvidence(agent, screen.text);
+      const parsed = parseScreen(screen.text);
+      const activeForWait =
+        agent.cli === "claude" &&
+        (parsed.status === "working" ||
+          parsed.status === "thinking" ||
+          parsed.control_state === "busy");
       const hasTargetEvidence =
-        evidence.ready || (targetState === "ready" && evidence.activeCodex);
+        (evidence.ready && !activeForWait) ||
+        (targetState === "ready" && evidence.activeCodex);
       const awaitingManagedBootPrompt =
         targetState === "ready" &&
         agent.boot_prompt_pending === true &&
@@ -2922,9 +2929,9 @@ export class AgentEngine {
 
       const count = (waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
       waitForReadyPatternMatches.set(agent.agent_id, count);
-      // An idle-looking frame can appear briefly between active Claude frames.
-      // Keep the registry working until two separate poll observations agree.
-      if (count < Math.max(targetState === "idle" ? 2 : 1, evidence.consecutive)) {
+      // A resting-looking frame can appear briefly between active frames.
+      // Keep the registry in its pre-target state until two polls agree.
+      if (count < Math.max(2, evidence.consecutive)) {
         return { agent };
       }
 
@@ -3909,14 +3916,13 @@ export class AgentEngine {
       parsed,
     );
     const canBeInteractive = parsed.control_state !== "shell";
-    const active = screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     const activeCodex =
       agent.cli === "codex" &&
       canBeInteractive &&
       hasIdentity &&
-      active;
+      screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     return {
-      ready: canBeInteractive && hasIdentity && !active && match.matched,
+      ready: canBeInteractive && hasIdentity && match.matched,
       activeCodex,
       consecutive: match.consecutive,
     };
@@ -10353,6 +10359,22 @@ export class AgentEngine {
       INTERACTIVE_AGENT_STATES.has(this.terminationStateOf(initial, live));
     let restingObservations = confirmsRestingScreen(initialLive) ? 1 : 0;
     let needsSecondRestingRead = restingObservations === 1;
+    if (restingObservations === 1) {
+      waitForReadyPatternMatches.set(agentId, 1);
+    } else if (INTERACTIVE_AGENT_STATES.has(targetState)) {
+      // Count the entry screen as the first candidate. Short waits can then
+      // confirm rest on the first poll tick, even without a forcing probe.
+      await this.refreshTargetStateEvidence(
+        initial,
+        targetState,
+        waitForReadyPatternMatches,
+        initialState,
+      );
+      if (waitForReadyPatternMatches.has(agentId)) {
+        restingObservations = 1;
+        needsSecondRestingRead = true;
+      }
+    }
     // Entry already bought evidence, so the first sweep refresh is due one
     // full interval in.
     let lastForcedEvidenceElapsed = 0;
@@ -10402,6 +10424,17 @@ export class AgentEngine {
           const timeoutLive = current
             ? await this.refreshLiveState(current)
             : null;
+          if (
+            current && timeoutLive?.source === "screen" &&
+            INTERACTIVE_AGENT_STATES.has(targetState)
+          ) {
+            restingObservations = INTERACTIVE_AGENT_STATES.has(
+              this.terminationStateOf(current, timeoutLive),
+            ) ? restingObservations + 1 : 0;
+            if (restingObservations === 0) {
+              waitForReadyPatternMatches.delete(agentId);
+            }
+          }
           let timeoutState =
             current && timeoutLive
               ? this.terminationStateOf(current, timeoutLive)
@@ -10457,8 +10490,10 @@ export class AgentEngine {
             current &&
             timeoutEvidence &&
             (!INTERACTIVE_AGENT_STATES.has(targetState) ||
-              timeoutLive?.source !== "screen" ||
-              (restingObservations >= 2 && !isLiveActive(timeoutLive)))
+              (restingObservations >= 2 &&
+                timeoutLive?.source === "screen" &&
+                !isLiveActive(timeoutLive) &&
+                current.state !== "working"))
           ) {
             finish({
               matched: true,

@@ -486,8 +486,8 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     );
     await engine.getRegistry().reconstitute();
     engine.setLiveStateResolver(workingScreenProbe);
-    // The live resolver remains stale-working even after the final direct
-    // screen read sees rest. The screen-backed transition must win.
+    // The live resolver and fresh probe still say working at timeout. A lone
+    // final resting read cannot confirm idle across poll ticks.
     const freshProbe = vi.fn(async (agent: AgentRecord) =>
       workingScreenProbe(agent),
     );
