@@ -13,8 +13,10 @@ cmuxlayer launches an agent in one of two forms (`src/agent-engine.ts:1537`, `bu
 
 - **Launcher form.** If a launcher is registered for the repo (see
   [registry-optional-spawn](../guides/registry-optional-spawn.md)), cmuxlayer runs
-  `{repo}{Cli}` (for example `myrepoClaude`) with `-s` (skip approvals), `--worker`, `-w <cwd>`,
-  `-m <model>` and, for Codex, `-E <effort>` (`src/agent-engine.ts:1563-1576`). The launcher owns
+  `{repo}{Cli}` (for example `myrepoClaude`) with, when applicable, `-s` (skip approvals),
+  `-w <cwd>`, `-m <model>` (only when a model resolves) and, for Codex, `-E <effort>` and
+  `--worker` (`src/agent-engine.ts:1563-1576`; `--worker` is used only in the Codex form at
+  `:1625`). The launcher owns
   the environment.
 - **Raw form.** Without a launcher, cmuxlayer runs the CLI binary directly
   (`src/agent-engine.ts:1590`, `:1614-1617`). Kiro always uses its raw form.
@@ -35,7 +37,8 @@ Gemini) and `:1630` (Kiro); model flags `src/agent-engine.ts:1600-1612`; the Gem
 
 **Skip-approvals is configurable.** `CMUXLAYER_SPAWN_PERMISSION_MODE` defaults to
 `skip-permissions`; `default`, `ask` or `prompt` make spawned agents prompt instead
-(`src/permission-mode.ts:13-29`). `cmuxlayer init --permissions ask` writes it. The same choice
+(`src/permission-mode.ts:13-29`). `cmuxlayer init --permissions ask` writes it
+(`src/init-wizard.ts:229-237`, `:511`). The same choice
 applies to resume commands (`src/agent-command.ts:93-100`).
 
 **If a raw launch cannot apply the model you asked for**, the spawn result carries a
@@ -53,9 +56,11 @@ From `src/model-policy.ts`:
 | Gemini | `pro` | `:54` |
 | Kiro | `opus` | `:91` |
 
-A Codex model you name is checked before anything is created: against your account's catalog
-(`codex debug models`), and only if that cannot be read, against the list bundled with the binary,
-which can warn but never reject (`src/agent-engine.ts:685-740`).
+A Codex model you name is checked in spawn preflight, before any worktree or pane is created
+(`src/agent-engine.ts:2059-2066`): against your account's catalog (`codex debug models`), and only
+if that cannot be read, against the list bundled with the binary, which can warn but never
+reject. If neither list can be read, the spawn is refused (`src/agent-engine.ts:685-740`,
+`:730-733`).
 
 ### Cursor is Auto-only
 
@@ -91,7 +96,8 @@ call and looks like a hung pane (`src/agent-command.ts:77-80`).
 ### Typed or pasted
 
 Text is pasted when it spans more than one chunk or batch, or contains a newline, carriage return
-or tab (`src/server.ts:2608-2621`). Otherwise it is typed with `surface.send_text`.
+or tab, or the literal escape sequences `\n`, `\r` or `\t` (`src/server.ts:2608-2621`).
+Otherwise it is typed with the cmux `surface.send_text` call (`src/cmux-socket-client.ts:594-599`).
 
 - A paste goes through cmux `set-buffer` then `paste-buffer` (`src/cmux-client.ts:573-584`). The
   socket protocol has no paste RPC, so pasting needs the CLI client
@@ -103,7 +109,7 @@ or tab (`src/server.ts:2608-2621`). Otherwise it is typed with `surface.send_tex
 | Limit | Value | Source |
 |---|---|---|
 | Chunk size | 500 characters | `src/server.ts:653` |
-| Inline maximum | 1,800 characters; `CMUXLAYER_MAX_INLINE_CHARS` overrides it (minimum 500) | `src/server.ts:657`, `:677-689` |
+| Inline maximum | 1,800 characters; `CMUXLAYER_MAX_INLINE_CHARS` overrides it (minimum 500) | `src/server.ts:657`, `:685-697` |
 | Paste batch | 16,000 bytes | `src/server.ts:662` |
 
 **Multi-paragraph text is refused** for Claude Code, Codex, Cursor and Gemini: a blank line can
@@ -118,8 +124,11 @@ overrides the refusal.
   (`src/server.ts:666`, `:4006-4012`).
 - If the draft is still in the composer after the CLI's observe window, cmuxlayer waits 150 ms
   and sends one recovery Return (`src/server.ts:667`, `:6860-6891`).
-- Observe windows: Claude Code 4 s, Codex 250 ms, Cursor follow-ups 250 ms
-  (`src/server.ts:709-712`, `:6847-6859`).
+- Observe windows before that recovery Return: Claude Code 4 s, except for the boot prompt,
+  which uses 250 ms; Codex 250 ms; Cursor follow-ups 250 ms (`src/server.ts:709-712`,
+  `:6848-6856`).
+- An Antigravity (`agy`) boot prompt repaints slowly, so cmuxlayer polls every 250 ms for up to
+  3 s to see it on screen before pressing Return (`src/server.ts:670-673`, `:6523-6531`).
 - `return`, `enter`, `kp_enter`, `ctrl-m` and similar all count as a submit in the receipt
   (`src/key-names.ts:11-30`).
 
@@ -137,13 +146,20 @@ overrides the refusal.
 
 Patterns live in `src/pattern-registry.ts` and `src/screen-parser.ts`.
 
-| CLI | Ready (prompt) | Working |
-|---|---|---|
-| Claude Code | `❯`, high confidence | a spinner glyph (`✻✢✳✶⏺●`) + Thinking, Working, Running… |
-| Codex | `›`, `»`, `❯`, `codex>` | `Working (`, `• Working`, Waiting, Thinking; "Starting MCP servers" means still booting |
-| Cursor | `→`, `cursor>` | braille spinner or `⬢`/`⬡` + Calling, Editing, Reading… |
-| Gemini | `gemini>`, or a bare `>` seen twice (low confidence) | `✦ Working…` |
-| Kiro | `kiro>`, or a bare `>` seen twice (low confidence) | not detected |
+**Where the strings come from.** Most strings are *sampled*: copied from live panes, so a CLI
+release can change them without notice. The Antigravity (`agy`) strings are *upstream-sourced*:
+each one cites a byte offset in the agy 1.2.10 binary in its source comment
+(`src/screen-parser.ts:284-318`, e.g. `esc to cancel` @48882141). The Source column says which,
+and what pins it in the tests.
+
+| CLI | Ready (prompt) | Working | Source |
+|---|---|---|---|
+| Claude Code | `❯`, high confidence | a spinner glyph (`✻✢✳✶⏺●`) + Thinking, Working, Running… | sampled; captured screens in `tests/fixtures/a3-claude/` |
+| Codex | `›`, `»`, `❯`, `codex>` | `Working (`, `• Working`, Waiting, Thinking; "Starting MCP servers" means still booting | sampled; captured screens in `tests/fixtures/painpoints/`, `live/` |
+| Cursor | `→`, `cursor>` | braille spinner or `⬢`/`⬡` + Calling, Editing, Reading… | sampled; `tests/fixtures/cursor-*.txt` |
+| Gemini (gemini-cli) | `gemini>`, or a bare `>` seen twice (low confidence) | `✦ Working…` | sampled; inline test strings only, no captured screen |
+| Gemini (agy) | an empty `>` composer between `─` rules | an `esc to cancel` footer, or a braille spinner right above the composer's top rule | upstream-sourced; specimens in `tests/fixtures/gemini-antigravity/` |
+| Kiro | `kiro>`, or a bare `>` seen twice (low confidence) | not detected | no specimen |
 
 Sources: prompt prefixes `src/pattern-registry.ts:28-34`; ready patterns `:36-103`; working
 patterns `src/pattern-registry.ts:38-74` and `src/screen-parser.ts:249-283`, `:365-366`; Codex
@@ -151,7 +167,8 @@ boot `src/pattern-registry.ts:70-71`.
 
 Done and stopped signals:
 
-- A line that is just a `*_DONE` marker, for example `REVIEW_DONE` (`src/screen-parser.ts:155-156`).
+- A line that is just a `*_DONE` marker, for example `REVIEW_DONE`, optionally followed by one
+  token of up to 16 characters (`src/screen-parser.ts:155-156`).
 - Claude Code: `⏺ Completed` (`src/screen-parser.ts:319`).
 - Codex: "To continue this session, run codex resume" (the CLI exited;
   `src/screen-parser.ts:255`).
@@ -162,9 +179,17 @@ Done and stopped signals:
 - Codex `Goal paused (/goal resume)` is a **pause**, not done; a paused pane is never cleared as
   finished (`src/screen-parser.ts:328`, `src/agent-engine.ts:5406`).
 
-Gemini seats launched through a launcher may run the Antigravity CLI (`agy`). Its banner, footer,
-composer and spinner are parsed as Gemini (`src/screen-parser.ts:284-318`, `:693-868`). A raw
-launch still runs `gemini`.
+Gemini agents launched through a launcher may run the Antigravity CLI (`agy`), which is not a
+gemini-cli fork; a raw launch still runs `gemini`. An agy screen is recognized by its banner or
+footer model (`src/screen-parser.ts:693`) and reported as Gemini (`:868`). Its signals are
+structural, never spinner labels:
+
+- Ready: an empty `>` composer between full-width `─` rules (`src/screen-parser.ts:303-307`;
+  `antigravityScreenIsReady` at `:800`).
+- Working: the footer starts with `esc to cancel` (`:316`), or a braille spinner sits right above
+  the composer's top rule (`:308-310`); both are read by `antigravityScreenIsActive` (`:768`).
+- Not working: a finished `▸ Thought for` row left in the transcript (`:313`, `:761-766`).
+- Approval: `⚠ Approval Required` or `Do you want to proceed?` (`:317-318`).
 
 Kiro has no screen parser: only the ready pattern above, and it is never reported as working
 (`src/pattern-registry.ts:93-97`, `:231-232`).
@@ -174,9 +199,11 @@ Kiro has no screen parser: only the ready pattern above, and it is never reporte
 - cmuxlayer's public tools send no slash commands of their own. The internal `interact` handler,
   which is not callable over MCP, can send `/model <m>` and `/resume [id]`
   (`src/server.ts:20318`, `:20339-20341`).
-- **Reloading MCP after an upgrade.** In Claude Code, run `/mcp reconnect` in each seat; cmuxlayer
-  prints that advice when a seat runs a stale build (`src/version.ts:259`). **Codex has no `/mcp`**:
-  restart the Codex process (`scripts/post-release-reconnect-sweep.sh:64-65`).
+- **Reloading MCP after an upgrade.** In each Claude Code session, run `/mcp reconnect cmuxlayer`
+  (`scripts/post-release-reconnect-sweep.sh:67`); cmuxlayer prints that advice when a session runs
+  a stale build (`src/version.ts:259`). To drive the `/mcp` menu in another agent's pane, see the
+  [routing guide](../guides/agent-routing-and-handling.md). **Codex has no `/mcp`**: restart the
+  Codex process (`scripts/post-release-reconnect-sweep.sh:64-65`).
 - Nothing sends `/exit` or runs `/compact`. At high context use, a top-level agent gets a nudge
   line suggesting `/compact`, typed without Return (`src/agent-engine.ts:6848-6852`).
 - Stopping an agent sends Ctrl-C; a forced stop sends SIGKILL to a PID whose identity is verified
@@ -193,5 +220,5 @@ Kiro has no screen parser: only the ready pattern above, and it is never reporte
   (`src/agent-engine.ts:1976-1977`, `:5320-5339`).
 - **Permission prompts** are always escalated: the agent is marked `blocked_on_prompt` and no key
   is sent (`src/screen-parser.ts:1710-1711`, `src/agent-engine.ts:5394-5397`).
-- **Folder-trust prompts** are not handled. Approve them by hand, or pre-trust the directory in
-  the CLI.
+- **Folder-trust prompts:** cmuxlayer has no handler for them (no trust-prompt pattern in `src/`).
+  Approve them by hand, or pre-trust the directory in the CLI.
