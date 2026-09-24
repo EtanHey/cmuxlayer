@@ -69,6 +69,7 @@ import {
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
   COORDINATION_CONTRACT_POINTER_NOT_VERIFIED,
+  COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE,
   COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
@@ -171,8 +172,10 @@ import {
   formatDelivery,
 } from "./format.js";
 import {
+  antigravityComposerDraft,
   cleanScreenText,
   inferContextWindow,
+  isAntigravityScreen,
   isCodexUpdateMenuScreen,
   isPickerOrMenuScreen,
   parseScreen,
@@ -1763,6 +1766,9 @@ class LauncherReadinessError extends Error {
   }
 }
 
+const BOOT_COMPOSER_RESIDUE_READS = 3;
+const BOOT_COMPOSER_RESIDUE_POLL_MS = 500;
+
 class BootPromptDeliveryError extends Error {
   readonly rpc_methods: DeliveryRpcMethod[];
   readonly typed: boolean;
@@ -1789,6 +1795,18 @@ class BootPromptDeliveryError extends Error {
     this.submit_dispatched =
       deliverySubmitDispatchedFromError(delivery_error) ||
       deliverySubmitDispatchedFromError(submit_verification_error);
+  }
+}
+
+/** #801: a submitted boot prompt left text behind in the composer. */
+class BootComposerResidueError extends BootPromptDeliveryError {
+  constructor(
+    message: string,
+    delivered_chars: number,
+    readonly composer_residue: string,
+  ) {
+    super(message, delivered_chars);
+    this.name = "BootComposerResidueError";
   }
 }
 
@@ -3229,6 +3247,12 @@ function extractComposerInputRegion(
   knownCli?: CliType,
   preservePlaceholderText = false,
 ): string | null {
+  // Antigravity (cli "gemini") draws a bare `>` composer between `─` rules,
+  // which the prompt-prefix map cannot express without turning every `> text`
+  // blockquote into a composer line. Read its composer structurally (#802).
+  if (isAntigravityScreen(normalizeTerminalText(screenText))) {
+    return antigravityComposerDraft(normalizeTerminalText(screenText));
+  }
   const lines = normalizeTerminalText(screenText).split("\n");
   const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
@@ -3904,12 +3928,13 @@ function composeBootDeliveryText(
 ): string {
   if (!hasInlinePrompt(injectedPrompt)) return callerDeliveryText;
   if (!hasInlinePrompt(callerDeliveryText)) return injectedPrompt;
-  // Claude can treat a paragraph break in a pasted boot payload as a submit
-  // boundary. Keep the brief and pointer in one composer message so the
-  // brief cannot run while the engine-issued contract remains unsent. A
-  // multi-line brief without a paragraph break has the same boundary risk.
+  // Claude and Antigravity (cli "gemini", #801) can treat a paragraph break in
+  // a pasted boot payload as a submit boundary. Keep the brief and pointer in
+  // one composer message so the brief cannot run while the engine-issued
+  // contract remains unsent. A multi-line brief without a paragraph break has
+  // the same boundary risk.
   if (
-    cli === "claude" &&
+    (cli === "claude" || cli === "gemini") &&
     !/\r?\n\s*\r?\n/.test(callerDeliveryText) &&
     !/\r?\n\s*\r?\n/.test(injectedPrompt)
   ) {
@@ -8787,6 +8812,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stableSurfaceIdentity: opts.stableSurfaceIdentity,
         },
       );
+      await rejectBootComposerResidue(
+        readiness.cli,
+        deliveryRoute,
+        chunks.reduce((sum, chunk) => sum + chunk.length, 0),
+      );
       return fingerprintPromptReceipt({
         ...delivery,
         prompt_warning: promptWarning,
@@ -8796,7 +8826,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         } : {}),
       }, rawPrompt);
     } catch (error) {
-      if (error instanceof SurfaceGoneError) {
+      if (error instanceof SurfaceGoneError || error instanceof BootComposerResidueError) {
         throw error;
       }
       if (error instanceof SubmitVerificationError) {
@@ -8867,6 +8897,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         error instanceof SubmitVerificationError ? error : undefined,
         error,
       );
+    }
+  };
+
+  // #801: after a submitted boot prompt, agy's composer must be empty. A draft
+  // that stays put across reads (the contract pointer on surface:918 sat there
+  // for the whole run) is residue: fail loudly instead of leaving it unsent.
+  const rejectBootComposerResidue = async (
+    cli: CliType,
+    route: { surface: string; workspace?: string },
+    deliveredChars: number,
+  ): Promise<void> => {
+    if (cli !== "gemini") return;
+    let previous: string | null = null;
+    for (let attempt = 0; attempt < BOOT_COMPOSER_RESIDUE_READS; attempt += 1) {
+      if (attempt > 0) await delay(BOOT_COMPOSER_RESIDUE_POLL_MS);
+      const snapshot = await readParsedSurface(route.surface, route.workspace);
+      if (!snapshot) return;
+      const draft =
+        extractComposerInputRegion(snapshot.text, undefined, cli)?.trim() ?? "";
+      if (!draft) return;
+      if (draft === previous) {
+        throw new BootComposerResidueError(
+          `Boot prompt was submitted but left residue in the composer: "${draft}". ` +
+            "It was NOT sent; the agent never saw it (#801).",
+          deliveredChars,
+          draft,
+        );
+      }
+      previous = draft;
     }
   };
 
@@ -16290,7 +16349,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             monitorBoot,
             coordination,
           );
-          const injectedBootPrompt = bootContract.text;
+          // #782/#801: a sterile seat gets only the caller's brief typed.
+          const skipContractPointer = args.mcp_profile === "sterile";
+          const injectedBootPrompt = skipContractPointer
+            ? undefined
+            : bootContract.text;
           result.report_path = coordination.report_path;
           result.done_marker = coordination.done_marker;
           // Finding 3: never report the contract's size without reporting how
@@ -16300,9 +16363,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             coordinationFooterBytes(coordination);
           result.contract_path = bootContract.contract_path ?? undefined;
           result.coordination_footer_delivered = false;
-          result.coordination_footer_note = bootContract.contract_path
-            ? COORDINATION_CONTRACT_POINTER_NOT_VERIFIED
-            : COORDINATION_FOOTER_NOT_DELIVERED;
+          result.coordination_footer_note = skipContractPointer
+            ? COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE
+            : bootContract.contract_path
+              ? COORDINATION_CONTRACT_POINTER_NOT_VERIFIED
+              : COORDINATION_FOOTER_NOT_DELIVERED;
           try {
             const patched = stateMgr.updateRecord(result.agent_id, {
               report_path: coordination.report_path,
@@ -16381,7 +16446,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     timeout_ms: args.boot_prompt_timeout_ms,
                   }),
               });
-              if (bootContract.contract_path !== null) {
+              if (bootContract.contract_path !== null && !skipContractPointer) {
                 result.coordination_footer_delivered =
                   isBootPromptDelivered(bootPromptDelivery);
                 result.coordination_footer_note =

@@ -4229,6 +4229,83 @@ describe("tool handler integration", () => {
     expect(parsed.boot_prompt_warning).toContain("one-line file pointer");
   });
 
+  for (const residue of [null, "cmuxlayer contract for agent-1: Read and follow"] as const) {
+    it(`#801 send_command on an Antigravity pane ${residue ? "rejects a boot draft left in the composer" : "reports a clean composer"}`, async () => {
+      const promptPath = join(CHANNEL_TEST_DIR, "agy-boot.md");
+      mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+      writeFileSync(promptPath, "boot prompt", "utf8");
+      const rule = "─".repeat(60);
+      const banner = [
+        "      ▄▀▀▄        Antigravity CLI 1.2.10",
+        "     ▀▀▀▀▀▀       user@example.com (Google AI Pro)",
+        "    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)",
+        "",
+      ];
+      const footer = "? for shortcuts                                   Gemini 3.1 Pro · high";
+      let promptSent = false;
+      let promptSubmitted = false;
+      mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("read-screen")) {
+          const text = !promptSent
+            ? [...banner, rule, ">", rule, footer]
+            : !promptSubmitted
+              ? [...banner, rule, "> boot prompt", rule, "                                                  Gemini 3.1 Pro · high"]
+              : [
+                ...banner,
+                rule,
+                "> boot prompt",
+                "",
+                "  Done.",
+                "",
+                rule,
+                ">",
+                ...(residue ? [`  ${residue}`] : []),
+                rule,
+                residue ? "                                                  Gemini 3.1 Pro · high" : footer,
+              ];
+          return {
+            stdout: JSON.stringify({ surface: "surface:1", text: text.join("\n"), lines: 20, scrollback_used: false }),
+            stderr: "",
+          };
+        }
+        if (args.includes("send-key") && args.includes("return") && promptSent) {
+          promptSubmitted = true;
+        }
+        if (args.includes("send") && String(args.at(-1) ?? "") === "boot prompt") {
+          promptSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      });
+      const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+      const tool = (server as any)._registeredTools["send_command"];
+
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              surface: "surface:1",
+              command: "cmuxlayerGemini -s",
+              boot_prompt_path: promptPath,
+              boot_prompt_timeout_ms: 700,
+            },
+            {} as any,
+          ),
+        6_000,
+      );
+
+      const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(promptSubmitted, JSON.stringify(parsed)).toBe(true);
+      if (residue) {
+        expect(parsed.ok).toBe(false);
+        expect(JSON.stringify(parsed)).toContain(residue);
+        expect(JSON.stringify(parsed)).toMatch(/composer/i);
+      } else {
+        expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+        expect(parsed.boot_prompt_submit_verified).toBe(true);
+      }
+    }, 15_000);
+  }
+
   it("send_command verifies a cleared stable Claude boot prompt without a working marker", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "slow-claude.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -4883,9 +4960,10 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     // Two readiness matches, launch-command preflight, boot-prompt preflight,
-    // complete composer observation, then post-submit verification.
+    // complete composer observation, post-submit verification, then the
+    // gemini composer-residue read (#801).
     expect(readsWhenBootPromptSent).toBe(4);
-    expect(reads).toBe(7);
+    expect(reads).toBe(8);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),

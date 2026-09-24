@@ -2233,6 +2233,17 @@ describe("boot-submit readiness and attributable evidence", () => {
       .toBe(`${brief} ; ${pointer}`);
   });
 
+  it("#801 keeps a Gemini (Antigravity) brief and contract pointer in one submit", async () => {
+    // agy submits at a paragraph break like Claude: on surface:918 the brief ran
+    // and the pointer sat unsent in the composer for the whole run.
+    const { __submitEvidenceTestHooks } = await loadServerModule();
+    const brief = "Read and follow /tmp/goals/cursor-01.md";
+    const pointer = "cmuxlayer contract for cmuxlayerGemini-8b0398fe: Read and follow /tmp/contract.md";
+    const delivered = __submitEvidenceTestHooks.composeBootDeliveryText(brief, pointer, "gemini");
+    expect(delivered).toBe(`${brief} ; ${pointer}`);
+    expect(delivered).not.toMatch(/[\r\n]/);
+  });
+
   it("delivers an injected-only boot contract without a leading paragraph break", async () => {
     const { __submitEvidenceTestHooks } = await loadServerModule();
     const pointer = "cmuxlayer contract for agent-1: Read and follow /tmp/contract.md";

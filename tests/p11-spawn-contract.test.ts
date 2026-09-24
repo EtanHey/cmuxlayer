@@ -4393,6 +4393,18 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     }
   });
 
+  it("#801/#782 mcp_profile sterile never types the contract pointer, and says so", async () => {
+    const parsed = await spawn({ mcp_profile: "sterile" });
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(sentText(exec)).not.toContain("cmuxlayer contract for");
+    expect(sentText(exec)).toContain("task");
+    expect(parsed.coordination_footer_delivered).toBe(false);
+    expect(parsed.coordination_footer_note).toMatch(/skipped_sterile_profile/);
+    // The engine still issues the contract; the receipt keeps reporting it.
+    expect(parsed.report_path).toMatch(/report\.md$/);
+    expect(parsed.done_marker).toBeTruthy();
+  });
+
   it("FINDING 3: never reports contract bytes without reporting how they were sent", async () => {
     const parsed = await spawn();
     // The v0.4.41 `paused` hazard: an authoritative number with no provenance.

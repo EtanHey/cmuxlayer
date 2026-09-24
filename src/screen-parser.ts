@@ -739,6 +739,25 @@ function antigravityComposerIndex(lines: string[]): number {
 }
 
 /**
+ * The text in agy's composer: the `>` line plus its 2-space-indented
+ * continuation lines down to the bottom rule. "" when empty, null when no agy
+ * composer is on screen. Boot delivery reads this to observe its payload before
+ * Return (#802) and to reject residue left after submit (#801).
+ */
+export function antigravityComposerDraft(text: string): string | null {
+  const lines = text.split("\n");
+  const composerIndex = antigravityComposerIndex(lines);
+  if (composerIndex < 0) return null;
+  const draft = [(lines[composerIndex] ?? "").replace(/^\s*>\s?/, "").trim()];
+  for (let index = composerIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (ANTIGRAVITY_RULE_RE.test(line)) break;
+    draft.push(line.trim());
+  }
+  return draft.filter((line) => line !== "").join("\n");
+}
+
+/**
  * Working per upstream-sources.md §C.2: the footer starts with `esc to cancel`,
  * or a braille spinner line sits right above the composer's top rule (the
  * footer's left slot shows `Press up to edit queued messages` instead while
