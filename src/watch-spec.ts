@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { loadFleetConfig } from "./fleet-config.js";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -221,7 +221,7 @@ interface WatchRegistryState {
 }
 
 export function defaultWatchRegistryPath(): string {
-  return join(homedir(), ".golems-zikaron", "watch-specs.json");
+  return join(loadFleetConfig().coordinationDir, "watch-specs.json");
 }
 
 function registryPathFor(opts: WatchRegistryOptions): string {

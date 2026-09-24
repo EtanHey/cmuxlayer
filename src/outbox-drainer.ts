@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
+import { loadFleetConfig } from "./fleet-config.js";
 import { dirname, join } from "node:path";
 
 /** Payload shape accepted by the 3847 notify listener (matches the RAM watchdog). */
@@ -82,7 +82,7 @@ export interface DrainResult {
 }
 
 export interface OutboxDrainerOptions {
-  /** Path to the outbox file. Defaults to `~/.golems-zikaron/outbox.md`. */
+  /** Path to the outbox file. Defaults to `<coordinationDir>/outbox.md`. */
   outboxPath?: string;
   /** Path to the drained-state sidecar. Defaults next to the outbox file. */
   statePath?: string;
@@ -131,7 +131,7 @@ const DEFAULT_PRIORITY = "default";
 const STATE_VERSION = 2;
 
 export function defaultOutboxPath(): string {
-  return join(homedir(), ".golems-zikaron", "outbox.md");
+  return join(loadFleetConfig().coordinationDir, "outbox.md");
 }
 
 export function defaultStatePath(outboxPath: string): string {

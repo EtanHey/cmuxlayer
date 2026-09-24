@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { loadFleetConfig } from "./fleet-config.js";
 import { join } from "node:path";
 import type { CliType } from "./agent-types.js";
 import { reposEquivalent } from "./repo-workspace.js";
@@ -122,7 +122,7 @@ export function defaultSeatRegistryPath(
 ): string {
   const override = env.CMUXLAYER_SEAT_REGISTRY_PATH?.trim();
   if (override) return override;
-  return join(homedir(), ".golems", "config.yaml");
+  return loadFleetConfig(env).seatRegistryPath;
 }
 
 export function loadSeatRegistryFromConfig(
