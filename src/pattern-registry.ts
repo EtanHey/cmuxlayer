@@ -261,8 +261,3 @@ export function screenHasReadyAgentIdentity(
       return geminiScreenSignature(screenText) !== "unrecognized_screen";
   }
 }
-
-export function readyPatternRequiresAgentIdentity(cli: CliType): boolean {
-  void cli;
-  return true;
-}
