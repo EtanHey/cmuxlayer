@@ -46,6 +46,25 @@ it("realizes each fake split surface on input demand", async () => {
   }
 });
 
+it("gives concurrent fake socket splits distinct identities", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-concurrent-"));
+  const statePath = join(root, "state.json");
+  const socketPath = join(root, "cmux.sock");
+  const server = await startFakeCmuxSocket(socketPath, statePath, 10);
+  const clients = Array.from({ length: 2 }, () => new CmuxSocketClient({ socketPath }));
+  try {
+    const splits = await Promise.all(clients.map((client) =>
+      client.newSplit("right", { workspace: "workspace:bench", pane: "pane:bench" }),
+    ));
+    expect(new Set(splits.map((split) => split.surface)).size).toBe(splits.length);
+    expect(new Set(splits.map((split) => split.surface_id)).size).toBe(splits.length);
+  } finally {
+    for (const client of clients) client.disconnect();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("realizes a split through the benchmark's socket-first transport wrapper", async () => {
   const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-wrapper-fixture-"));
   const bin = join(root, "bin");
