@@ -459,6 +459,57 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     } finally { context.dispose(); }
   }, 15_000);
 
+  it("does not submit a changed composer after observing its owned boot pointer", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let composer = "";
+    let active = false;
+    let changedAfterRead = false;
+    let activeReads = 0;
+    const submitted: string[] = [];
+    const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("read-screen")) {
+        const snapshot = await base(cmd, args);
+        activeReads += 1;
+        // Route checks read earlier frames; this is the recovery's owned
+        // pointer snapshot, just before its mutation guard and Return.
+        if (activeReads === 4) {
+          composer = "human draft";
+          changedAfterRead = true;
+        }
+        return snapshot;
+      }
+      if (active && args.includes("send-key") && args.includes("return")) {
+        submitted.push(composer);
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (active && args.includes("send")) {
+        composer += String(args.at(-1));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
+      engine.getRegistry().set(agentId, record);
+      composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      active = true;
+
+      const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: true }, {}));
+      expect(changedAfterRead).toBe(true);
+      expect(submitted).toEqual([]);
+      expect(composer).toBe("human draft");
+      expect(result.error_code, JSON.stringify(result)).toBe("blocked_by_foreign_draft");
+      expect(result.submit_dispatched, JSON.stringify(result)).toBe(false);
+    } finally { context.dispose(); }
+  }, 15_000);
+
   it("send_to refuses a composer holding human-typed draft text, before typing anything", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";
