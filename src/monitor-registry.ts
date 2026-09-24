@@ -188,7 +188,6 @@ export interface MonitorRegistryGateQuery {
 type RawMonitorRecord = Record<string, unknown>;
 
 const STATE_VERSION = 1;
-const DEFAULT_NOTIFY_URL = "http://127.0.0.1:3847/notify";
 const DEFAULT_NOTIFY_SOURCE = "cmuxlayer-monitor-registry";
 const DEFAULT_SWEEPER_ID = "agent-engine";
 const DEFAULT_REAP_AFTER_MS = 24 * 60 * 60 * 1_000;
@@ -1144,8 +1143,9 @@ export async function sweepMonitorRegistry(
 
 export async function httpNotifyMonitorDeadman(
   event: MonitorDeadmanEvent,
-  notifyUrl = DEFAULT_NOTIFY_URL,
+  notifyUrl: string | null = loadFleetConfig().notifyUrl,
 ): Promise<boolean> {
+  if (!notifyUrl) return false;
   return httpDeliver(
     {
       title: "Monitor deadman fired",

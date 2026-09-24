@@ -11,8 +11,17 @@ import {
   resetFleetConfigWarningsForTests,
 } from "../src/fleet-config.js";
 import { defaultMonitorRegistryPath } from "../src/monitor-registry.js";
-import { defaultWatchRegistryPath } from "../src/watch-spec.js";
-import { defaultOutboxPath } from "../src/outbox-drainer.js";
+import {
+  defaultWatchRegistryPath,
+  httpNotifyWatch,
+} from "../src/watch-spec.js";
+import { httpNotifyMonitorDeadman } from "../src/monitor-registry.js";
+import {
+  defaultOutboxDrain,
+  defaultOutboxPath,
+  httpDeliver,
+  resetNotifyBackoffForTests,
+} from "../src/outbox-drainer.js";
 import { defaultSeatRegistryPath } from "../src/seat-identity.js";
 
 const GOLEMS_FIXTURE = join(__dirname, "fixtures", "fleet", "golems-fleet.json");
@@ -27,6 +36,9 @@ function tempHome(): string {
 afterEach(() => {
   vi.unstubAllEnvs();
   resetFleetConfigWarningsForTests();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  resetNotifyBackoffForTests();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -226,5 +238,99 @@ describe("paths and switches follow the fleet config", () => {
     expect(
       defaultSeatRegistryPath({ CMUXLAYER_FLEET_CONFIG: GOLEMS_FIXTURE }),
     ).toMatch(/\/\.golems\/config\.yaml$/);
+  });
+
+  it("disables the outbox drainer unless the fleet config enables it", () => {
+    const home = tempHome();
+    expect(defaultOutboxDrain(loadFleetConfig({}, home))).toBeUndefined();
+    expect(
+      defaultOutboxDrain(
+        loadFleetConfig({ CMUXLAYER_FLEET_CONFIG: GOLEMS_FIXTURE }, home),
+      ),
+    ).toEqual(expect.any(Function));
+  });
+});
+
+describe("notify delivery fails soft", () => {
+  it("skips delivery without network I/O when no notifyUrl is configured", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(
+      httpDeliver({ title: "t", body: "b", source: "s", priority: "default" }, null),
+    ).resolves.toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("treats watch and monitor notifications as skipped when no listener is configured", async () => {
+    const transport = vi.fn();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(
+      httpNotifyWatch(
+        {
+          watch_id: "w1",
+          owner: "lead",
+          target: "/tmp/x",
+          reason: "predicate_matched",
+          notify: true,
+        } as Parameters<typeof httpNotifyWatch>[0],
+        null,
+        transport,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      httpNotifyMonitorDeadman(
+        {
+          monitor_id: "m1",
+          owner_seat: "lead",
+          elapsed_s: 90,
+          watch_targets: [],
+          dedupe_key: "m1:1",
+        } as unknown as Parameters<typeof httpNotifyMonitorDeadman>[0],
+        null,
+      ),
+    ).resolves.toBe(false);
+    expect(transport).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("logs an unreachable listener once and backs off instead of retrying every sweep", async () => {
+    const fetchSpy = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    vi.stubGlobal("fetch", fetchSpy);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const payload = { title: "t", body: "b", source: "s", priority: "default" };
+    const url = "http://127.0.0.1:3847/notify";
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(httpDeliver(payload, url)).resolves.toBe(false);
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(String(logged.mock.calls[0]?.[0])).toContain(url);
+  });
+
+  it("clears the backoff after a successful delivery", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchSpy = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+        .mockResolvedValue({ ok: true });
+      vi.stubGlobal("fetch", fetchSpy);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const payload = { title: "t", body: "b", source: "s", priority: "default" };
+      const url = "http://127.0.0.1:3847/notify";
+
+      await expect(httpDeliver(payload, url)).resolves.toBe(false);
+      vi.advanceTimersByTime(60_001);
+      await expect(httpDeliver(payload, url)).resolves.toBe(true);
+      await expect(httpDeliver(payload, url)).resolves.toBe(true);
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

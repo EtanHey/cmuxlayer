@@ -11,7 +11,7 @@ import {
 } from "./self-registration.js";
 import type { AgentRoute } from "./agent-types.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
-import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
+import { defaultOutboxDrain } from "./outbox-drainer.js";
 import {
   defaultDeliveryTicketDir,
   fileDeliveryFailureGithubIssue,
@@ -401,7 +401,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           await this.waitForAgentShellReady(agentId);
           await this.sendAgentCommand(agentId, command);
         },
-        outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
+        outboxDrain: defaultOutboxDrain(),
         monitorRegistryPath: defaultMonitorRegistryPath(),
         monitorRegistryNotify: httpNotifyMonitorDeadman,
         selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),

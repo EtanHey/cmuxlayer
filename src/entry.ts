@@ -380,7 +380,7 @@ export async function startInProcessRuntime(
     { bindStdioLifecycle },
     { createCmuxClient },
     { createServer },
-    { drainOutbox, httpDeliver },
+    { defaultOutboxDrain },
     { defaultMonitorRegistryPath, httpNotifyMonitorDeadman },
     { defaultWatchRegistryPath, httpNotifyWatch },
     { ensureNodeMaxOldSpaceEnv, installHeapGuard },
@@ -420,7 +420,7 @@ export async function startInProcessRuntime(
   const serverOpts: CreateServerOptions = {
     client,
     safetyCallerContextProvider: () => callerContextFromEnv(runtimeEnv),
-    outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
+    outboxDrain: defaultOutboxDrain(),
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,
     watchRegistryPath: defaultWatchRegistryPath(),

@@ -4239,13 +4239,13 @@ export interface CreateServerOptions {
   /**
    * Best-effort outbox drain invoked at the tail of each agent-engine sweep.
    * Omitted by default (no-op) so tests never touch the real outbox/network;
-   * the real MCP entrypoints pass `() => drainOutbox({ deliver: httpDeliver })`
-   * to actually flush `~/.golems-zikaron/outbox.md` to the notify path.
+   * the real MCP entrypoints pass `defaultOutboxDrain()`, which flushes the
+   * fleet outbox to its notify URL when the fleet config enables it.
    */
   outboxDrain?: () => Promise<unknown>;
   /**
    * Canonical monitor-registry file scanned by the agent-engine deadman sweep.
-   * Omitted by default so tests do not touch ~/.golems-zikaron.
+   * Omitted by default so tests do not touch the fleet coordination dir.
    */
   monitorRegistryPath?: string;
   monitorRegistryNow?: () => number;
