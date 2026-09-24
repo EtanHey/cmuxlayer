@@ -10472,7 +10472,7 @@ export class AgentEngine {
               needsSecondRestingRead = false;
             }
             timeoutState =
-              refreshed.source === "screen"
+              refreshed.observedActive || refreshed.source === "screen"
                 ? current.state
                 : this.terminationStateOf(current, this.liveStateOf(current));
           }
