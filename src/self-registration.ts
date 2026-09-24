@@ -29,7 +29,7 @@ import type { AgentRecord } from "./agent-types.js";
 import type {
   CapturedSessionIdentity,
   SessionIdentityResolver,
-} from "./agent-engine.js";
+} from "./engine/types.js";
 
 const SESSION_REGISTRATION_TIMESTAMP_SKEW_MS = 5_000;
 const SESSION_REGISTRATION_CONTINUITY_BYTES = 64;
