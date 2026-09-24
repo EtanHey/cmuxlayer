@@ -3,7 +3,7 @@
  *
  * AIDEV-NOTE: AGENTS.md law — "Don't assume my setup: someone installing this
  * fresh has none of my skills or launchers." This wizard is the other half of
- * the registry-optional spawn contract (docs/registry-optional-spawn.md): that
+ * the registry-optional spawn contract (docs/guides/registry-optional-spawn.md): that
  * work made cmuxlayer *tolerate* a missing launcher registry, and this one
  * GENERATES the config for whichever of the two lanes the machine can run.
  *

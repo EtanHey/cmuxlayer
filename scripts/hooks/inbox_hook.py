@@ -21,7 +21,7 @@ For reads, the first candidate with an existing inbox dir wins; SessionStart
 creates the canonical (2) dir when none exists.
 
 FAIL-OPEN: any error -> exit 0 with no output. This hook must never wedge a
-session. NOT auto-registered — see docs/inbox-hook-transport.md (HOOK FILE
+session. NOT auto-registered — see docs/reference/inbox.md (HOOK FILE
 RULE: file exists first; registration is an explicit, separate decision).
 """
 

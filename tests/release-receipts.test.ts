@@ -892,9 +892,9 @@ describe("release receipt ledger hardening", () => {
   });
 });
 
-describe("docs/releases-and-brew.md tracks the shipped release path", () => {
+describe("docs/guides/releases-and-brew.md tracks the shipped release path", () => {
   const doc = () =>
-    readFileSync(join(repoRoot, "docs", "releases-and-brew.md"), "utf8");
+    readFileSync(join(repoRoot, "docs", "guides", "releases-and-brew.md"), "utf8");
 
   it("documents the receipts ledger and where it lands", () => {
     expect(doc()).toContain("release receipt");

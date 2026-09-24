@@ -1,6 +1,6 @@
 // AIDEV-NOTE: Live agent-state from the harness transcript JSONL — the sterile READ
 // channel that replaces fragile terminal scraping for tokens/context/model/response.
-// Field paths are the contract in docs/harness-jsonl-field-map.md (shared, verified vs
+// Field paths are the contract in docs/reference/harness-jsonl-field-map.md (shared, verified vs
 // on-disk JSONL 2026-06-04). Phoenix ingest (golems jsonl_to_phoenix_traces.py) reads
 // the SAME map — keep both in lockstep. Terminal scraping survives ONLY for live-TUI
 // liveness (wedge/menu/permission/idle) the JSONL can't show, and for Cursor context%

@@ -10,7 +10,7 @@
  *
  * It never merges the two sources itself. The script produces receipts + frames;
  * an Opus lane dispatches Sonnet sub-agents over the manifest and renders the
- * report. See docs/qa-video-harness.md.
+ * report. See docs/testing/qa-video-harness.md.
  *
  * AIDEV-NOTE: this script only orchestrates. All decision logic that could be
  * wrong in an interesting way lives in scripts/qa-video-lib.mjs and is covered
@@ -1442,7 +1442,7 @@ async function main() {
       `[qa-video] questions: ${join(result.root, "questions.json")} (${result.manifest.questions.length} questions, ${result.extracted}/${result.plannedFrames} frames)`,
       `[qa-video] expectations: ${join(result.root, "expectations.json")}`,
       `[qa-video] artifacts: ${formatBytes(result.artifactBytes)}; retention pruned ${prunedRuns.length} old run(s)`,
-      `[qa-video] next: adjudicate with Sonnet sub-agents, then render the report (docs/qa-video-harness.md)`,
+      `[qa-video] next: adjudicate with Sonnet sub-agents, then render the report (docs/testing/qa-video-harness.md)`,
       "",
     ].join("\n"),
   );

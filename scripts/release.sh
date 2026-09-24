@@ -16,7 +16,7 @@
 # so "did this release actually gate, ship, and land?" is answered by a file and
 # not by terminal scrollback.
 #
-# See docs/releases-and-brew.md.
+# See docs/guides/releases-and-brew.md.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -442,7 +442,7 @@ On EACH additional Mac (each run appends its own install evidence):
   $REPO_DIR/scripts/release-verify.sh "$VERSION"
   $REPO_DIR/scripts/release-verify.sh "$VERSION" --verify-only   # never upgrades
 
-# Outbox-semantics releases only (see docs/releases-and-brew.md "Pre-deploy hygiene"):
+# Outbox-semantics releases only (see docs/guides/releases-and-brew.md "Pre-deploy hygiene"):
 #   if this release changes outbox dedup-id derivation or the delivery gate,
 #   archive+truncate ~/.golems-zikaron/outbox.md on EACH target Mac BEFORE the
 #   new binary goes live. This is a manual, per-Mac step — intentionally NOT
