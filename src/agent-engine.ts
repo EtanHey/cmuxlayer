@@ -7871,8 +7871,16 @@ export class AgentEngine {
 
   async runSweep(): Promise<void> {
     await this.runLifecycleMutation(async (withUnlocked) => {
-      await this.holdBenchmarkSweepIfArmed();
-      await this.runSweepOnce(withUnlocked);
+      const benchmarkHoldToken = await this.holdBenchmarkSweepIfArmed();
+      try {
+        await this.runSweepOnce(withUnlocked);
+      } finally {
+        // AIDEV-NOTE: #791 — the benchmark's warm send waits for "complete".
+        // Reporting it before the released sweep body ran put every warm
+        // sample inside a live sweep. Still inside the lock, so the
+        // close-during-sweep waiter's timing is unchanged.
+        if (benchmarkHoldToken) this.completeBenchmarkSweepHold(benchmarkHoldToken);
+      }
     }, {
       label: "sweep",
     });
@@ -7880,18 +7888,25 @@ export class AgentEngine {
     await this.verifyPendingDeliveries();
   }
 
-  private async holdBenchmarkSweepIfArmed(): Promise<void> {
+  private completeBenchmarkSweepHold(token: string): void {
     const statePath =
       process.env.CMUXLAYER_BENCH_SWEEP_HOLD_STATE?.trim() ?? "";
     if (!statePath) return;
+    writeFileSync(statePath, JSON.stringify({ token, state: "complete" }));
+  }
+
+  private async holdBenchmarkSweepIfArmed(): Promise<string | null> {
+    const statePath =
+      process.env.CMUXLAYER_BENCH_SWEEP_HOLD_STATE?.trim() ?? "";
+    if (!statePath) return null;
 
     let armed: { token?: unknown; state?: unknown };
     try {
       armed = JSON.parse(readFileSync(statePath, "utf8"));
     } catch {
-      return;
+      return null;
     }
-    if (armed.state !== "armed" || typeof armed.token !== "string") return;
+    if (armed.state !== "armed" || typeof armed.token !== "string") return null;
 
     const token = armed.token;
     writeFileSync(statePath, JSON.stringify({ token, state: "held" }));
@@ -7900,8 +7915,7 @@ export class AgentEngine {
       try {
         const current = JSON.parse(readFileSync(statePath, "utf8"));
         if (current.token === token && current.state === "release") {
-          writeFileSync(statePath, JSON.stringify({ token, state: "complete" }));
-          return;
+          return token;
         }
       } catch {
         // The benchmark owns this opt-in state file and may be between writes.
