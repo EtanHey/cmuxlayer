@@ -223,20 +223,21 @@ describe("F1b #473 — wait_for terminates on live state, never on a contradicte
     expect(result.error).not.toBe("stale registry error");
   });
 
-  it("still short-circuits on a recorded done when no live evidence contradicts it", async () => {
-    stateMgr.writeState(makeRecord({ state: "done" }));
-    await engine.getRegistry().reconstitute();
-
-    const result = await engine.waitFor(
-      "voicelayerClaude-2ac0d960",
-      "idle",
-      1_500,
-    );
-
-    expect(result.matched).toBe(false);
-    expect(result.source).toBe("immediate");
-    expect(result.state).toBe("done");
-    expect(result.error).toBe("Agent has already completed");
+  it("confirms a cold done record from direct resting reads within two ticks", async () => {
+    vi.useFakeTimers();
+    try {
+      buildEngine(makeMockClient({ readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:worker", text: "Claude Code\n❯", lines: 30,
+        scrollback_used: false,
+      }) }));
+      stateMgr.writeState(makeRecord({ state: "done" }));
+      await engine.getRegistry().reconstitute();
+      const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 30_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const result = await pending;
+      expect(result).toMatchObject({ matched: false, state: "done" });
+      expect(result.elapsed).toBeLessThanOrEqual(2_000);
+    } finally { vi.useRealTimers(); }
   });
 
   it.each(["done", "error"] as const)(
@@ -747,20 +748,21 @@ describe("F1b round 2 — the wait buys its own evidence instead of hoping the c
     expect(probe.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("still short-circuits with a cold cache and NO forcing probe", async () => {
-    stateMgr.writeState(makeRecord({ state: "done" }));
-    await engine.getRegistry().reconstitute();
-    engine.setLiveStateResolver(coldSyncResolver);
-
-    const result = await engine.waitFor(
-      "voicelayerClaude-2ac0d960",
-      "idle",
-      1_500,
-    );
-
-    // Unprobed, no evidence exists anywhere: the record stands, unchanged.
-    expect(result.source).toBe("immediate");
-    expect(result.state).toBe("done");
+  it("confirms a closed done record without a forcing probe within two ticks", async () => {
+    vi.useFakeTimers();
+    try {
+      buildEngine(makeMockClient({ readScreen: vi.fn().mockRejectedValue(
+        new Error("surface not found"),
+      ) }));
+      stateMgr.writeState(makeRecord({ state: "done" }));
+      await engine.getRegistry().reconstitute();
+      engine.setLiveStateResolver(coldSyncResolver);
+      const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 30_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const result = await pending;
+      expect(result).toMatchObject({ matched: false, state: "done" });
+      expect(result.elapsed).toBeLessThanOrEqual(2_000);
+    } finally { vi.useRealTimers(); }
   });
 
   it("renders closure:pending — never artifact_missing — for a working child on a cold cache", async () => {

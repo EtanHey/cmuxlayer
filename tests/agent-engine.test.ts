@@ -8090,6 +8090,178 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    for (const cli of ["claude", "codex"] as const) {
+      it(`WF3 does not fail fast on one resting ${cli} frame from a stale done record`, async () => {
+        vi.useFakeTimers();
+        try {
+          const id = `wf3-${cli}`;
+          const surface = `surface:${id}`;
+          const started = Date.now();
+          const active = cli === "codex"
+            ? "OpenAI Codex\nWorking (2s • esc to interrupt)"
+            : "Claude Code\n✻ Swirling… (2s · esc to interrupt)\n❯";
+          const resting = cli === "codex" ? "OpenAI Codex\nModel: gpt-6-sol\n›" : "Claude Code\n❯";
+          const frame = () => {
+            const elapsed = Date.now() - started;
+            return (elapsed >= 2_000 && elapsed < 3_000) || elapsed >= 4_000
+              ? resting : active;
+          };
+          stateMgr.writeState(makeRecord({ agent_id: id, state: "done", surface_id: surface, cli, role: "worker" }));
+          liveSurfaces = [makeSurface(surface)];
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+            surface, text: frame(), lines: 80, scrollback_used: false,
+          }));
+          engine.setFreshLiveStateProbe(async (agent) =>
+            resolveLiveAgentState(agent, parseScreen(frame())));
+          await engine.getRegistry().reconstitute();
+          let settled = false;
+          const pending = engine.waitFor(id, "idle", 7_000);
+          void pending.then(() => { settled = true; });
+          await vi.advanceTimersByTimeAsync(3_500);
+          expect(settled).toBe(false);
+          await vi.advanceTimersByTimeAsync(3_000);
+          expect((await pending).elapsed).toBeGreaterThanOrEqual(4_000);
+        } finally { vi.useRealTimers(); }
+      });
+    }
+    it("WF3 confirms a done record with a genuinely resting screen promptly", async () => {
+      vi.useFakeTimers();
+      try {
+        const id = "wf3-finished";
+        const surface = `surface:${id}`;
+        stateMgr.writeState(makeRecord({ agent_id: id, state: "done", surface_id: surface, cli: "codex", role: "worker" }));
+        liveSurfaces = [makeSurface(surface)];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface, text: "OpenAI Codex\nModel: gpt-6-sol\n›", lines: 80, scrollback_used: false,
+        });
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen("OpenAI Codex\nModel: gpt-6-sol\n›")));
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor(id, "idle", 7_000);
+        await vi.advanceTimersByTimeAsync(3_000);
+        const result = await pending;
+        expect(result).toMatchObject({ matched: false, state: "done" });
+        expect(result.elapsed).toBeLessThanOrEqual(2_000);
+      } finally { vi.useRealTimers(); }
+    });
+    it("WF3 vetoes stale done when a direct Codex frame is working at confirmation", async () => {
+      vi.useFakeTimers();
+      try {
+        const id = "wf3-direct-working";
+        const surface = `surface:${id}`;
+        const started = Date.now();
+        const resting = "OpenAI Codex\nModel: gpt-6-sol\n›";
+        const active = "OpenAI Codex\nModel: gpt-6-sol\nWorking (2s • esc to interrupt)";
+        stateMgr.writeState(makeRecord({ agent_id: id, state: "done", surface_id: surface, cli: "codex", role: "worker" }));
+        liveSurfaces = [makeSurface(surface)];
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen(Date.now() - started < 2_000 ? active : resting)));
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+          surface, text: Date.now() - started < 4_000 ? active : resting,
+          lines: 80, scrollback_used: false,
+        }));
+        await engine.getRegistry().reconstitute();
+        let settled = false;
+        const pending = engine.waitFor(id, "idle", 8_000);
+        void pending.then(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(3_500);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(3_500);
+        expect(await pending).toMatchObject({ matched: false, state: "done" });
+      } finally { vi.useRealTimers(); }
+    });
+    it("WF3 timeout does not report done from one cached resting frame", async () => {
+      vi.useFakeTimers();
+      try {
+        const id = "wf3-timeout";
+        const surface = `surface:${id}`;
+        stateMgr.writeState(makeRecord({ agent_id: id, state: "done", surface_id: surface, cli: "claude", role: "worker" }));
+        liveSurfaces = [makeSurface(surface)];
+        let probes = 0;
+        engine.setFreshLiveStateProbe(async (agent) =>
+          ++probes === 1
+            ? resolveLiveAgentState(agent, parseScreen("Claude Code\n❯"))
+            : null);
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface, text: "Claude Code\n✻ Swirling… (2s · esc to interrupt)\n❯",
+          lines: 80, scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor(id, "idle", 500);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(await pending).toMatchObject({
+          matched: false, source: "timeout", state: "working",
+          error: expect.stringContaining("done record unconfirmed"),
+        });
+        expect(mockClient.readScreen).toHaveBeenCalled();
+      } finally { vi.useRealTimers(); }
+    });
+    it("WF3 also gates a done record written after wait entry", async () => {
+      vi.useFakeTimers();
+      try {
+        const id = "wf3-late-done-record";
+        const surface = `surface:${id}`;
+        const started = Date.now();
+        const active = "Claude Code\n✻ Swirling… (2s · esc to interrupt)\n❯";
+        const resting = "Claude Code\n❯";
+        const frame = () => {
+          const elapsed = Date.now() - started;
+          return (elapsed >= 2_000 && elapsed < 3_000) || elapsed >= 4_000
+            ? resting : active;
+        };
+        stateMgr.writeState(makeRecord({ agent_id: id, state: "working", surface_id: surface, cli: "claude", role: "worker" }));
+        liveSurfaces = [makeSurface(surface)];
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen(frame())));
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+          surface, text: frame(), lines: 80, scrollback_used: false,
+        }));
+        await engine.getRegistry().reconstitute();
+        let settled = false;
+        const pending = engine.waitFor(id, "idle", 7_000);
+        void pending.then(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(1_100);
+        stateMgr.writeState(makeRecord({ agent_id: id, state: "done", surface_id: surface, cli: "claude", role: "worker", version: 1 }));
+        await vi.advanceTimersByTimeAsync(2_400);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect((await pending).elapsed).toBeGreaterThanOrEqual(4_000);
+      } finally { vi.useRealTimers(); }
+    });
+    for (const cli of ["claude", "codex"] as const) {
+      it(`WF3 returns a finished ${cli} with a closed pane within two ticks`, async () => {
+        vi.useFakeTimers();
+        try {
+          const id = `wf3-closed-${cli}`;
+          stateMgr.writeState(makeRecord({
+            agent_id: id, state: "done", surface_id: `surface:${id}`, cli, role: "worker",
+          }));
+          liveSurfaces = [makeSurface(`surface:${id}`)];
+          engine.setFreshLiveStateProbe(async () => null);
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockRejectedValue(
+            new Error("surface not found"),
+          );
+          await engine.getRegistry().reconstitute();
+          const pending = engine.waitFor(id, "idle", 30_000);
+          await vi.advanceTimersByTimeAsync(2_000);
+          const result = await pending;
+          expect(result).toMatchObject({ matched: false, state: "done" });
+          expect(result.elapsed).toBeLessThanOrEqual(2_000);
+        } finally { vi.useRealTimers(); }
+      });
+    }
+    it("WF3 preserves done when a finished CLI has fallen back to a shell", async () => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "wf3-crashed", state: "done", surface_id: "surface:wf3-crashed",
+        cli: "codex", role: "worker",
+      }));
+      liveSurfaces = [makeSurface("surface:wf3-crashed")];
+      engine.setFreshLiveStateProbe(async (agent) =>
+        resolveLiveAgentState(agent, parseScreen("zsh: command not found: codex\n% ")));
+      await engine.getRegistry().reconstitute();
+      const result = await engine.waitFor("wf3-crashed", "idle", 5_000);
+      expect(result).toMatchObject({ matched: false, state: "done", source: "immediate" });
+    });
     for (const t of [500, 1_000, 3_000]) it(`XPROBE-U genuinely idle claude with a failing probe matches idle, t=${t}`, async () => {
       vi.useFakeTimers();
       try {
@@ -8373,7 +8545,9 @@ Session ID: ${sessionId}`,
         const result = await pending;
         expect(result.matched).toBe(true);
         expect(result.state).toBe("done");
-        const ready = await engine.waitFor("done-but-ready", "ready", 500);
+        const readyPending = engine.waitFor("done-but-ready", "ready", 500);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const ready = await readyPending;
         expect(ready.matched).toBe(false);
         expect(ready.state).toBe("done");
       } finally {
