@@ -38,6 +38,12 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("does not treat Claude quoted output with a Codex glyph as a draft", () => {
+    const parsed = parseScreen("Claude Code\n» quoted output\n  bypass permissions on");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).not.toBe("composer_dirty");
+  });
+
   it("keeps the Codex example prompt ready after dismissing a menu", () => {
     const parsed = parseScreen(
       "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
