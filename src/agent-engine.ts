@@ -2144,6 +2144,9 @@ export class AgentEngine {
     agent: AgentRecord,
     live: LiveAgentState,
   ): AgentState {
+    // A bare shell or harness API failure is positive evidence that the CLI
+    // crashed, even if the last persisted state was `done`.
+    if (live.screen_state === "error") return "error";
     if (TERMINAL_STATES.has(agent.state) && !isLiveActive(live)) {
       return agent.state;
     }
@@ -10346,6 +10349,16 @@ export class AgentEngine {
     // WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS thereafter.
     const initialLive = await this.refreshLiveState(initial);
     const initialState = this.terminationStateOf(initial, initialLive);
+    // A pool seat can retain `done` throughout a newly delivered turn. A
+    // single resting frame (or an unreadable pane) cannot confirm that record.
+    const recordDoneNeedsConfirmation = (
+      agent: AgentRecord,
+      state: AgentState,
+      live: LiveAgentState | null,
+    ): boolean =>
+      INTERACTIVE_AGENT_STATES.has(targetState) &&
+      agent.state === "done" && state === "done" &&
+      live?.screen_state !== "done";
 
     // Retroactive check — already in target state with required evidence?
     const initialEvidence = await this.getTargetStateEvidenceSource(
@@ -10397,7 +10410,8 @@ export class AgentEngine {
     }
 
     // Already in terminal done state and target isn't done?
-    if (initialState === "done" && targetState !== "done") {
+    if (initialState === "done" && targetState !== "done" &&
+        !recordDoneNeedsConfirmation(initial, initialState, initialLive)) {
       return {
         matched: false,
         state: initialState,
@@ -10410,10 +10424,43 @@ export class AgentEngine {
 
     const waitForReadyPatternMatches = new Map<string, number>();
     const confirmsRestingScreen = (live: LiveAgentState): boolean =>
-      live.source === "screen" &&
-      INTERACTIVE_AGENT_STATES.has(this.terminationStateOf(initial, live));
+      live.screen_state !== null &&
+      INTERACTIVE_AGENT_STATES.has(live.screen_state);
     let restingObservations = confirmsRestingScreen(initialLive) ? 1 : 0;
     let needsSecondRestingRead = restingObservations === 1;
+    let staleDoneRestingObservations = 0;
+    let lastStaleDoneObservationAt = -1;
+    const observeStaleDoneScreen = (agent: AgentRecord, live: LiveAgentState): void => {
+      if (!recordDoneNeedsConfirmation(agent, this.terminationStateOf(agent, live), live)) {
+        staleDoneRestingObservations = 0;
+        return;
+      }
+      const memo = this.freshLiveStates.get(agentId);
+      if (!memo || memo.live !== live || memo.at <= lastStaleDoneObservationAt) return;
+      const observedAt = memo.at;
+      lastStaleDoneObservationAt = observedAt;
+      staleDoneRestingObservations = confirmsRestingScreen(live)
+        ? staleDoneRestingObservations + 1 : 0;
+    };
+    observeStaleDoneScreen(initial, initialLive);
+    const confirmedStaleDone = async (
+      agent: AgentRecord,
+      state: AgentState,
+      live: LiveAgentState | null,
+    ): Promise<boolean> => {
+      if (!recordDoneNeedsConfirmation(agent, state, live)) {
+        return true;
+      }
+      if (staleDoneRestingObservations < 2 || !live || !confirmsRestingScreen(live) ||
+          isLiveActive(live)) return false;
+      if (await this.interactiveMatchScreenIsActive(agent, targetState)) {
+        restingObservations = 0;
+        staleDoneRestingObservations = 0;
+        needsSecondRestingRead = false;
+        return false;
+      }
+      return true;
+    };
     if (restingObservations === 1) {
       waitForReadyPatternMatches.set(agentId, 1);
     } else if (INTERACTIVE_AGENT_STATES.has(targetState)) {
@@ -10479,13 +10526,13 @@ export class AgentEngine {
           const timeoutLive = current
             ? await this.refreshLiveState(current)
             : null;
+          if (current && timeoutLive) observeStaleDoneScreen(current, timeoutLive);
           if (
-            current && timeoutLive?.source === "screen" &&
+            current && timeoutLive && timeoutLive.screen_state !== null &&
             INTERACTIVE_AGENT_STATES.has(targetState)
           ) {
-            restingObservations = INTERACTIVE_AGENT_STATES.has(
-              this.terminationStateOf(current, timeoutLive),
-            ) ? restingObservations + 1 : 0;
+            restingObservations = confirmsRestingScreen(timeoutLive)
+              ? restingObservations + 1 : 0;
             if (restingObservations === 0) {
               waitForReadyPatternMatches.delete(agentId);
             }
@@ -10576,6 +10623,12 @@ export class AgentEngine {
             });
             return;
           }
+          if (
+            current && timeoutState === "done" &&
+            !(await confirmedStaleDone(current, timeoutState, timeoutLive))
+          ) {
+            timeoutState = timeoutLive?.screen_state ?? "working";
+          }
           finish({
             matched: false,
             state: timeoutState,
@@ -10619,10 +10672,10 @@ export class AgentEngine {
           lastForcedEvidenceElapsed = elapsed;
           needsSecondRestingRead = false;
           forcedLive = await this.refreshLiveState(current);
-          if (INTERACTIVE_AGENT_STATES.has(targetState) && forcedLive.source === "screen") {
-            restingObservations = INTERACTIVE_AGENT_STATES.has(
-              this.terminationStateOf(current, forcedLive),
-            ) ? restingObservations + 1 : 0;
+          observeStaleDoneScreen(current, forcedLive);
+          if (INTERACTIVE_AGENT_STATES.has(targetState) && forcedLive.screen_state !== null) {
+            restingObservations = confirmsRestingScreen(forcedLive)
+              ? restingObservations + 1 : 0;
             if (restingObservations === 1) needsSecondRestingRead = true;
           }
         }
@@ -10691,7 +10744,10 @@ export class AgentEngine {
         }
 
         // Fail-fast on terminal error
-        if (TERMINAL_STATES.has(liveState) && liveState !== targetState) {
+        if (
+          TERMINAL_STATES.has(liveState) && liveState !== targetState &&
+          await confirmedStaleDone(current, liveState, forcedLive)
+        ) {
           clearInterval(checkInterval);
           finish({
             matched: false,
