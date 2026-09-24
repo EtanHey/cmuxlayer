@@ -110,7 +110,7 @@ bun run live:harness -- \
 Explicit run directory:
 
 ```bash
-RUN_ROOT="/Users/etanheyman/Gits/orchestrator/collab/2026-06-26-cmux-codex-collab-infra/live-8-agent-test/cursor-dummy-$(date +%Y%m%dT%H%M%S)"
+RUN_ROOT="$HOME/cmux-live-harness/cursor-dummy-$(date +%Y%m%dT%H%M%S)"
 CMUX_LIVE_HARNESS=1 \
 bun run live:harness -- \
   --cli cursor \
