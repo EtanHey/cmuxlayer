@@ -48,3 +48,32 @@ so the tools and their descriptions stay; only the connectors underneath get rew
 
 Don't assume my setup either — someone installing this fresh has none of my skills or launchers.
 
+## Working in this repo
+
+Commands (bun, as in CI):
+
+- `bun install`, then `bun run build` (tsc to `dist/`) and `bun run typecheck`.
+- `bun run test` runs the vitest suite serially. `git config core.hooksPath .githooks` enables the
+  pre-push hook, which runs `scripts/guard-no-docslocal.sh` and `scripts/run_tests.sh` (fixture
+  checks plus the full vitest suite). Never push with `--no-verify`.
+
+`src/` is flat; the layers are:
+
+- MCP tools: `server.ts` (all tool handlers), `control-health.ts`, `palette.ts`.
+- Engine: `agent-engine.ts` (spawn, monitor, resume, teardown) and its support files (`agent-*`, `launcher-registry.ts`, `model-policy.ts`, `permission-mode.ts`, `worktree.ts`).
+- Daemon and proxy: `daemon*.ts`, `proxy.ts`, `entry.ts`, `stdio-lifecycle.ts`.
+- cmux transport: `cmux-*.ts` (persistent socket, CLI fallback, version compatibility).
+- Monitors and inbox: `watch-spec.ts`, `monitor-registry.ts`, `inbox.ts`, `outbox-drainer.ts`.
+- Screen parsing: `screen-parser.ts`, `pattern-registry.ts`, `harness-session.ts`.
+- CLI and setup: `index.ts`, `init-*.ts`, `doctor.ts`; sidebar: `fleet-sidebar*.ts`.
+
+Rules that tests and hooks enforce:
+
+- Pane input is one short line. Put longer payloads in a file and send `Read and follow <path>`;
+  multi-paragraph inline text is refused.
+- Operator docs use the consolidated verbs, never the legacy names (`tests/thin-core-tools.test.ts`,
+  "legacy-name drift").
+- Documented tool counts must match the registrations (`tests/tool-count-drift.test.ts`).
+- Nothing under `docs.local/` is ever tracked (`scripts/guard-no-docslocal.sh`).
+- Stop a process by its recorded PID, never with a pattern killer (`pkill -f`): see the comment in
+  `src/coordination-paths.ts`.

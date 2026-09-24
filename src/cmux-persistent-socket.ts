@@ -1,9 +1,9 @@
 /**
  * Persistent socket connection for high-frequency cmux operations.
  *
- * Unlike CmuxSocketClient (which opens/closes a connection per request),
- * this keeps a single socket open and multiplexes requests over it.
- * Useful for sidebar sweeps (3+ calls every 5 seconds).
+ * Keeps a single socket open and multiplexes requests over it.
+ * CmuxSocketClient uses it as its transport, so every cmux call shares
+ * one connection instead of opening one per request.
  */
 
 import * as net from "node:net";

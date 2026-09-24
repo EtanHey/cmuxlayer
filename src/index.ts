@@ -3,7 +3,7 @@
 /**
  * cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
  *
- * Nine public MCP tools. Internal lifecycle and compatibility handlers remain
+ * Ten public MCP tools. Internal lifecycle and compatibility handlers remain
  * engine implementation details and are never registered on the MCP surface.
  */
 
