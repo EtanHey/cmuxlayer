@@ -372,6 +372,21 @@ describe("AgentEngine", () => {
       liveness_source: `screen:${surfaceUuid}`,
       liveness: { value: true, source: "screen" },
     });
+
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+      surface: worker.surface_id,
+      text: "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
+      lines: 5,
+      scrollback_used: false,
+    });
+    now = 3_000;
+    await watchEngine.runSweep();
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      observed_value: "working",
+    });
     watchEngine.dispose();
   });
 
