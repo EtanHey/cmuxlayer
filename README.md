@@ -9,7 +9,7 @@ cmuxLayer exposes a 10-tool public MCP surface for controlling cmux terminal wor
 [![install](https://img.shields.io/badge/install-brew%20install%20etanhey%2Flayers%2Fcmuxlayer-22c55e)](#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![MCP Tools](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-4452%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-4452%20collected-brightgreen.svg)](#testing)
 
 ## Quick start
 
