@@ -563,7 +563,7 @@ describe("MCP-shaped no-live harness replay", () => {
 describe("live harness classifier boundary documentation", () => {
   it("documents health codes that are intentionally outside classifyWorkerFailures", () => {
     const docs = readFileSync(
-      join(repoRoot, "docs", "live-agent-harness.md"),
+      join(repoRoot, "docs", "testing", "live-agent-harness.md"),
       "utf8",
     );
 

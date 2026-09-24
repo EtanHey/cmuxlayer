@@ -1,7 +1,7 @@
 # Live seat soak
 
 Run this ops tool from a source checkout at the release tag (or the reviewed
-candidate commit). Install checkout dependencies with `npm ci`. The installed
+candidate commit). Install checkout dependencies with `bun install --frozen-lockfile`. The installed
 `cmuxlayer` executable on `PATH` is the MCP server under test; the checkout
 supplies only the runner and its helpers. Confirm cmux is reachable. This is a
 manual, usage-consuming real MCP and cmux check; it is not part of CI. The
@@ -9,7 +9,7 @@ runner is not distributed in the npm package.
 
 ```bash
 cd /path/to/cmuxlayer-source-checkout
-npm ci
+bun install --frozen-lockfile
 command -v cmuxlayer
 node scripts/soak-live.mjs --agent-id WORKER_ID --lead-agent-id LEAD_ID --entry "$(command -v cmuxlayer)"
 ```

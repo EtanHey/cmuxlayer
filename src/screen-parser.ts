@@ -16,7 +16,7 @@ import { modelContextWindow } from "./harness-session.js";
 // 2026-07-11, superseded for the app tier by Etan's 400K ruling, 2026-07-15) — do NOT
 // guess/round. This is the SCREEN-PARSER FALLBACK only: harness JSONL
 // normally carries the real per-session window, but an explicitly versioned verified rule can
-// floor a stale smaller CLI value — see harness-session.ts + docs/harness-jsonl-field-map.md.
+// floor a stale smaller CLI value — see harness-session.ts + docs/reference/harness-jsonl-field-map.md.
 // All Claude models default to 200K; the 1M tier is detected
 // via version-aware rules, "(1M" suffix, or token_count > 200K (Claude-only — it's the Claude
 // Max/standard tier).

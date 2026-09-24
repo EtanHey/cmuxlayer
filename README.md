@@ -21,7 +21,7 @@ brew install --HEAD etanhey/layers/cmuxlayer # or: dogfood the latest main
 This installs the `cmuxlayer` command plus `cmuxlayer-app-server` and
 `cmuxlayer-proxy`. [cmux](https://github.com/manaflow-ai/cmux) must be running.
 For fleet wiring, versions, dogfooding, and the `CMUX_SOCKET_PATH` pin, see
-[docs/releases-and-brew.md](docs/releases-and-brew.md).
+[docs/guides/releases-and-brew.md](docs/guides/releases-and-brew.md).
 
 Then set up this machine:
 
@@ -37,8 +37,8 @@ and creates a backup first.
 
 For scripted installs, pass `--yes` with `--repo <name>=<path>`. cmuxlayer does
 not assume a fixed repository layout. See
-[docs/fresh-install.md](docs/fresh-install.md) for the walkthrough and
-[docs/registry-optional-spawn.md](docs/registry-optional-spawn.md) for how each
+[docs/guides/fresh-install.md](docs/guides/fresh-install.md) for the walkthrough and
+[docs/guides/registry-optional-spawn.md](docs/guides/registry-optional-spawn.md) for how each
 lane behaves.
 
 ### Optional fleet sidebar
@@ -122,7 +122,7 @@ cmuxLayer retains 45 internal tool definitions; only 10 are registered and calla
 
 For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. `send_to` also preserves the registry-independent escape hatch: use `mode:"surface"`, `mode:"command"`, or `mode:"key"` with a raw surface ref for shells, launch/resume commands, and stuck-pane recovery.
 
-See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
+See [Agent Routing and Handling Workflow](docs/guides/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
 ## MCP tools (10 registered and callable)
 

@@ -34,9 +34,8 @@ Only the exact 10-name public surface is callable; 35 internal definitions are u
 Updated in this repository:
 
 - `README.md`
-- `docs/agent-routing-and-handling.md`
-- `docs/metacommlayer-inbox.md`
-- `docs/inbox-hook-transport.md`
+- `docs/guides/agent-routing-and-handling.md`
+- `docs/reference/inbox.md`
 
 Historical design and test-plan documents retain legacy names as historical evidence. The signed-off brief retains the names because it defines the migration mapping itself.
 

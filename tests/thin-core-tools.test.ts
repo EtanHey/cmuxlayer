@@ -475,9 +475,8 @@ describe("consolidated compatibility", () => {
 describe("legacy-name drift", () => {
   it("keeps active operator docs on the consolidated verbs", () => {
     const activeDocs = [
-      "../docs/agent-routing-and-handling.md",
-      "../docs/metacommlayer-inbox.md",
-      "../docs/inbox-hook-transport.md",
+      "../docs/guides/agent-routing-and-handling.md",
+      "../docs/reference/inbox.md",
     ];
     const legacyName =
       /\b(send_to_agent|send_input|send_command|send_key|new_worktree_split|spawn_in_workspace|new_split|wait_for_all)\b/;
