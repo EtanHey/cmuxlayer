@@ -803,7 +803,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         } else {
           // Keep createServer's snapshot reader and verifier; inject the
           // generation change at the engine's verifier-result boundary.
-          const productionVerifier = engine.deliveryVerifier;
+          const productionVerifier = engine.deliveryQueue.deliveryVerifier;
           engine.setDeliveryVerifier(async (currentReceipt: any, snapshot: any) => {
             const observation = await productionVerifier(currentReceipt, snapshot);
             if (currentReceipt.delivery_id === receipt.delivery_id &&
