@@ -92,6 +92,24 @@ describe("parseScreen", () => {
     expect(parsed.response).toBeNull();
   });
 
+  it("does not carry an old Claude reply across a newer user question", () => {
+    const parsed = parseScreen("Claude Code\n⏺ Old reply\n❯ New question\n❯");
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.response).toBeNull();
+  });
+
+  it.each([
+    "⏺ Old reply\nCLAUDE_COUNTER: 91",
+    "---RESPONSE_START---\nOld reply\n---RESPONSE_END---",
+  ])("does not revive an old Claude response source after a new question", (oldReply) => {
+    const parsed = parseScreen(`Claude Code\n${oldReply}\n❯ New question\n❯`);
+
+    expect(parsed.status).toBe("idle");
+    expect(parsed.response).toBeNull();
+  });
+
   it("prefers a newer Claude ready reply over a stale counter response", () => {
     const parsed = parseScreen(`Claude Code
 ⏺ Old reply
