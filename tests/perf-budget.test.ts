@@ -18,6 +18,59 @@ import {
 
 const repoRoot = join(__dirname, "..");
 
+it("keeps the opt-in limiter benchmark protocol-compatible and isolated", () => {
+  const source = readFileSync(
+    join(repoRoot, "scripts", "bench-rate-limit.mjs"),
+    "utf8",
+  );
+  const expectedPollingMethods = [
+    "system.top",
+    "system.memory",
+    "system.tree",
+    "system.identify",
+    "window.list",
+    "window.current",
+    "window.displays",
+    "workspace.list",
+    "workspace.current",
+    "surface.list",
+    "surface.current",
+    "surface.read_text",
+    "surface.read_selection",
+    "pane.list",
+    "pane.surfaces",
+    "list_windows",
+    "current_window",
+    "list_workspaces",
+    "current_workspace",
+    "list_surfaces",
+    "read_screen",
+  ];
+
+  expect(source).toContain("const BURST = 9");
+  expect(source).toContain("const REFILL_MS = 100");
+  for (const method of expectedPollingMethods) {
+    expect(source).toContain(`\"${method}\"`);
+  }
+  expect(source).toContain("one_shared_daemon_upstream_connection");
+  expect(source).toContain("connection_intervals_recorded");
+  expect(source).toContain("startup_sockets_are_probe_only");
+  expect(source).toContain("connected_at_ms");
+  expect(source).toContain("closed_at_ms");
+  expect(source).toContain("active_at_capture");
+  expect(source).toContain('role: state.explicitControl');
+  expect(source).toContain('method !== "system.ping"');
+  expect(source).toContain("only_limited_connection_activated");
+  expect(source).toContain("mutation_unreplayed");
+  expect(source).toContain("mutation_uncharged");
+  expect(source).toContain("daemon_proxy_survived");
+  expect(source).toContain("protocol-compatible fake server");
+  expect(source).not.toContain("actual running0.64.24 app");
+  expect(
+    spawnSync(process.execPath, ["--check", join(repoRoot, "scripts", "bench-rate-limit.mjs")]).status,
+  ).toBe(0);
+});
+
 function attest<T extends Record<string, unknown>>(content: T) {
   const baseline = {
     ...content,

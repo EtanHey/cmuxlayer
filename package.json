@@ -63,6 +63,7 @@
     "install:fleet-sidebar": "node scripts/install-fleet-sidebar.mjs",
     "install:fleet-sidebar:dev": "node scripts/install-fleet-sidebar-dev.mjs",
     "bench:daemon": "node scripts/bench-daemon.mjs",
+    "bench:rate-limit": "node scripts/bench-rate-limit.mjs",
     "bench:daemon:check": "bun run build && node scripts/check-daemon-benchmark.mjs",
     "bench:daemon:check:fast": "CMUXLAYER_BENCH_ROUNDS=3 CMUXLAYER_BENCH_LOCAL_GATE=1 bun run bench:daemon:check",
     "bench:daemon:refresh": "bun run build && node scripts/refresh-daemon-baseline.mjs",
