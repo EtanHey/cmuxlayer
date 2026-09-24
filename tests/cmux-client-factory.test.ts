@@ -11,7 +11,10 @@ import * as net from "node:net";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createCmuxClient } from "../src/cmux-client-factory.js";
+import {
+  candidateSocketPathsForOpts,
+  createCmuxClient,
+} from "../src/cmux-client-factory.js";
 import { stateSocketPath } from "../src/cmux-socket-path.js";
 import { getTransportHealth } from "../src/cmux-transport-self-heal.js";
 
@@ -162,6 +165,16 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
           process.env.CMUX_SOCKET_CAPABILITY = savedCapability;
         }
       }
+    });
+
+    it("REG1c discovers injected socket A instead of ambient socket B", () => {
+      savedEnv = process.env.CMUX_SOCKET_PATH;
+      process.env.CMUX_SOCKET_PATH = "/tmp/reg1c-instance-b.sock";
+      expect(
+        candidateSocketPathsForOpts({
+          env: { CMUX_SOCKET_PATH: "/tmp/reg1c-instance-a.sock" },
+        }),
+      ).toEqual(["/tmp/reg1c-instance-a.sock"]);
     });
 
     it("pins the first degraded CLI call from CMUX_SOCKET_PATH", async () => {
