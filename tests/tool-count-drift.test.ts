@@ -151,19 +151,18 @@ describe("tool-count drift guard", () => {
     expect(readme).toContain("other 35 are not exposed through ToolSearch");
     expect(readme).toContain("retains 45 internal tool definitions");
 
-    const inventory = readme.slice(
-      readme.indexOf("**Terminal control (16)**"),
-      readme.indexOf("<details>"),
+    // The README documents only the callable surface: one table row per
+    // public tool, and no inventory of the internal definitions.
+    const toolsSection = readme.slice(
+      readme.indexOf("## MCP tools"),
+      readme.indexOf("## Supported agents"),
     );
-    const documentedInventory = [
-      ...inventory.matchAll(/`([^`]+)`/g),
-    ].map((match) => match[1]);
-    const liveDocumentedNames = registeredToolNames().filter(
-      (name) => name !== "resync_agents",
+    const tableNames = [...toolsSection.matchAll(/^\| `([^`]+)` \|/gm)].map(
+      (match) => match[1],
     );
-    expect(documentedInventory).toHaveLength(EXPECTED_TOOL_COUNT - 1);
-    expect(new Set(documentedInventory)).toEqual(new Set(liveDocumentedNames));
-    expect(readme).toContain("45th source registration is a removed");
+    expect(tableNames).toEqual(names);
+    expect(toolsSection).toContain("not callable over MCP");
+    expect(readme).not.toContain("Deprecated one-release alias");
   });
 
   it("goes red when a fixture count is mutated", () => {
