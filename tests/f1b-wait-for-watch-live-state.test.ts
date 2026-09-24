@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -846,6 +846,84 @@ describe("F1b round 2 — finding B: the ready-evidence gate no longer reads the
     engine.dispose();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
+
+  it.each([
+    ["codex", "resting screen probe"],
+    ["codex", "missing probe"],
+    ["claude", "resting screen probe"],
+    ["gemini", "resting screen probe"],
+  ] as const)(
+    "vetoes a false idle match for %s with %s when the direct screen is working",
+    async (cli, probeKind) => {
+      vi.useFakeTimers();
+      const workingFrame = cli === "codex"
+        ? readFileSync(
+            new URL("./fixtures/spawn/codex-0.144.3-surface-489-working.txt", import.meta.url),
+            "utf8",
+          )
+        : cli === "gemini"
+          ? "Gemini CLI\n✦ Thinking...\n> "
+          : `Claude Code\n${WORKING_SCREEN}`;
+      const readScreen = vi.fn().mockResolvedValue({
+        surface: "surface:worker",
+        text: workingFrame,
+        lines: 30,
+        scrollback_used: false,
+      });
+      buildEngine(readScreen);
+      stateMgr.writeState(makeRecord({
+        state: "ready",
+        cli,
+        surface_uuid: "uuid-worker",
+        prompt_delivered: true,
+      }));
+      await engine.getRegistry().reconstitute();
+      engine.setFreshLiveStateProbe(async (agent) =>
+        probeKind === "missing probe"
+          ? null
+          : resolveLiveAgentState(agent, {
+              status: "ready",
+              agent_type: cli,
+              control_state: "ready",
+            }),
+      );
+
+      const pending = engine.waitFor("voicelayerClaude-2ac0d960", "idle", 3_000);
+      await vi.advanceTimersByTimeAsync(3_500);
+      const result = await pending;
+
+      expect(result.matched).toBe(false);
+      expect(result.source).toBe("timeout");
+      expect(readScreen).toHaveBeenCalled();
+    },
+  );
+
+  it.each(["codex", "claude"] as const)(
+    "matches a genuinely idle %s pane promptly after the direct read",
+    async (cli) => {
+      const readScreen = vi.fn().mockResolvedValue({
+        surface: "surface:worker",
+        text: cli === "codex" ? RESTING_CODEX_SCREEN : "Claude Code\n❯",
+        lines: 30,
+        scrollback_used: false,
+      });
+      buildEngine(readScreen);
+      stateMgr.writeState(makeRecord({
+        state: "ready",
+        cli,
+        surface_uuid: "uuid-worker",
+        prompt_delivered: true,
+      }));
+      await engine.getRegistry().reconstitute();
+      engine.setFreshLiveStateProbe(async () => null);
+
+      const result = await engine.waitFor("voicelayerClaude-2ac0d960", "idle", 3_000);
+
+      expect(result.matched).toBe(true);
+      expect(result.elapsed).toBeLessThan(1_000);
+      expect(readScreen).toHaveBeenCalledOnce();
+    },
+  );
 
   it("reads the screen for a working record whose live state agrees", async () => {
     vi.useFakeTimers();

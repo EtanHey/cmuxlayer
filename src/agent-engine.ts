@@ -2907,9 +2907,11 @@ export class AgentEngine {
       const evidence = this.readReadyEvidence(agent, screen.text);
       const parsed = parseScreen(screen.text);
       const activeForWait =
-        agent.cli === "claude" &&
+        (targetState === "idle" || agent.cli === "claude") &&
+        !(agent.cli === "gemini" && this.geminiHasSettledReply(screen.text)) &&
         (parsed.status === "working" ||
           parsed.status === "thinking" ||
+          parsed.status === "draft_pending" ||
           parsed.control_state === "busy");
       if (activeForWait) {
         // The direct read is newer than the forced probe's resting memo.
@@ -10267,6 +10269,49 @@ export class AgentEngine {
    * Wait for an agent to reach a target state.
    * Retroactive check first, then polling sweep until match or timeout.
    */
+  private geminiHasSettledReply(text: string): boolean {
+    const lines = text.trimEnd().split("\n").map((line) => line.trim());
+    if (lines.at(-1) !== ">") return false;
+    const activity = /^✦\s*(?:Thinking|Working|Running|Reading|Writing|Calling)\b/i;
+    let lastActivity = -1;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (activity.test(lines[index] ?? "")) {
+        lastActivity = index;
+        break;
+      }
+    }
+    return lastActivity >= 0 && lines.slice(lastActivity + 1, -1).some(
+      (line) => /^✦\s+\S/.test(line) && !activity.test(line),
+    );
+  }
+
+  private async interactiveMatchScreenIsActive(
+    agent: AgentRecord,
+    targetState: AgentState,
+  ): Promise<boolean> {
+    try {
+      const screen = await this.readAgentScreen(agent, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      });
+      const parsed = parseScreen(screen.text);
+      // Ready can mean the CLI has booted and is processing its boot prompt.
+      // Only an idle match promises that active work has stopped.
+      if (targetState === "ready") return false;
+      // Gemini leaves a Thinking line in scrollback after a completed reply.
+      // Its final input prompt remains the idle evidence used by PROBE-L.
+      if (agent.cli === "gemini" && this.geminiHasSettledReply(screen.text)) {
+        return false;
+      }
+      return parsed.status === "working" ||
+        parsed.status === "thinking" ||
+        parsed.status === "draft_pending" ||
+        parsed.control_state === "busy";
+    } catch {
+      // A failed direct read has no new evidence to contradict the existing gate.
+      return false;
+    }
+  }
+
   async waitFor(
     agentId: string,
     targetState: AgentState,
@@ -10319,7 +10364,9 @@ export class AgentEngine {
       initialEvidence &&
       !initialRestingConflict &&
       !(this.freshLiveStateProbe && INTERACTIVE_AGENT_STATES.has(targetState) &&
-        initialLive.source === "screen")
+        initialLive.source === "screen") &&
+      (!INTERACTIVE_AGENT_STATES.has(targetState) ||
+        !(await this.interactiveMatchScreenIsActive(initial, targetState)))
     ) {
       const stateEstablishedByScreen =
         initialLive?.source === "screen" && initialState !== initial.state;
@@ -10510,7 +10557,9 @@ export class AgentEngine {
                 !isLiveActive(timeoutLive) &&
                 current.state !== "working") ||
               (refreshedSource === "screen" &&
-                INTERACTIVE_AGENT_STATES.has(current.state)))
+                INTERACTIVE_AGENT_STATES.has(current.state))) &&
+            (!INTERACTIVE_AGENT_STATES.has(targetState) ||
+              !(await this.interactiveMatchScreenIsActive(current, targetState)))
           ) {
             finish({
               matched: true,
@@ -10618,7 +10667,9 @@ export class AgentEngine {
           !refreshed.observedActive &&
           (!INTERACTIVE_AGENT_STATES.has(targetState) ||
             forcedLive?.source !== "screen" ||
-            (restingObservations >= 2 && !isLiveActive(forcedLive)))
+            (restingObservations >= 2 && !isLiveActive(forcedLive))) &&
+          (!INTERACTIVE_AGENT_STATES.has(targetState) ||
+            !(await this.interactiveMatchScreenIsActive(current, targetState)))
         ) {
           const stateEstablishedByScreen =
             live?.source === "screen" && liveState !== current.state;
