@@ -8090,6 +8090,60 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    it("reports the record state when a final spinner read contradicts a resting timeout probe", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(makeRecord({
+          agent_id: "timeout-spinner-state", state: "booting",
+          surface_id: "surface:timeout-spinner-state", cli: "claude", role: "worker",
+        }));
+        liveSurfaces = [makeSurface("surface:timeout-spinner-state")];
+        const resting = (agent: AgentRecord) =>
+          resolveLiveAgentState(agent, parseScreen("Claude Code\n❯"));
+        engine.setFreshLiveStateProbe(async (agent) => resting(agent));
+        engine.setLiveStateResolver(resting);
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:timeout-spinner-state",
+          text: "Claude Code\n✻ Swirling… (3s · esc to interrupt)\n❯",
+          lines: 80, scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("timeout-spinner-state", "ready", 500);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(await pending).toMatchObject({
+          matched: false, state: "booting", source: "timeout",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    for (const target of ["idle", "ready"] as const) {
+      for (const timeout of [500, 2_500]) {
+        it(`XPROBE-S does not match ${target} at ${timeout}ms when the screen turns active after a resting live probe`, async () => {
+          vi.useFakeTimers();
+          try {
+            stateMgr.writeState(makeRecord({
+              agent_id: "rest-then-active", state: target === "idle" ? "working" : "booting",
+              surface_id: "surface:rest-then-active", cli: "claude", role: "worker",
+            }));
+            liveSurfaces = [makeSurface("surface:rest-then-active")];
+            engine.setFreshLiveStateProbe(async (agent) =>
+              resolveLiveAgentState(agent, parseScreen("Claude Code\n❯")));
+            (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+              surface: "surface:rest-then-active",
+              text: "Claude Code\n✻ Swirling… (3s · esc to interrupt)\n❯",
+              lines: 80, scrollback_used: false,
+            });
+            await engine.getRegistry().reconstitute();
+            const pending = engine.waitFor("rest-then-active", target, timeout);
+            await vi.advanceTimersByTimeAsync(timeout + 500);
+            expect(await pending).toMatchObject({ matched: false });
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+      }
+    }
     const GEM_IDLE = "Gemini CLI\n> run the task\n✦ Thinking...\n✦ SOAK_OK_4\n> ";
     it("PROBE-K gemini idle with stale Thinking in scrollback: boot sweep reaches ready", async () => {
       vi.useFakeTimers();
