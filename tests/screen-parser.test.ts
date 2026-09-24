@@ -38,6 +38,14 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("keeps the Codex example prompt ready after dismissing a menu", () => {
+    const parsed = parseScreen(
+      "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
+    );
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.status).not.toBe("draft_pending");
+  });
+
   it("marks a multiline Claude composer draft as pending instead of ready", () => {
     const parsed = parseScreen(
       "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
