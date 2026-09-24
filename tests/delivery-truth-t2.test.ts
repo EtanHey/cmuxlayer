@@ -509,6 +509,10 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       expect(receipt?.text).toBe(composer);
       expect(receipt?.source_event).toBe("boot_prompt");
       expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
+      composer = ""; // Model a Return that landed despite its lost acknowledgement.
+      await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(result.delivery_id)?.delivery_state).toBe("submitted");
+      expect(engine.getAgentState(agentId)?.state).toBe("working");
     } finally { context.dispose(); }
   }, 15_000);
 
