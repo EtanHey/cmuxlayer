@@ -275,12 +275,6 @@ import {
   type InboxOpts,
 } from "./inbox.js";
 import {
-  buildFleetSidebarSnapshot,
-  DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
-  type FleetSidebarCandidate,
-  type FleetSidebarPublisherLike,
-} from "./fleet-sidebar.js";
-import {
   agentProcessLiveness,
   agentProcessMayBeAlive,
   processLiveness,
@@ -816,13 +810,6 @@ export interface AgentEngineOptions {
     | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
     | null;
   /**
-   * Receives the reconciled registry, topology, health, and screen evidence.
-   * Defaults to a NO-OP so bare engines never write operator configuration.
-   */
-  fleetSidebarPublisher?: FleetSidebarPublisherLike;
-  /** Render-only timeout for a working seat whose transcript/output stops advancing. */
-  fleetWorkingNoProgressTimeoutMs?: number;
-  /**
    * Bound how long a queued lifecycle mutation waits for the lock before it
    * fails fast with a structured error naming the holder (#529).
    * Env: CMUXLAYER_LIFECYCLE_LOCK_ACQUIRE_TIMEOUT_MS. 0 disables the bound.
@@ -914,7 +901,6 @@ const WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS = LIVE_EVIDENCE_TTL_MS;
 const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
 const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
-const FLEET_SIDEBAR_WAKE_REPUBLISH_DELAY_MS = 500;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
 const MAX_SPAWN_SESSION_CAPTURE_MS = 2_000;
@@ -954,22 +940,6 @@ const TRANSCRIPT_SESSION_CAPTURE_STATES = new Set<AgentState>([
   "working",
   "idle",
 ]);
-
-function toParsedScreenStatus(
-  status: string | null | undefined,
-): ParsedScreenStatus | null {
-  switch (status) {
-    case "draft_pending":
-    case "frozen":
-    case "thinking":
-    case "working":
-    case "idle":
-    case "done":
-      return status;
-    default:
-      return null;
-  }
-}
 
 /** Compare Claude's launcher ID and pane label using their shared model parts. */
 function parseClaudeModelIdentity(model: string): {
@@ -1048,11 +1018,6 @@ interface SidebarStatusSnapshot {
   surfaceId: string | null;
   workspaceId: string | null;
   healthSignature: string;
-}
-
-interface FleetScreenProgressSnapshot {
-  signature: string;
-  lastProgressAtMs: number;
 }
 
 interface HaltSinkResolution {
@@ -1790,16 +1755,12 @@ export class AgentEngine {
     | null;
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
-  private fleetSidebarWakeRepublishTimer: ReturnType<typeof setTimeout> | null =
-    null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
   private sweepTiming: SweepTimingOptions | null = null;
   private lastSweepSignature: string | null = null;
   private unchangedSweepCount = 0;
   private currentSweepScreenSignatures = new Map<string, string>();
   private sweepDebugLog: (message: string) => void;
-  /** agentId → last material (de-chromed) screen output change. */
-  private fleetScreenProgress = new Map<string, FleetScreenProgressSnapshot>();
   /** agentId → last-pushed status target/value */
   private sidebarSnapshot = new Map<string, SidebarStatusSnapshot>();
   /** e.g. "a1:spawned", "a1:done", "a1:error" */
@@ -1836,8 +1797,6 @@ export class AgentEngine {
     | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
     | null;
   private closeForensicsSweepInFlight = false;
-  private fleetSidebarPublisher: FleetSidebarPublisherLike;
-  private fleetWorkingNoProgressTimeoutMs: number;
   private startupInitializePromise: Promise<void> | null = null;
   private lifecycleMutationTail: Promise<void> = Promise.resolve();
   /** Serialize placement decisions and topology mutations within one workspace. */
@@ -2024,16 +1983,6 @@ export class AgentEngine {
       opts?.closeForensicsRunner !== undefined
         ? opts.closeForensicsRunner
         : null;
-    this.fleetSidebarPublisher = opts?.fleetSidebarPublisher ?? {
-      publish: () => {},
-      dispose: () => {},
-    };
-    this.fleetWorkingNoProgressTimeoutMs =
-      opts?.fleetWorkingNoProgressTimeoutMs ??
-      parseNonNegativeInteger(
-        process.env.CMUXLAYER_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
-        DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
-      );
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.postSpawnLivenessMs =
       opts?.postSpawnLivenessMs ??
@@ -2749,24 +2698,6 @@ export class AgentEngine {
     return agent.cli_session_id
       ? loadHarnessSessionWithMeta(harness, agent.cli_session_id)
       : null;
-  }
-
-  private lastAgentProgressAtMs(agent: AgentRecord): number | null {
-    let transcriptProgressAtMs = 0;
-    if (agent.cli_session_path) {
-      const mtimeMs = safeMtimeMs(agent.cli_session_path);
-      if (mtimeMs > 0) transcriptProgressAtMs = mtimeMs;
-    } else {
-      transcriptProgressAtMs =
-        this.loadGroundTruthSession(agent)?.mtime_ms ?? 0;
-    }
-    const screenProgressAtMs =
-      this.fleetScreenProgress.get(agent.agent_id)?.lastProgressAtMs ?? 0;
-    const lastProgressAtMs = Math.max(
-      transcriptProgressAtMs,
-      screenProgressAtMs,
-    );
-    return lastProgressAtMs > 0 ? lastProgressAtMs : null;
   }
 
   private transcriptHasSettledDone(agent: AgentRecord): boolean {
@@ -4083,11 +4014,6 @@ export class AgentEngine {
       nextAgentId,
     );
     this.rekeyAgentMapEntry(
-      this.fleetScreenProgress,
-      previousAgentId,
-      nextAgentId,
-    );
-    this.rekeyAgentMapEntry(
       this.readyPatternMatches,
       previousAgentId,
       nextAgentId,
@@ -4317,27 +4243,9 @@ export class AgentEngine {
         agent.agent_id,
         `${route.surface_id}:${screenTextSignature(screen.text)}`,
       );
-      this.recordFleetScreenProgress(agent.agent_id, screen.text);
       return screen;
     });
     return ctx.screen;
-  }
-
-  private recordFleetScreenProgress(agentId: string, screenText: string): void {
-    const parsed = parseScreen(screenText);
-    const materialOutput = cleanScreenText(
-      screenText,
-      BOOT_SESSION_CAPTURE_LINES,
-    );
-    const signature = screenTextSignature(
-      `${parsed.current_action ?? ""}\n${materialOutput}`,
-    );
-    const previous = this.fleetScreenProgress.get(agentId);
-    if (previous?.signature === signature) return;
-    this.fleetScreenProgress.set(agentId, {
-      signature,
-      lastProgressAtMs: Date.now(),
-    });
   }
 
   private async sweepReadMatchesBinding(
@@ -5956,7 +5864,6 @@ export class AgentEngine {
       }
     }
     this.deliveredLeadMonitorDeathAlerts.delete(agentId);
-    this.fleetScreenProgress.delete(agentId);
     this.cliExitShellMatches.delete(agentId);
     this.promptMotionObservedAtMs.delete(agentId);
     this.promptMotionScreenSignatures.delete(agentId);
@@ -6325,10 +6232,12 @@ export class AgentEngine {
   }
 
   /**
-   * Sync sidebar: diff agents against snapshot, push only changes.
+   * Reconcile every registry row against the observed topology and screen:
+   * rebind surfaces, advance lifecycle (boot capture, ready, done, CLI exit),
+   * evaluate health and halts, and push changed cmux status pills only.
    * Logs lifecycle events (spawned, done, error) once each.
    */
-  private async syncSidebar(
+  private async reconcileAgents(
     opts: { firstConnect?: boolean } = {},
     surfaceTopologyOverride?: SurfaceTopologySnapshot | null,
     snapshotMutationAllowed?: () => boolean,
@@ -6364,7 +6273,6 @@ export class AgentEngine {
       agentId: string;
       snapshot: SidebarStatusSnapshot;
     }> = [];
-    const fleetCandidates: FleetSidebarCandidate[] = [];
     const rowVersions = new Map<string, Pick<AgentRecord, "version" | "surface_id" | "surface_uuid">>();
 
     for (const registryAgent of agents) {
@@ -6727,46 +6635,6 @@ export class AgentEngine {
         this.clearHealthNotificationMemory(agentId);
       }
 
-      if (!(opts.firstConnect && TERMINAL_STATES.has(state))) {
-        if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
-          continue;
-        }
-        fleetCandidates.push({
-          agentId: agent.agent_id,
-          agentType: agent.cli,
-          agentState: state,
-          lastProgressAtMs: this.lastAgentProgressAtMs(agent),
-          surfaceUuid: observedSurfaceUuid ?? undefined,
-          surfaceRef: boundSurfaceRef,
-          surfaceTitle:
-            surfaceBinding.title ??
-            surfaceTopology?.titleBySurface.get(boundSurfaceRef) ??
-            null,
-          repo: agent.repo,
-          seatLane: agent.seat_lane ?? null,
-          seatId: agent.seat_id ?? null,
-          launcherName: agent.launcher_name ?? null,
-          role: inferRecordRoleOrNull(agent),
-          discovered: agent.agent_id.startsWith("auto-"),
-          registryVersion: agent.version,
-          registryUpdatedAt: agent.updated_at,
-          createdAt: agent.created_at,
-          taskSummary: agent.task_summary ?? null,
-          healthStatus: health.status,
-          healthReasons: health.issues,
-          healthIssueCodes: health.issue_codes,
-          healthIssueSeverities: health.issue_severities ?? {},
-          screenCurrentAction,
-          // A shell prompt before the launcher becomes an agent is not an idle
-          // agent. Keep the first-render seat visible as stalled/focusable
-          // until lifecycle evidence advances beyond creating/booting.
-          screenStatus:
-            state === "creating" || state === "booting"
-              ? null
-              : toParsedScreenStatus(healthInput.screen_status),
-        });
-      }
-
       // Status diff — only push if changed
       const statusChanged =
         !prev ||
@@ -6934,11 +6802,6 @@ export class AgentEngine {
     const currentAgentIds = new Set(
       this.registry.list().map((a) => a.agent_id),
     );
-    for (const agentId of this.fleetScreenProgress.keys()) {
-      if (!currentAgentIds.has(agentId)) {
-        this.fleetScreenProgress.delete(agentId);
-      }
-    }
     for (const [agentId, snapshot] of this.sidebarSnapshot) {
       if (!currentAgentIds.has(agentId)) {
         if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
@@ -6957,42 +6820,6 @@ export class AgentEngine {
       }
     }
 
-    const observedLiveSurfaceUuids =
-      observedUuidCoverage === "complete"
-        ? [...surfaceTopology!.surfaceRefById.keys()].sort()
-        : observedUuidCoverage === "legacy"
-          ? undefined
-          : null;
-    const currentFleetCandidates = fleetCandidates.filter((candidate) => rowIsCurrent(candidate.agentId));
-    const snapshot = buildFleetSidebarSnapshot(currentFleetCandidates, {
-      liveSurfaceRefs: new Set(observedLiveSurfaceRefs ?? []),
-      ...(observedLiveSurfaceUuids
-        ? { liveSurfaceUuids: new Set(observedLiveSurfaceUuids) }
-        : {}),
-      workingNoProgressTimeoutMs: this.fleetWorkingNoProgressTimeoutMs,
-    });
-    const publicationState = !topologyIsAuthoritative
-      ? "unknown"
-      : snapshot.seatCount > 0
-        ? "populated"
-        : currentFleetCandidates.length > 0
-          ? "unknown"
-          : opts.firstConnect
-            ? "unknown"
-            : "empty";
-    if (snapshotMutationAllowed && !snapshotMutationAllowed()) {
-      return;
-    }
-    try {
-      this.fleetSidebarPublisher.publish({
-        state: publicationState,
-        snapshot,
-        observedLiveSurfaceRefs,
-        observedLiveSurfaceUuids,
-      });
-    } catch {
-      // Best-effort custom UI: publication must never break reconciliation.
-    }
   }
 
   /** Whether a startup purge is pending (opt-in via enableStartupPurge) */
@@ -7335,7 +7162,7 @@ export class AgentEngine {
   /**
    * Initialize lifecycle state exactly once for a fresh runtime connection.
    * Reconstitution and one additive discovery complete before the immediate
-   * sidebar sync, so a fresh process cannot publish an empty first paint.
+   * reconcile, so a fresh process cannot publish an empty first paint.
    */
   initialize(discovery: AgentDiscovery): Promise<void> {
     if (this.startupInitializePromise === null) {
@@ -7345,17 +7172,6 @@ export class AgentEngine {
   }
 
   private async initializeOnce(discovery: AgentDiscovery): Promise<void> {
-    try {
-      this.fleetSidebarPublisher.publish({
-        state: "discovering",
-        snapshot: buildFleetSidebarSnapshot([], {
-          liveSurfaceRefs: new Set(),
-        }),
-        observedLiveSurfaceRefs: null,
-      });
-    } catch {
-      // Discovery and lifecycle startup must not depend on custom UI output.
-    }
     const newlySurfacelessAgentIds = await this.registry.reconstitute({
       confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
       now: Date.now(),
@@ -7403,9 +7219,9 @@ export class AgentEngine {
     // lifecycle age and ghost-eviction evidence.
     await this.reconcileRolePlacements("boot");
     try {
-      await this.syncSidebar({ firstConnect: true });
+      await this.reconcileAgents({ firstConnect: true });
     } catch {
-      // Sidebar/status publication is auxiliary. Boot placement may go live
+      // The first-connect reconcile is auxiliary. Boot placement may go live
       // once registry ingestion and the provenance-gated sweep have completed.
     }
   }
@@ -7639,7 +7455,7 @@ export class AgentEngine {
     } catch {
       // Best-effort cleanup of the removed workspace-less progress row.
     }
-    // Seed sidebar snapshot so syncSidebar clears their cmux entries.
+    // Seed sidebar snapshot so reconcileAgents clears their cmux entries.
     for (const purgedAgent of purgedIds) {
       this.sidebarSnapshot.set(purgedAgent.agent_id, {
         statusValue: "__purged__",
@@ -7676,7 +7492,7 @@ export class AgentEngine {
   }
 
   /**
-   * Public sweep: reconcile registry, purge dead entries, then sync sidebar.
+   * Public sweep: reconcile registry, purge dead entries, then reconcile agents.
    * If enableStartupPurge() was called, the first sweep also purges terminal
    * records carried over from the previous cmux session while retaining any
    * records that this startup's own topology scan just marked surfaceless.
@@ -8895,32 +8711,6 @@ export class AgentEngine {
     }
   }
 
-  requestFleetSidebarRepublish(): void {
-    if (this.fleetSidebarWakeRepublishTimer !== null) return;
-    const timer = setTimeout(() => {
-      void (this.startupInitializePromise ?? Promise.resolve())
-        .then(() => {
-          if (this.fleetSidebarWakeRepublishTimer !== timer) return;
-          return this.runLifecycleMutation(() => this.syncSidebar(), {
-            label: "sync-sidebar",
-          });
-        })
-        .catch((error) => {
-          console.error(
-            "[cmuxlayer] wake sidebar republish failed (will retry on sweep):",
-            error,
-          );
-        })
-        .finally(() => {
-          if (this.fleetSidebarWakeRepublishTimer === timer) {
-            this.fleetSidebarWakeRepublishTimer = null;
-          }
-        });
-    }, FLEET_SIDEBAR_WAKE_REPUBLISH_DELAY_MS);
-    this.fleetSidebarWakeRepublishTimer = timer;
-    timer.unref?.();
-  }
-
   private async runSweepOnce(
     withUnlocked: <T>(operation: () => Promise<T>) => Promise<T>,
   ): Promise<void> {
@@ -8940,7 +8730,7 @@ export class AgentEngine {
       const startedAtIso = new Date(startedAt).toISOString();
       const agentCount = this.registry.list().length;
       const lockHeld =
-        lockHeldOverride ?? (name !== "sidebar_ms" && this.lifecycleLockHolder === "sweep");
+        lockHeldOverride ?? (name !== "reconcile_ms" && this.lifecycleLockHolder === "sweep");
       const appendPhase = (
         stage: "started" | "completed" | "failed",
         durationMs: number | null,
@@ -9098,12 +8888,12 @@ export class AgentEngine {
       }
       await yieldToWaiters();
       if (!mutationsAreSafe) {
-        await time("sidebar_ms", () =>
-          this.syncSidebar({}, null, undefined, sweepCtx),
+        await time("reconcile_ms", () =>
+          this.reconcileAgents({}, null, undefined, sweepCtx),
         );
       } else if (this.assertSweepInputCurrent(sweepCtx)) {
-        await time("sidebar_ms", () =>
-          this.syncSidebar(
+        await time("reconcile_ms", () =>
+          this.reconcileAgents(
             {},
             surfaceTopology,
             () => this.assertSweepInputCurrent(sweepCtx),
@@ -9552,10 +9342,6 @@ export class AgentEngine {
       clearTimeout(this.sweepTimer);
       this.sweepTimer = null;
     }
-    if (this.fleetSidebarWakeRepublishTimer) {
-      clearTimeout(this.fleetSidebarWakeRepublishTimer);
-      this.fleetSidebarWakeRepublishTimer = null;
-    }
     for (const timer of this.postSpawnLivenessTimers) {
       clearTimeout(timer);
     }
@@ -9563,7 +9349,6 @@ export class AgentEngine {
     this.sweepTiming = null;
     this.lastSweepSignature = null;
     this.unchangedSweepCount = 0;
-    this.fleetSidebarPublisher.dispose();
   }
 
   private schedulePostSpawnLivenessAssertion(agentId: string): void {

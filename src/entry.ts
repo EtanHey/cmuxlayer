@@ -384,7 +384,6 @@ export async function startInProcessRuntime(
     { defaultMonitorRegistryPath, httpNotifyMonitorDeadman },
     { defaultWatchRegistryPath, httpNotifyWatch },
     { ensureNodeMaxOldSpaceEnv, installHeapGuard },
-    { FleetSidebarPublisher },
     { makeSelfRegistrationSessionLookup, makeSelfRegistrationSessionResolver },
   ] = await Promise.all([
     import("@modelcontextprotocol/sdk/server/stdio.js"),
@@ -395,7 +394,6 @@ export async function startInProcessRuntime(
     import("./monitor-registry.js"),
     import("./watch-spec.js"),
     import("./heap-guard.js"),
-    import("./fleet-sidebar.js"),
     import("./self-registration.js"),
   ]);
 
@@ -430,7 +428,6 @@ export async function startInProcessRuntime(
     enableCloseForensics: true,
     selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
     selfRegistrationSessionLookup: makeSelfRegistrationSessionLookup(),
-    fleetSidebarPublisher: new FleetSidebarPublisher(),
     defaultPalette: opts.env?.CMUXLAYER_DEFAULT_PALETTE,
     ...(explicitStateDir ? { stateDir: explicitStateDir } : {}),
     ...(rawReportWatchDeadlineMs !== undefined

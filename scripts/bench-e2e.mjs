@@ -1270,7 +1270,6 @@ export function buildIsolatedRuntimeEnv(baseEnv, reservation, cmuxSocketPath) {
     CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(root, "launcher-registry.json"),
     CMUXLAYER_DAEMON_PID_RECEIPT: join(root, "unexpected-daemon-pids.txt"),
     CMUXLAYER_BENCH_OWNER_TOKEN: randomUUID(),
-    CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH: join(root, "fleet-sidebar.swift"),
     CMUXLAYER_HARNESS_HOME: join(root, "harness"),
     CMUXLAYER_DEV: "1",
   });

@@ -7,7 +7,6 @@ import {
   type CmuxAppServerRuntimeOptions,
 } from "../src/app-server-runtime.js";
 import type { AgentRecord } from "../src/agent-types.js";
-import { FleetSidebarPublisher } from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-app-server-runtime-test");
 
@@ -21,8 +20,6 @@ class CmuxAppServerRuntime extends ProductionCmuxAppServerRuntime {
     };
     super({
       ...opts,
-      fleetSidebarPublisher:
-        opts.fleetSidebarPublisher ?? makeTempFleetPublisher(),
       surfaceObserverOwnerIdProvider: ownerId,
       surfaceObserverEpochProvider: () => {
         const owner = ownerId();
@@ -36,12 +33,6 @@ class CmuxAppServerRuntime extends ProductionCmuxAppServerRuntime {
       },
     });
   }
-}
-
-function makeTempFleetPublisher(): FleetSidebarPublisher {
-  return new FleetSidebarPublisher({
-    outputPath: join(TEST_DIR, "fleet.swift"),
-  });
 }
 
 function makeClient() {
@@ -312,7 +303,7 @@ describe("CmuxAppServerRuntime", () => {
     }
   });
 
-  it("discovers and publishes a live seat on first initialize", async () => {
+  it("discovers a live seat on first initialize", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     const client = makeClient();
@@ -360,78 +351,25 @@ describe("CmuxAppServerRuntime", () => {
       lines: 30,
       scrollback_used: false,
     });
-    const publisher = {
-      publish: vi.fn(),
-      dispose: vi.fn(),
-    };
     const runtime = new CmuxAppServerRuntime({
       client,
       stateDir: TEST_DIR,
-      fleetSidebarPublisher: publisher,
     });
 
     try {
       await runtime.initialize();
 
-      expect(publisher.publish).toHaveBeenCalledWith(
+      expect((runtime as any).registry.list()).toEqual([
         expect.objectContaining({
-          state: "populated",
-          observedLiveSurfaceRefs: ["surface:1"],
-          snapshot: expect.objectContaining({
-            seatCount: 1,
-            lanes: [
-              expect.objectContaining({
-                key: "cmuxlayer",
-                seats: [
-                  expect.objectContaining({
-                    surfaceRef: "surface:1",
-                    screenState: "working",
-                  }),
-                ],
-              }),
-            ],
-          }),
+          surface_id: "surface:1",
+          cli: "codex",
+          state: "working",
         }),
-      );
+      ]);
     } finally {
       runtime.dispose();
       rmSync(TEST_DIR, { recursive: true, force: true });
     }
-  });
-
-  it("forwards an injected fleet publisher to the reconciler and disposes it", async () => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    const publisher = {
-      publish: vi.fn(),
-      dispose: vi.fn(),
-    };
-    const runtime = new CmuxAppServerRuntime({
-      client: makeClient(),
-      stateDir: TEST_DIR,
-      fleetSidebarPublisher: publisher,
-    });
-
-    try {
-      await (runtime as any).engine.runSweep();
-
-      expect(publisher.publish).toHaveBeenCalledWith(
-        expect.objectContaining({
-          state: "unknown",
-          observedLiveSurfaceRefs: null,
-          observedLiveSurfaceUuids: null,
-          snapshot: {
-            seatCount: 0,
-            activeCount: 0,
-            lanes: [],
-          },
-        }),
-      );
-    } finally {
-      runtime.dispose();
-      rmSync(TEST_DIR, { recursive: true, force: true });
-    }
-    expect(publisher.dispose).toHaveBeenCalledOnce();
   });
 
   it("does not collapse surface listing failures into an absent surface", async () => {
@@ -444,7 +382,6 @@ describe("CmuxAppServerRuntime", () => {
     const runtime = new CmuxAppServerRuntime({
       client,
       stateDir: TEST_DIR,
-      fleetSidebarPublisher: makeTempFleetPublisher(),
     });
 
     await expect(
@@ -619,7 +556,6 @@ describe("CmuxAppServerRuntime", () => {
     const runtime = new CmuxAppServerRuntime({
       client,
       stateDir: TEST_DIR,
-      fleetSidebarPublisher: makeTempFleetPublisher(),
     });
     const record = {
       ...makeRecord(),

@@ -8,7 +8,7 @@ cmuxlayer can now expose a Claude Code `--channels` compatible push surface for 
 - sets server instructions describing the one-way channel behavior
 - emits `notifications/claude/channel` for agent `spawned`, `done`, and `errored` lifecycle events
 
-The implementation reuses the existing `AgentEngine.syncSidebar()` lifecycle dedupe, so sidebar logs and Claude channel pushes stay aligned.
+The implementation reuses the existing `AgentEngine.reconcileAgents()` lifecycle dedupe, so lifecycle logs and Claude channel pushes stay aligned.
 
 ## What The Channel Prototype Is Good For
 

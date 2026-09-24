@@ -8,7 +8,6 @@
  */
 
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
-import { runFleetSidebarCommand } from "./fleet-sidebar-cli.js";
 import { RUNNING_VERSION } from "./version.js";
 import { runDaemonFirstEntry } from "./entry.js";
 import { isMainModule } from "./is-main.js";
@@ -38,11 +37,6 @@ Usage:
   cmuxlayer install-session-hooks
                        Install the Claude and Codex SessionStart registry hooks.
                        Existing hook configuration is merged and backed up.
-  cmuxlayer fleet-sidebar <collapse|expand|toggle> <lane>
-                       Persist an independent Fleet lane state. Supported lanes:
-                       orc, golems, voicelayer, skillCreator, cmuxlayer, other.
-  cmuxlayer fleet-sidebar state
-                       Print the persisted per-lane collapse preferences.
   CMUX_INBOX_MSG_ID=<id> cmuxlayer inbox-cursor <agent-id>
                        Advance the agent-owned inbox cursor after handling a
                        message. CMUXLAYER_INBOX_BASE_DIR overrides its base dir.
@@ -103,13 +97,6 @@ async function main() {
     for (const path of result.changed) process.stdout.write(`updated ${path}\n`);
     for (const path of result.backups) process.stdout.write(`backup ${path}\n`);
     if (result.changed.length === 0) process.stdout.write("already installed\n");
-    return;
-  }
-  if (arg === "fleet-sidebar") {
-    const result = runFleetSidebarCommand(process.argv.slice(3));
-    const stream = result.ok ? process.stdout : process.stderr;
-    stream.write(`${result.message}\n`);
-    process.exitCode = result.ok ? 0 : 1;
     return;
   }
   if (arg === "inbox-cursor") {

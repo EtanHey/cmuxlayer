@@ -42,10 +42,6 @@ import {
   isSurfaceObserverEpochCurrent,
   type SurfaceObserverEpoch,
 } from "./surface-topology.js";
-import {
-  FleetSidebarPublisher,
-  type FleetSidebarPublisherLike,
-} from "./fleet-sidebar.js";
 import type {
   AppServerBridgeRuntime,
   BridgeScreenSnapshot,
@@ -194,7 +190,6 @@ export interface CmuxAppServerRuntimeOptions {
   client: CmuxLikeClient;
   stateDir?: string;
   inboxOpts?: InboxOpts;
-  fleetSidebarPublisher?: FleetSidebarPublisherLike;
   surfaceObserverOwnerIdProvider?: () => string | null | undefined;
   surfaceObserverEpochProvider?: () => string | null | undefined;
 }
@@ -416,8 +411,6 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           stateMgr: this.stateMgr,
           listSurfacesForRefMap: surfaceProvider,
         }),
-        fleetSidebarPublisher:
-          opts.fleetSidebarPublisher ?? new FleetSidebarPublisher(),
         deliveryTicketDir:
           process.env.VITEST === "true" || process.env.NODE_ENV === "test"
             ? undefined

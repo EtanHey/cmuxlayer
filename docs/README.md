@@ -13,7 +13,7 @@ Start with the [README](../README.md) for install and the public tool list.
 
 - [CLI reference](reference/cli-reference.md): how each agent CLI (Claude Code, Codex, Cursor, Gemini, Kiro) is launched, resumed, typed into and read.
 - [Control-plane invariants](reference/control-plane-invariants.md): the agent state machine rules.
-- [Sidebar and registry topology contract](reference/topology-contract.md)
+- [Registry topology contract](reference/topology-contract.md)
 - [Harness JSONL field map](reference/harness-jsonl-field-map.md): where token, context and model fields live in each CLI's session log.
 - [Thin-core tool cut](reference/thin-core-tool-cut.md): why the public surface is 10 tools.
 - [Claude channels](reference/claude-channels.md): the one-way `--channels` lifecycle notifications.

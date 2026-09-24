@@ -368,7 +368,6 @@ describe("AgentEngine", () => {
       watchRegistryNow: () => now,
       watchNotify: notify,
       sessionIdentityResolver: () => null,
-      fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
     });
     (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
       surface: worker.surface_id,
@@ -7982,7 +7981,7 @@ Session ID: ${sessionId}`,
       );
     });
 
-    it("orders boot ingestion before provable-leftover sweep and publication", async () => {
+    it("orders boot ingestion before provable-leftover sweep and first reconcile", async () => {
       const events: string[] = [];
       const record = makeRecord({
         agent_id: "boot-leftover-worker",
@@ -8011,13 +8010,14 @@ Session ID: ${sessionId}`,
       engine = new AgentEngine(stateMgr, registry, mockClient, {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
-        fleetSidebarPublisher: {
-          publish: ({ state }) => {
-            if (state !== "discovering") events.push("placement-live");
-          },
-          dispose: () => {},
-        },
       });
+      const reconcileAgents = (engine as any).reconcileAgents.bind(engine);
+      vi.spyOn(engine as any, "reconcileAgents").mockImplementation(
+        async (...args: unknown[]) => {
+          await reconcileAgents(...args);
+          events.push("placement-live");
+        },
+      );
       const discovery = {
         scan: vi.fn(async () => {
           events.push("ingest");

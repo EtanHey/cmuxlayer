@@ -18,7 +18,6 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { dispatch, writeHeartbeat } from "../src/inbox.js";
-import type { FleetSidebarPublication } from "../src/fleet-sidebar.js";
 import {
   currentCallerContext,
   runWithCallerContext,
@@ -7992,7 +7991,6 @@ describe("tool handler integration", () => {
       reportsSurfaceUuid: true,
       expectedSpawnRole: "worker" as const,
       expectedRole: "worker" as const,
-      expectedSidebarRole: "worker" as const,
     },
     {
       label: "a no-role Claude",
@@ -8002,7 +8000,6 @@ describe("tool handler integration", () => {
       reportsSurfaceUuid: true,
       expectedSpawnRole: "orchestrator" as const,
       expectedRole: "orchestrator" as const,
-      expectedSidebarRole: "lead" as const,
     },
     {
       label: "an explicit Codex orchestrator",
@@ -8012,7 +8009,6 @@ describe("tool handler integration", () => {
       reportsSurfaceUuid: true,
       expectedSpawnRole: "orchestrator" as const,
       expectedRole: "orchestrator" as const,
-      expectedSidebarRole: "lead" as const,
     },
     {
       label: "a ref-only override after UUID identity appears",
@@ -8022,10 +8018,9 @@ describe("tool handler integration", () => {
       reportsSurfaceUuid: false,
       expectedSpawnRole: "worker" as const,
       expectedRole: "orchestrator" as const,
-      expectedSidebarRole: "lead" as const,
     },
   ])(
-    "persists the authoritative new_split role for $label through registry and sidebar",
+    "persists the authoritative new_split role for $label through the registry",
     async ({
       cli,
       title: initialTitle,
@@ -8033,7 +8028,6 @@ describe("tool handler integration", () => {
       reportsSurfaceUuid,
       expectedSpawnRole,
       expectedRole,
-      expectedSidebarRole,
     }) => {
       const stateDir = join(
         CHANNEL_TEST_DIR,
@@ -8045,7 +8039,6 @@ describe("tool handler integration", () => {
           : "66666666-7777-4888-8999-aaaaaaaaaaaa";
       let created = false;
       let surfaceTitle = initialTitle;
-      const publications: FleetSidebarPublication[] = [];
       rmSync(stateDir, { recursive: true, force: true });
 
       const mockClient = {
@@ -8182,10 +8175,6 @@ describe("tool handler integration", () => {
         lifecycleServer = createServer({
           context,
           skipAgentLifecycle: false,
-          fleetSidebarPublisher: {
-            publish: (publication) => publications.push(publication),
-            dispose: vi.fn(),
-          },
         });
         await context.lifecycleStartPromise;
 
@@ -8193,14 +8182,6 @@ describe("tool handler integration", () => {
           ?.list()
           .find((candidate) => candidate.surface_id === "surface:agent");
         expect(record).toMatchObject({ cli, role: expectedRole });
-
-        const populated = [...publications]
-          .reverse()
-          .find((publication) => publication.state === "populated");
-        const seat = populated?.snapshot.lanes
-          .flatMap((lane) => lane.seats)
-          .find((candidate) => candidate.surfaceRef === "surface:agent");
-        expect(seat).toMatchObject({ role: expectedSidebarRole });
       } finally {
         await lifecycleServer?.close();
         context.dispose();
@@ -13729,10 +13710,7 @@ describe("registry reconstitution error logging", () => {
       stateDir: join(CHANNEL_TEST_DIR, "disposed-during-initialize"),
       controlHealthIntervalMs: 0,
     });
-    createServer({
-      context,
-      fleetSidebarPublisher: { publish: vi.fn(), dispose: vi.fn() },
-    });
+    createServer({ context });
     const engine = context.lifecycleSweepEngine!;
     const startSweep = vi.spyOn(engine, "startSweep");
     const initialization = context.lifecycleStartPromise!;
