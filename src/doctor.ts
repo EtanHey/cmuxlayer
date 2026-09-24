@@ -47,6 +47,7 @@ import {
   fleetConfigPath,
   genericFleetConfig,
   loadFleetConfig,
+  readFleetConfig,
   type FleetConfig,
 } from "./fleet-config.js";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
@@ -1319,7 +1320,8 @@ function checkFleetConfig(
   home: string,
 ): { config: FleetConfig; report: FleetConfigReport } {
   try {
-    const config = loadFleetConfig(env, home);
+    // Strict on purpose: doctor is where a bad fleet config gets reported.
+    const config = readFleetConfig(env, home);
     const legacyState = findLegacyCoordinationState(config, home);
     return {
       config,
