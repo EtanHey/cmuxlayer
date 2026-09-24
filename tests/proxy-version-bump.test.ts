@@ -64,6 +64,7 @@ class FakeDaemon {
   private server: net.Server | null = null;
   readonly connections: net.Socket[] = [];
   readonly messages: JSONRPCMessage[][] = [];
+  readonly socketErrors: Error[] = [];
 
   constructor(
     private readonly path: string,
@@ -79,6 +80,16 @@ class FakeDaemon {
       const connectionIndex = this.connections.push(socket) - 1;
       const messages = (this.messages[connectionIndex] = []);
       let buffer = "";
+      // #824: a proxy that reconnects drops this connection, possibly before
+      // a reply below is written. Record the resulting EPIPE instead of
+      // letting it escape as an uncaught exception.
+      socket.on("error", (error) => {
+        this.socketErrors.push(error);
+      });
+      const reply = (message: JSONRPCMessage) => {
+        if (socket.destroyed || !socket.writable) return;
+        socket.write(serializeMessage(message));
+      };
       socket.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
         let newlineIndex: number;
@@ -95,30 +106,26 @@ class FakeDaemon {
             if (this.opts.holdFirstInitialize && connectionIndex === 0) {
               continue;
             }
-            socket.write(
-              serializeMessage({
-                jsonrpc: "2.0",
-                id: req.id,
-                result: {
-                  protocolVersion: "2024-11-05",
-                  serverInfo: { name: "cmuxlayer", version: "0.3.31" },
-                  capabilities: {},
-                },
-              }),
-            );
+            reply({
+              jsonrpc: "2.0",
+              id: req.id,
+              result: {
+                protocolVersion: "2024-11-05",
+                serverInfo: { name: "cmuxlayer", version: "0.3.31" },
+                capabilities: {},
+              },
+            });
             return;
           }
           if (req.method === "tools/list") {
             if (this.opts.holdFirstToolsList && connectionIndex === 0) {
               continue;
             }
-            socket.write(
-              serializeMessage({
-                jsonrpc: "2.0",
-                id: req.id,
-                result: { tools: [] },
-              }),
-            );
+            reply({
+              jsonrpc: "2.0",
+              id: req.id,
+              result: { tools: [] },
+            });
           }
         }
       });
@@ -159,6 +166,47 @@ describe("proxy version-bump auto-reconnect", () => {
     }
     rmSync(TEST_ROOT, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it("FakeDaemon survives a peer that closes before its reply (#824)", async () => {
+    // The version-bump test drops its first connection to reconnect, so a
+    // FakeDaemon reply can land on a socket whose peer is gone. On a Unix
+    // socket that write fails with EPIPE; it must not become an uncaught
+    // exception that reds the whole run.
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("epipe");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown) => uncaught.push(error);
+    process.on("uncaughtException", onUncaught);
+    try {
+      const client = net.createConnection(path);
+      await new Promise<void>((resolve) => client.once("connect", resolve));
+      const frame = serializeMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { capabilities: {} },
+      });
+      // Destroy as soon as the frame is flushed: the fake reads it after the
+      // peer is gone and answers into a closed socket.
+      await new Promise<void>((resolve) =>
+        client.write(frame, () => {
+          client.destroy();
+          resolve();
+        }),
+      );
+      await waitFor(() => (daemon.messages[0]?.length ?? 0) > 0);
+      await waitFor(() => daemon.connections[0]?.destroyed === true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+
+    expect(uncaught).toEqual([]);
   });
 
   it("reconnects to the daemon when an installed-version bump is detected", async () => {
