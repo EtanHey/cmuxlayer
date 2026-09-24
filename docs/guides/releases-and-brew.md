@@ -179,9 +179,6 @@ hard gate:
 - `CMUX_CONTRACT_REQUIRE_LIVE=1 bun run test:contract` — the runner itself
   turns a skip into `[contract] FAIL:` and a non-zero exit.
 
-`scripts/nightly-contract-run.sh` writes its own nightly receipt under
-`~/.local/state/cmux/contract-nightly-<date>.json`.
-
 **Running it green.** Open a shell *inside a cmux pane* (that is the only place
 `CMUX_SOCKET_CAPABILITY` is granted) and run the lane. Verified green on
 2026-08-18 from a pane on the live socket:

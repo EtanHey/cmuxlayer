@@ -203,7 +203,7 @@ describe("as-any ratchet", () => {
     //
     // Context, stated honestly: this suite intermittently fails with
     // `[vitest-worker]: Timeout calling "onTaskUpdate"` while every test passes
-    // (see scripts/run_tests.sh:48-51, which documents the same condition).
+    // (see scripts/run_tests.sh:45-47, which documents the same condition).
     // Avoiding console here is cheap insurance, NOT a proven fix — measured
     // 1/3 runs failing with this file present vs 0/3 without, which at n=3
     // establishes nothing.

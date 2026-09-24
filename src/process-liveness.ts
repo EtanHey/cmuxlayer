@@ -37,12 +37,6 @@ export function processLiveness(
   }
 }
 
-export function processMayBeAlive(
-  pid: number | null | undefined,
-): boolean {
-  return Boolean(pid) && processLiveness(pid) !== "gone";
-}
-
 /** Read the fixed process start timestamp used to distinguish PID reuse. */
 export function processStartedAtMs(pid: number): number | null {
   try {

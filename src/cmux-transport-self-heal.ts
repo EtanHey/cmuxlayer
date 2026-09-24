@@ -12,7 +12,6 @@ import { CmuxSocketError } from "./cmux-socket-error.js";
 import { SURFACE_TOPOLOGY_CLIENT_METHODS } from "./surface-topology.js";
 import type { CreateCmuxClientOptions } from "./cmux-client-factory.js";
 import {
-  candidateSocketPathsForOpts,
   probeSocketHealth,
   probeUsableSocket,
   resolveSocketPath,
@@ -913,11 +912,4 @@ export function wrapSocketWithSelfHeal(
   opts: Omit<CmuxSelfHealingClientOptions, "cli" | "socket">,
 ): CmuxSelfHealingClient {
   return new CmuxSelfHealingClient({ cli, socket, ...opts });
-}
-
-export function primaryCandidateSocketPath(
-  factoryOpts?: CreateCmuxClientOptions,
-): string | null {
-  const paths = candidateSocketPathsForOpts(factoryOpts);
-  return paths[0] ?? null;
 }

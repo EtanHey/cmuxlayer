@@ -1174,22 +1174,6 @@ type BroadcastReceipt = {
 
 type DeliveryStatus = "delivering" | "delivered" | "failed" | "pending_verify";
 
-export const DELIVERY_RECEIPT_VOCABULARY = [
-  "delivered",
-  "delivery",
-  "delivery_state",
-  "terminal",
-  "typed",
-  "submit_attempted",
-  "submit_verified",
-  "submit_evidence",
-  "retry_count",
-  "rpc_methods",
-  "needs_attention",
-  "attention_reason",
-  "queued_behind_turn",
-] as const;
-
 export type SubmitEvidence =
   "token_delta" | "transcript_echo" | "cleared_composer" | "status_only";
 
