@@ -1005,6 +1005,37 @@ describe("enter reliability", () => {
     });
   });
 
+  it("verifies a raw surface Return at a live ready Codex prompt while the registry is booting", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.cli = "codex";
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "booting", cli: "codex" });
+
+    const result = await callTool(server, "send_to", {
+      mode: "surface",
+      surface: client.surface,
+      text: "surface boot receipt",
+      press_enter: true,
+    });
+    const receipt = parseResult(result);
+    const waited = await callTool(server, "wait_for", {
+      delivery_id: receipt.delivery_id,
+      timeout_ms: 1_000,
+    });
+
+    expect(receipt).toMatchObject({
+      delivery_state: "submitted",
+      submit_verified: true,
+    });
+    expect(parseResult(waited)).toMatchObject({
+      delivery_id: receipt.delivery_id,
+      delivery_state: "submitted",
+      terminal: true,
+    });
+  });
+
   it("returns a terminal typed receipt when surface mode does not press Enter", async () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);

@@ -1892,7 +1892,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exit(1);
-});
+export { startFakeCmuxSocket, writeFakeCmux };
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : String(error));
+    process.exit(1);
+  });
+}
