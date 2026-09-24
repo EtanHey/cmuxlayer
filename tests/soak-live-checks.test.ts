@@ -6,6 +6,7 @@ describe("live soak invariant checkers", () => {
   it("rejects a pending boot or send receipt even when the response landed", () => {
     expect(checkReceipt({ submit_verified: null, delivery_state: "pending_verify" }, true)).toContain("landed_with_unverified_receipt");
     expect(checkReceipt({ submit_verified: true, delivery_state: "submitted" }, true)).toEqual([]);
+    expect(checkReceipt({ submit_verified: true })).toEqual([]); // Valid boot receipt omits delivery_state.
   });
 
   it("catches idle or done registry state over a working or dirty composer", () => {
@@ -16,6 +17,10 @@ describe("live soak invariant checkers", () => {
 
   it("flags an error registry row over a busy screen as stale", () => {
     expect(checkStateAgreement({ state: "error" }, { status: "working", control_state: "busy" }))
+      .toContain("stale_registry_state");
+    expect(checkStateAgreement({ state: "ready" }, { status: "working", control_state: "busy" }))
+      .toContain("stale_registry_state");
+    expect(checkStateAgreement({ state: "working" }, { status: "idle", control_state: "ready" }))
       .toContain("stale_registry_state");
   });
 
@@ -36,11 +41,30 @@ describe("live soak invariant checkers", () => {
       .toEqual(["agent_ghost", "nonterminal_tombstone", "surface_still_live", "live_index_ghost"]);
   });
 
+  it("rejects a third column and a missing close topology", () => {
+    expect(checkPlacement({ column: 2, column_count: 3 })).toContain("wrong_column");
+    expect(checkClose({ agent_stopped: true, surface_closed: true }, false,
+      { state: "done" }, null, "surface:1", undefined)).toContain("close_observation_unavailable");
+    expect(checkClose({ agent_stopped: true, surface_closed: true }, false,
+      { state: "done" }, null, "surface:1", new Array(1))).toContain("close_observation_unavailable");
+  });
+
   it("does not count an echoed user prompt as the agent reply", () => {
     expect(hasReplyMarker({ screen_preview: "> Reply exactly SOAK_OK_1 then stop." }, "SOAK_OK_1")).toBe(false);
     expect(hasReplyMarker({ parsed: { response: "SOAK_OK_1" } }, "SOAK_OK_1")).toBe(true);
     expect(hasReplyMarker({ screen_preview: "⏺ SOAK_OK_1" }, "SOAK_OK_1")).toBe(true);
     expect(hasReplyMarker({ screen_preview: "• SOAK_OK_1" }, "SOAK_OK_1")).toBe(true);
+  });
+
+  it("fails closed on malformed receipt, state, tool, and reply inputs", () => {
+    expect(checkReceipt({ submit_verified: true, delivery_state: "mystery" })).toContain("nonterminal_or_failed_receipt");
+    expect(checkReceipt({ submit_verified: true }, "false" as unknown as boolean)).toContain("malformed_receipt");
+    expect(checkStateAgreement({}, {})).toContain("state_unavailable");
+    expect(checkStateAgreement({ state: "mystery" }, { status: "idle", control_state: "ready" })).toContain("state_unavailable");
+    expect(checkToolFailure({ ok: 1, isError: 0 })).toContain("tool_error");
+    expect(checkToolFailure({ ok: true, isError: false })).toEqual([]);
+    expect(checkToolFailure({ ok: true, isError: false, error: "unexpected" })).toContain("tool_error");
+    expect(hasReplyMarker({ parsed: { response: "" } }, "")).toBe(false);
   });
 
   it("continues until both the cycle count and duration floor are met", () => {
@@ -56,6 +80,11 @@ describe("live soak invariant checkers", () => {
     expect(nextSoakDelayMs(40, 40, 59 * 60_000, hour)).toBe(30_000);
     expect(nextSoakDelayMs(40, 40, hour, hour)).toBe(0);
     expect(nextSoakDelayMs(2, 40, 60_000, 0)).toBe(0);
+  });
+
+  it("rejects invalid progress before it can terminate or spin the soak", () => {
+    expect(() => shouldContinueSoak(Number.NaN, 40, 60_000, 60_000)).toThrow();
+    expect(() => nextSoakDelayMs(1, 0, 0, 60_000)).toThrow();
   });
 
   it("checks one continuous healthy MCP process and bounded RSS growth", () => {
@@ -91,8 +120,15 @@ describe("live soak invariant checkers", () => {
     expect(checkSoakSession({ ...session, healthSamples: [true, true, true] })).toEqual([]);
   });
 
+  it("rejects missing health results inside a sparse sample array", () => {
+    const session = { startPid: 123, endPid: 123, elapsedMs: 60 * 60_000,
+      minDurationMs: 60 * 60_000, minCycles: 40, cyclesCompleted: 40,
+      healthSamples: new Array(61), rssStartKb: 100, rssEndKb: 100 };
+    expect(checkSoakSession(session)).toContain("unhealthy_control_sample");
+  });
+
   it("tracks the MCP stdio PID separately from the control daemon PID", () => {
-    const health = { ok: true, health: { current_process: { pid: 999 }, warnings: [],
+    const health = { ok: true, isError: false, health: { current_process: { pid: 999 }, warnings: [],
       selected_transport: { transport_mode: "socket", transport_degraded: false } } };
     expect(checkControlHealthSample(health, 123, 123)).toEqual([]);
     expect(checkControlHealthSample(health, 124, 123)).toContain("mcp_pid_changed");
@@ -101,13 +137,33 @@ describe("live soak invariant checkers", () => {
       .toContain("control_transport_unhealthy");
   });
 
+  it("rejects incomplete or non-boolean control transport status", () => {
+    const health = { ok: true, isError: false, health: { warnings: [],
+      selected_transport: { transport_mode: "socket", transport_degraded: "false" } } };
+    expect(checkControlHealthSample(health, 123, 123)).toContain("control_transport_unhealthy");
+  });
+
   it("catches a stale parsed_only read against the immediate full read", () => {
-    const full = { ok: true, parsed: { status: "working", control_state: "busy", token_count: 190_479 } };
-    const stale = { ok: true, parsed: { status: "idle", control_state: "ready", token_count: 79_126 } };
+    const full = { ok: true, isError: false, parsed: { status: "working", control_state: "busy", token_count: 190_479 } };
+    const stale = { ok: true, isError: false, parsed: { status: "idle", control_state: "ready", token_count: 79_126 } };
     expect(checkParsedReadAgreement(full, stale, 200)).toEqual([
       "parsed_status_mismatch", "parsed_control_state_mismatch", "parsed_token_count_drift",
     ]);
     expect(checkParsedReadAgreement(full, { ...full, parsed: { ...full.parsed, token_count: 191_000 } }, 200)).toEqual([]);
     expect(checkParsedReadAgreement(full, full, 2_001)).toContain("parsed_sweep_window_exceeded");
   });
+
+  it("rejects malformed parsed reads and non-finite sweep duration", () => {
+    const read = { ok: true, parsed: {} };
+    expect(checkParsedReadAgreement(read, read, Number.NaN)).toContain("parsed_read_unavailable");
+    const unknown = { ok: true, isError: false, parsed: { status: "mystery", control_state: "ready", token_count: 1 } };
+    expect(checkParsedReadAgreement(unknown, unknown, 100)).toContain("parsed_read_unavailable");
+  });
+});
+
+it("matches valid null token counts before usage metadata appears", () => {
+  const read = { ok: true, isError: false, parsed: {
+    status: "working", control_state: "busy", token_count: null,
+  } };
+  expect(checkParsedReadAgreement(read, read, 100)).toEqual([]);
 });
