@@ -10508,7 +10508,9 @@ export class AgentEngine {
               (restingObservations >= 2 &&
                 timeoutLive?.source === "screen" &&
                 !isLiveActive(timeoutLive) &&
-                current.state !== "working"))
+                current.state !== "working") ||
+              (refreshedSource === "screen" &&
+                INTERACTIVE_AGENT_STATES.has(current.state)))
           ) {
             finish({
               matched: true,

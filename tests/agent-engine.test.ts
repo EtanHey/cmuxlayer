@@ -8090,6 +8090,20 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    for (const t of [500, 1_000, 3_000]) it(`XPROBE-U genuinely idle claude with a failing probe matches idle, t=${t}`, async () => {
+      vi.useFakeTimers();
+      try {
+        const id = `xu${t}`;
+        stateMgr.writeState(makeRecord({ agent_id: id, state: "working", surface_id: `surface:${id}`, cli: "claude", role: "worker" }));
+        liveSurfaces = [makeSurface(`surface:${id}`)];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: `surface:${id}`, text: "Claude Code\n❯", lines: 80, scrollback_used: false });
+        engine.setFreshLiveStateProbe(async () => null);
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor(id, "idle", t);
+        await vi.advanceTimersByTimeAsync(t + 1_500);
+        expect(await pending).toMatchObject({ matched: true, state: "idle" });
+      } finally { vi.useRealTimers(); }
+    });
     it("reports the record state when a final spinner read contradicts a resting timeout probe", async () => {
       vi.useFakeTimers();
       try {
