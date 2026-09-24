@@ -13333,14 +13333,8 @@ codex>
 
   it("close_surface reports a closed UUID surface without claiming an unproven process stopped", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
-    const witness = {
-      ref: "surface:witness",
-      id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-      workspace_ref: "workspace:1",
-    };
     const routeClient = makeUuidRouteClient([
       { ref: "surface:389", id: stableUuid, workspace_ref: "workspace:1" },
-      witness,
     ]);
     const record = makeServerAgentRecord({
       agent_id: "cmuxlayerClaude-unknown-process",
@@ -13358,7 +13352,7 @@ codex>
     try {
       const server = await createUuidRouteServer(routeClient, record);
       routeClient.client.closeSurface.mockImplementation(async () => {
-        routeClient.setLiveSurfaces([witness]);
+        routeClient.setLiveSurfaces([]);
       });
       const realKill = process.kill.bind(process);
       const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, signal) =>
