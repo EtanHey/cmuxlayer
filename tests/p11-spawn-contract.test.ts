@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { spawn as nodeSpawn } from "node:child_process";
+import { execFileSync, spawn as nodeSpawn } from "node:child_process";
 import { once } from "node:events";
 import {
   createServer,
@@ -814,6 +814,94 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
     ).toEqual([]);
+  });
+
+  it("reaps the exact recorded inbox tail when close_surface closes its agent", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "closed-tail-child";
+    const nonce = `t1-${Date.now()}-${process.pid}`;
+    const marker = `cmuxlayer-inbox-tail:${nonce}`;
+    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], {
+      stdio: "ignore",
+    });
+    try {
+      await once(tail, "spawn");
+      const pid = tail.pid;
+      expect(pid).toBeDefined();
+      await vi.waitFor(() =>
+        expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker),
+      );
+      const record: AgentRecord = {
+        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        agent_id: agentId,
+        surface_id: "surface:already-gone",
+        state: "done",
+        user_killed: false,
+      };
+      const agentDir = join(inboxDir, agentId);
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "inbox-tail.pid"), `${pid} ${nonce}\n`, "utf8");
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+
+      const closeResult = await server._registeredTools.close_surface.handler(
+        { scope: "agent", agent_id: agentId, force: true },
+        {} as never,
+      );
+
+      expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+      expect(closeResult.structuredContent).toMatchObject({ tail_reaped: true });
+      await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
+    } finally {
+      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+    }
+  });
+
+  it("refuses to signal a reused tail PID whose process title has another nonce", async () => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = server._registeredTools.interact._engine;
+    const agentId = "mismatched-tail-child";
+    const liveNonce = `t1-live-${Date.now()}-${process.pid}`;
+    const recordedNonce = `t1-stale-${Date.now()}-${process.pid}`;
+    const marker = `cmuxlayer-inbox-tail:${liveNonce}`;
+    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], {
+      stdio: "ignore",
+    });
+    try {
+      await once(tail, "spawn");
+      const pid = tail.pid;
+      expect(pid).toBeDefined();
+      await vi.waitFor(() =>
+        expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker),
+      );
+      const record: AgentRecord = {
+        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        agent_id: agentId,
+        surface_id: "surface:already-gone",
+        state: "done",
+        user_killed: false,
+      };
+      const agentDir = join(inboxDir, agentId);
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "inbox-tail.pid"), `${pid} ${recordedNonce}\n`, "utf8");
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(agentId, record);
+
+      const closeResult = await server._registeredTools.close_surface.handler(
+        { scope: "agent", agent_id: agentId, force: true },
+        {} as never,
+      );
+
+      expect(closeResult.isError, JSON.stringify(closeResult)).not.toBe(true);
+      expect(closeResult.structuredContent).toMatchObject({
+        tail_reaped: false,
+        tail_error: "tail_mismatch",
+      });
+      expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker);
+    } finally {
+      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
+    }
   });
 
   it("drops watches owned by a closed agent before close_surface returns", async () => {
