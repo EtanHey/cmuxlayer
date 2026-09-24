@@ -87,6 +87,32 @@ it("realizes a split through the benchmark's socket-first transport wrapper", as
   }
 });
 
+it("allocates distinct fake identities for concurrent socket splits", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-concurrent-fixture-"));
+  const statePath = join(root, "state.json");
+  const socketPath = join(root, "cmux.sock");
+  const server = await startFakeCmuxSocket(socketPath, statePath, 10);
+  const client = new CmuxSocketClient({ socketPath });
+  try {
+    const splits = await Promise.all(Array.from({ length: 4 }, () =>
+      client.newSplit("right", { workspace: "workspace:bench", pane: "pane:bench" }),
+    ));
+    expect(new Set(splits.map((split) => split.surface)).size).toBe(splits.length);
+    expect(new Set(splits.map((split) => split.surface_id)).size).toBe(splits.length);
+    const listed = await client.listPaneSurfaces({ workspace: "workspace:bench" });
+    for (const split of splits) {
+      expect(listed.surfaces).toContainEqual(expect.objectContaining({
+        ref: split.surface,
+        id: split.surface_id,
+      }));
+    }
+  } finally {
+    client.disconnect();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("realizes the fake split surface through the CLI fallback", async () => {
   const root = mkdtempSync(join(tmpdir(), "cmuxlayer-bench-cli-fixture-"));
   const bin = join(root, "bin");
