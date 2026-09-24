@@ -439,12 +439,15 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       const pointer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
       composer = pointer;
       active = true;
+      expect(engine.stateMgr.readState(agentId)?.state).toBe("booting");
       expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
       expect(__submitEvidenceTestHooks.screenShowsCompletePendingInput(screen(), pointer)).toBe(true);
       expect(__submitEvidenceTestHooks.composerHoldsForeignDraft(screen(), pointer, { cli: "claude", exact: true })).toBe(false);
       const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "Reply exactly SOAK2_1 then stop.", press_enter: true }, {}));
       expect(result.ok, JSON.stringify(result)).toBe(true);
       expect(submitted).toEqual([pointer, "Reply exactly SOAK2_1 then stop."]);
+      expect(engine.stateMgr.readState(agentId)?.state).toBe("working");
+      expect(engine.getAgentState(agentId)?.state).toBe("working");
       // A completed boot no longer owns another copy of this deterministic
       // pointer, even if the composer text happens to match it exactly.
       composer = pointer;
@@ -456,6 +459,46 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       const changed = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "next", press_enter: true }, {}));
       expect(changed.error_code).toBe("blocked_by_foreign_draft");
       expect(submitted).toHaveLength(2);
+    } finally { context.dispose(); }
+  }, 15_000);
+
+  it("does not retry an ambiguously acknowledged boot recovery Return", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    let composer = "";
+    let active = false;
+    let returnAttempts = 0;
+    const followupWrites: string[] = [];
+    const screen = () => active ? `Claude Code\nWorking\n❯ ${composer}` : "Claude Code\n❯ ";
+    const base = makeLifecycleExec(screen);
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (active && args.includes("send-key") && args.includes("return")) {
+        returnAttempts += 1;
+        // The pane may have accepted Return; the transport lost its ack and
+        // the screen still shows the old composer until the next repaint.
+        throw new Error("connection closed");
+      }
+      if (active && args.includes("send")) {
+        followupWrites.push(String(args.at(-1)));
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    });
+    const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const agentId = await spawnReadyAgent(server);
+      const engine = server._registeredTools.interact._engine;
+      const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
+      engine.getRegistry().set(agentId, record);
+      composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
+      active = true;
+
+      const result = parseToolResult(await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: true }, {}));
+      expect(returnAttempts).toBe(1);
+      expect(followupWrites).toEqual([]);
+      expect(result.ok).toBe(false);
+      expect(result.submit_verified).not.toBe(true);
+      expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
     } finally { context.dispose(); }
   }, 15_000);
 
