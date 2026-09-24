@@ -2144,9 +2144,6 @@ export class AgentEngine {
     agent: AgentRecord,
     live: LiveAgentState,
   ): AgentState {
-    // A bare shell or harness API failure is positive evidence that the CLI
-    // crashed, even if the last persisted state was `done`.
-    if (live.screen_state === "error") return "error";
     if (TERMINAL_STATES.has(agent.state) && !isLiveActive(live)) {
       return agent.state;
     }
@@ -10347,7 +10344,9 @@ export class AgentEngine {
     // wait BUYS its own evidence at entry, and again on a deliberate cadence
     // below. Cost: one screen read per agent at entry, one more per
     // WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS thereafter.
+    const initialMemo = this.freshLiveStates.get(agentId);
     const initialLive = await this.refreshLiveState(initial);
+    const initialProbeWasFresh = this.freshLiveStates.get(agentId) !== initialMemo;
     const initialState = this.terminationStateOf(initial, initialLive);
     // A pool seat can retain `done` throughout a newly delivered turn. A
     // single resting frame (or an unreadable pane) cannot confirm that record.
@@ -10358,7 +10357,7 @@ export class AgentEngine {
     ): boolean =>
       INTERACTIVE_AGENT_STATES.has(targetState) &&
       agent.state === "done" && state === "done" &&
-      live?.screen_state !== "done";
+      live?.screen_state !== "done" && live?.screen_state !== "error";
 
     // Retroactive check — already in target state with required evidence?
     const initialEvidence = await this.getTargetStateEvidenceSource(
@@ -10430,19 +10429,55 @@ export class AgentEngine {
     let needsSecondRestingRead = restingObservations === 1;
     let staleDoneRestingObservations = 0;
     let lastStaleDoneObservationAt = -1;
-    const observeStaleDoneScreen = (agent: AgentRecord, live: LiveAgentState): void => {
+    let lastStaleDoneObservationConfirmed = false;
+    let lastStaleDoneObservationActive = false;
+    const observeStaleDoneScreen = async (
+      agent: AgentRecord,
+      live: LiveAgentState,
+      probeWasFresh: boolean,
+    ): Promise<void> => {
       if (!recordDoneNeedsConfirmation(agent, this.terminationStateOf(agent, live), live)) {
         staleDoneRestingObservations = 0;
+        lastStaleDoneObservationConfirmed = false;
+        lastStaleDoneObservationActive = false;
         return;
       }
       const memo = this.freshLiveStates.get(agentId);
-      if (!memo || memo.live !== live || memo.at <= lastStaleDoneObservationAt) return;
-      const observedAt = memo.at;
+      const freshProbe = probeWasFresh && memo?.live === live &&
+        live.screen_state !== null;
+      const observedAt = freshProbe ? memo.at : Date.now();
+      if (observedAt <= lastStaleDoneObservationAt) return;
       lastStaleDoneObservationAt = observedAt;
-      staleDoneRestingObservations = confirmsRestingScreen(live)
+      if (freshProbe) {
+        lastStaleDoneObservationConfirmed = confirmsRestingScreen(live);
+        lastStaleDoneObservationActive = isLiveActive(live);
+      } else {
+        // A null probe can mean a closed pane. Buy one direct read before
+        // trusting the terminal record; a missing pane does not contradict it.
+        try {
+          const screen = await this.readAgentScreen(agent, {
+            lines: BOOT_SESSION_CAPTURE_LINES,
+          });
+          const parsed = parseScreen(screen.text);
+          const active = parsed.status === "working" ||
+            parsed.status === "thinking" ||
+            parsed.status === "draft_pending" ||
+            parsed.control_state === "busy";
+          const directState = resolveLiveAgentState(agent, parsed).screen_state;
+          lastStaleDoneObservationActive = active;
+          lastStaleDoneObservationConfirmed = !active &&
+            (directState === "ready" || directState === "idle" ||
+              directState === "error");
+        } catch {
+          lastStaleDoneObservationActive = false;
+          lastStaleDoneObservationConfirmed = true;
+        }
+      }
+      staleDoneRestingObservations = lastStaleDoneObservationConfirmed
         ? staleDoneRestingObservations + 1 : 0;
+      if (staleDoneRestingObservations === 1) needsSecondRestingRead = true;
     };
-    observeStaleDoneScreen(initial, initialLive);
+    await observeStaleDoneScreen(initial, initialLive, initialProbeWasFresh);
     const confirmedStaleDone = async (
       agent: AgentRecord,
       state: AgentState,
@@ -10451,11 +10486,15 @@ export class AgentEngine {
       if (!recordDoneNeedsConfirmation(agent, state, live)) {
         return true;
       }
-      if (staleDoneRestingObservations < 2 || !live || !confirmsRestingScreen(live) ||
-          isLiveActive(live)) return false;
+      if (staleDoneRestingObservations < 2 ||
+          !lastStaleDoneObservationConfirmed) return false;
+      // The direct veto is meaningful for idle. `ready` retains WF2's
+      // established ready-target behavior.
       if (await this.interactiveMatchScreenIsActive(agent, targetState)) {
         restingObservations = 0;
         staleDoneRestingObservations = 0;
+        lastStaleDoneObservationConfirmed = false;
+        lastStaleDoneObservationActive = true;
         needsSecondRestingRead = false;
         return false;
       }
@@ -10523,10 +10562,17 @@ export class AgentEngine {
           // final observation rather than reporting the record by default.
           // It also leaves fresh evidence behind for whatever renders the
           // reply (P11 closure reads it in the same turn).
+          const timeoutMemo = this.freshLiveStates.get(agentId);
           const timeoutLive = current
             ? await this.refreshLiveState(current)
             : null;
-          if (current && timeoutLive) observeStaleDoneScreen(current, timeoutLive);
+          if (current && timeoutLive) {
+            await observeStaleDoneScreen(
+              current,
+              timeoutLive,
+              this.freshLiveStates.get(agentId) !== timeoutMemo,
+            );
+          }
           if (
             current && timeoutLive && timeoutLive.screen_state !== null &&
             INTERACTIVE_AGENT_STATES.has(targetState)
@@ -10623,11 +10669,23 @@ export class AgentEngine {
             });
             return;
           }
-          if (
-            current && timeoutState === "done" &&
-            !(await confirmedStaleDone(current, timeoutState, timeoutLive))
-          ) {
-            timeoutState = timeoutLive?.screen_state ?? "working";
+          let unconfirmedDone = false;
+          if (current && timeoutState === "done" &&
+              INTERACTIVE_AGENT_STATES.has(targetState)) {
+            if (await confirmedStaleDone(current, timeoutState, timeoutLive)) {
+              finish({
+                matched: false,
+                state: "done",
+                elapsed,
+                source: "sweep",
+                agent: toPublicAgent({ ...current, state: "done" }),
+                error: current.error ?? "Agent entered terminal state: done",
+              });
+              return;
+            }
+            timeoutState = lastStaleDoneObservationActive
+              ? "working" : timeoutLive?.screen_state ?? current.state;
+            unconfirmedDone = true;
           }
           finish({
             matched: false,
@@ -10637,7 +10695,8 @@ export class AgentEngine {
             agent: current
               ? toPublicAgent({ ...current, state: timeoutState })
               : null,
-            error: `Timed out after ${timeoutMs}ms waiting for state "${targetState}"`,
+            error: `Timed out after ${timeoutMs}ms waiting for state "${targetState}"` +
+              (unconfirmedDone ? "; done record unconfirmed" : ""),
           });
           return;
         }
@@ -10671,8 +10730,13 @@ export class AgentEngine {
         ) {
           lastForcedEvidenceElapsed = elapsed;
           needsSecondRestingRead = false;
+          const forcedMemo = this.freshLiveStates.get(agentId);
           forcedLive = await this.refreshLiveState(current);
-          observeStaleDoneScreen(current, forcedLive);
+          await observeStaleDoneScreen(
+            current,
+            forcedLive,
+            this.freshLiveStates.get(agentId) !== forcedMemo,
+          );
           if (INTERACTIVE_AGENT_STATES.has(targetState) && forcedLive.screen_state !== null) {
             restingObservations = confirmsRestingScreen(forcedLive)
               ? restingObservations + 1 : 0;
