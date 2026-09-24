@@ -24,7 +24,7 @@ Do NOT auto-ingest these into BrainLayer. Only messages with `persist:true` are 
 `brain_store`, at the caller's discretion. Keep the channel dir off any BrainLayer watch path.
 
 ### orc / lead side (the write)
-- Dispatch: MCP `dispatch_to_agent { agent_id, task, from?, tag?, persist? }` (or append a line via
+- Dispatch: the internal `dispatch_to_agent { agent_id, task, from?, tag?, persist? }` handler (or append a line via
   the `dispatch()` lib). One record: `{ id, ts_ms, from, to, tag, task, persist? }`.
 - **FM#4 — keep dispatch low-rate / batched** so the agent's Monitor doesn't trip its flood auto-stop.
 - **FM#3 — detect wedged agents:** `inbox_check { agent_id, ack_timeout_ms, heartbeat_max_age_ms }`

@@ -180,7 +180,7 @@ Kiro has no screen parser: only the ready pattern above, and it is never reporte
 - Nothing sends `/exit` or runs `/compact`. At high context use, a top-level agent gets a nudge
   line suggesting `/compact`, typed without Return (`src/agent-engine.ts:6848-6852`).
 - Stopping an agent sends Ctrl-C; a forced stop sends SIGKILL to a PID whose identity is verified
-  (`src/agent-engine.ts:11740-11770`).
+  (`src/agent-engine.ts:11754-11788`).
 
 ## Menus and prompts
 
