@@ -8090,6 +8090,51 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
+    it("does not match a single idle frame between working Claude frames", async () => {
+      vi.useFakeTimers();
+      try {
+        const agentId = "claude-transient-idle";
+        stateMgr.writeState(makeRecord({
+          agent_id: agentId,
+          state: "working",
+          surface_id: "surface:transient-idle",
+          cli: "claude",
+          role: "worker",
+        }));
+        liveSurfaces = [makeSurface("surface:transient-idle")];
+        let screenText = "Claude Code\n· Swirling… (1s)\n❯";
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+          surface: "surface:transient-idle",
+          text: screenText,
+          lines: 80,
+          scrollback_used: false,
+        }));
+        engine.setFreshLiveStateProbe(async (agent) =>
+          resolveLiveAgentState(agent, parseScreen(screenText)),
+        );
+        await engine.getRegistry().reconstitute();
+
+        let settled = false;
+        const pending = engine.waitFor(agentId, "idle", 5_000);
+        void pending.then(() => { settled = true; });
+        screenText = "Claude Code\n❯";
+        await vi.advanceTimersByTimeAsync(1_100);
+        expect(settled).toBe(false);
+        expect(engine.getAgentState(agentId)?.state).toBe("working");
+
+        screenText = "Claude Code\n· Swirling… (2s)\n❯";
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(settled).toBe(false);
+        screenText = "Claude Code\n❯";
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(await pending).toMatchObject({ matched: true, state: "idle" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps a completed worker done when its live screen returns to ready", async () => {
       vi.useFakeTimers();
       try {

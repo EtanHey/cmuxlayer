@@ -2922,7 +2922,9 @@ export class AgentEngine {
 
       const count = (waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
       waitForReadyPatternMatches.set(agent.agent_id, count);
-      if (count < Math.max(1, evidence.consecutive)) {
+      // An idle-looking frame can appear briefly between active Claude frames.
+      // Keep the registry working until two separate poll observations agree.
+      if (count < Math.max(targetState === "idle" ? 2 : 1, evidence.consecutive)) {
         return { agent };
       }
 
@@ -3907,13 +3909,14 @@ export class AgentEngine {
       parsed,
     );
     const canBeInteractive = parsed.control_state !== "shell";
+    const active = screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     const activeCodex =
       agent.cli === "codex" &&
       canBeInteractive &&
       hasIdentity &&
-      screenHasActiveAgentMarker(agent.cli, screenText, parsed);
+      active;
     return {
-      ready: canBeInteractive && hasIdentity && match.matched,
+      ready: canBeInteractive && hasIdentity && !active && match.matched,
       activeCodex,
       consecutive: match.consecutive,
     };
@@ -10291,7 +10294,19 @@ export class AgentEngine {
       targetState,
       initialState,
     );
-    if (initialEvidence) {
+    // A screen can momentarily look resting while the registry still records
+    // active work. Let the poll path confirm that observation on a later tick.
+    const initialRestingConflict =
+      this.freshLiveStateProbe !== null &&
+      INTERACTIVE_AGENT_STATES.has(targetState) &&
+      (initial.state === "working" || initial.state === "booting") &&
+      INTERACTIVE_AGENT_STATES.has(initialState);
+    if (
+      initialEvidence &&
+      !initialRestingConflict &&
+      !(this.freshLiveStateProbe && INTERACTIVE_AGENT_STATES.has(targetState) &&
+        initialLive.source === "screen")
+    ) {
       const stateEstablishedByScreen =
         initialLive?.source === "screen" && initialState !== initial.state;
       return {
@@ -10333,6 +10348,11 @@ export class AgentEngine {
     }
 
     const waitForReadyPatternMatches = new Map<string, number>();
+    const confirmsRestingScreen = (live: LiveAgentState): boolean =>
+      live.source === "screen" &&
+      INTERACTIVE_AGENT_STATES.has(this.terminationStateOf(initial, live));
+    let restingObservations = confirmsRestingScreen(initialLive) ? 1 : 0;
+    let needsSecondRestingRead = restingObservations === 1;
     // Entry already bought evidence, so the first sweep refresh is due one
     // full interval in.
     let lastForcedEvidenceElapsed = 0;
@@ -10433,7 +10453,13 @@ export class AgentEngine {
                   timeoutState,
                 )
               : null;
-          if (current && timeoutEvidence) {
+          if (
+            current &&
+            timeoutEvidence &&
+            (!INTERACTIVE_AGENT_STATES.has(targetState) ||
+              timeoutLive?.source !== "screen" ||
+              (restingObservations >= 2 && !isLiveActive(timeoutLive)))
+          ) {
             finish({
               matched: true,
               state: timeoutState,
@@ -10483,21 +10509,40 @@ export class AgentEngine {
         // Re-force evidence on a deliberate cadence. Between refreshes the
         // memo from the last one answers, and it expires exactly when the next
         // is due, so no tick ever decides on evidence older than the TTL.
+        let forcedLive: LiveAgentState | null = null;
         if (
+          (needsSecondRestingRead && INTERACTIVE_AGENT_STATES.has(targetState)) ||
           elapsed - lastForcedEvidenceElapsed >=
-          WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS
+            WAIT_FOR_LIVE_EVIDENCE_INTERVAL_MS
         ) {
           lastForcedEvidenceElapsed = elapsed;
-          await this.refreshLiveState(current);
+          needsSecondRestingRead = false;
+          forcedLive = await this.refreshLiveState(current);
+          if (INTERACTIVE_AGENT_STATES.has(targetState) && forcedLive.source === "screen") {
+            restingObservations = INTERACTIVE_AGENT_STATES.has(
+              this.terminationStateOf(current, forcedLive),
+            ) ? restingObservations + 1 : 0;
+            if (restingObservations === 1) needsSecondRestingRead = true;
+          }
         }
 
-        const refreshed = await this.refreshTargetStateEvidence(
-          current,
-          targetState,
-          waitForReadyPatternMatches,
-          this.terminationStateOf(current, this.liveStateOf(current)),
-        );
+        const activeScreen = forcedLive?.source === "screen" && isLiveActive(forcedLive);
+        if (activeScreen && targetState === "idle") {
+          waitForReadyPatternMatches.delete(agentId);
+        }
+        const refreshed = activeScreen && targetState === "idle"
+          ? { agent: current }
+          : await this.refreshTargetStateEvidence(
+              current,
+              targetState,
+              waitForReadyPatternMatches,
+              this.terminationStateOf(current, this.liveStateOf(current)),
+            );
         current = refreshed.agent;
+        if (waitForReadyPatternMatches.has(agentId)) {
+          restingObservations = Math.max(restingObservations, 1);
+          needsSecondRestingRead = true;
+        }
 
         // The sweep runs the same live gate as the retroactive check: gating
         // only the entry short-circuit would just move the false completion
@@ -10512,7 +10557,12 @@ export class AgentEngine {
           targetState,
           liveState,
         );
-        if (evidenceSource) {
+        if (
+          evidenceSource &&
+          (!INTERACTIVE_AGENT_STATES.has(targetState) ||
+            forcedLive?.source !== "screen" ||
+            (restingObservations >= 2 && !isLiveActive(forcedLive)))
+        ) {
           const stateEstablishedByScreen =
             live?.source === "screen" && liveState !== current.state;
           clearInterval(checkInterval);
