@@ -77,8 +77,12 @@ function expandHome(path: string, home: string): string {
   return path.startsWith("~/") ? join(home, path.slice(2)) : path;
 }
 
-/** Load the fleet config; throws naming the file when it is present but invalid. */
-export function loadFleetConfig(
+/**
+ * Strict read: throws naming the file when it is present but invalid, or when
+ * CMUXLAYER_FLEET_CONFIG points at a missing file. `doctor` uses this so it can
+ * report the problem; runtime code uses `loadFleetConfig`.
+ */
+export function readFleetConfig(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): FleetConfig {
@@ -124,6 +128,34 @@ export function loadFleetConfig(
     values[key] = kind === "path" ? expandHome(value.trim(), home) : value.trim();
   }
   return values as unknown as FleetConfig;
+}
+
+const warnedFleetConfigErrors = new Set<string>();
+
+/**
+ * Runtime read: a bad fleet config must never take cmuxlayer down. On any
+ * error it logs ONE line per distinct problem (path and reason) and falls back
+ * to the generic defaults.
+ */
+export function loadFleetConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+  log: (line: string) => void = (line) => console.error(line),
+): FleetConfig {
+  try {
+    return readFleetConfig(env, home);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (!warnedFleetConfigErrors.has(reason)) {
+      warnedFleetConfigErrors.add(reason);
+      log(`[cmuxlayer] ${reason}; using generic defaults (${FLEET_CONFIG_DOC})`);
+    }
+    return genericFleetConfig(home);
+  }
+}
+
+export function resetFleetConfigWarningsForTests(): void {
+  warnedFleetConfigErrors.clear();
 }
 
 /** One startup line when legacy fleet state would otherwise be silently orphaned. */

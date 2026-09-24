@@ -561,6 +561,44 @@ describe("CmuxLayerDaemon", () => {
     }
   });
 
+  it("comes up on generic defaults with one warning when the fleet config is invalid", async () => {
+    const sandbox = stateDir("invalid-fleet-config");
+    const sandboxHome = join(sandbox, "home");
+    const badFleet = join(sandbox, "fleet.json");
+    mkdirSync(sandboxHome, { recursive: true });
+    writeFileSync(badFleet, '{"outbox":"yes"}');
+    vi.stubEnv("HOME", sandboxHome);
+    vi.stubEnv("CMUXLAYER_STATE_DIR", join(sandbox, "state"));
+    vi.stubEnv("CMUXLAYER_INBOX_BASE_DIR", join(sandbox, "inbox"));
+    vi.stubEnv("CMUXLAYER_FLEET_CONFIG", badFleet);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const daemon = trackIntervalDaemon(await runDaemon({
+        socketPath: join(sandbox, "daemon.sock"),
+        exec: createListSurfacesExec(),
+        skipAgentLifecycle: true,
+        monitorReconcile: () => undefined,
+        detectStaleBuild: () => null,
+      }));
+      const coordination = join(sandboxHome, ".local", "state", "cmuxlayer");
+      expect((daemon as any).opts.monitorRegistryPath).toBe(
+        join(coordination, "monitor-registry.json"),
+      );
+      expect((daemon as any).opts.watchRegistryPath).toBe(
+        join(coordination, "watch-specs.json"),
+      );
+      const warnings = errors.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes(badFleet));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/"outbox" must be a boolean/);
+      expect(warnings[0]).toMatch(/generic defaults/);
+    } finally {
+      errors.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("rejects start after the socket transport has been closed", async () => {
     const socket = new net.Socket();
     const transport = new SocketJsonRpcTransport(socket);

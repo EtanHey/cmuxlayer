@@ -7,6 +7,8 @@ import {
   fleetConfigPath,
   legacyCoordinationWarning,
   loadFleetConfig,
+  readFleetConfig,
+  resetFleetConfigWarningsForTests,
 } from "../src/fleet-config.js";
 import { defaultMonitorRegistryPath } from "../src/monitor-registry.js";
 import { defaultWatchRegistryPath } from "../src/watch-spec.js";
@@ -24,6 +26,7 @@ function tempHome(): string {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  resetFleetConfigWarningsForTests();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -117,10 +120,10 @@ describe("fleet config", () => {
     writeFileSync(path, body);
 
     expect(() =>
-      loadFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home),
+      readFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home),
     ).toThrow(message);
     expect(() =>
-      loadFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home),
+      readFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home),
     ).toThrow(path);
   });
 
@@ -129,8 +132,30 @@ describe("fleet config", () => {
     const path = join(home, "missing.json");
 
     expect(() =>
-      loadFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home),
+      readFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home),
     ).toThrow(/CMUXLAYER_FLEET_CONFIG points at a missing file/);
+  });
+
+  it("never throws at runtime: a bad file logs one line and yields generic defaults", () => {
+    const home = tempHome();
+    const path = join(home, "fleet.json");
+    writeFileSync(path, '{"outbox":"yes"}');
+    const lines: string[] = [];
+    const log = (line: string) => lines.push(line);
+
+    for (let call = 0; call < 3; call += 1) {
+      expect(
+        loadFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home, log),
+      ).toEqual({ ...loadFleetConfig({}, home), source: null });
+    }
+    expect(
+      loadFleetConfig({ CMUXLAYER_FLEET_CONFIG: join(home, "gone.json") }, home, log),
+    ).toMatchObject({ source: null });
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain(path);
+    expect(lines[0]).toMatch(/"outbox" must be a boolean; using generic defaults/);
+    expect(lines[1]).toMatch(/missing file/);
   });
 });
 
