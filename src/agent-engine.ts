@@ -4280,18 +4280,6 @@ export class AgentEngine {
     );
   }
 
-  private blockingBackgroundWaitElapsedMs(screenText: string): number | null {
-    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
-    const match = visibleTail.match(
-      /\bWait(?:ing|ed) for background terminal\s*\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s(?:\s*•\s*esc to interrupt)?\)/i,
-    );
-    if (!match) return null;
-    const hours = Number.parseInt(match[1] ?? "0", 10);
-    const minutes = Number.parseInt(match[2] ?? "0", 10);
-    const seconds = Number.parseInt(match[3] ?? "0", 10);
-    return ((hours * 60 + minutes) * 60 + seconds) * 1_000;
-  }
-
   private isIdleSupervisor(agent: AgentRecord, _screenText: string): boolean {
     return agent.role === "orchestrator";
   }
@@ -4306,14 +4294,10 @@ export class AgentEngine {
       BOOT_SESSION_CAPTURE_LINES,
     );
     const transcriptMtime = this.loadGroundTruthSession(agent)?.mtime_ms ?? 0;
-    // cleanScreenText intentionally removes spinner/chrome lines. During an active
-    // background wait those lines carry the only changing progress evidence.
-    const waitElapsedMs = this.blockingBackgroundWaitElapsedMs(screenText);
-    const backgroundProgress =
-      waitElapsedMs === null
-        ? ""
-        : `:background_wait=${waitElapsedMs}:tokens=${parsed.token_count ?? "unknown"}`;
-    return `${screenTextSignature(materialScreen)}:${transcriptMtime}${backgroundProgress}`;
+    // The wait timer advances even when the background command is blocked in
+    // an editor. Screen output, transcript updates, and token activity are
+    // observable progress; elapsed time alone is not.
+    return `${screenTextSignature(materialScreen)}:${transcriptMtime}:tokens=${parsed.token_count ?? "unknown"}`;
   }
 
   private isMatureHaltEpisode(agent: AgentRecord, nowMs: number): boolean {
@@ -4815,7 +4799,20 @@ export class AgentEngine {
     } else if (parsed.paused === true) {
       haltType = "paused";
     } else if (screenActive) {
-      if (agent.halt_last_progress_signature !== progressSignature) {
+      const previousSignature = agent.halt_last_progress_signature;
+      const signatureWithoutTokens = (signature: string) =>
+        signature.replace(/:tokens=(?:\d+|unknown)$/, "");
+      const previousTokenCount = previousSignature?.match(/:tokens=(\d+)$/)?.[1];
+      const tokenGrowth =
+        parsed.token_count !== null &&
+        previousTokenCount !== undefined &&
+        parsed.token_count > Number(previousTokenCount);
+      if (
+        !previousSignature ||
+        signatureWithoutTokens(previousSignature) !==
+          signatureWithoutTokens(progressSignature) ||
+        tokenGrowth
+      ) {
         return this.clearHaltEpisode(agent, {
           halt_last_active_at: nowIso,
           halt_last_progress_at_ms: nowMs,

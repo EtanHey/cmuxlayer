@@ -11458,9 +11458,9 @@ Session ID: ${sessionId}`,
 
     it.each([
       {
-        name: "advancing background-terminal elapsed time",
-        first: "Waiting for background terminal (4m 02s • esc to interrupt)",
-        second: "Waiting for background terminal (4m 03s • esc to interrupt)",
+        name: "new background-terminal output",
+        first: "Waiting for background terminal (4m 02s • esc to interrupt)\n  Test files 12/20 passed",
+        second: "Waiting for background terminal (4m 03s • esc to interrupt)\n  Test files 13/20 passed",
       },
       {
         name: "advancing token count during a background-terminal wait",
@@ -11517,6 +11517,63 @@ Session ID: ${sessionId}`,
           (message) => message.tag === "agent_halt_wedged",
         ),
       ).toEqual([]);
+    });
+
+    it("still reports an editor-blocked background terminal after a long advancing wait", async () => {
+      let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltWedgedDwellMs: 1_000,
+          haltWedgedSweeps: 1,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "editor-wedge-parent",
+        surface_id: "surface:editor-wedge-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "editor-wedge-child",
+        surface_id: "surface:editor-wedge-child",
+        state: "working",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+
+      const screen = (elapsed: string) =>
+        `OpenAI Codex\nModel: gpt-5.6\nWaiting for background terminal (${elapsed} • esc to interrupt)\n└ git rebase --continue\n  git commit -e`;
+      await (engine as any).maybeEscalateLiveHalt(child, screen("52m 00s"));
+      nowMs += 1_001;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 01s"),
+      );
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 02s"),
+      );
+
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_wedged",
+        ),
+      ).toHaveLength(1);
     });
 
     it("keeps halt unblock calls served and send_to payloads valid", async () => {
