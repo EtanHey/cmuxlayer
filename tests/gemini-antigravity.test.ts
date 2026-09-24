@@ -204,4 +204,12 @@ describe("Antigravity CLI screens (cli: gemini)", () => {
     expect(antigravityComposerDraft(typed)).toBe("Read and follow /tmp/goal.md");
     expect(antigravityComposerDraft("Claude Code\n❯ ")).toBeNull();
   });
+
+  it("#801 gate 1: reads the live wrapped paste in agy's composer as the whole payload", () => {
+    const draft = antigravityComposerDraft(readFixture("typed-unsubmitted-wrapped-payload-pro-high.txt")) ?? "";
+    expect(draft.replace(/\s+/g, "")).toContain(
+      "Readandfollow~/Gits/cmuxlayer/.worktrees/801-boot-one-message/results/live-agent-harness/gemini-2026-09-24T16-56-24-838Z/goals/cursor-01.md",
+    );
+    expect(screenHasActiveAgentMarker("gemini", readFixture("typed-unsubmitted-wrapped-payload-pro-high.txt"))).toBe(false);
+  });
 });

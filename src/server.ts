@@ -668,6 +668,8 @@ const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
 // CLI fallback paste acknowledgement can precede the Claude composer repaint.
 // Keep a short budget for surfaces that never paint the owned payload.
 const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 250;
+const BOOT_PAYLOAD_OBSERVE_AGY_TIMEOUT_MS = 3_000;
+const BOOT_PAYLOAD_OBSERVE_AGY_POLL_MS = 250;
 function parsePositiveIntegerMs(
   value: string | undefined,
   fallback: number,
@@ -6488,7 +6490,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // short caller deadlines still get only one read.
     const readLimit = opts.timeout_ms >= BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS
       ? 3 : 1;
-    for (let read = 0; read < readLimit; read += 1) {
+    const startedAt = Date.now();
+    for (let read = 0; ; read += 1) {
       await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
@@ -6502,9 +6505,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
         };
       }
-      if (read + 1 < readLimit) {
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+      // #801 gate 1: agy's Bubble Tea textarea repainted a 150-char paste only
+      // after the 3-read window (surface:947), so Return was never pressed.
+      // Antigravity panes alone keep polling; other CLIs keep the #511 budget.
+      const antigravity =
+        snapshot !== null && isAntigravityScreen(normalizeTerminalText(snapshot.text));
+      if (antigravity) {
+        if (Date.now() - startedAt >= BOOT_PAYLOAD_OBSERVE_AGY_TIMEOUT_MS) break;
+        await delay(BOOT_PAYLOAD_OBSERVE_AGY_POLL_MS);
+        continue;
       }
+      if (read + 1 >= readLimit) break;
+      await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
     return null;
   };
