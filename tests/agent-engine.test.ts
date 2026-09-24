@@ -11519,6 +11519,63 @@ Session ID: ${sessionId}`,
       ).toEqual([]);
     });
 
+    it("still reports an editor-blocked background terminal after a long advancing wait", async () => {
+      let nowMs = Date.parse("2026-09-23T00:20:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltWedgedDwellMs: 1_000,
+          haltWedgedSweeps: 1,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "editor-wedge-parent",
+        surface_id: "surface:editor-wedge-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "editor-wedge-child",
+        surface_id: "surface:editor-wedge-child",
+        state: "working",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+
+      const screen = (elapsed: string) =>
+        `OpenAI Codex\nModel: gpt-5.6\nWaiting for background terminal (${elapsed} • esc to interrupt)\n└ git rebase --continue\n  git commit -e`;
+      await (engine as any).maybeEscalateLiveHalt(child, screen("52m 00s"));
+      nowMs += 1_001;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 01s"),
+      );
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        screen("52m 02s"),
+      );
+
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_wedged",
+        ),
+      ).toHaveLength(1);
+    });
+
     it("keeps halt unblock calls served and send_to payloads valid", async () => {
       const { createServer } = await import("../src/server.js");
       type ToolServer = {
