@@ -20,7 +20,7 @@ bun install
 ## PR Process
 
 - All PRs are reviewed by [CodeRabbit](https://coderabbit.ai/) (automated)
-- PRs are squash-merged to keep history clean
+- PRs land as merge commits, so each branch commit stays in history
 - Write a clear summary and test plan in your PR description
 
 ## Vouching Model

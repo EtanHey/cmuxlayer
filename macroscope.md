@@ -13,7 +13,7 @@ These rules apply repo-wide. Flag violations when reviewing any code in this rep
 
 ### Testing
 - All new tools and tool behavior changes need transport-level coverage in `tests/server.test.ts`, not only engine-level or client-mock tests.
-- `bun test` must pass before any pull request is opened or merged.
+- `bun run test` must pass before any pull request is opened or merged.
 - `tsc --noEmit` must pass before any pull request is opened or merged.
 
 ### Style

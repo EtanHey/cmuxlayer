@@ -9,7 +9,7 @@ cmuxLayer exposes a 10-tool public MCP surface for controlling cmux terminal wor
 [![install](https://img.shields.io/badge/install-brew%20install%20etanhey%2Flayers%2Fcmuxlayer-22c55e)](#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![MCP Tools](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-3759%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-4452%20passing-brightgreen.svg)](#testing)
 
 ## Quick start
 
@@ -93,7 +93,8 @@ env_vars = ["CMUX_SURFACE_ID", "CMUX_WORKSPACE_ID", "CMUX_TAB_ID", "CMUX_SOCKET_
 To keep only a per-session resident subset of tools, set
 `CMUXLAYER_DEFAULT_PALETTE` to comma-separated bare tool names, for example
 `list_surfaces,spawn_agent,send_to`. The server also exposes `expand_palette`,
-which makes every deferred tool available for the rest of that MCP session.
+which registers the rest of the 10 public tools for the rest of that MCP
+session; it never exposes the internal definitions.
 When unset or blank, the signed 10-tool thin-core default applies. When set, the
 environment value overrides that default for the session. Unknown names are
 warned and ignored while valid names still load.
@@ -130,81 +131,20 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 
 **Public MCP surface** — `spawn_agent` `report_to_parent` `send_to` `read_screen` `list_agents` `wait_for` `control_health` `close_surface` `update_surface` `list_surfaces`
 
-The other 35 internal definitions, including `interact`, are not callable. The detailed inventory below names 44 live definitions; the 45th source registration is a removed error-only tombstone and is omitted from operator guidance.
-
-**Terminal control (16)** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `update_surface` `browser_surface`
-
-**Agent lifecycle (13)** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast` `report_to_parent`
-
-**Metacomm (agent inbox, 2)** — `dispatch_to_agent` `inbox_check`
-
-**Workspace state (7)** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
-
-**Monitor registry (6)** — `register_monitor` `signal_monitor` `deregister_monitor` `list_monitors` `query_monitor_registry` `arm_watch`
-
-<details>
-<summary>Full tool reference</summary>
-
-### Read-only (10)
-
 | Tool | What it does |
 |------|-------------|
-| `list_surfaces` | List all surfaces across workspaces |
-| `control_health` | Report socket, binary, process, and job-control diagnostics |
-| `read_screen` | Read terminal output with parsed agent status |
-| `get_agent_state` | Full state of a tracked agent |
-| `list_agents` | All agents, with optional filters |
-| `my_agents` | Children of a parent agent with live screen status |
-| `read_agent_output` | Structured output between delimiter markers |
-| `inbox_check` | Inspect an agent's inbox channel: pending messages, monitor liveness, stale dispatches |
-| `list_monitors` | List shared monitor-registry records |
-| `query_monitor_registry` | Query monitor gates and liveness metadata |
-
-### Mutating (32)
-
-| Tool | What it does |
-|------|-------------|
-| `select_workspace` | Switch the active workspace |
-| `create_workspace` | Create a new named workspace |
-| `delete_workspace` | Delete a workspace after live-agent and caller-workspace safety checks |
-| `new_split` | Deprecated one-release alias; use `spawn_agent(placement:...)` for managed agents |
-| `new_surface` | Create a tab in an existing pane |
-| `move_surface` | Move a surface to another pane or position |
-| `send_input` | Deprecated one-release alias for `send_to(mode:"surface")` |
-| `send_command` | Deprecated one-release alias for `send_to(mode:"command")` |
-| `send_key` | Deprecated one-release alias for `send_to(mode:"key")` |
-| `rename_tab` | Rename a surface tab |
-| `update_surface` | Move or rename one terminal surface |
-| `notify` | Show a cmux notification banner |
-| `set_status` | Set sidebar status key-value pair |
-| `set_progress` | Set progress indicator (0.0-1.0) |
-| `browser_surface` | Interact with browser surfaces |
 | `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
-| `new_worktree_split` | Deprecated one-release alias; use `spawn_agent(worktree:true, placement:"worker")` |
-| `spawn_in_workspace` | Deprecated one-release alias; create/reuse a workspace and call `spawn_agent` for each managed agent |
-| `dispatch_to_agent` | Append a task to an agent's inbox file (deterministic write channel) |
-| `send_to` | Send by agent ID or raw surface using `mode:"agent"|"surface"|"command"|"key"` |
-| `send_to_agent` | Deprecated one-release alias for `send_to(mode:"agent")` |
-| `wait_for` | Wait for one `agent_id` or several `ids` (defaults to `done`) |
-| `wait_for_all` | Deprecated one-release alias for `wait_for(ids:[...])` |
-| `interact` | Send interactive input (confirm, cancel, resume) |
-| `broadcast` | Fan out a guarded message to agents by role |
 | `report_to_parent` | Raise a short blocker to the managed agent's registry parent |
-| `supersede_agent_goal` | Replace a managed agent's active file-backed goal |
-| `register_monitor` | Register or re-arm a monitor deadman record |
-| `signal_monitor` | Refresh a monitor heartbeat |
-| `deregister_monitor` | Mark a monitor intentionally stopped |
-| `arm_watch` | Arm a lifecycle watch for an agent transition |
-
-### Destructive (3)
-
-| Tool | What it does |
-|------|-------------|
+| `send_to` | Send by agent ID or raw surface using `mode:"agent"\|"surface"\|"command"\|"key"` |
+| `read_screen` | Read terminal output with parsed agent status |
+| `list_agents` | All agents, with optional filters |
+| `wait_for` | Wait for one `agent_id` or several `ids` (defaults to `done`) |
+| `control_health` | Report socket, binary, process, and job-control diagnostics |
 | `close_surface` | Close one surface, managed agent, or workspace, with live-agent guards |
-| `stop_agent` | Gracefully stop an agent |
-| `kill` | Force-kill agent processes |
+| `update_surface` | Move or rename one terminal surface |
+| `list_surfaces` | List all surfaces across workspaces |
 
-</details>
+These 10 are the whole public surface. The internal definitions are not callable over MCP.
 
 ## Supported agents
 
@@ -253,8 +193,8 @@ repositories. The error lists every path it searched.
 ## Testing
 
 ```bash
-bun run test        # 3759 tests via vitest
-npm run typecheck   # Type checking
+bun run test        # vitest; 4452 tests collected by `vitest list`
+bun run typecheck   # Type checking
 ```
 
 ## Git hooks
@@ -270,10 +210,10 @@ This enables `.githooks/pre-push`, which runs `scripts/run_tests.sh` and blocks 
 ## Development
 
 ```bash
-npm install
-npm run dev         # Run with tsx (hot reload)
-npm run build       # Compile TypeScript
-npm start           # Run compiled output
+bun install
+bun run dev         # Run with tsx (hot reload)
+bun run build       # Compile TypeScript
+bun run start       # Run compiled output
 ```
 
 ## Contributing
