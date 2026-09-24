@@ -39,6 +39,12 @@ const codexBannerOverlayReadyFixture = Buffer.from(
 ).toString("utf8");
 
 describe("parseScreen", () => {
+  it("keeps a current Codex draft dirty despite older working output", () => {
+    const parsed = parseScreen("Codex\nWorking (0m 12s · esc to interrupt)\n› Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
   it("keeps quoted chevron output in a clean Claude pane ready", () => {
     const parsed = parseScreen("Claude Code\n» quoted output\n  bypass permissions on");
     expect(parsed.status).toBe("idle");
