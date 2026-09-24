@@ -4393,6 +4393,94 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     }
   });
 
+  it("#801 review F1: spawn_agent reports agy composer residue as ok:false naming it", async () => {
+    // agy submits at a paragraph break: a two-paragraph brief falls back to the
+    // blank-line join, the first paragraph runs, and the pointer stays drafted.
+    const rule = "─".repeat(60);
+    const banner = [
+      "      ▄▀▀▄        Antigravity CLI 1.2.10",
+      "     ▀▀▀▀▀▀       user@example.com (Google AI Pro)",
+      "    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)",
+      "",
+    ];
+    const footer = (draft: boolean) =>
+      draft
+        ? "                                                  Gemini 3.1 Pro · high"
+        : "? for shortcuts                                   Gemini 3.1 Pro · high";
+    const screen = { text: [...banner, rule, ">", rule, footer(false)].join("\n") };
+    let typed = "";
+    const base = makeExec(screen.text, "agent-pane", screen);
+    const agyExec = vi.fn().mockImplementation(async (cmd: string, args: string[]) => {
+      if (args.includes("set-buffer")) {
+        typed = String(args.at(-1) ?? "");
+        return { stdout: "{}", stderr: "" };
+      }
+      const sendsText = args.includes("send") && !args.includes("send-key");
+      if (args.includes("paste-buffer") || sendsText) {
+        if (sendsText) typed = String(args.at(-1) ?? "");
+        const [first, ...rest] = typed.split(/\n\s*\n/);
+        const composer = [`> ${first}`, ...rest.map((line) => `  ${line}`)];
+        screen.text = [...banner, rule, ...composer, rule, footer(true)].join("\n");
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return") && typed) {
+        const [first, ...rest] = typed.split(/\n\s*\n/);
+        screen.text = [
+          ...banner, rule, `> ${first}`, "", "  On it.", "", rule, ">",
+          ...rest.map((line) => `  ${line}`), rule, footer(rest.length > 0),
+        ].join("\n");
+        return { stdout: "{}", stderr: "" };
+      }
+      return base(cmd, args);
+    }) as unknown as ExecFn;
+    await server.close();
+    exec = agyExec;
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+
+    const parsed = await spawn({
+      cli: "gemini",
+      model: undefined,
+      prompt: "Paragraph one of the brief.\n\nParagraph two of the brief.",
+      allow_long_inline: true,
+    });
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(false);
+    expect(parsed.error_code).toBe("boot_composer_residue");
+    expect(parsed.composer_residue).toContain("cmuxlayer contract for");
+    expect(parsed.submit_dispatched).toBe(true);
+    expect(String(parsed.next_action ?? "")).not.toMatch(/Return was not dispatched/i);
+  }, 30_000);
+
+  it("#801/#782 mcp_profile sterile never types the contract pointer, and says so", async () => {
+    const parsed = await spawn({ mcp_profile: "sterile" });
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(sentText(exec)).not.toContain("cmuxlayer contract for");
+    expect(sentText(exec)).toContain("task");
+    expect(parsed.coordination_footer_delivered).toBe(false);
+    expect(parsed.coordination_footer_note).toMatch(/skipped_sterile_profile/);
+    // The engine still issues the contract; the receipt keeps reporting it.
+    expect(parsed.report_path).toMatch(/report\.md$/);
+    expect(parsed.done_marker).toBeTruthy();
+    // Review F5: the lead's report watch stays armed, and the note says so.
+    expect(parsed.coordination_footer_note).toMatch(/report watch/i);
+  });
+
+  it("#801 review F4: sterile note never claims a contract file when none was written (inline mode)", async () => {
+    const previous = process.env.CMUXLAYER_BOOT_CONTRACT;
+    process.env.CMUXLAYER_BOOT_CONTRACT = "inline";
+    try {
+      const parsed = await spawn({ mcp_profile: "sterile" });
+      expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+      expect(parsed.contract_path ?? null).toBeNull();
+      expect(parsed.coordination_footer_note).toMatch(/skipped_sterile_profile/);
+      expect(parsed.coordination_footer_note).not.toMatch(/contract file at contract_path/);
+      expect(sentText(exec)).not.toContain("cmuxlayer mailbox contract for");
+    } finally {
+      if (previous === undefined) delete process.env.CMUXLAYER_BOOT_CONTRACT;
+      else process.env.CMUXLAYER_BOOT_CONTRACT = previous;
+    }
+  });
+
   it("FINDING 3: never reports contract bytes without reporting how they were sent", async () => {
     const parsed = await spawn();
     // The v0.4.41 `paused` hazard: an authoritative number with no provenance.

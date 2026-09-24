@@ -7,7 +7,7 @@ import {
   screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
 } from "../src/pattern-registry.js";
-import { parseScreen } from "../src/screen-parser.js";
+import { antigravityComposerDraft, parseScreen } from "../src/screen-parser.js";
 
 // repoGolem's `{repo}Gemini` launches the Antigravity CLI (`agy` 1.2.10), not the
 // old gemini CLI. Fixtures are verbatim `read_screen raw:true` / `cmux read-screen`
@@ -192,5 +192,24 @@ describe("Antigravity CLI screens (cli: gemini)", () => {
     expect(bootReadinessDriftNote("codex", unknown)).toBe("");
     expect(bootReadinessDriftNote(undefined, unknown)).toBe("");
     expect(bootReadinessDriftNote("gemini", "")).toBe("");
+  });
+
+  it("#801/#802 reads agy's composer draft structurally (empty, typed, or residue)", () => {
+    expect(antigravityComposerDraft(readFixture("boot-ready-pro-high.txt"))).toBe("");
+    expect(antigravityComposerDraft(readFixture("idle-finished-reply-pro-high.txt"))).toBe("");
+    const residue = antigravityComposerDraft(readFixture("idle-reply-contract-draft-pro-high.txt"));
+    expect(residue).toContain("cmuxlayer contract for cmuxlayerGemini-8b0398fe: Read and follow");
+    expect(residue).toContain("contract.md");
+    const typed = readFixture("boot-ready-pro-high.txt").replace(/\n>\n/, "\n> Read and follow /tmp/goal.md\n");
+    expect(antigravityComposerDraft(typed)).toBe("Read and follow /tmp/goal.md");
+    expect(antigravityComposerDraft("Claude Code\n❯ ")).toBeNull();
+  });
+
+  it("#801 gate 1: reads the live wrapped paste in agy's composer as the whole payload", () => {
+    const draft = antigravityComposerDraft(readFixture("typed-unsubmitted-wrapped-payload-pro-high.txt")) ?? "";
+    expect(draft.replace(/\s+/g, "")).toContain(
+      "Readandfollow~/Gits/cmuxlayer/.worktrees/801-boot-one-message/results/live-agent-harness/gemini-2026-09-24T16-56-24-838Z/goals/cursor-01.md",
+    );
+    expect(screenHasActiveAgentMarker("gemini", readFixture("typed-unsubmitted-wrapped-payload-pro-high.txt"))).toBe(false);
   });
 });

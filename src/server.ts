@@ -69,6 +69,8 @@ import {
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
   COORDINATION_CONTRACT_POINTER_NOT_VERIFIED,
+  COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE,
+  COORDINATION_CONTRACT_SKIPPED_STERILE_NO_FILE,
   COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
@@ -171,8 +173,10 @@ import {
   formatDelivery,
 } from "./format.js";
 import {
+  antigravityComposerDraft,
   cleanScreenText,
   inferContextWindow,
+  isAntigravityScreen,
   isCodexUpdateMenuScreen,
   isPickerOrMenuScreen,
   parseScreen,
@@ -665,6 +669,8 @@ const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
 // CLI fallback paste acknowledgement can precede the Claude composer repaint.
 // Keep a short budget for surfaces that never paint the owned payload.
 const BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS = 250;
+const BOOT_PAYLOAD_OBSERVE_AGY_TIMEOUT_MS = 3_000;
+const BOOT_PAYLOAD_OBSERVE_AGY_POLL_MS = 250;
 function parsePositiveIntegerMs(
   value: string | undefined,
   fallback: number,
@@ -1763,6 +1769,9 @@ class LauncherReadinessError extends Error {
   }
 }
 
+const BOOT_COMPOSER_RESIDUE_READS = 3;
+const BOOT_COMPOSER_RESIDUE_POLL_MS = 500;
+
 class BootPromptDeliveryError extends Error {
   readonly rpc_methods: DeliveryRpcMethod[];
   readonly typed: boolean;
@@ -1789,6 +1798,23 @@ class BootPromptDeliveryError extends Error {
     this.submit_dispatched =
       deliverySubmitDispatchedFromError(delivery_error) ||
       deliverySubmitDispatchedFromError(submit_verification_error);
+  }
+}
+
+/** #801: a submitted boot prompt left text behind in the composer. */
+class BootComposerResidueError extends BootPromptDeliveryError {
+  readonly error_code = "boot_composer_residue";
+
+  constructor(
+    message: string,
+    delivered_chars: number,
+    readonly composer_residue: string,
+    evidence: DeliveryErrorEvidence,
+    /** The part before the residue was submitted and verified. */
+    readonly submit_verified: boolean,
+  ) {
+    super(message, delivered_chars, undefined, evidence);
+    this.name = "BootComposerResidueError";
   }
 }
 
@@ -3229,6 +3255,12 @@ function extractComposerInputRegion(
   knownCli?: CliType,
   preservePlaceholderText = false,
 ): string | null {
+  // Antigravity (cli "gemini") draws a bare `>` composer between `─` rules,
+  // which the prompt-prefix map cannot express without turning every `> text`
+  // blockquote into a composer line. Read its composer structurally (#802).
+  if (isAntigravityScreen(normalizeTerminalText(screenText))) {
+    return antigravityComposerDraft(normalizeTerminalText(screenText));
+  }
   const lines = normalizeTerminalText(screenText).split("\n");
   const cli = knownCli ?? inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
@@ -3453,6 +3485,15 @@ function composerHoldsForeignDraft(
   if (options?.exact) {
     const region = extractComposerInputRegion(screenText, submittedText, options.cli);
     return region !== null && region !== normalizeTerminalText(submittedText).trimEnd();
+  }
+  // Antigravity has no prompt prefix (a bare `>` under a rule), so the prefix
+  // reader sees nothing; read its composer structurally (#809 review F7).
+  if (isAntigravityScreen(normalizeTerminalText(screenText))) {
+    const compactAgyDraft = (antigravityComposerDraft(normalizeTerminalText(screenText)) ?? "")
+      .replace(/\s+/g, "");
+    if (!compactAgyDraft) return false;
+    const compactAgyPayload = submittedText.replace(/\s+/g, "");
+    return compactAgyPayload.length === 0 || !compactAgyPayload.includes(compactAgyDraft);
   }
   if (promptLine === null || !promptLine.trim()) return false;
   // An empty first line may be a placeholder followed by real draft text.
@@ -3904,12 +3945,13 @@ function composeBootDeliveryText(
 ): string {
   if (!hasInlinePrompt(injectedPrompt)) return callerDeliveryText;
   if (!hasInlinePrompt(callerDeliveryText)) return injectedPrompt;
-  // Claude can treat a paragraph break in a pasted boot payload as a submit
-  // boundary. Keep the brief and pointer in one composer message so the
-  // brief cannot run while the engine-issued contract remains unsent. A
-  // multi-line brief without a paragraph break has the same boundary risk.
+  // Claude and Antigravity (cli "gemini", #801) can treat a paragraph break in
+  // a pasted boot payload as a submit boundary. Keep the brief and pointer in
+  // one composer message so the brief cannot run while the engine-issued
+  // contract remains unsent. A multi-line brief without a paragraph break has
+  // the same boundary risk.
   if (
-    cli === "claude" &&
+    (cli === "claude" || cli === "gemini") &&
     !/\r?\n\s*\r?\n/.test(callerDeliveryText) &&
     !/\r?\n\s*\r?\n/.test(injectedPrompt)
   ) {
@@ -6463,7 +6505,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // short caller deadlines still get only one read.
     const readLimit = opts.timeout_ms >= BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS
       ? 3 : 1;
-    for (let read = 0; read < readLimit; read += 1) {
+    const startedAt = Date.now();
+    for (let read = 0; ; read += 1) {
       await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
@@ -6477,9 +6520,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
         };
       }
-      if (read + 1 < readLimit) {
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+      // #801 gate 1: agy's Bubble Tea textarea repainted a 150-char paste only
+      // after the 3-read window (surface:947), so Return was never pressed.
+      // Antigravity panes alone keep polling; other CLIs keep the #511 budget.
+      const antigravity =
+        snapshot !== null && isAntigravityScreen(normalizeTerminalText(snapshot.text));
+      if (antigravity) {
+        if (Date.now() - startedAt >= BOOT_PAYLOAD_OBSERVE_AGY_TIMEOUT_MS) break;
+        await delay(BOOT_PAYLOAD_OBSERVE_AGY_POLL_MS);
+        continue;
       }
+      if (read + 1 >= readLimit) break;
+      await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
     return null;
   };
@@ -8787,6 +8839,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stableSurfaceIdentity: opts.stableSurfaceIdentity,
         },
       );
+      // Review F2 on #809: only a dispatched Return can leave residue; an
+      // unsubmitted payload stays a pending_verify receipt.
+      if (delivery.submit_dispatched === true) {
+        await rejectBootComposerResidue(
+          readiness.cli,
+          deliveryRoute,
+          chunks.reduce((sum, chunk) => sum + chunk.length, 0),
+          delivery,
+        );
+      }
       return fingerprintPromptReceipt({
         ...delivery,
         prompt_warning: promptWarning,
@@ -8796,7 +8858,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         } : {}),
       }, rawPrompt);
     } catch (error) {
-      if (error instanceof SurfaceGoneError) {
+      if (error instanceof SurfaceGoneError || error instanceof BootComposerResidueError) {
         throw error;
       }
       if (error instanceof SubmitVerificationError) {
@@ -8867,6 +8929,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         error instanceof SubmitVerificationError ? error : undefined,
         error,
       );
+    }
+  };
+
+  // #801: after a submitted boot prompt, agy's composer must be empty. A draft
+  // that stays put across reads (the contract pointer on surface:918 sat there
+  // for the whole run) is residue: fail loudly instead of leaving it unsent.
+  const rejectBootComposerResidue = async (
+    cli: CliType,
+    route: { surface: string; workspace?: string },
+    deliveredChars: number,
+    delivery: {
+      rpc_methods: DeliveryRpcMethod[];
+      submit_verified?: boolean | null;
+    },
+  ): Promise<void> => {
+    if (cli !== "gemini") return;
+    let previous: string | null = null;
+    for (let attempt = 0; attempt < BOOT_COMPOSER_RESIDUE_READS; attempt += 1) {
+      if (attempt > 0) await delay(BOOT_COMPOSER_RESIDUE_POLL_MS);
+      const snapshot = await readParsedSurface(route.surface, route.workspace);
+      if (!snapshot) return;
+      const draft =
+        extractComposerInputRegion(snapshot.text, undefined, cli)?.trim() ?? "";
+      if (!draft) return;
+      if (draft === previous) {
+        throw new BootComposerResidueError(
+          `Boot prompt was submitted but left residue in the composer: "${draft}". ` +
+            "It was NOT sent; the agent never saw it (#801).",
+          deliveredChars,
+          draft,
+          {
+            rpc_methods: [...delivery.rpc_methods],
+            typed: true,
+            submit_dispatched: true,
+          },
+          delivery.submit_verified === true,
+        );
+      }
+      previous = draft;
     }
   };
 
@@ -11894,6 +11995,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             error_code: e.error_code,
             last_10_lines: e.last_10_lines,
             recovery: e.recovery,
+          });
+        }
+        if (e instanceof BootComposerResidueError) {
+          return err(e, {
+            delivered_chars: e.delivered_chars,
+            error_code: e.error_code,
+            composer_residue: e.composer_residue,
+            typed: e.typed,
+            submit_dispatched: e.submit_dispatched,
+            rpc_methods: e.rpc_methods,
           });
         }
         if (e instanceof BootPromptDeliveryError) {
@@ -16290,7 +16401,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             monitorBoot,
             coordination,
           );
-          const injectedBootPrompt = bootContract.text;
+          // #782/#801: a sterile seat gets only the caller's brief typed.
+          const skipContractPointer = args.mcp_profile === "sterile";
+          const injectedBootPrompt = skipContractPointer
+            ? undefined
+            : bootContract.text;
           result.report_path = coordination.report_path;
           result.done_marker = coordination.done_marker;
           // Finding 3: never report the contract's size without reporting how
@@ -16300,9 +16415,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             coordinationFooterBytes(coordination);
           result.contract_path = bootContract.contract_path ?? undefined;
           result.coordination_footer_delivered = false;
-          result.coordination_footer_note = bootContract.contract_path
-            ? COORDINATION_CONTRACT_POINTER_NOT_VERIFIED
-            : COORDINATION_FOOTER_NOT_DELIVERED;
+          result.coordination_footer_note = skipContractPointer
+            ? bootContract.contract_path
+              ? COORDINATION_CONTRACT_POINTER_SKIPPED_STERILE
+              : COORDINATION_CONTRACT_SKIPPED_STERILE_NO_FILE
+            : bootContract.contract_path
+              ? COORDINATION_CONTRACT_POINTER_NOT_VERIFIED
+              : COORDINATION_FOOTER_NOT_DELIVERED;
           try {
             const patched = stateMgr.updateRecord(result.agent_id, {
               report_path: coordination.report_path,
@@ -16381,7 +16500,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     timeout_ms: args.boot_prompt_timeout_ms,
                   }),
               });
-              if (bootContract.contract_path !== null) {
+              if (bootContract.contract_path !== null && !skipContractPointer) {
                 result.coordination_footer_delivered =
                   isBootPromptDelivered(bootPromptDelivery);
                 result.coordination_footer_note =
@@ -16443,17 +16562,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 result.surface_id,
               );
               const agentId = record?.agent_id ?? result.agent_id;
-              const updated = stateMgr.updateRecord(agentId, {
-                // A readiness timeout happens before delivery. Preserve the
-                // pending marker so a later idle CLI cannot be mistaken for a
-                // successfully tasked agent by the lifecycle sweep.
-                boot_prompt_pending:
-                  e instanceof BootPromptTimeoutError ||
-                  e instanceof BootPromptDeliveryError,
-                prompt_delivered: false,
-                submit_verified:
-                  e instanceof BootPromptDeliveryError ? false : null,
-              });
+              const updated = stateMgr.updateRecord(
+                agentId,
+                e instanceof BootComposerResidueError
+                  ? {
+                    // The brief itself was submitted and is running; only the
+                    // residue was left behind (#801 review F1).
+                    boot_prompt_pending: false,
+                    prompt_delivered: true,
+                    submit_verified: e.submit_verified,
+                  }
+                  : {
+                    // A readiness timeout happens before delivery. Preserve the
+                    // pending marker so a later idle CLI cannot be mistaken for a
+                    // successfully tasked agent by the lifecycle sweep.
+                    boot_prompt_pending:
+                      e instanceof BootPromptTimeoutError ||
+                      e instanceof BootPromptDeliveryError,
+                    prompt_delivered: false,
+                    submit_verified:
+                      e instanceof BootPromptDeliveryError ? false : null,
+                  },
+              );
               registry.set(agentId, updated);
               result.agent_id = updated.agent_id;
               return updated;
@@ -16508,6 +16638,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 error_code: e.error_code,
                 last_10_lines: e.last_10_lines,
                 recovery: e.recovery,
+              });
+            }
+            if (e instanceof BootComposerResidueError) {
+              await refreshManagedMetadataBestEffort(result.agent_id);
+              await lifecycleSeatManifestPublisher({ agentId: result.agent_id });
+              return err(e, {
+                ...extra,
+                error_code: e.error_code,
+                composer_residue: e.composer_residue,
+                delivered_chars: e.delivered_chars,
+                typed: e.typed,
+                submit_dispatched: e.submit_dispatched,
+                rpc_methods: e.rpc_methods,
+                boot_prompt_submit_verified: e.submit_verified,
+                report_path: result.report_path,
+                done_marker: result.done_marker,
+                contract_path: result.contract_path,
+                next_action:
+                  "Return WAS dispatched: the brief was submitted and the agent is working on it, " +
+                  "but the text in composer_residue stayed unsent in its composer. Do not re-spawn. " +
+                  "If the residue is the contract pointer, relay contract_path, report_path and done_marker " +
+                  "to the agent yourself; otherwise send the residue with send_to once the draft is cleared.",
               });
             }
             if (e instanceof BootPromptDeliveryError) {

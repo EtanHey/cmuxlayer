@@ -4229,6 +4229,156 @@ describe("tool handler integration", () => {
     expect(parsed.boot_prompt_warning).toContain("one-line file pointer");
   });
 
+  for (const residue of [null, "cmuxlayer contract for agent-1: Read and follow"] as const) {
+    it(`#801 send_command on an Antigravity pane ${residue ? "rejects a boot draft left in the composer" : "reports a clean composer"}`, async () => {
+      const promptPath = join(CHANNEL_TEST_DIR, "agy-boot.md");
+      mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+      writeFileSync(promptPath, "boot prompt", "utf8");
+      const rule = "─".repeat(60);
+      const banner = [
+        "      ▄▀▀▄        Antigravity CLI 1.2.10",
+        "     ▀▀▀▀▀▀       user@example.com (Google AI Pro)",
+        "    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)",
+        "",
+      ];
+      const footer = "? for shortcuts                                   Gemini 3.1 Pro · high";
+      let promptSent = false;
+      let promptSubmitted = false;
+      mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("read-screen")) {
+          const text = !promptSent
+            ? [...banner, rule, ">", rule, footer]
+            : !promptSubmitted
+              ? [...banner, rule, "> boot prompt", rule, "                                                  Gemini 3.1 Pro · high"]
+              : [
+                ...banner,
+                rule,
+                "> boot prompt",
+                "",
+                "  Done.",
+                "",
+                rule,
+                ">",
+                ...(residue ? [`  ${residue}`] : []),
+                rule,
+                residue ? "                                                  Gemini 3.1 Pro · high" : footer,
+              ];
+          return {
+            stdout: JSON.stringify({ surface: "surface:1", text: text.join("\n"), lines: 20, scrollback_used: false }),
+            stderr: "",
+          };
+        }
+        if (args.includes("send-key") && args.includes("return") && promptSent) {
+          promptSubmitted = true;
+        }
+        if (args.includes("send") && String(args.at(-1) ?? "") === "boot prompt") {
+          promptSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      });
+      const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+      const tool = (server as any)._registeredTools["send_command"];
+
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              surface: "surface:1",
+              command: "cmuxlayerGemini -s",
+              boot_prompt_path: promptPath,
+              boot_prompt_timeout_ms: 700,
+            },
+            {} as any,
+          ),
+        6_000,
+      );
+
+      const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(promptSubmitted, JSON.stringify(parsed)).toBe(true);
+      if (residue) {
+        expect(parsed.ok).toBe(false);
+        expect(parsed.error_code).toBe("boot_composer_residue");
+        expect(parsed.composer_residue).toBe(residue);
+        expect(parsed.submit_dispatched).toBe(true);
+      } else {
+        expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+        expect(parsed.boot_prompt_submit_verified).toBe(true);
+      }
+    }, 15_000);
+  }
+
+  for (const paintRead of [5, 14] as const) {
+  it(`#801 gate-1: send_command on agy with the paste painted at read ${paintRead} (${paintRead === 5 ? "inside" : "after"} the observe window)`, async () => {
+    // Live gate 1 (surface:947): agy rendered the paste after the 250 ms
+    // observation window, so Return was never pressed (pending_verify).
+    const promptPath = join(CHANNEL_TEST_DIR, "agy-slow-boot.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    const rule = "─".repeat(60);
+    const banner = [
+      "      ▄▀▀▄        Antigravity CLI 1.2.10",
+      "     ▀▀▀▀▀▀       user@example.com (Google AI Pro)",
+      "    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)",
+      "",
+    ];
+    const footer = "? for shortcuts                                   Gemini 3.1 Pro · high";
+    let promptSent = false;
+    let readsSinceSend = 0;
+    let promptSubmitted = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        if (promptSent) readsSinceSend += 1;
+        // Read 14 is the first read after the agy observe window (13 reads at
+        // 250 ms over 3000 ms): the reviewer's F2 probe.
+        const rendered = promptSent && readsSinceSend >= paintRead;
+        const text = promptSubmitted
+          ? [...banner, rule, "> boot prompt", "", "  Done.", "", rule, ">", rule, footer]
+          : [...banner, rule, rendered ? "> boot prompt" : ">", rule, rendered ? "                                                  Gemini 3.1 Pro · high" : footer];
+        return {
+          stdout: JSON.stringify({ surface: "surface:1", text: text.join("\n"), lines: 20, scrollback_used: false }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return") && promptSent) {
+        promptSubmitted = true;
+      }
+      if (args.includes("send") && String(args.at(-1) ?? "") === "boot prompt") {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:1",
+            command: "cmuxlayerGemini -s",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 5_000,
+          },
+          {} as any,
+        ),
+      12_000,
+    );
+
+    const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
+    if (paintRead === 5) {
+      expect(promptSubmitted, JSON.stringify(parsed.boot_prompt_receipt)).toBe(true);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.boot_prompt_submit_verified).toBe(true);
+    } else {
+      // Review F2: Return was never pressed, so this is pending_verify, never a
+      // "was submitted but left residue" claim about an unsubmitted payload.
+      expect(promptSubmitted).toBe(false);
+      expect(JSON.stringify(parsed)).not.toMatch(/left residue|boot_composer_residue/);
+      expect(parsed.boot_prompt_receipt?.submit_dispatched).toBe(false);
+    }
+  }, 20_000);
+  }
+
   it("send_command verifies a cleared stable Claude boot prompt without a working marker", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "slow-claude.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
