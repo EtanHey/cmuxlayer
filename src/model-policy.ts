@@ -4,8 +4,8 @@ export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
 const CLAUDE_UNGATED_LAUNCHER_ALIASES = new Set(["sonnet", "haiku"]);
 // Match the installed repoGolem launcher sourced by fresh interactive shells
 // (~/.config/ralphtools/golem-dispatch.zsh), not the potentially newer golems
-// checkout. Codex model validation is delegated to `codex debug models
-// --bundled` during spawn preflight, before any worktree or surface is created.
+// checkout. Codex model validation is delegated to `codex debug models` (the
+// account catalog) during spawn preflight, before any worktree or surface is created.
 export const CODEX_EFFORT_VALUES = [
   "low",
   "medium",
