@@ -107,12 +107,25 @@ describe("Antigravity CLI screens (cli: gemini)", () => {
     expect(matchReadyPattern("gemini", text).matched).toBe(false);
   });
 
-  it("is not ready while an approval prompt is on screen", () => {
+  it("is not ready while an approval dialog sits in the composer region", () => {
+    // No agy approval specimen exists yet; the dialog is placed where a live
+    // dialog can be (between the composer and the footer), never in transcript.
+    const text = readFixture("idle-finished-reply-pro-high.txt").replace(
+      /\n>\n(─+)\n/,
+      "\n>\n$1\n⚠ Approval Required\n  Do you want to proceed?\n$1\n",
+    );
+    expect(text).toContain("⚠ Approval Required");
+    expect(matchReadyPattern("gemini", text).matched).toBe(false);
+  });
+
+  it("stays ready when the reply transcript merely quotes approval wording (review F1)", () => {
     const text = readFixture("idle-finished-reply-pro-high.txt").replace(
       "  I have read the contract.",
-      "⚠ Approval Required\n  Do you want to proceed?\n  I have read the contract.",
+      "  Plan drafted. Do you want to proceed?\n  ⚠ Approval Required was shown earlier.\n  I have read the contract.",
     );
-    expect(matchReadyPattern("gemini", text).matched).toBe(false);
+    expect(text).toContain("Do you want to proceed?");
+    expect(parseScreen(text).status).toBe("idle");
+    expect(matchReadyPattern("gemini", text).matched).toBe(true);
   });
 
   it("does not claim a Claude pane that quotes Antigravity chrome", () => {
@@ -126,6 +139,33 @@ describe("Antigravity CLI screens (cli: gemini)", () => {
       "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
     ].join("\n");
     expect(parseScreen(text).agent_type).toBe("claude");
+  });
+
+  for (const [label, banner] of [
+    ["after a transcript row", ["  ⬢ Read specimens/working-surface903.txt"]],
+    ["before any transcript row", []],
+  ] as const) {
+    it(`does not claim a Cursor pane that quotes the agy banner ${label} (review F2)`, () => {
+      const text = [
+        "  Cursor Agent",
+        "  v2026.06.04-5fd875e",
+        "",
+        ...banner,
+        "      ▄▀▀▄        Antigravity CLI 1.2.10",
+        "     ▀▀▀▀▀▀       user@example.com (Google AI Pro)",
+        "    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (Low)",
+        "",
+        "  → Add a follow-up",
+        "  Auto · 12% · 1 file edited",
+      ].join("\n");
+      expect(parseScreen(text).agent_type).toBe("cursor");
+      expect(geminiScreenSignature(text)).toBe("unrecognized_screen");
+    });
+  }
+
+  it("drift note stays silent on a plain shell prompt (agy never launched; review F3)", () => {
+    expect(bootReadinessDriftNote("gemini", "etanheyman ~  $ cmuxlayerGemini -s\n")).toBe("");
+    expect(bootReadinessDriftNote("gemini", "user@host ~ % \n")).toBe("");
   });
 
   it("is not ready while agy is still loading (banner and composer, no model footer yet)", () => {

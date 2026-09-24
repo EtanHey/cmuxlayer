@@ -288,7 +288,10 @@ const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
 // (docs.local/lanes/gemini-antigravity/upstream-sources.md); "specimen" means
 // tests/fixtures/gemini-antigravity/.
 // `Antigravity CLI` @49048839; survives AGY_CLI_HIDE_LOGO (changelog 1.1.19).
-const ANTIGRAVITY_BANNER_RE = /^[\s▄▀]*Antigravity CLI\s+\d+(?:\.\d+)*\s*$/m;
+export const ANTIGRAVITY_BANNER_RE = /^[\s▄▀]*Antigravity CLI\s+\d+(?:\.\d+)*\s*$/m;
+// Any harness's transcript row: a banner quoted after one of these is content,
+// not live chrome (review F2 on #803).
+const ANY_TRANSCRIPT_ROW_RE = /^\s*(?:[•⏺●○▸⬢⬡✔✘⎿]\s+\S|[>❯›»→]\s+\S)/;
 // Banner model display name, e.g. `Gemini 3.1 Pro (Low)` @49410029.
 const ANTIGRAVITY_BANNER_MODEL_RE =
   /^[\s▄▀]*Gemini\s+(\d+(?:\.\d+)*(?:\s+[A-Z][A-Za-z]*)+)\s+\([A-Za-z]+\)\s*$/m;
@@ -682,9 +685,24 @@ function antigravityFooterLines(lines: string[]): string[] {
     .slice(-ANTIGRAVITY_FOOTER_SCAN_LINES);
 }
 
-/** Antigravity CLI chrome: its version banner, or its model footer at the bottom. */
+/**
+ * Antigravity CLI chrome: its model footer at the bottom, or its version banner
+ * drawn before any transcript row with an agy composer (`>` under a `─` rule)
+ * below it. A banner quoted inside another harness's transcript is neither.
+ */
 export function isAntigravityScreen(text: string): boolean {
-  return ANTIGRAVITY_BANNER_RE.test(text) || antigravityFooterShowsModel(text);
+  return antigravityFooterShowsModel(text) || hasLiveAntigravityBanner(text);
+}
+
+function hasLiveAntigravityBanner(text: string): boolean {
+  const lines = text.split("\n");
+  const bannerIndex = lines.findIndex((line) => ANTIGRAVITY_BANNER_RE.test(line));
+  if (bannerIndex < 0) return false;
+  if (lines.slice(0, bannerIndex).some((line) => ANY_TRANSCRIPT_ROW_RE.test(line))) {
+    return false;
+  }
+  const composerIndex = antigravityComposerIndex(lines);
+  return composerIndex > bannerIndex;
 }
 
 /**
@@ -776,7 +794,13 @@ export function antigravityScreenIsReady(text: string): boolean {
   ) {
     return false;
   }
-  return !ANTIGRAVITY_APPROVAL_RE.test(text) && !antigravityScreenIsActive(text);
+  // Only a dialog in the live input region counts: approval wording in the
+  // transcript above the composer's top rule is reply text (review F1 on #803).
+  const liveRegion = lines.slice(composerIndex - 1).join("\n");
+  return (
+    !ANTIGRAVITY_APPROVAL_RE.test(liveRegion) &&
+    !antigravityScreenIsActive(text)
+  );
 }
 
 function detectAgentType(text: string): ParsedScreenAgentType {

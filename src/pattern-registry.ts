@@ -152,12 +152,24 @@ export function geminiScreenSignature(
   return "unrecognized_screen";
 }
 
+const SHELL_PROMPT_WITH_INPUT_RE = /^\s*\S.*?\s[$%#](?:\s+\S.*)?\s*$/;
+
 /** Suffix for a boot-readiness timeout on a gemini pane nobody recognizes. */
 export function bootReadinessDriftNote(
   cli: CliType | undefined,
   lastScreenText: string,
 ): string {
   if (cli !== "gemini" || lastScreenText.trim() === "") return "";
+  // agy never launched: a launch failure, not a parser gap (review F3 on #803).
+  // A `$`/`%`/`#` shell prompt, with or without the typed launcher; a bare `>`
+  // is left alone, since an unrecognized TUI composer can look like that.
+  const lastLine = lastScreenText.trimEnd().split("\n").at(-1) ?? "";
+  if (
+    parseScreen(lastScreenText).control_state === "shell" ||
+    SHELL_PROMPT_WITH_INPUT_RE.test(lastLine)
+  ) {
+    return "";
+  }
   if (geminiScreenSignature(lastScreenText) !== "unrecognized_screen") return "";
   return " (gemini screen signature: unrecognized_screen; capture it as a new specimen)";
 }

@@ -142,6 +142,7 @@ import {
   type WatchOwnerResolution,
 } from "./watch-owner.js";
 import {
+  ANTIGRAVITY_BANNER_RE,
   antigravityScreenIsActive,
   classifyPromptDisposition,
   cleanScreenText,
@@ -3895,7 +3896,7 @@ export class AgentEngine {
         return (
           /^Gemini CLI$/i.test(trimmed) ||
           /^gemini>\s*$/i.test(trimmed) ||
-          /^[▄▀\s]*Antigravity CLI\s+\d/i.test(trimmed)
+          ANTIGRAVITY_BANNER_RE.test(trimmed)
         );
       case "kiro":
         return /^Kiro\b/i.test(trimmed) || /^kiro>\s*$/i.test(trimmed);
