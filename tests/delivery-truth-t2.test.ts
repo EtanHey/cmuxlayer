@@ -521,6 +521,16 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       expect(engine.getAgentState(agentId)?.state).toBe("working");
       expect(returnAttempts).toBe(1);
       expect(followupWrites).toEqual([]);
+      const rebooted = engine.stateMgr.updateRecord(agentId, {
+        state: "booting",
+        boot_prompt_pending: true,
+        prompt_delivered: false,
+        submit_verified: null,
+      });
+      engine.getRegistry().set(agentId, rebooted);
+      await engine.verifyPendingDeliveries();
+      expect(engine.getAgentState(agentId)?.state).toBe("booting");
+      expect(engine.getAgentState(agentId)?.boot_prompt_pending).toBe(true);
     } finally { context.dispose(); }
   }, 15_000);
 
