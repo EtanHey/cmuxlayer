@@ -155,7 +155,10 @@ These 10 are the whole public surface. The internal definitions are not callable
 | Gemini CLI | `gemini` | status, model, tokens, context % |
 | Cursor | `cursor agent` | status, model, tokens, context % |
 | Kiro CLI | `kiro-cli` | spawn and lifecycle only; no Kiro-specific screen parser |
+
 `read_screen` auto-detects agent type and parses metadata from terminal output.
+For launch and resume forms, input limits, and the ready/working/done markers per
+CLI, see the [CLI reference](docs/reference/cli-reference.md).
 
 ## Architecture
 
