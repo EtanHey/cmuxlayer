@@ -61,6 +61,12 @@ describe("parseScreen", () => {
     expect(parsed.control_state).toBe("composer_dirty");
   });
 
+  it("keeps a Codex draft dirty above its task-suffixed model footer", () => {
+    const parsed = parseScreen("Codex\n› Keep this draft\ngpt-6-sol medium · ~/Gits/cmuxlayer/.worktrees/lane-a-true-state · Read lane");
+    expect(parsed.status).toBe("draft_pending");
+    expect(parsed.control_state).toBe("composer_dirty");
+  });
+
   it("marks a multiline Claude composer draft as pending instead of ready", () => {
     const parsed = parseScreen(
       "Claude Code\n❯ Read and follow the lane brief\n  then read the contract\n────────────────────\n  bypass permissions on",
