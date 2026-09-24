@@ -13122,6 +13122,31 @@ codex>
     );
   });
 
+  it("does not close an anonymous raw ref when every window read fails", async () => {
+    const routeClient = makeUuidRouteClient([
+      { ref: "surface:230", workspace_ref: "workspace:1" },
+    ]);
+    routeClient.client.listWindows = vi.fn().mockResolvedValue({
+      windows: [{ ref: "window:bad", workspace_count: 1 }],
+    });
+    routeClient.client.listWorkspaces.mockRejectedValue(
+      new Error("window.list timed out"),
+    );
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      skipAgentLifecycle: true,
+    });
+
+    const result = await registeredTestTool(server, "close_surface").handler(
+      { surface: "surface:230", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(routeClient.client.closeSurface).not.toHaveBeenCalled();
+  });
+
   it("send_to preserves a re-resolve error before any terminal mutation", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([
