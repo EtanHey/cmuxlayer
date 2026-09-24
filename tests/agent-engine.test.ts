@@ -7088,7 +7088,7 @@ Session ID: ${sessionId}`,
   });
 
   describe("waitFor", () => {
-    it("does not match a done record when the live screen confirms a different state", async () => {
+    it("keeps a completed worker done when its live screen returns to ready", async () => {
       vi.useFakeTimers();
       try {
         stateMgr.writeState(
@@ -7098,6 +7098,7 @@ Session ID: ${sessionId}`,
             surface_id: "surface:done-but-ready",
             cli: "claude",
             role: "worker",
+            task_done_detected_at: "2026-09-23T00:00:00.000Z",
           }),
         );
         liveSurfaces = [makeSurface("surface:done-but-ready")];
@@ -7106,13 +7107,13 @@ Session ID: ${sessionId}`,
         );
         await engine.getRegistry().reconstitute();
         const pending = engine.waitFor("done-but-ready", "done", 500);
-        await vi.advanceTimersByTimeAsync(1000);
+        await vi.advanceTimersByTimeAsync(1_000);
         const result = await pending;
-        expect(result.matched).toBe(false);
-        expect(result.state).toBe("ready");
+        expect(result.matched).toBe(true);
+        expect(result.state).toBe("done");
         const ready = await engine.waitFor("done-but-ready", "ready", 500);
-        expect(ready.matched).toBe(true);
-        expect(ready.source).toBe("screen");
+        expect(ready.matched).toBe(false);
+        expect(ready.state).toBe("done");
       } finally {
         vi.useRealTimers();
       }
