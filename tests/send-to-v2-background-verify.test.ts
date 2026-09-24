@@ -678,6 +678,44 @@ describe("send_to v2 background verify", () => {
     expect(client.sendKeyCalls).toEqual([]);
   });
 
+  it("still flags a stalled queue after compaction finishes but its history stays visible", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.title = "cmuxlayerCodex";
+    client.screenOverride = [
+      "OpenAI Codex",
+      "• Context compacted · 47s",
+      "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+      "  ↳ queued request",
+      "Working (1s • esc to interrupt)",
+      "› Ask Codex to do anything",
+      "gpt-6-sol high · 8% used",
+    ].join("\n");
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "codex", state: "working" });
+    const engine = server._registeredTools.interact._engine;
+    const queued = engine.acceptComposerQueue({
+      delivery_id: "compaction-history-stalled-queue",
+      agent_id: "agent-1",
+      text: "queued request",
+      press_enter: true,
+      source_event: "send_to",
+      retry_count: 0,
+      typed: true,
+      submit_dispatched: true,
+    });
+
+    await engine.verifyPendingDeliveries();
+    client.screenOverride = client.screenOverride.replace("Working (1s • esc to interrupt)\n", "");
+    await vi.advanceTimersByTimeAsync(30_000);
+    await engine.verifyPendingDeliveries();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "stalled_queue",
+      terminal: true,
+    });
+  });
+
   it("ends a Codex queue only after sustained idle evidence with recovery guidance", async () => {
     const client = new FakeAgentSurfaceClient();
     client.title = "cmuxlayerCodex";
