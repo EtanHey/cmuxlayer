@@ -142,10 +142,13 @@ import {
   type WatchOwnerResolution,
 } from "./watch-owner.js";
 import {
+  ANTIGRAVITY_BANNER_RE,
+  antigravityScreenIsActive,
   classifyPromptDisposition,
   cleanScreenText,
   containsPromptApprovalChooser,
   hasVisibleAgentProgress,
+  isAntigravityScreen,
   isBlockingPromptChooserScreen,
   isPromptResolutionAuditSafe,
   parseScreen,
@@ -3890,7 +3893,11 @@ export class AgentEngine {
       case "cursor":
         return /^Cursor Agent$/i.test(trimmed) || /^cursor>\s*$/i.test(trimmed);
       case "gemini":
-        return /^Gemini CLI$/i.test(trimmed) || /^gemini>\s*$/i.test(trimmed);
+        return (
+          /^Gemini CLI$/i.test(trimmed) ||
+          /^gemini>\s*$/i.test(trimmed) ||
+          ANTIGRAVITY_BANNER_RE.test(trimmed)
+        );
       case "kiro":
         return /^Kiro\b/i.test(trimmed) || /^kiro>\s*$/i.test(trimmed);
     }
@@ -10270,6 +10277,9 @@ export class AgentEngine {
    * Retroactive check first, then polling sweep until match or timeout.
    */
   private geminiHasSettledReply(text: string): boolean {
+    // Antigravity keeps past-tense `▸ Thought for` rows in its transcript and
+    // draws its model footer below the composer; its live block decides.
+    if (isAntigravityScreen(text)) return !antigravityScreenIsActive(text);
     const lines = text.trimEnd().split("\n").map((line) => line.trim());
     if (lines.at(-1) !== ">") return false;
     const activity = /^✦\s*(?:Thinking|Working|Running|Reading|Writing|Calling)\b/i;

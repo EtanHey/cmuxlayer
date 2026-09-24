@@ -250,6 +250,7 @@ import {
   CLI_INPUT_PROMPT_PREFIXES,
   CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE,
   CURSOR_FOLLOWUP_PLACEHOLDER_RE,
+  bootReadinessDriftNote,
   matchReadyPattern,
   screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
@@ -7978,7 +7979,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     }
     throw new BootPromptTimeoutError(
-      `Timed out after ${opts.timeout_ms}ms waiting for boot prompt readiness on ${lastSurface}`,
+      `Timed out after ${opts.timeout_ms}ms waiting for boot prompt readiness on ${lastSurface}${bootReadinessDriftNote(opts.cli, lastText)}`,
       tailLines(lastText, 10),
     );
   };

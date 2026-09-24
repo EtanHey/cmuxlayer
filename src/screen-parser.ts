@@ -281,6 +281,41 @@ const CLI_UPDATE_BARE_STEP_RE =
 const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
 const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
+// AIDEV-NOTE: repoGolem's `{repo}Gemini` runs the Antigravity CLI (`agy`), a Go
+// Charm/bubbletea TUI (google3/third_party/jetski/cli) that is NOT a gemini-cli
+// fork, so none of the gemini-cli patterns above apply. Signals are structural
+// only (never spinner labels or tips). Byte offsets are into the agy 1.2.10 binary
+// (docs.local/lanes/gemini-antigravity/upstream-sources.md); "specimen" means
+// tests/fixtures/gemini-antigravity/.
+// `Antigravity CLI` @49048839; survives AGY_CLI_HIDE_LOGO (changelog 1.1.19).
+export const ANTIGRAVITY_BANNER_RE = /^[\s▄▀]*Antigravity CLI\s+\d+(?:\.\d+)*\s*$/m;
+// Any harness's transcript row: a banner quoted after one of these is content,
+// not live chrome (review F2 on #803).
+const ANY_TRANSCRIPT_ROW_RE = /^\s*(?:[•⏺●○▸⬢⬡✔✘⎿]\s+\S|[>❯›»→]\s+\S)/;
+// Banner model display name, e.g. `Gemini 3.1 Pro (Low)` @49410029.
+const ANTIGRAVITY_BANNER_MODEL_RE =
+  /^[\s▄▀]*Gemini\s+(\d+(?:\.\d+)*(?:\s+[A-Z][A-Za-z]*)+)\s+\([A-Za-z]+\)\s*$/m;
+// Footer right segment `<model> · <effort> [· N task(s) · /tasks]`: effort badge
+// (changelog 1.1.5), `%d task(s) · /tasks` @49414881.
+const ANTIGRAVITY_FOOTER_MODEL_RE =
+  /(?:^|\s{2,})Gemini\s+(\d+(?:\.\d+)*(?:\s+[A-Z][A-Za-z]*)+)\s+·\s+[a-z]+(?:\s+·\s+\d+\s+task\(s\)\s+·\s+\/tasks)?\s*$/;
+const ANTIGRAVITY_FOOTER_SCAN_LINES = 4;
+// Composer: `>` between full-width `─` rules; multi-line input continues on
+// 2-space-indented lines (specimen; packages cli/layout, cli/editing).
+const ANTIGRAVITY_COMPOSER_RE = /^\s*>(?:\s|$)/;
+const ANTIGRAVITY_EMPTY_COMPOSER_RE = /^\s*>\s*$/;
+const ANTIGRAVITY_RULE_RE = /^\s*─{8,}\s*$/;
+// Spinner line directly above the composer's top rule: a braille frame (U+2800
+// block; frame set @48129643) then two spaces. Its label is never parsed.
+const ANTIGRAVITY_SPINNER_RE = /^\s*[\u2800-\u28ff] {2}\S/;
+// Lines agy draws between the spinner and the top rule: queued input
+// (`▸ <text>`, specimen working-queued-*) and a rotating tip (never a signal).
+const ANTIGRAVITY_QUEUED_INPUT_RE = /^\s*▸\s+(?!Thought for\b)\S/;
+const ANTIGRAVITY_TIP_RE = /^\s*└\s+Tip:/;
+// Footer busy hint `esc to cancel` @48882141: the working discriminator.
+const ANTIGRAVITY_BUSY_FOOTER_RE = /^\s*esc to cancel\b/;
+// `⚠ Approval Required` @49480436, `Do you want to proceed?` @49611135.
+const ANTIGRAVITY_APPROVAL_RE = /⚠\s*Approval Required|Do you want to proceed\?/;
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 // Claude's context-limit/auto-compact banner wording is not stable. A pane
 // sitting at one of these blockers must not become "working" merely because
@@ -644,6 +679,130 @@ function isCursorAgentScreen(text: string): boolean {
   return false;
 }
 
+function antigravityFooterLines(lines: string[]): string[] {
+  return lines
+    .filter((line) => line.trim() !== "")
+    .slice(-ANTIGRAVITY_FOOTER_SCAN_LINES);
+}
+
+/**
+ * Antigravity CLI chrome: its model footer at the bottom, or its version banner
+ * drawn before any transcript row with an agy composer (`>` under a `─` rule)
+ * below it. A banner quoted inside another harness's transcript is neither.
+ */
+export function isAntigravityScreen(text: string): boolean {
+  return antigravityFooterShowsModel(text) || hasLiveAntigravityBanner(text);
+}
+
+function hasLiveAntigravityBanner(text: string): boolean {
+  const lines = text.split("\n");
+  const bannerIndex = lines.findIndex((line) => ANTIGRAVITY_BANNER_RE.test(line));
+  if (bannerIndex < 0) return false;
+  if (lines.slice(0, bannerIndex).some((line) => ANY_TRANSCRIPT_ROW_RE.test(line))) {
+    return false;
+  }
+  const composerIndex = antigravityComposerIndex(lines);
+  return composerIndex > bannerIndex;
+}
+
+/**
+ * agy draws its banner and an empty `>` composer before the session finishes
+ * loading; the footer only gains `<model> · <effort>` once it has (specimen
+ * boot-loading-no-model-flash.txt vs boot-ready-flash.txt).
+ */
+export function antigravityFooterShowsModel(text: string): boolean {
+  return antigravityFooterLines(text.split("\n")).some((line) =>
+    ANTIGRAVITY_FOOTER_MODEL_RE.test(line),
+  );
+}
+
+function parseAntigravityModel(text: string): string | null {
+  const footerModel = antigravityFooterLines(text.split("\n"))
+    .map((line) => line.match(ANTIGRAVITY_FOOTER_MODEL_RE)?.[1])
+    .filter((model): model is string => model !== undefined)
+    .at(-1);
+  const display = footerModel ?? text.match(ANTIGRAVITY_BANNER_MODEL_RE)?.[1];
+  // "3.1 Pro" -> "gemini-3.1-pro", so the context-window table resolves it.
+  return display ? `gemini-${display.trim().toLowerCase().replace(/\s+/g, "-")}` : null;
+}
+
+function antigravityComposerIndex(lines: string[]): number {
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    if (
+      ANTIGRAVITY_COMPOSER_RE.test(lines[index] ?? "") &&
+      ANTIGRAVITY_RULE_RE.test(lines[index - 1] ?? "")
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Working per upstream-sources.md §C.2: the footer starts with `esc to cancel`,
+ * or a braille spinner line sits right above the composer's top rule (the
+ * footer's left slot shows `Press up to edit queued messages` instead while
+ * input is queued, specimen working-spinner-only-*). Background task rows and
+ * the `N task(s)` footer segment are NOT busy (§C.5), and neither are finished
+ * `▸ Thought for` / tool rows left in the transcript.
+ */
+export function antigravityScreenIsActive(text: string): boolean {
+  const lines = text.split("\n");
+  const composerIndex = antigravityComposerIndex(lines);
+  if (composerIndex < 0) return false;
+  if (
+    antigravityFooterLines(lines.slice(composerIndex + 1)).some((line) =>
+      ANTIGRAVITY_BUSY_FOOTER_RE.test(line),
+    )
+  ) {
+    return true;
+  }
+  for (let index = composerIndex - 2; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (
+      line.trim() === "" ||
+      ANTIGRAVITY_QUEUED_INPUT_RE.test(line) ||
+      ANTIGRAVITY_TIP_RE.test(line)
+    ) {
+      continue;
+    }
+    return ANTIGRAVITY_SPINNER_RE.test(line);
+  }
+  return false;
+}
+
+/**
+ * Ready for a new prompt per §C.1/§C.6: an EMPTY composer (`>` with the bottom
+ * rule directly under it; a draft renders on indented lines below a `>`), the
+ * session loaded (footer or banner shows the model; the banner and composer are
+ * drawn before that, specimen boot-loading-no-model-flash), not working, and no
+ * approval prompt.
+ */
+export function antigravityScreenIsReady(text: string): boolean {
+  const lines = text.split("\n");
+  const composerIndex = antigravityComposerIndex(lines);
+  if (composerIndex < 0) return false;
+  if (
+    !ANTIGRAVITY_EMPTY_COMPOSER_RE.test(lines[composerIndex] ?? "") ||
+    !ANTIGRAVITY_RULE_RE.test(lines[composerIndex + 1] ?? "")
+  ) {
+    return false;
+  }
+  if (
+    !antigravityFooterShowsModel(text) &&
+    !ANTIGRAVITY_BANNER_MODEL_RE.test(text)
+  ) {
+    return false;
+  }
+  // Only a dialog in the live input region counts: approval wording in the
+  // transcript above the composer's top rule is reply text (review F1 on #803).
+  const liveRegion = lines.slice(composerIndex - 1).join("\n");
+  return (
+    !ANTIGRAVITY_APPROVAL_RE.test(liveRegion) &&
+    !antigravityScreenIsActive(text)
+  );
+}
+
 function detectAgentType(text: string): ParsedScreenAgentType {
   // Transcript content above the last composer can quote another harness's
   // footer or spinner. Only footers below that composer establish live chrome;
@@ -685,6 +844,9 @@ function detectAgentType(text: string): ParsedScreenAgentType {
     }
   }
   if (chrome) return chrome;
+  // Antigravity transcripts are full of `●` tool rows and quoted file text, so
+  // its own chrome must win before the loose Claude markers below.
+  if (isAntigravityScreen(text)) return "gemini";
   const claudeMarkers = [
     "CLAUDE_COUNTER",
     "bypass permissions on",
@@ -1501,7 +1663,8 @@ export function hasVisibleAgentProgress(
   return (
     agentType === "gemini" &&
     ((/Gemini CLI/i.test(normalized) && /Thinking/i.test(normalized)) ||
-      GEMINI_WORKING_RE.test(normalized))
+      GEMINI_WORKING_RE.test(normalized) ||
+      antigravityScreenIsActive(normalized))
   );
 }
 
@@ -1707,7 +1870,7 @@ function hasAgentScreenEvidence(
         text,
       );
     case "gemini":
-      return /Gemini CLI|gemini-[0-9]/i.test(text);
+      return /Gemini CLI|gemini-[0-9]/i.test(text) || isAntigravityScreen(text);
     case "cursor":
       return CURSOR_AGENT_BANNER_RE.test(text) || CURSOR_MODE_BAR_RE.test(text);
     default:
@@ -1781,7 +1944,7 @@ function parseModelAndCost(
 
   if (agentType === "gemini") {
     return {
-      model: text.match(GEMINI_MODEL_RE)?.[1] ?? null,
+      model: parseAntigravityModel(text) ?? text.match(GEMINI_MODEL_RE)?.[1] ?? null,
       cost: null,
     };
   }

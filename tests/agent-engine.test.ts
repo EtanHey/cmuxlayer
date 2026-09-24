@@ -8360,6 +8360,45 @@ Session ID: ${sessionId}`,
         expect(r.matched).toBe(true);
       } finally { vi.useRealTimers(); }
     });
+    const antigravityFixture = (name: string) =>
+      readFileSync(new URL(`./fixtures/gemini-antigravity/${name}`, import.meta.url), "utf8");
+    it("#799 booting Antigravity pane at its idle composer: boot sweep reaches ready", async () => {
+      vi.useFakeTimers();
+      try {
+        const t0 = new Date("2026-09-24T01:00:00.000Z");
+        vi.setSystemTime(t0);
+        stateMgr.writeState(makeRecord({ agent_id: "ag-boot", state: "booting", surface_id: "surface:ag-boot", cli: "gemini", role: "worker", updated_at: t0.toISOString() }));
+        liveSurfaces = [makeSurface("surface:ag-boot")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:ag-boot", text: antigravityFixture("idle-finished-reply-pro-high.txt"), lines: 80, scrollback_used: false });
+        await engine.getRegistry().reconstitute();
+        for (let i = 0; i < 3; i++) await engine.runSweep();
+        expect(engine.getAgentState("ag-boot")?.state).toBe("ready");
+      } finally { vi.useRealTimers(); }
+    });
+    it("#799 Antigravity pane mid-tool-call (spinner, no esc footer): wait_for idle does not match", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(makeRecord({ agent_id: "ag-work", state: "working", surface_id: "surface:ag-work", cli: "gemini", role: "worker" }));
+        liveSurfaces = [makeSurface("surface:ag-work")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:ag-work", text: antigravityFixture("working-spinner-only-pro-low.txt"), lines: 80, scrollback_used: false });
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("ag-work", "idle", 8_000);
+        await vi.advanceTimersByTimeAsync(9_500);
+        expect((await pending).matched).toBe(false);
+      } finally { vi.useRealTimers(); }
+    });
+    it("#799 Antigravity pane after a finished reply: wait_for idle matches", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(makeRecord({ agent_id: "ag-done", state: "working", surface_id: "surface:ag-done", cli: "gemini", role: "worker" }));
+        liveSurfaces = [makeSurface("surface:ag-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:ag-done", text: antigravityFixture("idle-finished-reply-pro-high.txt"), lines: 80, scrollback_used: false });
+        await engine.getRegistry().reconstitute();
+        const pending = engine.waitFor("ag-done", "idle", 8_000);
+        await vi.advanceTimersByTimeAsync(9_500);
+        expect((await pending).matched).toBe(true);
+      } finally { vi.useRealTimers(); }
+    });
     for (const cli of ["claude", "gemini"] as const) {
       it(`PROBE-J booting ${cli} already working on its boot prompt: sweep outcome`, async () => {
         vi.useFakeTimers();
