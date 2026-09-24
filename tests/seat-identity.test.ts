@@ -113,13 +113,24 @@ describe("seat identity uniqueness", () => {
 describe("seat registry source", () => {
   it("lets the caller point the seat registry away from the machine's ~/.golems", () => {
     const pinned = join(tmpdir(), "cmuxlayer-seat-registry-fixture.yaml");
+    // Pin the fleet config explicitly: an env without CMUXLAYER_FLEET_CONFIG
+    // falls back to the host's ~/.config/cmuxlayer/fleet.json, which is how
+    // this assertion once passed on a fleet Mac and failed on CI.
+    const genericFleet = join(__dirname, "fixtures", "fleet", "generic-fleet.json");
+    const golemsFleet = join(__dirname, "fixtures", "fleet", "golems-fleet.json");
 
     expect(
-      defaultSeatRegistryPath({ CMUXLAYER_SEAT_REGISTRY_PATH: pinned }),
+      defaultSeatRegistryPath({
+        CMUXLAYER_SEAT_REGISTRY_PATH: pinned,
+        CMUXLAYER_FLEET_CONFIG: golemsFleet,
+      }),
     ).toBe(pinned);
-    expect(defaultSeatRegistryPath({})).toBe(
-      join(homedir(), ".golems", "config.yaml"),
-    );
+    expect(
+      defaultSeatRegistryPath({ CMUXLAYER_FLEET_CONFIG: genericFleet }),
+    ).toBe(join(homedir(), ".config", "cmuxlayer", "seats.yaml"));
+    expect(
+      defaultSeatRegistryPath({ CMUXLAYER_FLEET_CONFIG: golemsFleet }),
+    ).toBe(join(homedir(), ".golems", "config.yaml"));
   });
 
   // The suite once asserted `brainClaude` — a seat that exists only in the
