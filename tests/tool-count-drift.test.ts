@@ -28,9 +28,6 @@ const DOCUMENTED_COUNT_PATTERN =
 // Known blind spot: "N registered" phrasing is intentionally not matched.
 
 const EXCLUDED_DIRECTORY_PARTS = new Set(["site", "out", ".next"]);
-const EXCLUDED_PATHS = new Set([
-  "docs/design/track-4-send-to-wait-for-facade.md",
-]);
 
 type Document = { path: string; content: string };
 type CountClaim = {
@@ -82,8 +79,7 @@ function documentedFiles(root = REPO_ROOT): Document[] {
     .map((absolutePath) => ({
       path: relative(root, absolutePath).split(sep).join("/"),
       content: readFileSync(absolutePath, "utf8"),
-    }))
-    .filter(({ path }) => !EXCLUDED_PATHS.has(path));
+    }));
 }
 
 function claimsIn(documents: Document[]): CountClaim[] {
