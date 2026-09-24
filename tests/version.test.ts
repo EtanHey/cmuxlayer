@@ -18,6 +18,12 @@ import {
   resolveInstalledEntryScript,
 } from "../src/version.js";
 
+describe("release version", () => {
+  it("reports v0.4.86 from package metadata", () => {
+    expect(readVersion()).toBe("0.4.86");
+  });
+});
+
 describe("resolveInstalledDaemonScript", () => {
   it("falls back to the unresolved daemon path when realpath is unavailable", () => {
     expect(
