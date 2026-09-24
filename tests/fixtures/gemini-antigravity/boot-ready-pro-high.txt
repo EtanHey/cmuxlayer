@@ -1,0 +1,18 @@
+Last login: Thu Sep 24 19:12:27 on ttys037
+etanheyman ~  $ cmux_nf_s=$(ulimit -Sn); cmux_nf_h=$(ulimit -Hn); [ "$cmux_nf_s" = unlimited ] || [ "$cmux_nf_s" -ge 65536 ] || { [ "$cmux_nf_h" = unlimited ] && cmux_nf_h=65536; [ "$cmux_nf_h" -gt 65536 ] && cmux_nf_h=65536; ulimit -Sn "$cmux_nf_h"; }; cmuxlayerGemini -s
+[4] 71771
+cmuxlayerGemini
+
+[4]  + done       ( /Applications/iTerm.app/Contents/Resources/it2profile -s Golems 2> /dev/nul)
+
+
+      ▄▀▀▄        Antigravity CLI 1.2.10
+     ▀▀▀▀▀▀       user@example.com
+    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)
+   ▄▀▀    ▀▀▄     ~/Gits/cmuxlayer
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                        Gemini 3.1 Pro · high

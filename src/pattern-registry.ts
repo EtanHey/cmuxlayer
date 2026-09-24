@@ -5,7 +5,12 @@
  */
 
 import type { CliType } from "./agent-types.js";
-import { parseScreen } from "./screen-parser.js";
+import {
+  antigravityScreenIsActive,
+  antigravityScreenIsReady,
+  isAntigravityScreen,
+  parseScreen,
+} from "./screen-parser.js";
 import type { ParsedScreenResult } from "./types.js";
 
 export interface ReadyPattern {
@@ -113,11 +118,48 @@ export function matchReadyPattern(
         (!CODEX_ACTIVE_RE.test(screenContent) &&
           !CODEX_UNSTABLE_LAUNCH_RE.test(screenContent))) &&
       (cli !== "gemini" ||
-        !hasGeminiActiveMarkerAfterLastPrompt(screenContent)) &&
+        (isAntigravityScreen(screenContent)
+          ? antigravityScreenIsReady(screenContent)
+          : !hasGeminiActiveMarkerAfterLastPrompt(screenContent))) &&
       (cli !== "cursor" || !CURSOR_ACTIVE_RE.test(screenContent)),
     confidence: entry.confidence,
     consecutive: entry.consecutive,
   };
+}
+
+export type GeminiScreenSignature =
+  | "gemini_cli"
+  | "antigravity"
+  | "unrecognized_screen";
+
+const GEMINI_CLI_IDENTITY_RE = /(?:^|\n)\s*(?:Gemini CLI|gemini>)\s*$/im;
+
+/**
+ * Drift check for `cli:"gemini"` panes: a screen carrying neither the old
+ * gemini CLI's nor Antigravity's signature is a new specimen to capture, not
+ * an idle agent.
+ */
+export function geminiScreenSignature(
+  screenText: string,
+): GeminiScreenSignature {
+  if (isAntigravityScreen(screenText)) return "antigravity";
+  if (
+    GEMINI_CLI_IDENTITY_RE.test(screenText) ||
+    parseScreen(screenText).agent_type === "gemini"
+  ) {
+    return "gemini_cli";
+  }
+  return "unrecognized_screen";
+}
+
+/** Suffix for a boot-readiness timeout on a gemini pane nobody recognizes. */
+export function bootReadinessDriftNote(
+  cli: CliType | undefined,
+  lastScreenText: string,
+): string {
+  if (cli !== "gemini" || lastScreenText.trim() === "") return "";
+  if (geminiScreenSignature(lastScreenText) !== "unrecognized_screen") return "";
+  return " (gemini screen signature: unrecognized_screen; capture it as a new specimen)";
 }
 
 function hasGeminiActiveMarkerAfterLastPrompt(screenContent: string): boolean {
@@ -170,7 +212,10 @@ export function screenHasActiveAgentMarker(
     case "cursor":
       return CURSOR_ACTIVE_RE.test(screenText);
     case "gemini":
-      return GEMINI_ACTIVE_RE.test(screenText);
+      return (
+        GEMINI_ACTIVE_RE.test(screenText) ||
+        antigravityScreenIsActive(screenText)
+      );
     case "kiro":
       return false;
   }
@@ -201,7 +246,7 @@ export function screenHasReadyAgentIdentity(
     case "kiro":
       return /(?:^|\n)\s*kiro>\s*$/im.test(screenText);
     case "gemini":
-      return /(?:^|\n)\s*(?:Gemini CLI|gemini>)\s*$/im.test(screenText);
+      return geminiScreenSignature(screenText) !== "unrecognized_screen";
   }
 }
 

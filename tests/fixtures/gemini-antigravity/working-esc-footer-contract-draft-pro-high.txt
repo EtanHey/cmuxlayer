@@ -1,0 +1,25 @@
+Last login: Thu Sep 24 19:12:27 on ttys037
+etanheyman ~  $ cmux_nf_s=$(ulimit -Sn); cmux_nf_h=$(ulimit -Hn); [ "$cmux_nf_s" = unlimited ] || [ "$cmux_nf_s" -ge 65536 ] || { [ "$cmux_nf_h" = unlimited ] && cmux_nf_h=65536; [ "$cmux_nf_h" -gt 65536 ] && cmux_nf_h=65536; ulimit -Sn "$cmux_nf_h"; }; cmuxlayerGemini -s
+[4] 71771
+cmuxlayerGemini
+
+[4]  + done       ( /Applications/iTerm.app/Contents/Resources/it2profile -s Golems 2> /dev/nul)
+
+
+      ▄▀▀▄        Antigravity CLI 1.2.10
+     ▀▀▀▀▀▀       user@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 3.1 Pro (High)
+   ▄▀▀    ▀▀▄     ~/Gits/cmuxlayer
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Read and follow
+  ~/Gits/cmuxlayer/.worktrees/g1-antigravity/results/live-agent-harness/gem
+  ini-2026-09-24T16-13-17-768Z/goals/cursor-01.md
+⢿  Generating...
+────────────────────────────────────────────────────────────────────────────────────────────
+>
+  cmuxlayer contract for cmuxlayerGemini-8b0398fe: Read and follow
+  ~/.cmux/agents/cmuxlayerGemini-8b0398fe/contract.md
+────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                          Gemini 3.1 Pro · high
