@@ -2847,6 +2847,7 @@ export class AgentEngine {
   ): Promise<{
     agent: AgentRecord;
     source?: RefreshedTargetStateEvidenceSource;
+    observedActive?: boolean;
   }> {
     if (targetState === "ready" || targetState === "idle") {
       return this.refreshInteractiveTargetStateEvidence(
@@ -2888,6 +2889,7 @@ export class AgentEngine {
   ): Promise<{
     agent: AgentRecord;
     source?: RefreshedTargetStateEvidenceSource;
+    observedActive?: boolean;
   }> {
     const inPreTargetState = (state: AgentState): boolean =>
       targetState === "ready" ? state === "booting" : state === "working";
@@ -2909,6 +2911,12 @@ export class AgentEngine {
         (parsed.status === "working" ||
           parsed.status === "thinking" ||
           parsed.control_state === "busy");
+      if (activeForWait) {
+        // The direct read is newer than the forced probe's resting memo.
+        this.freshLiveStates.delete(agent.agent_id);
+        waitForReadyPatternMatches.delete(agent.agent_id);
+        return { agent, observedActive: true };
+      }
       const hasTargetEvidence =
         (evidence.ready && !activeForWait) ||
         (targetState === "ready" && evidence.activeCodex);
@@ -10440,6 +10448,7 @@ export class AgentEngine {
               ? this.terminationStateOf(current, timeoutLive)
               : "error";
           let refreshedSource: RefreshedTargetStateEvidenceSource | undefined;
+          let refreshedActive = false;
           const finalReadyNeedsAnotherConsecutiveObservation =
             current !== null &&
             targetState === "ready" &&
@@ -10457,6 +10466,11 @@ export class AgentEngine {
             );
             current = refreshed.agent;
             refreshedSource = refreshed.source;
+            refreshedActive = refreshed.observedActive === true;
+            if (refreshed.observedActive) {
+              restingObservations = 0;
+              needsSecondRestingRead = false;
+            }
             timeoutState =
               refreshed.source === "screen"
                 ? current.state
@@ -10489,6 +10503,7 @@ export class AgentEngine {
           if (
             current &&
             timeoutEvidence &&
+            !refreshedActive &&
             (!INTERACTIVE_AGENT_STATES.has(targetState) ||
               (restingObservations >= 2 &&
                 timeoutLive?.source === "screen" &&
@@ -10574,6 +10589,10 @@ export class AgentEngine {
               this.terminationStateOf(current, this.liveStateOf(current)),
             );
         current = refreshed.agent;
+        if (refreshed.observedActive) {
+          restingObservations = 0;
+          needsSecondRestingRead = false;
+        }
         if (waitForReadyPatternMatches.has(agentId)) {
           restingObservations = Math.max(restingObservations, 1);
           needsSecondRestingRead = true;
@@ -10594,6 +10613,7 @@ export class AgentEngine {
         );
         if (
           evidenceSource &&
+          !refreshed.observedActive &&
           (!INTERACTIVE_AGENT_STATES.has(targetState) ||
             forcedLive?.source !== "screen" ||
             (restingObservations >= 2 && !isLiveActive(forcedLive)))
