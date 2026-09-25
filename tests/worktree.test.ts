@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -563,6 +564,41 @@ describe("worktree helpers", () => {
       expect(lstatSync(link, { throwIfNoEntry: false })).toBeUndefined();
       expect(existsSync(join(sibling, "keep-me"))).toBe(true);
     });
+    it("reports failed instead of throwing when the stale link cannot be unlinked", async () => {
+      const repoRoot = join(TEST_ROOT, "repo");
+      const sibling = join(repoRoot, "node_modules");
+      mkdirSync(join(sibling, "keep-me"), { recursive: true });
+      const worktreePath = join(repoRoot, ".worktrees", "deps-readonly");
+      mkdirSync(worktreePath, { recursive: true });
+      writeFileSync(join(worktreePath, "bun.lock"), "{}\n");
+      const link = join(worktreePath, "node_modules");
+      symlinkSync(sibling, link, "dir");
+      const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) =>
+        args.includes("list")
+          ? { stdout: worktreeListOutput([repoRoot, worktreePath]), stderr: "" }
+          : { stdout: "true\n", stderr: "" });
+      const bootstrapExec = vi.fn();
+      // A read-only checkout: the link's directory refuses the unlink (EACCES).
+      chmodSync(worktreePath, 0o555);
+      try {
+        const result = await prepareWorktree({
+          repo: "cmuxlayer",
+          repoRoot,
+          homeGitsDir: TEST_ROOT,
+          worktree: { name: "deps-readonly", reuse: true },
+          exec,
+          bootstrapScript: null,
+          bootstrapExec,
+        });
+
+        expect(result.node_modules_bootstrapped).toBe("failed");
+        expect(result.node_modules_bootstrap_error).toMatch(/EACCES|EPERM/);
+        expect(bootstrapExec).not.toHaveBeenCalled();
+        expect(existsSync(join(sibling, "keep-me"))).toBe(true);
+      } finally {
+        chmodSync(worktreePath, 0o755);
+      }
+    });
   });
 
   describe("runBootstrap (#807)", () => {
@@ -572,16 +608,16 @@ describe("worktree helpers", () => {
 
     it("kills the whole process group on timeout, not just the script", async () => {
       const pidFile = join(TEST_ROOT, "grandchild.pid");
-      const script = join(TEST_ROOT, "slow-bootstrap.sh");
-      writeFileSync(
-        script,
-        `#!/bin/sh\nsleep 30 &\necho $! > "${pidFile}"\nwait\n`,
-        { mode: 0o755 },
-      );
-
-      await expect(runBootstrap(script, [], 500)).rejects.toThrow(
-        "timed out after 500 ms",
-      );
+      // /bin/sh -c, not a freshly written script: macOS can take >500 ms to
+      // scan a new executable on first exec, and a kill landing before the
+      // pid is written made this test flake (w40, #857).
+      await expect(
+        runBootstrap(
+          "/bin/sh",
+          ["-c", `sleep 30 & echo $! > "${pidFile}"; wait`],
+          2_000,
+        ),
+      ).rejects.toThrow("timed out after 2000 ms");
 
       const grandchild = Number(readFileSync(pidFile, "utf8").trim());
       expect(grandchild).toBeGreaterThan(0);
@@ -594,7 +630,7 @@ describe("worktree helpers", () => {
         }
       };
       await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 2_000 });
-    });
+    }, 10_000);
 
     it("rejects with the exit code and stderr when the command fails", async () => {
       const script = join(TEST_ROOT, "failing-bootstrap.sh");
