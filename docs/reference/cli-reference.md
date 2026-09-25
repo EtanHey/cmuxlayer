@@ -215,9 +215,9 @@ Kiro has no screen parser: only the ready pattern above, and it is never reporte
   cmuxlayer moves the selection down to "Skip until next version", re-reads the screen, and
   presses Return (`src/server.ts:2928-2966`, `:7817-7858`).
 - **During monitoring,** the sweep classifies a Codex update menu as `codex_update_menu` and a
-  model chooser as `model_menu` (`src/screen-parser.ts:1607-1635`). It only resolves them (with
-  Escape) when `CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE=1`; otherwise the agent is escalated
-  (`src/agent-engine.ts:1976-1977`, `:5320-5339`).
+  model chooser as `model_menu` (`src/screen-parser.ts:1607-1635`), and always escalates it: the
+  agent is marked `blocked_on_prompt` and no key is sent (`maybeEscalateLiveHalt` in
+  `src/engine/halt.ts`).
 - **Permission prompts** are always escalated: the agent is marked `blocked_on_prompt` and no key
   is sent (`src/screen-parser.ts:1710-1711`, `src/agent-engine.ts:5394-5397`).
 - **Folder-trust prompts:** cmuxlayer has no handler for them (no trust-prompt pattern in `src/`).
