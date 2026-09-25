@@ -16,7 +16,6 @@ Start with the [README](../README.md) for install and the public tool list.
 - [Registry topology contract](reference/topology-contract.md)
 - [Harness JSONL field map](reference/harness-jsonl-field-map.md): where token, context and model fields live in each CLI's session log.
 - [Thin-core tool cut](reference/thin-core-tool-cut.md): why the public surface is 10 tools.
-- [Claude channels](reference/claude-channels.md): the one-way `--channels` lifecycle notifications.
 - [Inbox dispatch](reference/inbox.md): the file-backed write channel and its wake transport.
 
 ## Testing

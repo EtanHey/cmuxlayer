@@ -670,7 +670,6 @@ export class CmuxLayerDaemon {
           client,
           stateDir: this.opts.stateDir,
           skipAgentLifecycle: this.opts.skipAgentLifecycle,
-          enableClaudeChannels: this.opts.enableClaudeChannels,
           spawnPreflight: this.opts.spawnPreflight,
           disableSpawnPreflight: this.opts.disableSpawnPreflight,
           selfRegistrationSessionResolver:
