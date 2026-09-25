@@ -39,7 +39,11 @@ export function atomicWriteFileSync(
     if (opts.mode !== undefined) chmodSync(tmp, opts.mode);
     renameSync(tmp, path);
   } catch (error) {
-    rmSync(tmp, { force: true });
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Cleanup is best-effort; never let it replace the write's own error.
+    }
     throw error;
   }
 }
@@ -57,7 +61,9 @@ export async function atomicWriteFile(
     if (opts.mode !== undefined) await chmod(tmp, opts.mode);
     await rename(tmp, path);
   } catch (error) {
-    await rm(tmp, { force: true });
+    await rm(tmp, { force: true }).catch(() => {
+      // Cleanup is best-effort; never let it replace the write's own error.
+    });
     throw error;
   }
 }
