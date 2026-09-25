@@ -1161,7 +1161,9 @@ export function registerListAgentsTool(
                 }
                 throw error;
               }
-              if (engine.lifecycleLockRevision() === revision + 1) {
+              // Our own reacquire is observeOnly, so any advance is a holder
+              // that may have changed what the unlocked scan observed.
+              if (engine.lifecycleLockRevision() === revision) {
                 discovered = observed;
                 break;
               }
@@ -1215,7 +1217,9 @@ export function registerListAgentsTool(
             );
             return { merged: scoped, discovered, observedAtMs };
           },
-          { label: "list-agents" },
+          // Discovery reads cmux, not the registry: another list_agents
+          // holder cannot stale this scan, so it must not invalidate it (#892).
+          { label: "list-agents", observeOnly: true },
         );
         invalidateSurfaceTopologyCallScope(client as object);
         const reconciledTopology = await collectSurfaceTopology();
