@@ -33,6 +33,25 @@ export const CANONICAL_OPERATIONS = [
   "read_screen_10_parallel",
 ];
 export const BENCHMARK_HISTORY_LIMIT = 50;
+
+// AIDEV-NOTE (#791): the two warm tail rows sample twice the canonical 8x12
+// workload. Their p95 is then the ~10th-largest of 192 samples instead of the
+// ~5th of 96, so an isolated burst of up to ~9 slow samples in one run no longer
+// flips the row, while a shift on every sample still does (tests pin both).
+export const TAIL_ROW_SAMPLE_MULTIPLIER = Object.freeze({
+  send_to_agent_warm: 2,
+  list_agents: 2,
+});
+
+/** Samples one run of `operation` must carry under the canonical replay. */
+export function canonicalSamplesPerRun(
+  operation,
+  clients = CANONICAL_CLIENTS,
+  rounds = CANONICAL_ROUNDS,
+) {
+  if (operation.endsWith("_10_parallel")) return rounds;
+  return clients * rounds * (TAIL_ROW_SAMPLE_MULTIPLIER[operation] ?? 1);
+}
 const REQUIRED_REGRESSION_RATIO = 1.25;
 // performance.now() and setTimeout(1) can differ slightly at sub-ms resolution.
 // An early fire never creates overrun; a fire more than 2ms early is untrusted.
@@ -149,9 +168,7 @@ export function validateBaseline(baseline) {
   for (const operation of baseline.replay.operations) {
     const metadata = baseline.replay?.row_metadata?.[operation];
     const stress = operation.endsWith("_10_parallel");
-    const expectedSamples = stress
-      ? CANONICAL_ROUNDS
-      : CANONICAL_CLIENTS * CANONICAL_ROUNDS;
+    const expectedSamples = canonicalSamplesPerRun(operation);
     if (
       !metadata ||
       metadata.sampling !== "sampled" ||

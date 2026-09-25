@@ -10,6 +10,27 @@ For `first_send_after_spawn` and `send_to_agent_warm`, each sampled send starts 
 
 Each lifecycle measures `first_send_after_spawn` while a daemon sweep is held on the lifecycle lock. Then it releases the hold and waits for the sweep to report `complete` before measuring `send_to_agent_warm`. The daemon writes `complete` only after the released sweep body (`runSweepOnce`) has finished, not when the hold is released. The warm send therefore no longer runs inside that sweep's body. The sweep's post-lock delivery drain and verification can still run briefly alongside it, and so can a later periodic sweep. Before #791, `complete` was written the moment the hold was released. As a result, every warm send in 35 hosted runs (3,360 samples) started 3-5 ms into a live sweep. When that sweep's reconcile pass stalled the daemon event loop for 150 ms or more, 29 of 31 overlapping sends were slow. Across 78 hosted runs, that alone turned `send_to_agent_warm` p95 RED in 7 of them while p50 stayed flat. Sweep contention is budgeted by `spawn_close_during_sweep` and the held first send. The warm row keeps its committed ceiling and margin rule.
 
+## Tail rows sample twice as much
+
+`send_to_agent_warm` and `list_agents` sample 192 calls per run (twice the
+canonical 8 × 12), and every other row keeps 96. Their p95 is then about the
+10th-largest sample instead of the 5th, so an isolated burst of up to about nine
+slow calls in one run no longer flips the row. A regression that shifts every
+call still fails: the tests pin both a +60 ms shift on all 192 warm sends and the
+#803 burst specimen (#791).
+
+Why: across 40 hosted runs, the warm-send spikes were isolated samples at random
+positions, not a warm-up round. Their receipt phase timings were normal: no
+lifecycle-lock wait, event-loop delay max about 1–2 ms, and a quiet paired
+control. The extra 90–175 ms happened before the delivery `route` phase started
+(#852 tracks attributing it). With 96 samples, a run that happened to catch five
+or more of them went red.
+
+`list_agents`'s `lock_hold_ms` is p95 of the per-call elapsed time, not its
+maximum. With eight concurrent callers queuing on the lifecycle lock, the
+maximum was one client's worst wait, including queueing, rather than the scan's
+lock occupancy.
+
 ## Refresh after a legitimate speedup
 
 Dispatch the `CI` workflow on the commit whose performance should become the new floor:
