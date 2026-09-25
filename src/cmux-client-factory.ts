@@ -20,6 +20,7 @@ import {
   wrapCliWithSelfHeal,
   wrapSocketWithSelfHeal,
 } from "./cmux-transport-self-heal.js";
+import { sleep as defaultSleep } from "./util/sleep.js";
 
 export interface CreateCmuxClientOptions extends SocketProbeOptions {
   /** CLI exec function (for testing) */
@@ -69,10 +70,6 @@ async function probeUsableSocketWithRetry(
     }
   }
   return lastResult;
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function instancePin(

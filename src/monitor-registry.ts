@@ -2,10 +2,9 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  renameSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
+import { atomicWriteFileSync } from "./util/atomic-write.js";
 import { loadFleetConfig } from "./fleet-config.js";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -234,14 +233,11 @@ function readRawRegistry(path: string): {
 }
 
 function writeRawRegistry(path: string, monitors: readonly unknown[]): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(
-    tmpPath,
+  atomicWriteFileSync(
+    path,
     `${JSON.stringify({ version: STATE_VERSION, monitors }, null, 2)}\n`,
-    "utf8",
+    { mkdir: true },
   );
-  renameSync(tmpPath, path);
 }
 
 function withRegistryWriteLock<T>(path: string, fn: () => T): T {

@@ -5,16 +5,10 @@
  * through DeliveryQueueDeps.
  */
 
+import { atomicWriteFileSync } from "../util/atomic-write.js";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentRegistry } from "../agent-registry.js";
 import type { AgentRecord, DeliveryEventType } from "../agent-types.js";
 import {
@@ -212,18 +206,11 @@ export class DeliveryQueue {
   }
 
   private persistDeliveryReceipts(): void {
-    mkdirSync(dirname(this.deliveryReceiptsPath), { recursive: true });
-    const tempPath = `${this.deliveryReceiptsPath}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(
-        tempPath,
-        `${JSON.stringify([...this.deliveryReceipts.values()], null, 2)}\n`,
-        "utf8",
-      );
-      renameSync(tempPath, this.deliveryReceiptsPath);
-    } finally {
-      if (existsSync(tempPath)) unlinkSync(tempPath);
-    }
+    atomicWriteFileSync(
+      this.deliveryReceiptsPath,
+      `${JSON.stringify([...this.deliveryReceipts.values()], null, 2)}\n`,
+      { mkdir: true },
+    );
   }
 
   queueDelivery(input: {

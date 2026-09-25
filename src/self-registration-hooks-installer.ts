@@ -3,13 +3,11 @@ import {
   chmod,
   copyFile,
   lstat,
-  mkdir,
   readFile,
   realpath,
-  rename,
   stat,
-  writeFile,
 } from "node:fs/promises";
+import { atomicWriteFile } from "./util/atomic-write.js";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,11 +158,7 @@ async function writeChangedFile(
   } else if (writeMode === undefined) {
     writeMode = defaultMode;
   }
-  await mkdir(dirname(writePath), { recursive: true });
-  const temporary = `${writePath}.tmp-${process.pid}`;
-  await writeFile(temporary, content, { encoding: "utf8", mode: writeMode });
-  if (writeMode !== undefined) await chmod(temporary, writeMode);
-  await rename(temporary, writePath);
+  await atomicWriteFile(writePath, content, { mkdir: true, mode: writeMode });
   if (writeMode !== undefined) await chmod(writePath, writeMode);
   result.changed.push(path);
 }

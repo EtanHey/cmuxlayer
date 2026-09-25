@@ -54,6 +54,7 @@ import type {
   ControlMode,
 } from "./types.js";
 import { defaultRepoCheckoutPath } from "./repo-root-fallback.js";
+import { sleep as delay } from "./util/sleep.js";
 
 const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
@@ -153,10 +154,6 @@ function chunkTerminalInput(text: string, chunkSize: number): string[] {
   }
 
   return chunks;
-}
-
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function deriveRepoFromCwd(cwd: string): string {

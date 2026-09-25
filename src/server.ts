@@ -357,6 +357,7 @@ import {
   normalizeSpawnAxes,
   BroadcastArgsSchema,
 } from "./mcp/schemas.js";
+import { sleep as delay } from "./util/sleep.js";
 
 // Public surface kept stable: these moved to ./mcp/schemas.ts (CX-2 S2).
 export {
@@ -2457,10 +2458,6 @@ function requiredBootReadyObservations(
     return registryRequirement;
   }
   return Math.max(2, registryRequirement);
-}
-
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isRetryableDeliveryError(error: unknown): boolean {

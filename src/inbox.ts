@@ -20,7 +20,7 @@
 //
 // send_input is KEPT as the fallback path — this channel is additive (belt-and-suspenders) until
 // proven in production.
-import { randomUUID } from "node:crypto";
+import { atomicWriteFileSync } from "./util/atomic-write.js";
 import { execFile } from "node:child_process";
 import {
   appendFileSync,
@@ -28,10 +28,8 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -503,7 +501,6 @@ export function writeInboxCursor(
   const path = inboxCursorPath(agentId, opts);
   const lockPath = `${path}.lock`;
   let lockAcquired = false;
-  let tempPath: string | null = null;
   try {
     try {
       mkdirSync(lockPath);
@@ -535,13 +532,9 @@ export function writeInboxCursor(
         );
       }
     }
-    tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(tempPath, `${messageId}\n`, "utf8");
-    renameSync(tempPath, path);
-    tempPath = null;
+    atomicWriteFileSync(path, `${messageId}\n`);
     return messageId;
   } finally {
-    if (tempPath) rmSync(tempPath, { force: true });
     if (lockAcquired) rmSync(lockPath, { recursive: true, force: true });
   }
 }
