@@ -61,10 +61,11 @@ describe("rename_tab persistence — socket V1 command format", () => {
       .fn()
       .mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["rename_tab"];
+    // rename_tab is reached through update_surface since CX-3 S6.
+    const tool = (server as any)._registeredTools["update_surface"];
 
     await tool.handler(
-      { surface: "surface:1", title: "Agent Build" },
+      { action: "rename", surface: "surface:1", title: "Agent Build" },
       {} as any,
     );
 

@@ -199,13 +199,10 @@ async function loadInputDeliveryTestModule(): Promise<InputDeliveryTestModule> {
 const EXPECTED_TOOLS = [
   "list_surfaces",
   "control_health",
-  "delete_workspace",
-  "move_surface",
   "send_input",
   "send_command",
   "send_key",
   "read_screen",
-  "rename_tab",
   "update_surface",
   "close_surface",
 ] as const;
@@ -923,7 +920,7 @@ describe("input delivery batching helpers", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 11 low-level tools", () => {
+  it("registers all 8 low-level tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
@@ -3446,13 +3443,16 @@ describe("tool handler integration", () => {
       stderr: "",
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["move_surface"];
+    // move_surface is reached through update_surface (CX-3 S6), which adds
+    // its action to the move receipt.
+    const tool = (server as any)._registeredTools["update_surface"];
     const result = await tool.handler(
-      { surface: "surface:102", pane: "pane:1" },
+      { action: "move", surface: "surface:102", pane: "pane:1" },
       {} as any,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(Object.keys(data).sort()).toEqual([
+      "action",
       "ok",
       "pane",
       "retry_count",
@@ -5748,7 +5748,7 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const sendInput = registeredTools["send_input"];
     const sendKey = registeredTools["send_key"];
-    const renameTab = registeredTools["rename_tab"];
+    const updateSurface = registeredTools["update_surface"];
     const longText = [
       "abcdef".repeat(20),
       "ghijkl".repeat(20),
@@ -5776,8 +5776,8 @@ describe("tool handler integration", () => {
       keyResult.structuredContent ?? JSON.parse(keyResult.content[0].text);
     expect(keyParsed.error).toMatch(/delivery.*in progress/i);
 
-    const renameResult = await renameTab.handler(
-      { surface: "surface:1", title: "blocked" },
+    const renameResult = await updateSurface.handler(
+      { action: "rename", surface: "surface:1", title: "blocked" },
       {} as any,
     );
     expect(renameResult.isError).toBe(true);
@@ -8314,10 +8314,11 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["move_surface"];
+    const tool = registeredTools["update_surface"];
 
     const result = await tool.handler(
       {
+        action: "move",
         surface: "surface:3",
         pane: "pane:2",
         workspace: "workspace:1",
@@ -8374,10 +8375,11 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["move_surface"];
+    const tool = (server as any)._registeredTools["update_surface"];
 
     const result = await tool.handler(
       {
+        action: "move",
         surface: "surface:source",
         pane: "pane:dest",
         workspace: "workspace:dest",
@@ -9347,9 +9349,12 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["rename_tab"];
+    const tool = registeredTools["update_surface"];
 
-    await tool.handler({ surface: "surface:1", title: "New Title" }, {} as any);
+    await tool.handler(
+      { action: "rename", surface: "surface:1", title: "New Title" },
+      {} as any,
+    );
 
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",

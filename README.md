@@ -91,7 +91,7 @@ Tell your AI agent things like:
 - *"Read the screen of surface:2 and tell me if the build passed"*
 - *"Wait for all agents to finish, then read their output"*
 
-cmuxLayer retains 17 internal tool definitions; only 10 are registered and callable through MCP. The other 7 are not exposed through ToolSearch or any other MCP path. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+cmuxLayer retains 14 internal tool definitions; only 10 are registered and callable through MCP. The other 4 are not exposed through ToolSearch or any other MCP path. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent routing workflow
 

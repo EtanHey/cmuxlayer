@@ -2424,7 +2424,7 @@ describe("agent lifecycle tool registration", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(17);
+    expect(Object.keys(registeredTools)).toHaveLength(14);
   });
 
 });
@@ -5111,7 +5111,7 @@ describe("agent lifecycle tool handlers", () => {
       seatManifestNow: () => "2026-07-12T12:00:00.000Z",
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const rename = (server as any)._registeredTools["rename_tab"];
+    const rename = (server as any)._registeredTools["update_surface"];
     const spawnResult = await spawn.handler(
       { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
@@ -5122,7 +5122,11 @@ describe("agent lifecycle tool handlers", () => {
     manifests.length = 0;
 
     await rename.handler(
-      { surface: "surface:new", title: "cmuxlayerClaude [review-seat]" },
+      {
+        action: "rename",
+        surface: "surface:new",
+        title: "cmuxlayerClaude [review-seat]",
+      },
       {} as any,
     );
 
@@ -11690,11 +11694,16 @@ codex>
         },
       ]);
 
+      // Both reach their plain functions through update_surface (CX-3 S6).
       const args =
         toolName === "move_surface"
-          ? { surface: "surface:230", pane: "pane:destination" }
-          : { surface: "surface:230", title: "must not rename replacement" };
-      const result = await registeredTestTool(server, toolName).handler(
+          ? { action: "move", surface: "surface:230", pane: "pane:destination" }
+          : {
+              action: "rename",
+              surface: "surface:230",
+              title: "must not rename replacement",
+            };
+      const result = await registeredTestTool(server, "update_surface").handler(
         args,
         {} as any,
       );

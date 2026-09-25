@@ -39,12 +39,9 @@ describe("B1: ToolAnnotations on all tools", () => {
   const DESTRUCTIVE_TOOLS = ["close_surface", "stop_agent"];
 
   const MUTATING_TOOLS = [
-    "delete_workspace",
-    "move_surface",
     "send_input",
     "send_command",
     "send_key",
-    "rename_tab",
     "spawn_agent",
     "list_agents",
     "send_to",
@@ -68,7 +65,7 @@ describe("B1: ToolAnnotations on all tools", () => {
 
   it("all registered test-mode tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(17);
+    expect(toolNames.length).toBe(14);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,
