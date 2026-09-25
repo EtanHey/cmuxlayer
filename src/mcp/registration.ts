@@ -17,10 +17,12 @@ import type { DefaultToolPalette } from "../palette.js";
 import type { StateManager } from "../state-manager.js";
 import { runWithSurfaceTopologyCallScope } from "../surface-topology.js";
 import {
+  currentCliFallbackCount,
   currentCliFallbackSources,
   currentCliFallbackUsed,
   withTransportRetryTracking,
 } from "../transport-retry-context.js";
+import type { DeliveryRpcMethod } from "../delivery/receipts.js";
 import type { CmuxServerContext } from "./context.js";
 import {
   ANNOTATIONS,
@@ -73,6 +75,21 @@ export function engineForTests(server: unknown): AgentEngine | undefined {
   if (!server || typeof server !== "object") return undefined;
   const deps = (server as { [TOOL_DEPS]?: ToolDeps })[TOOL_DEPS];
   return deps?.engine ?? undefined;
+}
+
+/**
+ * An RPC method counts as the one that dispatched only when no CLI fallback
+ * happened during the dispatch and the transport is the socket.
+ */
+export function createSuccessfulDispatchRpcMethod(client: unknown) {
+  return (
+    method: DeliveryRpcMethod,
+    cliFallbackCountBeforeDispatch: number,
+  ): DeliveryRpcMethod | null =>
+    currentCliFallbackCount() === cliFallbackCountBeforeDispatch &&
+    getTransportHealth(client)?.mode === "socket"
+      ? method
+      : null;
 }
 
 export interface ToolRegistrationOptions {

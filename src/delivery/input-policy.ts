@@ -1,24 +1,15 @@
 /**
  * Input delivery policy: send/boot/launch timing constants, terminal input
  * chunking and UTF-8 batching, paste policy, and the inline/multiline/dense/
- * spawn-prompt/broadcast input guards. Moved verbatim from server.ts (CX-2 S4);
+ * spawn-prompt input guards. Moved verbatim from server.ts (CX-2 S4);
  * imports nothing from the server.
  */
 
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../agent-health-input.js";
 import type {
-  AgentRecord,
-  AgentRole,
   CliType,
 } from "../agent-types.js";
-import {
-  inferAgentRole,
-  inferRecordRoleOrNull,
-  isAgentRoleInferenceError,
-  launcherNameForCli,
-} from "../layout-policy.js";
 import { hasInlinePrompt } from "./composer-screen.js";
-import type { BroadcastRole } from "./receipts.js";
 
 export const SEND_INPUT_CHUNK_THRESHOLD = 500;
 
@@ -367,10 +358,7 @@ export function assertInteractiveMultilineInputAllowed(opts: {
   tool:
     | "send_input"
     | "send_to"
-    | "send_to_agent"
-    | "spawn_agent"
-    | "new_worktree_split"
-    | "spawn_in_workspace";
+    | "spawn_agent";
   arg?: "text" | "prompt";
   value: string | undefined;
   cli: CliType | undefined;
@@ -405,10 +393,7 @@ export function assertInlineInputAllowed(opts: {
     | "send_input"
     | "send_command"
     | "spawn_agent"
-    | "new_worktree_split"
-    | "spawn_in_workspace"
-    | "send_to"
-    | "send_to_agent";
+    | "send_to";
   arg: "text" | "command" | "prompt";
   value: string | undefined;
   allowLongInline?: boolean;
@@ -441,11 +426,7 @@ export function assertDenseInlineInputAllowed(opts: {
     | "send_input"
     | "send_command"
     | "spawn_agent"
-    | "new_worktree_split"
-    | "spawn_in_workspace"
-    | "send_to"
-    | "send_to_agent"
-    | "broadcast";
+    | "send_to";
   arg: "text" | "command" | "prompt";
   value: string | undefined;
   allowLongInline?: boolean;
@@ -465,7 +446,7 @@ export function assertDenseInlineInputAllowed(opts: {
 
   const argName = `${opts.tool}.${opts.arg}`;
   const overrideGuidance =
-    opts.tool === "broadcast" || opts.allowLongInlineSupported === false
+    opts.allowLongInlineSupported === false
       ? ""
       : " To deliberately send raw inline text, pass allow_long_inline:true.";
   throw new Error(
@@ -475,7 +456,7 @@ export function assertDenseInlineInputAllowed(opts: {
 }
 
 export function assertSpawnPromptInputAllowed(opts: {
-  tool: "spawn_agent" | "new_worktree_split" | "spawn_in_workspace";
+  tool: "spawn_agent";
   value: string | undefined;
   cli: CliType;
   allowLongInline?: boolean;
@@ -503,48 +484,6 @@ export function assertSpawnPromptInputAllowed(opts: {
     allowLongInline: opts.allowLongInline,
     allowLongInlineSupported: opts.allowLongInlineSupported,
   });
-}
-
-export function assertBroadcastInlineInputAllowed(text: string): void {
-  if (inlineByteLength(text) > SEND_INPUT_MAX_INLINE_CHARS) {
-    throw new Error(
-      `broadcast.text is ${inlineByteLength(text)} bytes (UTF-8), above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS} bytes. ` +
-        `Broadcasts are capped to one-line pointers: write the payload to a file and broadcast "Read and follow <path>" instead. ` +
-        `CMUXLAYER_MAX_INLINE_CHARS may be set to a byte count >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
-    );
-  }
-
-  assertDenseInlineInputAllowed({
-    tool: "broadcast",
-    arg: "text",
-    value: text,
-  });
-}
-
-export function broadcastRoleMatches(
-  requestedRole: BroadcastRole,
-  agentRole: AgentRole | null,
-): boolean {
-  if (requestedRole === "all") return true;
-  if (requestedRole === "workers") return agentRole === "worker";
-  return agentRole === "orchestrator";
-}
-
-export function inferBroadcastRecordRole(agent: AgentRecord): AgentRole | null {
-  try {
-    return inferAgentRole({
-      role: agent.role,
-      cli: agent.cli,
-      launcherName:
-        agent.launcher_name ?? launcherNameForCli(agent.repo, agent.cli),
-      title: agent.task_summary,
-    });
-  } catch (error) {
-    if (isAgentRoleInferenceError(error)) {
-      return inferRecordRoleOrNull(agent);
-    }
-    throw error;
-  }
 }
 
 export function assertBootPromptMode(

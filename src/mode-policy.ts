@@ -27,14 +27,8 @@ const MUTATING_TOOLS = new Set([
   "focus_surface",
   "close_surface",
   "spawn_agent",
-  "new_worktree_split",
-  "spawn_in_workspace",
   "stop_agent",
   "send_to",
-  "send_to_agent",
-  "supersede_agent_goal",
-  "interact",
-  "kill",
   "agent_engine",
 ]);
 

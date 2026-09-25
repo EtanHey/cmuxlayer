@@ -51,6 +51,7 @@ import {
 import { StateManager } from "../src/state-manager.js";
 import { isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
 import { engineForTests } from "../src/server.js";
+import { agentStateTool } from "./helpers/mcp-tool-harness.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -447,7 +448,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("persists the contract on the record, so the consumer reads what was issued", async () => {
     const parsed = await spawn();
-    const getState = server._registeredTools["get_agent_state"];
+    const getState = agentStateTool(server);
     const state = await getState.handler(
       { agent_id: parsed.agent_id },
       {} as never,
@@ -865,7 +866,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     }
   });
 
-  for (const route of ["stop_agent", "close_surface", "kill"] as const) {
+  for (const route of ["stop_agent", "close_surface"] as const) {
     it(`reaps the canonical inbox tail when ${route} receives an alias`, async () => {
       await server._registeredTools.list_agents.handler({}, {} as never);
       const engine = engineForTests(server);
@@ -893,11 +894,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
         const result = route === "stop_agent"
           ? await server._registeredTools.stop_agent.handler({ agent_id: alias, force: true }, {} as never)
-          : route === "close_surface"
-            ? await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: alias, force: true }, {} as never)
-            : await server._registeredTools.kill.handler({ target: alias, force: true }, {} as never);
+          : await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: alias, force: true }, {} as never);
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
-        if (route !== "kill") expect(result.structuredContent).toMatchObject({ tail_reaped: true });
+        expect(result.structuredContent).toMatchObject({ tail_reaped: true });
         await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
       } finally {
         if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
@@ -905,7 +904,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
   }
 
-  for (const route of ["stop_agent", "close_surface", "kill"] as const) {
+  for (const route of ["stop_agent", "close_surface"] as const) {
     it(`reaps a dead agent's tail after ${route} reports a stop postcondition failure`, async () => {
       await server._registeredTools.list_agents.handler({}, {} as never);
       const engine = engineForTests(server);
@@ -936,11 +935,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
         const result = route === "stop_agent"
           ? await server._registeredTools.stop_agent.handler({ agent_id: agentId, force: true }, {} as never)
-          : route === "close_surface"
-            ? await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: agentId, force: true }, {} as never)
-            : await server._registeredTools.kill.handler({ target: agentId, force: true }, {} as never);
+          : await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: agentId, force: true }, {} as never);
         expect(result.isError, JSON.stringify(result)).toBe(true);
-        if (route !== "kill") expect(result.structuredContent).toMatchObject({ tail_reaped: true });
+        expect(result.structuredContent).toMatchObject({ tail_reaped: true });
         await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
       } finally {
         vi.restoreAllMocks();
@@ -1025,48 +1022,6 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         tail_error: "tail_mismatch",
       });
       expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker);
-    } finally {
-      if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
-    }
-  });
-
-  it("reaps the recorded inbox tail through the kill agent path", async () => {
-    await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = engineForTests(server);
-    const agentId = "killed-tail-child";
-    const nonce = `t1-kill-${Date.now()}-${process.pid}`;
-    const marker = `cmuxlayer-inbox-tail:${nonce}`;
-    const tail = nodeSpawn(process.execPath, ["-e", "process.title = process.argv[1]; setInterval(() => {}, 1000)", marker], {
-      stdio: "ignore",
-    });
-    try {
-      await once(tail, "spawn");
-      const pid = tail.pid;
-      expect(pid).toBeDefined();
-      await vi.waitFor(() =>
-        expect(execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker),
-      );
-      const record: AgentRecord = {
-        ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
-        agent_id: agentId,
-        surface_id: "surface:already-gone",
-        state: "done",
-        user_killed: false,
-      };
-      const agentDir = join(inboxDir, agentId);
-      mkdirSync(agentDir, { recursive: true });
-      writeFileSync(join(agentDir, "inbox-tail.pid"), `${pid} ${nonce}\n`, "utf8");
-      engine.stateMgr.writeState(record);
-      engine.getRegistry().set(agentId, record);
-
-      const result = await server._registeredTools.kill.handler(
-        { target: agentId, force: true },
-        {} as never,
-      );
-
-      expect(result.isError, JSON.stringify(result)).not.toBe(true);
-      expect(result.structuredContent).toMatchObject({ killed: [agentId] });
-      await vi.waitFor(() => expect(tail.signalCode).toBe("SIGTERM"));
     } finally {
       if (tail.exitCode === null && tail.signalCode === null) tail.kill("SIGTERM");
     }
@@ -1219,7 +1174,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(watch).not.toHaveProperty("notification_delivered_at_ms");
   });
 
-  it.each(["stop_agent", "kill", "close_surface"] as const)(
+  it.each(["stop_agent", "close_surface"] as const)(
     "drops a child-scoped report watch after %s terminates the child",
     async (toolName) => {
       await server._registeredTools.list_agents.handler({}, {} as never);
@@ -1260,9 +1215,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       const args =
         toolName === "stop_agent"
           ? { agent_id: child.agent_id, force: true }
-          : toolName === "kill"
-            ? { target: child.agent_id, force: true }
-            : { scope: "surface", surface: child.surface_id, force: true };
+          : { scope: "surface", surface: child.surface_id, force: true };
       const result = await server._registeredTools[toolName].handler(
         args,
         {} as never,
@@ -4545,7 +4498,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const override = join(inboxDir, "collab", "worker-report.md");
     const parsed = await spawn({ report_path: override });
     expect(parsed.report_path).toBe(override);
-    const getState = server._registeredTools["get_agent_state"];
+    const getState = agentStateTool(server);
     const state = await getState.handler(
       { agent_id: parsed.agent_id },
       {} as never,
@@ -4591,17 +4544,6 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const child = await spawn({ parent_agent_id: parent.agent_id });
     expect(child.ok, JSON.stringify(child)).toBe(true);
     expect(child.report_path).not.toBe(collab);
-    const refused = await server._registeredTools.arm_watch.handler({
-      owner: child.agent_id, target: collab,
-      change: "content", deadline: 100_000,
-    }, {} as never);
-    const refusal = refused.structuredContent ?? JSON.parse(refused.content[0].text);
-    expect(refusal.error_code).toBe("shared_collab_watch_target");
-    const marker = await server._registeredTools.arm_watch.handler({
-      owner: child.agent_id, target: collab,
-      marker: "W5_DONE", deadline: 100_000,
-    }, {} as never);
-    expect((marker.structuredContent ?? JSON.parse(marker.content[0].text)).ok).toBe(true);
     await armWatch({
       owner: child.agent_id, provenance: "public", target: collab,
       change: "content", deadline: 100_000,

@@ -299,9 +299,6 @@ export type DeliveryEventType =
   | "send_command"
   | "send_key"
   | "send_to"
-  | "send_to_agent"
-  | "supersede_agent_goal"
-  | "interact"
   | "press_enter"
   | "report_to_parent"
   | "dispatch_nudge";

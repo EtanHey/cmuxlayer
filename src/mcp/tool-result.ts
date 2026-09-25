@@ -72,13 +72,6 @@ export function controlModeFromStatusEntries(entries: unknown): ControlMode {
     : "autonomous";
 }
 
-export function screenUnavailableMessage(error: unknown): string {
-  return readErrorText(error).replace(
-    /^Error\ncmux read-screen failed:\s*/i,
-    "",
-  );
-}
-
 export function isSurfaceGoneReadFailure(error: unknown, surface: string): boolean {
   const text = readErrorText(error).toLowerCase();
   const surfaceLower = surface.toLowerCase();

@@ -45,54 +45,48 @@ describe("WatchSpec MCP contract", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("returns a structured immediate error when arm_watch targets a missing file", async () => {
+  // The arm_watch tool was retired (CX-3 S8a-2); its validation and liveness
+  // contract lives in the engine's armWatch, which wait_for and spawn use.
+  it("refuses a missing watch target with a structured WatchArmError", async () => {
     const server = createWatchServer();
     const target = join(TEST_DIR, "missing.md");
 
-    const { raw, parsed } = await callTool(server, "arm_watch", {
-      owner: "lead-a",
-      target,
-      marker: "DONE",
-      deadline: Date.now() + 5_000,
-      provenance: "engine",
-    });
-
-    expect(raw.isError).toBe(true);
-    expect(parsed).toMatchObject({
-      error_code: "watch_target_missing",
-      target,
-    });
+    await expect(
+      engineForTests(server)!.armWatch({
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: Date.now() + 5_000,
+        provenance: "engine",
+      }),
+    ).rejects.toMatchObject({ code: "watch_target_missing", target });
   });
 
-  it("returns liveness provenance when arm_watch accepts a declared watch", async () => {
+  it("returns liveness provenance when the engine arms a declared watch", async () => {
     const server = createWatchServer();
     const target = join(TEST_DIR, "findings.md");
     writeFileSync(target, "# Findings\n", "utf8");
 
-    const { raw, parsed } = await callTool(server, "arm_watch", {
+    const watch = await engineForTests(server)!.armWatch({
       owner: "lead-a",
       target,
       marker: "DONE",
       deadline: Date.now() + 5_000,
+      provenance: "public",
     });
 
-    expect(raw.isError).not.toBe(true);
-    expect(parsed).toMatchObject({
-      ok: true,
-      watch: {
-        owner: "lead-a",
-        target,
-        provenance: "public",
-        state: "armed",
-        liveness_source: target,
-        liveness: { value: true, source: "process" },
-      },
+    expect(watch).toMatchObject({
+      owner: "lead-a",
+      target,
+      provenance: "public",
+      state: "armed",
+      liveness_source: target,
+      liveness: { value: true, source: "process" },
     });
   });
 
-  it("enum-constrains agent predicates at both WatchSpec schema boundaries", () => {
+  it("enum-constrains agent predicates at the wait_for WatchSpec boundary", () => {
     const server = createWatchServer() as any;
-    const armSchema = server._registeredTools.arm_watch.inputSchema;
     const waitSchema = server._registeredTools.wait_for.inputSchema;
     const baseWatch = {
       owner: "lead-a",
@@ -101,28 +95,16 @@ describe("WatchSpec MCP contract", () => {
     };
 
     for (const predicate of ["thinking", "working", "idle", "done", "error"]) {
-      expect(armSchema.safeParse({ ...baseWatch, predicate }).success).toBe(
-        true,
-      );
       expect(
         waitSchema.safeParse({ watch: { ...baseWatch, predicate } }).success,
       ).toBe(true);
     }
     for (const predicate of ["creating", "booting", "ready", "arbitrary"]) {
-      expect(armSchema.safeParse({ ...baseWatch, predicate }).success).toBe(
-        false,
-      );
       expect(
         waitSchema.safeParse({ watch: { ...baseWatch, predicate } }).success,
       ).toBe(false);
     }
-    expect(armSchema.shape.predicate.description).toContain(
-      "thinking, working, idle, done, error",
-    );
     const fileWatch = { ...baseWatch, target: join(TEST_DIR, "report.md") };
-    expect(
-      armSchema.safeParse({ ...fileWatch, change: "content" }).success,
-    ).toBe(true);
     expect(
       waitSchema.safeParse({
         watch: { ...fileWatch, change: "content" },

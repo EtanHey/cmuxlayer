@@ -1640,11 +1640,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     // break spawn, not protect a human.
     const draftGuardedEvent =
       opts.source_event === "send_to" ||
-      opts.source_event === "send_to_agent" ||
       opts.source_event === "send_input" ||
       opts.source_event === "dispatch_nudge" ||
-      opts.source_event === "report_to_parent" ||
-      opts.source_event === "interact";
+      opts.source_event === "report_to_parent";
     const draftGuardText = opts.chunks.join("");
     const pendingBootAgent = resolveLatestSurfaceAgentRecord(
       stateMgr, opts.surface, opts.stableSurfaceIdentity,

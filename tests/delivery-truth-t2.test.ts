@@ -921,7 +921,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     }
   }, 15_000);
 
-  it.each(["interact", "targeting", "surface", "background", "queued_nudge"] as const)("tracks a %s recovery Return when its acknowledgement is lost", async (mode) => {
+  it.each(["agent", "targeting", "surface", "background", "queued_nudge"] as const)("tracks a %s recovery Return when its acknowledgement is lost", async (mode) => {
     vi.stubEnv("CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", "100");
     const { createServer, createServerContext } = await loadServerModule();
     let composer = "";
@@ -960,8 +960,8 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         await engine.drainDeliveryQueue();
         result = { delivery_id: queued.delivery_id };
       } else {
-        result = parseToolResult(mode === "interact"
-          ? await server._registeredTools.interact.handler({ agent: agentId, action: "send", text: "later" }, {})
+        result = parseToolResult(mode === "agent"
+          ? await server._registeredTools.send_to.handler({ agent_id: agentId, text: "later", press_enter: true }, {})
           : mode === "targeting"
             ? await server._registeredTools.send_to.handler({ text: "later", press_enter: true,
                 targeting: { agent_ids: [agentId] } }, {})
@@ -979,7 +979,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       expect(pending).toHaveLength(1);
       expect(pending[0]).toMatchObject({ delivery_state: "pending_verify", terminal: false,
         text: composer, boot_instance_id: engine.stateMgr.readState(agentId)?.boot_instance_id });
-      if (mode === "interact" || mode === "surface") {
+      if (mode === "agent" || mode === "surface") {
         expect(result.ok).toBe(false);
         expect(result.delivery_state).toBe("pending_verify");
       } else if (mode === "targeting") {
@@ -1179,286 +1179,6 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     );
 
     expect(parseToolResult(result).ok).toBe(true);
-    expect(mutatedPane(mockExec)).toBe(true);
-    context.dispose();
-  });
-
-  it("interact skill refuses a non-empty composer and names its contents", async () => {
-    const { createServer, createServerContext } = await loadServerModule();
-    let screenText = "Claude Code\n❯ ";
-    const mockExec = makeLifecycleExec(() => screenText);
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const agentId = await spawnReadyAgent(server);
-    screenText = "Claude Code\n❯ keep this human draft\n";
-    mockExec.mockClear();
-
-    const result = await (server as any)._registeredTools.interact.handler(
-      { agent: agentId, action: "skill", command: "/review" },
-      {} as any,
-    );
-    expect(result.isError).toBe(true);
-    expect(parseToolResult(result).error).toContain("keep this human draft");
-    expect(mutatedPane(mockExec)).toBe(false);
-    context.dispose();
-  });
-
-  it("interact skill submits from an empty composer and receipts the screen result", async () => {
-    const { createServer, createServerContext } = await loadServerModule();
-    let screenText = "Claude Code\n❯ ";
-    let submitted = false;
-    const baseExec = makeLifecycleExec(() => screenText);
-    const mockExec: ExecFn = vi.fn().mockImplementation(
-      async (command: string, args: string[]) => {
-        if (args.includes("send-key") && args.includes("return")) {
-          submitted = true;
-        }
-        if (
-          submitted &&
-          args.includes("read-screen") &&
-          args.includes("--lines") &&
-          args.includes("20")
-        ) {
-          return {
-            stdout: JSON.stringify({
-              surface: "surface:new",
-              text: "Claude Code\n❯ /review\nCLAUDE_COUNTER:1\n",
-              lines: 20,
-              scrollback_used: false,
-            }),
-            stderr: "",
-          };
-        }
-        return baseExec(command, args);
-      },
-    );
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const agentId = await spawnReadyAgent(server);
-    submitted = false;
-    screenText = "Claude Code\n❯ \nCLAUDE_COUNTER:1\n";
-    mockExec.mockClear();
-
-    const result = await (server as any)._registeredTools.interact.handler(
-      { agent: agentId, action: "skill", command: "/review" },
-      {} as any,
-    );
-    expect(parseToolResult(result)).toMatchObject({
-      ok: true,
-      submit_verified: true,
-      screen_result_line: "CLAUDE_COUNTER:1",
-    });
-    expect(mutatedPane(mockExec)).toBe(true);
-    context.dispose();
-  });
-
-  it("interact skill does not report terminal chrome as a screen result", async () => {
-    const { createServer, createServerContext } = await loadServerModule();
-    let screenText = "Claude Code\n❯ ";
-    let submitted = false;
-    const baseExec = makeLifecycleExec(() => screenText);
-    const mockExec: ExecFn = vi.fn().mockImplementation(
-      async (command: string, args: string[]) => {
-        if (args.includes("send-key") && args.includes("return")) {
-          submitted = true;
-        }
-        if (
-          submitted &&
-          args.includes("read-screen") &&
-          args.includes("--lines") &&
-          args.includes("20")
-        ) {
-          return {
-            stdout: JSON.stringify({
-              surface: "surface:new",
-              text:
-                "Claude Code\n⏺ Earlier unrelated answer\n❯ /review\n⏵⏵ bypass permissions on · 2 monitors\n",
-              lines: 20,
-              scrollback_used: false,
-            }),
-            stderr: "",
-          };
-        }
-        return baseExec(command, args);
-      },
-    );
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const agentId = await spawnReadyAgent(server);
-    submitted = false;
-    screenText = "Claude Code\n❯ \nCLAUDE_COUNTER:1\n";
-
-    const result = await (server as any)._registeredTools.interact.handler(
-      { agent: agentId, action: "skill", command: "/review" },
-      {} as any,
-    );
-
-    expect(parseToolResult(result)).toMatchObject({
-      ok: true,
-      submit_verified: true,
-      screen_result_available: false,
-      screen_result_line: null,
-    });
-    context.dispose();
-  });
-
-  it.each([
-    "✻ Thinking…",
-    "✻ Working…",
-    "⏺ Running…",
-    "❯ investigate next issue",
-  ])(
-    "interact skill does not report non-result row %s as a screen result",
-    async (nonResultLine) => {
-      const { createServer, createServerContext } = await loadServerModule();
-      let screenText = "Claude Code\n❯ ";
-      let submitted = false;
-      const baseExec = makeLifecycleExec(() => screenText);
-      const mockExec: ExecFn = vi.fn().mockImplementation(
-        async (command: string, args: string[]) => {
-          if (args.includes("send-key") && args.includes("return")) {
-            submitted = true;
-          }
-          if (
-            submitted &&
-            args.includes("read-screen") &&
-            args.includes("--lines") &&
-            args.includes("20")
-          ) {
-            return {
-              stdout: JSON.stringify({
-                surface: "surface:new",
-                text: `Claude Code\n❯ /review\n${nonResultLine}\n`,
-                lines: 20,
-                scrollback_used: false,
-              }),
-              stderr: "",
-            };
-          }
-          return baseExec(command, args);
-        },
-      );
-      const context = createServerContext({
-        exec: mockExec,
-        stateDir: testDir,
-        disableSpawnPreflight: true,
-        sessionIdentityResolver: () => null,
-      });
-      const server = createServer({ context });
-      const agentId = await spawnReadyAgent(server);
-      submitted = false;
-
-      const result = await (server as any)._registeredTools.interact.handler(
-        { agent: agentId, action: "skill", command: "/review" },
-        {} as any,
-      );
-
-      expect(parseToolResult(result)).toMatchObject({
-        ok: true,
-        submit_verified: true,
-        screen_result_available: false,
-        screen_result_line: null,
-      });
-      context.dispose();
-    },
-  );
-
-  it("interact skill does not reuse a historical identical command echo", async () => {
-    const { createServer, createServerContext } = await loadServerModule();
-    let submitted = false;
-    const beforeScreen =
-      "Claude Code\n❯ /review\n⏺ Historical review result\n❯ \n";
-    const baseExec = makeLifecycleExec(() =>
-      submitted ? `${beforeScreen}CLAUDE_COUNTER:1\n` : beforeScreen,
-    );
-    const mockExec: ExecFn = vi.fn().mockImplementation(
-      async (command: string, args: string[]) => {
-        if (args.includes("send-key") && args.includes("return")) {
-          submitted = true;
-        }
-        return baseExec(command, args);
-      },
-    );
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const agentId = await spawnReadyAgent(server);
-    submitted = false;
-
-    const result = await (server as any)._registeredTools.interact.handler(
-      { agent: agentId, action: "skill", command: "/review" },
-      {} as any,
-    );
-
-    expect(parseToolResult(result)).toMatchObject({
-      ok: true,
-      submit_verified: true,
-      screen_result_available: false,
-      screen_result_line: null,
-    });
-    context.dispose();
-  });
-
-  it("interact skill keeps the successful receipt when only its final observation fails", async () => {
-    const { createServer, createServerContext } = await loadServerModule();
-    let screenText = "Claude Code\n❯ ";
-    let failFinalObservation = false;
-    const baseExec = makeLifecycleExec(() => screenText);
-    const mockExec: ExecFn = vi.fn().mockImplementation(
-      async (command: string, args: string[]) => {
-        if (
-          failFinalObservation &&
-          args.includes("read-screen") &&
-          args.includes("--lines") &&
-          args.includes("20")
-        ) {
-          throw new Error("surface disappeared after submitted skill");
-        }
-        return baseExec(command, args);
-      },
-    );
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const agentId = await spawnReadyAgent(server);
-    screenText = "Claude Code\n> \nCLAUDE_COUNTER:1\n";
-    failFinalObservation = true;
-
-    const result = await (server as any)._registeredTools.interact.handler(
-      { agent: agentId, action: "skill", command: "/review" },
-      {} as any,
-    );
-
-    expect(result.isError).not.toBe(true);
-    expect(parseToolResult(result)).toMatchObject({
-      ok: true,
-      submit_verified: true,
-      screen_result_available: false,
-      screen_result_line: null,
-    });
     expect(mutatedPane(mockExec)).toBe(true);
     context.dispose();
   });
@@ -1909,7 +1629,6 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
 
     const result = await bootViaSendCommand(server, "mimirClaude", 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writePrompt(),
         boot_prompt_timeout_ms: 50,
@@ -1944,7 +1663,6 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
 
     const result = await bootViaSendCommand(server, "mimirClaude", 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writePrompt(),
         boot_prompt_timeout_ms: 50,
@@ -2314,7 +2032,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 5_000,
@@ -2339,7 +2056,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 250,
@@ -2377,7 +2093,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 600,
@@ -2403,7 +2118,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 1_000,
@@ -2433,7 +2147,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 1_000,
@@ -2462,7 +2175,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 1_000,
@@ -2493,7 +2205,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 500,
@@ -2527,7 +2238,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         cli: "claude",
         boot_prompt_path: writeBootPrompt(),
@@ -2561,7 +2271,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         cli: "claude",
         boot_prompt_path: writeBootPrompt(),
@@ -2595,7 +2304,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         cli: "claude",
         boot_prompt_path: writeBootPrompt(),
@@ -2628,7 +2336,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 750,
@@ -2661,7 +2368,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 1_500,
@@ -2695,7 +2401,6 @@ describe("boot-submit readiness and attributable evidence", () => {
 
     const result = await bootViaSendCommand(server, harness.launcher, 
       {
-        direction: "right",
         workspace: "workspace:1",
         boot_prompt_path: writeBootPrompt(),
         boot_prompt_timeout_ms: 1_500,

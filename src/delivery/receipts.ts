@@ -5,24 +5,8 @@
  * reads the errors. Moved verbatim from server.ts (CX-2 S3).
  */
 
-import { z } from "zod";
 import type { ParsedScreenResult } from "../types.js";
-import { BroadcastRoleSchema } from "../mcp/schemas.js";
 import type { ToolReturn } from "../mcp/tool-result.js";
-
-export type BroadcastRole = z.infer<typeof BroadcastRoleSchema>;
-
-export type BroadcastReceipt = {
-  agent_id: string;
-  seat: string;
-  delivered: boolean;
-  delivery_state?: PublicDeliveryState;
-  submit_verified: boolean | null;
-  submit_verification_reason?: SubmitVerificationFailureReason;
-  retry_safe?: false;
-  error?: string;
-  skipped?: string;
-};
 
 export type DeliveryStatus = "delivering" | "delivered" | "failed" | "pending_verify";
 

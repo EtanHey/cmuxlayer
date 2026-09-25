@@ -52,9 +52,7 @@ describe("isMutatingTool", () => {
     expect(isMutatingTool("rename_tab")).toBe(true);
     expect(isMutatingTool("move_surface")).toBe(true);
     expect(isMutatingTool("send_to")).toBe(true);
-    expect(isMutatingTool("send_to_agent")).toBe(true);
     expect(isMutatingTool("stop_agent")).toBe(true);
-    expect(isMutatingTool("kill")).toBe(true);
     expect(isMutatingTool("agent_engine")).toBe(true);
     expect(isMutatingTool("focus_surface")).toBe(true);
   });
@@ -110,7 +108,6 @@ describe("assertMutationAllowed", () => {
     expect(() => assertMutationAllowed("focus_surface", "manual")).toThrow(
       /manual/i,
     );
-    expect(() => assertMutationAllowed("kill", "manual")).toThrow(/manual/i);
   });
 
   it("allows non-mutating public tools in manual mode", () => {

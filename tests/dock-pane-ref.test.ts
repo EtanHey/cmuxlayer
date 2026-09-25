@@ -1,12 +1,11 @@
 /**
- * Regression test for the pane_ref matching bug: the real cmux socket does NOT
- * include pane_ref in the surface.list response, so describePaneLayouts can't
- * match panes to their surfaces → workerCount=0 on every pane → dock always
- * falls back to a fresh right split even when a worker-majority pane exists.
- *
- * The fix: cmux-socket-client.ts injects pane_ref from the opts.pane input
- * when it is absent from the socket response. This file used to drive the
- * retired new_split tool; it now pins the same docking through spawn_agent.
+ * Worker docking when the socket's surface.list omits pane_ref. The real cmux
+ * socket leaves pane_ref out; cmux-socket-client.ts backfills it from the
+ * requested pane. This pins that a worker spawn docks into the existing
+ * workers pane (pane:2) instead of opening a fresh split. Spawn placement
+ * docks by column, so this holds even without the backfill -- the backfill's
+ * own guard is the list_surfaces test in server.test.ts. (Ported from the
+ * retired new_split tool, CX-3 S8a-1.)
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";

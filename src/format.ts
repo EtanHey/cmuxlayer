@@ -5,9 +5,8 @@
  * No ANSI color codes (MCP tool output doesn't support them in Claude Code).
  */
 
-import type { AgentRecord, ObservedPublicAgent } from "./agent-types.js";
-import { resumeCommandForAgent } from "./agent-facade.js";
-import type { CmuxSurface, ParsedScreenResult } from "./types.js";
+import type { ObservedPublicAgent } from "./agent-types.js";
+import type { ParsedScreenResult } from "./types.js";
 
 function truncate(text: string, maxLen: number = 60): string {
   if (!text) return "";
@@ -20,12 +19,6 @@ function pad(text: string, width: number): string {
   const s = String(text ?? "");
   if (s.length >= width) return s.slice(0, width - 1) + "\u2026";
   return s.padEnd(width);
-}
-
-function alignRight(text: string, width: number): string {
-  const s = String(text ?? "");
-  if (s.length >= width) return s.slice(0, width - 1) + "\u2026";
-  return s.padStart(width);
 }
 
 // Context bar: visual fill indicator
@@ -205,40 +198,6 @@ export function formatListAgents(
     );
   }
 
-  lines.push("\u2514\u2500");
-  return lines.join("\n");
-}
-
-export function formatAgentState(agent: AgentRecord): string {
-  const lines: string[] = [];
-  lines.push(`\u250c\u2500 Agent: ${agent.agent_id}`);
-  lines.push(
-    `\u2502 repo: ${agent.repo}  state: ${agent.state}  model: ${agent.model}`,
-  );
-  lines.push(`\u2502 surface: ${agent.surface_id}  cli: ${agent.cli}`);
-  if (agent.cli_session_id) {
-    lines.push(`\u2502 session: ${agent.cli_session_id}`);
-    const resumeCommand = resumeCommandForAgent(agent);
-    lines.push(
-      resumeCommand
-        ? `\u2502 resume: ${resumeCommand}`
-        : "\u2502 resumable: false (no runnable resume command)",
-    );
-  } else {
-    lines.push("\u2502 resumable: false (no cli_session_id)");
-  }
-  if (agent.cli_session_path) {
-    lines.push(`\u2502 transcript: ${agent.cli_session_path}`);
-  }
-  if (agent.parent_agent_id) {
-    lines.push(`\u2502 parent: ${agent.parent_agent_id}`);
-  }
-  if (agent.error) {
-    lines.push(`\u2502 error: ${truncate(agent.error, 60)}`);
-  }
-  lines.push(
-    `\u2502 created: ${agent.created_at}  depth: ${agent.spawn_depth}`,
-  );
   lines.push("\u2514\u2500");
   return lines.join("\n");
 }

@@ -16,15 +16,13 @@ import {
 import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
-import { AgentEngine } from "../src/agent-engine.js";
 import { withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
-import { dispatch, writeHeartbeat } from "../src/inbox.js";
+import { dispatch } from "../src/inbox.js";
 import {
   currentCallerContext,
   runWithCallerContext,
 } from "../src/caller-context.js";
 import {
-  currentCliFallbackCount,
   recordCliFallback,
   withTransportRetryTracking,
 } from "../src/transport-retry-context.js";
@@ -37,6 +35,7 @@ import {
   SurfaceGoneError,
 } from "../src/delivery/receipts.js";
 import { err, surfaceGonePayload } from "../src/mcp/tool-result.js";
+import { createSuccessfulDispatchRpcMethod } from "../src/mcp/registration.js";
 import { buildLaunchCommand } from "../src/engine/launch-command.js";
 import type { CliType } from "../src/agent-types.js";
 
@@ -171,22 +170,6 @@ function registeredTestTool(
   return tool;
 }
 
-function createServerWithoutCallerContext(
-  ...args: Parameters<typeof createServerImpl>
-): ReturnType<typeof createServerImpl> {
-  const server = createServerImpl(withTestObserver(args[0]));
-  const close = server.close.bind(server);
-  server.close = async () => {
-    try {
-      await close();
-    } finally {
-      openServers.delete(server);
-    }
-  };
-  openServers.add(server);
-  return server;
-}
-
 const codexComposerFrame = (text: string): string =>
   [
     "OpenAI Codex",
@@ -225,8 +208,6 @@ const EXPECTED_TOOLS = [
   "rename_tab",
   "update_surface",
   "close_surface",
-  "dispatch_to_agent",
-  "inbox_check",
 ] as const;
 
 const TEST_PROCESS_SCOPE = `${process.pid}-${process.env.VITEST_WORKER_ID ?? "0"}`;
@@ -321,13 +302,9 @@ function bootPromptDeliveryForTest(
     inboxOpts: {},
     resolveCurrentCallerAgent: () => null,
     assertSurfaceMutationAllowed: async () => {},
-    // createServer's rule: an RPC method counts only when no CLI fallback
-    // happened during the dispatch and the transport is the socket.
-    successfulDispatchRpcMethod: (method, cliFallbackCountBeforeDispatch) =>
-      currentCliFallbackCount() === cliFallbackCountBeforeDispatch &&
-      getTransportHealth(context.client)?.mode === "socket"
-        ? method
-        : null,
+    successfulDispatchRpcMethod: createSuccessfulDispatchRpcMethod(
+      context.client,
+    ),
     lifecycleSeatManifestPublisher: async () => {},
   });
   const created = { surface: "surface:2", workspace: "workspace:1" };
@@ -526,19 +503,6 @@ describe("fake timer harness", () => {
   }, 1_000);
 });
 
-function setFakeSystemTime(now: Date): void {
-  const setSystemTime = (
-    vi as unknown as {
-      setSystemTime?: (value: Date) => void;
-    }
-  ).setSystemTime;
-  if (setSystemTime) {
-    setSystemTime.call(vi, now);
-  } else {
-    vi.useFakeTimers({ now });
-  }
-}
-
 describe("createServer", () => {
   it("reports the client socket currently observed after runtime failover", () => {
     const stateDir = processScopedTmpDir("cmuxlayer-observer-context");
@@ -631,10 +595,6 @@ describe("createServer", () => {
     expect(schemaFor("spawn_agent").properties?.placement.enum).toEqual(
       ["left", "right", ...publicRoles],
     );
-    expect(
-      schemaFor("spawn_in_workspace").properties?.agents.items.properties.role
-        .enum,
-    ).toEqual(publicRoles);
     expect(
       schemaFor("send_to").properties?.targeting.properties.role.enum,
     ).toEqual(["implementor", "reviewer", "gatherer"]);
@@ -963,7 +923,7 @@ describe("input delivery batching helpers", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 13 low-level tools", () => {
+  it("registers all 11 low-level tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
@@ -987,10 +947,10 @@ describe("tool registration", () => {
     // guard is that allow_busy is still marked deprecated AND that the safety
     // gates it does NOT bypass are stated -- not the exact wording, which is
     // what made a description trim look like a behaviour regression.
-    expect(source.match(/Deprecated no-op\./g)).toHaveLength(2);
+    expect(source.match(/Deprecated no-op\./g)).toHaveLength(1);
     expect(
       source.match(/Safety gates still refuse text at a picker\/menu/g),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it("warns when the active socket transport reports degraded health", async () => {
@@ -1019,52 +979,6 @@ describe("tool registration", () => {
 
 describe("tool handler integration", () => {
   let mockExec: ExecFn;
-
-  const defaultPanePlacementResult = (args: string[]) => {
-    if (args.includes("list-windows")) {
-      return {
-        stdout: JSON.stringify({
-          windows: [{ ref: "window:1", workspace_count: 1 }],
-        }),
-        stderr: "",
-      };
-    }
-    if (args.includes("list-workspaces")) {
-      return {
-        stdout: JSON.stringify({
-          workspaces: [
-            {
-              ref: "workspace:1",
-              title: "Workspace 1",
-            },
-          ],
-        }),
-        stderr: "",
-      };
-    }
-    if (args.includes("list-panes")) {
-      return {
-        stdout: JSON.stringify({
-          workspace_ref: "workspace:1",
-          window_ref: "window:1",
-          panes: [
-            {
-              ref: "pane:1",
-              index: 0,
-              focused: true,
-              surface_count: 1,
-              surface_refs: ["surface:1"],
-            },
-          ],
-        }),
-        stderr: "",
-      };
-    }
-    if (args.includes("list-status")) {
-      return { stdout: "[]", stderr: "" };
-    }
-    return null;
-  };
 
   beforeEach(() => {
     mockExec = vi.fn().mockResolvedValue({
@@ -1146,164 +1060,6 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["workspace", "close", "workspace:probe"]),
     );
-  });
-
-  it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
-    const calls: string[] = [];
-    let surfaceIndex = 0;
-    const pendingBootContracts = new Map<string, string>();
-    const submittedBootContracts = new Map<string, string>();
-    const launchedSurfaces = new Set<string>();
-    const mockClient = {
-      createWorkspace: vi.fn().mockImplementation(async (title: string) => {
-        calls.push(`create:${title}`);
-        return { workspace: "workspace:grid", title };
-      }),
-      selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
-        calls.push(`select:${workspace}`);
-      }),
-      listWorkspaces: vi.fn().mockResolvedValue({
-        workspaces: [{ ref: "workspace:grid", title: "grid" }],
-      }),
-      listPanes: vi.fn().mockResolvedValue({
-        workspace_ref: "workspace:grid",
-        window_ref: "window:1",
-        panes: [],
-      }),
-      listPaneSurfaces: vi.fn().mockResolvedValue({
-        workspace_ref: "workspace:grid",
-        window_ref: "window:1",
-        pane_ref: "pane:1",
-        surfaces: [],
-      }),
-      newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
-        surfaceIndex += 1;
-        calls.push(`spawn:${opts.workspace}:surface:${surfaceIndex}`);
-        return {
-          workspace: opts.workspace,
-          surface: `surface:${surfaceIndex}`,
-          pane: `pane:${surfaceIndex}`,
-          title: "",
-          type: "terminal",
-        };
-      }),
-      newSurface: vi.fn(),
-      focusSurface: vi.fn().mockResolvedValue(undefined),
-      send: vi.fn().mockImplementation(async (surface: string, text: string) => {
-        if (text.includes("cmuxlayer contract for")) {
-          pendingBootContracts.set(surface, text);
-        } else {
-          launchedSurfaces.add(surface);
-        }
-      }),
-      pasteText: vi.fn().mockImplementation(
-        async (surface: string, text: string) => {
-          if (text.includes("cmuxlayer contract for")) {
-            pendingBootContracts.set(surface, text);
-          }
-        },
-      ),
-      sendKey: vi.fn().mockImplementation(async (surface: string, key: string) => {
-        if (key === "return" && pendingBootContracts.has(surface)) {
-          const pending = pendingBootContracts.get(surface) ?? "";
-          pendingBootContracts.delete(surface);
-          submittedBootContracts.set(surface, pending);
-        }
-      }),
-      readScreen: vi.fn().mockImplementation(async (surface: string) => {
-        const pending = pendingBootContracts.get(surface);
-        return {
-          surface,
-          text: submittedBootContracts.has(surface)
-            ? `• ${submittedBootContracts.get(surface)}\nWorking (1s - esc to interrupt)`
-            : pending
-              ? surface === "surface:2"
-                ? `OpenAI Codex\n» ${pending}\ngpt-5.4 high · ~/Gits/cmuxlayer`
-                : `Claude Code\n❯ ${pending}`
-              : !launchedSurfaces.has(surface)
-                ? "$ "
-                : surface === "surface:2"
-                  ? "OpenAI Codex\nmodel: gpt-5.4\n\n›"
-                  : "Claude Code\n>",
-          lines: 80,
-          scrollback_used: false,
-        };
-      }),
-      log: vi.fn().mockResolvedValue(undefined),
-      setStatus: vi.fn().mockResolvedValue(undefined),
-      clearStatus: vi.fn().mockResolvedValue(undefined),
-      setProgress: vi.fn().mockResolvedValue(undefined),
-      closeSurface: vi.fn().mockResolvedValue(undefined),
-      identify: vi.fn().mockResolvedValue({}),
-      browser: vi.fn().mockResolvedValue({}),
-    };
-    const stateDir = join(CHANNEL_TEST_DIR, "spawn-in-workspace-sequence");
-    rmSync(stateDir, { recursive: true, force: true });
-    mkdirSync(stateDir, { recursive: true });
-    const server = createServer({
-      client: mockClient as any,
-      stateDir,
-      disableSpawnPreflight: true,
-    });
-    const tool = (server as any)._registeredTools["spawn_in_workspace"];
-
-    const result = await runWithFakeTimers(
-      () =>
-        tool.handler(
-          {
-            workspace_title: "red-team",
-            verbose: true,
-            agents: [
-              {
-                repo: "brainlayer",
-                model: "sonnet",
-                cli: "claude",
-                role: "orchestrator",
-              },
-              {
-                repo: "cmuxlayer",
-                model: "gpt-5.4",
-                cli: "codex",
-                role: "worker",
-              },
-            ],
-          },
-          {} as any,
-        ),
-      100_000,
-    );
-
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.workspace).toBe("workspace:grid");
-    expect(parsed.agents).toHaveLength(2);
-    expect(parsed).toHaveProperty("retry_count", 0);
-    expect(parsed.agents[0]).toMatchObject({
-      agent_id: expect.any(String),
-      surface_id: "surface:1",
-      role: "orchestrator",
-      boot_prompt_delivered: true,
-      boot_prompt_submit_verified: true,
-    });
-    expect(parsed.agents[0]).toHaveProperty("health");
-    expect(parsed.agents[0]).toHaveProperty("monitor_boot");
-    expect(parsed.agents[1]).toMatchObject({
-      role: "worker",
-      boot_prompt_delivered: true,
-      boot_prompt_submit_verified: true,
-      monitor_boot: expect.any(Object),
-    });
-    expect(calls.slice(0, 4)).toEqual([
-      "create:red-team",
-      "select:workspace:grid",
-      "select:workspace:grid",
-      "spawn:workspace:grid:surface:1",
-    ]);
-    expect(calls).toContain("spawn:workspace:grid:surface:2");
-
-    await server.close();
-    rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("list_surfaces dedupes overlapping pane results and returns the condensed default schema", async () => {
