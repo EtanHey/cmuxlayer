@@ -15,9 +15,11 @@
  *       `brew trust etanhey/layers`; cmuxlayer is a formula, not gated.
  *   (c) CMUX_SOCKET_PATH if set, else "unset (auto-discover)";
  *   (d) live cmux app version compatibility against the internal tested set;
- *   (e) read-only `.mcp.json` drift detection for stale `cmux` keys or entries
- *       that bypass `~/.golems/bin/cmuxlayer-mcp`, plus existence, symlink-target,
- *       and executable-bit checks for every referenced launcher.
+ *   (e) read-only `.mcp.json` drift detection for stale `cmux` keys and, when
+ *       the fleet config names an `mcpLauncher`, entries that bypass it, plus
+ *       existence, symlink-target, and executable-bit checks for that launcher;
+ *   (f) the fleet config itself, and legacy coordination state it leaves
+ *       unclaimed (see fleet-config.ts).
  *
  * Non-interactivity invariants (§ headline / conformance checks):
  *   - exit 0 when healthy; runs cleanly under `</dev/null` with NONINTERACTIVE=1;
@@ -39,6 +41,15 @@ import {
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import {
+  FLEET_CONFIG_DOC,
+  findLegacyCoordinationState,
+  fleetConfigPath,
+  genericFleetConfig,
+  loadFleetConfig,
+  readFleetConfig,
+  type FleetConfig,
+} from "./fleet-config.js";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
 import { REPO_HOME_ENV } from "./repo-root-fallback.js";
 import {
@@ -67,7 +78,6 @@ const execFileAsync = promisify(execFile);
 
 export const TAP_NAME = "etanhey/layers";
 export const FORMULA_NAME = "etanhey/layers/cmuxlayer";
-export const SLEEP_GUARD_LABEL = "com.golems.cmux-caffeinate";
 export const SLEEP_GUARD_README = "launchd/cmux-caffeinate/README.md";
 
 /** Result of a single best-effort `brew <args>` invocation. */
@@ -92,8 +102,8 @@ export interface CommandResult {
 /** Runs `pmset -g assertions`; never throws — failures are reported in the result. */
 export type PmsetRunner = () => Promise<CommandResult>;
 
-/** Runs `launchctl print gui/<uid>/com.golems.cmux-caffeinate`; never throws. */
-export type LaunchctlRunner = () => Promise<CommandResult>;
+/** Runs `launchctl print gui/<uid>/<label>`; never throws. */
+export type LaunchctlRunner = (label: string) => Promise<CommandResult>;
 
 export interface McpConfigDriftEntry {
   path: string;
@@ -137,6 +147,8 @@ export interface DetectRuntimeProvenanceOptions {
   env?: NodeJS.ProcessEnv;
   execPath?: string;
   nodeVersion?: string;
+  /** Fleet MCP launcher shim; defaults to the fleet config's `mcpLauncher`. */
+  mcpLauncher?: string | null;
 }
 
 export interface McpReconnectProcedureReport {
@@ -154,6 +166,8 @@ export interface CheckMcpConfigDriftOptions {
   listMcpConfigPaths?: McpConfigPathLister;
   readMcpConfigFile?: McpConfigFileReader;
   probeLauncher?: McpLauncherProbe;
+  /** Fleet MCP launcher shim; null skips launcher checks. Defaults to the fleet config. */
+  mcpLauncher?: string | null;
 }
 
 export interface DoctorReport {
@@ -188,8 +202,12 @@ export interface DoctorReport {
   socketPath: { set: boolean; value: string | null; note: string };
   /** Best-effort internal cmux app compatibility note; never affects health. */
   cmuxCompatibility: CmuxVersionCompatibilityReport;
-  /** Durable sleep-survival guard: pmset assertion plus launchd KeepAlive job. */
+  /**
+   * Optional sleep-survival guard (pmset assertion plus launchd KeepAlive job),
+   * checked only when the fleet config names its label. Info only: never health.
+   */
   sleepGuard: {
+    configured: boolean;
     systemSleepPrevented: boolean;
     keepAliveLoaded: boolean;
     durable: boolean;
@@ -203,6 +221,17 @@ export interface DoctorReport {
   mcpConfigDrift: McpConfigDriftReport;
   /** What `cmuxlayer init` wrote, and whether this process can see it. */
   initConfig: InitConfigReport;
+  /** Fleet config in effect, plus legacy state it leaves unclaimed. Never health. */
+  fleetConfig: FleetConfigReport;
+}
+
+export interface FleetConfigReport {
+  ok: boolean;
+  /** Config file in effect (or the invalid one); null on generic defaults. */
+  source: string | null;
+  /** Legacy coordination files that no fleet config claims. */
+  legacyState: string[];
+  note: string;
 }
 
 /**
@@ -297,6 +326,8 @@ export interface RunDoctorOptions {
   version: string;
   /** Environment to inspect; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** Home directory for the fleet config and legacy-state checks; defaults to os.homedir(). */
+  home?: string;
   /** Injectable brew runner; defaults to the real `brew` via execFile. */
   brew?: BrewRunner;
   /** Injectable pmset runner; defaults to the real `pmset -g assertions`. */
@@ -829,11 +860,11 @@ function currentUid(): string {
   return process.env.UID ?? "501";
 }
 
-export const realLaunchctlRunner: LaunchctlRunner = async () => {
+export const realLaunchctlRunner: LaunchctlRunner = async (label) => {
   try {
     const { stdout, stderr } = await execFileAsync(
       "launchctl",
-      ["print", `gui/${currentUid()}/${SLEEP_GUARD_LABEL}`],
+      ["print", `gui/${currentUid()}/${label}`],
       { timeout: 10_000 },
     );
     return { ok: true, stdout: stdout ?? "", stderr: stderr ?? "" };
@@ -939,9 +970,12 @@ export function detectRuntimeProvenance(
   const distEntrypoint =
     /\/dist\/index\.js$/.test(normalizedEntrypoint) || brewBinEntrypoint;
   const sourceEntrypoint = /\/src\/index\.ts$/.test(normalizedEntrypoint);
-  const launcherEntrypoint =
-    normalizedEntrypoint === "cmuxlayer-mcp" ||
-    normalizedEntrypoint.endsWith("/.golems/bin/cmuxlayer-mcp");
+  const mcpLauncher =
+    opts.mcpLauncher !== undefined ? opts.mcpLauncher : fleetMcpLauncher();
+  const launcherEntrypoint = isFleetMcpLauncher(
+    normalizedEntrypoint,
+    mcpLauncher,
+  );
 
   let mode: RuntimeMode = "unknown";
   if (distEntrypoint) {
@@ -1017,47 +1051,60 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isCmuxlayerMcpLauncher(part: string): boolean {
+/** The fleet's MCP launcher shim, or null when unset or the config is unreadable. */
+function fleetMcpLauncher(): string | null {
+  try {
+    return loadFleetConfig().mcpLauncher;
+  } catch {
+    return null;
+  }
+}
+
+function launcherBasename(launcher: string): string {
+  return launcher.slice(launcher.lastIndexOf("/") + 1);
+}
+
+/**
+ * Whether a command part is the fleet's launcher: its bare name, the configured
+ * path, or (for a `~/` path) the same path under any home directory.
+ */
+function isFleetMcpLauncher(part: string, launcher: string | null): boolean {
+  if (!launcher) return false;
   const normalized = part.replaceAll("\\", "/");
   return (
-    normalized === "cmuxlayer-mcp" ||
-    normalized === "~/.golems/bin/cmuxlayer-mcp" ||
-    normalized.endsWith("/.golems/bin/cmuxlayer-mcp")
+    normalized === launcherBasename(launcher) ||
+    normalized === launcher ||
+    normalized === resolveLauncherReference(launcher, launcher) ||
+    (launcher.startsWith("~/") && normalized.endsWith(launcher.slice(1)))
   );
 }
 
-function serverReferencesLauncher(server: unknown): boolean {
+function serverCommandParts(server: unknown): string[] {
   if (!isRecord(server)) {
-    return false;
-  }
-
-  const command = typeof server.command === "string" ? server.command : "";
-  const args = Array.isArray(server.args)
-    ? server.args.filter((arg): arg is string => typeof arg === "string")
-    : [];
-
-  return [command, ...args].some(isCmuxlayerMcpLauncher);
-}
-
-function serverLauncherReference(server: unknown): string | null {
-  if (!isRecord(server)) {
-    return null;
+    return [];
   }
   const command = typeof server.command === "string" ? server.command : "";
   const args = Array.isArray(server.args)
     ? server.args.filter((arg): arg is string => typeof arg === "string")
     : [];
-  return [command, ...args].find(isCmuxlayerMcpLauncher) ?? null;
+  return [command, ...args];
 }
 
-function resolveLauncherReference(reference: string): string {
-  if (reference === "cmuxlayer-mcp") {
-    return join(homedir(), ".golems", "bin", "cmuxlayer-mcp");
-  }
-  if (reference === "~/.golems/bin/cmuxlayer-mcp") {
-    return join(homedir(), ".golems", "bin", "cmuxlayer-mcp");
-  }
-  return reference;
+function serverLauncherReference(
+  server: unknown,
+  launcher: string | null,
+): string | null {
+  return (
+    serverCommandParts(server).find((part) =>
+      isFleetMcpLauncher(part, launcher),
+    ) ?? null
+  );
+}
+
+function resolveLauncherReference(reference: string, launcher: string): string {
+  const target =
+    reference === launcherBasename(launcher) ? launcher : reference;
+  return target.startsWith("~/") ? join(homedir(), target.slice(2)) : target;
 }
 
 async function realMcpLauncherProbe(
@@ -1127,15 +1174,19 @@ async function realMcpLauncherProbe(
   };
 }
 
-function driftReason(serverKey: string, server: unknown): string | null {
+function driftReason(
+  serverKey: string,
+  server: unknown,
+  launcher: string | null,
+): string | null {
   const reasons: string[] = [];
 
   if (serverKey === "cmux") {
     reasons.push("stale server key cmux (use cmuxlayer)");
   }
 
-  if (!serverReferencesLauncher(server)) {
-    reasons.push("does not reference launcher cmuxlayer-mcp");
+  if (launcher && serverLauncherReference(server, launcher) === null) {
+    reasons.push(`does not reference launcher ${launcherBasename(launcher)}`);
   }
 
   return reasons.length > 0 ? reasons.join("; ") : null;
@@ -1149,6 +1200,8 @@ export async function checkMcpConfigDrift(
   const readMcpConfigFile =
     opts.readMcpConfigFile ?? realMcpConfigFileReader;
   const probeLauncher = opts.probeLauncher ?? realMcpLauncherProbe;
+  const launcher =
+    opts.mcpLauncher !== undefined ? opts.mcpLauncher : fleetMcpLauncher();
 
   let paths: string[];
   try {
@@ -1180,12 +1233,15 @@ export async function checkMcpConfigDrift(
         continue;
       }
 
-      const reasons = [driftReason(serverKey, server)].filter(
+      const reasons = [driftReason(serverKey, server, launcher)].filter(
         (reason): reason is string => reason !== null,
       );
-      const launcherReference = serverLauncherReference(server);
-      if (launcherReference) {
-        const launcherPath = resolveLauncherReference(launcherReference);
+      const launcherReference = serverLauncherReference(server, launcher);
+      if (launcher && launcherReference) {
+        const launcherPath = resolveLauncherReference(
+          launcherReference,
+          launcher,
+        );
         let launcherProbe = launcherProbes.get(launcherPath);
         if (!launcherProbe) {
           launcherProbe = await probeLauncher(launcherPath);
@@ -1208,7 +1264,9 @@ export async function checkMcpConfigDrift(
     drifted,
     launcherOk: launchers.every((launcher) => launcher.ok),
     launchers,
-    note: "scanned <repo root>/*/.mcp.json (CMUXLAYER_REPO_HOME, else ~/Gits) for cmux/cmuxlayer entries expected to reference an existing executable launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
+    note: launcher
+      ? `scanned <repo root>/*/.mcp.json (CMUXLAYER_REPO_HOME, else ~/Gits) for cmux/cmuxlayer entries expected to reference an existing executable launcher ${launcherBasename(launcher)}; read-only, skipped missing/unreadable/invalid JSON`
+      : "scanned <repo root>/*/.mcp.json (CMUXLAYER_REPO_HOME, else ~/Gits) for stale cmux keys; no fleet mcpLauncher configured, so launcher checks are skipped; read-only, skipped missing/unreadable/invalid JSON",
   };
 }
 
@@ -1224,9 +1282,19 @@ export function parseSystemSleepPrevented(
 async function checkSleepGuard(
   pmset: PmsetRunner,
   launchctl: LaunchctlRunner,
+  label: string | null,
 ): Promise<DoctorReport["sleepGuard"]> {
+  if (!label) {
+    return {
+      configured: false,
+      systemSleepPrevented: false,
+      keepAliveLoaded: false,
+      durable: false,
+      note: "not configured (no sleepGuardLabel in the fleet config)",
+    };
+  }
   const pmsetResult = await pmset();
-  const launchctlResult = await launchctl();
+  const launchctlResult = await launchctl(label);
 
   const systemSleepPrevented = pmsetResult.ok
     ? parseSystemSleepPrevented(pmsetResult.stdout)
@@ -1234,14 +1302,52 @@ async function checkSleepGuard(
   const keepAliveLoaded = launchctlResult.ok;
   const durable = systemSleepPrevented && keepAliveLoaded;
 
+  // AIDEV-NOTE: an unloaded guard is a supported choice (Etan ruled the sleep
+  // gate stays off), so it is info, never a failure.
   return {
+    configured: true,
     systemSleepPrevented,
     keepAliveLoaded,
     durable,
     note: durable
-      ? "durable: pmset assertion active and launchd KeepAlive guard loaded"
-      : `not durable; install ${SLEEP_GUARD_README}`,
+      ? `durable: pmset assertion active and launchd KeepAlive guard ${label} loaded`
+      : `info: sleep guard ${label} not active (optional; ${SLEEP_GUARD_README} installs it)`,
   };
+}
+
+function checkFleetConfig(
+  env: NodeJS.ProcessEnv,
+  home: string,
+): { config: FleetConfig; report: FleetConfigReport } {
+  try {
+    // Strict on purpose: doctor is where a bad fleet config gets reported.
+    const config = readFleetConfig(env, home);
+    const legacyState = findLegacyCoordinationState(config, home);
+    return {
+      config,
+      report: {
+        ok: true,
+        source: config.source,
+        legacyState,
+        note:
+          legacyState.length > 0
+            ? `none; legacy coordination state is NOT read: ${legacyState.join(", ")} (see ${FLEET_CONFIG_DOC})`
+            : config.source
+              ? config.source
+              : "none (generic defaults)",
+      },
+    };
+  } catch (error) {
+    return {
+      config: genericFleetConfig(home),
+      report: {
+        ok: false,
+        source: fleetConfigPath(env, home),
+        legacyState: [],
+        note: `${error instanceof Error ? error.message : String(error)}; using generic defaults`,
+      },
+    };
+  }
 }
 
 export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
@@ -1255,10 +1361,17 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
   const socketRaw = env.CMUX_SOCKET_PATH;
   const socketSet = typeof socketRaw === "string" && socketRaw.length > 0;
 
+  const fleet = checkFleetConfig(env, opts.home ?? homedir());
   const tap = await checkTap(brew);
-  const sleepGuard = await checkSleepGuard(pmset, launchctl);
+  const sleepGuard = await checkSleepGuard(
+    pmset,
+    launchctl,
+    fleet.config.sleepGuardLabel,
+  );
   const runtimeProvenance = (
-    opts.runtimeProvenance ?? (() => detectRuntimeProvenance({ env }))
+    opts.runtimeProvenance ??
+    (() =>
+      detectRuntimeProvenance({ env, mcpLauncher: fleet.config.mcpLauncher }))
   )();
   const cmuxCompatibility = assessCmuxVersionCompatibility(
     await (opts.cmuxVersion ?? realCmuxVersionRunner)(env),
@@ -1266,6 +1379,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
   const mcpConfigDrift = await checkMcpConfigDrift({
     listMcpConfigPaths: opts.listMcpConfigPaths,
     readMcpConfigFile: opts.readMcpConfigFile,
+    mcpLauncher: fleet.config.mcpLauncher,
   });
   const { daemon, selfHeal } = await checkDaemonIntegrity(opts, env);
 
@@ -1290,6 +1404,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
     cmuxCompatibility,
     sleepGuard,
     runtimeProvenance,
+    fleetConfig: fleet.report,
     mcpReconnectProcedure: mcpReconnectProcedure(),
     mcpConfigDrift,
     initConfig: checkInitConfig(
@@ -1382,7 +1497,10 @@ export function renderDoctorText(report: DoctorReport): string {
   );
 
   lines.push(
-    `│ ${mark(report.sleepGuard.durable)} sleep guard: ${report.sleepGuard.note}`,
+    `│ ${report.sleepGuard.durable ? "✔" : report.sleepGuard.configured ? "ℹ" : "—"} sleep guard: ${report.sleepGuard.note}`,
+  );
+  lines.push(
+    `│ ${report.fleetConfig.ok ? (report.fleetConfig.legacyState.length > 0 ? "ℹ" : "—") : "✗"} fleet config: ${report.fleetConfig.note}`,
   );
 
   lines.push(

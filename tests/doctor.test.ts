@@ -75,6 +75,14 @@ Assertion status system-wide:
    pid 17232(caffeinate): [0x0000000100008001] 00:04:14 PreventUserIdleSystemSleep named: "caffeinate command-line tool"
 `;
 
+const GOLEMS_FLEET_CONFIG = join(
+  __dirname,
+  "fixtures",
+  "fleet",
+  "golems-fleet.json",
+);
+const GOLEMS_MCP_LAUNCHER = "~/.golems/bin/cmuxlayer-mcp";
+
 const emptyPmset = async () => ({ ok: true, stdout: "", stderr: "" });
 const missingLaunchctl = async () => ({
   ok: false,
@@ -89,6 +97,7 @@ function mcpConfig(content: unknown): string {
 
 function fakeMcpConfigReaders(files: Record<string, string>) {
   return {
+    mcpLauncher: GOLEMS_MCP_LAUNCHER,
     listMcpConfigPaths: async () => [
       ...Object.keys(files),
       "/home/test-user/Gits/missing/.mcp.json",
@@ -115,6 +124,7 @@ function runDoctorForTest(opts: Parameters<typeof runDoctor>[0]) {
     }),
     ...opts,
     env: {
+      CMUXLAYER_FLEET_CONFIG: GOLEMS_FLEET_CONFIG,
       CMUXLAYER_DAEMON_SOCKET: join(
         "/tmp",
         `cmuxlayer-doctor-no-daemon-${process.pid}.sock`,
@@ -1142,6 +1152,7 @@ describe("runDoctor — report shape", () => {
           ],
           env: { CMUXLAYER_DEV: "1" },
           execPath: "/opt/homebrew/opt/node/bin/node",
+          mcpLauncher: GOLEMS_MCP_LAUNCHER,
         }),
     });
 
@@ -1425,10 +1436,17 @@ describe("renderDoctorText", () => {
         note: "running cmux v0.64.17; tested against v0.64.17, v0.64.14-nightly",
       },
       sleepGuard: {
+        configured: true,
         systemSleepPrevented: false,
         keepAliveLoaded: false,
         durable: false,
-        note: "not durable; install launchd/cmux-caffeinate/README.md",
+        note: "info: sleep guard com.golems.cmux-caffeinate not active (optional; launchd/cmux-caffeinate/README.md installs it)",
+      },
+      fleetConfig: {
+        ok: true,
+        source: "/home/test-user/.config/cmuxlayer/fleet.json",
+        legacyState: [],
+        note: "/home/test-user/.config/cmuxlayer/fleet.json",
       },
       runtimeProvenance: {
         distEntrypoint: true,
@@ -1510,7 +1528,7 @@ describe("renderDoctorText", () => {
     expect(text).toMatch(/WARN.*running cmux v0\.65\.0/i);
   });
 
-  it("prints sleep guard status and install hint when not durable", () => {
+  it("prints sleep guard status and install hint as info when not durable", () => {
     const text = renderDoctorText(baseReport());
     expect(text).toMatch(/sleep guard/i);
     expect(text).toMatch(/launchd\/cmux-caffeinate\/README\.md/);
@@ -1608,10 +1626,17 @@ describe("renderDoctorJson", () => {
         note: "running cmux v0.64.17; tested against v0.64.17, v0.64.14-nightly",
       },
       sleepGuard: {
+        configured: true,
         systemSleepPrevented: true,
         keepAliveLoaded: true,
         durable: true,
         note: "durable",
+      },
+      fleetConfig: {
+        ok: true,
+        source: null,
+        legacyState: [],
+        note: "none (generic defaults)",
       },
       runtimeProvenance: {
         distEntrypoint: true,
@@ -1657,5 +1682,104 @@ describe("renderDoctorJson", () => {
     expect(parsed.mcpReconnectProcedure.automation).toBe(false);
     expect(parsed.mcpConfigDrift.scanned).toBe(1);
     expect(parsed.mcpConfigDrift.drifted[0]?.serverKey).toBe("cmuxlayer");
+  });
+});
+
+describe("doctor fleet config", () => {
+  function fleetHome(): string {
+    const home = mkdtempSync(join(tmpdir(), "cmuxlayer-doctor-fleet-"));
+    doctorTempDirs.push(home);
+    return home;
+  }
+
+  it("skips the fleet-only launcher and sleep-guard checks without a fleet config", async () => {
+    const launchctl = vi.fn(missingLaunchctl);
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: { CMUXLAYER_FLEET_CONFIG: undefined },
+      home: fleetHome(),
+      brew: makeBrew({ tapList: "etanhey/layers\n" }),
+      launchctl,
+      listMcpConfigPaths: async () => ["/home/test-user/Gits/generic/.mcp.json"],
+      readMcpConfigFile: async () =>
+        mcpConfig({
+          mcpServers: { cmuxlayer: { command: "cmuxlayer", args: [] } },
+        }),
+    });
+
+    expect(launchctl).not.toHaveBeenCalled();
+    expect(report.sleepGuard).toMatchObject({
+      configured: false,
+      durable: false,
+    });
+    expect(report.mcpConfigDrift.drifted).toEqual([]);
+    expect(report.mcpConfigDrift.launchers).toEqual([]);
+    expect(report.fleetConfig).toMatchObject({
+      ok: true,
+      source: null,
+      legacyState: [],
+    });
+    expect(report.healthy).toBe(true);
+    expect(renderDoctorText(report)).toMatch(/fleet config: none/);
+  });
+
+  it("reports legacy coordination state that no fleet config claims, without failing", async () => {
+    const home = fleetHome();
+    const legacy = join(home, ".golems-zikaron", "watch-specs.json");
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, "{}");
+
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: { CMUXLAYER_FLEET_CONFIG: undefined },
+      home,
+      brew: makeBrew({ tapList: "etanhey/layers\n" }),
+    });
+
+    expect(report.fleetConfig.legacyState).toEqual([legacy]);
+    expect(report.healthy).toBe(true);
+    const text = renderDoctorText(report);
+    expect(text).toContain(legacy);
+    expect(text).toContain("docs/guides/fresh-install.md#fleet-config");
+  });
+
+  it("reports a configured but unloaded sleep guard as info, never a failure", async () => {
+    const launchctl = vi.fn(missingLaunchctl);
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: {},
+      brew: makeBrew({ tapList: "etanhey/layers\n" }),
+      launchctl,
+    });
+
+    expect(launchctl).toHaveBeenCalledWith("com.golems.cmux-caffeinate");
+    expect(report.sleepGuard).toMatchObject({
+      configured: true,
+      keepAliveLoaded: false,
+      durable: false,
+    });
+    expect(report.sleepGuard.note).toMatch(/^info:/);
+    expect(report.healthy).toBe(true);
+    const line = renderDoctorText(report)
+      .split("\n")
+      .find((entry) => entry.includes("sleep guard"));
+    expect(line).toMatch(/^│ ℹ sleep guard: info:/);
+  });
+
+  it("reports an invalid fleet config instead of throwing", async () => {
+    const home = fleetHome();
+    const path = join(home, "fleet.json");
+    writeFileSync(path, "{");
+
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: { CMUXLAYER_FLEET_CONFIG: path },
+      home,
+      brew: makeBrew({ tapList: "etanhey/layers\n" }),
+    });
+
+    expect(report.fleetConfig).toMatchObject({ ok: false, source: path });
+    expect(report.fleetConfig.note).toMatch(/not valid JSON/);
+    expect(renderDoctorText(report)).toMatch(/✗ fleet config:/);
   });
 });
