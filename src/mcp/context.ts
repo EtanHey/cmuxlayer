@@ -16,7 +16,6 @@ import { AgentRegistry } from "../agent-registry.js";
 import { deriveCmuxObserverEpoch, deriveCmuxObserverOwnerId } from "../cmux-observer-identity.js";
 import type { AgentEngine } from "../agent-engine.js";
 import type {
-  AgentLifecycleEvent,
   LifecycleLockState,
   SelfRegistrationSessionEntry,
   SessionIdentityResolver,
@@ -26,7 +25,6 @@ import { type DeliveryFailureTicket } from "../delivery-failure-tickets.js";
 import { type MonitorDeadmanNotify } from "../monitor-registry.js";
 import { type WatchNotify } from "../watch-spec.js";
 import type {
-  AgentRecord,
   AgentRole,
   DeliveryEventType,
 } from "../agent-types.js";
@@ -71,8 +69,6 @@ export interface CreateServerOptions {
   defaultPalette?: string;
   /** Keep retired handlers registered only for direct unit coverage. Never set in production. */
   exposeInternalToolsForTests?: boolean;
-  /** Opt into Claude Code channel notifications for lifecycle events */
-  enableClaudeChannels?: boolean;
   /** Override spawn preflight checks (primarily for tests). */
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   /** Explicitly disable spawn preflight checks (primarily for mocked tests). */
@@ -253,7 +249,6 @@ export interface CmuxServerContext {
   capturedSurfaceObserverEpoch: string | null;
   codexRolloutFillProvider: CodexRolloutFillProvider;
   surfaceWriteLiveness: SurfaceWriteLivenessTracker;
-  enableClaudeChannels: boolean;
   skipAgentLifecycle: boolean;
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   disableSpawnPreflight?: boolean;
@@ -411,9 +406,6 @@ export function createServerContext(
       opts?.codexRolloutFillProvider ?? makeCodexRolloutFillProvider(),
     surfaceWriteLiveness:
       opts?.surfaceWriteLiveness ?? new SurfaceWriteLivenessTracker(),
-    enableClaudeChannels:
-      opts?.enableClaudeChannels ??
-      process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1",
     skipAgentLifecycle: opts?.skipAgentLifecycle ?? false,
     spawnPreflight: opts?.spawnPreflight,
     disableSpawnPreflight: opts?.disableSpawnPreflight,
@@ -491,56 +483,4 @@ export function resolveServerInboxBaseDir(input: {
   return input.isVitest
     ? join(tmpdir(), `cmuxlayer-vitest-inbox-${process.pid}`)
     : undefined;
-}
-
-export function formatLifecycleChannelContent(
-  event: AgentLifecycleEvent,
-  agent: AgentRecord,
-  healthSummary?: string,
-): string {
-  switch (event) {
-    case "spawned":
-      return `cmux agent spawned: ${agent.repo} (${agent.agent_id}) is ${agent.state}`;
-    case "done":
-      return `cmux agent done: ${agent.repo} (${agent.agent_id}) finished`;
-    case "errored":
-      return agent.error
-        ? `cmux agent errored: ${agent.repo} (${agent.agent_id}) - ${agent.error}`
-        : `cmux agent errored: ${agent.repo} (${agent.agent_id})`;
-    case "health":
-      return `cmux agent health changed: ${agent.repo} (${agent.agent_id}) health=${healthSummary ?? "unknown"} state=${agent.state}`;
-  }
-}
-
-export function buildLifecycleChannelMeta(
-  event: AgentLifecycleEvent,
-  agent: AgentRecord,
-  healthSummary?: string,
-): Record<string, string> {
-  const meta: Record<string, string> = {
-    source: "cmux-agent-status",
-    event,
-    agent_id: agent.agent_id,
-    repo: agent.repo,
-    state: agent.state,
-    surface_id: agent.surface_id,
-    model: agent.model,
-    cli: agent.cli,
-    spawn_depth: String(agent.spawn_depth),
-  };
-
-  if (agent.parent_agent_id) {
-    meta.parent_agent_id = agent.parent_agent_id;
-  }
-  if (agent.cli_session_id) {
-    meta.cli_session_id = agent.cli_session_id;
-  }
-  if (agent.cli_session_path) {
-    meta.cli_session_path = agent.cli_session_path;
-  }
-  if (event === "health" && healthSummary) {
-    meta.health_summary = healthSummary;
-  }
-
-  return meta;
 }

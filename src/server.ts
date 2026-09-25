@@ -52,7 +52,6 @@ import {
   buildLaunchCommand,
   resolveSweepTiming,
   type AgentDeliveryReceipt,
-  type AgentLifecycleEvent,
 } from "./agent-engine.js";
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
@@ -453,8 +452,6 @@ import {
   registerAutoVitestTempDir,
   createServerContext,
   resolveServerInboxBaseDir,
-  formatLifecycleChannelContent,
-  buildLifecycleChannelMeta,
 } from "./mcp/context.js";
 import type {
   CreateServerOptions,
@@ -715,11 +712,6 @@ export { sanitizeTerminalInput } from "./sanitize.js";
  * rather than silenced by a permanently-cached non-stale verdict.
  */
 const defaultStaleBuildWarner = createStaleBuildWarner();
-
-const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
-const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
-const CLAUDE_CHANNEL_INSTRUCTIONS =
-  "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmuxlayer agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
 
 type ListSurfacesRemoteState =
   "local" | "connected" | "disconnected" | "unavailable";
@@ -1391,8 +1383,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : createFileSystemSeatManifestWriter());
   const seatManifestNow =
     opts?.seatManifestNow ?? (() => new Date().toISOString());
-  const enableClaudeChannels =
-    opts?.enableClaudeChannels ?? context.enableClaudeChannels;
   const skipAgentLifecycle =
     opts?.skipAgentLifecycle ?? context.skipAgentLifecycle;
   const lifecycleInitializer =
@@ -1999,15 +1989,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   };
 
-  const server = new McpServer(
-    {
-      name: "cmuxlayer",
-      version: RUNNING_VERSION,
-    },
-    enableClaudeChannels
-      ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }
-      : undefined,
-  );
+  const server = new McpServer({
+    name: "cmuxlayer",
+    version: RUNNING_VERSION,
+  });
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
   const rawRegisterTool = server.registerTool.bind(server) as (
     name: string,
@@ -2276,14 +2261,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         context.dispose();
       }
     };
-  }
-
-  if (enableClaudeChannels) {
-    server.server.registerCapabilities({
-      experimental: {
-        [CLAUDE_CHANNEL_CAPABILITY]: {},
-      },
-    });
   }
 
   const snapshotDelivery = (record: DeliveryRecord) => {
@@ -10488,27 +10465,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         throw context.lifecycleStartError;
       }
     };
-    const notifyLifecycleEvent = async (
-      event: AgentLifecycleEvent,
-      agent: AgentRecord,
-      healthSummary?: string,
-    ): Promise<void> => {
-      if (!enableClaudeChannels) {
-        return;
-      }
-      if (!server.server.transport) {
-        throw new Error("Claude channel transport is not connected yet");
-      }
-
-      // Claude turns meta keys into <channel ...> attributes, so keep keys simple.
-      await server.server.notification({
-        method: CLAUDE_CHANNEL_NOTIFICATION,
-        params: {
-          content: formatLifecycleChannelContent(event, agent, healthSummary),
-          meta: buildLifecycleChannelMeta(event, agent, healthSummary),
-        },
-      });
-    };
     const watchRegistryPath =
       opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json");
     const testProcess =
@@ -10685,7 +10641,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           },
           notify: (notifyOpts) => client.notify(notifyOpts),
-          notifyLifecycleEvent,
+          // The Claude channel emitter was removed (N1a); lifecycle events
+          // have no MCP-side consumer.
+          notifyLifecycleEvent: async () => {},
         },
         {
           spawnPreflight:
