@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { EventLog } from "./event-log.js";
-import { atomicWriteJson } from "./atomic-json-write.js";
+import { atomicWriteJson } from "./util/atomic-write.js";
 import {
   assertValidTransition,
   isFailedSpawnTombstone,

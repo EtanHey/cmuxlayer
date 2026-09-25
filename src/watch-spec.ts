@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { atomicWriteFileSync } from "./util/atomic-write.js";
 import { loadFleetConfig } from "./fleet-config.js";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -423,14 +424,11 @@ function writeRegistry(
   version: unknown,
   rows: readonly unknown[],
 ): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(
-    temporary,
+  atomicWriteFileSync(
+    path,
     `${JSON.stringify({ version, watches: rows }, null, 2)}\n`,
-    "utf8",
+    { mkdir: true },
   );
-  renameSync(temporary, path);
 }
 
 function reportPathReservationFile(path: string): string {
@@ -481,14 +479,11 @@ function writeReportPathReservations(
     rmSync(path, { force: true });
     return;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(
-    temporary,
+  atomicWriteFileSync(
+    path,
     `${JSON.stringify({ version: STATE_VERSION, reservations }, null, 2)}\n`,
-    "utf8",
+    { mkdir: true },
   );
-  renameSync(temporary, path);
 }
 
 function processStartedAtMs(pid: number): number | null {

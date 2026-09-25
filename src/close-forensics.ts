@@ -37,7 +37,7 @@ import type {
 } from "./agent-types.js";
 import type { StateManager } from "./state-manager.js";
 import type { CmuxSurface } from "./types.js";
-import { atomicWriteJson } from "./atomic-json-write.js";
+import { atomicWriteJson } from "./util/atomic-write.js";
 
 /** Minimal shape of a parsed line from `~/.cmuxterm/events.jsonl`. */
 export interface CmuxEvent {

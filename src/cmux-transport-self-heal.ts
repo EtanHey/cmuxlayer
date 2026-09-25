@@ -18,6 +18,7 @@ import {
   type SocketProbeResult,
 } from "./cmux-socket-probe.js";
 import { recordTransportRetry } from "./transport-retry-context.js";
+import { sleep as defaultSleep } from "./util/sleep.js";
 
 export const DEFAULT_PING_RETRY_ATTEMPTS = 3;
 export const DEFAULT_PING_RETRY_BACKOFF_MS = [100, 250, 500] as const;
@@ -893,10 +894,6 @@ export class CmuxSelfHealingClient {
       this.reprobeTimer = null;
     }
   }
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function wrapCliWithSelfHeal(

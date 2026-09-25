@@ -26,6 +26,7 @@ import {
   probeSocketHealth,
   type SocketProbeResult,
 } from "./cmux-socket-probe.js";
+import { sleep as defaultSleep } from "./util/sleep.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTOSTART_POLL_MS = 50;
@@ -115,10 +116,6 @@ function terminateSpawnedDaemon(
       error,
     );
   }
-}
-
-async function defaultSleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function probeDaemonSocket(socketPath: string): Promise<boolean> {
