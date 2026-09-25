@@ -11,7 +11,6 @@ import { homedir, tmpdir } from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
-import { CmuxSocketError } from "./cmux-socket-error.js";
 import { initializeNewSurfaceRuntime, readRuntimeMetadata, SurfaceRuntimeNotStartedError } from "./surface-runtime.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -58,7 +57,6 @@ import {
   RetryableDeliveryError,
   buildLaunchCommand,
   resolveSweepTiming,
-  LifecycleLockTimeoutError,
   type AgentDeliveryReceipt,
   type AgentLifecycleEvent,
   type LifecycleLockState,
@@ -183,7 +181,6 @@ import {
 } from "./shell-prompt.js";
 import {
   CreatedIdentityScope,
-  createdIdentityFromError,
 } from "./created-identity.js";
 import {
   dispatch,
@@ -230,7 +227,6 @@ import type {
   CmuxPane,
   CmuxReadScreenResult,
   CmuxSurface,
-  CmuxStatusEntry,
   CmuxTerminalMetadata,
   CmuxWorkspace,
   ControlMode,
@@ -349,7 +345,6 @@ import {
   PUBLIC_TOOL_NAME_SET,
   BaseOutputShape,
   PUBLIC_TOOL_OUTPUT_SCHEMAS,
-  BroadcastRoleSchema,
   legacyCompatibleAgentRoleSchema,
   spawnFunctionSchema,
   spawnPlacementSchema,
@@ -358,6 +353,84 @@ import {
   BroadcastArgsSchema,
 } from "./mcp/schemas.js";
 import { sleep as delay } from "./util/sleep.js";
+import {
+  deliveryRpcMethodsFromError,
+  deliveryTypedFromError,
+  deliverySubmitDispatchedFromError,
+  bootPromptFailureMutationEvidence,
+  preserveDeliveryEvidenceOnError,
+  createDeliveryPhaseTimings,
+  withSurfaceDeliveryTimings,
+  addDeliveryPhaseTiming,
+  timeDeliveryPhase,
+  buildPublicDeliveryReceipt,
+  defaultNonDeliveryWarning,
+  pausedTargetWarning,
+  DeliveryError,
+  resolveSubmitVerificationFailureReason,
+  SubmitVerificationError,
+  AmbiguousBootRecoveryReturnError,
+  submitVerificationFailurePayload,
+  DeliverySafetyGateError,
+  ManualModeMutationError,
+  PLACEMENT_WORKSPACE_UNRESOLVED,
+  BootPromptTimeoutError,
+  LauncherReadinessError,
+  BOOT_COMPOSER_RESIDUE_READS,
+  BOOT_COMPOSER_RESIDUE_POLL_MS,
+  BootPromptDeliveryError,
+  BootComposerResidueError,
+  BootPromptUpdateMenuBlockedError,
+  SurfaceGoneError,
+} from "./delivery/receipts.js";
+import type {
+  BroadcastRole,
+  BroadcastReceipt,
+  DeliveryStatus,
+  SubmitEvidence,
+  PublicDeliveryReceipt,
+  DeliveryRpcMethod,
+  DeliveryPhaseTimings,
+  DeliveryRecord,
+  SubmitVerificationFailureReason,
+  SubmitKeyVerificationReason,
+} from "./delivery/receipts.js";
+import {
+  readErrorText,
+  controlModeFromStatusEntries,
+  screenUnavailableMessage,
+  isSurfaceGoneReadFailure,
+  surfaceGonePayload,
+  ok,
+  okFormatted,
+  shapeSuccessfulSendToResult,
+  err,
+  findErrorInChain,
+  requireValue,
+  LifecycleStartTimeoutError,
+} from "./mcp/tool-result.js";
+import type {
+  ToolReturn,
+} from "./mcp/tool-result.js";
+
+// Public surface kept stable: these moved to ./mcp/tool-result.ts (CX-2 S3).
+export {
+  __leanReceiptTestHooks,
+  LifecycleStartTimeoutError,
+} from "./mcp/tool-result.js";
+
+
+// Public surface kept stable: these moved to ./delivery/receipts.ts (CX-2 S3).
+export {
+  buildPublicDeliveryReceipt,
+  pausedTargetWarning,
+} from "./delivery/receipts.js";
+export type {
+  SubmitEvidence,
+  PublicDeliveryReceipt,
+  DeliveryRecord,
+} from "./delivery/receipts.js";
+
 
 // Public surface kept stable: these moved to ./mcp/schemas.ts (CX-2 S2).
 export {
@@ -489,13 +562,6 @@ export function selectDuplicateWatchOwnerCandidate<T>(
   }
   return best?.candidate;
 }
-
-type TextContent = { type: "text"; text: string };
-type ToolReturn = {
-  content: TextContent[];
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
 
 // Only the internal scope=agent close delegate can request this teardown path.
 // A remote JSON tool caller cannot supply a symbol property.
@@ -662,1029 +728,6 @@ const READY_PATTERN_CLIS: CliType[] = [
   "kiro",
   "cursor",
 ];
-type BroadcastRole = z.infer<typeof BroadcastRoleSchema>;
-type BroadcastReceipt = {
-  agent_id: string;
-  seat: string;
-  delivered: boolean;
-  delivery_state?: PublicDeliveryState;
-  submit_verified: boolean | null;
-  submit_verification_reason?: SubmitVerificationFailureReason;
-  retry_safe?: false;
-  error?: string;
-  skipped?: string;
-};
-
-type DeliveryStatus = "delivering" | "delivered" | "failed" | "pending_verify";
-
-export type SubmitEvidence =
-  "token_delta" | "transcript_echo" | "cleared_composer" | "status_only";
-
-type PublicDeliveryState =
-  | "typed"
-  | "submitted"
-  | "queued"
-  | "queued_followup"
-  | "rescued"
-  | "failed"
-  | "pending_verify"
-  | "failed_confirmed"
-  | "stalled_queue";
-
-export interface PublicDeliveryReceipt {
-  delivered: boolean;
-  terminal: boolean;
-  typed: boolean;
-  submit_attempted: boolean;
-  submit_dispatched?: boolean;
-  submit_verified: boolean | null;
-  submitted: boolean;
-  submit_evidence?: SubmitEvidence | null;
-  retry_count: number;
-  rpc_methods: Array<"surface.send_text" | "surface.send_key">;
-  delivery?: PublicDeliveryState;
-  delivery_state?: PublicDeliveryState;
-  delivery_id?: string;
-  duplicate_of?: string;
-  needs_attention?: boolean;
-  attention_reason?: string;
-  queued_behind_turn?: boolean;
-  timings_ms?: DeliveryPhaseTimings;
-  observation?: {
-    status: ParsedScreenResult["status"];
-    composer_empty: boolean;
-    prompt_echoed: boolean;
-    last_10_lines: string[];
-  };
-  WARNING?: string;
-}
-
-type DeliveryRpcMethod = PublicDeliveryReceipt["rpc_methods"][number];
-
-type DeliveryErrorEvidence = {
-  rpc_methods: DeliveryRpcMethod[];
-  typed?: boolean;
-  submit_dispatched?: boolean;
-};
-
-const deliveryRpcMethodsFromError = (
-  error: unknown,
-): DeliveryRpcMethod[] =>
-  error &&
-  typeof error === "object" &&
-  "rpc_methods" in error &&
-  Array.isArray((error as { rpc_methods?: unknown }).rpc_methods)
-    ? [...(error as DeliveryErrorEvidence).rpc_methods]
-    : error instanceof SubmitVerificationError
-      ? [...error.receipt.rpc_methods]
-      : [];
-
-const deliveryTypedFromError = (error: unknown): boolean =>
-  Boolean(
-    error &&
-      typeof error === "object" &&
-      "typed" in error &&
-      (error as { typed?: unknown }).typed === true,
-  ) ||
-  (error instanceof SubmitVerificationError && error.receipt.typed === true);
-
-const deliverySubmitDispatchedFromError = (error: unknown): boolean =>
-  Boolean(
-    error &&
-      typeof error === "object" &&
-      "submit_dispatched" in error &&
-      (error as { submit_dispatched?: unknown }).submit_dispatched === true,
-  ) ||
-  (error instanceof SubmitVerificationError &&
-    error.receipt.submit_attempted === true);
-
-function bootPromptFailureMutationEvidence(input: {
-  delivered_chars: number;
-  typed: boolean;
-  submit_dispatched: boolean;
-  rpc_methods: DeliveryRpcMethod[];
-}) {
-  const typed = input.typed || input.delivered_chars > 0 ||
-    input.rpc_methods.includes("surface.send_text");
-  return buildPublicDeliveryReceipt({
-    delivery_state: "failed",
-    typed,
-    submit_attempted: input.submit_dispatched,
-    submit_dispatched: input.submit_dispatched,
-    submit_verified: false,
-    retry_count: 0,
-    rpc_methods: [...input.rpc_methods],
-  });
-}
-
-const preserveDeliveryEvidenceOnError = (
-  error: unknown,
-  rpcMethods: ReadonlySet<DeliveryRpcMethod>,
-  typed: boolean,
-  submitDispatched: boolean,
-): unknown => {
-  if (rpcMethods.size === 0 && !typed && !submitDispatched) return error;
-  const target =
-    error && typeof error === "object"
-      ? error
-      : new Error(String(error), { cause: error });
-  try {
-    Object.defineProperty(target, "rpc_methods", {
-      configurable: true,
-      enumerable: false,
-      value: [...rpcMethods],
-    });
-    if (typed) {
-      Object.defineProperty(target, "typed", {
-        configurable: true,
-        enumerable: false,
-        value: true,
-      });
-    }
-    if (submitDispatched) {
-      Object.defineProperty(target, "submit_dispatched", {
-        configurable: true,
-        enumerable: false,
-        value: true,
-      });
-    }
-    return target;
-  } catch {
-    const wrapped = new Error(
-      error instanceof Error ? error.message : String(error),
-      { cause: error },
-    );
-    Object.defineProperty(wrapped, "rpc_methods", {
-      configurable: true,
-      enumerable: false,
-      value: [...rpcMethods],
-    });
-    if (typed) {
-      Object.defineProperty(wrapped, "typed", {
-        configurable: true,
-        enumerable: false,
-        value: true,
-      });
-    }
-    if (submitDispatched) {
-      Object.defineProperty(wrapped, "submit_dispatched", {
-        configurable: true,
-        enumerable: false,
-        value: true,
-      });
-    }
-    return wrapped;
-  }
-};
-
-type DeliveryPhase =
-  "route" | "lock" | "lock_hold" | "enumerate" | "type" | "verify";
-type DeliveryPhaseTimings = Record<DeliveryPhase, number> & {
-  // RPC durations are summed; concurrent topology calls can exceed wall time.
-  // Target-list time wraps those topology calls and must not be added to them.
-  enumerate_topology_rpc: number;
-  enumerate_scan_target_list: number;
-  enumerate_screen_read: number;
-  enumerate_rpc_count: number;
-  event_loop_delay_max: number;
-  event_loop_delay_mean: number;
-};
-
-function createDeliveryPhaseTimings(): DeliveryPhaseTimings {
-  return {
-    route: 0, lock: 0, lock_hold: 0, enumerate: 0, type: 0, verify: 0,
-    enumerate_topology_rpc: 0, enumerate_scan_target_list: 0,
-    enumerate_screen_read: 0, enumerate_rpc_count: 0,
-    event_loop_delay_max: 0, event_loop_delay_mean: 0,
-  };
-}
-
-function withSurfaceDeliveryTimings(
-  result: ToolReturn,
-  timings: DeliveryPhaseTimings,
-): ToolReturn {
-  const payload = result.structuredContent;
-  if (!payload) return result;
-  const structuredContent = {
-    ...payload,
-    timings_ms: payload.timings_ms ?? timings,
-  };
-  return {
-    ...result,
-    content: [{ type: "text", text: JSON.stringify(structuredContent) }],
-    structuredContent,
-  };
-}
-
-function addDeliveryPhaseTiming(
-  timings: DeliveryPhaseTimings | undefined,
-  phase: DeliveryPhase,
-  startedAt: number,
-): void {
-  if (!timings) return;
-  timings[phase] += Math.max(0, Date.now() - startedAt);
-}
-
-async function timeDeliveryPhase<T>(
-  timings: DeliveryPhaseTimings | undefined,
-  phase: DeliveryPhase,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const startedAt = Date.now();
-  try {
-    return await operation();
-  } finally {
-    addDeliveryPhaseTiming(timings, phase, startedAt);
-  }
-}
-
-/**
- * The only public receipt builder for text/key delivery. A delivery
- * discriminator is intentionally absent until the engine has evidence for a
- * queued, failed, or verified-submitted outcome.
- */
-export function buildPublicDeliveryReceipt(input: {
-  delivery_state?: PublicDeliveryState;
-  delivery_id?: string;
-  typed: boolean;
-  submit_attempted: boolean;
-  submit_verified: boolean | null;
-  submit_evidence?: SubmitEvidence | null;
-  retry_count: number;
-  rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
-  needs_attention?: boolean;
-  attention_reason?: string | null;
-  queued_behind_turn?: boolean;
-  timings_ms?: DeliveryPhaseTimings;
-  observation?: PublicDeliveryReceipt["observation"];
-  submit_dispatched?: boolean;
-  WARNING?: string;
-}): PublicDeliveryReceipt {
-  const evidencedState =
-    input.delivery_state === "typed" ||
-    input.delivery_state === "queued" ||
-    input.delivery_state === "queued_followup" ||
-    input.delivery_state === "rescued" ||
-    input.delivery_state === "failed" ||
-    input.delivery_state === "pending_verify" ||
-    input.delivery_state === "failed_confirmed" ||
-    input.delivery_state === "stalled_queue"
-      ? input.delivery_state
-      : input.delivery_state === "submitted" && input.submit_verified === true
-        ? "submitted"
-        : undefined;
-  const terminal =
-    evidencedState === "typed" ||
-    evidencedState === "submitted" ||
-    evidencedState === "rescued" ||
-    evidencedState === "failed" ||
-    evidencedState === "failed_confirmed" ||
-    evidencedState === "stalled_queue";
-  const warning =
-    input.WARNING ??
-    defaultNonDeliveryWarning(
-      evidencedState,
-      input.rpc_methods ?? [],
-      input.typed,
-      input.submit_dispatched === true,
-    );
-  return {
-    delivered: evidencedState === "submitted" && input.submit_verified === true,
-    terminal,
-    typed: input.typed,
-    submit_attempted: input.submit_attempted,
-    ...(input.submit_dispatched !== undefined
-      ? { submit_dispatched: input.submit_dispatched }
-      : {}),
-    submit_verified: input.submit_verified,
-    submitted: input.submit_verified === true,
-    ...(input.submit_verified !== null
-      ? { submit_evidence: input.submit_evidence ?? null }
-      : {}),
-    retry_count: input.retry_count,
-    rpc_methods: input.rpc_methods ?? [],
-    ...(evidencedState
-      ? { delivery: evidencedState, delivery_state: evidencedState }
-      : {}),
-    ...(input.delivery_id ? { delivery_id: input.delivery_id } : {}),
-    ...(input.needs_attention === true
-      ? {
-          needs_attention: true,
-          ...(input.attention_reason
-            ? { attention_reason: input.attention_reason }
-            : {}),
-        }
-      : {}),
-    ...(input.queued_behind_turn === true ? { queued_behind_turn: true } : {}),
-    ...(input.timings_ms ? { timings_ms: { ...input.timings_ms } } : {}),
-    ...(input.observation ? { observation: input.observation } : {}),
-    ...(warning ? { WARNING: warning } : {}),
-  };
-}
-
-/**
- * One plain-language line a caller cannot honestly quote as "sent".
- *
- * AIDEV-NOTE (T2 #445): `ok:true` with `delivered:false` was routinely read as
- * success -- a lead's own words: "I treated the first as evidence of the
- * second." The booleans two levels down were correct and still misread, so the
- * receipt now says it in words at the top level. Explicit callers keep their
- * own WARNING (the paused-target line is more specific than this default).
- */
-function defaultNonDeliveryWarning(
-  state: PublicDeliveryState | undefined,
-  rpcMethods: readonly DeliveryRpcMethod[],
-  typed: boolean,
-  submitDispatched: boolean,
-): string | undefined {
-  switch (state) {
-    case "pending_verify":
-    case "queued":
-    case "queued_followup":
-      return (
-        `NOT DELIVERED YET — state ${state}: the message has not been observed ` +
-        "to land. It resolves in the background; do not relay as sent. " +
-        "Query wait_for({delivery_id}) for the terminal outcome."
-      );
-    case "failed":
-    case "failed_confirmed":
-    case "stalled_queue":
-      if (state === "stalled_queue") {
-        return "STALLED QUEUE — the target is idle but still shows the queued message. Inspect its pane and use Escape to release it, then verify delivery before retrying.";
-      }
-      if (typed || rpcMethods.includes("surface.send_text")) {
-        return submitDispatched || rpcMethods.includes("surface.send_key")
-          ? `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}) after ` +
-              "text reached the target and the submission key was sent. The task " +
-              "may have been submitted despite the later failure; do not resend. " +
-              "Inspect the target pane before any recovery."
-          : `PARTIALLY DELIVERED — terminal cmuxlayer failure (${state}). The ` +
-              "text reached the target composer, but no submission key succeeded; " +
-              "it may remain there unsubmitted. Do not resend. Inspect the target " +
-              "pane before any recovery.";
-      }
-      return (
-        `NOT DELIVERED — terminal failure (${state}). The message did not ` +
-        "land and will not be retried; do not relay as sent."
-      );
-    case "rescued":
-      return (
-        "NOT VERIFIED — state rescued: the prompt first appeared after an " +
-        "interrupt, so external intervention delivered text but cmuxlayer did " +
-        "not verify an intact task turn. Do not relay as delivered."
-      );
-    default:
-      return undefined;
-  }
-}
-
-export function pausedTargetWarning(source: string): string {
-  return (
-    `WARNING — target pane is paused (source: ${source}) and cannot act. ` +
-    "Delivery is queued, not submitted. Do not relay as sent."
-  );
-}
-
-export interface DeliveryRecord {
-  delivery_id: string;
-  surface: string;
-  workspace?: string;
-  status: DeliveryStatus;
-  total_chunks: number;
-  sent_chunks: number;
-  chunk_size: number;
-  chunk_delay_ms: number;
-  chunks: string[];
-  press_enter: boolean;
-  verify_submit: boolean;
-  submit_verified: boolean | null;
-  submit_verification_reason?: SubmitVerificationFailureReason;
-  retry_safe?: false;
-  retry_count: number;
-  rpc_methods: DeliveryRpcMethod[];
-  typed: boolean;
-  submit_dispatched: boolean;
-  rename_to_task?: string;
-  started_at: string;
-  completed_at?: string;
-  error?: string;
-  failed_chunk?: number;
-  /** Internal UUID guard; omitted from public delivery snapshots. */
-  stableSurfaceIdentity?: string | null;
-  /** Ref-only provenance captured before an asynchronous write starts. */
-  surfaceObserverIdentity?: string | null;
-  beforeMutation?: () => Promise<void>;
-  lockKey?: string;
-}
-
-class DeliveryError extends Error {
-  constructor(
-    message: string,
-    readonly failed_chunk?: number,
-    cause?: unknown,
-  ) {
-    super(message, { cause });
-    this.name = "DeliveryError";
-  }
-}
-
-/**
- * Why a submit could not be verified. This is the sentence a receipt shows the
- * fleet when a delivery did not land, so it is spelled out rather than nested:
- * the order is "what we saw" before "what we required", most specific first.
- */
-function resolveSubmitVerificationFailureReason(observed: {
-  sawPendingInput: boolean;
-  sawReadableScreen: boolean;
-  sawBlankScreen: boolean;
-  bootConsumptionRefuted: boolean;
-  requireWorkingStatus: boolean;
-}): SubmitVerificationFailureReason {
-  if (observed.sawPendingInput) return "input_still_pending";
-  if (!observed.sawReadableScreen) {
-    return observed.sawBlankScreen
-      ? "surface_screen_empty"
-      : "surface_read_unavailable";
-  }
-  if (observed.bootConsumptionRefuted) return "consumption_not_observed";
-  if (observed.requireWorkingStatus) return "working_status_not_observed";
-  return "submit_evidence_absent";
-}
-
-type SubmitVerificationFailureReason =
-  | "surface_read_unavailable"
-  | "surface_screen_empty"
-  | "input_still_pending"
-  | "working_status_not_observed"
-  | "consumption_not_observed"
-  | "submit_evidence_absent";
-
-/**
- * Why a bare submit-key dispatch could not be confirmed. A key send carries no
- * text, so the text path's evidence (does the screen still show what we typed?)
- * does not apply; prompt-state transitions and an emptied composer are the
- * available positive evidence.
- */
-type SubmitKeyVerificationReason =
-  "surface_read_unavailable" | "submit_evidence_absent";
-
-class SubmitVerificationError extends Error {
-  readonly retry_safe = false;
-  readonly receipt: PublicDeliveryReceipt;
-
-  constructor(
-    message: string,
-    readonly retry_count: number,
-    readonly reason: SubmitVerificationFailureReason,
-    receipt?: PublicDeliveryReceipt,
-  ) {
-    super(message);
-    this.name = "SubmitVerificationError";
-    this.receipt =
-      receipt ??
-      buildPublicDeliveryReceipt({
-        typed: true,
-        submit_attempted: true,
-        submit_verified: false,
-        retry_count,
-      });
-  }
-}
-
-class AmbiguousBootRecoveryReturnError extends Error {
-  receipt?: PublicDeliveryReceipt;
-  constructor(
-    readonly pointer: string,
-    readonly bootInstanceId: string,
-    readonly agentId: string,
-    cause: unknown,
-  ) {
-    super(
-      `Recovered boot Return acknowledgement is uncertain: ${cause instanceof Error ? cause.message : String(cause)}`,
-    );
-    this.name = "AmbiguousBootRecoveryReturnError";
-  }
-}
-
-const submitVerificationFailurePayload = (error: SubmitVerificationError) => ({
-  ...error.receipt,
-  submit_verification_reason: error.reason,
-  retry_safe: error.retry_safe,
-});
-
-class DeliverySafetyGateError extends Error {
-  readonly receipt = buildPublicDeliveryReceipt({
-    delivery_state: "failed",
-    typed: false,
-    submit_attempted: false,
-    submit_verified: false,
-    retry_count: 0,
-  });
-  readonly delivered = this.receipt.delivered;
-  readonly submit_verified = this.receipt.submit_verified;
-
-  constructor(
-    readonly error_code:
-      | "blocked_by_interactive_prompt"
-      | "blocked_by_permission_prompt"
-      | "blocked_by_foreign_draft"
-      | "owned_boot_contract_pending"
-      | "nothing_owned_to_submit"
-      | "draft_ownership_unverified"
-      | "boot_instance_changed",
-    readonly screen: ParsedScreenResult,
-    readonly draftText?: string,
-  ) {
-    super(
-      error_code === "draft_ownership_unverified"
-        ? "Cannot verify composer ownership from the current frame. Return was not sent; read the pane and retry when its composer is observable."
-        : error_code === "boot_instance_changed"
-        ? "Managed boot instance changed before recovered Return; no key was sent. Re-read the agent before retrying."
-        : error_code === "nothing_owned_to_submit"
-        ? "No owned text to submit: this composer could be showing an empty-input hint. Return was not sent."
-        : error_code === "blocked_by_permission_prompt"
-        ? "delivery blocked by active permission prompt"
-        : error_code === "blocked_by_foreign_draft"
-          ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
-        : error_code === "owned_boot_contract_pending"
-          ? "The engine-issued boot contract is still pending in this composer. Its Return could not be verified, so no followup text was typed."
-        : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
-    );
-    this.name = "DeliverySafetyGateError";
-  }
-}
-
-class ManualModeMutationError extends Error {
-  readonly error_code = "manual_mode";
-  readonly control = "manual";
-
-  constructor(
-    readonly tool: string,
-    readonly surface?: string,
-    readonly workspace?: string,
-  ) {
-    super(
-      `Tool "${tool}" is blocked${
-        surface ? ` for surface ${surface}` : ""
-      }${workspace ? ` in workspace ${workspace}` : ""}: surface is in manual mode`,
-    );
-    this.name = "ManualModeMutationError";
-  }
-}
-
-const PLACEMENT_WORKSPACE_UNRESOLVED =
-  "PLACEMENT_WORKSPACE_UNRESOLVED" as const;
-
-class BootPromptTimeoutError extends Error {
-  constructor(
-    message: string,
-    readonly last_10_lines: string[],
-    readonly pending_input_observed = false,
-  ) {
-    super(message);
-    this.name = "BootPromptTimeoutError";
-  }
-}
-
-class LauncherReadinessError extends Error {
-  constructor(
-    message: string,
-    readonly last_10_lines: string[],
-  ) {
-    super(message);
-    this.name = "LauncherReadinessError";
-  }
-}
-
-const BOOT_COMPOSER_RESIDUE_READS = 3;
-const BOOT_COMPOSER_RESIDUE_POLL_MS = 500;
-
-class BootPromptDeliveryError extends Error {
-  readonly rpc_methods: DeliveryRpcMethod[];
-  readonly typed: boolean;
-  readonly submit_dispatched: boolean;
-
-  constructor(
-    message: string,
-    readonly delivered_chars: number,
-    readonly submit_verification_error?: SubmitVerificationError,
-    readonly delivery_error?: unknown,
-  ) {
-    super(message, {
-      cause: delivery_error ?? submit_verification_error,
-    });
-    this.name = "BootPromptDeliveryError";
-    const deliveryMethods = deliveryRpcMethodsFromError(delivery_error);
-    this.rpc_methods =
-      deliveryMethods.length > 0
-        ? deliveryMethods
-        : deliveryRpcMethodsFromError(submit_verification_error);
-    this.typed =
-      deliveryTypedFromError(delivery_error) ||
-      deliveryTypedFromError(submit_verification_error);
-    this.submit_dispatched =
-      deliverySubmitDispatchedFromError(delivery_error) ||
-      deliverySubmitDispatchedFromError(submit_verification_error);
-  }
-}
-
-/** #801: a submitted boot prompt left text behind in the composer. */
-class BootComposerResidueError extends BootPromptDeliveryError {
-  readonly error_code = "boot_composer_residue";
-
-  constructor(
-    message: string,
-    delivered_chars: number,
-    readonly composer_residue: string,
-    evidence: DeliveryErrorEvidence,
-    /** The part before the residue was submitted and verified. */
-    readonly submit_verified: boolean,
-  ) {
-    super(message, delivered_chars, undefined, evidence);
-    this.name = "BootComposerResidueError";
-  }
-}
-
-class BootPromptUpdateMenuBlockedError extends Error {
-  readonly error_code = "blocked_by_update_menu";
-  readonly recovery: string;
-
-  constructor(
-    message: string,
-    readonly last_10_lines: string[],
-    surface: string,
-  ) {
-    super(message);
-    this.name = "BootPromptUpdateMenuBlockedError";
-    this.recovery =
-      `First resolve the update menu on ${surface}; cmuxlayer deliberately did not press Return. ` +
-      "Then deliver or resume the boot prompt on that same surface instead of rerunning the spawn.";
-  }
-}
-
-class SurfaceGoneError extends Error {
-  readonly error_code = "pane_died";
-
-  constructor(
-    readonly surface: string,
-    readonly originalError: unknown,
-  ) {
-    super(`surface ${surface} disappeared - respawn`);
-    this.name = "SurfaceGoneError";
-  }
-}
-
-function readErrorText(error: unknown): string {
-  if (error instanceof Error) {
-    const extra = error as Error & {
-      code?: unknown;
-      stderr?: unknown;
-      stdout?: unknown;
-      cause?: unknown;
-    };
-    return [
-      error.name,
-      error.message,
-      typeof extra.code === "string" ? extra.code : "",
-      typeof extra.stderr === "string" ? extra.stderr : "",
-      typeof extra.stdout === "string" ? extra.stdout : "",
-      extra.cause instanceof Error ? extra.cause.message : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
-  return String(error);
-}
-
-function controlModeFromStatusEntries(entries: unknown): ControlMode {
-  if (!Array.isArray(entries)) {
-    return "autonomous";
-  }
-  const entry = entries.find((candidate): candidate is CmuxStatusEntry => {
-    if (typeof candidate !== "object" || candidate === null) {
-      return false;
-    }
-    const maybeEntry = candidate as Partial<CmuxStatusEntry>;
-    return maybeEntry.key === "mode.control";
-  });
-  return entry?.value === "manual" || entry?.value === "autonomous"
-    ? entry.value
-    : "autonomous";
-}
-
-function screenUnavailableMessage(error: unknown): string {
-  return readErrorText(error).replace(
-    /^Error\ncmux read-screen failed:\s*/i,
-    "",
-  );
-}
-
-function isSurfaceGoneReadFailure(error: unknown, surface: string): boolean {
-  const text = readErrorText(error).toLowerCase();
-  const surfaceLower = surface.toLowerCase();
-  if (
-    text.includes(`unable to resolve workspace for surface ${surfaceLower}`)
-  ) {
-    return true;
-  }
-  if (/\bsurface[-_\s]?not[-_\s]?found\b/.test(text)) {
-    return true;
-  }
-  return /\bnot_found\b/.test(text) && text.includes("surface");
-}
-
-function surfaceGonePayload(
-  error: SurfaceGoneError,
-  extra: Record<string, unknown> = {},
-): Record<string, unknown> {
-  return {
-    error_code: error.error_code,
-    pane_died: true,
-    surface: error.surface,
-    action: "respawn",
-    ...extra,
-  };
-}
-
-function ok(data: Record<string, unknown>): ToolReturn {
-  const payload = {
-    ok: true,
-    retry_count: currentTransportRetryCount(),
-    ...data,
-  };
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload) }],
-    structuredContent: payload,
-  };
-}
-
-/** ok() variant with formatted human-readable text content */
-function okFormatted(
-  formattedText: string,
-  data: Record<string, unknown>,
-): ToolReturn {
-  const payload = {
-    ok: true,
-    retry_count: currentTransportRetryCount(),
-    ...data,
-  };
-  return {
-    content: [{ type: "text", text: formattedText }],
-    structuredContent: payload,
-  };
-}
-
-/** Reduce verified send_to successes without discarding routing or safety state. */
-function shapeSuccessfulSendToResult(
-  result: ToolReturn,
-  args: Record<string, unknown>,
-): ToolReturn {
-  const full = result.structuredContent;
-  const verifiedSubmit =
-    (full?.delivery_state === "submitted" && full.submitted === true) ||
-    (args.mode === "key" &&
-      full?.submit_attempted === true &&
-      full.submit_dispatched === true &&
-      full.submit_verified === true);
-  if (
-    result.isError === true ||
-    !full ||
-    full.ok !== true ||
-    !verifiedSubmit
-  ) {
-    return result;
-  }
-
-  const surfaceMode = args.mode !== "agent";
-  const identityKey = surfaceMode ? "surface" : "agent_id";
-  const identity =
-    full[identityKey] ??
-    args[identityKey] ??
-    (surfaceMode ? args.target : undefined);
-  const receiptFloor = {
-    ok: true,
-    retry_count:
-      typeof full.retry_count === "number"
-        ? full.retry_count
-        : currentTransportRetryCount(),
-    ...(typeof identity === "string" ? { [identityKey]: identity } : {}),
-  };
-  const lean: Record<string, unknown> = {
-    ...receiptFloor,
-    ...("caller_agent_id" in full ? { caller_agent_id: full.caller_agent_id } : {}),
-    ...(args.mode === "key"
-      ? {
-          key: full.key ?? args.text,
-          submit_verified: full.submit_verified,
-          submit_verification_reason:
-            full.submit_verification_reason ?? null,
-        }
-      : {
-          delivery_state: "submitted",
-          submitted: true,
-        }),
-    ...(typeof full.delivery_id === "string"
-      ? { delivery_id: full.delivery_id }
-      : {}),
-    ...(full.queued_behind_turn === true ? { queued_behind_turn: true } : {}),
-    ...(typeof full.duplicate_of === "string"
-      ? { duplicate_of: full.duplicate_of }
-      : {}),
-    ...(Array.isArray(full.warnings) && full.warnings.length > 0
-      ? { warnings: full.warnings }
-      : {}),
-  };
-  return {
-    ...result,
-    content: [{ type: "text", text: JSON.stringify(lean) }],
-    structuredContent: lean,
-  };
-}
-
-export const __leanReceiptTestHooks = { shapeSuccessfulSendToResult };
-
-function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
-  const message = error instanceof Error ? error.message : String(error);
-  const modeExtra =
-    error instanceof ManualModeMutationError
-      ? {
-          error_code: error.error_code,
-          tool: error.tool,
-          ...(error.surface ? { surface: error.surface } : {}),
-          ...(error.workspace ? { workspace: error.workspace } : {}),
-          control: error.control,
-        }
-      : {};
-  const deliverySafetyExtra =
-    error instanceof DeliverySafetyGateError
-      ? {
-          ...error.receipt,
-          error_code: error.error_code,
-          screen: error.screen,
-          ...(["nothing_owned_to_submit", "draft_ownership_unverified", "boot_instance_changed"].includes(error.error_code)
-            ? { key_dispatched: false, submit_dispatched: false }
-            : {}),
-        }
-      : {};
-  const submitVerificationExtra =
-    error instanceof SubmitVerificationError
-      ? submitVerificationFailurePayload(error)
-      : error instanceof BootPromptDeliveryError &&
-          error.submit_verification_error
-        ? submitVerificationFailurePayload(error.submit_verification_error)
-        : {};
-  const placementWorkspaceExtra =
-    error &&
-    typeof error === "object" &&
-    "code" in error &&
-    error.code === PLACEMENT_WORKSPACE_UNRESOLVED
-      ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
-      : {};
-  const placementTimeoutExtra =
-    error &&
-    typeof error === "object" &&
-    "code" in error &&
-    error.code === "placement_timeout"
-      ? { error_code: "placement_timeout", retryable: true }
-      : {};
-  const placementPendingExtra =
-    error &&
-    typeof error === "object" &&
-    "code" in error &&
-    error.code === "placement_pending"
-      ? {
-          error_code: "placement_pending",
-          retryable: true,
-          ...("remainingMs" in error &&
-          typeof error.remainingMs === "number" &&
-          Number.isFinite(error.remainingMs)
-            ? { remaining_ms: error.remainingMs }
-            : {}),
-        }
-      : {};
-  // #529: the bounded lifecycle timeouts carry a `code` that must reach the
-  // tool payload, or automated callers see only free text and cannot tell a
-  // bounded control-plane wait from any other failure. Both are retryable.
-  const lifecycleTimeoutExtra =
-    error instanceof LifecycleStartTimeoutError
-      ? { error_code: error.code, waited_ms: error.waitedMs, retryable: true }
-      : error instanceof LifecycleLockTimeoutError
-        ? {
-            error_code: error.code,
-            waited_ms: error.waitedMs,
-            lock_holder: error.holder,
-            held_for_ms: error.heldForMs,
-            queue_depth: error.queueDepth,
-            retryable: true,
-          }
-        : {};
-  const cmuxUnavailableExtra =
-    error instanceof CmuxSocketError && error.code === "cmux_unavailable"
-      ? { error_code: "cmux_unavailable", retryable: true }
-      : {};
-  const readinessTimeout = findErrorInChain(
-    error,
-    (candidate): candidate is BootPromptTimeoutError | LauncherReadinessError =>
-      candidate instanceof BootPromptTimeoutError ||
-      candidate instanceof LauncherReadinessError,
-  );
-  const readinessExtra = readinessTimeout
-    ? { last_10_lines: readinessTimeout.last_10_lines }
-    : {};
-  const rpcMethods = deliveryRpcMethodsFromError(error);
-  const deliveryRpcExtra =
-    rpcMethods.length > 0 ? { rpc_methods: rpcMethods } : {};
-  const deliveryTyped = deliveryTypedFromError(error);
-  const deliverySubmitDispatched = deliverySubmitDispatchedFromError(error);
-  const deliveryMutationExtra =
-    deliveryTyped || deliverySubmitDispatched
-      ? {
-          typed: deliveryTyped,
-          submit_attempted: deliverySubmitDispatched,
-          submit_dispatched: deliverySubmitDispatched,
-          rpc_methods: rpcMethods,
-          WARNING: defaultNonDeliveryWarning(
-            "failed",
-            rpcMethods,
-            deliveryTyped,
-            deliverySubmitDispatched,
-          ),
-        }
-      : {};
-  const ambiguousBootRecoveryExtra =
-    error instanceof AmbiguousBootRecoveryReturnError
-      ? { agent_id: error.agentId, ...error.receipt }
-      : {};
-  const retryMeta =
-    error && typeof error === "object"
-      ? {
-          retry_count:
-            "retry_count" in error &&
-            typeof (error as { retry_count?: unknown }).retry_count === "number"
-              ? (error as { retry_count: number }).retry_count
-              : currentTransportRetryCount(),
-          ...(error &&
-          "transport_state" in error &&
-          typeof (error as { transport_state?: unknown }).transport_state ===
-            "string"
-            ? {
-                transport_state: (error as { transport_state: string })
-                  .transport_state,
-              }
-            : {}),
-        }
-      : { retry_count: currentTransportRetryCount() };
-  const payload = {
-    ok: false,
-    error: message,
-    ...retryMeta,
-    ...modeExtra,
-    ...deliverySafetyExtra,
-    ...submitVerificationExtra,
-    ...placementWorkspaceExtra,
-    ...placementTimeoutExtra,
-    ...placementPendingExtra,
-    ...lifecycleTimeoutExtra,
-    ...cmuxUnavailableExtra,
-    ...readinessExtra,
-    ...deliveryRpcExtra,
-    ...deliveryMutationExtra,
-    ...ambiguousBootRecoveryExtra,
-    ...extra,
-    ...createdIdentityFromError(error),
-  };
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload) }],
-    structuredContent: payload,
-    isError: true,
-  };
-}
-
-function findErrorInChain<T extends Error>(
-  error: unknown,
-  predicate: (error: Error) => error is T,
-): T | null {
-  const seen = new Set<unknown>();
-  let current = error;
-  while (current instanceof Error && !seen.has(current)) {
-    if (predicate(current)) return current;
-    seen.add(current);
-    current =
-      current instanceof AgentLaunchError && current.launch_cause !== undefined
-        ? current.launch_cause
-        : current.cause;
-  }
-  return null;
-}
-
-function requireValue(
-  value: string | number | undefined,
-  message: string,
-): asserts value is string | number {
-  if (value === undefined || value === "") {
-    throw new Error(message);
-  }
-}
 
 type ListSurfacesRemoteState =
   "local" | "connected" | "disconnected" | "unavailable";
@@ -2818,22 +1861,6 @@ export type LifecycleAgentInputDeliverer = (args: {
 
 export const DEFAULT_LIFECYCLE_START_TIMEOUT_MS = 60_000;
 export const DEFAULT_REPORT_WATCH_DEADLINE_MS = 60 * 60 * 1_000;
-
-/** Lifecycle initialization never settled inside its bound (#529). */
-export class LifecycleStartTimeoutError extends Error {
-  readonly code = "ELIFECYCLESTARTTIMEOUT";
-  readonly waitedMs: number;
-
-  constructor(waitedMs: number) {
-    super(
-      `cmuxlayer lifecycle initialization did not complete within ${waitedMs}ms; ` +
-        "the daemon or its startup sweep is wedged. " +
-        "Retry; if it persists, see control_health.daemon_lifecycle.lifecycle_start.",
-    );
-    this.name = "LifecycleStartTimeoutError";
-    this.waitedMs = waitedMs;
-  }
-}
 
 export function resolveLifecycleStartTimeoutMs(
   env: NodeJS.ProcessEnv = process.env,
