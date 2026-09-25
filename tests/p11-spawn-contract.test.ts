@@ -5162,7 +5162,9 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         .filter((name) => name.endsWith(".ts"))
         .map((name) => `src/engine/${name}`),
     ];
-    for (const sourcePaths of [["src/server.ts"], engineFiles]) {
+    // The server is server.ts plus its extracted MCP tool modules (CX-3b S10a).
+    const serverFiles = ["src/server.ts", "src/mcp/tools/agent.ts"];
+    for (const sourcePaths of [serverFiles, engineFiles]) {
       const source = sourcePaths
         .map((sourcePath) => readFileSync(join(process.cwd(), sourcePath), "utf8"))
         .join("\n");
