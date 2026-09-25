@@ -135,11 +135,6 @@ import {
   type SeatRegistry,
 } from "./seat-identity.js";
 import {
-  latestMonitorForOwnerSeats,
-  transferMonitorRegistryOwner,
-  type MonitorDeadmanNotify,
-} from "./monitor-registry.js";
-import {
   captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology,
   enumerateAllWindowWorkspacesWithRetry,
@@ -392,10 +387,6 @@ export class AgentEngine {
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
   private outboxDrainInFlight = false;
-  private monitorRegistryPath?: string;
-  private monitorRegistryNow?: () => number;
-  private monitorRegistryNotify: MonitorDeadmanNotify;
-  private monitorRegistrySweepInFlight = false;
   private watchRegistryPath?: string;
   private watchRegistryNow?: () => number;
   private watchNotify: WatchNotify;
@@ -546,10 +537,6 @@ export class AgentEngine {
     // the real outbox or network. Production entrypoints inject the real
     // drainOutbox (see server.ts createServer / app-server-runtime).
     this.outboxDrain = opts?.outboxDrain ?? (async () => {});
-    this.monitorRegistryPath = opts?.monitorRegistryPath;
-    this.monitorRegistryNow = opts?.monitorRegistryNow;
-    this.monitorRegistryNotify =
-      opts?.monitorRegistryNotify ?? (async () => {});
     this.watchRegistryPath = opts?.watchRegistryPath;
     this.watchRegistryNow = opts?.watchRegistryNow;
     this.watchNotify = opts?.watchNotify ?? (async () => {});
@@ -1978,12 +1965,6 @@ export class AgentEngine {
     if (this.deliveredLeadMonitorDeathAlerts.delete(previousAgentId)) {
       this.deliveredLeadMonitorDeathAlerts.add(nextAgentId);
     }
-    if (this.monitorRegistryPath) {
-      void transferMonitorRegistryOwner(previousAgentId, nextAgentId, {
-        registryPath: this.monitorRegistryPath,
-        now: this.monitorRegistryNow,
-      }).catch(() => {});
-    }
   }
 
   private finalizeCapturedSession(
@@ -3053,8 +3034,6 @@ export class AgentEngine {
       return false;
     }
 
-    if (this.latestLeadMonitor(agent)?.state === "deadman-fired") return true;
-
     if (
       agent.pid !== null &&
       agent.pid !== undefined &&
@@ -3069,21 +3048,6 @@ export class AgentEngine {
         agent.error ?? "",
       )
     );
-  }
-
-  private leadOwnerSeats(agent: AgentRecord): string[] {
-    return [agent.seat_id, agent.agent_id].filter(
-      (ownerSeat): ownerSeat is string =>
-        typeof ownerSeat === "string" && ownerSeat.trim().length > 0,
-    );
-  }
-
-  private latestLeadMonitor(agent: AgentRecord) {
-    if (!this.monitorRegistryPath) return null;
-    return latestMonitorForOwnerSeats(this.leadOwnerSeats(agent), {
-      registryPath: this.monitorRegistryPath,
-      now: this.monitorRegistryNow,
-    });
   }
 
   private async maybeNotifyLeadMonitorDeath(
@@ -3430,7 +3394,6 @@ export class AgentEngine {
       get client() { return engine.client; },
       get stateMgr() { return engine.stateMgr; },
       get cliExitShellMatches() { return engine.cliExitShellMatches; },
-      get monitorRegistryPath() { return engine.monitorRegistryPath; },
       get inboxOpts() { return engine.inboxOpts; },
       get lifecycleLockQueueDepth() { return engine.lifecycleLockQueueDepth; },
       assertSweepInputCurrent: (...args) => engine.assertSweepInputCurrent(...args),
@@ -3911,11 +3874,6 @@ export class AgentEngine {
       get lastSweepSignature() { return engine.lastSweepSignature; },
       set lastSweepSignature(value) { engine.lastSweepSignature = value; },
       get lifecycleLockHolder() { return engine.lifecycleLockHolder; },
-      get monitorRegistryNotify() { return engine.monitorRegistryNotify; },
-      get monitorRegistryNow() { return engine.monitorRegistryNow; },
-      get monitorRegistryPath() { return engine.monitorRegistryPath; },
-      get monitorRegistrySweepInFlight() { return engine.monitorRegistrySweepInFlight; },
-      set monitorRegistrySweepInFlight(value) { engine.monitorRegistrySweepInFlight = value; },
       get outboxDrain() { return engine.outboxDrain; },
       get outboxDrainInFlight() { return engine.outboxDrainInFlight; },
       set outboxDrainInFlight(value) { engine.outboxDrainInFlight = value; },
@@ -3973,7 +3931,6 @@ export class AgentEngine {
       runSweepOnce: (...args) => engine.runSweepOnce(...args),
       scheduleClosedChildReportWatchPrune: (...args) => engine.scheduleClosedChildReportWatchPrune(...args),
       shouldYieldSweep: (...args) => engine.shouldYieldSweep(...args),
-      sweepMonitorRegistryBestEffort: (...args) => engine.sweepMonitorRegistryBestEffort(...args),
       sweepStateSignature: (...args) => engine.sweepStateSignature(...args),
       sweepWatchesBestEffort: (...args) => engine.sweepWatchesBestEffort(...args),
       verifyPendingDeliveries: (...args) => engine.verifyPendingDeliveries(...args),
@@ -4282,9 +4239,6 @@ export class AgentEngine {
   }
   private markIntentionalSurfaceCloses(...args: Parameters<typeof sweepImpl.markIntentionalSurfaceCloses>): ReturnType<typeof sweepImpl.markIntentionalSurfaceCloses> {
     return sweepImpl.markIntentionalSurfaceCloses.call(this.sweepHost(), ...args);
-  }
-  private sweepMonitorRegistryBestEffort(...args: Parameters<typeof sweepImpl.sweepMonitorRegistryBestEffort>): ReturnType<typeof sweepImpl.sweepMonitorRegistryBestEffort> {
-    return sweepImpl.sweepMonitorRegistryBestEffort.call(this.sweepHost(), ...args);
   }
 
   /** The on-disk record for an agent the in-memory registry has not bound. */

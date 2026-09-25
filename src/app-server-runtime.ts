@@ -16,10 +16,6 @@ import {
   defaultDeliveryTicketDir,
   fileDeliveryFailureGithubIssue,
 } from "./delivery-failure-tickets.js";
-import {
-  defaultMonitorRegistryPath,
-  httpNotifyMonitorDeadman,
-} from "./monitor-registry.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
   deriveCmuxObserverEpoch,
@@ -399,8 +395,6 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           await this.sendAgentCommand(agentId, command);
         },
         outboxDrain: defaultOutboxDrain(),
-        monitorRegistryPath: defaultMonitorRegistryPath(),
-        monitorRegistryNotify: httpNotifyMonitorDeadman,
         selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
         selfRegistrationSessionLookup: makeSelfRegistrationSessionLookup(),
         inboxOpts: opts.inboxOpts,

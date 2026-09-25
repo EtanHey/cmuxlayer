@@ -188,7 +188,8 @@ async function startDoctorDaemon(
         surfaces: Array<{ surface_id: string; since_at: string }>;
         truncated: boolean;
       };
-      monitor_registry: {
+      /** An older daemon's retired monitor block; current daemons omit it. */
+      monitor_registry?: {
         total: number;
         rearming: number;
         collapsed: number;
@@ -268,10 +269,14 @@ async function startDoctorDaemon(
                                   }),
                                 ),
                             },
-                            monitor_registry: {
-                              available: true,
-                              ...opts.selfHeal.monitor_registry,
-                            },
+                            ...(opts.selfHeal.monitor_registry
+                              ? {
+                                  monitor_registry: {
+                                    available: true,
+                                    ...opts.selfHeal.monitor_registry,
+                                  },
+                                }
+                              : {}),
                           },
                         }
                       : {}),
@@ -482,13 +487,6 @@ describe("runDoctor — report shape", () => {
           ],
           truncated: false,
         },
-        monitor_registry: {
-          total: 2,
-          rearming: 0,
-          collapsed: 0,
-          collapsed_monitors: [],
-          truncated: false,
-        },
       },
     });
 
@@ -506,42 +504,7 @@ describe("runDoctor — report shape", () => {
     );
   });
 
-  it("reports collapsed monitors with their reasons from daemon control_health", async () => {
-    const path = join("/tmp", `cmuxlayer-doctor-collapsed-${process.pid}.sock`);
-    await startDoctorDaemon(path, {
-      version: "0.3.33",
-      selfHeal: {
-        pane_pty_dead: { count: 0, surfaces: [], truncated: false },
-        monitor_registry: {
-          total: 3,
-          rearming: 1,
-          collapsed: 1,
-          collapsed_monitors: [
-            {
-              monitor_id: "monitor-collapsed",
-              reason: "owner-not-alive",
-            },
-          ],
-          truncated: false,
-        },
-      },
-    });
-
-    const report = await runDoctorForTest({
-      version: "0.3.33",
-      env: { CMUXLAYER_DAEMON_SOCKET: path },
-      brew: makeBrew({}),
-      detectStaleBuild: () => null,
-    });
-
-    expect(report.selfHeal).toMatchObject({ available: true, ok: false });
-    expect(report.healthy).toBe(false);
-    expect(renderDoctorText(report)).toMatch(
-      /✗.*collapsed monitors.*monitor-collapsed: owner-not-alive/i,
-    );
-  });
-
-  it("reports healthy pane liveness and monitor reconciliation state", async () => {
+  it("reports healthy pane liveness from a daemon without the retired monitor block", async () => {
     const path = join(
       "/tmp",
       `cmuxlayer-doctor-self-heal-green-${process.pid}.sock`,
@@ -550,13 +513,6 @@ describe("runDoctor — report shape", () => {
       version: "0.3.33",
       selfHeal: {
         pane_pty_dead: { count: 0, surfaces: [], truncated: false },
-        monitor_registry: {
-          total: 4,
-          rearming: 1,
-          collapsed: 0,
-          collapsed_monitors: [],
-          truncated: false,
-        },
       },
     });
 
@@ -570,45 +526,10 @@ describe("runDoctor — report shape", () => {
     expect(report.selfHeal).toMatchObject({ available: true, ok: true });
     expect(report.healthy).toBe(true);
     expect(renderDoctorText(report)).toMatch(/✔.*pane_pty_dead: none/i);
-    expect(renderDoctorText(report)).toMatch(
-      /✔.*monitor registry: total=4 rearming=1 collapsed=0/i,
-    );
+    expect(renderDoctorText(report)).not.toMatch(/monitor registry/i);
   });
 
-  it("rejects impossible monitor summary counters as unavailable", async () => {
-    const path = join(
-      "/tmp",
-      `cmuxlayer-doctor-self-heal-invalid-${process.pid}.sock`,
-    );
-    await startDoctorDaemon(path, {
-      version: "0.3.33",
-      selfHeal: {
-        pane_pty_dead: { count: 0, surfaces: [], truncated: false },
-        monitor_registry: {
-          total: 1,
-          rearming: 2,
-          collapsed: 0,
-          collapsed_monitors: [],
-          truncated: false,
-        },
-      },
-    });
-
-    const report = await runDoctorForTest({
-      version: "0.3.33",
-      env: { CMUXLAYER_DAEMON_SOCKET: path },
-      brew: makeBrew({}),
-      detectStaleBuild: () => null,
-    });
-
-    expect(report.selfHeal).toMatchObject({
-      available: false,
-      ok: true,
-      note: expect.stringMatching(/malformed/i),
-    });
-  });
-
-  it("preserves and renders truncation when daemon detail arrays exceed the bound", async () => {
+  it("preserves pane truncation and ignores an older daemon's monitor block", async () => {
     const path = join(
       "/tmp",
       `cmuxlayer-doctor-self-heal-truncated-${process.pid}.sock`,
@@ -649,13 +570,9 @@ describe("runDoctor — report shape", () => {
       truncated: true,
     });
     expect(report.selfHeal.panePtyDead.surfaces).toHaveLength(100);
-    expect(report.selfHeal.monitorRegistry).toMatchObject({
-      collapsed: 101,
-      truncated: true,
-    });
-    expect(report.selfHeal.monitorRegistry.collapsedMonitors).toHaveLength(100);
+    expect(report.selfHeal).not.toHaveProperty("monitorRegistry");
     expect(renderDoctorText(report)).toMatch(/pane_pty_dead: 101.*truncated/i);
-    expect(renderDoctorText(report)).toMatch(/collapsed monitors:.*truncated/i);
+    expect(renderDoctorText(report)).not.toMatch(/collapsed monitors/i);
   });
 
   it("rejects self-heal counters that contradict their detail rows", async () => {
@@ -672,18 +589,6 @@ describe("runDoctor — report shape", () => {
             {
               surface_id: "surface:unexpected",
               since_at: "2026-07-11T12:00:01.000Z",
-            },
-          ],
-          truncated: false,
-        },
-        monitor_registry: {
-          total: 1,
-          rearming: 0,
-          collapsed: 0,
-          collapsed_monitors: [
-            {
-              monitor_id: "monitor:unexpected",
-              reason: "owner-not-alive",
             },
           ],
           truncated: false,
@@ -1410,14 +1315,6 @@ describe("renderDoctorText", () => {
         available: false,
         ok: true,
         panePtyDead: { count: 0, surfaces: [], truncated: false },
-        monitorRegistry: {
-          available: false,
-          total: 0,
-          rearming: 0,
-          collapsed: 0,
-          collapsedMonitors: [],
-          truncated: false,
-        },
         note: "no daemon running (starts on demand)",
       },
       tap: {
@@ -1600,14 +1497,6 @@ describe("renderDoctorJson", () => {
         available: false,
         ok: true,
         panePtyDead: { count: 0, surfaces: [], truncated: false },
-        monitorRegistry: {
-          available: false,
-          total: 0,
-          rearming: 0,
-          collapsed: 0,
-          collapsedMonitors: [],
-          truncated: false,
-        },
         note: "no daemon running (starts on demand)",
       },
       tap: {

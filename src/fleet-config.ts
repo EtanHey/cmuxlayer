@@ -15,7 +15,7 @@ import { join } from "node:path";
 export interface FleetConfig {
   /** File the values came from; null when running on generic defaults. */
   source: string | null;
-  /** Holds monitor-registry.json, watch-specs.json and outbox.md. */
+  /** Holds watch-specs.json and outbox.md. */
   coordinationDir: string;
   /** Drain `<coordinationDir>/outbox.md` to `notifyUrl` each sweep. */
   outbox: boolean;

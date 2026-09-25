@@ -46,10 +46,6 @@ import {
   type CoordinationContract,
 } from "./coordination-paths.js";
 import {
-  readMonitorRegistry,
-  type MonitorRegistryOptions,
-} from "./monitor-registry.js";
-import {
   readWatchRegistry,
   removeWatches,
   reserveWatchReportPath,
@@ -1242,13 +1238,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  const monitorRegistryOptions = (): MonitorRegistryOptions => ({
-    ...(opts?.monitorRegistryPath
-      ? { registryPath: opts.monitorRegistryPath }
-      : {}),
-    ...(opts?.monitorRegistryNow ? { now: opts.monitorRegistryNow } : {}),
-  });
-
   const server = new McpServer({
     name: "cmuxlayer",
     version: RUNNING_VERSION,
@@ -1487,9 +1476,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surfaceWriteLiveness,
         surfaceIds: knownSurfaceIds,
         panePtyDeadSince: surfacePtyDeadSince,
-        monitorRegistry: opts?.monitorRegistryPath
-          ? monitorRegistryOptions()
-          : undefined,
       }),
     };
     const health =
@@ -2482,19 +2468,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 );
           return observation?.parsed ?? null;
         },
-        resolveCollapsedMonitors: (ownerSeats) => {
-          if (!opts?.monitorRegistryPath) return [];
-          const owners = new Set(ownerSeats);
-          return readMonitorRegistry(monitorRegistryOptions())
-            .monitors.filter(
-              (monitor) =>
-                monitor.state === "collapsed" && owners.has(monitor.owner_seat),
-            )
-            .map((monitor) => ({
-              monitor_id: monitor.monitor_id,
-              reason: monitor.collapsed_reason ?? "unknown",
-            }));
-        },
       },
       {
         ...overrides,
@@ -2858,8 +2831,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           self_heal: {
             pane_pty_dead:
               healthWithStale.self_heal.pane_pty_dead.count,
-            collapsed_monitors:
-              healthWithStale.self_heal.monitor_registry.collapsed,
           },
           caller_live_watches: {
             count: watches.length,

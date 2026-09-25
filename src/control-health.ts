@@ -2,18 +2,11 @@ import { execFile } from "node:child_process";
 import { getTransportHealth } from "./cmux-transport-self-heal.js";
 import {
   constants as fsConstants,
-  readFileSync,
   realpathSync,
-  statSync,
 } from "node:fs";
 import { access, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import {
-  queryMonitorRegistryForGates,
-  readMonitorRegistry,
-  type MonitorRegistryOptions,
-} from "./monitor-registry.js";
 import type { SurfaceWriteLivenessTracker } from "./surface-write-liveness.js";
 import {
   daemonLifecycleSnapshot,
@@ -22,7 +15,6 @@ import {
 import type { LifecycleLockState } from "./engine/types.js";
 
 const MAX_SELF_HEAL_DETAILS = 100;
-const MAX_MONITOR_REGISTRY_BYTES = 1024 * 1024;
 
 const RUNNING_SCRIPT_PATH = (() => {
   const entrypoint = process.argv[1];
@@ -62,7 +54,6 @@ export interface ControlHealthOptions {
   surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
   surfaceIds?: readonly string[];
   panePtyDeadSince?: ReadonlyMap<string, number>;
-  monitorRegistryPath?: string;
   /**
    * #529: daemon spawn/exit/reap facts. Defaults to this process's record,
    */
@@ -79,15 +70,6 @@ export interface ControlHealthSelfHeal {
       since_at?: string;
       last_attempt_at: string;
     }>;
-    truncated: boolean;
-  };
-  monitor_registry: {
-    available: boolean;
-    error?: string;
-    total: number;
-    rearming: number;
-    collapsed: number;
-    collapsed_monitors: Array<{ monitor_id: string; reason: string }>;
     truncated: boolean;
   };
 }
@@ -192,7 +174,6 @@ export function collectSelfHealHealth(
     surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
     surfaceIds?: readonly string[];
     panePtyDeadSince?: ReadonlyMap<string, number>;
-    monitorRegistry?: MonitorRegistryOptions;
   } = {},
 ): ControlHealthSelfHeal {
   const surfaceIds = [...new Set(opts.surfaceIds ?? [])];
@@ -219,74 +200,11 @@ export function collectSelfHealHealth(
     }
   }
 
-  let monitors: ReturnType<typeof readMonitorRegistry>["monitors"] = [];
-  let monitorRegistryAvailable = false;
-  let monitorRegistryError: string | undefined;
-  const registryPath = opts.monitorRegistry?.registryPath;
-  if (registryPath) {
-    try {
-      const registryStat = statSync(registryPath);
-      if (registryStat.size > MAX_MONITOR_REGISTRY_BYTES) {
-        throw new Error(
-          `monitor registry exceeds ${MAX_MONITOR_REGISTRY_BYTES} bytes`,
-        );
-      }
-      const parsed = JSON.parse(readFileSync(registryPath, "utf8")) as unknown;
-      if (
-        !Array.isArray(parsed) &&
-        (typeof parsed !== "object" ||
-          parsed === null ||
-          !Array.isArray((parsed as { monitors?: unknown }).monitors))
-      ) {
-        throw new Error("monitor registry JSON has invalid shape");
-      }
-      const registryQuery = queryMonitorRegistryForGates(opts.monitorRegistry);
-      if (
-        registryQuery.monitors.some((monitor) => monitor.liveness === "invalid")
-      ) {
-        throw new Error("monitor registry contains invalid records");
-      }
-      monitors = readMonitorRegistry(opts.monitorRegistry).monitors;
-      monitorRegistryAvailable = true;
-    } catch (error) {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
-        monitors = readMonitorRegistry(opts.monitorRegistry).monitors;
-        monitorRegistryAvailable = true;
-      } else {
-        monitorRegistryError =
-          error instanceof Error ? error.message : String(error);
-      }
-    }
-  } else {
-    monitorRegistryError = "monitor registry path is not configured";
-  }
-  const collapsedMonitors = monitors
-    .filter((monitor) => monitor.state === "collapsed")
-    .map((monitor) => ({
-      monitor_id: monitor.monitor_id,
-      reason: monitor.collapsed_reason ?? "unknown",
-    }));
-
   return {
     pane_pty_dead: {
       count: deadSurfaceCount,
       surfaces: deadSurfaces,
       truncated: deadSurfaceCount > deadSurfaces.length,
-    },
-    monitor_registry: {
-      available: monitorRegistryAvailable,
-      ...(monitorRegistryError ? { error: monitorRegistryError } : {}),
-      total: monitors.length,
-      rearming: monitors.filter((monitor) => monitor.state === "rearming")
-        .length,
-      collapsed: collapsedMonitors.length,
-      collapsed_monitors: collapsedMonitors.slice(0, MAX_SELF_HEAL_DETAILS),
-      truncated: collapsedMonitors.length > MAX_SELF_HEAL_DETAILS,
     },
   };
 }
@@ -868,9 +786,6 @@ export async function collectControlHealth(
       surfaceWriteLiveness: opts.surfaceWriteLiveness,
       surfaceIds: opts.surfaceIds,
       panePtyDeadSince: opts.panePtyDeadSince,
-      monitorRegistry: opts.monitorRegistryPath
-        ? { registryPath: opts.monitorRegistryPath }
-        : undefined,
     }),
     daemon_lifecycle: {
       ...(opts.daemonLifecycle ?? daemonLifecycleSnapshot()),
@@ -1012,16 +927,6 @@ export function formatControlHealth(health: ControlHealth): string {
     ...health.self_heal.pane_pty_dead.surfaces.map(
       (surface) =>
         `  ${surface.surface_id} since ${surface.since_at ?? surface.last_attempt_at}`,
-    ),
-    ...(health.self_heal.monitor_registry.available
-      ? [
-          `monitor registry: total=${health.self_heal.monitor_registry.total} rearming=${health.self_heal.monitor_registry.rearming} collapsed=${health.self_heal.monitor_registry.collapsed}`,
-        ]
-      : [
-          `monitor registry: unavailable (${health.self_heal.monitor_registry.error ?? "unknown error"})`,
-        ]),
-    ...health.self_heal.monitor_registry.collapsed_monitors.map(
-      (monitor) => `  ${monitor.monitor_id}: ${monitor.reason}`,
     ),
     ...formatDaemonLifecycle(health.daemon_lifecycle),
   ];

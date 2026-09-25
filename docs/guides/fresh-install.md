@@ -233,7 +233,7 @@ reports the problem instead of failing.
 
 | Key | Without a fleet config | What it does |
 |---|---|---|
-| `coordinationDir` | `~/.local/state/cmuxlayer` | Holds `monitor-registry.json`, `watch-specs.json` and `outbox.md`. |
+| `coordinationDir` | `~/.local/state/cmuxlayer` | Holds `watch-specs.json` and `outbox.md`. A `monitor-registry.json` left there by releases before 0.4.88 is no longer read. |
 | `outbox` | `false` | Drains `<coordinationDir>/outbox.md` to `notifyUrl` after each sweep. |
 | `outboxTitle` | `cmuxlayer outbox` | Notification title for drained outbox entries. |
 | `notifyUrl` | unset: notifications are skipped | HTTP listener for monitor, watch and outbox notifications. An unreachable listener is logged once, then retried at most once a minute; it never throws. |

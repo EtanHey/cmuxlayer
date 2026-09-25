@@ -454,9 +454,6 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
           }
         },
         outboxDrain: opts?.outboxDrain,
-        monitorRegistryPath: opts?.monitorRegistryPath,
-        monitorRegistryNow: opts?.monitorRegistryNow,
-        monitorRegistryNotify: opts?.monitorRegistryNotify,
         watchRegistryPath,
         watchRegistryNow: opts?.watchRegistryNow,
         watchNotify: async (event) => {

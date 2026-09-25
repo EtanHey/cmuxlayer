@@ -23,7 +23,6 @@ export type AgentHealthIssueCode =
   | "inbox_channel_dir_deleted"
   | "inbox_monitor_not_alive"
   | "unread_inbox_dispatches"
-  | "monitor_collapsed"
   | "stale_inbox_dispatches"
   | "agent_wedged"
   | "agent_shell_fallback"
@@ -75,7 +74,6 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   non_claude_orchestrator: "info",
   worker_spawned_orchestrator: "blocking",
   inbox_channel_dir_deleted: "blocking",
-  monitor_collapsed: "blocking",
   stale_inbox_dispatches: "blocking",
   missing_managed_lead_agent_id: "degraded",
   missing_cli_session_id: "info",
@@ -112,12 +110,6 @@ export interface AgentHealthInput {
   screen_errors?: string[] | null;
   topology?: AgentTopologyHealthInput | null;
   surface_write_liveness?: SurfaceWriteLivenessObservation | null;
-  collapsed_monitors?: CollapsedMonitorHealthInput[];
-}
-
-export interface CollapsedMonitorHealthInput {
-  monitor_id: string;
-  reason: string;
 }
 
 export interface AgentHealth {
@@ -346,25 +338,6 @@ export function evaluateAgentHealth(
   const recommendedActions: string[] = [];
   const role = inferRecordRoleOrNull(agent);
   const autoDiscovered = isAutoDiscovered(agent);
-
-  const collapsedMonitors = input.collapsed_monitors ?? [];
-  if (collapsedMonitors.length > 0) {
-    addIssue(
-      issueCodes,
-      issues,
-      "monitor_collapsed",
-      collapsedMonitors
-        .map(
-          (monitor) =>
-            `registered monitor ${monitor.monitor_id} collapsed: ${monitor.reason}`,
-        )
-        .join("; "),
-    );
-    addRecommendedAction(
-      recommendedActions,
-      "repair_or_replace_collapsed_monitor",
-    );
-  }
 
   if (agent.seat_identity_status === "mismatch") {
     addIssue(
