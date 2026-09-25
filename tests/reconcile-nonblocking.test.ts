@@ -31,6 +31,27 @@ function loopHeldInEveryTrial(trialMaxMs: number[], budgetMs: number): boolean {
   return trialMaxMs.every((maxMs) => maxMs > budgetMs);
 }
 
+/**
+ * #817 row 2: under sustained load (load 16-55) three back-to-back trials sit
+ * inside one burst, and all three read over budget. Idle time between trials
+ * means a burst has to last over a second to take all three.
+ */
+const TRIAL_PAUSE_MS = 250;
+
+async function runTrials(input: {
+  trials: number;
+  pauseMs: number;
+  runTrial: (trial: number) => Promise<number>;
+  pause: (ms: number) => Promise<void>;
+}): Promise<number[]> {
+  const trialMaxMs: number[] = [];
+  for (let trial = 0; trial < input.trials; trial += 1) {
+    if (trial > 0) await input.pause(input.pauseMs);
+    trialMaxMs.push(await input.runTrial(trial));
+  }
+  return trialMaxMs;
+}
+
 // A full-height Claude Code pane: enough text that parsing is real work.
 const SCREEN = [
   ...Array.from({ length: 180 }, (_, i) =>
@@ -89,6 +110,44 @@ describe("loopHeldInEveryTrial (#817: one scheduler spike is not a held loop)", 
 
   it("refuses to judge zero trials", () => {
     expect(() => loopHeldInEveryTrial([], BUDGET_MS)).toThrow();
+  });
+});
+
+describe("runTrials spacing (#817: a burst must be long to take all three trials)", () => {
+  // Fake clock: each trial takes 300 ms, and a 600 ms load burst covers
+  // 100-700 ms. A trial overlapping the burst reads 120 ms, otherwise 12 ms.
+  const burstFrom = 100;
+  const burstTo = 700;
+  const simulate = async (pauseMs: number) => {
+    let clock = 0;
+    const pauses: number[] = [];
+    const maxes = await runTrials({
+      trials: TRIALS,
+      pauseMs,
+      runTrial: async () => {
+        const start = clock;
+        clock += 300;
+        return start < burstTo && clock > burstFrom ? 120 : 12;
+      },
+      pause: async (ms) => {
+        pauses.push(ms);
+        clock += ms;
+      },
+    });
+    return { maxes, pauses };
+  };
+
+  it("a 600 ms burst covering two adjacent trials does not fail the guard", async () => {
+    const { maxes } = await simulate(TRIAL_PAUSE_MS);
+    expect(maxes.filter((ms) => ms > BUDGET_MS)).toHaveLength(2);
+    expect(loopHeldInEveryTrial(maxes, BUDGET_MS)).toBe(false);
+  });
+
+  it("pauses at least 250 ms, and only between trials", async () => {
+    const { maxes, pauses } = await simulate(TRIAL_PAUSE_MS);
+    expect(maxes).toHaveLength(TRIALS);
+    expect(pauses).toEqual(Array(TRIALS - 1).fill(TRIAL_PAUSE_MS));
+    expect(TRIAL_PAUSE_MS).toBeGreaterThanOrEqual(250);
   });
 });
 
@@ -154,28 +213,32 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     await engine.getRegistry().reconstitute();
     await engine.runSweep(); // warm module and JIT state; measure steady state
     const readScreen = client.readScreen as ReturnType<typeof vi.fn>;
-    const trialMaxMs: number[] = [];
-    for (let trial = 0; trial < TRIALS; trial += 1) {
-      const readsBefore = readScreen.mock.calls.length;
-      const delay = monitorEventLoopDelay({ resolution: 1 });
-      delay.enable();
-      const startedAt = performance.now();
-      try {
-        await engine.runSweep();
-        await engine.runSweep();
-        await engine.runSweep();
-      } finally {
-        delay.disable();
-      }
-      // Proof of work: every sweep read every agent's screen (not a no-op sweep).
-      expect(readScreen.mock.calls.length - readsBefore).toBeGreaterThanOrEqual(
-        AGENTS * 3,
-      );
-      const maxMs = delay.max / 1e6;
-      trialMaxMs.push(maxMs);
-      const sweepMs = (performance.now() - startedAt) / 3;
-      process.stderr.write(`[#810] trial ${trial + 1}/${TRIALS}: sweep ${sweepMs.toFixed(1)} ms avg, event_loop_delay_max ${maxMs.toFixed(1)} ms\n`);
-    }
+    const trialMaxMs = await runTrials({
+      trials: TRIALS,
+      pauseMs: TRIAL_PAUSE_MS,
+      pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      runTrial: async (trial) => {
+        const readsBefore = readScreen.mock.calls.length;
+        const delay = monitorEventLoopDelay({ resolution: 1 });
+        delay.enable();
+        const startedAt = performance.now();
+        try {
+          await engine.runSweep();
+          await engine.runSweep();
+          await engine.runSweep();
+        } finally {
+          delay.disable();
+        }
+        // Proof of work: every sweep read every agent's screen (not a no-op sweep).
+        expect(readScreen.mock.calls.length - readsBefore).toBeGreaterThanOrEqual(
+          AGENTS * 3,
+        );
+        const maxMs = delay.max / 1e6;
+        const sweepMs = (performance.now() - startedAt) / 3;
+        process.stderr.write(`[#810] trial ${trial + 1}/${TRIALS}: sweep ${sweepMs.toFixed(1)} ms avg, event_loop_delay_max ${maxMs.toFixed(1)} ms\n`);
+        return maxMs;
+      },
+    });
     expect(
       loopHeldInEveryTrial(trialMaxMs, BUDGET_MS),
       `every trial exceeded ${BUDGET_MS} ms: ${trialMaxMs.map((ms) => ms.toFixed(1)).join(", ")}`,
