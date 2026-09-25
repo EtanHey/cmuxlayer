@@ -46,6 +46,7 @@ import {
   TERMINAL_STATES,
 } from "./types.js";
 import { parseNonNegativeInteger, parsePositiveInteger } from "./env.js";
+import { LoopStallMonitor } from "./loop-stall.js";
 
 
 export function isSubjectSideReportWatchPruneEligible(
@@ -504,6 +505,9 @@ export async function runSweepOnce(
   this.sweepBackgroundProcessSnapshot = null;
   const timings: Record<string, number> = {};
   const sweepStartedAt = Date.now();
+  // #810 reopen signal: the longest event-loop stall during this sweep.
+  const loopStall = new LoopStallMonitor();
+  loopStall.start();
   const sweepId = ++this.sweepTelemetrySeq;
   let sweepCompleted = false;
   let failedPhase: string | null = null;
@@ -694,6 +698,7 @@ export async function runSweepOnce(
   } finally {
     this.sweepBackgroundProcessSnapshot = null;
     timings.total_ms = Date.now() - sweepStartedAt;
+    const loopStallMaxMs = loopStall.stop();
     try {
       this.stateMgr.getEventLog().appendSweepPhase({
         ts: new Date().toISOString(),
@@ -708,6 +713,7 @@ export async function runSweepOnce(
         agent_count: this.registry.list().length,
         lock_held: false,
         durations_ms: timings,
+        loop_stall_max_ms: loopStallMaxMs,
       });
     } catch {
       // Telemetry is best-effort and cannot fail the sweep.

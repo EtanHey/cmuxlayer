@@ -356,6 +356,8 @@ export interface SweepPhaseTelemetryEvent {
   lock_held: boolean;
   durations_ms?: Record<string, number>;
   failed_phase?: string;
+  /** Summary rows only (#810): the longest event-loop stall during the sweep. */
+  loop_stall_max_ms?: number;
 }
 
 export interface AgentCliExitEvent {
