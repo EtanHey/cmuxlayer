@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { createServer, createServerContext, PUBLIC_TOOL_NAMES } from "../src/server.js";
+import {
+  createServer,
+  createServerContext,
+  engineForTests,
+  PUBLIC_TOOL_NAMES,
+} from "../src/server.js";
+import { AgentEngine } from "../src/agent-engine.js";
 import { runWithCallerContext } from "../src/caller-context.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
@@ -133,6 +139,25 @@ describe("thin-core tool palette", () => {
     expect(Object.keys(tools).sort()).toEqual([...PUBLIC_TOOL_NAMES].sort());
     expect(tools.reorder_surface).toBeUndefined();
     expect(tools.interact).toBeUndefined();
+  });
+
+  it("keeps the lifecycle engine reachable for tests without any internal tool", () => {
+    const server = createServer({
+      exec: makeExec(),
+      disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0,
+      exposeInternalToolsForTests: false,
+    });
+    expect(engineForTests(server)).toBeInstanceOf(AgentEngine);
+    expect(
+      engineForTests(
+        createServer({
+          exec: makeExec(),
+          controlHealthIntervalMs: 0,
+          skipAgentLifecycle: true,
+        }),
+      ),
+    ).toBeUndefined();
   });
 
   it("removes legacy aliases instead of advertising deprecations", () => {
@@ -408,7 +433,7 @@ describe("consolidated compatibility", () => {
       disableSpawnPreflight: true,
       controlHealthIntervalMs: 0,
     }) as any;
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const waitForAll = vi.spyOn(engine, "waitForAll").mockResolvedValue([]);
 
     const result = await server._registeredTools.wait_for.handler(

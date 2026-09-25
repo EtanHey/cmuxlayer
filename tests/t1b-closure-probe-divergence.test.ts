@@ -19,6 +19,7 @@ import { createServer } from "../src/server.js";
 import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import type { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-t1b-closure-probe-divergence-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-t1b-closure-probe.sock";
@@ -174,7 +175,7 @@ function makeAgent(
 }
 
 function testEngine(server: any) {
-  return server._registeredTools["interact"]._engine;
+  return engineForTests(server);
 }
 
 function registerAgent(server: any, record: AgentRecord): AgentRecord {
@@ -197,7 +198,7 @@ function rowFor(parsed: any, agentId: string): any {
 }
 
 function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
+  const engine = engineForTests(server);
   if (engine && typeof engine.dispose === "function") engine.dispose();
 }
 

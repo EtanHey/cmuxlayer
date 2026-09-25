@@ -14,6 +14,7 @@ import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.
 import { CLI_READY_PATTERNS } from "../src/pattern-registry.js";
 import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
+import { engineForTests } from "../src/server.js";
 
 let testDir = "";
 
@@ -54,7 +55,7 @@ async function spawnReadyAgent(
     {} as any,
   );
   const agentId = parseToolResult(spawnResult).agent_id;
-  const engine = server._registeredTools.interact._engine;
+  const engine = engineForTests(server);
   const registry = engine.getRegistry();
   registry.set(agentId, { ...registry.get(agentId), state: "ready" });
   return agentId;
@@ -209,7 +210,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context }) as any;
       const targetId = await spawnReadyAgent(server, "codex");
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       engine.acceptComposerQueue({
         delivery_id: "engine-owned-queue",
         agent_id: targetId,
@@ -276,7 +277,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context }) as any;
       const targetId = await spawnReadyAgent(server, "codex");
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       engine.acceptComposerQueue({
         delivery_id: "engine-owned-long-queue",
         agent_id: targetId,
@@ -329,7 +330,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context }) as any;
       const targetId = await spawnReadyAgent(server, cli);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const target = { ...engine.getRegistry().get(targetId), cli, state: "ready", ...(surfaceUuid ? { surface_uuid: surfaceUuid } : {}) };
       engine.stateMgr.writeState(target);
       engine.getRegistry().set(targetId, target);
@@ -407,7 +408,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       const server = createServer({ context }) as any;
       const targetId = await spawnReadyAgent(server);
       const peer = createServer({ context }) as any;
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const target = { ...engine.getRegistry().get(targetId), cli: kind.endsWith("-control") ? undefined : cli };
       engine.stateMgr.writeState(target); engine.getRegistry().set(targetId, target);
       const callerId = "draft-guard-sender";
@@ -525,7 +526,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
       try {
         const server = createServer({ context }) as any; const peer = createServer({ context }) as any;
-        const id = await spawnReadyAgent(server); const engine = server._registeredTools.interact._engine;
+        const id = await spawnReadyAgent(server); const engine = engineForTests(server);
         const target = { ...engine.getRegistry().get(id), cli }; engine.stateMgr.writeState(target); engine.getRegistry().set(id, target);
         const callerUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         const caller = { ...target, agent_id: "partial-reader", surface_id: "surface:caller", surface_uuid: callerUuid, role: "lead" };
@@ -578,7 +579,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       const agentId = await spawnReadyAgent(server);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
       engine.getRegistry().set(agentId, record);
       const pointer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
@@ -616,7 +617,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       const agentId = await spawnReadyAgent(server);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const boot = engine.stateMgr.updateRecord(agentId, {
         boot_prompt_pending: true, prompt_delivered: false, submit_verified: null,
       });
@@ -661,7 +662,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       const agentId = await spawnReadyAgent(server);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
       engine.getRegistry().set(agentId, record);
       composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
@@ -785,7 +786,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       try {
         const server = createServer({ context, inboxBaseDir: testDir }) as any;
         agentId = await spawnReadyAgent(server);
-        engine = server._registeredTools.interact._engine;
+        engine = engineForTests(server);
         const boot = engine.stateMgr.updateRecord(agentId, {
           boot_prompt_pending: true, prompt_delivered: false, submit_verified: null,
         });
@@ -874,7 +875,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       const agentId = await spawnReadyAgent(server);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
       engine.getRegistry().set(agentId, record);
       composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
@@ -919,7 +920,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       const agentId = await spawnReadyAgent(server);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
       engine.getRegistry().set(agentId, record);
       const ready = engine.stateMgr.transition(agentId, "ready");
@@ -1017,7 +1018,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       agentId = await spawnReadyAgent(server);
-      engine = server._registeredTools.interact._engine;
+      engine = engineForTests(server);
       const oldBoot = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, prompt_delivered: false, submit_verified: null });
       engine.getRegistry().set(agentId, oldBoot);
       composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));
@@ -1078,7 +1079,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       const agentId = await spawnReadyAgent(server);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
       engine.getRegistry().set(agentId, record);
       composer = bootContractPointer(agentId, coordinationContractPath(agentId, { baseDir: testDir }));

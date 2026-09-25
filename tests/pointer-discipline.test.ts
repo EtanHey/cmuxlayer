@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
+import { engineForTests } from "../src/server.js";
 
 const previousMaxInlineChars = process.env.CMUXLAYER_MAX_INLINE_CHARS;
 let testDir = "";
@@ -40,7 +41,7 @@ function parseToolResult(result: any) {
 }
 
 function getLifecycleEngine(server: any) {
-  return server._registeredTools.interact._engine;
+  return engineForTests(server);
 }
 
 async function spawnReadyAgent(server: any) {

@@ -1,4 +1,5 @@
 import type { AgentEngine } from "../../src/agent-engine.js";
+import { engineForTests } from "../../src/server.js";
 
 export type ToolCallResult = {
   structuredContent?: unknown;
@@ -11,7 +12,6 @@ export type RegisteredTool = {
     args: Record<string, unknown>,
     extra: Record<string, unknown>,
   ): Promise<ToolCallResult>;
-  _engine?: AgentEngine;
 };
 
 export type ServerWithRegisteredTools = {
@@ -30,7 +30,7 @@ export function getTool(server: unknown, name: string): RegisteredTool {
 }
 
 export function getEngine(server: unknown): AgentEngine {
-  const engine = getTool(server, "interact")._engine;
+  const engine = engineForTests(server);
   if (!engine) throw new Error("Lifecycle engine not registered");
   return engine;
 }

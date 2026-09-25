@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-watch-spec-mcp-test");
 
@@ -235,7 +236,7 @@ describe("WatchSpec MCP contract", () => {
     vi.useFakeTimers();
     try {
       const server = createWatchServer() as any;
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       let resolveWait!: (value: unknown) => void;
       vi.spyOn(engine, "waitForWatch").mockImplementation(
         () =>

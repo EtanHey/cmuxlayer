@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-verified-relay-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-verified-relay-test.sock";
@@ -133,7 +134,7 @@ function registerAgent(
   server: any,
   overrides?: Partial<AgentRecord>,
 ): AgentRecord {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const stateMgr = engine["stateMgr"];
   const registry = engine.getRegistry();
 
@@ -171,7 +172,7 @@ function registerAgent(
 }
 
 function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
+  const engine = engineForTests(server);
   if (engine && typeof engine.dispose === "function") {
     engine.dispose();
   }

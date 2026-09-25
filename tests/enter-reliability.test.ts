@@ -12,6 +12,7 @@ import {
 } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { runWithCallerContext } from "../src/caller-context.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-enter-reliability-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-enter-reliability-test.sock";
@@ -604,7 +605,7 @@ function registerAgent(
   server: any,
   overrides?: Partial<AgentRecord>,
 ): AgentRecord {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const stateMgr = engine["stateMgr"];
   const registry = engine.getRegistry();
 
@@ -642,7 +643,7 @@ function registerAgent(
 }
 
 function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
+  const engine = engineForTests(server);
   if (engine && typeof engine.dispose === "function") {
     engine.dispose();
   }
@@ -931,7 +932,7 @@ describe("enter reliability", () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);
     registerAgent(server);
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     let releaseLock!: () => void;
     const held = engine.runLifecycleMutation(
       () =>
@@ -1331,7 +1332,7 @@ describe("enter reliability", () => {
     client.completionMode = "idle";
     server = createReliabilityServer(client);
     registerAgent(server, { state: "idle" });
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     let releaseLock!: () => void;
     const held = engine.runLifecycleMutation(
       () =>
@@ -1775,7 +1776,7 @@ describe("enter reliability", () => {
     // background verifier resolve the surface-mode receipt.
     client.requiredReturns = 1;
     await client.sendKey(client.surface, "return");
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
     const waited = await callTool(server, "wait_for", {
       delivery_id: parsed.delivery_id,

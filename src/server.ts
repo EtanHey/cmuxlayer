@@ -487,9 +487,11 @@ export type {
 
 
 import {
+  bindToolDeps,
   installToolRegistration,
   type ToolDeps,
 } from "./mcp/registration.js";
+export { engineForTests } from "./mcp/registration.js";
 // Public surface kept stable: these moved to ./mcp/tool-result.ts (CX-2 S3).
 export {
   __leanReceiptTestHooks,
@@ -1986,6 +1988,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     engine: null,
     registry: null,
   };
+  bindToolDeps(server, toolDeps);
   if (ownsContext) {
     const close = server.close.bind(server);
     server.close = async (): Promise<void> => {
@@ -16784,12 +16787,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       },
     );
-
-    // Expose engine on the tool for test access
-    const registeredInteract = (server as any)._registeredTools["interact"];
-    if (registeredInteract) {
-      registeredInteract._engine = engine;
-    }
 
     // 20. kill
     server.tool(

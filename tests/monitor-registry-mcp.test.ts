@@ -8,6 +8,7 @@ import {
   registerMonitor,
 } from "../src/monitor-registry.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-monitor-registry-mcp-test");
 
@@ -426,7 +427,7 @@ describe("monitor registry MCP tools", () => {
       monitorRegistryNow: () => now,
       monitorRegistryNotify: notify,
     });
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     await callTool(server, "register_monitor", {
       monitor_id: "engine-sweep-deadman",
       owner_seat: "seat-a",

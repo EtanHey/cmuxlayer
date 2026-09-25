@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-paused-visibility-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-paused-visibility-test.sock";
@@ -180,7 +181,7 @@ function makeAgent(
 }
 
 function registerAgent(server: any, record: AgentRecord): AgentRecord {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const stateMgr = engine["stateMgr"] as StateManager;
   stateMgr.writeState(record);
   engine.getRegistry().set(record.agent_id, record);
@@ -188,7 +189,7 @@ function registerAgent(server: any, record: AgentRecord): AgentRecord {
 }
 
 function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
+  const engine = engineForTests(server);
   if (engine && typeof engine.dispose === "function") {
     engine.dispose();
   }
