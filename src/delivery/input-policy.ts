@@ -1,7 +1,7 @@
 /**
  * Input delivery policy: send/boot/launch timing constants, terminal input
  * chunking and UTF-8 batching, paste policy, and the inline/multiline/dense/
- * spawn-prompt/broadcast input guards. Moved verbatim from server.ts (CX-2 S4);
+ * spawn-prompt input guards. Moved verbatim from server.ts (CX-2 S4);
  * imports nothing from the server.
  */
 
@@ -9,8 +9,6 @@ import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../agent-health-input.js";
 import type {
   CliType,
 } from "../agent-types.js";
-import {
-} from "../layout-policy.js";
 import { hasInlinePrompt } from "./composer-screen.js";
 
 export const SEND_INPUT_CHUNK_THRESHOLD = 500;
@@ -360,10 +358,7 @@ export function assertInteractiveMultilineInputAllowed(opts: {
   tool:
     | "send_input"
     | "send_to"
-    | "send_to_agent"
-    | "spawn_agent"
-    | "new_worktree_split"
-    | "spawn_in_workspace";
+    | "spawn_agent";
   arg?: "text" | "prompt";
   value: string | undefined;
   cli: CliType | undefined;
@@ -398,10 +393,7 @@ export function assertInlineInputAllowed(opts: {
     | "send_input"
     | "send_command"
     | "spawn_agent"
-    | "new_worktree_split"
-    | "spawn_in_workspace"
-    | "send_to"
-    | "send_to_agent";
+    | "send_to";
   arg: "text" | "command" | "prompt";
   value: string | undefined;
   allowLongInline?: boolean;
@@ -434,11 +426,7 @@ export function assertDenseInlineInputAllowed(opts: {
     | "send_input"
     | "send_command"
     | "spawn_agent"
-    | "new_worktree_split"
-    | "spawn_in_workspace"
-    | "send_to"
-    | "send_to_agent"
-    | "broadcast";
+    | "send_to";
   arg: "text" | "command" | "prompt";
   value: string | undefined;
   allowLongInline?: boolean;
@@ -458,7 +446,7 @@ export function assertDenseInlineInputAllowed(opts: {
 
   const argName = `${opts.tool}.${opts.arg}`;
   const overrideGuidance =
-    opts.tool === "broadcast" || opts.allowLongInlineSupported === false
+    opts.allowLongInlineSupported === false
       ? ""
       : " To deliberately send raw inline text, pass allow_long_inline:true.";
   throw new Error(
@@ -468,7 +456,7 @@ export function assertDenseInlineInputAllowed(opts: {
 }
 
 export function assertSpawnPromptInputAllowed(opts: {
-  tool: "spawn_agent" | "new_worktree_split" | "spawn_in_workspace";
+  tool: "spawn_agent";
   value: string | undefined;
   cli: CliType;
   allowLongInline?: boolean;

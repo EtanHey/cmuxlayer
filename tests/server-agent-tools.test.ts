@@ -14124,6 +14124,61 @@ codex>
     });
   });
 
+  // Ported from the retired get_agent_state (CX-3 S8a-2 r2): the only case
+  // that kills sameCodexSessionBinding's after.cli guard.
+  it("read_screen discards a Codex fill when the record changes to another CLI during rollout I/O", async () => {
+    const stableUuid = "cece0000-0000-4000-8000-000000000001";
+    const path = "/fixtures/codex/state-cli-before.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:state-cli-race",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-state-cli-race",
+      surface_id: "surface:state-cli-race",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      cli_session_path: path,
+    });
+    const fill = deferred<CodexRolloutFill | null>();
+    const get = vi.fn(() => fill.promise);
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const pending = registeredTestTool(server, "read_screen").handler(
+      { surface: "surface:state-cli-race", parsed_only: true },
+      {},
+    );
+    await vi.waitFor(() => expect(get).toHaveBeenCalledWith(path));
+    const updated = {
+      ...record,
+      cli: "claude" as const,
+      version: record.version + 1,
+    };
+    const engine = testLifecycleEngine(server);
+    engine.stateMgr.writeState(updated);
+    engine.getRegistry().set(updated.agent_id, updated);
+    fill.resolve({
+      token_count: 300_000,
+      context_window: 400_000,
+      context_pct: 75,
+      observed_model_context_window: null,
+    });
+
+    const result = parseToolResult(await pending);
+    expect(result.parsed).toMatchObject({
+      token_count: null,
+      context_pct: 25,
+    });
+  });
+
   it("get_agent_state never reads a Codex rollout for a UUID-less record", async () => {
     const path = "/fixtures/codex/uuidless-agent-state.jsonl";
     const routeClient = makeUuidRouteClient([
