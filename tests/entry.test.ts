@@ -134,7 +134,6 @@ describe("daemon-first MCP entry", () => {
         createServer({
           stateDir,
           skipAgentLifecycle: true,
-          exposeInternalToolsForTests: false,
           controlHealthWarnings: fallbackWarnings,
           exec: vi.fn().mockRejectedValue(
             Object.assign(new Error("Command failed: cmux list-windows\nError: Socket not found at /tmp/missing-cmux.sock"), { code: 1 }),

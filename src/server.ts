@@ -936,8 +936,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       palette: createDefaultToolPalette(
         opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
       ),
-      exposeInternalToolsForTests:
-        opts?.exposeInternalToolsForTests ?? process.env.VITEST === "true",
       resolveCallerAgentId: () => resolveCurrentCallerAgent()?.agent_id ?? null,
     });
   // AIDEV-NOTE: handlers leaving this closure take their dependencies from
@@ -2279,6 +2277,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     stateMgr,
     withSurfaceWrite,
   };
+  // Test-only access, on the same seam as engineForTests (bindToolDeps): a
+  // non-enumerable symbol property holding four closures. It adds no MCP
+  // registration and nothing in production reads it; binding it here keeps
+  // tests on the exact functions send_to and close_surface call.
   bindInternalToolsForTests(server, {
     send_input: (args) => sendInput(rawSendDeps, args as SendInputArgs),
     send_command: (args) => sendCommand(rawSendDeps, args as SendCommandArgs),

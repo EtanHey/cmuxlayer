@@ -27,7 +27,6 @@ import type { CmuxServerContext } from "./context.js";
 import {
   ANNOTATIONS,
   BaseOutputShape,
-  PUBLIC_TOOL_NAME_SET,
   PUBLIC_TOOL_OUTPUT_SCHEMAS,
 } from "./schemas.js";
 import {
@@ -138,8 +137,6 @@ export interface ToolRegistrationOptions {
   /** The (topology-invalidating) cmux client whose transport health is reported. */
   client: unknown;
   palette: DefaultToolPalette | null;
-  /** Keep retired handlers registered only for direct unit coverage. */
-  exposeInternalToolsForTests: boolean;
   /** Caller agent stamped onto send_to receipts. */
   resolveCallerAgentId: () => string | null;
 }
@@ -188,7 +185,6 @@ export function installToolRegistration(
   {
     client,
     palette,
-    exposeInternalToolsForTests,
     resolveCallerAgentId,
   }: ToolRegistrationOptions,
 ): ToolRegistration {
@@ -399,26 +395,6 @@ export function installToolRegistration(
           ) => Promise<ToolReturn>,
         );
       }
-    }
-    if (
-      typeof toolName === "string" &&
-      !PUBLIC_TOOL_NAME_SET.has(toolName) &&
-      !exposeInternalToolsForTests
-    ) {
-      return {
-        update(updates: Record<string, unknown>) {
-          const callback = updates.callback;
-          if (typeof callback === "function") {
-            toolHandlersByName.set(
-              toolName,
-              callback as (
-                args: Record<string, unknown>,
-                extra: unknown,
-              ) => Promise<ToolReturn>,
-            );
-          }
-        },
-      };
     }
     if (
       palette &&

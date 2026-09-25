@@ -33,7 +33,6 @@ async function connectPaletteServer(value: string) {
   process.env[ENV_KEY] = value;
   const server = createServer({
     skipAgentLifecycle: true,
-    exposeInternalToolsForTests: false,
   });
   const client = new Client({ name: "palette-test", version: "0.1.0" });
   const [clientTransport, serverTransport] =
@@ -57,7 +56,7 @@ async function closePaletteServer(
 describe("CMUXLAYER_DEFAULT_PALETTE", () => {
   it("publishes only the ratified Phase 5 surface with an output schema per tool", async () => {
     delete process.env[ENV_KEY];
-    const server = createServer({ exposeInternalToolsForTests: false });
+    const server = createServer({});
     const client = new Client({ name: "tool-cut-test", version: "0.1.0" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -81,7 +80,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
 
   it("keeps the palette validation registry aligned with the full tool surface", async () => {
     delete process.env[ENV_KEY];
-    const server = createServer({ exposeInternalToolsForTests: false });
+    const server = createServer({});
     try {
       const registered = Object.keys(
         (server as unknown as { _registeredTools: Record<string, unknown> })
@@ -169,7 +168,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
       } else {
         process.env[ENV_KEY] = value;
       }
-      const server = createServer({ exposeInternalToolsForTests: false });
+      const server = createServer({});
       try {
         const names = Object.keys(
           (server as unknown as { _registeredTools: Record<string, unknown> })
@@ -198,7 +197,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
 
   it("keeps deferred lifecycle tools skipped without crashing lifecycle setup", async () => {
     process.env[ENV_KEY] = "list_surfaces,control_health,read_screen";
-    const server = createServer({ exposeInternalToolsForTests: false });
+    const server = createServer({});
     try {
       expect(
         Object.keys(

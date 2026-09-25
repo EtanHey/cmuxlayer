@@ -152,7 +152,7 @@ describe("tool-count drift guard", () => {
     expect(readme).toContain("there are no hidden internal tool definitions");
 
     // The README documents only the callable surface: one table row per
-    // public tool, and no inventory of the internal definitions.
+    // public tool, and states that nothing else is registered.
     const toolsSection = readme.slice(
       readme.indexOf("## MCP tools"),
       readme.indexOf("## Supported agents"),
@@ -161,7 +161,7 @@ describe("tool-count drift guard", () => {
       (match) => match[1],
     );
     expect(tableNames).toEqual(names);
-    expect(toolsSection).toContain("not callable over MCP");
+    expect(toolsSection).toContain("no other tool is registered");
     expect(readme).not.toContain("Deprecated one-release alias");
   });
 
