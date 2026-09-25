@@ -9122,6 +9122,30 @@ describe("agent lifecycle tool handlers", () => {
     },
   );
 
+  // #881 r1 (w63): a registry-terminal record is not a booting seat, whatever
+  // its stale boot fields say. The mask applies only while nothing is terminal.
+  it("#863 list_agents does not mask a registry-terminal record as booting", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const list = (server as any)._registeredTools["list_agents"];
+    const spawned = parseToolResult(await spawn.handler(
+      { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+      {} as any,
+    ));
+    const engine = engineForTests(server) as AgentEngine;
+    const errored = engine.stateMgr.updateRecord(spawned.agent_id, {
+      state: "error", boot_prompt_pending: true,
+      prompt_delivered: false, submit_verified: false,
+    } as any);
+    engine.getRegistry().set(errored.agent_id, errored);
+
+    const parsed = parseToolResult(await list.handler({ detail: "full" }, {} as any));
+    const row = parsed.agents.find((a: any) => a.agent_id === spawned.agent_id);
+    expect(row.state.value).not.toBe("booting");
+    expect(row).not.toHaveProperty("boot");
+    expect(row.health.issue_codes).not.toContain("boot_prompt_unsubmitted");
+  });
+
   it("#863 list_agents keeps a verified-submitted boot as working with no boot field", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];

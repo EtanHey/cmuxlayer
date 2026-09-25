@@ -506,13 +506,14 @@ export function evaluateAgentHealth(
   // AIDEV-NOTE (#863): a managed boot whose prompt the registry has not
   // verified as submitted stays `booting`. The screen's `working`/`ready` is
   // the CLI's own chrome (or the unsent draft), not the tasked agent -- for
-  // 31 minutes it told a lead a stuck seat had booted. Terminal screen states
-  // (done/error) still reconcile.
+  // 31 minutes it told a lead a stuck seat had booted. A terminal registry or
+  // screen state (done/error) is never masked; it reconciles as before.
   const bootUnsubmitted =
     agent.boot_prompt_pending === true && agent.prompt_delivered !== true;
   const bootMasked =
     bootUnsubmitted &&
-    !TERMINAL_HEALTH_STATES.has(screenConfirmedState ?? agent.state);
+    !TERMINAL_HEALTH_STATES.has(agent.state) &&
+    !(screenConfirmedState && TERMINAL_HEALTH_STATES.has(screenConfirmedState));
   if (bootMasked) {
     addIssue(
       issueCodes,
