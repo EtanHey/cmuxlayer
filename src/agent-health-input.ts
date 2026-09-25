@@ -2,7 +2,6 @@ import type { AgentRecord, AgentRole } from "./agent-types.js";
 import type {
   AgentHealthInput,
   AgentTopologyHealthInput,
-  CollapsedMonitorHealthInput,
 } from "./agent-health.js";
 import type { WorkerHarvestability } from "./engine/types.js";
 import type { SurfaceWriteLivenessObservation } from "./surface-write-liveness.js";
@@ -46,7 +45,6 @@ export interface AgentHealthInputOverrides {
   harvestability?: WorkerHarvestability | null;
   inbox_channel_dir_deleted?: boolean | null;
   surface_write_liveness?: SurfaceWriteLivenessObservation | null;
-  collapsed_monitors?: CollapsedMonitorHealthInput[];
 }
 
 export interface AgentHealthInputDeps {
@@ -66,9 +64,6 @@ export interface AgentHealthInputDeps {
   observeSurfaceWriteLiveness?: (
     agent: AgentRecord,
   ) => SurfaceWriteLivenessObservation | null;
-  resolveCollapsedMonitors?: (
-    ownerSeats: string[],
-  ) => Promise<CollapsedMonitorHealthInput[]> | CollapsedMonitorHealthInput[];
 }
 
 export async function buildAgentHealthInput(
@@ -154,13 +149,6 @@ export async function buildAgentHealthInput(
     overrides.surface_write_liveness !== undefined
       ? overrides.surface_write_liveness
       : deps.observeSurfaceWriteLiveness?.(agent);
-  const ownerSeats = [agent.agent_id, agent.seat_id]
-    .filter((ownerSeat): ownerSeat is string => Boolean(ownerSeat?.trim()))
-    .filter((ownerSeat, index, all) => all.indexOf(ownerSeat) === index);
-  const collapsedMonitors =
-    overrides.collapsed_monitors !== undefined
-      ? overrides.collapsed_monitors
-      : (await deps.resolveCollapsedMonitors?.(ownerSeats)) ?? [];
 
   return {
     parent_role: overrides.parent_role,
@@ -179,6 +167,5 @@ export async function buildAgentHealthInput(
     closure_artifact_verified: closureArtifactVerified,
     harvestability,
     surface_write_liveness: surfaceWriteLiveness,
-    collapsed_monitors: collapsedMonitors,
   };
 }

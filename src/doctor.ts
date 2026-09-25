@@ -309,15 +309,6 @@ export interface DoctorSelfHealReport {
     }>;
     truncated: boolean;
   };
-  monitorRegistry: {
-    available: boolean;
-    error?: string;
-    total: number;
-    rearming: number;
-    collapsed: number;
-    collapsedMonitors: Array<{ monitorId: string; reason: string }>;
-    truncated: boolean;
-  };
   note: string;
 }
 
@@ -375,15 +366,6 @@ function unavailableSelfHeal(note: string): DoctorSelfHealReport {
     available: false,
     ok: true,
     panePtyDead: { count: 0, surfaces: [], truncated: false },
-    monitorRegistry: {
-      available: false,
-      error: note,
-      total: 0,
-      rearming: 0,
-      collapsed: 0,
-      collapsedMonitors: [],
-      truncated: false,
-    },
     note,
   };
 }
@@ -401,28 +383,12 @@ function parseDoctorSelfHeal(value: unknown): DoctorSelfHealReport {
     return unavailableSelfHeal("self-heal state unavailable from control_health");
   }
   const pane = isRecord(value.pane_pty_dead) ? value.pane_pty_dead : null;
-  const registry = isRecord(value.monitor_registry)
-    ? value.monitor_registry
-    : null;
-  if (!pane || !registry) {
+  if (!pane) {
     return unavailableSelfHeal("self-heal state unavailable from control_health");
   }
 
   const paneCount = nonNegativeInteger(pane.count);
-  const registryAvailable = registry.available;
-  const total = nonNegativeInteger(registry.total);
-  const rearming = nonNegativeInteger(registry.rearming);
-  const collapsed = nonNegativeInteger(registry.collapsed);
-  if (
-    paneCount === null ||
-    typeof registryAvailable !== "boolean" ||
-    total === null ||
-    rearming === null ||
-    collapsed === null ||
-    rearming > total ||
-    collapsed > total ||
-    rearming + collapsed > total
-  ) {
+  if (paneCount === null) {
     return unavailableSelfHeal("self-heal state malformed in control_health");
   }
 
@@ -449,32 +415,13 @@ function parseDoctorSelfHeal(value: unknown): DoctorSelfHealReport {
         },
       ];
     });
-  const rawCollapsedMonitors = Array.isArray(registry.collapsed_monitors)
-    ? registry.collapsed_monitors
-    : [];
-  const collapsedMonitors = rawCollapsedMonitors
-    .slice(0, 100)
-    .flatMap((monitor) => {
-      if (!isRecord(monitor)) return [];
-      if (
-        typeof monitor.monitor_id !== "string" ||
-        typeof monitor.reason !== "string"
-      ) {
-        return [];
-      }
-      return [{ monitorId: monitor.monitor_id, reason: monitor.reason }];
-    });
   if (
     surfaces.length !== Math.min(rawSurfaces.length, 100) ||
-    collapsedMonitors.length !== Math.min(rawCollapsedMonitors.length, 100) ||
-    paneCount < rawSurfaces.length ||
-    collapsed < rawCollapsedMonitors.length
+    paneCount < rawSurfaces.length
   ) {
     return unavailableSelfHeal("self-heal state malformed in control_health");
   }
-  const registryError =
-    typeof registry.error === "string" ? registry.error : undefined;
-  const ok = paneCount === 0 && registryAvailable && collapsed === 0;
+  const ok = paneCount === 0;
   return {
     available: true,
     ok,
@@ -486,23 +433,9 @@ function parseDoctorSelfHeal(value: unknown): DoctorSelfHealReport {
         rawSurfaces.length > 100 ||
         paneCount > surfaces.length,
     },
-    monitorRegistry: {
-      available: registryAvailable,
-      ...(registryError ? { error: registryError } : {}),
-      total,
-      rearming,
-      collapsed,
-      collapsedMonitors,
-      truncated:
-        registry.truncated === true ||
-        rawCollapsedMonitors.length > 100 ||
-        collapsed > collapsedMonitors.length,
-    },
     note: ok
-      ? "pane write-liveness and monitor reconciliation healthy"
-      : registryAvailable
-        ? "pane write-liveness or monitor reconciliation requires attention"
-        : `monitor registry unavailable: ${registryError ?? "unknown error"}`,
+      ? "pane write-liveness healthy"
+      : "pane write-liveness requires attention",
   };
 }
 
@@ -1448,22 +1381,6 @@ export function renderDoctorText(report: DoctorReport): string {
           : `${report.selfHeal.panePtyDead.count} (${paneDetails || "details unavailable"})`
       }${report.selfHeal.panePtyDead.truncated ? " [details truncated]" : ""}`,
     );
-    if (!report.selfHeal.monitorRegistry.available) {
-      lines.push(
-        `│ ✗    monitor registry: unavailable (${report.selfHeal.monitorRegistry.error ?? "unknown error"})`,
-      );
-    } else {
-      const collapsedDetails = report.selfHeal.monitorRegistry.collapsedMonitors
-        .map((monitor) => `${monitor.monitorId}: ${monitor.reason}`)
-        .join(", ");
-      lines.push(
-        `│ ${mark(report.selfHeal.monitorRegistry.collapsed === 0)}    monitor registry: total=${report.selfHeal.monitorRegistry.total} rearming=${report.selfHeal.monitorRegistry.rearming} collapsed=${report.selfHeal.monitorRegistry.collapsed}${
-          report.selfHeal.monitorRegistry.collapsed > 0
-            ? `; collapsed monitors: ${collapsedDetails || "details unavailable"}`
-            : ""
-        }${report.selfHeal.monitorRegistry.truncated ? " [details truncated]" : ""}`,
-      );
-    }
   }
 
   // (b) §3 tap

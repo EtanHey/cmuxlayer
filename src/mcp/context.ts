@@ -22,7 +22,6 @@ import type {
   SpawnAgentParams,
 } from "../engine/types.js";
 import { type DeliveryFailureTicket } from "../delivery-failure-tickets.js";
-import { type MonitorDeadmanNotify } from "../monitor-registry.js";
 import { type WatchNotify } from "../watch-spec.js";
 import type {
   AgentRole,
@@ -114,13 +113,6 @@ export interface CreateServerOptions {
    * fleet outbox to its notify URL when the fleet config enables it.
    */
   outboxDrain?: () => Promise<unknown>;
-  /**
-   * Canonical monitor-registry file scanned by the agent-engine deadman sweep.
-   * Omitted by default so tests do not touch the fleet coordination dir.
-   */
-  monitorRegistryPath?: string;
-  monitorRegistryNow?: () => number;
-  monitorRegistryNotify?: MonitorDeadmanNotify;
   /** Canonical persistent WatchSpec registry scanned by the agent engine. */
   watchRegistryPath?: string;
   watchRegistryNow?: () => number;
@@ -273,7 +265,6 @@ export interface CmuxServerContext {
   lifecycleSweepEngine: AgentEngine | null;
   parentReportPathReservations: Set<string>;
   lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null;
-  lifecycleAgentInputDelivererReadyListeners: Set<() => void>;
   setLifecycleAgentInputDeliverer(
     deliverer: LifecycleAgentInputDeliverer | null,
   ): void;
@@ -425,16 +416,8 @@ export function createServerContext(
     lifecycleSweepEngine: null,
     parentReportPathReservations: new Set(),
     lifecycleAgentInputDeliverer: null,
-    lifecycleAgentInputDelivererReadyListeners: new Set(),
     setLifecycleAgentInputDeliverer(deliverer) {
-      const becameReady =
-        context.lifecycleAgentInputDeliverer === null && deliverer !== null;
       context.lifecycleAgentInputDeliverer = deliverer;
-      if (becameReady) {
-        for (const listener of context.lifecycleAgentInputDelivererReadyListeners) {
-          listener();
-        }
-      }
     },
     controlHealthCollector: opts?.controlHealthCollector,
     controlHealthWarnings: opts?.controlHealthWarnings ?? [],
@@ -451,7 +434,6 @@ export function createServerContext(
       context.lifecycleSweepEngine = null;
       context.parentReportPathReservations.clear();
       context.lifecycleAgentInputDeliverer = null;
-      context.lifecycleAgentInputDelivererReadyListeners.clear();
       context.originalLaunchCommandsBySurface.clear();
       context.launchShellRecoveryBySurface.clear();
       context.capturedSurfaceUuidByRef.clear();

@@ -37,10 +37,6 @@ import {
 } from "../src/coordination-paths.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
-import {
-  reconcileMonitorRegistry,
-  registerMonitor,
-} from "../src/monitor-registry.js";
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
 import type { CodexRolloutFill } from "../src/codex-rollout-fill.js";
 import { readInbox } from "../src/inbox.js";
@@ -8146,58 +8142,6 @@ describe("agent lifecycle tool handlers", () => {
     expect(testLifecycleEngine(server).getAgentState("brainClaude")?.repo).toBe(
       "brainlayer",
     );
-  });
-
-  it("list_agents surfaces a collapsed monitor on its owning agent health", async () => {
-    const registryPath = join(TEST_DIR, "monitor-registry.json");
-    const watchedFile = join(TEST_DIR, "collab.md");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    const server = createTrackedServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-    });
-    const spawn = (server as any)._registeredTools["spawn_agent"];
-    const list = (server as any)._registeredTools["list_agents"];
-    const spawnResult = await spawn.handler(
-      {
-        repo: "cmuxlayer",
-        model: "gpt-5.5",
-        cli: "codex",
-        prompt: "watch collab",
-      },
-      {} as any,
-    );
-    const agentId = parseToolResult(spawnResult).agent_id;
-    await registerMonitor(
-      {
-        monitor_id: "agent-collab-watch",
-        owner_seat: agentId,
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-    await reconcileMonitorRegistry({
-      registryPath,
-      now: () => 62_000,
-      ownerAlive: async () => false,
-      rearm: vi.fn(),
-    });
-
-    const parsed = parseToolResult(
-      await list.handler({ detail: "full" }, {} as any),
-    );
-
-    expect(parsed.agents[0]?.health).toMatchObject({
-      status: "unhealthy",
-      issue_codes: expect.arrayContaining(["monitor_collapsed"]),
-    });
   });
 
   it("send_to preserves socket RPC provenance in a rebuilt agent receipt", async () => {

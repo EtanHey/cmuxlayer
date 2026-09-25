@@ -37,7 +37,6 @@ import type { SpawnGuard } from "../spawn-guard.js";
 import type { SurfaceBindingObservation } from "../surface-binding-observation.js";
 import type { SpawnModelPolicy } from "../model-policy.js";
 import type { SeatRegistry } from "../seat-identity.js";
-import type { MonitorDeadmanNotify } from "../monitor-registry.js";
 import type {
   AllWindowWorkspaceEnumeration,
   SurfaceObserverEpoch,
@@ -425,14 +424,6 @@ export interface AgentEngineOptions {
    * production entrypoints inject `defaultOutboxDrain()`.
    */
   outboxDrain?: () => Promise<unknown>;
-  /**
-   * Optional monitor-registry deadman sweep. Omitted by default so tests and
-   * library construction never read/write the real home-directory registry.
-   * Production entrypoints pass the canonical path and injected notify hook.
-   */
-  monitorRegistryPath?: string;
-  monitorRegistryNow?: () => number;
-  monitorRegistryNotify?: MonitorDeadmanNotify;
   /** Persistent declared-watch registry. Disabled when omitted. */
   watchRegistryPath?: string;
   watchRegistryNow?: () => number;

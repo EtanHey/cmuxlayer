@@ -2,7 +2,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { StateManager } from "../src/state-manager.js";
 import { join } from "node:path";
 import net from "node:net";
 import { EventEmitter, once } from "node:events";
@@ -21,11 +22,7 @@ import {
 import type { ExecFn } from "../src/cmux-client.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { AgentDiscovery } from "../src/agent-discovery.js";
-import {
-  readMonitorRegistry,
-  registerMonitor,
-} from "../src/monitor-registry.js";
-import { ack, inboxPath, readInbox } from "../src/inbox.js";
+import { inboxPath, readInbox } from "../src/inbox.js";
 import { engineForTests } from "../src/server.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
@@ -519,9 +516,7 @@ describe("CmuxLayerDaemon", () => {
         socketPath: join(sandbox, "daemon.sock"),
         exec: createListSurfacesExec(),
         skipAgentLifecycle: true,
-        monitorRegistryPath: join(sandbox, "monitor-registry.json"),
         watchRegistryPath: join(sandbox, "watch-registry.json"),
-        monitorReconcile: () => undefined,
         detectStaleBuild: () => null,
       }));
       const context = await (daemon as any).getContext();
@@ -562,13 +557,9 @@ describe("CmuxLayerDaemon", () => {
         socketPath: join(sandbox, "daemon.sock"),
         exec: createListSurfacesExec(),
         skipAgentLifecycle: true,
-        monitorReconcile: () => undefined,
         detectStaleBuild: () => null,
       }));
       const coordination = join(sandboxHome, ".local", "state", "cmuxlayer");
-      expect((daemon as any).opts.monitorRegistryPath).toBe(
-        join(coordination, "monitor-registry.json"),
-      );
       expect((daemon as any).opts.watchRegistryPath).toBe(
         join(coordination, "watch-specs.json"),
       );
@@ -770,1001 +761,77 @@ describe("CmuxLayerDaemon", () => {
     expect(detectStaleBuild).toHaveBeenCalledTimes(callsAfterShutdown);
   });
 
-  it("runs monitor reconciliation immediately on daemon boot", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const monitorReconcile = vi.fn().mockResolvedValue(undefined);
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-reconcile-boot"),
-      exec: createListSurfacesExec(),
-      skipAgentLifecycle: true,
-      monitorReconcile,
-      monitorReconcileIntervalMs: 0,
-    });
-
-    await daemon.start();
-
-    expect(monitorReconcile).toHaveBeenCalledTimes(1);
-    await daemon.shutdown();
-  });
-
-  it("does not overlap periodic monitor reconciliation passes", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const firstPass = deferred<void>();
-    const monitorReconcile = vi
-      .fn()
-      .mockImplementationOnce(() => firstPass.promise)
-      .mockResolvedValue(undefined);
-    const daemon = trackIntervalDaemon(
-      new CmuxLayerDaemon({
-        socketPath: socketPath("monitor-reconcile-overlap"),
-        exec: createListSurfacesExec(),
-        skipAgentLifecycle: true,
-        monitorReconcile,
-        monitorReconcileIntervalMs: 5,
-      }),
-    );
-
-    await daemon.start();
-    await delay(20);
-    expect(monitorReconcile).toHaveBeenCalledTimes(1);
-
-    firstPass.resolve();
-    await waitUntil(() => monitorReconcile.mock.calls.length >= 2);
-    await daemon.shutdown();
-  });
-
-  it("does not force a second pass when relay readiness lands during a successful pass", async () => {
-    let finishFirst: ((value: unknown) => void) | null = null;
-    const firstPass = new Promise((resolve) => {
-      finishFirst = resolve;
-    });
-    const monitorReconcile = vi
-      .fn()
-      .mockImplementationOnce(() => firstPass)
-      .mockResolvedValue({ rearmed: [], collapsed: [], failed: [] });
-    const context = createServerContext({
-      exec: createListSurfacesExec(),
-      stateDir: stateDir("relay-ready-successful-pass"),
-      skipAgentLifecycle: true,
-    });
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("relay-ready-successful-pass"),
-      context,
-      monitorReconcile,
-      monitorReconcileIntervalMs: 0,
-    });
-
-    await daemon.start();
-    await waitUntil(() => monitorReconcile.mock.calls.length === 1);
-    context.setLifecycleAgentInputDeliverer(
-      vi.fn().mockResolvedValue(undefined),
-    );
-    finishFirst?.({ rearmed: ["monitor-a"], collapsed: [], failed: [] });
-    await delay(20);
-
-    expect(monitorReconcile).toHaveBeenCalledTimes(1);
-    await daemon.shutdown();
-  });
-
-  it("scopes a relay-ready retry to failed monitors from a mixed pass", async () => {
-    let finishFirst: ((value: unknown) => void) | null = null;
-    const firstPass = new Promise((resolve) => {
-      finishFirst = resolve;
-    });
-    const monitorReconcile = vi
-      .fn()
-      .mockImplementationOnce(() => firstPass)
-      .mockResolvedValue({
-        rearmed: ["monitor-a"],
-        collapsed: [],
-        failed: [],
-      });
-    const context = createServerContext({
-      exec: createListSurfacesExec(),
-      stateDir: stateDir("relay-ready-mixed-pass"),
-      skipAgentLifecycle: true,
-    });
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("relay-ready-mixed-pass"),
-      context,
-      monitorReconcile,
-      monitorReconcileIntervalMs: 0,
-    });
-
-    await daemon.start();
-    await waitUntil(() => monitorReconcile.mock.calls.length === 1);
-    context.setLifecycleAgentInputDeliverer(
-      vi.fn().mockResolvedValue(undefined),
-    );
-    finishFirst?.({
-      rearmed: ["monitor-b"],
-      collapsed: [],
-      failed: ["monitor-a"],
-    });
-    await waitUntil(() => monitorReconcile.mock.calls.length === 2);
-
-    expect(monitorReconcile.mock.calls[1]?.[0]).toEqual({
-      rearmClaimTimeoutMs: 0,
-      monitorIds: ["monitor-a"],
-    });
-    await daemon.shutdown();
-  });
-
-  it("clears the monitor reconciliation timer during shutdown", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const monitorReconcile = vi.fn().mockResolvedValue(undefined);
-    const daemon = trackIntervalDaemon(
-      new CmuxLayerDaemon({
-        socketPath: socketPath("monitor-reconcile-clear"),
-        exec: createListSurfacesExec(),
-        skipAgentLifecycle: true,
-        monitorReconcile,
-        monitorReconcileIntervalMs: 5,
-      }),
-    );
-
-    await daemon.start();
-    await waitUntil(() => monitorReconcile.mock.calls.length >= 2);
-    await daemon.shutdown();
-    const callsAfterShutdown = monitorReconcile.mock.calls.length;
-    await delay(20);
-
-    expect(monitorReconcile).toHaveBeenCalledTimes(callsAfterShutdown);
-  });
-
-  it("does not enqueue a duplicate monitor re-arm after daemon restart", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "restart-monitor-registry.json");
-    const watchedFile = join(TEST_ROOT, "restart-collab.md");
-    const inboxBaseDir = join(TEST_ROOT, "restart-inbox");
-    const sharedStateDir = stateDir("restart-state");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "restart-monitor",
-        owner_seat: "worker-a",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const clients: ReturnType<typeof createPlacementClient>[] = [];
-    const guardedRelays: Array<ReturnType<typeof vi.fn>> = [];
-    const monitorOwnerWedgedNotify = vi.fn().mockResolvedValue(true);
-    const createContext = () => {
-      const client = createPlacementClient([]);
-      clients.push(client);
-      const context = createServerContext({
-        client: client as any,
-        stateDir: sharedStateDir,
-        skipAgentLifecycle: true,
-      });
-      const guardedRelay = vi.fn().mockResolvedValue(undefined);
-      guardedRelays.push(guardedRelay);
-      context.setLifecycleAgentInputDeliverer(guardedRelay);
-      if (context.stateMgr.listStates().length === 0) {
-        context.stateMgr.writeState({
-          agent_id: "worker-a",
-          surface_id: "surface:caller",
-          surface_observer_id: context.surfaceObserverId,
-          workspace_id: "workspace:1",
-          state: "working",
-          repo: "cmuxlayer",
-          model: "codex",
-          cli: "codex",
-          cli_session_id: "session-a",
-          task_summary: "watch collab",
-          pid: 123,
-          version: 1,
-          created_at: new Date(1_000).toISOString(),
-          updated_at: new Date(1_000).toISOString(),
-          error: null,
-          parent_agent_id: null,
-          spawn_depth: 0,
-          deletion_intent: false,
-          quality: "verified",
-          max_cost_per_agent: null,
-        });
-      }
-      return context;
-    };
-    const first = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-restart-first"),
-      context: createContext(),
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 0,
-      monitorOwnerWedgedNotify,
-      inboxBaseDir,
-    });
-    await first.start();
-    await first.shutdown();
-
-    const second = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-restart-second"),
-      context: createContext(),
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 123_001,
-      monitorReconcileIntervalMs: 0,
-      monitorOwnerWedgedNotify,
-      inboxBaseDir,
-    });
-    await second.start();
-    await second.shutdown();
-
-    expect(readInbox("worker-a", { baseDir: inboxBaseDir })).toHaveLength(1);
-    expect(readInbox("worker-a", { baseDir: inboxBaseDir })[0]).toMatchObject({
-      from: "cmuxlayer-daemon",
-      tag: "monitor-rearm",
-      task: expect.stringContaining(`tail -n0 -F ${watchedFile}`),
-    });
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      monitor_id: "restart-monitor",
-      state: "collapsed",
-      collapsed_reason: "owner-wedged",
-    });
-    expect(monitorOwnerWedgedNotify).toHaveBeenCalledTimes(1);
-    const rearmMessage = readInbox("worker-a", { baseDir: inboxBaseDir })[0]!;
-    expect(rearmMessage.reply_to).toBe("cmuxlayer-daemon");
-    expect(guardedRelays[0]).toHaveBeenCalledWith({
-      agent_id: "worker-a",
-      text: `[inbox] ${rearmMessage.id} — reply_to: ${rearmMessage.reply_to} — read ${inboxPath("worker-a", { baseDir: inboxBaseDir })}`,
-      press_enter: true,
-      allow_busy: true,
-      source_event: "dispatch_nudge",
-    });
-    expect(clients[0]?.send).not.toHaveBeenCalled();
-    expect(clients[0]?.sendKey).not.toHaveBeenCalled();
-  });
-
-  it("resolves a monitor owner's stable UUID before probing pane liveness", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "uuid-owner-monitor-registry.json");
-    const watchedFile = join(TEST_ROOT, "uuid-owner-collab.md");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "uuid-owner-monitor",
-        owner_seat: "worker-moved",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const client = createPlacementClient([]);
-    const context = createServerContext({
-      client: client as any,
-      stateDir: stateDir("uuid-owner-state"),
-      skipAgentLifecycle: true,
-    });
-    context.stateMgr.writeState({
-      agent_id: "worker-moved",
-      surface_id: "surface:recycled",
-      surface_uuid: "surface-uuid-owner",
-      workspace_id: "workspace:stale",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-moved",
-      task_summary: "watch collab",
-      pid: 123,
+  it("R1: boots over a legacy monitor-registry.json without reconciling it or re-arming", async () => {
+    const sandbox = stateDir("r1-retired-monitor-registry");
+    const sandboxHome = join(sandbox, "home");
+    const coordinationDir = join(sandboxHome, ".local", "state", "cmuxlayer");
+    const inboxBaseDir = join(sandbox, "inbox");
+    mkdirSync(coordinationDir, { recursive: true });
+    vi.stubEnv("HOME", sandboxHome);
+    const legacyRegistry = JSON.stringify({
       version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
+      monitors: [
+        {
+          monitor_id: "legacy-monitor",
+          owner_seat: "worker-a",
+          watch_targets: [join(sandbox, "collab.md")],
+          mechanism: "event",
+          deadman_timeout_s: 60,
+          armed_at: "2026-01-01T00:00:00.000Z",
+          last_signal_at: "2026-01-01T00:00:00.000Z",
+          state: "alive",
+          rearm_command: "tail -n0 -F collab.md",
+        },
+      ],
     });
-    const resolveAgentIoRoute = vi.fn().mockResolvedValue({
-      agent_id: "worker-moved",
-      surface_id: "surface:moved",
-      surface_uuid: "surface-uuid-owner",
-      workspace_id: "workspace:fresh",
-      state: "working",
-      session_id: "session-moved",
-      resumable: true,
-    });
-    context.lifecycleSweepEngine = {
-      resolveAgentIoRoute,
-      dispose: vi.fn(),
-    } as any;
-
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-uuid-owner"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 0,
-      inboxBaseDir: join(TEST_ROOT, "uuid-owner-inbox"),
-    });
-
-    await daemon.start();
-    await waitUntil(() => client.readScreen.mock.calls.length > 0);
-    await daemon.shutdown();
-
-    expect(resolveAgentIoRoute).toHaveBeenCalledWith("worker-moved");
-    expect(client.readScreen).toHaveBeenCalledWith("surface:moved", {
-      workspace: "workspace:fresh",
-    });
-    expect(client.readScreen).not.toHaveBeenCalledWith(
-      "surface:recycled",
-      expect.anything(),
-    );
-  });
-
-  it("defers a UUID-backed monitor until lifecycle routing is initialized", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "uuid-owner-boot-registry.json");
-    const watchedFile = join(TEST_ROOT, "uuid-owner-boot-collab.md");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "uuid-owner-boot-monitor",
-        owner_seat: "worker-before-first-connection",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const client = createPlacementClient([]);
-    const context = createServerContext({
-      client: client as any,
-      stateDir: stateDir("uuid-owner-boot-state"),
-    });
-    context.stateMgr.writeState({
-      agent_id: "worker-before-first-connection",
-      surface_id: "surface:stale-before-connect",
-      surface_uuid: "surface-uuid-before-connect",
-      surface_observer_id: TEST_OBSERVER_OWNER,
-      workspace_id: "workspace:stale",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-before-connect",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    expect(context.lifecycleSweepEngine).toBeNull();
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-uuid-owner-before-connect"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 0,
-      inboxBaseDir: join(TEST_ROOT, "uuid-owner-boot-inbox"),
-    });
-
-    await daemon.start();
-    await delay(20);
-    await daemon.shutdown();
-
-    expect(client.readScreen).not.toHaveBeenCalled();
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      monitor_id: "uuid-owner-boot-monitor",
-      state: "alive",
-    });
-  });
-
-  it("defers an owned UUID-less monitor row when the current observer is unknown", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(
-      TEST_ROOT,
-      "unknown-observer-owner-monitor-registry.json",
-    );
-    const watchedFile = join(TEST_ROOT, "unknown-observer-owner-collab.md");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "unknown-observer-owner-monitor",
-        owner_seat: "worker-prior-observer",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const client = {
-      ...createPlacementClient([]),
-      currentSocketPath: vi.fn().mockReturnValue(" "),
-    };
-    const context = createServerContext({
-      client: client as any,
-      stateDir: stateDir("unknown-observer-owner-state"),
-      skipAgentLifecycle: true,
-      surfaceObserverOwnerIdProvider: () => null,
-      surfaceObserverEpochProvider: () => null,
-    });
-    expect(context.surfaceObserverId).toBeNull();
-    context.stateMgr.writeState({
-      agent_id: "worker-prior-observer",
-      surface_id: "surface:recycled",
-      surface_uuid: null,
-      surface_observer_id: "cmux:/tmp/prior.sock",
-      workspace_id: "workspace:stale",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-prior-observer",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-unknown-observer-owner"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 0,
-      inboxBaseDir: join(TEST_ROOT, "unknown-observer-owner-inbox"),
-    });
-
-    await daemon.start();
-    await delay(20);
-    await daemon.shutdown();
-
-    expect(client.readScreen).not.toHaveBeenCalled();
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      state: "alive",
-    });
-  });
-
-  it("defers an unowned UUID-less monitor row when the current observer is unknown", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(
-      TEST_ROOT,
-      "unknown-observer-unowned-monitor-registry.json",
-    );
-    const watchedFile = join(TEST_ROOT, "unknown-observer-unowned-collab.md");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "unknown-observer-unowned-monitor",
-        owner_seat: "worker-unowned-legacy",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const client = {
-      ...createPlacementClient([]),
-      currentSocketPath: vi.fn().mockReturnValue(" "),
-    };
-    const context = createServerContext({
-      client: client as any,
-      stateDir: stateDir("unknown-observer-unowned-state"),
-      skipAgentLifecycle: true,
-      surfaceObserverOwnerIdProvider: () => null,
-      surfaceObserverEpochProvider: () => null,
-    });
-    expect(context.surfaceObserverId).toBeNull();
-    context.stateMgr.writeState({
-      agent_id: "worker-unowned-legacy",
-      surface_id: "surface:recycled",
-      surface_uuid: null,
-      surface_observer_id: null,
-      workspace_id: "workspace:stale",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-unowned-legacy",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-unknown-observer-unowned"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 0,
-      inboxBaseDir: join(TEST_ROOT, "unknown-observer-unowned-inbox"),
-    });
-
-    await daemon.start();
-    await delay(20);
-    await daemon.shutdown();
-
-    expect(client.readScreen).not.toHaveBeenCalled();
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      state: "alive",
-    });
-  });
-
-  it("collapses and loudly escalates a pty-dead monitor owner without inbox re-arm", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "pty-dead-monitor-registry.json");
-    const watchedFile = join(TEST_ROOT, "pty-dead-collab.md");
-    const inboxBaseDir = join(TEST_ROOT, "pty-dead-inbox");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "pty-dead-monitor",
-        owner_seat: "worker-wedged",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const context = createServerContext({
-      client: createPlacementClient([]) as any,
-      stateDir: stateDir("pty-dead-state"),
-      skipAgentLifecycle: true,
-    });
-    context.stateMgr.writeState({
-      agent_id: "worker-wedged",
-      surface_id: "surface:caller",
-      surface_observer_id: context.surfaceObserverId,
-      workspace_id: "workspace:1",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-wedged",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    context.surfaceWriteLiveness.recordFailure("surface:caller", {
-      code: "EPIPE",
-    }, null, context.surfaceObserverId);
-    context.surfaceWriteLiveness.recordFailure("surface:caller", {
-      code: "EPIPE",
-    }, null, context.surfaceObserverId);
-    const guardedRelay = vi.fn().mockResolvedValue(undefined);
-    context.setLifecycleAgentInputDeliverer(guardedRelay);
-    const monitorOwnerPtyDeadNotify = vi.fn().mockResolvedValue(true);
-    const daemon = trackIntervalDaemon(
-      new CmuxLayerDaemon({
-        socketPath: socketPath("monitor-owner-pty-dead"),
-        context,
-        monitorRegistryPath: registryPath,
-        monitorRegistryNow: () => 62_000,
-        monitorReconcileIntervalMs: 5,
-        monitorOwnerPtyDeadNotify,
-        inboxBaseDir,
-      }),
-    );
-
-    await daemon.start();
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
-    );
-    await delay(20);
-    await daemon.shutdown();
-
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      monitor_id: "pty-dead-monitor",
-      state: "collapsed",
-      collapsed_reason: "owner-pty-dead",
-    });
-    expect(monitorOwnerPtyDeadNotify).toHaveBeenCalledTimes(1);
-    expect(monitorOwnerPtyDeadNotify).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: "Monitor owner PTY dead",
-        body: expect.stringContaining("pty-dead-monitor"),
-        priority: "high",
-        dedupe_key: "pty-dead-monitor:owner-pty-dead",
-      }),
-    );
-    expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toEqual([]);
-    expect(guardedRelay).not.toHaveBeenCalled();
-  });
-
-  it("does not collapse a fresh UUID owner from stale failures on its recycled ref", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "pty-recycled-monitor-registry.json");
-    const watchedFile = join(TEST_ROOT, "pty-recycled-collab.md");
-    const inboxBaseDir = join(TEST_ROOT, "pty-recycled-inbox");
-    const oldUuid = "11111111-2222-4333-8444-555555555555";
-    const currentUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "pty-recycled-monitor",
-        owner_seat: "worker-current",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const client = createPlacementClient([]);
-    const context = createServerContext({
-      client: client as any,
-      stateDir: stateDir("pty-recycled-state"),
-      skipAgentLifecycle: true,
-    });
-    context.stateMgr.writeState({
-      agent_id: "worker-current",
-      surface_id: "surface:caller",
-      surface_uuid: currentUuid,
-      surface_observer_id: context.surfaceObserverId,
-      workspace_id: "workspace:1",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-current",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    context.lifecycleSweepEngine = {
-      resolveAgentIoRoute: vi.fn().mockResolvedValue({
-        agent_id: "worker-current",
+    writeFileSync(join(coordinationDir, "monitor-registry.json"), legacyRegistry);
+    try {
+      vi.stubEnv("CMUXLAYER_INBOX_BASE_DIR", inboxBaseDir);
+      const sandboxState = join(sandbox, "state");
+      new StateManager(sandboxState).writeState({
+        agent_id: "worker-a",
         surface_id: "surface:caller",
-        surface_uuid: currentUuid,
         workspace_id: "workspace:1",
         state: "working",
-        session_id: "session-current",
-        resumable: true,
-      }),
-      dispose: vi.fn(),
-    } as any;
-    const brokenPipe = Object.assign(new Error("broken pipe"), {
-      code: "EPIPE",
-    });
-    context.surfaceWriteLiveness.recordFailure(
-      "surface:caller",
-      brokenPipe,
-      oldUuid,
-      context.surfaceObserverId,
-    );
-    context.surfaceWriteLiveness.recordFailure(
-      "surface:caller",
-      brokenPipe,
-      oldUuid,
-      context.surfaceObserverId,
-    );
-    const monitorOwnerPtyDeadNotify = vi.fn().mockResolvedValue(true);
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-owner-recycled-pty"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 0,
-      monitorOwnerPtyDeadNotify,
-      inboxBaseDir,
-    });
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        cli_session_id: "session-a",
+        task_summary: "watch collab",
+        pid: 123,
+        version: 1,
+        created_at: new Date(1_000).toISOString(),
+        updated_at: new Date(1_000).toISOString(),
+        error: null,
+        parent_agent_id: null,
+        spawn_depth: 0,
+        deletion_intent: false,
+        quality: "verified",
+        max_cost_per_agent: null,
+      } as any);
+      // runDaemon wires the production defaults, the way a real boot does.
+      const daemon = trackIntervalDaemon(await runDaemon({
+        socketPath: join(sandbox, "daemon.sock"),
+        exec: createListSurfacesExec(),
+        stateDir: sandboxState,
+        skipAgentLifecycle: true,
+        detectStaleBuild: () => null,
+      }));
+      await delay(50);
+      await daemon.shutdown();
 
-    await daemon.start();
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
-    );
-    await daemon.shutdown();
-
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      monitor_id: "pty-recycled-monitor",
-      state: "rearming",
-    });
-    expect(client.readScreen).toHaveBeenCalledWith("surface:caller", {
-      workspace: "workspace:1",
-    });
-    expect(monitorOwnerPtyDeadNotify).not.toHaveBeenCalled();
-  });
-
-  it("collapses and loudly escalates a pane-alive owner that never acknowledges re-arm", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "wedged-monitor-registry.json");
-    const watchedFile = join(TEST_ROOT, "wedged-collab.md");
-    const inboxBaseDir = join(TEST_ROOT, "wedged-inbox");
-    let now = 62_000;
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "wedged-monitor",
-        owner_seat: "worker-wedged",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const context = createServerContext({
-      client: createPlacementClient([]) as any,
-      stateDir: stateDir("wedged-state"),
-      skipAgentLifecycle: true,
-    });
-    context.stateMgr.writeState({
-      agent_id: "worker-wedged",
-      surface_id: "surface:caller",
-      surface_observer_id: context.surfaceObserverId,
-      workspace_id: "workspace:1",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-wedged",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    const guardedRelay = vi.fn().mockResolvedValue(undefined);
-    context.setLifecycleAgentInputDeliverer(guardedRelay);
-    const monitorOwnerWedgedNotify = vi.fn().mockResolvedValue(true);
-    const daemon = trackIntervalDaemon(
-      new CmuxLayerDaemon({
-        socketPath: socketPath("monitor-owner-wedged"),
-        context,
-        monitorRegistryPath: registryPath,
-        monitorRegistryNow: () => now,
-        monitorReconcileIntervalMs: 5,
-        monitorOwnerWedgedNotify,
-        inboxBaseDir,
-      }),
-    );
-
-    await daemon.start();
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
-    );
-    now = 72_001;
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state ===
-        "collapsed",
-    );
-    await delay(20);
-    await daemon.shutdown();
-
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      monitor_id: "wedged-monitor",
-      state: "collapsed",
-      collapsed_reason: "owner-wedged",
-    });
-    expect(monitorOwnerWedgedNotify).toHaveBeenCalledTimes(1);
-    expect(monitorOwnerWedgedNotify).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: "Monitor owner wedged",
-        body: expect.stringContaining("wedged-monitor"),
-        priority: "high",
-        dedupe_key: "wedged-monitor:owner-wedged",
-      }),
-    );
-    expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toHaveLength(
-      1,
-    );
-    expect(guardedRelay).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps normal re-arm flow when the pane-alive owner acknowledges in time", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "acked-monitor-registry.json");
-    const watchedFile = join(TEST_ROOT, "acked-collab.md");
-    const inboxBaseDir = join(TEST_ROOT, "acked-inbox");
-    let now = 62_000;
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "acked-monitor",
-        owner_seat: "worker-live",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const context = createServerContext({
-      client: createPlacementClient([]) as any,
-      stateDir: stateDir("acked-state"),
-      skipAgentLifecycle: true,
-    });
-    context.stateMgr.writeState({
-      agent_id: "worker-live",
-      surface_id: "surface:caller",
-      surface_observer_id: context.surfaceObserverId,
-      workspace_id: "workspace:1",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-live",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    const guardedRelay = vi.fn().mockResolvedValue(undefined);
-    context.setLifecycleAgentInputDeliverer(guardedRelay);
-    const monitorOwnerWedgedNotify = vi.fn();
-    const daemon = trackIntervalDaemon(
-      new CmuxLayerDaemon({
-        socketPath: socketPath("monitor-owner-acked"),
-        context,
-        monitorRegistryPath: registryPath,
-        monitorRegistryNow: () => now,
-        monitorReconcileIntervalMs: 5,
-        monitorOwnerWedgedNotify,
-        inboxBaseDir,
-      }),
-    );
-
-    await daemon.start();
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
-    );
-    now = 65_000;
-    ack(
-      "worker-live",
-      `monitor-rearm:acked-monitor:${new Date(1_000).toISOString()}`,
-      "rearmed",
-      { baseDir: inboxBaseDir, now: () => now },
-    );
-    now = 72_001;
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.rearm_claimed_at ===
-        new Date(72_001).toISOString(),
-    );
-    await daemon.shutdown();
-
-    const record = readMonitorRegistry({ registryPath }).monitors[0];
-    expect(record).toMatchObject({
-      monitor_id: "acked-monitor",
-      state: "rearming",
-    });
-    expect(record).not.toHaveProperty("collapsed_reason");
-    expect(monitorOwnerWedgedNotify).not.toHaveBeenCalled();
-    expect(readInbox("worker-live", { baseDir: inboxBaseDir })).toHaveLength(1);
-    expect(guardedRelay).toHaveBeenCalledTimes(1);
-  });
-
-  it("retries a claimed monitor as soon as the guarded relay becomes ready", async () => {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const registryPath = join(TEST_ROOT, "relay-ready-monitor-registry.json");
-    const watchedFile = join(TEST_ROOT, "relay-ready-collab.md");
-    const inboxBaseDir = join(TEST_ROOT, "relay-ready-inbox");
-    writeFileSync(watchedFile, "# collab\n", "utf8");
-    await registerMonitor(
-      {
-        monitor_id: "relay-ready-monitor",
-        owner_seat: "worker-a",
-        watch_targets: [watchedFile],
-        mechanism: "event",
-        deadman_timeout_s: 60,
-        rearm_command: `tail -n0 -F ${watchedFile}`,
-      },
-      { registryPath, now: () => 1_000 },
-    );
-
-    const context = createServerContext({
-      client: createPlacementClient([]) as any,
-      stateDir: stateDir("relay-ready-state"),
-      skipAgentLifecycle: true,
-    });
-    context.stateMgr.writeState({
-      agent_id: "worker-a",
-      surface_id: "surface:caller",
-      surface_observer_id: context.surfaceObserverId,
-      workspace_id: "workspace:1",
-      state: "working",
-      repo: "cmuxlayer",
-      model: "codex",
-      cli: "codex",
-      cli_session_id: "session-a",
-      task_summary: "watch collab",
-      pid: 123,
-      version: 1,
-      created_at: new Date(1_000).toISOString(),
-      updated_at: new Date(1_000).toISOString(),
-      error: null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      deletion_intent: false,
-      quality: "verified",
-      max_cost_per_agent: null,
-    });
-    const daemon = new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-relay-ready"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 0,
-      monitorOwnerWedgedNotify: vi.fn(),
-      inboxBaseDir,
-    });
-
-    await daemon.start();
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
-    );
-    const guardedRelay = vi.fn().mockResolvedValue(undefined);
-    context.setLifecycleAgentInputDeliverer(guardedRelay);
-
-    await waitUntil(() => guardedRelay.mock.calls.length === 1);
-    expect(readInbox("worker-a", { baseDir: inboxBaseDir })).toHaveLength(1);
-    await daemon.shutdown();
+      // No re-arm task, and the on-disk data is left alone.
+      expect(
+        readInbox("worker-a", { baseDir: inboxBaseDir }).filter(
+          (message) => message.tag === "monitor-rearm",
+        ),
+      ).toEqual([]);
+      expect(
+        readFileSync(join(coordinationDir, "monitor-registry.json"), "utf8"),
+      ).toBe(legacyRegistry);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("reuses one lifecycle AgentEngine across servers sharing a context", async () => {

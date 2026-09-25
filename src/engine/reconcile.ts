@@ -10,7 +10,6 @@ import { evaluateAgentHealth } from "../agent-health.js";
 import type { AgentRecord } from "../agent-types.js";
 import { inferRecordRoleOrNull } from "../layout-policy.js";
 import { isLiveActive, resolveLiveAgentState } from "../live-agent-state.js";
-import { readMonitorRegistry } from "../monitor-registry.js";
 import { parseScreen } from "../screen-parser.js";
 import {
   EMPTY_SURFACE_TOPOLOGY,
@@ -36,7 +35,6 @@ export interface ReconcileHost {
   readonly client: AgentEngine["client"];
   readonly stateMgr: AgentEngine["stateMgr"];
   readonly cliExitShellMatches: AgentEngine["cliExitShellMatches"];
-  readonly monitorRegistryPath: AgentEngine["monitorRegistryPath"];
   readonly inboxOpts: AgentEngine["inboxOpts"];
   readonly lifecycleLockQueueDepth: AgentEngine["lifecycleLockQueueDepth"];
   assertSweepInputCurrent: AgentEngine["assertSweepInputCurrent"];
@@ -319,22 +317,6 @@ export async function reconcileAgents(
         resolveSurfaceWorkspace: async (targetAgent) =>
           surfaceTopology?.workspaceBySurface.get(targetAgent.surface_id) ??
           null,
-        resolveCollapsedMonitors: (ownerSeats) => {
-          if (!this.monitorRegistryPath) return [];
-          const owners = new Set(ownerSeats);
-          return readMonitorRegistry({
-            registryPath: this.monitorRegistryPath,
-          })
-            .monitors.filter(
-              (monitor) =>
-                monitor.state === "collapsed" &&
-                owners.has(monitor.owner_seat),
-            )
-            .map((monitor) => ({
-              monitor_id: monitor.monitor_id,
-              reason: monitor.collapsed_reason ?? "unknown",
-            }));
-        },
       },
       {
         ...healthTopologyOverrides(agent, surfaceTopology),

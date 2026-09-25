@@ -10,12 +10,10 @@ import {
   readFleetConfig,
   resetFleetConfigWarningsForTests,
 } from "../src/fleet-config.js";
-import { defaultMonitorRegistryPath } from "../src/monitor-registry.js";
 import {
   defaultWatchRegistryPath,
   httpNotifyWatch,
 } from "../src/watch-spec.js";
-import { httpNotifyMonitorDeadman } from "../src/monitor-registry.js";
 import {
   defaultOutboxDrain,
   defaultOutboxPath,
@@ -231,15 +229,12 @@ describe("legacy coordination state guard", () => {
 });
 
 describe("paths and switches follow the fleet config", () => {
-  it("puts monitor, watch, and outbox state under the coordination dir", () => {
+  it("puts watch and outbox state under the coordination dir", () => {
     const home = tempHome();
     const path = join(home, "fleet.json");
     writeFileSync(path, JSON.stringify({ coordinationDir: join(home, "coord") }));
     vi.stubEnv("CMUXLAYER_FLEET_CONFIG", path);
 
-    expect(defaultMonitorRegistryPath()).toBe(
-      join(home, "coord", "monitor-registry.json"),
-    );
     expect(defaultWatchRegistryPath()).toBe(join(home, "coord", "watch-specs.json"));
     expect(defaultOutboxPath()).toBe(join(home, "coord", "outbox.md"));
   });
@@ -278,7 +273,7 @@ describe("notify delivery fails soft", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("treats watch and monitor notifications as skipped when no listener is configured", async () => {
+  it("treats watch notifications as skipped when no listener is configured", async () => {
     const transport = vi.fn();
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
@@ -296,18 +291,6 @@ describe("notify delivery fails soft", () => {
         transport,
       ),
     ).resolves.toBe(true);
-    await expect(
-      httpNotifyMonitorDeadman(
-        {
-          monitor_id: "m1",
-          owner_seat: "lead",
-          elapsed_s: 90,
-          watch_targets: [],
-          dedupe_key: "m1:1",
-        } as unknown as Parameters<typeof httpNotifyMonitorDeadman>[0],
-        null,
-      ),
-    ).resolves.toBe(false);
     expect(transport).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });

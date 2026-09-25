@@ -2,6 +2,7 @@
  * TDD tests for Task 17 — agent reconcile (formerly "Sidebar Sync").
  * Tests reconcileAgents(), runSweep(), cmux status pills, and lifecycle log events.
  */
+import { spawnSync } from "node:child_process";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   mkdirSync,
@@ -20,10 +21,6 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import { armWatch, readWatchRegistry } from "../src/watch-spec.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../src/agent-health-input.js";
-import {
-  readMonitorRegistry,
-  registerMonitor,
-} from "../src/monitor-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
@@ -123,25 +120,6 @@ function makeWorkspace(ref: string) {
     selected: false,
     pinned: false,
   };
-}
-
-async function armLeadMonitor(input: {
-  registryPath: string;
-  monitorId: string;
-  ownerSeat: string;
-  now: () => number;
-  timeoutS?: number;
-}): Promise<void> {
-  await registerMonitor(
-    {
-      monitor_id: input.monitorId,
-      owner_seat: input.ownerSeat,
-      watch_targets: ["orchestrator/collab/example.md"],
-      mechanism: "event",
-      deadman_timeout_s: input.timeoutS ?? 60,
-    },
-    { registryPath: input.registryPath, now: input.now },
-  );
 }
 
 function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
@@ -2989,70 +2967,17 @@ describe("Agent reconcile", () => {
     ]);
   });
 
-  it("fires one proactive alert when the registry deadman fires for a lead", async () => {
-    const inboxDir = join(TEST_DIR, "lead-registry-deadman-inbox");
-    const registryPath = join(TEST_DIR, "lead-deadman-registry.json");
-    const agentId = "cmuxlayer-lead-registry-deadman";
-    let now = 1_000_000;
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: agentId,
-        state: "working",
-        surface_id: "surface:lead-stale",
-        workspace_id: "workspace:cmuxlayer",
-        cli_session_id: "session-lead-stale",
-        cli: "claude",
-        model: "claude",
-        role: "orchestrator",
-        repo: "cmuxlayer",
-        task_summary: "Lead remediation lane",
-      }),
-    );
-    liveSurfaces = [makeSurface("surface:lead-stale")];
-    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
-    engine.dispose();
-    engine = new AgentEngine(stateMgr, registry, mockClient, {
-      spawnPreflight: async () => {},
-      inboxOpts: { baseDir: inboxDir, now: () => now },
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-    });
-    await armLeadMonitor({
-      registryPath,
-      monitorId: "lead-deadman-1",
-      ownerSeat: agentId,
-      now: () => now,
-    });
-    now += 61_000;
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-    await engine.runSweep();
-
-    expect(mockClient.notify).toHaveBeenCalledTimes(1);
-    expect(mockClient.notify).toHaveBeenCalledWith({
-      title: "Lead monitor/session ended",
-      subtitle: "cmuxlayer lead cmuxlayer-lead-registry-deadman",
-      body: "Lead seat cmuxlayer-lead-registry-deadman in workspace workspace:cmuxlayer is watch-blind: monitor/session ended - lead is watch-blind. Last-known state: working.",
-      workspace: "workspace:cmuxlayer",
-      surface: "surface:lead-stale",
-    });
-    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalledWith(
-      "health",
-      expect.objectContaining({ agent_id: agentId }),
-      expect.stringContaining("inbox_monitor_not_alive"),
-    );
-  });
-
   it("suppresses watch-blind alerts and sidebar status when the lead pane is already closed", async () => {
     const inboxDir = join(TEST_DIR, "lead-closed-pane-inbox");
-    const registryPath = join(TEST_DIR, "lead-closed-pane-registry.json");
     const agentId = "cmuxlayer-lead-closed-pane";
     let now = 1_250_000;
     stateMgr.writeState(
       makeRecord({
         agent_id: agentId,
-        state: "working",
+        // Watch-blind evidence without the retired registry: a lead whose
+        // session ended (the error-state leg of isLeadWatchBlind).
+        state: "error",
+        error: "pty session ended",
         surface_id: "surface:lead-closed",
         workspace_id: "workspace:cmuxlayer",
         cli_session_id: "session-lead-closed",
@@ -3090,14 +3015,6 @@ describe("Agent reconcile", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-    });
-    await armLeadMonitor({
-      registryPath,
-      monitorId: "lead-closed-pane-1",
-      ownerSeat: agentId,
-      now: () => now,
     });
     now += 61_000;
     await engine.getRegistry().reconstitute();
@@ -3113,9 +3030,8 @@ describe("Agent reconcile", () => {
     );
   });
 
-  it("does not alert from stale inbox heartbeat when no registry deadman fired", async () => {
+  it("does not alert a lead from a stale inbox heartbeat alone", async () => {
     const inboxDir = join(TEST_DIR, "lead-stale-inbox-only");
-    const registryPath = join(TEST_DIR, "lead-stale-inbox-only-registry.json");
     const agentId = "cmuxlayer-lead-stale-inbox-only";
     let now = 1_500_000;
     stateMgr.writeState(
@@ -3138,8 +3054,6 @@ describe("Agent reconcile", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
     });
     writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
     now += 61_000;
@@ -3155,180 +3069,8 @@ describe("Agent reconcile", () => {
     );
   });
 
-  it("does not fire the lead monitor-death alert for a worker registry deadman", async () => {
-    const inboxDir = join(TEST_DIR, "worker-registry-deadman-inbox");
-    const registryPath = join(TEST_DIR, "worker-registry-deadman.json");
-    const agentId = "cmuxlayer-worker-registry-deadman";
-    let now = 2_000_000;
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: agentId,
-        state: "working",
-        surface_id: "surface:worker-stale",
-        workspace_id: "workspace:cmuxlayer",
-        cli_session_id: "session-worker-stale",
-        role: "worker",
-        repo: "cmuxlayer",
-        task_summary: "Worker remediation lane",
-      }),
-    );
-    liveSurfaces = [makeSurface("surface:worker-stale")];
-    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
-    engine.dispose();
-    engine = new AgentEngine(stateMgr, registry, mockClient, {
-      spawnPreflight: async () => {},
-      inboxOpts: { baseDir: inboxDir, now: () => now },
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-    });
-    await armLeadMonitor({
-      registryPath,
-      monitorId: "worker-deadman-1",
-      ownerSeat: agentId,
-      now: () => now,
-    });
-    now += 61_000;
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    expect(mockClient.notify).not.toHaveBeenCalled();
-    expect(mockClient.setStatus).toHaveBeenCalledWith(
-      agentId,
-      expect.stringContaining("health=healthy"),
-      expect.any(Object),
-    );
-  });
-
-  it("re-arms the lead monitor-death alert after a newer alive registry monitor appears", async () => {
-    const inboxDir = join(TEST_DIR, "lead-monitor-rearm-inbox");
-    const registryPath = join(TEST_DIR, "lead-monitor-rearm-registry.json");
-    const agentId = "cmuxlayer-lead-monitor-rearm";
-    let now = 3_000_000;
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: agentId,
-        state: "working",
-        surface_id: "surface:lead-rearm",
-        workspace_id: "workspace:cmuxlayer",
-        cli_session_id: "session-lead-rearm",
-        cli: "claude",
-        model: "claude",
-        role: "orchestrator",
-        repo: "cmuxlayer",
-        task_summary: "Lead remediation lane",
-      }),
-    );
-    liveSurfaces = [makeSurface("surface:lead-rearm")];
-    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
-    engine.dispose();
-    engine = new AgentEngine(stateMgr, registry, mockClient, {
-      spawnPreflight: async () => {},
-      inboxOpts: { baseDir: inboxDir, now: () => now },
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-    });
-    await armLeadMonitor({
-      registryPath,
-      monitorId: "lead-rearm-1",
-      ownerSeat: agentId,
-      now: () => now,
-    });
-    now += 61_000;
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    now += 1_000;
-    await armLeadMonitor({
-      registryPath,
-      monitorId: "lead-rearm-2",
-      ownerSeat: agentId,
-      now: () => now,
-    });
-    await engine.runSweep();
-
-    now += 61_000;
-    await engine.runSweep();
-
-    expect(mockClient.notify).toHaveBeenCalledTimes(2);
-  });
-
-  it("registry deadman timeout waits for a cross-agent sweep instead of an owner-local timer", async () => {
-    vi.useFakeTimers();
-    const inboxDir = join(TEST_DIR, "lead-monitor-cross-agent-inbox");
-    const registryPath = join(TEST_DIR, "lead-monitor-cross-agent-sweep.json");
-    const agentId = "cmuxlayer-lead-monitor-deadman";
-    let now = 4_000_000;
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: agentId,
-        state: "working",
-        surface_id: "surface:lead-deadman",
-        workspace_id: "workspace:cmuxlayer",
-        cli_session_id: "session-lead-deadman",
-        cli: "claude",
-        model: "claude",
-        role: "orchestrator",
-        repo: "cmuxlayer",
-        task_summary: "Lead remediation lane",
-      }),
-    );
-    liveSurfaces = [makeSurface("surface:lead-deadman")];
-    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
-    engine.dispose();
-    engine = new AgentEngine(stateMgr, registry, mockClient, {
-      spawnPreflight: async () => {},
-      inboxOpts: { baseDir: inboxDir, now: () => now },
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-    });
-    await armLeadMonitor({
-      registryPath,
-      monitorId: "lead-cross-agent-1",
-      ownerSeat: agentId,
-      now: () => now,
-    });
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    expect(mockClient.notify).not.toHaveBeenCalled();
-
-    now += AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1;
-    const advanceTimersByTimeAsync = (
-      vi as unknown as {
-        advanceTimersByTimeAsync?: (ms: number) => Promise<void>;
-      }
-    ).advanceTimersByTimeAsync;
-    if (advanceTimersByTimeAsync) {
-      await advanceTimersByTimeAsync.call(
-        vi,
-        AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1,
-      );
-    } else {
-      vi.advanceTimersByTime(AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1);
-      await Promise.resolve();
-      await Promise.resolve();
-    }
-
-    expect(mockClient.notify).not.toHaveBeenCalled();
-
-    await engine.runSweep();
-
-    expect(mockClient.notify).toHaveBeenCalledTimes(1);
-    expect(mockClient.notify).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: "Lead monitor/session ended",
-        surface: "surface:lead-deadman",
-        workspace: "workspace:cmuxlayer",
-      }),
-    );
-  });
-
   it("lead monitor-death delivery memory follows session-capture rename", async () => {
     const inboxDir = join(TEST_DIR, "lead-monitor-rename-inbox");
-    const registryPath = join(TEST_DIR, "lead-monitor-rename-registry.json");
     const pendingAgentId = "claude-cmuxlayer-pending-lead";
     const sessionId = "12345678-1234-1234-1234-123456789abc";
     const finalAgentId = generateAgentId("claude", "cmuxlayer", sessionId);
@@ -3337,7 +3079,10 @@ describe("Agent reconcile", () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: pendingAgentId,
+        // Watch-blind through the dead-pid leg (the registry leg is retired):
+        // the recorded process has already exited.
         state: "working",
+        pid: spawnSync("true").pid ?? null,
         surface_id: "surface:lead-rename",
         workspace_id: "workspace:cmuxlayer",
         cli_session_id: null,
@@ -3355,14 +3100,6 @@ describe("Agent reconcile", () => {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
       sessionIdentityResolver: () => capturedSessionId,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-    });
-    await armLeadMonitor({
-      registryPath,
-      monitorId: "lead-rename-1",
-      ownerSeat: pendingAgentId,
-      now: () => now,
     });
     now += AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1;
     await engine.getRegistry().reconstitute();
@@ -3383,10 +3120,6 @@ describe("Agent reconcile", () => {
     expect(stateMgr.readState(pendingAgentId)).toBeNull();
     expect(stateMgr.readState(finalAgentId)).not.toBeNull();
     expect(mockClient.notify).toHaveBeenCalledTimes(1);
-    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      monitor_id: "lead-rename-1",
-      owner_seat: finalAgentId,
-    });
   });
 
   it("does not emit done notifications until a worker has verified terminal evidence", async () => {

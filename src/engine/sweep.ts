@@ -17,7 +17,6 @@ import {
   agentDir,
   reapOrphanedPendingChannelMarkers,
 } from "../inbox.js";
-import { sweepMonitorRegistry } from "../monitor-registry.js";
 import {
   type WatchOwnerResolution,
   canonicalAgentId,
@@ -119,10 +118,6 @@ export interface SweepHost {
   lastChannelMarkerReapFailureAt: AgentEngine["lastChannelMarkerReapFailureAt"];
   lastSweepSignature: AgentEngine["lastSweepSignature"];
   readonly lifecycleLockHolder: AgentEngine["lifecycleLockHolder"];
-  readonly monitorRegistryNotify: AgentEngine["monitorRegistryNotify"];
-  readonly monitorRegistryNow: AgentEngine["monitorRegistryNow"];
-  readonly monitorRegistryPath: AgentEngine["monitorRegistryPath"];
-  monitorRegistrySweepInFlight: AgentEngine["monitorRegistrySweepInFlight"];
   readonly outboxDrain: AgentEngine["outboxDrain"];
   outboxDrainInFlight: AgentEngine["outboxDrainInFlight"];
   readonly registry: AgentEngine["registry"];
@@ -169,7 +164,6 @@ export interface SweepHost {
   runSweepOnce: AgentEngine["runSweepOnce"];
   scheduleClosedChildReportWatchPrune: AgentEngine["scheduleClosedChildReportWatchPrune"];
   shouldYieldSweep: AgentEngine["shouldYieldSweep"];
-  sweepMonitorRegistryBestEffort: AgentEngine["sweepMonitorRegistryBestEffort"];
   sweepStateSignature: AgentEngine["sweepStateSignature"];
   sweepWatchesBestEffort: AgentEngine["sweepWatchesBestEffort"];
   verifyPendingDeliveries: AgentEngine["verifyPendingDeliveries"];
@@ -667,8 +661,6 @@ export async function runSweepOnce(
       );
     }
     await yieldToWaiters();
-    await time("monitors_ms", () => this.sweepMonitorRegistryBestEffort());
-    await yieldToWaiters();
     if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
       await time("placements_ms", () =>
         this.reconcileRolePlacements("idle", {
@@ -836,23 +828,6 @@ export function markIntentionalSurfaceCloses(
   }
 }
 
-export async function sweepMonitorRegistryBestEffort(this: SweepHost): Promise<void> {
-  if (!this.monitorRegistryPath) return;
-  if (this.monitorRegistrySweepInFlight) return;
-  this.monitorRegistrySweepInFlight = true;
-  try {
-    await sweepMonitorRegistry({
-      registryPath: this.monitorRegistryPath,
-      now: this.monitorRegistryNow,
-      notify: this.monitorRegistryNotify,
-    });
-  } catch {
-    // The registry deadman is best-effort inside the sweep; never break
-    // lifecycle reconciliation because the shared file is temporarily busy.
-  } finally {
-    this.monitorRegistrySweepInFlight = false;
-  }
-}
 export async function sweepWatchesBestEffort(
   this: SweepHost,
   withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>,
