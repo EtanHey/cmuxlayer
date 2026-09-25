@@ -12,6 +12,7 @@ import { TEST_SURFACE_OBSERVER_OWNER } from "./helpers/test-surface-observer.js"
 // surface and got "Stable surface UUID 4779… changed or disappeared during
 // send_command; refusing terminal mutation."
 const SELF_UUID = "47794976-E567-4358-91CF-D1608A7CA31F";
+const OTHER_UUID = "0C1A6B2E-5D4F-4E3A-9B8C-7D6E5F4A3B2C";
 const COMMAND = "/mcp reconnect voicelayer";
 
 class SeatClient {
@@ -19,6 +20,11 @@ class SeatClient {
   readonly keys: string[] = [];
   private typed = "";
   listPanesCalls = 0;
+  /** From this listPanes call on, surface:1 reports a different stable UUID. */
+  swapUuidFromCall = Number.POSITIVE_INFINITY;
+  private uuid() {
+    return this.listPanesCalls >= this.swapUuidFromCall ? OTHER_UUID : SELF_UUID;
+  }
   async listWindows() {
     return { windows: [{ ref: "window:1", index: 0, selected: true }] };
   }
@@ -41,7 +47,7 @@ class SeatClient {
           focused: true,
           surface_count: 1,
           surface_refs: ["surface:1"],
-          surface_ids: [SELF_UUID],
+          surface_ids: [this.uuid()],
           selected_surface_ref: "surface:1",
         },
       ],
@@ -53,7 +59,7 @@ class SeatClient {
       window_ref: "window:1",
       pane_ref: "pane:1",
       surfaces: [
-        { ref: "surface:1", id: SELF_UUID, title: "orcClaude", type: "terminal", index: 0, selected: true },
+        { ref: "surface:1", id: this.uuid(), title: "orcClaude", type: "terminal", index: 0, selected: true },
       ],
     };
   }
@@ -147,11 +153,50 @@ describe("send_command to the caller's own surface (#805)", () => {
     expect(result.isError).toBeFalsy();
     expect(parsed.ok).toBe(true);
     expect(parsed.self_target).toBe(true);
-    expect(parsed.self_target_note).toMatch(/runs when .*turn ends/i);
+    expect(parsed.delivery_state).toBe("typed");
+    expect(parsed.submitted).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.self_target_note).toBe(
+      "Typed into the caller's own surface: the caller's turn is blocked in this call, so the command is expected to run when that turn ends; submit is not verifiable from inside it.",
+    );
     expect(client.texts.join("")).toBe(COMMAND);
     expect(client.keys.filter((key) => key === "return" || key === "enter")).toHaveLength(1);
   });
 
+
+  it("does not treat a ref-shaped caller id as the self target of a UUID-bound route", async () => {
+    vi.useFakeTimers();
+    const { sendCommand } = server();
+    const pending = runWithCallerContext(
+      { surfaceId: "surface:1", workspaceId: "workspace:1" },
+      () => sendCommand.handler({ surface: "surface:1", command: COMMAND }, {}),
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    const parsed = parse(await pending);
+
+    expect(parsed.self_target).toBeUndefined();
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toMatch(/Enter submit could not be verified/);
+  });
+
+  it("still refuses real UUID drift with the changed-or-disappeared message", async () => {
+    const { client, sendCommand } = server();
+    // The route binds SELF_UUID; by the pre-mutation re-read surface:1 is a
+    // different surface.
+    client.swapUuidFromCall = 2;
+    const parsed = parse(
+      await runWithCallerContext(
+        { surfaceId: SELF_UUID, workspaceId: "workspace:1" },
+        () => sendCommand.handler({ surface: "surface:1", command: COMMAND }, {}),
+      ),
+    );
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toBe(
+      `Stable surface UUID ${SELF_UUID} changed or disappeared during send_command; refusing terminal mutation.`,
+    );
+    expect(client.texts).toEqual([]);
+  });
 
   it("names a failed topology re-read as such, not as UUID drift", async () => {
     // The route's topology read completes; the observer goes away during

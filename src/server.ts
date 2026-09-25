@@ -4758,10 +4758,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // input until the turn ends: submit evidence cannot appear, and
         // verifying would poll topology to a timeout. Deliver, skip that
         // verification, and say so on the receipt.
+        // Match on the stable UUID whenever the route has one; the mutable ref
+        // is only the fallback for ref-only connectors (a ref-shaped caller id
+        // must not match a UUID-bound route by ref).
         const callerSurface = currentCallerContext()?.surfaceId?.trim().toLowerCase();
+        const routeUuid = route.stableSurfaceIdentity?.trim().toLowerCase();
         const selfTarget = Boolean(callerSurface) &&
-          (route.stableSurfaceIdentity?.trim().toLowerCase() === callerSurface ||
-            route.surface.toLowerCase() === callerSurface);
+          (routeUuid
+            ? routeUuid === callerSurface
+            : route.surface.toLowerCase() === callerSurface);
         const delivery = await withSurfaceWrite(
           route.surface,
           async () => {
@@ -4833,7 +4838,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? {
                 self_target: true,
                 self_target_note:
-                  "Sent to the caller's own surface: the caller's turn is blocked in this call, so the command runs when that turn ends; submit is not verifiable from inside it.",
+                  "Typed into the caller's own surface: the caller's turn is blocked in this call, so the command is expected to run when that turn ends; submit is not verifiable from inside it.",
               }
             : {}),
           ...remapFields(route),
