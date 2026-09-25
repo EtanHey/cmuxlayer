@@ -1,3 +1,4 @@
+import "./helpers/pin-long-inline-cap.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

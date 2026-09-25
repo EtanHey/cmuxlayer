@@ -109,7 +109,7 @@ Otherwise it is typed with the cmux `surface.send_text` call (`src/cmux-socket-c
 | Limit | Value | Source |
 |---|---|---|
 | Chunk size | 500 characters | `src/server.ts:653` |
-| Inline maximum | 1,800 characters; `CMUXLAYER_MAX_INLINE_CHARS` overrides it (minimum 500) | `src/server.ts:657`, `:685-697` |
+| Inline maximum | 500 UTF-8 bytes; `CMUXLAYER_MAX_INLINE_CHARS` overrides it (a byte count, minimum 500); `allow_long_inline: true` bypasses it for deliberate raw sends | `src/delivery/input-policy.ts` (`DEFAULT_SEND_INPUT_MAX_INLINE_CHARS`, `assertInlineInputAllowed`) |
 | Paste batch | 16,000 bytes | `src/server.ts:662` |
 
 **Multi-paragraph text is refused** for Claude Code, Codex, Cursor and Gemini: a blank line can
