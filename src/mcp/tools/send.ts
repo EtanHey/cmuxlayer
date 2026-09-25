@@ -4,6 +4,10 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
+import { readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
+import { reportMarkerMatches } from "../../live-agent-harness.js";
+import { toPublicAgent } from "../../agent-facade.js";
 import { RetryableDeliveryError } from "../../agent-engine.js";
 import { type WatchSpec } from "../../watch-spec.js";
 import type { AgentRecord, AgentState } from "../../agent-types.js";
@@ -90,6 +94,46 @@ export function registerWaitForTool(
     registry,
     resolveCurrentCallerAgent,
   } = deps;
+  const REPORT_MARKER_POLL_MS = 500;
+  const waitForReportMarker = async (
+    agentId: string,
+    reportPath: string,
+    doneMarker: string,
+    timeoutMs: number,
+  ) => {
+    if (!registry.get(agentId)) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    const startedAt = Date.now();
+    const snapshot = (matched: boolean, source: "report_file" | "timeout" | "immediate", error?: string) => {
+      const agent = registry.get(agentId);
+      return {
+        matched,
+        state: agent?.state ?? "unknown",
+        elapsed: Date.now() - startedAt,
+        source,
+        report_path: reportPath,
+        done_marker: doneMarker,
+        agent: agent ? toPublicAgent(agent) : undefined,
+        ...(error ? { error } : {}),
+      };
+    };
+    while (true) {
+      const text = await readFile(reportPath, "utf8").catch(() => undefined);
+      if (reportMarkerMatches(text, doneMarker)) {
+        return snapshot(true, "report_file");
+      }
+      if (registry.get(agentId)?.state === "error") {
+        return snapshot(false, "immediate", registry.get(agentId)?.error ?? "Agent is in error state");
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        return snapshot(false, "timeout");
+      }
+      await new Promise((resolveDelay) =>
+        setTimeout(resolveDelay, Math.min(REPORT_MARKER_POLL_MS, timeoutMs)),
+      );
+    }
+  };
   // 12. wait_for
   server.tool(
     "wait_for",
@@ -133,6 +177,17 @@ export function registerWaitForTool(
         .optional()
         .default(300000)
         .describe("Timeout in milliseconds (default: 5 minutes)"),
+      report_path: z
+        .string()
+        .optional()
+        .describe(
+          "With done_marker and agent_id: file-backed done. Matches when this ABSOLUTE file's final non-empty line equals done_marker, the same report contract spawn_agent issues.",
+        ),
+      done_marker: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Final-line marker for report_path"),
     },
     ANNOTATIONS.mutating,
     async (args, extra) => {
@@ -320,11 +375,31 @@ export function registerWaitForTool(
         if (!args.agent_id) {
           throw new Error("wait_for requires agent_id, ids, or delivery_id");
         }
-        const result = await engine.waitFor(
-          args.agent_id,
-          targetState,
-          args.timeout_ms,
-        );
+        if (
+          (args.report_path !== undefined) !==
+          (args.done_marker !== undefined)
+        ) {
+          throw new Error(
+            "wait_for file-backed done needs report_path and done_marker together",
+          );
+        }
+        if (args.report_path !== undefined && !isAbsolute(args.report_path)) {
+          throw new Error(
+            `wait_for report_path must be absolute: ${args.report_path}`,
+          );
+        }
+        // #808: file-backed done. A sterile worker is never told the engine
+        // report path, so the registry may never reach `done`; the caller's
+        // own report contract (final line == done_marker) decides instead.
+        const result =
+          args.report_path !== undefined && args.done_marker !== undefined
+            ? await waitForReportMarker(
+                args.agent_id,
+                args.report_path,
+                args.done_marker,
+                args.timeout_ms,
+              )
+            : await engine.waitFor(args.agent_id, targetState, args.timeout_ms);
         await refreshManagedMetadataBestEffort(result.agent?.agent_id);
         const resultAgent = result.agent
           ? engine.getAgentState(result.agent.agent_id)

@@ -3,11 +3,15 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 let harness;
+// The daemon-first proxy fails any request at 300 s (DEFAULT_REQUEST_TIMEOUT_MS
+// in src/proxy.ts), so one long wait_for dies there. Wait in slices instead.
+const WAIT_SLICE_MS = 120_000;
 
 function usage() {
   process.stderr.write(`Usage: run-live-agent-harness.mjs [options]
@@ -28,6 +32,11 @@ Options:
   --cleanup-poll-ms <ms>                    close cleanup poll interval (default: 500)
   --server-command <cmd>                    MCP server executable
   --server-arg <arg>                        Repeatable MCP server arg
+  --daemon-socket <path>                    Daemon socket for this run (default: a private
+                                            per-run socket, so THIS build's dist/ serves it)
+  --installed-daemon                        Opt out: let the proxy reach the installed daemon
+                                            on the default socket (the run then fails unless
+                                            that daemon is this build)
   --help                                    Show help
 `);
 }
@@ -49,6 +58,8 @@ function parseArgs(argv) {
     cleanupPollMs: 500,
     serverCommand: "",
     serverArgs: [],
+    daemonSocket: "",
+    installedDaemon: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -103,6 +114,12 @@ function parseArgs(argv) {
         break;
       case "--server-arg":
         options.serverArgs.push(argv[++index]);
+        break;
+      case "--daemon-socket":
+        options.daemonSocket = resolve(argv[++index]);
+        break;
+      case "--installed-daemon":
+        options.installedDaemon = true;
         break;
       default:
         throw new Error(`Unknown argument: ${arg}`);
@@ -241,7 +258,7 @@ class McpStdioClient {
   }
 
   async initialize() {
-    await this.request("initialize", {
+    const result = await this.request("initialize", {
       protocolVersion: "2025-03-26",
       capabilities: {},
       clientInfo: {
@@ -250,6 +267,7 @@ class McpStdioClient {
       },
     });
     this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    return result;
   }
 
   async callTool(name, args, timeoutMs) {
@@ -301,24 +319,17 @@ function sleep(ms) {
   });
 }
 
-function errorLooksNotFound(call) {
-  const text = `${call?.error ?? ""}\n${call?.text ?? ""}`;
-  return /not found/i.test(text);
-}
-
-function listIncludesAgent(call, agentId) {
+function listIncludesLiveAgent(call, agentId) {
   const agents = call?.structured?.agents;
   if (!agentId || !Array.isArray(agents)) return false;
-  return agents.some((agent) => {
-    if (typeof agent !== "object" || agent === null) return false;
-    const id =
-      typeof agent.agent_id === "string"
-        ? agent.agent_id
-        : typeof agent.id === "string"
-          ? agent.id
-          : "";
-    return id === agentId;
-  });
+  return agents.some(
+    (agent) =>
+      typeof agent === "object" &&
+      agent !== null &&
+      (agent.agent_id ?? agent.id) === agentId &&
+      agent.state !== "done" &&
+      agent.state !== "error",
+  );
 }
 
 function listIncludesSurface(call, surfaceId) {
@@ -340,8 +351,9 @@ async function pollCloseCleanup(client, config, worker) {
   while (Date.now() - startedAt <= config.cleanupTimeoutMs) {
     attempts += 1;
     if (worker.agent_id) {
-      stateAfterClose = await client.callTool("get_agent_state", {
-        agent_id: worker.agent_id,
+      // Default summary hides close tombstones: still listed = still live.
+      stateAfterClose = await client.callTool("list_agents", {
+        agent_ids: [worker.agent_id],
       });
     }
     agentsAfterClose = await client.callTool("list_agents", {
@@ -352,11 +364,13 @@ async function pollCloseCleanup(client, config, worker) {
       verbose: true,
     });
 
+    // Stopped agents persist as done/resumable by design: "gone" means no
+    // longer listed as live, not deleted.
     const stateGone =
       !worker.agent_id ||
-      stateAfterClose?.ok === false ||
-      errorLooksNotFound(stateAfterClose);
-    const agentListed = listIncludesAgent(agentsAfterClose, worker.agent_id);
+      (stateAfterClose?.ok === true &&
+        !listIncludesLiveAgent(stateAfterClose, worker.agent_id));
+    const agentListed = listIncludesLiveAgent(agentsAfterClose, worker.agent_id);
     const surfacePresent = listIncludesSurface(
       surfacesAfterClose,
       worker.surface_id,
@@ -419,12 +433,58 @@ async function main() {
     events: [],
   };
 
-  const client = new McpStdioClient(server.command, server.args, process.env);
+  // #800: the entry is a daemon-first proxy, so without a pinned socket it
+  // talks to whatever daemon owns the default socket (the INSTALLED one on a
+  // fleet Mac) and "harness green" proves that binary, not this build.
+  const installedSocket = join(homedir(), ".local", "state", "cmux", "cmuxlayer-stated.sock");
+  const socketPath =
+    cliOptions.daemonSocket ||
+    process.env.CMUXLAYER_DAEMON_SOCKET?.trim() ||
+    (cliOptions.installedDaemon
+      ? installedSocket
+      : harness.defaultHarnessDaemonSocket(homedir(), process.pid));
+  const privateSocket = resolve(socketPath) !== resolve(installedSocket);
+  const childEnv = { ...process.env, CMUXLAYER_DAEMON_SOCKET: socketPath };
+  const client = new McpStdioClient(server.command, server.args, childEnv);
   const seenAgentIds = new Set();
   let baselineWorkerSurfaceCount = 0;
 
   try {
-    await client.initialize();
+    const initialized = await client.initialize();
+
+    // #808: fail loudly, up front, when a tool this runner needs is gone.
+    const listed = await client.request("tools/list", {});
+    const listedNames = Array.isArray(listed?.tools)
+      ? listed.tools.map((tool) => tool.name)
+      : [];
+    const missing = harness.missingHarnessTools(listedNames);
+    results.preflight = { tools: listedNames, missing };
+    if (missing.length > 0) {
+      throw new Error(
+        `live harness: required tools missing from tools/list: ${missing.join(", ")}`,
+      );
+    }
+
+    const health = await client.callTool("control_health", { detail: "full" });
+    results.daemon = harness.buildHarnessDaemonBlock({
+      socketPath,
+      privateSocket,
+      serverVersion:
+        typeof initialized?.serverInfo?.version === "string"
+          ? initialized.serverInfo.version
+          : null,
+      controlHealth: health.structured,
+      distDir: join(REPO_ROOT, "dist"),
+    });
+    results.daemon_failures = harness.harnessDaemonFailures(results.daemon);
+    process.stderr.write(
+      `live harness daemon: ${JSON.stringify(results.daemon)}\n`,
+    );
+    if (results.daemon_failures.length > 0) {
+      throw new Error(
+        `live harness: the serving daemon is not this build (${results.daemon.binary ?? "unknown binary"}, expected under ${results.daemon.expected_dist})`,
+      );
+    }
 
     recordEvent(results.events, { step: "baseline" });
     results.baseline_agents = await client.callTool("list_agents", {
@@ -510,8 +570,9 @@ async function main() {
       });
 
       if (worker.agent_id) {
-        worker.state_after_spawn = await client.callTool("get_agent_state", {
-          agent_id: worker.agent_id,
+        worker.state_after_spawn = await client.callTool("list_agents", {
+          agent_ids: [worker.agent_id],
+          detail: "full",
         });
       }
 
@@ -529,16 +590,29 @@ async function main() {
 
       recordEvent(results.events, { worker: spec.name, step: "wait_start" });
       if (worker.agent_id) {
-        worker.wait = await client.callTool(
-          "wait_for",
-          {
-            agent_id: worker.agent_id,
-            target_state: "done",
-            timeout_ms: config.waitTimeoutMs,
-            report_path: spec.report,
-            done_marker: spec.marker,
-          },
-          config.waitTimeoutMs + 30_000,
+        const waitDeadline = Date.now() + config.waitTimeoutMs;
+        worker.wait_slices = 0;
+        do {
+          const slice = Math.max(
+            1_000,
+            Math.min(WAIT_SLICE_MS, waitDeadline - Date.now()),
+          );
+          worker.wait_slices += 1;
+          worker.wait = await client.callTool(
+            "wait_for",
+            {
+              agent_id: worker.agent_id,
+              target_state: "done",
+              timeout_ms: slice,
+              report_path: spec.report,
+              done_marker: spec.marker,
+            },
+            slice + 30_000,
+          );
+        } while (
+          worker.wait?.ok === true &&
+          !harness.waitIsDone(worker.wait) &&
+          Date.now() < waitDeadline
         );
       }
 
@@ -563,12 +637,22 @@ async function main() {
       }
 
       if (worker.agent_id) {
-        worker.state_after_done = await client.callTool("get_agent_state", {
-          agent_id: worker.agent_id,
+        worker.state_after_done = await client.callTool("list_agents", {
+          agent_ids: [worker.agent_id],
+          detail: "full",
         });
       }
 
-      if (worker.surface_id) {
+      if (worker.agent_id) {
+        // The harness owns this dummy and has harvested its report: stop the
+        // agent and close its pane. A plain surface close is (correctly)
+        // refused for a still-live agent and left pane + record behind (#808).
+        worker.close = await client.callTool("close_surface", {
+          agent_id: worker.agent_id,
+          scope: "agent",
+          force: true,
+        });
+      } else if (worker.surface_id) {
         worker.close = await client.callTool("close_surface", {
           surface: worker.surface_id,
           workspace: config.workspace,
@@ -619,15 +703,34 @@ async function main() {
         failures: worker.failures,
       });
     }
+  } catch (error) {
+    results.error = error instanceof Error ? error.message : String(error);
   } finally {
     results.stderr = client.stderr.trim() || undefined;
     results.finished_at = new Date().toISOString();
     client.close();
+    // Stop the private daemon this run started, by its recorded PID.
+    if (
+      results.daemon?.private === true &&
+      results.daemon.from_this_build === true &&
+      typeof results.daemon.pid === "number"
+    ) {
+      try {
+        process.kill(results.daemon.pid, "SIGTERM");
+        results.daemon.stopped = true;
+      } catch {
+        results.daemon.stopped = false;
+      }
+    }
   }
 
   const summary = harness.summarizeHarnessRun(results.workers);
-  results.green = summary.green;
-  results.final_marker = summary.green
+  results.green =
+    summary.green &&
+    results.error === undefined &&
+    (results.daemon_failures ?? ["daemon_not_identified"]).length === 0 &&
+    results.workers.length > 0;
+  results.final_marker = results.green
     ? config.finalGreen
     : config.finalRed;
 
@@ -642,7 +745,7 @@ async function main() {
   await writeFile(reportPath, reportMarkdown, "utf8");
 
   process.stdout.write(`${reportMarkdown}\n`);
-  process.exit(summary.green ? 0 : 1);
+  process.exit(results.green ? 0 : 1);
 }
 
 main().catch((error) => {

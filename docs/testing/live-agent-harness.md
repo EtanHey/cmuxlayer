@@ -7,6 +7,22 @@ agent launchers, and local auth/session state through cmuxlayer's stdio MCP serv
 
 ## What it proves
 
+Before any worker, the runner:
+
+- pins **a private daemon socket** (`~/.local/state/cmux/cmuxlayer-harness-<pid>.sock`)
+  unless you pass `--daemon-socket` or `--installed-daemon`. The entry is a
+  daemon-first proxy: without a pinned socket it talks to whatever daemon owns the
+  default socket, which on a fleet Mac is the installed Homebrew build, and a green
+  run would prove that binary instead of this one (#800). The private socket makes
+  the proxy start a daemon from this build's `dist/`; the runner stops that daemon
+  by its recorded PID when the run ends.
+- checks `tools/list` for every tool it calls (`spawn_agent`, `list_agents`,
+  `list_surfaces`, `wait_for`, `close_surface`, `control_health`) and fails red
+  naming any that are missing.
+- records **which daemon served the run** from `control_health(detail:"full")`
+  (version, binary path, pid, socket) and fails red if that binary is not under
+  this build's `dist/`.
+
 For each sequential worker the runner:
 
 1. writes a tiny read-only goal file
@@ -14,9 +30,16 @@ For each sequential worker the runner:
 3. spawns the worker with a sandboxed MCP profile by default
 4. verifies managed id / launcher-model policy
 5. captures verbose `list_surfaces` topology (`selected`, `column`, `column_count`)
-6. waits for file-backed DONE via `wait_for(report_path, done_marker)`
+6. waits for file-backed DONE via `wait_for({agent_id, report_path, done_marker})`:
+   it matches when the report's final non-empty line equals the marker. A sterile
+   worker is never told the engine's own report path (#782), so the registry may
+   stay `ready`; the file is the done signal (#808). The wait runs in 120 s
+   slices up to `--wait-timeout-ms`, because the daemon-first proxy fails any
+   single request at 300 s
 7. harvests the report marker
-8. closes the worker surface
+8. stops the worker and closes its pane: `close_surface({agent_id, scope:"agent", force:true})`.
+   The harness owns the dummy and has harvested its report; a plain surface close is
+   (correctly) refused while the agent is still live
 9. polls cleanup until no stale managed record or worker surface remains
 
 It writes machine JSON plus human Markdown with an exact final green/red marker.
@@ -55,8 +78,7 @@ bun run pre-pr:harness
 
 This checks the Cursor, Codex, Claude, and Gemini harness contracts with
 fixtures only, including MCP-shaped replay payloads for `spawn_agent`,
-`wait_for`, `get_agent_state`, `list_agents`, `list_surfaces`, and
-`close_surface`. It does not connect to cmux, launch agent CLIs, touch
+`wait_for`, `list_agents`, `list_surfaces`, and `close_surface`. It does not connect to cmux, launch agent CLIs, touch
 BrainLayer, or write run artifacts.
 
 Use the explicit live smoke tier only when you are willing to launch one real
@@ -137,8 +159,10 @@ Under `--root`:
 
 - `goals/<worker>.md`
 - `reports/<worker>.md` (written by live workers)
-- `mcp-run-results.json`
-- `run-report.md`
+- `mcp-run-results.json`: includes `daemon` (`socket_path`, `private`, `version`,
+  `binary`, `pid`, `expected_dist`, `from_this_build`, `stopped`), `preflight`
+  (`tools`, `missing`) and, on a run-level failure, `error`
+- `run-report.md`: includes a `## Daemon` section and, on failure, `## Run error`
 
 The default `results/live-agent-harness/` tree is local scratch and is ignored
 by git. Treat raw harness artifacts as local ignored scratch. Do not
@@ -157,13 +181,19 @@ Exit code `0` only when every worker is green and the final marker matches
 
 The runner fails red on:
 
+- a required tool missing from `tools/list`
+- any run-level error (recorded as `error` in the JSON and `## Run error` in the
+  report), and any worker the runner never classified (`worker_not_classified`);
+  the exit code and final marker come from this run-level verdict
+- a serving daemon that is not this build (`daemon_not_from_this_build`)
 - `spawn_agent` `ok:false`
 - boot prompt typed but not submitted
 - missing report file or wrong DONE marker
-- `wait_for` not reaching `done`
+- `wait_for` not matching (neither the report marker nor registry `done`)
 - duplicate managed id under one run
 - `auto-*` managed id
-- stale managed record after close
+- stale managed record after close: the worker is still listed as **live** (a stopped
+  agent keeps a persisted `done`/resumable record by design, and that is not stale)
 - unexpected extra live worker surfaces in the target workspace
 - worker not in right column / workspace not selected / third column topology
 
@@ -172,8 +202,8 @@ The runner fails red on:
 `classifyWorkerFailures` is the live harness worker-run classifier. It only
 uses the evidence collected by the live runner for one harness worker:
 `spawn_agent`, launch state text, verbose `list_surfaces`, `wait_for`, report
-marker text, cleanup `get_agent_state`, cleanup `list_agents`, and cleanup
-`list_surfaces`.
+marker text, cleanup `list_agents({agent_ids})`, cleanup `list_agents`, and
+cleanup `list_surfaces`.
 
 Agent lifecycle health remains the owner for broader registry/session/screen
 health:
