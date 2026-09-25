@@ -3,7 +3,13 @@
  * Tests reconcileAgents(), runSweep(), cmux status pills, and lifecycle log events.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -719,10 +725,15 @@ describe("Agent reconcile", () => {
   });
 
   it("guards every sweep-reachable mutation helper before its first side effect", () => {
-    const source = readFileSync(
-      new URL("../src/agent-engine.ts", import.meta.url),
-      "utf8",
-    );
+    // Extracted engine collaborators (src/engine/*.ts) hold the bodies; the
+    // engine keeps one-line delegates, so an extracted function wins.
+    const engineDir = new URL("../src/engine/", import.meta.url);
+    const source = [
+      readFileSync(new URL("../src/agent-engine.ts", import.meta.url), "utf8"),
+      ...readdirSync(engineDir)
+        .filter((name) => name.endsWith(".ts"))
+        .map((name) => readFileSync(new URL(name, engineDir), "utf8")),
+    ].join("\n");
     const guardedHelpers = [
       "maybeCaptureBootSessionId",
       "maybeMarkBootReady",
@@ -741,7 +752,14 @@ describe("Agent reconcile", () => {
     ];
 
     for (const helper of guardedHelpers) {
-      const declaration = [
+      const extracted = [
+        `export async function ${helper}(`,
+        `export function ${helper}(`,
+      ]
+        .map((needle) => source.indexOf(needle))
+        .filter((offset) => offset >= 0)
+        .sort((left, right) => left - right)[0];
+      const declaration = extracted ?? [
         `private async ${helper}(`,
         `private ${helper}(`,
         `async ${helper}(`,
