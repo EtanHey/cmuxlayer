@@ -11,6 +11,7 @@ The deferral is **INTERIM and reversible**. A separate architecture decision wil
 ## Consolidated contracts
 
 - `send_to` accepts `mode:"agent"` (default), `mode:"surface"`, `mode:"command"`, and `mode:"key"`. Surface modes accept `target` or `surface` directly and do not require an agent-registry record.
+  - `mode:"command"` to the caller's **own** surface (for example `/mcp reconnect <server>`) is typed with `delivery_state:"typed"` and `self_target:true`. It is expected to run when the caller's turn ends and is never submit-verified (#805).
 - `spawn_agent` accepts role-driven `placement`, `workspace`, and `worktree` arguments.
 - `wait_for` accepts one `agent_id` or several `ids`.
 
