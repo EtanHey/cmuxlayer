@@ -1625,12 +1625,23 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       if (submitAttempted) typedDraftOwners.delete(ownerKey);
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
+      // #879: re-check the bound boot instance at the last pre-mutation hook,
+      // like the pointer path's assertOwnedPointerBeforeReturn. A newer boot
+      // installed after the ownership check must not receive this Return.
+      const beforeKeyMutation = ownedBoot
+        ? async () => {
+            await opts.beforeMutation?.();
+            if (stateMgr.readState(ownedBoot!.agentId)?.boot_instance_id !== ownedBoot!.instanceId) {
+              throw new DeliverySafetyGateError("boot_instance_changed", submitBaseline!.parsed);
+            }
+          }
+        : opts.beforeMutation;
       const keyRpcMethod = await timeDeliveryPhase(opts.timings, "type", () =>
         sendKeyWithRetry(
           opts.surface,
           key,
           opts.workspace,
-          opts.beforeMutation,
+          beforeKeyMutation,
           submitAttempted ? 1 : SEND_INPUT_RETRY_ATTEMPTS,
         ),
       );
