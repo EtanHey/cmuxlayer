@@ -30,6 +30,7 @@ export type AgentHealthIssueCode =
   | "pane_pty_dead"
   | "harness_api_error"
   | "registry_screen_disagreement"
+  | "boot_prompt_unsubmitted"
   | "registry_surface_workspace_mismatch"
   | "closure_without_artifact"
   | "pr_loop_incomplete"
@@ -84,6 +85,9 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   auto_discovered_agent: "info",
   ambiguous_repo_cwd_label: "info",
   registry_screen_disagreement: "degraded",
+  // #863: the pane is live, but its managed boot prompt was never verified
+  // as submitted -- the agent has not been tasked, whatever the screen says.
+  boot_prompt_unsubmitted: "degraded",
 };
 
 export interface AgentTopologyHealthInput {
@@ -231,6 +235,8 @@ function deriveStatus(
   }
   return "healthy";
 }
+
+const TERMINAL_HEALTH_STATES: ReadonlySet<AgentState> = new Set(["done", "error"]);
 
 function isLongRunning(agent: AgentRecord): boolean {
   return (
@@ -524,7 +530,25 @@ export function evaluateAgentHealth(
       "tracked agent surface has fallen back to a bare shell with no agent process visible",
     );
   }
-  if (screenConfirmedState && screenConfirmedState !== agent.state) {
+  // AIDEV-NOTE (#863): a managed boot whose prompt the registry has not
+  // verified as submitted stays `booting`. The screen's `working`/`ready` is
+  // the CLI's own chrome (or the unsent draft), not the tasked agent -- for
+  // 31 minutes it told a lead a stuck seat had booted. Terminal screen states
+  // (done/error) still reconcile.
+  const bootUnsubmitted =
+    agent.boot_prompt_pending === true && agent.prompt_delivered !== true;
+  const bootMasked =
+    bootUnsubmitted &&
+    !TERMINAL_HEALTH_STATES.has(screenConfirmedState ?? agent.state);
+  if (bootMasked) {
+    addIssue(
+      issueCodes,
+      issues,
+      "boot_prompt_unsubmitted",
+      "boot prompt not verified as submitted (prompt_delivered is not true); the agent is still booting, not working",
+    );
+    if (agent.state !== "booting") reconciledState = "booting";
+  } else if (screenConfirmedState && screenConfirmedState !== agent.state) {
     // Reconcile SILENTLY. The screen is authoritative and we are correcting the
     // registry from it right here -- the caller's request succeeded and nothing
     // is wrong with it. Emitting an issue for staleness we just self-healed put

@@ -14,6 +14,7 @@ The deferral is **INTERIM and reversible**. A separate architecture decision wil
   - `mode:"command"` to the caller's **own** surface (for example `/mcp reconnect <server>`) is typed with `delivery_state:"typed"` and `self_target:true`. It is expected to run when the caller's turn ends and is never submit-verified (#805).
 - `spawn_agent` accepts role-driven `placement`, `workspace`, and `worktree` arguments.
 - `wait_for` accepts one `agent_id` or several `ids`.
+- `list_agents` rows at default detail carry `state`, `closure`, and, while a managed boot prompt is not yet verified as submitted, `boot:"unsubmitted"` (#863). In that window `state` stays `booting` even when the screen reads `working` or `ready`: the screen shows the CLI's own chrome or the unsent draft, not a tasked agent. `closure` stays `pending`, and full detail's `health` lists `boot_prompt_unsubmitted` (degraded). `boot` disappears once the registry verifies the submit (`prompt_delivered:true`). After that, the screen-derived state applies again. A `state` filter reads the same rendered state.
 
 The enumerated legacy mapping contains eight names, despite the signed-off prose calling it “9→3”: `send_to_agent`, `send_input`, `send_command`, `send_key`, `new_worktree_split`, `spawn_in_workspace`, `new_split`, and `wait_for_all`. None of them is registered or callable through MCP. CX-3 S8 deletes the hidden definitions outright (Etan, R2-5): `new_split` and the other monitor, workspace and surface tools went in S8a-1; the agent-family names follow in S8a-2.
 

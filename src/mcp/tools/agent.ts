@@ -719,6 +719,8 @@ export function registerListAgentsTool(
     surface_id: string;
     send_via: "send_to";
     closure: ClosureState;
+    /** #863: present only while the managed boot prompt is unsubmitted. */
+    boot?: "unsubmitted";
     parsed_cli_mismatch?: true;
     health?: AgentHealth;
   };
@@ -865,6 +867,7 @@ export function registerListAgentsTool(
                 blocked_on_prompt: agent.blocked_on_prompt.value,
                 send_via: agent.send_via,
                 closure: agent.closure,
+                ...(agent.boot ? { boot: agent.boot } : {}),
                 ...(agent.parsed_cli_mismatch === true
                   ? { parsed_cli_mismatch: true }
                   : {}),
@@ -1019,6 +1022,11 @@ export function registerListAgentsTool(
                 topology,
               );
               const reconciledState = health.reconciled_state ?? agent.state;
+              // #863: the health block keeps an unsubmitted boot `booting`;
+              // that state is the registry's, not the screen's.
+              const bootUnsubmitted = health.issue_codes.includes(
+                "boot_prompt_unsubmitted",
+              );
               const screenObservation = trustedScreenObservation
                 ? {
                     observed_at_ms: liveDiscovery!.observed_at_ms,
@@ -1036,9 +1044,10 @@ export function registerListAgentsTool(
                   ...toObservedPublicAgent(agent, {
                     derivedAtMs: registryObservedAt,
                     state: reconciledState,
-                    stateSource: health.screen_confirmed_state
-                      ? "screen"
-                      : "registry",
+                    stateSource:
+                      health.screen_confirmed_state && !bootUnsubmitted
+                        ? "screen"
+                        : "registry",
                     screenObservedAtMs: screenObservation?.observed_at_ms,
                     screenModel: screenObservation?.model,
                     ...(trustedScreenObservation?.paused !== undefined
@@ -1073,6 +1082,7 @@ export function registerListAgentsTool(
                   // (pending -> wait) WITHOUT a second full-detail call. A bare
                   // boolean made both of those `false`; that was the S3 bug.
                   closure: rowHarvestability.closure,
+                  ...(bootUnsubmitted ? { boot: "unsubmitted" as const } : {}),
                   ...(args.detail === "full"
                     ? {
                         health: {
