@@ -4542,7 +4542,7 @@ describe("agent lifecycle tool handlers", () => {
       reused: false,
     });
     expect(parsed.mcp_profile).toBeUndefined();
-    expect(parsed.worktree).not.toHaveProperty("node_modules_linked");
+    expect(parsed.worktree).not.toHaveProperty("node_modules_bootstrapped");
     expect(parsed.worktree).not.toHaveProperty("mcp_json_copied");
     expect(worktreeExec).toHaveBeenCalledWith("git", [
       "-C",
@@ -5355,7 +5355,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBe("worker");
     expect(parsed.mcp_profile).toBe("sterile");
-    expect(parsed.worktree).toHaveProperty("node_modules_linked");
+    expect(parsed.worktree).toHaveProperty("node_modules_bootstrapped");
     expect(parsed.worktree).toHaveProperty("mcp_json_copied");
     expect(parsed.worktree.path).toBe(worktreePath);
     expect(mockExec).toHaveBeenCalledWith(

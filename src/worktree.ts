@@ -1,11 +1,14 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { loadFleetConfig } from "./fleet-config.js";
 import {
+  accessSync,
+  constants as fsConstants,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   realpathSync,
-  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -44,7 +47,19 @@ export interface PrepareWorktreeInput {
   homeGitsDir?: string;
   worktree?: boolean | string | WorktreeRequest;
   exec?: WorktreeExec;
+  /** Dependency bootstrap script; defaults to the fleet config's `worktreeBootstrap` (unset: none). */
+  bootstrapScript?: string | null;
+  /** Runs the bootstrap (script or inline install); injectable for tests. */
+  bootstrapExec?: WorktreeExec;
 }
+
+/**
+ * How a worktree's dependencies were set up (#807). `script`: the fleet's
+ * worktree-bootstrap script ran; `inline`: `bun install --frozen-lockfile`;
+ * `skipped`: neither applied; `failed`: the attempt errored (the worktree is
+ * kept and the error is reported). node_modules is never symlinked.
+ */
+export type NodeModulesBootstrap = "script" | "inline" | "skipped" | "failed";
 
 export interface PreparedWorktree {
   path: string;
@@ -53,12 +68,81 @@ export interface PreparedWorktree {
   base: string;
   created: boolean;
   reused: boolean;
-  node_modules_linked: boolean;
+  node_modules_bootstrapped: NodeModulesBootstrap;
+  node_modules_bootstrap_error?: string;
+  /** Set on `skipped` when the configured bootstrap script is missing or not executable. */
+  node_modules_bootstrap_reason?: "script_missing";
   mcp_json_copied: boolean;
 }
 
 function defaultExec(cmd: string, args: string[]) {
   return execFileAsync(cmd, args);
+}
+
+export const BOOTSTRAP_TIMEOUT_MS = 180_000;
+const BOOTSTRAP_STDERR_TAIL = 2_000;
+
+/**
+ * AIDEV-NOTE (#807): the bootstrap runs in its own process group so a timeout
+ * kills the install it started too; killing only the script would leave
+ * `bun install` (or npm) writing into the worktree after we report `failed`.
+ * Resolution is on `exit`, not `close`, so a grandchild holding the pipes
+ * cannot stall the spawn.
+ */
+export function runBootstrap(
+  cmd: string,
+  args: string[],
+  timeoutMs: number = BOOTSTRAP_TIMEOUT_MS,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(cmd, args, {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-BOOTSTRAP_STDERR_TAIL);
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // Group already gone.
+        }
+      }
+    }, timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${cmd} timed out after ${timeoutMs} ms`));
+      } else if (code === 0) {
+        resolvePromise({ stdout, stderr });
+      } else {
+        const status = code === null ? `signal ${signal}` : `code ${code}`;
+        reject(new Error(`${cmd} exited with ${status}: ${stderr.trim()}`));
+      }
+    });
+  });
+}
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function safeName(input: string): string {
@@ -169,14 +253,60 @@ export function formatMcpProfileEnv(profile?: McpProfile): string {
   return env.join(" ");
 }
 
-function linkNodeModules(repoRoot: string, worktreePath: string): boolean {
-  const source = join(repoRoot, "node_modules");
-  const target = join(worktreePath, "node_modules");
-  if (!existsSync(source) || existsSync(target)) {
-    return false;
+/**
+ * AIDEV-NOTE (#807): per-worktree dependency install, never a symlink. A
+ * symlinked node_modules inherits whatever a sibling installed and breaks when
+ * that sibling goes stale. A configured bootstrap script wins (it detects the
+ * lockfile type); if it is missing or not executable the result is `skipped`
+ * with reason `script_missing`, never a silent fall-through to another
+ * install. With no script, a bun lockfile gets a frozen install from bun's
+ * global cache (no re-download). Failure is reported, not thrown:
+ * the worktree stays usable and the receipt says why deps are missing.
+ */
+async function bootstrapWorktreeDeps(
+  worktreePath: string,
+  script: string | null,
+  exec: WorktreeExec,
+): Promise<
+  Pick<
+    PreparedWorktree,
+    | "node_modules_bootstrapped"
+    | "node_modules_bootstrap_error"
+    | "node_modules_bootstrap_reason"
+  >
+> {
+  // Unlink a reused worktree's stale node_modules symlink (the link only,
+  // never its target) before choosing a path: a script would install through
+  // it into the sibling checkout, and `skipped` would leave the agent running
+  // on the sibling's deps.
+  const nodeModules = join(worktreePath, "node_modules");
+  if (lstatSync(nodeModules, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    unlinkSync(nodeModules);
   }
-  symlinkSync(source, target, "dir");
-  return true;
+  if (script !== null && !isExecutable(script)) {
+    return {
+      node_modules_bootstrapped: "skipped",
+      node_modules_bootstrap_reason: "script_missing",
+    };
+  }
+  const hasBunLock =
+    existsSync(join(worktreePath, "bun.lock")) ||
+    existsSync(join(worktreePath, "bun.lockb"));
+  if (script === null && !hasBunLock) return { node_modules_bootstrapped: "skipped" };
+  try {
+    if (script !== null) {
+      await exec(script, [worktreePath]);
+      return { node_modules_bootstrapped: "script" };
+    }
+    await exec("bun", ["install", "--frozen-lockfile", "--cwd", worktreePath]);
+    return { node_modules_bootstrapped: "inline" };
+  } catch (error) {
+    return {
+      node_modules_bootstrapped: "failed",
+      node_modules_bootstrap_error:
+        error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function copyMcpJson(repoRoot: string, worktreePath: string): boolean {
@@ -258,6 +388,11 @@ export async function prepareWorktree(
   const homeGitsDir = resolve(input.homeGitsDir ?? join(homedir(), "Gits"));
   const repoRoot = resolve(input.repoRoot ?? join(homeGitsDir, repo));
   const exec = input.exec ?? defaultExec;
+  const bootstrapExec = input.bootstrapExec ?? runBootstrap;
+  const bootstrapScript =
+    input.bootstrapScript !== undefined
+      ? input.bootstrapScript
+      : loadFleetConfig().worktreeBootstrap;
 
   const spec = normalizeWorktreeRequest(repo, input.worktree);
   const defaultPath = join(repoRoot, ".worktrees", spec.name);
@@ -317,7 +452,7 @@ export async function prepareWorktree(
       base: spec.base,
       created: false,
       reused: true,
-      node_modules_linked: linkNodeModules(repoRoot, worktreePath),
+      ...(await bootstrapWorktreeDeps(worktreePath, bootstrapScript, bootstrapExec)),
       mcp_json_copied: copyMcpJson(repoRoot, worktreePath),
     };
   }
@@ -346,14 +481,12 @@ export async function prepareWorktree(
     base: spec.base,
     created: true,
     reused: false,
-    node_modules_linked: false,
+    node_modules_bootstrapped: "skipped",
     mcp_json_copied: false,
   };
   try {
     mkdirSync(worktreePath, { recursive: true });
-    prepared.node_modules_linked = linkNodeModules(repoRoot, worktreePath);
     prepared.mcp_json_copied = copyMcpJson(repoRoot, worktreePath);
-    return prepared;
   } catch (error) {
     try {
       await rollbackPreparedWorktree(repoRoot, prepared, exec);
@@ -370,6 +503,12 @@ export async function prepareWorktree(
     }
     throw error;
   }
+  // Fail-soft: a failed install is reported on the receipt, never rolled back.
+  Object.assign(
+    prepared,
+    await bootstrapWorktreeDeps(worktreePath, bootstrapScript, bootstrapExec),
+  );
+  return prepared;
 }
 
 export async function rollbackPreparedWorktree(

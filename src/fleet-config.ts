@@ -27,6 +27,8 @@ export interface FleetConfig {
   mcpLauncher: string | null;
   /** launchd label of an optional sleep guard doctor reports on. */
   sleepGuardLabel: string | null;
+  /** Script run as `<script> <worktree>` to install a worktree's deps (#807); null: none. */
+  worktreeBootstrap: string | null;
 }
 
 export const FLEET_CONFIG_DOC = "docs/guides/fresh-install.md#fleet-config";
@@ -47,6 +49,7 @@ const KEYS: Record<Exclude<keyof FleetConfig, "source">, KeyKind> = {
   notifyUrl: "string",
   mcpLauncher: "string",
   sleepGuardLabel: "string",
+  worktreeBootstrap: "path",
 };
 
 export function fleetConfigPath(
@@ -69,6 +72,7 @@ export function genericFleetConfig(home: string = homedir()): FleetConfig {
     notifyUrl: null,
     mcpLauncher: null,
     sleepGuardLabel: null,
+    worktreeBootstrap: null,
   };
 }
 

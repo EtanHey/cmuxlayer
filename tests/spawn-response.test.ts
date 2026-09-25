@@ -114,7 +114,7 @@ describe("spawn response shaping", () => {
         branch: "feat/lean-response",
         created: false,
         reused: true,
-        node_modules_linked: true,
+        node_modules_bootstrapped: "inline",
         mcp_json_copied: true,
       },
     });
