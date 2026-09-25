@@ -63,8 +63,8 @@ const baseline = attest({
       list_surfaces: { sampling: "sampled", samples_per_run: 96 },
       read_screen: { sampling: "sampled", samples_per_run: 96 },
       send_to_surface_warm: { sampling: "sampled", samples_per_run: 96 },
-      send_to_agent_warm: { sampling: "sampled", samples_per_run: 96 },
-      list_agents: { sampling: "sampled", samples_per_run: 96 },
+      send_to_agent_warm: { sampling: "sampled", samples_per_run: 192 },
+      list_agents: { sampling: "sampled", samples_per_run: 192 },
       control_health: { sampling: "sampled", samples_per_run: 96 },
       spawn_close_during_sweep: { sampling: "sampled", samples_per_run: 96 },
       first_send_after_spawn: { sampling: "sampled", samples_per_run: 96 },
@@ -221,6 +221,42 @@ const result = {
   },
 };
 
+/**
+ * The warm-agent tail row samples 192 per run (#791). A hosted 96-sample warm
+ * artifact becomes one 192-sample run by replaying it as a second, later pass:
+ * same elapsed values (so p50/p95 are unchanged), indices 96-191, and every
+ * timestamp shifted past the first pass.
+ */
+type WarmPass = { paired_control: { samples: Array<Record<string, number | string>> } };
+
+/** Append `second` after `first` as one run: later indices, timestamps shifted past `first`. */
+function concatWarmPasses<T extends WarmPass>(first: T, second: WarmPass): T {
+  const head = first.paired_control.samples;
+  const tail = second.paired_control.samples;
+  const span = Math.max(...head.map((sample) => Number(sample.send_completed_at_ms))) -
+    Math.min(...tail.map((sample) => Number(sample.send_started_at_ms))) + 1_000;
+  const shifted = tail.map((sample, index) => {
+    const next: Record<string, number | string> = { ...sample, sample_index: head.length + index };
+    for (const key of Object.keys(sample)) {
+      if (key.endsWith("_at_ms")) next[key] = Number(sample[key]) + span;
+    }
+    return next;
+  });
+  return { ...first, paired_control: { ...first.paired_control, samples: [...head, ...shifted] } };
+}
+
+function asTwoPassWarmRun<T extends WarmPass>(warm: T): T {
+  return concatWarmPasses(warm, warm);
+}
+
+function withRawPercentiles<T extends WarmPass>(warm: T): T & { p50_ms: number; p95_ms: number } {
+  const elapsed = warm.paired_control.samples
+    .map((sample) => Number(sample.send_elapsed_ms))
+    .sort((a, b) => a - b);
+  const at = (pct: number) => Math.round(elapsed[Math.ceil(elapsed.length * pct) - 1] * 100) / 100;
+  return { ...warm, p50_ms: at(0.5), p95_ms: at(0.95) };
+}
+
 describe("daemon performance budget", () => {
   it("requires an explicit reason for any committed-row increase", () => {
     expect(() => requireBaselineIncreaseReason([[101, 100]], "")).toThrow(
@@ -344,10 +380,18 @@ describe("daemon performance budget", () => {
   });
 
   it("excuses only send latency matched by a simultaneous socket control stall", () => {
-    const pairedSamples = (fastSend: number, slowSend: number, slowControl: number) =>
-      Array.from({ length: 96 }, (_, sample_index) => {
-        const send_elapsed_ms = sample_index < 90 ? fastSend : slowSend;
-        const control_timer_overrun_ms = sample_index < 90 ? 1 : slowControl;
+    // first_send_after_spawn samples 96 per run; the send_to_agent_warm tail row
+    // samples 192 (#791), so its slow block is 12 samples to stay above p95.
+    const pairedSamples = (
+      fastSend: number,
+      slowSend: number,
+      slowControl: number,
+      length = 96,
+      fastCount = 90,
+    ) =>
+      Array.from({ length }, (_, sample_index) => {
+        const send_elapsed_ms = sample_index < fastCount ? fastSend : slowSend;
+        const control_timer_overrun_ms = sample_index < fastCount ? 1 : slowControl;
         const send_started_at_ms = sample_index * 2_000;
         const send_completed_at_ms = send_started_at_ms + send_elapsed_ms;
         const control_timer_started_at_ms = send_started_at_ms;
@@ -369,6 +413,8 @@ describe("daemon performance budget", () => {
           control_transport: "socket",
         };
       });
+    const warmSamples = (fastSend: number, slowSend: number, slowControl: number) =>
+      pairedSamples(fastSend, slowSend, slowControl, 192, 180);
     const candidate = {
       ...result,
       latency: {
@@ -392,7 +438,7 @@ describe("daemon performance budget", () => {
           p95_ms: 340,
           paired_control: {
             kind: "fake_socket_timed_ping",
-            samples: pairedSamples(240, 340, 101),
+            samples: warmSamples(240, 340, 101),
           },
         },
       },
@@ -425,7 +471,7 @@ describe("daemon performance budget", () => {
           ...candidate.latency.send_to_agent_warm,
           paired_control: {
             kind: "fake_socket_timed_ping",
-            samples: pairedSamples(240, 340, 1),
+            samples: warmSamples(240, 340, 1),
           },
         },
       },
@@ -445,7 +491,7 @@ describe("daemon performance budget", () => {
           ...candidate.latency.send_to_agent_warm,
           paired_control: {
             kind: "fake_socket_timed_ping",
-            samples: pairedSamples(240, 340, 101).slice(1),
+            samples: warmSamples(240, 340, 101).slice(1),
           },
         },
       },
@@ -455,13 +501,13 @@ describe("daemon performance budget", () => {
       entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
     )).toMatchObject({ current: 340, passed: false });
     expect(malformedComparison.paired_control_evaluation.send_to_agent_warm).toMatchObject({
-      verdict_basis: "raw", valid_pairs: 0, invalid_pairs: 96,
-      invalid_reasons: { sample_count_mismatch: 96 },
+      verdict_basis: "raw", valid_pairs: 0, invalid_pairs: 192,
+      invalid_reasons: { sample_count_mismatch: 192 },
     });
 
     // A timer delayed only after send completion is not simultaneous proof.
-    const postSend = pairedSamples(240, 340, 101).map((sample) =>
-      sample.sample_index < 90 ? sample : {
+    const postSend = warmSamples(240, 340, 101).map((sample) =>
+      sample.sample_index < 180 ? sample : {
         ...sample,
         control_timer_started_at_ms: sample.send_completed_at_ms + 1,
         control_timer_due_at_ms: sample.send_completed_at_ms + 2,
@@ -483,8 +529,8 @@ describe("daemon performance budget", () => {
     )).toMatchObject({ current: 340, passed: false });
 
     // Receipt fields must prove the timer interval, not just claim an overlap.
-    const forged = pairedSamples(240, 340, 101).map((sample) =>
-      sample.sample_index < 90 ? sample : {
+    const forged = warmSamples(240, 340, 101).map((sample) =>
+      sample.sample_index < 180 ? sample : {
         ...sample,
         control_timer_overrun_ms: 1,
       });
@@ -502,8 +548,8 @@ describe("daemon performance budget", () => {
       entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
     )).toMatchObject({ current: 340, passed: false });
 
-    const oneForged = pairedSamples(240, 340, 101);
-    oneForged[95] = { ...oneForged[95], control_timer_overrun_ms: 1 };
+    const oneForged = warmSamples(240, 340, 101);
+    oneForged[191] = { ...oneForged[191], control_timer_overrun_ms: 1 };
     const partlyInvalid = compareBenchmark(baseline, {
       ...candidate,
       latency: {
@@ -518,7 +564,7 @@ describe("daemon performance budget", () => {
       entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms",
     )).toMatchObject({ current: 240, raw_current: 340, passed: true });
     expect(partlyInvalid.paired_control_evaluation.send_to_agent_warm).toMatchObject({
-      verdict_basis: "adjusted", valid_pairs: 95, invalid_pairs: 1,
+      verdict_basis: "adjusted", valid_pairs: 191, invalid_pairs: 1,
       invalid_reasons: { timer_overrun_inconsistent: 1 },
     });
 
@@ -531,7 +577,7 @@ describe("daemon performance budget", () => {
           p50_ms: 340,
           paired_control: {
             kind: "fake_socket_timed_ping",
-            samples: pairedSamples(340, 340, 101),
+            samples: warmSamples(340, 340, 101),
           },
         },
       },
@@ -618,9 +664,10 @@ describe("daemon performance budget", () => {
       ...result,
       latency: { ...result.latency, send_to_agent_warm: { ...result.latency.send_to_agent_warm, ...warm } },
     }).rows.filter((entry) => entry.operation === "send_to_agent_warm" && entry.metric !== "request_bytes");
-    expect(warmRows(hosted.warm).every((entry) => entry.passed)).toBe(true);
-
-    const shifted = structuredClone(hosted.warm);
+    const warm = asTwoPassWarmRun(hosted.warm);
+    expect(warmRows(warm).every((entry) => entry.passed)).toBe(true);
+    // RED for #791's rule: a +60 ms shift on EVERY one of the 192 samples must fail.
+    const shifted = structuredClone(warm);
     for (const sample of shifted.paired_control.samples) {
       sample.send_elapsed_ms += 60;
       sample.send_completed_at_ms += 60;
@@ -631,6 +678,28 @@ describe("daemon performance budget", () => {
     shifted.p95_ms = Math.round(elapsed[Math.ceil(elapsed.length * 0.95) - 1] * 100) / 100;
     expect(warmRows(shifted).find((entry) => entry.metric === "p50_ms"))
       .toMatchObject({ current: 159.23, ceiling: 151.92, passed: false });
+  });
+
+  it("tolerates the #803 isolated burst at 192 samples but still fails a +60 ms shift", () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, "tests/fixtures/p1-hosted-warm-burst.json"), "utf8"));
+    const warmRow = (warm: object) => compareBenchmark(hostedBaseline, {
+      ...result,
+      latency: { ...result.latency, send_to_agent_warm: { ...result.latency.send_to_agent_warm, ...warm } },
+    }).rows.find((entry) => entry.operation === "send_to_agent_warm" && entry.metric === "p95_ms");
+
+    // At 96 samples p95 is the ~5th-largest: #803's burst of 11 slow samples put it at 273.89.
+    expect(fixture.burst.p95_ms).toBe(273.89);
+    // At 192 samples (the burst pass + a quiet pass) p95 is the ~10th-largest.
+    const run = withRawPercentiles(concatWarmPasses(fixture.burst, fixture.quiet));
+    expect(run.paired_control.samples).toHaveLength(192);
+    expect(warmRow(run)).toMatchObject({ passed: true });
+
+    const shifted = structuredClone(run);
+    for (const sample of shifted.paired_control.samples) {
+      sample.send_elapsed_ms = Number(sample.send_elapsed_ms) + 60;
+      sample.send_completed_at_ms = Number(sample.send_completed_at_ms) + 60;
+    }
+    expect(warmRow(withRawPercentiles(shifted))).toMatchObject({ passed: false });
   });
 
   it("reports a cold-start alert without turning it into a blocking verdict", () => {
@@ -666,7 +735,7 @@ describe("daemon performance budget", () => {
           ...result.latency.first_send_after_spawn,
           sampled: { ...result.latency.first_send_after_spawn.sampled, ...hosted.first },
         },
-        send_to_agent_warm: { ...result.latency.send_to_agent_warm, ...hosted.warm },
+        send_to_agent_warm: { ...result.latency.send_to_agent_warm, ...asTwoPassWarmRun(hosted.warm) },
       },
     };
     const comparison = compareBenchmark(baseline, candidate);
@@ -674,11 +743,11 @@ describe("daemon performance budget", () => {
       verdict_basis: "adjusted", valid_pairs: 88, invalid_pairs: 0, invalid_reasons: {},
     });
     expect(comparison.paired_control_evaluation.send_to_agent_warm).toMatchObject({
-      verdict_basis: "adjusted", valid_pairs: 96, invalid_pairs: 0, invalid_reasons: {},
+      verdict_basis: "adjusted", valid_pairs: 192, invalid_pairs: 0, invalid_reasons: {},
     });
     const markdown = renderMarkdownComparison(baseline, candidate, comparison);
     expect(markdown).toContain("first_send_after_spawn: adjusted; 88 valid, 0 invalid");
-    expect(markdown).toContain("send_to_agent_warm: adjusted; 96 valid, 0 invalid");
+    expect(markdown).toContain("send_to_agent_warm: adjusted; 192 valid, 0 invalid");
     expect(resultWithComparison(candidate, comparison).perf_budget.paired_control_evaluation)
       .toEqual(comparison.paired_control_evaluation);
 
@@ -1443,7 +1512,15 @@ describe("daemon performance budget", () => {
     expect(source).toContain("Array.isArray(receipt.agents)");
     expect(source).toContain("receipt.agents.some(");
     expect(source).toContain("agent.agent_id === spawnResult.agent_id");
-    expect(source).toContain("{ lockHoldFromElapsed: true }");
+    expect(source).toContain("lockHoldFromElapsed: true,");
+    // #791 tail rows: twice the rounds; list_agents lock hold is p95, not max.
+    expect(source).toContain("roundMultiplier: TAIL_ROW_SAMPLE_MULTIPLIER.list_agents");
+    expect(source).toContain('lockHold: "p95"');
+    expect(source).toContain(
+      "const lifecycleRounds = rounds * TAIL_ROW_SAMPLE_MULTIPLIER.send_to_agent_warm",
+    );
+    // Every other spawn-lifecycle row keeps exactly the canonical samples.
+    expect(source).toContain("const canonical = samples.slice(0, rounds * clients.length)");
     expect(source).toContain(
       "lock_hold_ms: lockHoldFromElapsed ? elapsedMs : 0",
     );

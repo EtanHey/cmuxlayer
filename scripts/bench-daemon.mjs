@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import net from "node:net";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
+import { TAIL_ROW_SAMPLE_MULTIPLIER } from "./check-daemon-benchmark.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distIndex = join(repoRoot, "dist", "index.js");
@@ -1262,7 +1263,7 @@ async function requireSurfaceDeliveryProof(
   return read;
 }
 
-function summarizeTimedSamples(samples) {
+function summarizeTimedSamples(samples, { lockHold = "max" } = {}) {
   const transports = samples.map((sample) => sample.transport);
   const lockHolds = samples.map((sample) =>
     requireFiniteLockHold(sample.lock_hold_ms, "sample"),
@@ -1272,7 +1273,8 @@ function summarizeTimedSamples(samples) {
     request_sha256: samples[0]?.request_sha256,
     p50_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 50)),
     p95_ms: round(percentile(samples.map((sample) => sample.elapsed_ms), 95)),
-    lock_hold_ms: Math.max(...lockHolds),
+    lock_hold_ms:
+      lockHold === "p95" ? round(percentile(lockHolds, 95)) : Math.max(...lockHolds),
     transport: transports.every((value) => value === "socket")
       ? "socket"
       : "cli",
@@ -1581,10 +1583,10 @@ async function measureWarmToolAcrossClients(
   name,
   args,
   validateReceipt,
-  { lockHoldFromElapsed = false } = {},
+  { lockHoldFromElapsed = false, roundMultiplier = 1, lockHold = "max" } = {},
 ) {
   const samples = [];
-  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+  for (let roundIndex = 0; roundIndex < rounds * roundMultiplier; roundIndex += 1) {
     await Promise.all(
       clients.map(async (client) => {
         const startedAt = nowMs();
@@ -1608,7 +1610,7 @@ async function measureWarmToolAcrossClients(
       }),
     );
   }
-  return summarizeTimedSamples(samples);
+  return summarizeTimedSamples(samples, { lockHold });
 }
 
 async function measureLiveListAgentsAcrossClients(clients) {
@@ -1656,7 +1658,14 @@ async function measureLiveListAgentsAcrossClients(clients) {
           throw new Error("list_agents omitted the live spawned agent");
         }
       },
-      { lockHoldFromElapsed: true },
+      {
+        lockHoldFromElapsed: true,
+        // #791: a tail row. Twice the rounds, and lock_hold_ms is p95 of the
+        // per-call elapsed time rather than its max: the max was one client's
+        // worst wait (queueing included), not the scan's lock occupancy.
+        roundMultiplier: TAIL_ROW_SAMPLE_MULTIPLIER.list_agents,
+        lockHold: "p95",
+      },
     );
   } catch (error) {
     measurementError = error;
@@ -1698,7 +1707,10 @@ async function measureSpawnLifecycleAcrossClients(
 ) {
   const samples = [];
   const pendingControls = [];
-  for (let roundIndex = 0; roundIndex < rounds; roundIndex += 1) {
+  // #791: send_to_agent_warm is a tail row sampled over twice the rounds. Every
+  // other row below keeps exactly the canonical first rounds x clients samples.
+  const lifecycleRounds = rounds * TAIL_ROW_SAMPLE_MULTIPLIER.send_to_agent_warm;
+  for (let roundIndex = 0; roundIndex < lifecycleRounds; roundIndex += 1) {
     for (const [clientIndex, client] of clients.entries()) {
       const sampleIndex = roundIndex * clients.length + clientIndex;
       samples.push(
@@ -1707,29 +1719,30 @@ async function measureSpawnLifecycleAcrossClients(
     }
   }
   await Promise.all(pendingControls);
+  const canonical = samples.slice(0, rounds * clients.length);
   return {
     first: samples[0].first,
     second: samples[0].second,
     surface: samples[0].surface,
     spawn_close_sample: samples[0].spawn_close_during_sweep,
     sampled: {
-      ...summarizeTimedSamples(samples.map((sample) => sample.first)),
-      paired_control: pairedControlSamples(samples, "first"),
+      ...summarizeTimedSamples(canonical.map((sample) => sample.first)),
+      paired_control: pairedControlSamples(canonical, "first"),
     },
     send_to_agent_warm: {
       ...summarizeTimedSamples(samples.map((sample) => sample.second)),
       paired_control: pairedControlSamples(samples, "second"),
     },
     send_to_surface_warm: summarizeTimedSamples(
-      samples.map((sample) => sample.surface),
+      canonical.map((sample) => sample.surface),
     ),
     sample_diagnostics: {
-      first_send_after_spawn: summarizeSendSampleDiagnostics(samples, "first"),
+      first_send_after_spawn: summarizeSendSampleDiagnostics(canonical, "first"),
       send_to_agent_warm: summarizeSendSampleDiagnostics(samples, "second"),
-      send_to_surface_warm: summarizeSendSampleDiagnostics(samples, "surface"),
+      send_to_surface_warm: summarizeSendSampleDiagnostics(canonical, "surface"),
     },
     spawn_close_during_sweep: summarizeTimedSamples(
-      samples.map((sample) => sample.spawn_close_during_sweep),
+      canonical.map((sample) => sample.spawn_close_during_sweep),
     ),
     surface_receipts_waitable: samples.every(
       (sample) =>

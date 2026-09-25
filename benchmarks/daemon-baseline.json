@@ -42,11 +42,11 @@
       },
       "send_to_agent_warm": {
         "sampling": "sampled",
-        "samples_per_run": 96
+        "samples_per_run": 192
       },
       "list_agents": {
         "sampling": "sampled",
-        "samples_per_run": 96
+        "samples_per_run": 192
       },
       "control_health": {
         "sampling": "sampled",
@@ -163,6 +163,6 @@
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "1b9d5ad4e790624a5d75dfbb5fd7d1aa0693fda34c6039173b51b58db3aea33f"
+    "content_sha256": "1c47dafedcbb37c4eed94b1aec221e5cb6834735c0fbc20fb8ebdced5b04a11a"
   }
 }
