@@ -30,6 +30,20 @@ afterEach(() => {
 });
 
 describe("atomicWriteFileSync", () => {
+  it("throws the write's own error when temp cleanup also fails", () => {
+    const dir = tempDir();
+    const file = join(dir, "not-a-dir");
+    writeFileSync(file, "x");
+    // The parent is a file: the write fails (ENOTDIR), and so would a cleanup rm.
+    let thrown: NodeJS.ErrnoException | undefined;
+    try {
+      atomicWriteFileSync(join(file, "child.json"), "{}");
+    } catch (error) {
+      thrown = error as NodeJS.ErrnoException;
+    }
+    expect(thrown?.syscall).toBe("open");
+  });
+
   it("replaces the file with exactly the given content and leaves no temp file", () => {
     const dir = tempDir();
     const path = join(dir, "state.json");
