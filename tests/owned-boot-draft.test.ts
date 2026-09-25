@@ -40,7 +40,11 @@ const NEW_UUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
  * Return), then renders exactly once `rendered` flips.
  */
 function makeSlowComposerPane() {
-  const state = { composer: "", rendered: false, submitted: [] as string[] };
+  const state = {
+    composer: "", rendered: false, submitted: [] as string[],
+    /** Test hook: observes every pane call before the fake answers it. */
+    onExec: undefined as undefined | ((args: string[]) => void),
+  };
   const screen = () => {
     const visible = state.rendered ? state.composer : "";
     return state.submitted.length > 0
@@ -48,6 +52,7 @@ function makeSlowComposerPane() {
       : ["Claude Code", "What can I help you with?", `❯ ${visible}`].join("\n");
   };
   const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+    state.onExec?.(args);
     if (args.includes("send-key") && args.includes("return")) {
       if (state.rendered && state.composer) {
         state.submitted.push(state.composer);
@@ -209,6 +214,38 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
       expect(refused.error_code).toBe("blocked_by_foreign_draft");
       expect(t.pane.state.submitted).toHaveLength(0);
       expect(t.engine.stateMgr.readState(spawned.agent_id)).toMatchObject({ prompt_delivered: false });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // #879 Macroscope (HIGH, on 2a8d73a): the instance was checked only at the
+  // pre-Return read. A replacement boot installed after that check -- here,
+  // while the route is re-validated just before Return -- must still refuse.
+  it("refuses before mutation when a newer boot lands between the ownership check and the Return", async () => {
+    const t = await setup();
+    try {
+      t.setSession("11111111-2222-4333-8444-555555555555");
+      const spawned = await t.spawn(LEAD_UUID);
+      expect(spawned.next_action).toContain('send_to({mode:"key"');
+      t.pane.state.rendered = true;
+      let baselineRead = false;
+      let swapped = false;
+      t.pane.state.onExec = (args) => {
+        if (args.includes("read-screen")) baselineRead = true;
+        else if (baselineRead && !swapped && args.includes("list-panes")) {
+          swapped = true;
+          const reboot = t.engine.stateMgr.updateRecord(spawned.agent_id, {
+            boot_instance_id: "33333333-4444-4555-8666-777777777777",
+          } as any);
+          t.engine.getRegistry().set(reboot.agent_id, reboot);
+        }
+      };
+      const pressesBefore = returnPresses(t.pane.exec);
+      const refused = await t.keyReturn(LEAD_UUID, spawned.surface_id);
+      expect(swapped).toBe(true);
+      expect(refused.ok, JSON.stringify(refused)).toBe(false);
+      expect(refused.error_code).toBe("boot_instance_changed");
+      expect(returnPresses(t.pane.exec)).toBe(pressesBefore);
+      expect(t.pane.state.submitted).toHaveLength(0);
     } finally { t.context.dispose(); }
   }, 30_000);
 
