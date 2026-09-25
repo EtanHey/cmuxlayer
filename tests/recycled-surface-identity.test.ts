@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-recycled-surface-identity-test");
 const TEST_OBSERVER_OWNER =
@@ -213,7 +214,7 @@ function createRelayServer(client: any) {
 }
 
 function registerClaudeAgentOnSurface1(server: any): AgentRecord {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const stateMgr = engine["stateMgr"];
   const registry = engine.getRegistry();
 
@@ -250,7 +251,7 @@ function registerClaudeAgentOnSurface1(server: any): AgentRecord {
 }
 
 function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
+  const engine = engineForTests(server);
   if (engine && typeof engine.dispose === "function") {
     engine.dispose();
   }

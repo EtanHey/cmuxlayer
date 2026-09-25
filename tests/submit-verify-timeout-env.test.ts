@@ -3,6 +3,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-submit-verify-timeout-env-test");
 const ENV_KEY = "CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS";
@@ -97,7 +98,7 @@ function parseResult(result: any): any {
 }
 
 function registerReadyAgent(server: any, client: StuckAgentClient): void {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const stateMgr = engine["stateMgr"];
   const registry = engine.getRegistry();
   const now = "2026-07-01T00:00:00Z";
@@ -131,7 +132,7 @@ function registerReadyAgent(server: any, client: StuckAgentClient): void {
 }
 
 function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
+  const engine = engineForTests(server);
   if (engine && typeof engine.dispose === "function") {
     engine.dispose();
   }

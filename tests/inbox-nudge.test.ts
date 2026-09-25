@@ -41,6 +41,7 @@ import {
 import { runWithCallerContext } from "../src/caller-context.js";
 import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-inbox-nudge");
 
@@ -340,7 +341,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(parsed.nudge.sent).toBe(true);
     expect(parsed.nudge.delivery).toBe("submitted");
     expect(parsed.nudge.delivery_id).toEqual(expect.any(String));
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     expect(engine.getDeliveryReceipt(parsed.nudge.delivery_id)).toMatchObject({
       delivery_state: "submitted",
       terminal: true,
@@ -395,7 +396,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
 
   it("queues a busy-agent inbox wake without typing into its active composer", async () => {
     const agentId = await spawnTestAgent(server);
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
     engine.getRegistry().set(agentId, working);
     writeHeartbeat(agentId, { baseDir: inboxDir, now: () => 1 });
@@ -430,7 +431,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
 
   it("reports success when a never-armed busy recipient accepts the verified nudge queue", async () => {
     const agentId = await spawnTestAgent(server);
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
     engine.getRegistry().set(agentId, working);
 
@@ -488,7 +489,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
 
   it("wakes an idle live agent exactly once on enqueue even when its monitor is fresh", async () => {
     const agentId = await spawnTestAgent(server);
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const idle = engine.stateMgr.updateRecord(agentId, { state: "idle" });
     engine.getRegistry().set(agentId, idle);
     writeHeartbeat(agentId, { baseDir: inboxDir });
@@ -521,7 +522,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
 
   it("puts the resolved caller agent id in the envelope and ping reply address", async () => {
     const agentId = await spawnTestAgent(server);
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const target = engine.getRegistry().get(agentId)!;
     const idle = engine.stateMgr.updateRecord(agentId, { state: "idle" });
     engine.getRegistry().set(agentId, idle);
@@ -974,7 +975,7 @@ describe("report_to_parent hierarchy-bound escalation", () => {
   });
 
   function register(...records: AgentRecord[]) {
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     for (const record of records) {
       engine.stateMgr.writeState(record);
       engine.getRegistry().set(record.agent_id, record);
@@ -1022,7 +1023,7 @@ describe("report_to_parent hierarchy-bound escalation", () => {
     const parent = hierarchyRecord({ agentId: "parent", surfaceId: "surface:new", surfaceUuid: parentUuid, parentAgentId: null });
     const child = { ...hierarchyRecord({ agentId: "worker", surfaceId: "surface:child", surfaceUuid: childUuid, parentAgentId: parent.agent_id, state: "working" }), collab_path: join(inboxDir, "collab.md"), halt_escalation: true };
     register(parent, child);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await server._registeredTools.list_agents.handler({}, {});
     const episode = await runWithCallerContext({ surfaceId: childUuid }, () => engine.maybeEscalateLiveHalt(child, 'Claude Code\nAPI Error: 500 {"request_id":"req_636halt"}\n❯'));
     expect(readInbox(parent.agent_id, { baseDir: inboxDir }).some(message => message.tag === "agent_halt_harness_api_error"), JSON.stringify(episode)).toBe(true);
@@ -1072,7 +1073,7 @@ describe("report_to_parent hierarchy-bound escalation", () => {
       task: "Blocked on the signed release fixture",
     });
     expect(sendCalls(exec).at(-1)?.join(" ")).toContain("surface:new");
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
       delivery_state: "submitted",
       source_event: "report_to_parent",
@@ -1105,7 +1106,7 @@ describe("report_to_parent hierarchy-bound escalation", () => {
     expect(result.structuredContent).toMatchObject({ ok: true, delivery: "pending_verify",
       delivery_id: expect.any(String), route: "direct", durable: true });
     expect((exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return"))).toHaveLength(1);
-    expect(server._registeredTools.interact._engine.getDeliveryReceipt(result.structuredContent?.delivery_id))
+    expect(engineForTests(server).getDeliveryReceipt(result.structuredContent?.delivery_id))
       .toMatchObject({ boot_recovery: true, delivery_state: "pending_verify" });
     await expect(server.validateToolOutput(tool, result, "report_to_parent")).resolves.toBeUndefined();
     const pending = { delivery_id: "receipt-1", delivery_state: "pending_verify",

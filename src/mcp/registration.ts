@@ -54,6 +54,27 @@ export interface ToolDeps {
   registry: AgentRegistry | null;
 }
 
+// A global-registry symbol, not a module WeakMap: tests that call
+// vi.resetModules() load a second copy of this module and must still find
+// the deps a server from the first copy was bound with.
+const TOOL_DEPS = Symbol.for("cmuxlayer.toolDeps");
+
+/** Record the deps a server's handlers use, so tests can reach them. */
+export function bindToolDeps(server: McpServer, deps: ToolDeps): void {
+  Object.defineProperty(server, TOOL_DEPS, { value: deps, enumerable: false });
+}
+
+/**
+ * Tests only: the lifecycle engine behind a `createServer` result, or
+ * undefined for `skipAgentLifecycle` servers. Replaces the handle that used
+ * to hang off the hidden `interact` tool.
+ */
+export function engineForTests(server: unknown): AgentEngine | undefined {
+  if (!server || typeof server !== "object") return undefined;
+  const deps = (server as { [TOOL_DEPS]?: ToolDeps })[TOOL_DEPS];
+  return deps?.engine ?? undefined;
+}
+
 export interface ToolRegistrationOptions {
   /** The (topology-invalidating) cmux client whose transport health is reported. */
   client: unknown;

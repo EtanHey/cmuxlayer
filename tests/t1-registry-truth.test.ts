@@ -27,6 +27,7 @@ import { StateManager } from "../src/state-manager.js";
 import { setResumeArtifactResolver } from "../src/resume-verification.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-t1-registry-truth");
 const OBSERVER = "cmux:/tmp/cmux-t1-live.sock#socket=16777229";
@@ -447,7 +448,7 @@ describe("T1 #481 — the seat proof reaches a path callers actually use", () =>
   });
 
   afterEach(() => {
-    const engine = server?._registeredTools?.interact?._engine;
+    const engine = engineForTests(server);
     if (engine && typeof engine.dispose === "function") engine.dispose();
     rmSync(SERVER_DIR, { recursive: true, force: true });
   });
@@ -469,7 +470,7 @@ describe("T1 #481 — the seat proof reaches a path callers actually use", () =>
       surfaceObserverOwnerIdProvider: () => SERVER_OBSERVER,
       surfaceObserverEpochProvider: () => `${SERVER_OBSERVER}@test`,
     } as any);
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const seatFields = {
       repo: "cmuxlayer",
       cli: "claude",
@@ -531,7 +532,7 @@ describe("T1 #481 — parsed_cli_mismatch reaches a reader again", () => {
   });
 
   afterEach(() => {
-    const engine = server?._registeredTools?.interact?._engine;
+    const engine = engineForTests(server);
     if (engine && typeof engine.dispose === "function") engine.dispose();
     rmSync(SERVER_DIR, { recursive: true, force: true });
   });
@@ -553,7 +554,7 @@ describe("T1 #481 — parsed_cli_mismatch reaches a reader again", () => {
       surfaceObserverOwnerIdProvider: () => SERVER_OBSERVER,
       surfaceObserverEpochProvider: () => `${SERVER_OBSERVER}@test`,
     } as any);
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const record = {
       agent_id: "cmuxlayerCodex-lead",
       surface_id: "surface:lead",

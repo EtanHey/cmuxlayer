@@ -17,6 +17,7 @@ import {
   AgentEngine,
   DELIVERY_TARGET_GONE_CONFIRM_MISSES,
 } from "../src/agent-engine.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-send-to-v2-verify-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-send-to-v2-verify-test.sock";
@@ -252,7 +253,7 @@ function createVerifyServer(
     surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
     ...extras,
   });
-  const engine = (server as any)._registeredTools.interact._engine;
+  const engine = engineForTests(server);
   engine.dispose();
   return server;
 }
@@ -261,7 +262,7 @@ function registerAgent(
   server: any,
   overrides?: Partial<AgentRecord>,
 ): AgentRecord {
-  const engine = server._registeredTools.interact._engine;
+  const engine = engineForTests(server);
   const now = "2026-08-17T20:00:00Z";
   const record: AgentRecord = {
     agent_id: "agent-1",
@@ -333,7 +334,7 @@ describe("send_to v2 background verify", () => {
       delivered: false,
       submit_verified: null,
     });
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
       delivery_id: parsed.delivery_id,
       delivery_state: "pending_verify",
@@ -359,7 +360,7 @@ describe("send_to v2 background verify", () => {
       await vi.advanceTimersByTimeAsync(100);
     }
     const parsed = parseResult(await resultPromise);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
 
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
@@ -373,7 +374,7 @@ describe("send_to v2 background verify", () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
     registerAgent(server);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const acceptPendingVerify = vi.spyOn(engine, "acceptPendingVerify");
 
     const accepted = parseResult(
@@ -432,7 +433,7 @@ describe("send_to v2 background verify", () => {
     expect(finalScreen.text).toContain("busy cursor follow-up");
     expect(finalScreen.text).not.toContain("enter send now");
     expect(finalScreen.text).not.toMatch(/^→ busy cursor follow-up$/m);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
       delivery_id: parsed.delivery_id,
       delivery_state: "queued_followup",
@@ -496,7 +497,7 @@ describe("send_to v2 background verify", () => {
     );
     expect(sent.delivery_state).toBe("queued_followup");
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
       delivery_state: "queued_followup",
@@ -525,7 +526,7 @@ describe("send_to v2 background verify", () => {
     });
     server = createVerifyServer(client);
     await vi.advanceTimersByTimeAsync(0);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     engine.dispose();
     await engine.runSweep();
     const reportPath = join(TEST_DIR, "r1b-report.md");
@@ -591,7 +592,7 @@ describe("send_to v2 background verify", () => {
       });
       server = createVerifyServer(client);
       await vi.advanceTimersByTimeAsync(0);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       engine.dispose();
       await engine.runSweep();
       const reportPath = join(TEST_DIR, "r1b-negative-report.md");
@@ -655,7 +656,7 @@ describe("send_to v2 background verify", () => {
     ].join("\n");
     server = createVerifyServer(client);
     registerAgent(server, { cli: "codex", state: "working" });
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const queued = engine.acceptComposerQueue({
       delivery_id: "compacting-codex-queue",
       agent_id: "agent-1",
@@ -692,7 +693,7 @@ describe("send_to v2 background verify", () => {
     ].join("\n");
     server = createVerifyServer(client);
     registerAgent(server, { cli: "codex", state: "working" });
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const queued = engine.acceptComposerQueue({
       delivery_id: "compaction-history-stalled-queue",
       agent_id: "agent-1",
@@ -728,7 +729,7 @@ describe("send_to v2 background verify", () => {
     ].join("\n");
     server = createVerifyServer(client);
     registerAgent(server, { cli: "codex", state: "ready" });
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const queued = engine.acceptComposerQueue({
       delivery_id: "stalled-codex-queue",
       agent_id: "agent-1",
@@ -777,7 +778,7 @@ describe("send_to v2 background verify", () => {
     expect(parsed.delivery_state).toBe("pending_verify");
 
     client.clearComposer("lands later");
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
 
     expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
@@ -810,7 +811,7 @@ describe("send_to v2 background verify", () => {
     for (let i = 0; i < 30; i++) {
       await Promise.resolve();
     }
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const inFlight = engine.listDeliveryReceipts();
     expect(inFlight).toEqual([
       expect.objectContaining({
@@ -850,7 +851,7 @@ describe("send_to v2 background verify", () => {
       }),
     );
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
       text: sanitized,
     });
@@ -942,7 +943,7 @@ describe("send_to v2 background verify", () => {
     expect(sent.delivery_state).toBe("pending_verify");
 
     await vi.advanceTimersByTimeAsync(1_000);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
 
     expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
@@ -979,7 +980,7 @@ describe("send_to v2 background verify", () => {
     );
 
     await vi.advanceTimersByTimeAsync(1_000);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
 
     const receipt = engine.getDeliveryReceipt(sent.delivery_id);
@@ -1018,7 +1019,7 @@ describe("send_to v2 background verify", () => {
       }),
     );
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     engine.getRegistry().remove("agent-1");
     for (let miss = 0; miss < DELIVERY_TARGET_GONE_CONFIRM_MISSES; miss += 1) {
       await engine.verifyPendingDeliveries();
@@ -1055,7 +1056,7 @@ describe("send_to v2 background verify", () => {
       }),
     );
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     engine.setDeliveryVerifier(async () => ({
       outcome: "failed_confirmed" as const,
       reason: "composer_rejected_input",
@@ -1153,7 +1154,7 @@ describe("send_to v2 background verify", () => {
           press_enter: true,
         }),
       );
-      const engine = local._registeredTools.interact._engine;
+      const engine = engineForTests(local);
       engine.setDeliveryVerifier(observedFailure);
       await engine.verifyPendingDeliveries();
       const receipt = engine.getDeliveryReceipt(sent.delivery_id);
@@ -1188,7 +1189,7 @@ describe("send_to v2 background verify", () => {
       },
     });
     registerAgent(server);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     engine.setDeliveryVerifier(async () => ({
       outcome: "failed_confirmed" as const,
       reason: "composer_rejected_input",
@@ -1259,7 +1260,7 @@ describe("send_to v2 background verify", () => {
     );
 
     await vi.advanceTimersByTimeAsync(1_000);
-    await server._registeredTools.interact._engine.verifyPendingDeliveries();
+    await engineForTests(server).verifyPendingDeliveries();
 
     expect(readdirSync(ticketDir)).toHaveLength(1);
     // T2 #471: deadline-elapsed verdicts are never escalated, deduped or not.
@@ -1297,7 +1298,7 @@ describe("send_to v2 background verify", () => {
       timed_out: true,
     });
     expect(
-      server._registeredTools.interact._engine.getDeliveryReceipt(
+      engineForTests(server).getDeliveryReceipt(
         sent.delivery_id,
       ),
     ).toMatchObject({
@@ -1330,7 +1331,7 @@ describe("send_to v2 background verify", () => {
       {} as any,
     );
     const verifyPromise =
-      server._registeredTools.interact._engine.verifyPendingDeliveries();
+      engineForTests(server).verifyPendingDeliveries();
     await vi.advanceTimersByTimeAsync(200);
     await verifyPromise;
     const waited = parseResult(await waitPromise);
@@ -1394,7 +1395,7 @@ describe("send_to v2 background verify", () => {
     });
     waited.rpc_methods.push("surface.send_key");
     expect(
-      server._registeredTools.interact._engine.getDeliveryReceipt(
+      engineForTests(server).getDeliveryReceipt(
         sent.delivery_id,
       ).rpc_methods,
     ).toEqual(["surface.send_text"]);
@@ -1411,7 +1412,7 @@ describe("send_to v2 background verify", () => {
       press_enter: true,
     });
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const terminal = engine.queueDelivery({
       delivery_id: "terminal-history",
       agent_id: "agent-1",
@@ -1476,7 +1477,7 @@ describe("send_to v2 background verify", () => {
     expect(sent.delivery_state).toBe("queued_followup");
 
     await vi.advanceTimersByTimeAsync(11 * 60 * 1000);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
 
     expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
@@ -1511,7 +1512,7 @@ describe("send_to v2 background verify", () => {
       "→ leftover truncated follow-up",
     ].join("\n");
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
 
     expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
@@ -1540,7 +1541,7 @@ describe("send_to v2 background verify", () => {
     expect(sent.delivery_state).toBe("pending_verify");
 
     await vi.advanceTimersByTimeAsync(1_000);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     await engine.verifyPendingDeliveries();
 
     expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
@@ -1569,7 +1570,7 @@ describe("send_to v2 background verify", () => {
     );
     expect(sent.delivery_state).toBe("pending_verify");
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     engine.getRegistry().remove("agent-1");
 
     for (let miss = 1; miss < DELIVERY_TARGET_GONE_CONFIRM_MISSES; miss += 1) {
@@ -1625,7 +1626,7 @@ describe("send_to v2 background verify", () => {
     });
     registerAgent(server);
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const loaded = engine.getDeliveryReceipt("hist-1");
     expect(loaded.verify_deadline_at).toBe("2026-08-17T20:10:00.000Z");
 
@@ -1717,7 +1718,7 @@ describe("send_to v2 background verify", () => {
       }),
     );
 
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     expect(engine.listDeliveryReceipts()).toHaveLength(2);
     client.readScreenCalls = 0;
     await engine.verifyPendingDeliveries();

@@ -50,6 +50,7 @@ import {
 } from "../src/live-agent-state.js";
 import { StateManager } from "../src/state-manager.js";
 import { isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
+import { engineForTests } from "../src/server.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -333,7 +334,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid);
     server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "lead-collab.md") };
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -354,7 +355,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined, [], parentUuid);
     server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -381,7 +382,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
     exec = withFakeRightSplitTopology(exec);
     server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(parentUuid), collab_path: join(inboxDir, "original.md") };
     engine.stateMgr.writeState(parent); engine.getRegistry().set(parent.agent_id, parent);
     const requested = join(inboxDir, "child-channel.md");
@@ -400,7 +401,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       return { id: `bbbbbbbb-bbbb-4bbb-8bbb-${suffix}`, ref: `surface:child-${created}`, title: "child", text: "Claude Code\nWhat can I help you with?\n❯ " };
     });
     server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
-    let engine = server._registeredTools.interact._engine;
+    let engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     engine.stateMgr.writeState(parent); engine.getRegistry().set(parent.agent_id, parent);
     const collab = join(inboxDir, "adopted.md");
@@ -422,7 +423,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(engine.stateMgr.readState(parent.agent_id)?.collab_path).toBe(updatedPath);
     await server.close();
     server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR, disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
-    engine = server._registeredTools.interact._engine;
+    engine = engineForTests(server);
     expect(engine.stateMgr.readState(parent.agent_id)?.collab_path).toBe(updatedPath);
     const afterRestart = await spawn({}, server, parentUuid);
     expect(afterRestart.ok, JSON.stringify(afterRestart)).toBe(true);
@@ -505,7 +506,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchNotify: unavailableExternalNotify,
       }),
     );
-    let engine = server._registeredTools.interact._engine;
+    let engine = engineForTests(server);
     const parent = { ...parentRecord(parentUuid), collab_path: withCollab ? join(inboxDir, "collab.md") : undefined };
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -562,7 +563,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    engine = server._registeredTools.interact._engine;
+    engine = engineForTests(server);
     const beforeRestartSweep = (exec as ReturnType<typeof vi.fn>).mock.calls
       .length;
     watchNow += 1;
@@ -688,7 +689,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       reportWatchDeadlineMs: 2_000,
     });
     server = createServer(serverOptions);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -747,7 +748,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     watchNow = 3_001;
     server = createServer(serverOptions);
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const restartedEngine = server._registeredTools.interact._engine;
+    const restartedEngine = engineForTests(server);
     await restartedEngine.sweepWatchesBestEffort();
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches,
@@ -779,7 +780,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("drops a child-scoped report watch when close_surface closes the agent", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord();
     const reportPath = join(inboxDir, "closed-child", "report.md");
     const child: AgentRecord = {
@@ -824,7 +825,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("reaps the exact recorded inbox tail when close_surface closes its agent", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const agentId = "closed-tail-child";
     const nonce = `t1-${Date.now()}-${process.pid}`;
     const marker = `cmuxlayer-inbox-tail:${nonce}`;
@@ -867,7 +868,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   for (const route of ["stop_agent", "close_surface", "kill"] as const) {
     it(`reaps the canonical inbox tail when ${route} receives an alias`, async () => {
       await server._registeredTools.list_agents.handler({}, {} as never);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const alias = `tail-alias-${route}`;
       const canonical = `tail-canonical-${route}`;
       const nonce = `t1b-alias-${route.replaceAll("_", "-")}-${Date.now()}-${process.pid}`;
@@ -907,7 +908,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   for (const route of ["stop_agent", "close_surface", "kill"] as const) {
     it(`reaps a dead agent's tail after ${route} reports a stop postcondition failure`, async () => {
       await server._registeredTools.list_agents.handler({}, {} as never);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const agentId = `failed-stop-tail-${route}`;
       const nonce = `t1b-failed-${route.replaceAll("_", "-")}-${Date.now()}-${process.pid}`;
       const marker = `cmuxlayer-inbox-tail:${nonce}`;
@@ -951,7 +952,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("keeps the inbox tail when a failed stop cannot prove the agent process exited", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const agentId = "unproven-stop-tail";
     const nonce = `t1b-unproven-${Date.now()}-${process.pid}`;
     const marker = `cmuxlayer-inbox-tail:${nonce}`;
@@ -985,7 +986,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("refuses to signal a reused tail PID whose process title has another nonce", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const agentId = "mismatched-tail-child";
     const liveNonce = `t1-live-${Date.now()}-${process.pid}`;
     const recordedNonce = `t1-stale-${Date.now()}-${process.pid}`;
@@ -1031,7 +1032,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("reaps the recorded inbox tail through the kill agent path", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const agentId = "killed-tail-child";
     const nonce = `t1-kill-${Date.now()}-${process.pid}`;
     const marker = `cmuxlayer-inbox-tail:${nonce}`;
@@ -1073,7 +1074,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("drops watches owned by a closed agent before close_surface returns", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const owner = {
       ...parentRecord(),
       agent_id: "closed-watch-owner",
@@ -1108,7 +1109,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("drops a closed parent's watches but preserves its active child's report-path reservation", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = {
       ...parentRecord(),
       agent_id: "closed-parent-with-active-child",
@@ -1165,7 +1166,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("reaps a pending owned watch without claiming it was delivered", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const owner = {
       ...parentRecord(),
       agent_id: "closed-pending-owner",
@@ -1222,7 +1223,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     "drops a child-scoped report watch after %s terminates the child",
     async (toolName) => {
       await server._registeredTools.list_agents.handler({}, {} as never);
-      const engine = server._registeredTools.interact._engine;
+      const engine = engineForTests(server);
       const reportPath = join(inboxDir, toolName, "report.md");
       const child: AgentRecord = {
         ...parentRecord(),
@@ -1303,7 +1304,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const reportPath = join(inboxDir, "locked-close-child", "report.md");
     const child: AgentRecord = {
       ...parentRecord(childUuid),
@@ -1366,7 +1367,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("keeps a report watch when the child resumes after synchronous cleanup fails", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const reportPath = join(inboxDir, "resumed-during-cleanup", "report.md");
     const child: AgentRecord = {
       ...parentRecord(),
@@ -1436,7 +1437,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("drops persisted closed-child report watches before the first daemon sweep", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord();
     const reportPath = join(inboxDir, "closed-child", "report.md");
     const child: AgentRecord = {
@@ -1486,7 +1487,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("prunes only owners confirmed dead at daemon start", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const liveAliasOwner = {
       ...parentRecord(),
       seat_id: "live-lead-alias",
@@ -1581,7 +1582,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("retains an active child when its parent owner is a resolved alias", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = {
       ...parentRecord(),
       agent_id: "canonical-dead-parent",
@@ -1633,7 +1634,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("prunes at least 100 legacy rows whose agent directories exist but state files do not", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const legacyWatches = Array.from({ length: 120 }, (_, index) => ({
       watch_id: `legacy-dead-${index}`,
       owner: "lead-parent",
@@ -1701,7 +1702,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("retains a subjectless legacy report watch when its state file exists but is malformed", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const agentId = "malformed-legacy-state";
     const reportPath = join(inboxDir, agentId, "report.md");
     mkdirSync(dirname(reportPath), { recursive: true });
@@ -1729,7 +1730,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("never treats a provenance-absent subjectless public watch on an arbitrary path as legacy engine state", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const target = join(STATE_DIR, "caller-owned-arbitrary-watch.md");
     writeFileSync(target, "caller data\n", "utf8");
     const watch = {
@@ -1768,7 +1769,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("never lets terminal-child pruning remove an undelivered notification", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const reportPath = join(inboxDir, "pending-notification", "report.md");
     const child: AgentRecord = {
       ...parentRecord(),
@@ -1829,7 +1830,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   });
 
   it("retains a settled failed watch for its waiter, then prunes after release", async () => {
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const target = join(inboxDir, "settled-deadline.md");
     writeFileSync(target, "", "utf8");
     await engine.armWatch({
@@ -1916,7 +1917,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchRegistryNow: () => watchNow,
       }),
     );
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const target = join(inboxDir, "registry-clock-waiter.md");
     writeFileSync(target, "", "utf8");
     await engine.armWatch({
@@ -1971,7 +1972,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       watchRegistryNow: () => watchNow,
     });
     server = createServer(serverOptions);
-    let engine = server._registeredTools.interact._engine;
+    let engine = engineForTests(server);
     engine.stateMgr.writeState(parentRecord());
     engine.getRegistry().set("lead-parent", parentRecord());
     (
@@ -2018,7 +2019,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     await server.close();
     watchNow = 3_000;
     server = createServer(serverOptions);
-    engine = server._registeredTools.interact._engine;
+    engine = engineForTests(server);
     engine.stateMgr.writeState(parentRecord());
     engine.getRegistry().set("lead-parent", parentRecord());
     (
@@ -2055,7 +2056,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = {
       ...parentRecord(),
       agent_id: "cmuxlayerClaude-live-seat",
@@ -2135,7 +2136,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const exactOwnerId = "cmuxlayerClaude-exact-owner";
     const seatCollision: AgentRecord = {
       ...parentRecord(seatCollisionUuid),
@@ -2214,7 +2215,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const staleOwner: AgentRecord = {
       ...parentRecord("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
       agent_id: "cmuxlayerClaude-stale-seat",
@@ -2303,7 +2304,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const retiredOwner: AgentRecord = {
       ...parentRecord(retiredUuid),
       agent_id: "cmuxlayerClaude-retired-ready",
@@ -2734,7 +2735,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("fails a missing owner seat fast and re-arms the persistent content watch", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const reportPath = join(inboxDir, "missing-owner-child", "report.md");
     const child: AgentRecord = {
       ...parentRecord(),
@@ -2795,7 +2796,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchNotify: unavailableExternalNotify,
       }),
     );
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const ownerId = "resumed-lead-seat";
     const reportPath = join(inboxDir, "resumed-owner-child", "report.md");
     const child: AgentRecord = {
@@ -2888,7 +2889,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchNotify: externalNotify,
       }),
     );
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const child: AgentRecord = {
       ...parentRecord(),
       agent_id: "externally-notified-child",
@@ -2975,7 +2976,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchNotify: externalNotify,
       }),
     );
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const owner = {
       ...parentRecord(parentUuid),
       agent_id: "cmuxlayerClaude-live-seat",
@@ -3054,7 +3055,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(parentUuid), state: "done" as const };
     const reportPath = join(inboxDir, "terminal-owner-child", "report.md");
     const child: AgentRecord = {
@@ -3125,7 +3126,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     const reportPath = join(inboxDir, "local-only-child", "report.md");
     const child: AgentRecord = {
@@ -3209,7 +3210,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     const reportPath = join(inboxDir, "live-first-delivery", "report.md");
     const child: AgentRecord = {
@@ -3281,7 +3282,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     const reportPath = join(inboxDir, "legacy-live-terminal", "report.md");
     const child: AgentRecord = {
@@ -3352,7 +3353,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord();
     const reportPath = join(inboxDir, "live-terminal-child", "report.md");
     const child: AgentRecord = {
@@ -3412,7 +3413,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("retries pruning after retaining a watch revision that re-arms during liveness probing", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const reportPath = join(inboxDir, "concurrent-rearm", "report.md");
     const child: AgentRecord = {
@@ -3509,7 +3510,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("retries pruning after a watch mutates to pending during liveness probing", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const reportPath = join(inboxDir, "concurrent-pending", "report.md");
     const child: AgentRecord = {
@@ -3598,7 +3599,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("keeps lifecycle initialization live and retries startup pruning after lock contention", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord();
     const reportPath = join(inboxDir, "locked-startup-child", "report.md");
     const child: AgentRecord = {
@@ -3654,7 +3655,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ).toHaveLength(1);
 
       rmSync(lockPath, { recursive: true, force: true });
-      await server._registeredTools.interact._engine.runSweep();
+      await engineForTests(server).runSweep();
       expect(
         readWatchRegistry({ registryPath: watchRegistryPath }).watches,
       ).toEqual([]);
@@ -3666,7 +3667,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("retains a valid subject watch when retry sees only persisted child state", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord();
     const reportPath = join(inboxDir, "persisted-only-child", "report.md");
     const child: AgentRecord = {
@@ -3711,7 +3712,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("prunes a terminal child's report watch when stop left user_killed unset", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const target = join(
       inboxDir,
@@ -3753,7 +3754,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("leaves non-report subject watches alone when pruning a closed child", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(), agent_id: "lead-parent" };
     const child: AgentRecord = {
       ...parentRecord(),
@@ -3810,7 +3811,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("retains a legacy shared-path watch when any matching direct child is live", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const target = join(inboxDir, "legacy-shared", "report.md");
     const liveChild: AgentRecord = {
       ...parentRecord(),
@@ -3859,7 +3860,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("preserves a prune request scheduled while the previous prune is in flight", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const controlled = engine as unknown as {
       pruneClosedChildReportWatches: () => Promise<void>;
       retryClosedChildReportWatchPrune: () => Promise<void>;
@@ -3901,7 +3902,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const owner = parentRecord();
     const foreignParent: AgentRecord = {
       ...parentRecord("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
@@ -3984,7 +3985,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchNotify: externalNotify,
       }),
     );
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     mkdirSync(join(inboxDir, child.agent_id), { recursive: true });
     writeFileSync(reportPath, "before\n", "utf8");
     for (const record of [owner, nextParent, child]) {
@@ -4038,7 +4039,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchNotify: externalNotify,
       }),
     );
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -4118,7 +4119,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         watchRegistryPath,
       }),
     );
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = parentRecord(parentUuid);
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -4562,7 +4563,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       inboxBaseDir: inboxDir, watchRegistryPath,
     }));
     const parent = { ...parentRecord(), collab_path: collab };
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
 
@@ -4583,7 +4584,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       inboxBaseDir: inboxDir, watchRegistryPath,
       watchRegistryNow: () => watchNow,
     }));
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const parent = { ...parentRecord(), collab_path: collab };
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -4887,7 +4888,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("replays the 107-row incident: subject prune removes zero while dead-owner prune removes the seven firing markers", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const incident = JSON.parse(
       readFileSync(
         new URL("./fixtures/watch-specs-incident-20260827.json", import.meta.url),
@@ -4978,7 +4979,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("retains an active subject watch under an ambiguous live seat alias", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const actualParent = {
       ...parentRecord(),
       agent_id: "cmuxlayerClaude-actual-parent",
@@ -5054,7 +5055,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const unrelated = {
       ...parentRecord(unrelatedUuid),
       agent_id: "cmuxlayerClaude-unrelated-ready",
@@ -5114,7 +5115,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
   it("removes a terminal owner's watch when close uses its pending alias", async () => {
     await server._registeredTools.list_agents.handler({}, {} as never);
-    const engine = server._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const pendingOwnerId = "cmuxlayerClaude-pending-owner";
     const finalOwnerId = "cmuxlayerClaude-terminal-owner";
     const owner = {

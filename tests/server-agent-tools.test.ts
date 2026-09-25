@@ -58,6 +58,7 @@ import {
 } from "../src/watch-spec.js";
 import { recordCliFallback } from "../src/transport-retry-context.js";
 import { RAISE_NOFILE_SOFT_LIMIT, withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
+import { engineForTests } from "../src/server.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -1014,7 +1015,7 @@ describe("lean spawn tool responses", () => {
 
   it("spawn_agent exposes a pending placement as a typed retryable receipt", async () => {
     const server = createLifecycleServer(makeLifecycleExec());
-    const engine = (server as any)._registeredTools.interact._engine as AgentEngine;
+    const engine = engineForTests(server) as AgentEngine;
     vi.spyOn(engine, "spawnAgent").mockRejectedValueOnce(Object.assign(
       new Error("Split outcome unknown; retry in 7777ms."),
       { code: "placement_pending", remainingMs: 7777 },
@@ -1093,7 +1094,7 @@ describe("lean spawn tool responses", () => {
       ),
     ).toBe(true);
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     expect(
       engine.getAgentState(result.structuredContent.agent_id),
     ).toMatchObject({
@@ -1364,7 +1365,7 @@ describe("lean spawn tool responses", () => {
       sessionIdentityResolver: () => null,
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const parent = makeServerAgentRecord({
       agent_id: "cmuxlayerCodex-parent",
       surface_id: "surface:caller",
@@ -2455,13 +2456,7 @@ function registeredTestTool(server: unknown, name: string): RegisteredTestTool {
 }
 
 function testLifecycleEngine(server: unknown): TestLifecycleEngine {
-  const interact = registeredTestTool(
-    server,
-    "interact",
-  ) as RegisteredTestTool & {
-    _engine: TestLifecycleEngine;
-  };
-  return interact._engine;
+  return engineForTests(server) as unknown as TestLifecycleEngine;
 }
 
 function parseToolResult(result: TestToolResult): Record<string, unknown> {
@@ -2863,7 +2858,7 @@ describe("agent lifecycle tool handlers", () => {
   it("#636 rejects collab_path on resume before resolving or mutating an agent", async () => {
     const exec = makeLifecycleExec();
     const server = createLifecycleServer(exec);
-    const engine = (server as any)._registeredTools.interact._engine;
+    const engine = engineForTests(server);
     const resolve = vi.spyOn(engine, "resolveResumeAgent").mockImplementation(() => { throw new Error("resume resolution must not run"); });
     const resume = vi.spyOn(engine, "resumeAgent");
     const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: "existing-agent", collab_path: join(TEST_DIR, "new-collab.md") }, {}));
@@ -3576,7 +3571,7 @@ describe("agent lifecycle tool handlers", () => {
     process.env.CMUX_WORKSPACE_ID = "workspace:caller";
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const parentRecord: AgentRecord = {
       agent_id: "parent-codex",
       surface_id: "surface:parent",
@@ -3649,7 +3644,7 @@ describe("agent lifecycle tool handlers", () => {
   it("#378 binding: a worker caller forces reviewer-Claude to worker and records parentage", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const parent = makeServerAgentRecord({
       agent_id: "cmuxlayerCodex-parent",
       surface_id: "surface:caller",
@@ -3704,7 +3699,7 @@ describe("agent lifecycle tool handlers", () => {
   it("#378 MEDIUM-A: a terminal caller record cannot shadow the live registry on a reused surface", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const deadWorker = makeServerAgentRecord({
       agent_id: "cmuxlayerCodex-dead",
       surface_id: "surface:reused",
@@ -3763,7 +3758,7 @@ describe("agent lifecycle tool handlers", () => {
   it("F1: a caller whose registry record went stale-done is still recorded as parent", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     // #408 poisons the record of a live lead within minutes. Under the old
     // terminal-state filter this caller was invisible, so the child it spawned
     // got parent_agent_id:null -- the U6 violation observed live.
@@ -3813,7 +3808,7 @@ describe("agent lifecycle tool handlers", () => {
   it("F1: the #378 worker guard still fires for a stale-done worker caller", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const staleWorker = makeServerAgentRecord({
       agent_id: "cmuxlayerCodex-staleworker",
       surface_id: "surface:caller",
@@ -3867,7 +3862,7 @@ describe("agent lifecycle tool handlers", () => {
   it("stop_agent logs a durable close entry carrying caller, force, and target", async () => {
     const server = createLifecycleServer(mockExec);
     const stopTool = (server as any)._registeredTools["stop_agent"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     // Seed a terminal agent so stopAgent short-circuits (no surface teardown),
     // isolating the handler's own close-event emission.
     const record = makeServerAgentRecord({
@@ -3919,7 +3914,7 @@ describe("agent lifecycle tool handlers", () => {
   it("kill logs a durable close entry per killed agent with caller and force", async () => {
     const server = createLifecycleServer(mockExec);
     const killTool = (server as any)._registeredTools["kill"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const record = makeServerAgentRecord({
       agent_id: "codex-golems-killme",
       surface_id: "surface:killme",
@@ -3965,7 +3960,7 @@ describe("agent lifecycle tool handlers", () => {
     );
     const first =
       firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const firstRecord = registry.get(first.agent_id);
     registry.set(first.agent_id, { ...firstRecord, state: "idle" });
@@ -4010,7 +4005,7 @@ describe("agent lifecycle tool handlers", () => {
     );
     const first =
       firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const firstRecord = registry.get(first.agent_id);
     registry.set(first.agent_id, { ...firstRecord, state: "ready" });
@@ -7146,7 +7141,7 @@ describe("agent lifecycle tool handlers", () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
       {
@@ -7346,7 +7341,7 @@ describe("agent lifecycle tool handlers", () => {
         }),
       );
       const spawn = (server as any)._registeredTools["spawn_agent"];
-      const engine = (server as any)._registeredTools["interact"]._engine;
+      const engine = engineForTests(server);
 
       const resultPromise = spawn.handler(
         {
@@ -10730,7 +10725,7 @@ describe("agent lifecycle tool handlers", () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const list = (server as any)._registeredTools["list_agents"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
       {
@@ -10768,7 +10763,7 @@ describe("agent lifecycle tool handlers", () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const list = (server as any)._registeredTools["list_agents"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
       {
@@ -10838,7 +10833,7 @@ describe("agent lifecycle tool handlers", () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
       {
@@ -11464,7 +11459,7 @@ describe("agent lifecycle tool handlers", () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
       {
@@ -11691,7 +11686,7 @@ codex>
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
       {
@@ -11784,7 +11779,7 @@ codex>
       {} as any,
     );
     const agentId = parseToolResult(spawnResult).agent_id as string;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const idle = engine.stateMgr.resetState(
       agentId,
       "idle",
@@ -11822,7 +11817,7 @@ codex>
       {} as any,
     );
     const agentId = parseToolResult(spawnResult).agent_id as string;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const idle = engine.stateMgr.resetState(agentId, "idle", {});
     engine.getRegistry().set(agentId, idle);
     failReturn = true;
@@ -11874,7 +11869,7 @@ codex>
         {} as any,
       );
       const agentId = parseToolResult(spawnResult).agent_id as string;
-      const engine = (server as any)._registeredTools["interact"]._engine;
+      const engine = engineForTests(server);
       const registry = engine.getRegistry();
       const exited = engine.stateMgr.updateRecord(agentId, {
         state: "error",
@@ -11910,7 +11905,7 @@ codex>
         {} as any,
       );
       const agentId = parseToolResult(spawnResult).agent_id as string;
-      const engine = (server as any)._registeredTools["interact"]._engine;
+      const engine = engineForTests(server);
       const registry = engine.getRegistry();
       const liveError = engine.stateMgr.updateRecord(agentId, {
         state: "error",
@@ -11954,7 +11949,7 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const working = engine.stateMgr.transition(agentId, "working");
     registry.set(agentId, working);
@@ -14117,7 +14112,7 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
     registry.set(agentId, working);
@@ -14191,7 +14186,7 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const agent = registry.get(agentId);
     registry.set(agentId, { ...agent, state: "working" });
@@ -14231,7 +14226,7 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const idle = engine.stateMgr.resetState(
       agentId,
@@ -14285,7 +14280,7 @@ codex>
       const agentId = (
         spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
       ).agent_id;
-      const engine = (server as any)._registeredTools["interact"]._engine;
+      const engine = engineForTests(server);
       const registry = engine.getRegistry();
       const spawned = engine.getAgentState(agentId) as AgentRecord;
       const parent = makeServerAgentRecord({
@@ -14430,7 +14425,7 @@ codex>
       cli: "codex",
     });
     const server = await createUuidRouteServer(routeClient, record);
-    const engine = registeredTestTool(server, "interact")._engine;
+    const engine = engineForTests(server);
     const originalSend = routeClient.client.send.getMockImplementation();
     routeClient.client.send.mockImplementation(
       async (surface: string, text: string) => {
@@ -14834,7 +14829,7 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const agent = registry.get(agentId);
     registry.set(agentId, { ...agent, state: "ready" });
@@ -14939,7 +14934,7 @@ codex>
         {} as any,
       ),
     );
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const ready = engine.stateMgr.updateRecord(spawned.agent_id, {
       state: "ready",
@@ -15030,7 +15025,7 @@ codex>
         {} as any,
       ),
     );
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const ready = engine.stateMgr.updateRecord(spawned.agent_id, {
       state: "ready",
@@ -15123,7 +15118,7 @@ codex>
         {} as any,
       ),
     );
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const ready = engine.stateMgr.updateRecord(spawned.agent_id, {
       state: "ready",
@@ -15213,7 +15208,7 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const agent = registry.get(agentId);
     registry.set(agentId, { ...agent, state: "ready" });
@@ -15276,7 +15271,7 @@ codex>
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const ready = engine.stateMgr.transition(agentId, "ready");
     registry.set(agentId, ready);
@@ -15364,7 +15359,7 @@ codex>
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const stateMgr = engine.stateMgr;
     const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
     const registry = engine.getRegistry();
@@ -15437,7 +15432,7 @@ codex>
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const stateMgr = engine.stateMgr;
     const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
     const registry = engine.getRegistry();
@@ -15494,7 +15489,7 @@ codex>
     const pendingAgentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const currentAgentId = resolveCurrentTestAgentId(
       engine.stateMgr,
       pendingAgentId,
@@ -15553,7 +15548,7 @@ codex>
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const current = engine.stateMgr.updateRecord(agentId, {
       boot_prompt_pending: true,
     });
@@ -15609,7 +15604,7 @@ codex>
       const agentId = (
         spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
       ).agent_id;
-      const engine = (server as any)._registeredTools["interact"]._engine;
+      const engine = engineForTests(server);
       const registry = engine.getRegistry();
       let current = engine.stateMgr.transition(agentId, "ready");
       registry.set(agentId, current);
@@ -15691,7 +15686,7 @@ codex>
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const stateMgr = engine.stateMgr;
     const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
     const registry = engine.getRegistry();
@@ -15765,7 +15760,7 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const stateMgr = engine["stateMgr"];
     const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
 
@@ -15803,7 +15798,7 @@ codex>
   it("wait_for returns the engine snapshot without a second public-agent read", async () => {
     const server = createLifecycleServer(mockExec);
     const waitFor = (server as any)._registeredTools["wait_for"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     vi.spyOn(engine, "waitFor").mockResolvedValue({
       matched: true,
@@ -15846,7 +15841,7 @@ codex>
   it("wait_for mine=true preserves wait_for_all over the caller's direct children", async () => {
     const server = createLifecycleServer(mockExec);
     const waitFor = (server as any)._registeredTools["wait_for"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const parent = makeServerAgentRecord({
       agent_id: "parent-agent",
       surface_id: "surface:parent",
@@ -17033,7 +17028,7 @@ codex>
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const myAgents = (server as any)._registeredTools["my_agents"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const parentResult = await spawn.handler(
       {
@@ -17075,7 +17070,7 @@ codex>
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const myAgents = (server as any)._registeredTools["my_agents"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const pendingParentId = "orchestratorClaude-pending-test";
     const parentRecord: AgentRecord = {
@@ -17295,7 +17290,7 @@ codex>
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const myAgents = (server as any)._registeredTools["my_agents"];
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
       { repo: "voicelayer", cli: "claude", prompt: "fix tts" },

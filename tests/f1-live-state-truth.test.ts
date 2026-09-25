@@ -15,6 +15,7 @@ import type { CmuxServerContext } from "../src/server.js";
 import { runWithCallerContext } from "../src/caller-context.js";
 import type { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-f1-live-state-truth-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-f1-live-state-truth.sock";
@@ -182,7 +183,7 @@ function makeAgent(
 }
 
 function registerAgent(server: any, record: AgentRecord): AgentRecord {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const stateMgr = engine["stateMgr"] as StateManager;
   stateMgr.writeState(record);
   engine.getRegistry().set(record.agent_id, record);
@@ -266,7 +267,7 @@ describe("F1 — live state, not the stale registry record", () => {
   });
 
   it("R1 reopens a stale-done record only after verified send_to and a working sweep", async () => {
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     await context.lifecycleStartPromise;
     (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
     await engine.runSweep(); // Finish startup's terminal purge before seeding the live record.
@@ -297,7 +298,7 @@ describe("F1 — live state, not the stale registry record", () => {
   });
 
   it("R1 detects existing TASK_DONE evidence again after reopened work returns to idle", async () => {
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     await context.lifecycleStartPromise;
     (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
     await engine.runSweep();
@@ -340,7 +341,7 @@ describe("F1 — live state, not the stale registry record", () => {
   });
 
   it("R1 never reopens error, user-killed, or missing-surface records", async () => {
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     await context.lifecycleStartPromise;
     (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
     await engine.runSweep();
@@ -361,7 +362,7 @@ describe("F1 — live state, not the stale registry record", () => {
   });
 
   it("R1 leaves a done record alone when the screen works without verified send_to", async () => {
-    const engine = server._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     await context.lifecycleStartPromise;
     (client as any).getTransportHealth = () => ({ mode: "socket", degraded: false });
     await engine.runSweep();

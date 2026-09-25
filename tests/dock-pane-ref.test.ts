@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-dock-pane-ref-test");
 
@@ -169,7 +170,7 @@ function createDockServer(client: RealCmuxFormatClient) {
 }
 
 function registerWorkers(server: any) {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const stateMgr = engine["stateMgr"];
   const registry = engine.getRegistry();
   const now = "2026-05-30T12:00:00Z";
@@ -210,7 +211,7 @@ function registerWorkers(server: any) {
 }
 
 function disposeServer(server: any) {
-  const engine = server?._registeredTools?.interact?._engine;
+  const engine = engineForTests(server);
   if (engine && typeof engine.dispose === "function") engine.dispose();
 }
 

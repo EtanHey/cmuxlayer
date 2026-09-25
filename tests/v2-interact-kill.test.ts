@@ -18,6 +18,7 @@ import type { ExecFn } from "../src/cmux-client.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-v2");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-v2-test.sock";
@@ -300,7 +301,7 @@ function createV2Server(exec: ExecFn) {
 }
 
 function finalizeAgentAlias(server: any, pendingId: string, finalId: string) {
-  const engine = server._registeredTools["interact"]._engine;
+  const engine = engineForTests(server);
   const renamed = engine.stateMgr.renameState(pendingId, finalId);
   engine.getRegistry().rename(pendingId, finalId, renamed);
   return engine;
@@ -451,7 +452,7 @@ describe("interact — agent resolution", () => {
 
     // Access engine directly to manipulate agent state for test.
     // In production, the reconciliation sweep would detect readiness.
-    const engine = (server as any)._registeredTools["interact"]._engine;
+    const engine = engineForTests(server);
     const registry = engine.getRegistry();
     const agent = registry.get(agentId);
     // Directly set state to ready in registry (bypassing state manager

@@ -26,6 +26,7 @@ import {
   registerMonitor,
 } from "../src/monitor-registry.js";
 import { ack, inboxPath, readInbox } from "../src/inbox.js";
+import { engineForTests } from "../src/server.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-daemon-test.sock";
@@ -1794,8 +1795,8 @@ describe("CmuxLayerDaemon", () => {
       const firstServer = createServer({ context });
       const secondServer = createServer({ context });
 
-      expect((firstServer as any)._registeredTools.interact._engine).toBe(
-        (secondServer as any)._registeredTools.interact._engine,
+      expect(engineForTests(firstServer)).toBe(
+        engineForTests(secondServer),
       );
       expect(context.lifecycleAgentInputDeliverer).toBeNull();
       await context.lifecycleStartPromise;
