@@ -27,7 +27,14 @@ export const DENSE_INLINE_POLICY_MAX_UNBROKEN_CHARS =
 
 export const BOOT_PROMPT_PATH_WARNING_CHARS = 500;
 
-export const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
+// #837: 500 UTF-8 bytes, the line the fleet's client-side SEND-SIZE-GATE hook
+// drew, so the limit lives here (server-side) and the hook can be deleted. The
+// env name keeps "CHARS" for compatibility; the value is measured in bytes.
+export const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 500;
+
+export function inlineByteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
 
 export const PANE_INPUT_BREAKAGE_GUIDANCE =
   "Max 2-3 short lines. Longer payloads BREAK the receiving pane — write the payload to a file and send one line: `Read and follow <path>`.";
@@ -410,7 +417,7 @@ export function assertInlineInputAllowed(opts: {
   if (
     opts.allowLongInline ||
     opts.value === undefined ||
-    opts.value.length <= SEND_INPUT_MAX_INLINE_CHARS
+    inlineByteLength(opts.value) <= SEND_INPUT_MAX_INLINE_CHARS
   ) {
     return;
   }
@@ -425,7 +432,7 @@ export function assertInlineInputAllowed(opts: {
       ? ""
       : " To deliberately send raw inline text, pass allow_long_inline:true.";
   throw new Error(
-    `${argName} is ${opts.value.length} characters, above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS}. Pane keystrokes are capped to one-line pointers: write the payload to a file and send "Read and follow <path>" instead.${promptPathGuidance}${overrideGuidance} CMUXLAYER_MAX_INLINE_CHARS may be set to a positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
+    `${argName} is ${inlineByteLength(opts.value)} bytes (UTF-8), above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS} bytes. Pane keystrokes are capped to one-line pointers: write the payload to a file and send "Read and follow <path>" instead.${promptPathGuidance}${overrideGuidance} CMUXLAYER_MAX_INLINE_CHARS may be set to a byte count >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
   );
 }
 
@@ -499,11 +506,11 @@ export function assertSpawnPromptInputAllowed(opts: {
 }
 
 export function assertBroadcastInlineInputAllowed(text: string): void {
-  if (text.length > SEND_INPUT_MAX_INLINE_CHARS) {
+  if (inlineByteLength(text) > SEND_INPUT_MAX_INLINE_CHARS) {
     throw new Error(
-      `broadcast.text is ${text.length} characters, above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS}. ` +
+      `broadcast.text is ${inlineByteLength(text)} bytes (UTF-8), above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS} bytes. ` +
         `Broadcasts are capped to one-line pointers: write the payload to a file and broadcast "Read and follow <path>" instead. ` +
-        `CMUXLAYER_MAX_INLINE_CHARS may be set to a positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
+        `CMUXLAYER_MAX_INLINE_CHARS may be set to a byte count >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
     );
   }
 

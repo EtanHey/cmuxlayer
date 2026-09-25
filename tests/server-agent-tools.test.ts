@@ -1,3 +1,4 @@
+import "./helpers/pin-long-inline-cap.js";
 /**
  * Integration tests for the agent lifecycle MCP tools registered in server.ts.
  * Tests tool registration and handler dispatch with mocked cmux client.

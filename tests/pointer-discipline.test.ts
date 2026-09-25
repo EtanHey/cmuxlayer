@@ -247,7 +247,11 @@ function makeStaticScreenExec(text: string): ExecFn {
 describe("pane input pointer discipline", () => {
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-pointer-discipline-"));
-    delete process.env.CMUXLAYER_MAX_INLINE_CHARS;
+    // These cases test the dense-run policy BELOW the general cap and chunked
+    // delivery of allowed long text, so they pin the pre-#837 1,800 cap via the
+    // supported override (modules reload per test). The 500-byte default is
+    // pinned in tests/inline-cap-bytes.test.ts.
+    process.env.CMUXLAYER_MAX_INLINE_CHARS = "1800";
   });
 
   afterEach(() => {
@@ -340,11 +344,19 @@ describe("pane input pointer discipline", () => {
     server = module.createServer({ exec: mockExec, skipAgentLifecycle: true });
     tool = (server as any)._registeredTools["send_input"];
 
+    // An invalid override falls back to the 500-byte default (#837).
     result = await tool.handler(
-      {
-        surface: "surface:1",
-        text: `${"x".repeat(850)}\n${"x".repeat(849)}`,
-      },
+      { surface: "surface:1", text: "x".repeat(501) },
+      {} as any,
+    );
+
+    parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("CMUXLAYER_MAX_INLINE_CHARS=500 bytes");
+    expect(mockExec).not.toHaveBeenCalled();
+
+    result = await tool.handler(
+      { surface: "surface:1", text: "x".repeat(500) },
       {} as any,
     );
 
@@ -435,6 +447,9 @@ describe("pane input pointer discipline", () => {
   });
 
   it("counts astral symbols as Unicode characters for the dense threshold", async () => {
+    // 751 emoji are 3,004 UTF-8 bytes; the general cap counts bytes (#837), so
+    // raise it past them and leave only the dense code-point threshold in play.
+    process.env.CMUXLAYER_MAX_INLINE_CHARS = "4000";
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
