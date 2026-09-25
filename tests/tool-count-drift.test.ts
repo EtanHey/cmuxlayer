@@ -161,7 +161,9 @@ describe("tool-count drift guard", () => {
       (match) => match[1],
     );
     expect(tableNames).toEqual(names);
-    expect(toolsSection).toContain("no other tool is registered");
+    expect(toolsSection).toContain(
+      "setting `CMUXLAYER_DEFAULT_PALETTE` adds `expand_palette` and no other tool is registered",
+    );
     expect(readme).not.toContain("Deprecated one-release alias");
   });
 

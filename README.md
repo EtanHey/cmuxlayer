@@ -91,7 +91,7 @@ Tell your AI agent things like:
 - *"Read the screen of surface:2 and tell me if the build passed"*
 - *"Wait for all agents to finish, then read their output"*
 
-cmuxLayer registers exactly 10 tools, and all 10 are callable through MCP; there are no hidden internal tool definitions. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+By default cmuxLayer registers exactly 10 tools, and all 10 are callable through MCP; there are no hidden internal tool definitions. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent routing workflow
 
@@ -118,7 +118,7 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 | `update_surface` | Move or rename one terminal surface |
 | `list_surfaces` | List all surfaces across workspaces |
 
-These 10 are the whole surface: no other tool is registered.
+These 10 are the whole surface: setting `CMUXLAYER_DEFAULT_PALETTE` adds `expand_palette` and no other tool is registered.
 
 ## Supported agents
 
