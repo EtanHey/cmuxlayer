@@ -43,62 +43,6 @@ export const ANNOTATIONS = {
   } as const,
 };
 
-export const MonitorMechanismSchema = z.enum(["event", "offset-poll"]);
-
-export const MonitorDedupeSchema = z.enum(["offset", "seen-set", "header-keyed"]);
-
-export const MonitorRegistryGateSchema = z.enum(["gate-9", "gate-10"]);
-
-export const RegisterMonitorArgsSchema = {
-  monitor_id: z.string().describe("Stable unique monitor id"),
-  owner_seat: z.string().describe("Seat/agent responsible for the monitor"),
-  watch_targets: z
-    .array(z.string())
-    .min(1)
-    .describe("Files, channels, or resources this monitor watches"),
-  mechanism: MonitorMechanismSchema.describe("Monitor mechanism"),
-  watermark_key: z
-    .string()
-    .optional()
-    .describe("Required for offset-poll monitors"),
-  dedupe: MonitorDedupeSchema.optional().describe("Dedupe strategy"),
-  pattern: z.string().optional().describe("Optional delivery/watch pattern"),
-  deadman_timeout_s: z
-    .number()
-    .positive()
-    .describe("Required deadman timeout in seconds"),
-  addressee: z.string().optional().describe("Owner to notify on deadman fire"),
-  rearm_command: z
-    .string()
-    .optional()
-    .describe("Exact command the owner must use to recreate the watcher"),
-} as const;
-
-export const MonitorIdArgsSchema = {
-  monitor_id: z.string().describe("Monitor id"),
-} as const;
-
-export const QueryMonitorRegistryArgsSchema = {
-  gate: MonitorRegistryGateSchema.optional().describe(
-    "Optional gate query mode",
-  ),
-  owner_seat: z.string().optional().describe("Filter by owner seat"),
-  monitor_id: z.string().optional().describe("Filter or claimed monitor id"),
-  monitor_ids: z
-    .array(z.string())
-    .optional()
-    .describe("Filter or claimed monitor ids"),
-  claimed_monitor_ids: z
-    .array(z.string())
-    .optional()
-    .describe("Additional monitor ids claimed by a gate caller"),
-  include_dead: z
-    .boolean()
-    .optional()
-    .default(false)
-    .describe("Include intentionally deregistered dead monitors"),
-} as const;
-
 export const WatchSpecArgsSchema = {
   owner: z.string().min(1).describe("Agent/seat notified by the watch"),
   target: z.string().min(1).describe("Absolute file path or public agent_id"),

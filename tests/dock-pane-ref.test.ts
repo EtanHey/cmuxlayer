@@ -5,7 +5,8 @@
  * falls back to a fresh right split even when a worker-majority pane exists.
  *
  * The fix: cmux-socket-client.ts injects pane_ref from the opts.pane input
- * when it is absent from the socket response.
+ * when it is absent from the socket response. This file used to drive the
+ * retired new_split tool; it now pins the same docking through spawn_agent.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
@@ -40,6 +41,8 @@ async function callTool(
  */
 class RealCmuxFormatClient {
   readonly sendCalls: string[] = [];
+  readonly newSurfacePanes: string[] = [];
+  readonly newSplitCalls: string[] = [];
 
   async listWorkspaces() {
     return {
@@ -123,6 +126,7 @@ class RealCmuxFormatClient {
   }
 
   async newSurface(opts: { pane: string }) {
+    this.newSurfacePanes.push(opts.pane);
     return {
       workspace: "workspace:1",
       surface: "surface:new",
@@ -133,6 +137,7 @@ class RealCmuxFormatClient {
   }
 
   async newSplit(direction: string) {
+    this.newSplitCalls.push(direction);
     return {
       workspace: "workspace:1",
       surface: "surface:stray",
@@ -229,21 +234,21 @@ describe("dock pane-ref matching", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("new_split role=worker docks into the workers pane when listPaneSurfaces omits pane_ref", async () => {
+  it("spawn_agent role=worker docks into the workers pane when listPaneSurfaces omits pane_ref", async () => {
     const client = new RealCmuxFormatClient();
     server = createDockServer(client);
     registerWorkers(server);
 
-    const result = await callTool(server, "new_split", {
-      direction: "right",
+    await callTool(server, "spawn_agent", {
+      repo: "brainlayer",
+      cli: "codex",
       role: "worker",
       workspace: "workspace:1",
+      boot_prompt_timeout_ms: 100,
     });
-    const parsed = parseResult(result);
 
     // Must dock into the existing workers pane (pane:2), not create a new split.
-    expect(parsed.placement).toBe("surface");
-    expect(parsed.pane).toBe("pane:2");
-    expect(parsed.role).toBe("worker");
+    expect(client.newSurfacePanes).toEqual(["pane:2"]);
+    expect(client.newSplitCalls).toEqual([]);
   });
 });

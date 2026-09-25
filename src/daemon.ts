@@ -1004,7 +1004,7 @@ export class CmuxLayerDaemon {
               id: `monitor-rearm:${record.monitor_id}:${record.last_signal_at}`,
               from: "cmuxlayer-daemon",
               tag: "monitor-rearm",
-              task: `Re-arm monitor ${record.monitor_id} with this exact command, then signal_monitor after the watcher is live:\n${record.rearm_command}`,
+              task: `Re-arm monitor ${record.monitor_id} with this exact command:\n${record.rearm_command}`,
             },
             inboxOpts,
           );

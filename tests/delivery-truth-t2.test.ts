@@ -39,6 +39,31 @@ function parseToolResult(result: any) {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
+// The boot-submit cases used to boot through the retired new_split tool. They
+// now launch the same agent on an existing surface with send_command, which
+// hands the prompt to the same deliverBootPrompt path (CX-3 S8a-1).
+function bootViaSendCommand(
+  server: any,
+  launcher: string,
+  args: { boot_prompt_path?: string; boot_prompt_timeout_ms?: number },
+  extra: unknown,
+) {
+  return server._registeredTools.send_command.handler(
+    {
+      surface: "surface:2",
+      workspace: "workspace:1",
+      command: `${launcher} -s`,
+      boot_prompt_path: args.boot_prompt_path,
+      boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
+    },
+    extra,
+  );
+}
+
+function isLauncherSend(args: string[]): boolean {
+  return !args.some((arg) => arg.includes("Read and follow"));
+}
+
 async function spawnReadyAgent(
   server: any,
   cli: "claude" | "codex" = "claude",
@@ -1785,18 +1810,6 @@ function makeBootSplitExec(postReturnScreen: string): ExecFn {
   let promptSent = false;
   let returnPressed = false;
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
-    if (args.includes("new-split")) {
-      return {
-        stdout: JSON.stringify({
-          workspace: "workspace:1",
-          surface: "surface:2",
-          pane: "pane:1",
-          title: "New",
-          type: "terminal",
-        }),
-        stderr: "",
-      };
-    }
     if (args.includes("list-panes")) {
       return {
         stdout: JSON.stringify({
@@ -1836,11 +1849,11 @@ function makeBootSplitExec(postReturnScreen: string): ExecFn {
       };
     }
     if (args.includes("send") && !args.includes("send-key")) {
-      promptSent = true;
+      if (!isLauncherSend(args)) promptSent = true;
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("send-key") && args.includes("return")) {
-      returnPressed = true;
+      if (promptSent) returnPressed = true;
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("read-screen")) {
@@ -1894,9 +1907,7 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
     );
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools[
-      "new_split"
-    ].handler(
+    const result = await bootViaSendCommand(server, "mimirClaude", 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -1931,9 +1942,7 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
     );
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools[
-      "new_split"
-    ].handler(
+    const result = await bootViaSendCommand(server, "mimirClaude", 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -1985,6 +1994,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     cli?: "codex" | "claude";
   }): {
     exec: ExecFn;
+    launcher: string;
     returnPresses: () => number;
     promptSentAfterRead: () => number | null;
   } {
@@ -1996,19 +2006,6 @@ describe("boot-submit readiness and attributable evidence", () => {
     let postReturnReads = 0;
     const exec: ExecFn = vi.fn().mockImplementation(
       async (_cmd, args: string[]) => {
-        if (args.includes("new-split")) {
-          const cli = opts.cli ?? "codex";
-          return {
-            stdout: JSON.stringify({
-              workspace: "workspace:1",
-              surface: "surface:2",
-              pane: "pane:1",
-              title: cli === "claude" ? "cmuxlayerClaude" : "cmuxlayerCodex",
-              type: "terminal",
-            }),
-            stderr: "",
-          };
-        }
         if (args.includes("list-panes")) {
           return {
             stdout: JSON.stringify({
@@ -2048,12 +2045,13 @@ describe("boot-submit readiness and attributable evidence", () => {
           };
         }
         if (args.includes("send") && !args.includes("send-key")) {
+          if (isLauncherSend(args)) return { stdout: "{}", stderr: "" };
           promptSent = true;
           promptSentAfterRead = screenReads;
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("send-key") && args.includes("return")) {
-          returnPresses += 1;
+          if (promptSent) returnPresses += 1;
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("read-screen")) {
@@ -2159,6 +2157,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     );
     return {
       exec,
+      launcher: opts.cli === "claude" ? "cmuxlayerClaude" : "cmuxlayerCodex",
       returnPresses: () => returnPresses,
       promptSentAfterRead: () => promptSentAfterRead,
     };
@@ -2313,7 +2312,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2338,7 +2337,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2376,7 +2375,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2402,7 +2401,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2432,7 +2431,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2461,7 +2460,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2492,7 +2491,7 @@ describe("boot-submit readiness and attributable evidence", () => {
       skipAgentLifecycle: true,
     });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2526,7 +2525,7 @@ describe("boot-submit readiness and attributable evidence", () => {
       skipAgentLifecycle: true,
     });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2560,7 +2559,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2594,7 +2593,7 @@ describe("boot-submit readiness and attributable evidence", () => {
     });
     const server = createServer({ exec: harness.exec, skipAgentLifecycle: true });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2627,7 +2626,7 @@ describe("boot-submit readiness and attributable evidence", () => {
       skipAgentLifecycle: true,
     });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2660,7 +2659,7 @@ describe("boot-submit readiness and attributable evidence", () => {
       skipAgentLifecycle: true,
     });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",
@@ -2694,7 +2693,7 @@ describe("boot-submit readiness and attributable evidence", () => {
       skipAgentLifecycle: true,
     });
 
-    const result = await (server as any)._registeredTools.new_split.handler(
+    const result = await bootViaSendCommand(server, harness.launcher, 
       {
         direction: "right",
         workspace: "workspace:1",

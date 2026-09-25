@@ -491,7 +491,6 @@ function createTrackedServer(
       "spawn_agent",
       "new_worktree_split",
       "spawn_in_workspace",
-      "new_split",
     ]) {
       const tool = registeredTools?.[toolName];
       if (!tool?.handler) continue;
@@ -2523,7 +2522,7 @@ describe("agent lifecycle tool registration", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(45);
+    expect(Object.keys(registeredTools)).toHaveLength(32);
   });
 
   it("keeps resync_agents only as a removed compatibility stub", async () => {
@@ -12668,65 +12667,6 @@ codex>
     );
   });
 
-  it("uses the selected workspace from the caller's window when two windows are selected", async () => {
-    const routeClient = makeCrossWindowUuidRouteClient([
-      {
-        ref: "surface:A",
-        workspace_ref: "workspace:A",
-        window_ref: "window:A",
-      },
-      {
-        ref: "surface:B",
-        workspace_ref: "workspace:B",
-        window_ref: "window:B",
-      },
-    ]);
-    routeClient.client.listWorkspaces.mockImplementation(
-      async (opts?: { window?: string }) => ({
-        workspaces: [
-          {
-            ref: opts?.window === "window:B" ? "workspace:B" : "workspace:A",
-            id:
-              opts?.window === "window:B"
-                ? "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
-                : "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
-            title: opts?.window ?? "window:A",
-            index: 0,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      }),
-    );
-    routeClient.client.newSplit.mockResolvedValue({
-      workspace: "workspace:A",
-      surface: "surface:new",
-      pane: "pane:new",
-      title: "",
-      type: "terminal" as const,
-    });
-
-    const server = createTrackedServer({
-      client: routeClient.client as any,
-      stateDir: TEST_DIR,
-      disableSpawnPreflight: true,
-      lifecycleInitializer: async () => {},
-    });
-    const result = await runWithCallerContext(
-      { workspaceId: "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb" },
-      () =>
-        registeredTestTool(server, "new_split").handler(
-          { direction: "right", workspace: "workspace:A" },
-          {} as any,
-        ),
-    );
-
-    expect(result.isError).not.toBe(true);
-    expect(routeClient.client.selectWorkspace).toHaveBeenCalledWith(
-      "workspace:A",
-    );
-  });
-
   it("raw send_to on a stale ref with no mapped agent names that no live agent occupies it", async () => {
     const routeClient = makeUuidRouteClient([
       {
@@ -17695,48 +17635,6 @@ describe("auto-focus discipline (focus target before split, restore after render
     return { exec, calls };
   }
 
-  it("new_split restores the prior surface after a cross-workspace spawn", async () => {
-    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:1" });
-    const server = createLifecycleServer(exec);
-    const tool = (server as any)._registeredTools["new_split"];
-
-    const result = await tool.handler(
-      { direction: "right", workspace: "workspace:2", type: "terminal" },
-      {} as any,
-    );
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.surface).toBe("surface:new");
-
-    const focusTarget = selectIdx(calls, "workspace:2");
-    const restorePrior = focusSurfaceIdx(calls, "surface:origin");
-    const readScreen = firstReadScreenIdx(calls);
-
-    // Target was focused BEFORE the prior focus was restored.
-    expect(focusTarget).toBeGreaterThanOrEqual(0);
-    expect(restorePrior).toBeGreaterThan(focusTarget);
-    // Readiness was awaited between the split and the focus-back.
-    expect(readScreen).toBeGreaterThan(focusTarget);
-    expect(readScreen).toBeLessThan(restorePrior);
-    // Restoring only the workspace can land on a different pane/tab.
-    expect(selectIdx(calls, "workspace:1")).toBe(-1);
-  });
-
-  it("new_split restores the prior surface after a same-workspace spawn", async () => {
-    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:2" });
-    const server = createLifecycleServer(exec);
-    const tool = (server as any)._registeredTools["new_split"];
-
-    await tool.handler(
-      { direction: "right", workspace: "workspace:2", type: "terminal" },
-      {} as any,
-    );
-
-    const selectCalls = calls.filter((a) => a.includes("select-workspace"));
-    expect(selectCalls).toHaveLength(0);
-    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
-  });
-
   it("spawn_agent restores the prior surface after a same-workspace spawn", async () => {
     const { exec, calls } = makeFocusLifecycleExec();
     const server = createLifecycleServer(exec);
@@ -18044,46 +17942,6 @@ describe("auto-focus discipline (focus target before split, restore after render
     );
   });
 
-  it("new_split keeps its success response when focus restoration fails", async () => {
-    const { exec } = makeFocusExec({
-      selectedWorkspace: "workspace:1",
-      focusSurfaceFails: true,
-    });
-    const server = createLifecycleServer(exec);
-    const tool = (server as any)._registeredTools["new_split"];
-
-    const result = await tool.handler(
-      { direction: "right", workspace: "workspace:2", type: "terminal" },
-      {} as any,
-    );
-
-    expect(result.structuredContent.ok).toBe(true);
-    expect(result.structuredContent.surface).toBe("surface:new");
-    expect(result.structuredContent.warnings).toEqual(
-      expect.arrayContaining([expect.stringMatching(/focus restore failed/i)]),
-    );
-  });
-
-  it("new_split does not steal focus back after the user moves during readiness", async () => {
-    const { exec, calls } = makeFocusExec({
-      selectedWorkspace: "workspace:1",
-      moveFocusDuringReadinessTo: {
-        workspace: "workspace:1",
-        surface: "surface:user-choice",
-      },
-    });
-    const server = createLifecycleServer(exec);
-    const tool = (server as any)._registeredTools["new_split"];
-
-    const result = await tool.handler(
-      { direction: "right", workspace: "workspace:2", type: "terminal" },
-      {} as any,
-    );
-
-    expect(result.structuredContent.ok).toBe(true);
-    expect(focusSurfaceIdx(calls, "surface:origin")).toBe(-1);
-  });
-
   it("spawn_agent does not steal focus back after the user moves during readiness", async () => {
     const { exec, calls } = makeFocusLifecycleExec({
       moveFocusDuringReadinessTo: {
@@ -18208,45 +18066,6 @@ describe("auto-focus discipline (focus target before split, restore after render
     expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
   });
 
-  it("new_split with focus=true explicitly focuses and stays on the new surface", async () => {
-    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:1" });
-    const server = createLifecycleServer(exec);
-    const tool = (server as any)._registeredTools["new_split"];
-
-    await tool.handler(
-      {
-        direction: "right",
-        workspace: "workspace:2",
-        type: "terminal",
-        focus: true,
-      },
-      {} as any,
-    );
-
-    expect(selectIdx(calls, "workspace:2")).toBeGreaterThanOrEqual(0);
-    expect(focusSurfaceIdx(calls, "surface:new")).toBeGreaterThanOrEqual(0);
-    expect(focusSurfaceIdx(calls, "surface:origin")).toBe(-1);
-    expect(selectIdx(calls, "workspace:1")).toBe(-1);
-  });
-
-  it("new_split waits for the new terminal to render before restoring focus", async () => {
-    const { exec, calls, readScreenCount } = makeFocusExec({
-      selectedWorkspace: "workspace:1",
-      notReadyFor: 2,
-    });
-    const server = createLifecycleServer(exec);
-    const tool = (server as any)._registeredTools["new_split"];
-
-    await tool.handler(
-      { direction: "right", workspace: "workspace:2", type: "terminal" },
-      {} as any,
-    );
-
-    // Polled until ready (2 not-ready + 1 ready) and only then restored focus.
-    expect(readScreenCount()).toBeGreaterThanOrEqual(3);
-    const restorePrior = focusSurfaceIdx(calls, "surface:origin");
-    expect(restorePrior).toBeGreaterThan(lastReadScreenIdx(calls));
-  });
 });
 
 // AIDEV-NOTE (P11 / lane brief): the S3 regression test is the non-negotiable

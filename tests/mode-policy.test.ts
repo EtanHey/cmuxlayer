@@ -3,7 +3,6 @@ import {
   isReadOnlyTool,
   isMutatingTool,
   assertMutationAllowed,
-  parseReservedModeKey,
 } from "../src/mode-policy.js";
 
 describe("isReadOnlyTool", () => {
@@ -47,10 +46,6 @@ describe("isMutatingTool", () => {
 
   it("returns true for delete_workspace", () => {
     expect(isMutatingTool("delete_workspace")).toBe(true);
-  });
-
-  it("returns true for browser_surface", () => {
-    expect(isMutatingTool("browser_surface")).toBe(true);
   });
 
   it("returns true for lifecycle and tab mutation tools", () => {
@@ -118,41 +113,8 @@ describe("assertMutationAllowed", () => {
     expect(() => assertMutationAllowed("kill", "manual")).toThrow(/manual/i);
   });
 
-  it("allows metadata tools in manual mode", () => {
-    expect(() => assertMutationAllowed("set_status", "manual")).not.toThrow();
-    expect(() => assertMutationAllowed("set_progress", "manual")).not.toThrow();
-  });
-});
-
-describe("parseReservedModeKey", () => {
-  it("parses mode.control key", () => {
-    expect(parseReservedModeKey("mode.control", "autonomous")).toEqual({
-      control: "autonomous",
-    });
-    expect(parseReservedModeKey("mode.control", "manual")).toEqual({
-      control: "manual",
-    });
-  });
-
-  it("parses mode.intent key", () => {
-    expect(parseReservedModeKey("mode.intent", "chat")).toEqual({
-      intent: "chat",
-    });
-    expect(parseReservedModeKey("mode.intent", "audit")).toEqual({
-      intent: "audit",
-    });
-  });
-
-  it("returns null for non-mode keys", () => {
-    expect(parseReservedModeKey("agent", "running")).toBeNull();
-    expect(parseReservedModeKey("task", "build")).toBeNull();
-  });
-
-  it("throws for invalid mode.control value", () => {
-    expect(() => parseReservedModeKey("mode.control", "invalid")).toThrow();
-  });
-
-  it("throws for invalid mode.intent value", () => {
-    expect(() => parseReservedModeKey("mode.intent", "invalid")).toThrow();
+  it("allows non-mutating public tools in manual mode", () => {
+    expect(() => assertMutationAllowed("list_agents", "manual")).not.toThrow();
+    expect(() => assertMutationAllowed("wait_for", "manual")).not.toThrow();
   });
 });

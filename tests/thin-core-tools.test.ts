@@ -177,19 +177,13 @@ describe("thin-core tool palette", () => {
     }
   });
 
-  it("accepts optional new_split direction and string worktree shorthand in tool schemas", () => {
+  it("accepts the string worktree shorthand in the spawn_agent schema", () => {
     const server = createServer({
       exec: makeExec(),
       disableSpawnPreflight: true,
       controlHealthIntervalMs: 0,
     }) as any;
 
-    expect(
-      server._registeredTools.new_split.inputSchema.safeParse({
-        type: "terminal",
-        role: "worker",
-      }).success,
-    ).toBe(true);
     expect(
       server._registeredTools.spawn_agent.inputSchema.safeParse({
         repo: "cmuxlayer",
