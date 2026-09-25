@@ -7912,6 +7912,43 @@ describe("agent lifecycle tool handlers", () => {
     expect(reads).toBeGreaterThanOrEqual(2);
   });
 
+  it("concurrent fresh list_agents calls do not discard each other's unlocked scans (#892)", async () => {
+    const stableUuid = "65111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([{
+      ref: "surface:list-fanout",
+      id: stableUuid,
+      workspace_ref: "workspace:1",
+    }]);
+    const record = makeServerAgentRecord({
+      agent_id: "list-fanout-agent",
+      surface_id: "surface:list-fanout",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "working",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    let reads = 0;
+    routeClient.client.readScreen.mockImplementation(async (surface: string) => {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { surface, text: "OpenAI Codex\nWorking", lines: 20, scrollback_used: false };
+    });
+    const callers = 4;
+    const handler = registeredTestTool(server, "list_agents").handler;
+    const results = await Promise.all(
+      Array.from({ length: callers }, () => handler({ max_age_ms: 0 }, {})),
+    );
+    for (const result of results) {
+      expect(result.isError).not.toBe(true);
+      expect(parseToolResult(result).agents).toEqual(
+        expect.arrayContaining([expect.objectContaining({ agent_id: "list-fanout-agent" })]),
+      );
+    }
+    // Another list_agents holder cannot change what discovery observes, so
+    // each caller's single unlocked scan stands: one screen read per call.
+    expect(reads).toBe(callers);
+  });
+
   it("list_agents retries when a surface rebinds during its unlocked discovery scan", async () => {
     const stableUuid = "71111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([{

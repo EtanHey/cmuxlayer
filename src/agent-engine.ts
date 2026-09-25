@@ -418,6 +418,12 @@ export class AgentEngine {
    * by a per-acquisition token instead.
    */
   private lifecycleLockAcquisitionSeq = 0;
+  /**
+   * Acquisitions by holders that may change what discovery observes. An
+   * `observeOnly` holder (a fresh `list_agents` scan) does not advance it, so
+   * concurrent status reads stop discarding each other's unlocked scans (#892).
+   */
+  private lifecycleLockMutatingSeq = 0;
   private lifecycleLockAcquisitionId: number | null = null;
   private lifecycleLockAcquiredAtMs: number | null = null;
   private lifecycleLockQueueDepth = 0;
@@ -3960,9 +3966,10 @@ export class AgentEngine {
     operation: (
       withUnlocked: <U>(work: () => Promise<U>) => Promise<U>,
     ) => Promise<T>,
-    opts?: { label?: string },
+    opts?: { label?: string; observeOnly?: boolean },
   ): Promise<T> {
     const label = opts?.label ?? "lifecycle-mutation";
+    const observeOnly = opts?.observeOnly === true;
     let releaseHeld: (() => void) | null = null;
     const acquire = async (): Promise<void> => {
       const previous = this.lifecycleMutationTail;
@@ -4010,6 +4017,7 @@ export class AgentEngine {
       }
 
       const acquisitionId = ++this.lifecycleLockAcquisitionSeq;
+      if (!observeOnly) this.lifecycleLockMutatingSeq += 1;
       this.lifecycleLockHolder = label;
       this.lifecycleLockAcquisitionId = acquisitionId;
       this.lifecycleLockAcquiredAtMs = Date.now();
@@ -4127,9 +4135,12 @@ export class AgentEngine {
     };
   }
 
-  /** Internal revision for rejecting I/O snapshots after the lock was lent. */
+  /**
+   * Internal revision for rejecting I/O snapshots after the lock was lent.
+   * Only non-`observeOnly` holders advance it.
+   */
   lifecycleLockRevision(): number {
-    return this.lifecycleLockAcquisitionSeq;
+    return this.lifecycleLockMutatingSeq;
   }
 
   // sweep: bodies live in ./engine/sweep.ts (CX-3).
