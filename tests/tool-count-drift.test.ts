@@ -139,8 +139,9 @@ describe("tool-count drift guard", () => {
   );
 
   it("keeps the documented public names aligned with the callable registry", () => {
-    const source = readFileSync(join(REPO_ROOT, "src", "server.ts"), "utf8");
-    const block = source.match(/export const PUBLIC_TOOL_NAMES = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
+    // The one literal list lives in palette.ts; server's PUBLIC_TOOL_NAMES is it.
+    const source = readFileSync(join(REPO_ROOT, "src", "palette.ts"), "utf8");
+    const block = source.match(/export const REGISTERED_TOOL_NAMES = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
     const names = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
     expect(names).toEqual(EXPECTED_PUBLIC_TOOL_NAMES);
 

@@ -4,6 +4,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createServer } from "../src/server.js";
 import { REGISTERED_TOOL_NAMES } from "../src/palette.js";
+import { PUBLIC_TOOL_NAMES } from "../src/server.js";
 
 const ENV_KEY = "CMUXLAYER_DEFAULT_PALETTE";
 const originalEnv = process.env[ENV_KEY];
@@ -259,5 +260,12 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
     } finally {
       await closePaletteServer(fixture);
     }
+  });
+});
+
+describe("public tool list", () => {
+  // server.ts and palette.ts used to keep hand-copied twins of this list.
+  it("has exactly one source: the palette's registered tool names", () => {
+    expect(PUBLIC_TOOL_NAMES).toBe(REGISTERED_TOOL_NAMES);
   });
 });
