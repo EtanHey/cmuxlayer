@@ -275,25 +275,28 @@ async function bootstrapWorktreeDeps(
     | "node_modules_bootstrap_reason"
   >
 > {
-  // Unlink a reused worktree's stale node_modules symlink (the link only,
-  // never its target) before choosing a path: a script would install through
-  // it into the sibling checkout, and `skipped` would leave the agent running
-  // on the sibling's deps.
-  const nodeModules = join(worktreePath, "node_modules");
-  if (lstatSync(nodeModules, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    unlinkSync(nodeModules);
-  }
-  if (script !== null && !isExecutable(script)) {
-    return {
-      node_modules_bootstrapped: "skipped",
-      node_modules_bootstrap_reason: "script_missing",
-    };
-  }
-  const hasBunLock =
-    existsSync(join(worktreePath, "bun.lock")) ||
-    existsSync(join(worktreePath, "bun.lockb"));
-  if (script === null && !hasBunLock) return { node_modules_bootstrapped: "skipped" };
   try {
+    // Unlink a reused worktree's stale node_modules symlink (the link only,
+    // never its target) before choosing a path: a script would install
+    // through it into the sibling checkout, and `skipped` would leave the
+    // agent running on the sibling's deps. Inside the try so an EACCES on a
+    // read-only checkout is reported as `failed`, not thrown out of spawn.
+    const nodeModules = join(worktreePath, "node_modules");
+    if (lstatSync(nodeModules, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      unlinkSync(nodeModules);
+    }
+    if (script !== null && !isExecutable(script)) {
+      return {
+        node_modules_bootstrapped: "skipped",
+        node_modules_bootstrap_reason: "script_missing",
+      };
+    }
+    const hasBunLock =
+      existsSync(join(worktreePath, "bun.lock")) ||
+      existsSync(join(worktreePath, "bun.lockb"));
+    if (script === null && !hasBunLock) {
+      return { node_modules_bootstrapped: "skipped" };
+    }
     if (script !== null) {
       await exec(script, [worktreePath]);
       return { node_modules_bootstrapped: "script" };
