@@ -12,8 +12,8 @@ import { atomicWriteFileSync } from "./util/atomic-write.js";
 import { loadFleetConfig } from "./fleet-config.js";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { httpDeliver } from "./outbox-drainer.js";
+import { processLiveness, processStartedAtMs } from "./util/pid-alive.js";
 
 export type WatchState = "armed" | "firing" | "fired" | "failed";
 export type WatchObservedSource = "process" | "screen";
@@ -486,32 +486,15 @@ function writeReportPathReservations(
   );
 }
 
-function processStartedAtMs(pid: number): number | null {
-  try {
-    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-      encoding: "utf8",
-    }).trim();
-    const parsed = Date.parse(started);
-    return Number.isFinite(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
 function reservationProcessIsLive(
   reservation: WatchReportPathReservation,
   opts: WatchRegistryOptions,
 ): boolean {
   const { pid } = reservation;
-  const alive = opts.reservationProcessAlive ?? ((candidatePid: number) => {
-    if (candidatePid === process.pid) return true;
-    try {
-      process.kill(candidatePid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "EPERM";
-    }
-  });
+  // Only ESRCH frees a reservation; EPERM and other probe errors fail closed.
+  const alive =
+    opts.reservationProcessAlive ??
+    ((candidatePid: number) => processLiveness(candidatePid) !== "gone");
   if (!alive(pid)) return false;
   const startedAt =
     (opts.reservationProcessStartedAtMs ?? processStartedAtMs)(pid);
