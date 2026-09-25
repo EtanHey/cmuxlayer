@@ -567,3 +567,25 @@ export const BroadcastArgsSchema = z.object({
   workspace: z.string().optional(),
   press_enter: z.boolean().optional().default(true),
 });
+
+// Spawn-tool argument schemas, moved from createServer (CX-3b S10b).
+export const worktreeArgSchema = z.union([
+  z.boolean(),
+  z.string(),
+  z.object({
+    create: z.boolean().optional(),
+    reuse: z.boolean().optional(),
+    name: z.string().optional(),
+    path: z.string().optional(),
+    branch: z.string().optional(),
+    base: z.string().optional(),
+  }),
+]);
+
+export const mcpProfileSchema = z.union([
+  z.enum(["inherit", "sterile", "skill_eval"]),
+  z.object({
+    include: z.array(z.string()).optional(),
+    exclude: z.array(z.string()).optional(),
+  }),
+]);

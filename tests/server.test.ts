@@ -2,7 +2,7 @@ import "./helpers/pin-long-inline-cap.js";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -878,7 +878,12 @@ describe("tool registration", () => {
   });
 
   it("documents allow_busy as a deprecated no-op for immediate send delivery", () => {
-    const source = readFileSync(join(import.meta.dirname, "..", "src", "server.ts"), "utf8");
+    // Tool descriptions live in server.ts and its extracted tool modules (CX-3b S10).
+    const toolsDir = join(import.meta.dirname, "..", "src", "mcp", "tools");
+    const source = [
+      join(import.meta.dirname, "..", "src", "server.ts"),
+      ...readdirSync(toolsDir).filter((name) => name.endsWith(".ts")).map((name) => join(toolsDir, name)),
+    ].map((path) => readFileSync(path, "utf8")).join("\n");
     // #611: this pinned 300+ chars of prose per site, twice. What it should
     // guard is that allow_busy is still marked deprecated AND that the safety
     // gates it does NOT bypass are stated -- not the exact wording, which is
