@@ -76,11 +76,9 @@ When unset or blank, the signed 10-tool thin-core default applies. When set, the
 environment value overrides that default for the session. Unknown names are
 warned and ignored while valid names still load.
 
-Autonomous prompt resolution is experimental and disabled by default.
-cmuxlayer detects prompt choosers, marks the agent `blocked_on_prompt`, and
-escalates without sending a key. Setting
-`CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE=1` restores the known-imperfect
-Escape-based resolver for isolated testing only; do not enable it for fleet use.
+cmuxlayer never answers a prompt chooser on an agent's behalf. It detects the
+chooser, marks the agent `blocked_on_prompt`, and escalates without sending a
+key.
 
 > **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
 

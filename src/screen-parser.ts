@@ -1485,7 +1485,8 @@ function hasApprovalPromptBlock(
  * Independent fail-closed check for the mutation/audit boundary. This scans the
  * raw chooser rows again and deliberately does not consume PromptDisposition or
  * safePromptResolutionType, so a future resolve-classification regression
- * cannot launder a consent chooser into a resolved_prompt event.
+ * cannot launder a consent chooser into a resolved_prompt event. (N1b removed
+ * that resolve path; containsPromptApprovalChooser still exposes the check.)
  */
 function hasRawApprovalChooser(text: string): boolean {
   const normalized = normalizeText(text);
@@ -1633,17 +1634,6 @@ function safePromptResolutionType(
   if (chooser.hasAttachedModelCommand) return "model_menu";
   if (cli === "codex" && !chooser.hasUnexplainedHeader) return "model_menu";
   return null;
-}
-
-export function isPromptResolutionAuditSafe(
-  text: string,
-  cli?: CliType,
-): boolean {
-  const normalized = normalizeText(text);
-  if (hasRawApprovalChooser(normalized)) return false;
-  const chooser = analyzeActiveChooser(normalized);
-  if (!chooser) return false;
-  return safePromptResolutionType(normalized, cli, chooser) !== null;
 }
 
 export function hasVisibleAgentProgress(

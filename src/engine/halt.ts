@@ -10,12 +10,9 @@ import { dispatchOnce, readInbox } from "../inbox.js";
 import {
   classifyPromptDisposition,
   cleanScreenText,
-  containsPromptApprovalChooser,
   hasVisibleAgentProgress,
   isBlockingPromptChooserScreen,
-  isPromptResolutionAuditSafe,
   parseScreen,
-  type PromptDisposition,
 } from "../screen-parser.js";
 import type { ParsedScreenResult } from "../types.js";
 import { rawResumeCommandOrNull } from "./launch-command.js";
@@ -43,7 +40,6 @@ export function screenTextSignature(text: string): string {
  * engine, so spies on the engine still intercept.
  */
 export interface HaltHost {
-  readonly autoResolvePrompts: AgentEngine["autoResolvePrompts"];
   readonly backgroundChildCpuTimes: AgentEngine["backgroundChildCpuTimes"];
   readonly client: AgentEngine["client"];
   readonly haltAwaitingInputDwellMs: AgentEngine["haltAwaitingInputDwellMs"];
@@ -55,12 +51,10 @@ export interface HaltHost {
   readonly inboxOpts: AgentEngine["inboxOpts"];
   readonly promptMotionObservedAtMs: AgentEngine["promptMotionObservedAtMs"];
   readonly promptMotionScreenSignatures: AgentEngine["promptMotionScreenSignatures"];
-  readonly promptResolutionFailures: AgentEngine["promptResolutionFailures"];
   readonly registry: AgentEngine["registry"];
   readonly stateMgr: AgentEngine["stateMgr"];
   sweepBackgroundProcessSnapshot: AgentEngine["sweepBackgroundProcessSnapshot"];
   appendHaltEscalationEvent: AgentEngine["appendHaltEscalationEvent"];
-  appendResolvedPromptEvent: AgentEngine["appendResolvedPromptEvent"];
   assertSweepInputCurrent: AgentEngine["assertSweepInputCurrent"];
   backgroundChildUsedCpu: AgentEngine["backgroundChildUsedCpu"];
   clearHaltEpisode: AgentEngine["clearHaltEpisode"];
@@ -74,7 +68,6 @@ export interface HaltHost {
   isIdleSupervisor: AgentEngine["isIdleSupervisor"];
   isMatureHaltEpisode: AgentEngine["isMatureHaltEpisode"];
   loadGroundTruthSession: AgentEngine["loadGroundTruthSession"];
-  maybeResolvePrompt: AgentEngine["maybeResolvePrompt"];
   nearestLiveHaltAncestor: AgentEngine["nearestLiveHaltAncestor"];
   observableHaltProgressSignature: AgentEngine["observableHaltProgressSignature"];
   persistPausedState: AgentEngine["persistPausedState"];
@@ -478,142 +471,6 @@ export function appendHaltEscalationEvent(
   }
 }
 
-export function appendResolvedPromptEvent(this: HaltHost, input: {
-  agent: AgentRecord;
-  disposition: Extract<PromptDisposition, { kind: "resolve" }>;
-  beforeControlState: ParsedScreenResult["control_state"];
-  afterControlState: ParsedScreenResult["control_state"] | null;
-  screenText: string;
-  outcome: "recovered" | "failed";
-  error: string | null;
-  nowIso: string;
-}): boolean {
-  const excerptSource = cleanScreenText(input.screenText, 8);
-  if (
-    !isPromptResolutionAuditSafe(input.screenText, input.agent.cli) ||
-    containsPromptApprovalChooser(excerptSource)
-  ) {
-    return false;
-  }
-  const excerpt = excerptSource.replace(/\s+/g, " ").trim().slice(0, 240);
-  this.stateMgr.getEventLog().appendResolvedPrompt({
-    ts: input.nowIso,
-    event_type: "resolved_prompt",
-    agent_id: input.agent.agent_id,
-    surface_id: input.agent.surface_id,
-    workspace_id: input.agent.workspace_id ?? null,
-    prompt_type: input.disposition.prompt_type,
-    key_sent: input.disposition.key,
-    outcome: input.outcome,
-    before_control_state: input.beforeControlState,
-    after_control_state: input.afterControlState,
-    screen_signature: screenTextSignature(input.screenText),
-    screen_excerpt: excerpt,
-    error: input.error,
-  });
-  return true;
-}
-
-export async function maybeResolvePrompt(
-  this: HaltHost,
-  agent: AgentRecord,
-  screenText: string,
-  disposition: Extract<PromptDisposition, { kind: "resolve" }>,
-  nowIso: string,
-  ctx: SweepAgentContext = {},
-): Promise<{ agent: AgentRecord; recovered: boolean }> {
-  if (!this.assertSweepInputCurrent(ctx)) return { agent, recovered: false };
-  const signature = screenTextSignature(screenText);
-  if (this.promptResolutionFailures.get(agent.agent_id) === signature) {
-    return { agent, recovered: false };
-  }
-  if (
-    !isPromptResolutionAuditSafe(screenText, agent.cli) ||
-    containsPromptApprovalChooser(cleanScreenText(screenText, 8))
-  ) {
-    this.promptResolutionFailures.set(agent.agent_id, signature);
-    return { agent, recovered: false };
-  }
-
-  const before = parseScreen(screenText);
-  let afterControlState: ParsedScreenResult["control_state"] | null = null;
-  let error: string | null = null;
-  try {
-    const route = await this.resolveAgentIoRoute(agent.agent_id);
-    if (!this.assertSweepInputCurrent(ctx))
-      return { agent, recovered: false };
-    const assertSurfaceBindingCurrent = async (): Promise<void> => {
-      await this.resolveUnchangedAgentIoRoute(
-        agent.agent_id,
-        route,
-        "prompt resolution",
-      );
-    };
-    if (!this.assertSweepInputCurrent(ctx)) {
-      return { agent, recovered: false };
-    }
-    await this.client.sendKey(route.surface_id, disposition.key, {
-      workspace: route.workspace_id ?? undefined,
-      ...this.stableSurfaceWriteOptions(route.surface_uuid),
-      beforeMutation: assertSurfaceBindingCurrent,
-    });
-    await assertSurfaceBindingCurrent();
-    const afterScreen = await this.client.readScreen(route.surface_id, {
-      lines: BOOT_SESSION_CAPTURE_LINES,
-      workspace: route.workspace_id ?? undefined,
-    });
-    await assertSurfaceBindingCurrent();
-    if (!this.assertSweepInputCurrent(ctx)) {
-      return { agent, recovered: false };
-    }
-    const after = parseScreen(afterScreen.text);
-    afterControlState = after.control_state;
-    const recovered =
-      after.control_state === "ready" || after.control_state === "busy";
-    if (!recovered) {
-      error = `prompt remained ${after.control_state} after Escape`;
-      this.promptResolutionFailures.set(agent.agent_id, signature);
-    } else {
-      this.promptResolutionFailures.delete(agent.agent_id);
-    }
-    const auditWritten = this.appendResolvedPromptEvent({
-      agent,
-      disposition,
-      beforeControlState: before.control_state,
-      afterControlState,
-      screenText,
-      outcome: recovered ? "recovered" : "failed",
-      error,
-      nowIso,
-    });
-    if (!auditWritten) {
-      this.promptResolutionFailures.set(agent.agent_id, signature);
-      return { agent, recovered: false };
-    }
-    if (!recovered) return { agent, recovered: false };
-
-    agent = this.persistPromptBlockedState(agent, false, nowIso);
-    return { agent: this.clearHaltEpisode(agent), recovered: true };
-  } catch (cause) {
-    if (!this.assertSweepInputCurrent(ctx)) {
-      return { agent, recovered: false };
-    }
-    error = cause instanceof Error ? cause.message : String(cause);
-    this.promptResolutionFailures.set(agent.agent_id, signature);
-    this.appendResolvedPromptEvent({
-      agent,
-      disposition,
-      beforeControlState: before.control_state,
-      afterControlState,
-      screenText,
-      outcome: "failed",
-      error,
-      nowIso,
-    });
-    return { agent, recovered: false };
-  }
-}
-
 export async function maybeEscalateLiveHalt(
   this: HaltHost,
   agent: AgentRecord,
@@ -625,28 +482,13 @@ export async function maybeEscalateLiveHalt(
   const nowIso = new Date(nowMs).toISOString();
   const parsed = parseScreen(screenText);
   let disposition = classifyPromptDisposition(screenText, agent.cli);
-  if (disposition.kind === "resolve" && this.autoResolvePrompts) {
-    const resolution = await this.maybeResolvePrompt(
-      agent,
-      screenText,
-      disposition,
-      nowIso,
-      ctx,
-    );
-    if (!this.assertSweepInputCurrent(ctx)) return agent;
-    agent = resolution.agent;
-    if (resolution.recovered) return agent;
+  if (disposition.kind === "resolve") {
+    // N1b: prompt menus always escalate to a human; cmuxlayer never sends
+    // keys to answer a chooser on the agent's behalf.
     disposition = {
       kind: "escalate",
       prompt_type: "human_or_unknown_chooser",
     };
-  } else if (disposition.kind === "resolve") {
-    disposition = {
-      kind: "escalate",
-      prompt_type: "human_or_unknown_chooser",
-    };
-  } else {
-    this.promptResolutionFailures.delete(agent.agent_id);
   }
   const progressSignature = this.observableHaltProgressSignature(
     agent,

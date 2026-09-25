@@ -466,8 +466,6 @@ export class AgentEngine {
   private readyPatternMatches = new Map<string, number>();
   /** agentId → consecutive bound-screen observations at a bare shell. */
   private cliExitShellMatches = new Map<string, number>();
-  /** One failed safe-resolution attempt per unchanged prompt screen. */
-  private promptResolutionFailures = new Map<string, string>();
   /** Last time changing output proved that chooser chrome belonged to live work. */
   private promptMotionObservedAtMs = new Map<string, number>();
   /** Last raw chooser screen used only to prove visible cross-sweep motion. */
@@ -531,7 +529,6 @@ export class AgentEngine {
   private haltProcessSnapshot?: () => string | Promise<string>;
   private sweepBackgroundProcessSnapshot: Promise<string | null> | null = null;
   private backgroundChildCpuTimes = new Map<string, Map<number, string>>();
-  private autoResolvePrompts: boolean;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -589,8 +586,6 @@ export class AgentEngine {
         ),
     );
     this.haltProcessSnapshot = opts?.haltProcessSnapshot;
-    this.autoResolvePrompts =
-      process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE === "1";
     this.deliveryQueue = new DeliveryQueue(
       {
         stateMgr,
@@ -2051,11 +2046,6 @@ export class AgentEngine {
       nextAgentId,
     );
     this.rekeyAgentMapEntry(
-      this.promptResolutionFailures,
-      previousAgentId,
-      nextAgentId,
-    );
-    this.rekeyAgentMapEntry(
       this.promptMotionObservedAtMs,
       previousAgentId,
       nextAgentId,
@@ -2771,12 +2761,6 @@ export class AgentEngine {
   private appendHaltEscalationEvent(...args: Parameters<typeof haltImpl.appendHaltEscalationEvent>): ReturnType<typeof haltImpl.appendHaltEscalationEvent> {
     return haltImpl.appendHaltEscalationEvent.call(this.haltHost(), ...args);
   }
-  private appendResolvedPromptEvent(...args: Parameters<typeof haltImpl.appendResolvedPromptEvent>): ReturnType<typeof haltImpl.appendResolvedPromptEvent> {
-    return haltImpl.appendResolvedPromptEvent.call(this.haltHost(), ...args);
-  }
-  private maybeResolvePrompt(...args: Parameters<typeof haltImpl.maybeResolvePrompt>): ReturnType<typeof haltImpl.maybeResolvePrompt> {
-    return haltImpl.maybeResolvePrompt.call(this.haltHost(), ...args);
-  }
   private maybeEscalateLiveHalt(...args: Parameters<typeof haltImpl.maybeEscalateLiveHalt>): ReturnType<typeof haltImpl.maybeEscalateLiveHalt> {
     return haltImpl.maybeEscalateLiveHalt.call(this.haltHost(), ...args);
   }
@@ -2788,7 +2772,6 @@ export class AgentEngine {
     if (this.haltHostCache) return this.haltHostCache;
     const engine = this;
     this.haltHostCache = {
-      get autoResolvePrompts() { return engine.autoResolvePrompts; },
       get backgroundChildCpuTimes() { return engine.backgroundChildCpuTimes; },
       get client() { return engine.client; },
       get haltAwaitingInputDwellMs() { return engine.haltAwaitingInputDwellMs; },
@@ -2800,13 +2783,11 @@ export class AgentEngine {
       get inboxOpts() { return engine.inboxOpts; },
       get promptMotionObservedAtMs() { return engine.promptMotionObservedAtMs; },
       get promptMotionScreenSignatures() { return engine.promptMotionScreenSignatures; },
-      get promptResolutionFailures() { return engine.promptResolutionFailures; },
       get registry() { return engine.registry; },
       get stateMgr() { return engine.stateMgr; },
       get sweepBackgroundProcessSnapshot() { return engine.sweepBackgroundProcessSnapshot; },
       set sweepBackgroundProcessSnapshot(value) { engine.sweepBackgroundProcessSnapshot = value; },
       appendHaltEscalationEvent: (...args) => engine.appendHaltEscalationEvent(...args),
-      appendResolvedPromptEvent: (...args) => engine.appendResolvedPromptEvent(...args),
       assertSweepInputCurrent: (...args) => engine.assertSweepInputCurrent(...args),
       backgroundChildUsedCpu: (...args) => engine.backgroundChildUsedCpu(...args),
       clearHaltEpisode: (...args) => engine.clearHaltEpisode(...args),
@@ -2820,7 +2801,6 @@ export class AgentEngine {
       isIdleSupervisor: (...args) => engine.isIdleSupervisor(...args),
       isMatureHaltEpisode: (...args) => engine.isMatureHaltEpisode(...args),
       loadGroundTruthSession: (...args) => engine.loadGroundTruthSession(...args),
-      maybeResolvePrompt: (...args) => engine.maybeResolvePrompt(...args),
       nearestLiveHaltAncestor: (...args) => engine.nearestLiveHaltAncestor(...args),
       observableHaltProgressSignature: (...args) => engine.observableHaltProgressSignature(...args),
       persistPausedState: (...args) => engine.persistPausedState(...args),
