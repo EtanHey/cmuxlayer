@@ -2559,9 +2559,11 @@ export class AgentEngine {
     const trimmed = line.trim();
     switch (cli) {
       case "claude":
-        return /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?/i.test(
-          trimmed,
-        );
+        // AIDEV-NOTE: anchors are banner lines ABOVE the composer. Claude's
+        // CLAUDE_COUNTER status line and "bypass permissions on" footer sit
+        // BELOW it; as anchors they emptied the region and hid a typed boot
+        // prompt. Same set as the server's composer anchor (composer-screen).
+        return /Claude Code|What can I help you with\?/i.test(trimmed);
       case "codex":
         return (
           /\bOpenAI\s+Codex\b/i.test(trimmed) ||
