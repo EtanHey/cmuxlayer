@@ -1,4 +1,8 @@
-import type { CliType } from "./agent-types.js";
+import { MAX_SPAWN_DEPTH, type CliType } from "./agent-types.js";
+import {
+  DAEMON_SOCKET_FILENAME,
+  NIGHTLY_DAEMON_SOCKET_FILENAME,
+} from "./daemon-socket-path.js";
 import { MODEL_POLICY_CONTRACT } from "./model-policy.js";
 
 export interface HarnessWorkerSpec {
@@ -87,6 +91,12 @@ export interface HarnessRunResults {
   events: Array<Record<string, unknown>>;
   green?: boolean;
   final_marker?: string;
+  /** H1: which daemon served the run (#800). */
+  daemon?: HarnessDaemonBlock & { stopped?: boolean };
+  daemon_failures?: string[];
+  preflight?: { tools: string[]; missing: string[] };
+  /** A run-level failure (preflight, daemon identity) recorded, not thrown. */
+  error?: string;
 }
 
 const CLI_LAUNCHER_SUFFIX: Record<CliType, string> = {
@@ -332,9 +342,28 @@ export function isStaleManagedRecord(
   agentId: string | undefined,
 ): boolean {
   if (!agentId) return false;
-  if (stateAfterClose?.ok === true) return true;
+  // H1: stateAfterClose is a list_agents({agent_ids}) reply (the hidden
+  // get_agent_state is gone); the record is stale while that list still names
+  // it. Older artifacts carry a get_agent_state reply, where ok:true meant found.
+  const directAgents = stateAfterClose?.structured?.agents;
+  if (Array.isArray(directAgents)) {
+    if (listNamesAgent(directAgents, agentId)) return true;
+  } else if (stateAfterClose?.ok === true) {
+    return true;
+  }
   const agents = agentsAfterClose?.structured?.agents;
   if (!Array.isArray(agents)) return false;
+  return listNamesAgent(agents, agentId);
+}
+
+const TERMINAL_AGENT_STATES = new Set(["done", "error"]);
+
+/**
+ * Names the agent as still LIVE. A stopped agent keeps a persisted done
+ * (resumable) record by design, so a terminal state is not stale; a row with
+ * no state (older artifacts) counts as live.
+ */
+function listNamesAgent(agents: unknown[], agentId: string): boolean {
   return agents.some((agent) => {
     if (typeof agent !== "object" || agent === null) return false;
     const id =
@@ -343,8 +372,262 @@ export function isStaleManagedRecord(
         : typeof (agent as { id?: unknown }).id === "string"
           ? (agent as { id: string }).id
           : "";
-    return id === agentId;
+    const state = (agent as { state?: unknown }).state;
+    return id === agentId && !(typeof state === "string" && TERMINAL_AGENT_STATES.has(state));
   });
+}
+
+/**
+ * H1 (#808): the public tools the live runner calls. The runner checks
+ * tools/list for these up front and exits non-zero naming any that are
+ * missing, instead of failing mid-run on a removed tool.
+ */
+export const REQUIRED_HARNESS_TOOLS = [
+  "spawn_agent",
+  "list_agents",
+  "list_surfaces",
+  "wait_for",
+  "close_surface",
+  "control_health",
+] as const;
+
+export function missingHarnessTools(listed: readonly string[]): string[] {
+  const have = new Set(listed);
+  return REQUIRED_HARNESS_TOOLS.filter((name) => !have.has(name));
+}
+
+/**
+ * H1 (#800): the entry proxies to whichever daemon owns the socket, so on a
+ * fleet Mac the default socket is the INSTALLED daemon. The runner therefore
+ * pins a private socket per run, which makes the proxy start a daemon from
+ * this build's dist/.
+ */
+export function defaultHarnessDaemonSocket(home: string, pid: number): string {
+  return `${home}/.local/state/cmux/cmuxlayer-harness-${pid}.sock`;
+}
+
+/** The sockets an installed daemon owns: stable and nightly (#889 must-fix 4). */
+export function installedHarnessDaemonSockets(home: string): string[] {
+  const dir = `${home}/.local/state/cmux`;
+  return [`${dir}/${DAEMON_SOCKET_FILENAME}`, `${dir}/${NIGHTLY_DAEMON_SOCKET_FILENAME}`];
+}
+
+export interface HarnessDaemonPlan {
+  socket_path: string;
+  /** The socket is an installed daemon's default (stable or nightly). */
+  installed_socket: boolean;
+  /**
+   * This run created the socket, so the proxy starts the daemon from this
+   * build. A socket that already existed belongs to someone else's daemon.
+   */
+  started_by_run: boolean;
+  /** --installed-daemon: the run proves the installed daemon, not this build. */
+  build_check: "enforced" | "opted_out";
+}
+
+/**
+ * Which socket the run uses and whether the run owns the daemon behind it.
+ * "Private" means started by this run, never merely "not the default path":
+ * an inherited --daemon-socket or CMUXLAYER_DAEMON_SOCKET daemon is not ours.
+ */
+export function planHarnessDaemon(input: {
+  daemonSocketArg: string;
+  envSocket: string | undefined;
+  installedDaemon: boolean;
+  home: string;
+  pid: number;
+  socketExists: (path: string) => boolean;
+}): HarnessDaemonPlan {
+  const installedSockets = installedHarnessDaemonSockets(input.home);
+  const socketPath =
+    input.daemonSocketArg ||
+    input.envSocket?.trim() ||
+    (input.installedDaemon
+      ? installedSockets[0]
+      : defaultHarnessDaemonSocket(input.home, input.pid));
+  const installedSocket = installedSockets.includes(socketPath);
+  return {
+    socket_path: socketPath,
+    installed_socket: installedSocket,
+    started_by_run: !installedSocket && !input.socketExists(socketPath),
+    build_check: input.installedDaemon ? "opted_out" : "enforced",
+  };
+}
+
+export interface HarnessDaemonBlock {
+  socket_path: string;
+  /** Started by this run (same as started_by_run); kept for the report. */
+  private: boolean;
+  started_by_run: boolean;
+  installed_socket: boolean;
+  build_check: "enforced" | "opted_out";
+  version: string | null;
+  binary: string | null;
+  pid: number | null;
+  expected_dist: string;
+  from_this_build: boolean;
+}
+
+/**
+ * Which daemon actually served the run: control_health(detail:"full") runs
+ * inside the serving daemon, so its current_process names that binary.
+ */
+export function buildHarnessDaemonBlock(input: {
+  plan: HarnessDaemonPlan;
+  serverVersion: string | null;
+  controlHealth: Record<string, unknown> | undefined;
+  distDir: string;
+}): HarnessDaemonBlock {
+  const health = input.controlHealth?.health as
+    | { current_process?: { pid?: unknown; script_path?: unknown } }
+    | undefined;
+  const current = health?.current_process;
+  const binary = typeof current?.script_path === "string" ? current.script_path : null;
+  const pid = typeof current?.pid === "number" ? current.pid : null;
+  const dist = input.distDir.replace(/\/+$/, "");
+  const optedOut = input.plan.build_check === "opted_out";
+  return {
+    socket_path: input.plan.socket_path,
+    private: !optedOut && input.plan.started_by_run,
+    started_by_run: input.plan.started_by_run,
+    installed_socket: input.plan.installed_socket,
+    build_check: input.plan.build_check,
+    version: input.serverVersion,
+    binary,
+    pid,
+    expected_dist: dist,
+    // Opted out, the run does not claim this build served it (#889 must-fix 2).
+    from_this_build: !optedOut && binary !== null && binary.startsWith(`${dist}/`),
+  };
+}
+
+export function harnessDaemonFailures(block: HarnessDaemonBlock): string[] {
+  if (block.build_check === "opted_out") return [];
+  return block.from_this_build ? [] : ["daemon_not_from_this_build"];
+}
+
+/**
+ * Stop the daemon only when this run started it, by its recorded PID (never a
+ * pattern). An inherited or installed daemon is never signalled.
+ */
+export function stopHarnessDaemon(
+  block: HarnessDaemonBlock | undefined,
+  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
+): boolean | undefined {
+  if (
+    !block ||
+    block.started_by_run !== true ||
+    block.installed_socket ||
+    typeof block.pid !== "number"
+  ) {
+    return undefined;
+  }
+  try {
+    kill(block.pid, "SIGTERM");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const TERMINAL_ROW_STATES = new Set(["done", "error"]);
+
+/**
+ * The calling seat's spawn depth, from a list_agents({detail:"full"}) reply:
+ * the live record whose surface is the caller's pane (CMUX_SURFACE_ID). null
+ * when the runner is not inside a managed pane (a plain terminal).
+ */
+export function harnessCallerSpawnDepth(
+  listAgentsFull: Record<string, unknown> | undefined,
+  callerSurface: string | undefined,
+): number | null {
+  const surface = callerSurface?.trim();
+  const agents = listAgentsFull?.agents;
+  if (!surface || !Array.isArray(agents)) return null;
+  for (const row of agents) {
+    if (typeof row !== "object" || row === null) continue;
+    const r = row as Record<string, unknown>;
+    const detail = (typeof r.detail === "object" && r.detail !== null
+      ? r.detail
+      : {}) as Record<string, unknown>;
+    const rawState = r.state as unknown;
+    const state =
+      typeof rawState === "object" && rawState !== null
+        ? (rawState as { value?: unknown }).value
+        : rawState;
+    if (typeof state === "string" && TERMINAL_ROW_STATES.has(state)) continue;
+    const surfaces = [r.surface_id, r.surface_uuid, detail.surface_id, detail.surface_uuid];
+    if (!surfaces.includes(surface)) continue;
+    const depth = detail.spawn_depth ?? r.spawn_depth;
+    if (typeof depth === "number") return depth;
+  }
+  return null;
+}
+
+/**
+ * #889 must-fix 3: a seat at depth >= MAX_SPAWN_DEPTH must not run the live
+ * harness (its dummy would nest past the depth guard). Refused in preflight.
+ */
+export function harnessDepthRefusal(depth: number | null): string | null {
+  if (depth === null || depth < MAX_SPAWN_DEPTH) return null;
+  return (
+    `live harness: refusing at spawn depth ${depth} (limit ${MAX_SPAWN_DEPTH}). ` +
+    `Run it from a plain terminal, or from a lead seat at depth <= ${MAX_SPAWN_DEPTH - 1}.`
+  );
+}
+
+export interface HarnessPreflightClient {
+  request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  callTool(name: string, args: Record<string, unknown>): Promise<ToolCallRecord>;
+}
+
+/**
+ * Everything the runner checks before its first spawn_agent: the tools it
+ * needs are listed, and the calling seat is shallow enough. Throws the
+ * reason; never spawns.
+ */
+export async function runHarnessPreflight(
+  client: HarnessPreflightClient,
+  input: { callerSurface: string | undefined },
+): Promise<{ tools: string[]; missing: string[]; caller_depth: number | null }> {
+  const listed = (await client.request("tools/list", {})) as
+    | { tools?: Array<{ name?: unknown }> }
+    | undefined;
+  const tools = Array.isArray(listed?.tools)
+    ? listed.tools.flatMap((tool) => (typeof tool.name === "string" ? [tool.name] : []))
+    : [];
+  const missing = missingHarnessTools(tools);
+  if (missing.length > 0) {
+    throw Object.assign(
+      new Error(`live harness: required tools missing from tools/list: ${missing.join(", ")}`),
+      { preflight: { tools, missing, caller_depth: null } },
+    );
+  }
+  let callerDepth: number | null = null;
+  if (input.callerSurface?.trim()) {
+    const agents = await client.callTool("list_agents", { detail: "full" });
+    callerDepth = harnessCallerSpawnDepth(agents.structured, input.callerSurface);
+  }
+  const refusal = harnessDepthRefusal(callerDepth);
+  if (refusal) {
+    throw Object.assign(new Error(refusal), {
+      preflight: { tools, missing, caller_depth: callerDepth },
+    });
+  }
+  return { tools, missing, caller_depth: callerDepth };
+}
+
+/**
+ * #889 must-fix 1: the worker reports under the coordination root (the only
+ * place wait_for's file-backed done may read), one file per worker per run;
+ * the runner copies it into its results/ dir afterwards.
+ */
+export function harnessCoordinationReportPath(
+  home: string,
+  runId: string,
+  workerName: string,
+): string {
+  return `${home}/.cmux/live-harness/${runId}/${workerName}.report.md`;
 }
 
 export function countUnexpectedWorkerSurfaces(
@@ -454,14 +737,12 @@ export function classifyWorkerFailures(input: {
 
   if (!input.wait || input.wait.ok !== true) {
     failures.push("wait_for_not_ok");
-  } else {
+  } else if (!waitIsDone(input.wait)) {
     const waitState =
       typeof input.wait.structured?.state === "string"
         ? input.wait.structured.state
         : "";
-    if (waitState !== "done") {
-      failures.push(`wait_for_state_${waitState || "missing"}`);
-    }
+    failures.push(`wait_for_state_${waitState || "missing"}`);
   }
 
   if (input.reportMissing || !input.reportText) {
@@ -495,13 +776,29 @@ export function summarizeHarnessRun(workers: WorkerRunRecord[]): {
   const workerFailures: Record<string, string[]> = {};
   let green = true;
   for (const worker of workers) {
-    const failures = worker.failures ?? [];
+    // A worker the runner never classified (its loop was cut off) is a
+    // failure, never an empty pass (H1 live finding).
+    const failures = worker.failures ?? ["worker_not_classified"];
     workerFailures[worker.name] = failures;
     if (!workerIsGreen(failures)) {
       green = false;
     }
   }
   return { green, workerFailures, finalMarker: "" };
+}
+
+/**
+ * The worker is done when wait_for matched: either the registry reached
+ * `done`, or (#808) the file-backed report marker matched, which leaves the
+ * registry state wherever it is (a sterile worker never learns the engine path).
+ */
+export function waitIsDone(wait: ToolCallRecord | undefined): boolean {
+  if (!wait || wait.ok !== true) return false;
+  const structured = wait.structured;
+  if (structured?.matched === true && structured.source === "report_file") {
+    return true;
+  }
+  return structured?.state === "done";
 }
 
 export function buildRunReportMarkdown(
@@ -524,6 +821,17 @@ export function buildRunReportMarkdown(
     `- MCP profile: \`${results.config.mcpProfile}\``,
     `- Cleanup timeout: ${results.config.cleanupTimeoutMs}ms`,
     "",
+    "## Daemon",
+    "",
+    ...(results.daemon
+      ? [
+          `- Version: \`${results.daemon.version ?? "unknown"}\``,
+          `- Binary: \`${results.daemon.binary ?? "unknown"}\` (pid ${results.daemon.pid ?? "unknown"}, this build: ${results.daemon.from_this_build ? "yes" : "NO"})`,
+          `- Socket: \`${results.daemon.socket_path}\` (${results.daemon.started_by_run ? "private, started by this run" : results.daemon.installed_socket ? "installed" : "inherited"}${results.daemon.build_check === "opted_out" ? "; build check opted out" : ""})`,
+        ]
+      : ["- not identified (run failed before control_health)"]),
+    "",
+    ...(results.error ? ["## Run error", "", results.error, ""] : []),
     "## Worker Summary",
     "",
     "| Worker | Agent ID | Spawn | Wait | Report | Failures |",
@@ -533,7 +841,7 @@ export function buildRunReportMarkdown(
   for (const worker of results.workers) {
     const failures = workerFailures[worker.name] ?? worker.failures ?? [];
     lines.push(
-      `| ${worker.name} | \`${worker.agent_id ?? "—"}\` | ${worker.spawn?.ok === true ? "ok" : "fail"} | ${worker.wait?.structured && worker.wait.structured.state === "done" ? "done" : "fail"} | ${worker.report_missing ? "missing" : (worker.report_final_line ?? "—")} | ${failures.length === 0 ? "—" : failures.join(", ")} |`,
+      `| ${worker.name} | \`${worker.agent_id ?? "—"}\` | ${worker.spawn?.ok === true ? "ok" : "fail"} | ${waitIsDone(worker.wait) ? "done" : "fail"} | ${worker.report_missing ? "missing" : (worker.report_final_line ?? "—")} | ${failures.length === 0 ? "—" : failures.join(", ")} |`,
     );
   }
 
@@ -545,9 +853,14 @@ export function buildRunReportMarkdown(
     "",
   );
 
-  const allFailures = results.workers.flatMap(
-    (worker) => worker.failures ?? [],
-  );
+  const failuresOf = (worker: WorkerRunRecord): string[] =>
+    worker.failures ?? ["worker_not_classified"];
+  const allFailures = [
+    ...results.workers.flatMap(failuresOf),
+    ...(results.error ? ["run_error"] : []),
+    ...(results.daemon_failures ?? []),
+    ...(results.workers.length === 0 ? ["no_workers_ran"] : []),
+  ];
   const finalMarker =
     allFailures.length === 0
       ? results.config.finalGreen
@@ -560,7 +873,7 @@ export function buildRunReportMarkdown(
     lines.push("One or more workers failed live harness checks.", "");
     lines.push("Primary failures:", "");
     for (const worker of results.workers) {
-      const failures = worker.failures ?? [];
+      const failures = failuresOf(worker);
       if (failures.length === 0) continue;
       lines.push(`- ${worker.name}: ${failures.join(", ")}`);
     }

@@ -4,12 +4,15 @@
 // Drives the FIXED cmuxlayer MCP (dist/index.js) against a REAL cmux instance:
 //   1. spawn N claude agents into a scoped throwaway workspace
 //   2. wait for each to reach an interactive (ready/idle) state
-//   3. RC3  — broadcast(role:"all") MUST deliver to all N (0 skipped "dead:error")
-//   4. RC4  — resync_agents() MUST NOT evict/orphan any of the N live surfaces
+//   3. RC3  — one send_to per agent MUST deliver to all N (0 skipped "dead:error")
+//   4. RC4  — all N stay registered (the resync sweep is automatic now)
 //   5. RC4  — send_to(agent_id) MUST deliver to each (still registry-addressable)
 //   6. §b   — kill one CLI child while its pane persists, force registry error,
 //              then reject silent delivered:true shell/void writes and require
 //              convergence to delivered:false/dead:* within three sends
+//
+// Public tools only (#889): a tools/list preflight exits RED naming any tool in
+// REQUIRED_ACCEPTANCE_TOOLS that the server does not list, before any spawn.
 //   7. cleanup: force-close the N surfaces
 //
 // Must run from a PANE-DESCENDED shell (cmux ancestry access-control denies
@@ -28,12 +31,56 @@
 import { execFile, spawn } from "node:child_process";
 import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const DEAD_CHILD_SEND_ATTEMPTS = 3;
 const INTERACTIVE_AGENT_STATES = new Set(["ready", "idle"]);
+
+// #889: the tools this script calls. get_agent_state, broadcast, and
+// resync_agents are gone from the public surface.
+export const REQUIRED_ACCEPTANCE_TOOLS = [
+  "spawn_agent",
+  "list_agents",
+  "send_to",
+  "read_screen",
+  "close_surface",
+];
+const CREATE_WORKSPACE_TOOLS = ["create_workspace", "delete_workspace"];
+
+export function missingAcceptanceTools(listed, { createWorkspace = false } = {}) {
+  const have = new Set(listed);
+  return [
+    ...REQUIRED_ACCEPTANCE_TOOLS,
+    ...(createWorkspace ? CREATE_WORKSPACE_TOOLS : []),
+  ].filter((name) => !have.has(name));
+}
+
+/** One agent's row from list_agents({agent_ids:[id], detail:"full"}), flattened. */
+export function agentRowFromList(list, agentId) {
+  const row = (list?.agents ?? []).find((agent) => agent?.agent_id === agentId);
+  if (!row) throw new Error(`list_agents did not return ${agentId}`);
+  const state =
+    typeof row.state === "object" && row.state !== null ? row.state.value : row.state;
+  return {
+    agent_id: row.agent_id,
+    state: typeof state === "string" ? state : "unknown",
+    surface_id: row.surface_id ?? row.detail?.surface_id,
+    workspace_id: row.detail?.workspace_id ?? row.workspace_id,
+  };
+}
+
+/** A send_to reply as the per-agent receipt the broadcast checks used to read. */
+export function sendToReceipt(agentId, reply) {
+  return {
+    agent_id: agentId,
+    delivered: typeof reply?.delivered === "boolean" ? reply.delivered : reply?.ok !== false,
+    ...(typeof reply?.skipped === "string" ? { skipped: reply.skipped } : {}),
+    ...(reply?.ok === false && reply?.error ? { error: reply.error } : {}),
+  };
+}
 
 function parseArgs(argv) {
   const o = {
@@ -474,10 +521,13 @@ async function runDeadChildProbe(mcp, spawnedAgent, workspace) {
   process.stdout.write("\n=== §b dead-child probe ===\n");
   let state;
   try {
-    state = await mcp.call(
-      "get_agent_state",
-      { agent_id: spawnedAgent.agent_id },
-      60_000,
+    state = agentRowFromList(
+      await mcp.call(
+        "list_agents",
+        { agent_ids: [spawnedAgent.agent_id], detail: "full" },
+        60_000,
+      ),
+      spawnedAgent.agent_id,
     );
   } catch (error) {
     return printSkippedDeadChild(
@@ -553,17 +603,19 @@ async function runDeadChildProbe(mcp, spawnedAgent, workspace) {
   const attempts = [];
   for (let attempt = 1; attempt <= DEAD_CHILD_SEND_ATTEMPTS; attempt += 1) {
     const sentinel = `CMUX_DEADCHILD_${Date.now()}_${process.pid}_${attempt}`;
-    const broadcast = await mcp.call(
-      "broadcast",
-      scopedRoleAllBroadcast(workspace, {
-        text: sentinel,
-        press_enter: false,
-      }),
-      60_000,
-    );
-    const receipt = (broadcast.receipts ?? []).find((candidate) =>
-      acceptedIds.has(candidate.agent_id),
-    );
+    let reply;
+    try {
+      reply = await mcp.call(
+        "send_to",
+        { mode: "agent", agent_id: target.agent_id, text: sentinel, press_enter: false },
+        60_000,
+      );
+    } catch (error) {
+      reply = { ok: false, error: error.message };
+    }
+    const receipt = acceptedIds.has(target.agent_id)
+      ? sendToReceipt(target.agent_id, reply)
+      : undefined;
     const screen = await mcp.call(
       "read_screen",
       {
@@ -615,6 +667,16 @@ async function main() {
   const spawned = [];
   try {
     await mcp.init();
+    const listed = await mcp.req("tools/list", {}, 30_000);
+    const missing = missingAcceptanceTools(
+      (listed?.tools ?? []).map((tool) => tool.name),
+      { createWorkspace: Boolean(opt.createWorkspace) },
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `preflight: required tools missing from tools/list: ${missing.join(", ")}`,
+      );
+    }
     if (opt.createWorkspace) {
       const created = await mcp.call(
         "create_workspace",
@@ -650,39 +712,46 @@ async function main() {
       const state = await waitForInteractiveAgent({
         agentId: a.agent_id,
         timeoutMs: opt.waitTimeoutMs,
-        getState: () =>
-          mcp.call("get_agent_state", { agent_id: a.agent_id }, 30_000),
+        getState: async () =>
+          agentRowFromList(
+            await mcp.call(
+              "list_agents",
+              { agent_ids: [a.agent_id], detail: "full" },
+              30_000,
+            ),
+            a.agent_id,
+          ),
       });
       process.stdout.write(`  interactive ${a.agent_id} (${state})\n`);
     }
 
     const ids = new Set(spawned.map((a) => a.agent_id));
-    const surfs = new Set(spawned.map((a) => a.surface_id));
 
-    // 3. RC3 — broadcast must deliver to all N (no dead:error skip)
-    const bc = await mcp.call(
-      "broadcast",
-      scopedRoleAllBroadcast(workspace, { text: "§7 acceptance ping" }),
-      120_000,
-    );
-    const mine = (bc.receipts ?? []).filter((r) => ids.has(r.agent_id));
+    // 3. RC3 — one send_to per agent must deliver to all N (no dead:error skip)
+    const mine = [];
+    for (const a of spawned) {
+      let reply;
+      try {
+        reply = await mcp.call(
+          "send_to",
+          { mode: "agent", agent_id: a.agent_id, text: "§7 acceptance ping" },
+          60_000,
+        );
+      } catch (error) {
+        reply = { ok: false, error: error.message };
+      }
+      mine.push(sendToReceipt(a.agent_id, reply));
+    }
     const deliveredMine = mine.filter((r) => r.delivered).length;
     const deadSkipped = mine.filter((r) => typeof r.skipped === "string" && r.skipped.startsWith("dead:"));
-    check(deliveredMine === opt.count, `broadcast delivered to all ${opt.count} spawned agents (got ${deliveredMine}; receipts=${JSON.stringify(mine)})`);
-    check(deadSkipped.length === 0, `broadcast skipped 0 spawned agents as dead:* (got ${deadSkipped.length})`);
+    check(deliveredMine === opt.count, `send_to delivered to all ${opt.count} spawned agents (got ${deliveredMine}; receipts=${JSON.stringify(mine)})`);
+    check(deadSkipped.length === 0, `send_to skipped 0 spawned agents as dead:* (got ${deadSkipped.length})`);
 
-    // 4. RC4 — resync must not evict/orphan the live surfaces
-    const rs = await mcp.call("resync_agents", {}, 120_000);
-    const diff = rs.diff ?? rs;
-    const evictedMine = (diff.evicted ?? []).filter((x) => ids.has(x));
-    const orphanedMine = (diff.orphaned ?? []).filter((x) => surfs.has(x));
-    check(evictedMine.length === 0, `resync evicted 0 spawned seats (got ${JSON.stringify(evictedMine)})`);
-    check(orphanedMine.length === 0, `resync orphaned 0 spawned surfaces (got ${JSON.stringify(orphanedMine)})`);
-
-    // 4b. still registered + addressable
-    const list = await mcp.call("list_agents", {}, 60_000);
+    // 4. RC4 — still registered + addressable. The resync sweep is automatic;
+    // there is no resync tool to call.
+    const list = await mcp.call("list_agents", { agent_ids: [...ids] }, 60_000);
     const stillListed = (list.agents ?? []).filter((a) => ids.has(a.agent_id)).length;
-    check(stillListed === opt.count, `all ${opt.count} spawned agents still registered after resync (got ${stillListed})`);
+    check(stillListed === opt.count, `all ${opt.count} spawned agents still registered (got ${stillListed})`);
 
     // 5. RC4 — send_to each must deliver
     let sendOk = 0;
@@ -749,7 +818,10 @@ async function main() {
   process.exit(green ? 0 : 1);
 }
 
-main().catch((e) => {
-  process.stdout.write(`RED_REGISTRY_LIVENESS fatal: ${e.stack ?? e.message}\n`);
-  process.exit(1);
-});
+// Run only when executed, so tests can import the exported helpers.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    process.stdout.write(`RED_REGISTRY_LIVENESS fatal: ${e.stack ?? e.message}\n`);
+    process.exit(1);
+  });
+}

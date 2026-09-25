@@ -3678,6 +3678,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       refreshManagedMetadataBestEffort,
       registry,
       resolveCurrentCallerAgent,
+      inboxOpts,
     });
 
     // 15. list_agents (src/mcp/tools/agent.ts, CX-3b S10a)
