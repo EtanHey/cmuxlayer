@@ -2672,8 +2672,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const currentWorkspace = currentRefForUuid
             ? current?.workspaceBySurface.get(currentRefForUuid)
             : null;
+          if (!current) {
+            // #805: a null re-read (observer unavailable, enumeration failed)
+            // is not evidence the UUID moved; say which one happened.
+            throw new Error(
+              `Could not re-read surface topology before ${operation} on ` +
+                `${currentRef} (surface observer unavailable or workspace ` +
+                `enumeration failed); refusing terminal mutation. Stable ` +
+                `surface UUID ${stableUuid} was not observed to change.`,
+            );
+          }
           if (
-            !current ||
             currentRefForUuid !== currentRef ||
             (currentWorkspace ?? null) !== (workspace ?? null)
           ) {
@@ -4744,6 +4753,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stateMgr,
           route.surface,
         );
+        // #805: a seat sending to its OWN surface (e.g. `/mcp reconnect x`) is
+        // blocked inside this very tool call, so its composer only queues the
+        // input until the turn ends: submit evidence cannot appear, and
+        // verifying would poll topology to a timeout. Deliver, skip that
+        // verification, and say so on the receipt.
+        const callerSurface = currentCallerContext()?.surfaceId?.trim().toLowerCase();
+        const selfTarget = Boolean(callerSurface) &&
+          (route.stableSurfaceIdentity?.trim().toLowerCase() === callerSurface ||
+            route.surface.toLowerCase() === callerSurface);
         const delivery = await withSurfaceWrite(
           route.surface,
           async () => {
@@ -4759,10 +4777,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               source_event: "send_command",
               verify_submit:
                 !bootPromptPath &&
+                !selfTarget &&
                 !!targetRecord &&
                 INTERACTIVE_AGENT_STATES.has(targetRecord.state),
               verify_submit_for_tracked_surface:
-                bootPromptPath ? undefined : targetRecord,
+                bootPromptPath || selfTarget ? undefined : targetRecord,
               beforeMutation: route.assertCurrent,
             });
           },
@@ -4810,6 +4829,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ...identity,
           command: sanitizedCommand,
           ...delivery,
+          ...(selfTarget
+            ? {
+                self_target: true,
+                self_target_note:
+                  "Sent to the caller's own surface: the caller's turn is blocked in this call, so the command runs when that turn ends; submit is not verifiable from inside it.",
+              }
+            : {}),
           ...remapFields(route),
           boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           boot_prompt_receipt: bootPromptDelivery,
