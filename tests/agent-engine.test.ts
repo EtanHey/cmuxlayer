@@ -16053,9 +16053,11 @@ Session ID: ${sessionId}`,
       });
       const receiptStore = (
         engine as unknown as {
-          deliveryReceipts: Map<string, AgentDeliveryReceipt>;
+          deliveryQueue: {
+            deliveryReceipts: Map<string, AgentDeliveryReceipt>;
+          };
         }
-      ).deliveryReceipts;
+      ).deliveryQueue.deliveryReceipts;
       receiptStore.set(receipt.delivery_id, {
         ...receipt,
         rpc_methods: null as unknown as AgentDeliveryReceipt["rpc_methods"],
@@ -16222,7 +16224,7 @@ Session ID: ${sessionId}`,
       );
       liveSurfaces = [makeSurface("surface:42")];
       await engine.getRegistry().reconstitute();
-      (engine as any).deliverySubmitTimeoutMs = 5;
+      (engine as any).deliveryQueue.deliverySubmitTimeoutMs = 5;
       engine.setDeliverySubmitter(
         async () => await new Promise<never>(() => {}),
       );
