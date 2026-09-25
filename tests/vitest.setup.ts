@@ -49,6 +49,17 @@ mkdirSync(root, { recursive: true });
 process.env.TMPDIR = root;
 process.env.TMP = root;
 process.env.TEMP = root;
+// AIDEV-NOTE (#834): HOME is sandboxed too. Every home-derived default
+// (the generic fleet coordinationDir ~/.local/state/cmuxlayer, the daemon's
+// ~/.local/state/cmux-agents, a golems fleet's ~/.golems-zikaron) resolves
+// through os.homedir(), which reads HOME. On a fleet Mac those are LIVE
+// directories the running daemon uses; a unit test once created and updated
+// ~/.golems-zikaron/.outbox-drained.json. Pointing HOME into the run's temp
+// root makes a stray default write land in the sandbox, which global-setup
+// removes with the root. tests/hermetic-home.test.ts pins it.
+const home = join(root, "home");
+mkdirSync(home, { recursive: true });
+process.env.HOME = home;
 // #482: `resumable` is now an observation of the harness session store. The
 // suite must never read the developer's real ~/.claude to decide it, so the
 // default here is the honest "I did not look" answer — which is exactly the
