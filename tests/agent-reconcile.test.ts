@@ -963,6 +963,38 @@ describe("Agent reconcile", () => {
     });
   });
 
+  it("records the sweep's longest event-loop stall on its summary row (#810)", async () => {
+    stateMgr.writeState(makeRecord({
+      agent_id: "loop-stall-agent",
+      surface_id: "surface:loop",
+      workspace_id: "workspace:test",
+    }));
+    liveSurfaces = [makeSurface("surface:loop")];
+    const quietScreen = async (surface: string) => ({
+      surface, text: "Working", lines: 20, scrollback_used: false,
+    });
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      // Hold the loop the way a blocking reconciler body would.
+      const until = performance.now() + 80;
+      while (performance.now() < until) { /* busy */ }
+      return quietScreen(surface);
+    });
+    await engine.runSweep();
+    mockClient.readScreen.mockImplementation(quietScreen);
+    await engine.runSweep();
+
+    const summaries = stateMgr.getEventLog().readEntries().filter(
+      (entry) => "event_type" in entry && entry.event_type === "sweep_phase" &&
+        "phase" in entry && entry.phase === "summary",
+    ) as Array<{ loop_stall_max_ms?: number }>;
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0]?.loop_stall_max_ms).toBeGreaterThanOrEqual(60);
+    // No upper bound on the quiet sweep: machine load can stall any process
+    // (#817). The per-sweep reset is pinned with an injected clock in
+    // tests/loop-stall.test.ts.
+    expect(summaries[1]?.loop_stall_max_ms).toEqual(expect.any(Number));
+  });
+
   it("does not hold the lifecycle lock during one blocked screen read", async () => {
     stateMgr.writeState(makeRecord({
       agent_id: "blocked-read-agent",
