@@ -36,7 +36,7 @@ import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
 import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
-import { agentProcessLiveness, agentProcessMayBeAlive } from "./process-liveness.js";
+import { agentProcessLiveness, agentProcessMayBeAlive } from "./util/pid-alive.js";
 import {
   currentCliFallbackCount,
   currentCliFallbackSources,

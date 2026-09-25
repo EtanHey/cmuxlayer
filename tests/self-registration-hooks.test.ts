@@ -372,6 +372,51 @@ describe("installSessionHooks", () => {
     expect(commands).toContain(`exec python3 '${installedHook}.old'`);
   });
 
+  it("quotes a hook path containing an apostrophe with the shared shellQuote", async () => {
+    const homeDir = tempDir("cmux-hook-o'brien-");
+    await installSessionHooks({ homeDir, assetsDir: hookAssets });
+
+    const hook = join(homeDir, ".claude", "hooks", "cmux-self-register.py");
+    const installed = JSON.parse(
+      readFileSync(join(homeDir, ".claude", "settings.json"), "utf8"),
+    );
+    const commands = installed.hooks.SessionStart.flatMap((group: any) =>
+      group.hooks.map((handler: any) => handler.command),
+    );
+    expect(commands).toEqual([
+      `exec python3 '${hook.replaceAll("'", "'\\''")}'`,
+    ]);
+  });
+
+  it("treats a hook installed with the legacy quote spelling as already installed", async () => {
+    const homeDir = tempDir("cmux-hook-o'brien-legacy-");
+    const claudeDir = join(homeDir, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const hook = join(claudeDir, "hooks", "cmux-self-register.py");
+    // What installers before CX-2 U1b wrote for a path with an apostrophe.
+    const legacyCommand = `exec python3 '${hook.replaceAll("'", `'"'"'`)}'`;
+    writeFileSync(
+      join(claudeDir, "settings.json"),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            { matcher: ".*", hooks: [{ type: "command", command: legacyCommand }] },
+          ],
+        },
+      }),
+    );
+
+    await installSessionHooks({ homeDir, assetsDir: hookAssets });
+
+    const installed = JSON.parse(
+      readFileSync(join(claudeDir, "settings.json"), "utf8"),
+    );
+    const commands = installed.hooks.SessionStart.flatMap((group: any) =>
+      group.hooks.map((handler: any) => handler.command),
+    );
+    expect(commands).toEqual([legacyCommand]);
+  });
+
   it("preserves restrictive modes on existing config files", async () => {
     const homeDir = tempDir("cmux-hook-config-mode-");
     const claudeDir = join(homeDir, ".claude");

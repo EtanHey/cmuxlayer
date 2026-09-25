@@ -179,7 +179,7 @@ import {
   agentProcessMayBeAlive,
   processLiveness,
   type ProcessLiveness,
-} from "./process-liveness.js";
+} from "./util/pid-alive.js";
 import {
   AgentLaunchError,
   TERMINAL_STATES,
