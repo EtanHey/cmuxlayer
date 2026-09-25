@@ -32,24 +32,59 @@ function loopHeldInEveryTrial(trialMaxMs: number[], budgetMs: number): boolean {
 }
 
 /**
- * #817 row 2: under sustained load (load 16-55) three back-to-back trials sit
- * inside one burst, and all three read over budget. Idle time between trials
- * means a burst has to last over a second to take all three.
+ * #817 rows 2-3: a busy Mac (load 16-55) and the hosted runner both stall for
+ * over a second, long enough to cover three spaced trials, so neither
+ * best-of-3 nor the pause alone tells a held loop from a stalled machine.
+ * Each attempt therefore idles TRIAL_PAUSE_MS first and measures loop delay
+ * during that idle window as a control. A held loop shows delay only while
+ * sweeps run; a stalled runner shows it while idle too, and that attempt is
+ * void. The guard needs 3 valid trials within MAX_ATTEMPTS attempts. It fails
+ * only if all 3 exceed the budget, and it skips (never fails) when the runner
+ * never goes quiet long enough.
  */
 const TRIAL_PAUSE_MS = 250;
+const MAX_ATTEMPTS = 6;
 
-async function runTrials(input: {
-  trials: number;
+interface ControlledAttempt {
+  controlMs: number;
+  trialMs: number;
+  valid: boolean;
+}
+
+async function runControlledTrials(input: {
+  needed: number;
+  maxAttempts: number;
   pauseMs: number;
-  runTrial: (trial: number) => Promise<number>;
-  pause: (ms: number) => Promise<void>;
-}): Promise<number[]> {
-  const trialMaxMs: number[] = [];
-  for (let trial = 0; trial < input.trials; trial += 1) {
-    if (trial > 0) await input.pause(input.pauseMs);
-    trialMaxMs.push(await input.runTrial(trial));
+  budgetMs: number;
+  /** Idle for `ms` and return the loop delay observed while idle. */
+  pause: (ms: number) => Promise<number>;
+  runTrial: (attempt: number) => Promise<number>;
+}): Promise<{
+  verdict: "pass" | "fail" | "skip";
+  attempts: ControlledAttempt[];
+  reason?: string;
+}> {
+  const attempts: ControlledAttempt[] = [];
+  const valid = () => attempts.filter((attempt) => attempt.valid);
+  while (valid().length < input.needed && attempts.length < input.maxAttempts) {
+    const controlMs = await input.pause(input.pauseMs);
+    const trialMs = await input.runTrial(attempts.length);
+    attempts.push({ controlMs, trialMs, valid: controlMs <= input.budgetMs });
   }
-  return trialMaxMs;
+  const validTrials = valid().map((attempt) => attempt.trialMs);
+  if (validTrials.length < input.needed) {
+    return {
+      verdict: "skip",
+      attempts,
+      reason:
+        `runner stalled: only ${validTrials.length}/${input.needed} attempts ` +
+        `had a quiet ${input.pauseMs} ms control in ${input.maxAttempts}`,
+    };
+  }
+  return {
+    verdict: loopHeldInEveryTrial(validTrials, input.budgetMs) ? "fail" : "pass",
+    attempts,
+  };
 }
 
 // A full-height Claude Code pane: enough text that parsing is real work.
@@ -113,41 +148,71 @@ describe("loopHeldInEveryTrial (#817: one scheduler spike is not a held loop)", 
   });
 });
 
-describe("runTrials spacing (#817: a burst must be long to take all three trials)", () => {
-  // Fake clock: each trial takes 300 ms, and a 600 ms load burst covers
-  // 100-700 ms. A trial overlapping the burst reads 120 ms, otherwise 12 ms.
-  const burstFrom = 100;
-  const burstTo = 700;
-  const simulate = async (pauseMs: number) => {
+describe("runControlledTrials (#817: a stalled runner is not a held loop)", () => {
+  // Fake clock. Every attempt idles TRIAL_PAUSE_MS (the control window), then
+  // runs a 300 ms trial. `stall(from, to)` says whether the machine was
+  // stalled over that span: 120 ms of delay if so, 12 ms if not.
+  const simulate = async (model: {
+    control: (from: number, to: number) => number;
+    trial: (from: number, to: number) => number;
+  }) => {
     let clock = 0;
     const pauses: number[] = [];
-    const maxes = await runTrials({
-      trials: TRIALS,
-      pauseMs,
-      runTrial: async () => {
-        const start = clock;
-        clock += 300;
-        return start < burstTo && clock > burstFrom ? 120 : 12;
-      },
+    const result = await runControlledTrials({
+      needed: TRIALS,
+      maxAttempts: MAX_ATTEMPTS,
+      pauseMs: TRIAL_PAUSE_MS,
+      budgetMs: BUDGET_MS,
       pause: async (ms) => {
         pauses.push(ms);
+        const from = clock;
         clock += ms;
+        return model.control(from, clock);
+      },
+      runTrial: async () => {
+        const from = clock;
+        clock += 300;
+        return model.trial(from, clock);
       },
     });
-    return { maxes, pauses };
+    return { ...result, pauses };
   };
+  const always = (ms: number) => () => ms;
 
-  it("a 600 ms burst covering two adjacent trials does not fail the guard", async () => {
-    const { maxes } = await simulate(TRIAL_PAUSE_MS);
-    expect(maxes.filter((ms) => ms > BUDGET_MS)).toHaveLength(2);
-    expect(loopHeldInEveryTrial(maxes, BUDGET_MS)).toBe(false);
+  it("skips, never fails, when the runner stalls in the idle control too", async () => {
+    const result = await simulate({ control: always(120), trial: always(120) });
+    expect(result.verdict).toBe("skip");
+    expect(result.attempts).toHaveLength(MAX_ATTEMPTS);
+    expect(result.attempts.every((attempt) => !attempt.valid)).toBe(true);
+    expect(result.reason).toMatch(/stalled/);
   });
 
-  it("pauses at least 250 ms, and only between trials", async () => {
-    const { maxes, pauses } = await simulate(TRIAL_PAUSE_MS);
-    expect(maxes).toHaveLength(TRIALS);
-    expect(pauses).toEqual(Array(TRIALS - 1).fill(TRIAL_PAUSE_MS));
+  it("fails a held loop: quiet controls, every valid trial over budget", async () => {
+    const result = await simulate({ control: always(12), trial: always(120) });
+    expect(result.verdict).toBe("fail");
+    expect(result.attempts).toHaveLength(TRIALS);
+  });
+
+  it("passes a clean run in exactly three attempts", async () => {
+    const result = await simulate({ control: always(12), trial: always(12) });
+    expect(result.verdict).toBe("pass");
+    expect(result.attempts).toHaveLength(TRIALS);
+    expect(result.pauses).toEqual(Array(TRIALS).fill(TRIAL_PAUSE_MS));
+  });
+
+  it("voids attempts inside a 600 ms burst and judges the clean ones", async () => {
+    const overlaps = (from: number, to: number) => from < 700 && to > 100;
+    const result = await simulate({
+      control: (from, to) => (overlaps(from, to) ? 120 : 12),
+      trial: (from, to) => (overlaps(from, to) ? 120 : 12),
+    });
+    expect(result.attempts.filter((attempt) => !attempt.valid)).toHaveLength(2);
+    expect(result.verdict).toBe("pass");
+  });
+
+  it("idles at least 250 ms before every attempt, capped at six attempts", () => {
     expect(TRIAL_PAUSE_MS).toBeGreaterThanOrEqual(250);
+    expect(MAX_ATTEMPTS).toBe(6);
   });
 });
 
@@ -209,19 +274,26 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it(`a ${AGENTS}-agent sweep never holds the loop for ${BUDGET_MS} ms`, async () => {
+  it(`a ${AGENTS}-agent sweep never holds the loop for ${BUDGET_MS} ms`, async (ctx) => {
     await engine.getRegistry().reconstitute();
     await engine.runSweep(); // warm module and JIT state; measure steady state
     const readScreen = client.readScreen as ReturnType<typeof vi.fn>;
-    const trialMaxMs = await runTrials({
-      trials: TRIALS,
+    const result = await runControlledTrials({
+      needed: TRIALS,
+      maxAttempts: MAX_ATTEMPTS,
       pauseMs: TRIAL_PAUSE_MS,
-      pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      runTrial: async (trial) => {
+      budgetMs: BUDGET_MS,
+      pause: async (ms) => {
+        const idle = monitorEventLoopDelay({ resolution: 1 });
+        idle.enable();
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        idle.disable();
+        return idle.max / 1e6;
+      },
+      runTrial: async () => {
         const readsBefore = readScreen.mock.calls.length;
         const delay = monitorEventLoopDelay({ resolution: 1 });
         delay.enable();
-        const startedAt = performance.now();
         try {
           await engine.runSweep();
           await engine.runSweep();
@@ -233,15 +305,20 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
         expect(readScreen.mock.calls.length - readsBefore).toBeGreaterThanOrEqual(
           AGENTS * 3,
         );
-        const maxMs = delay.max / 1e6;
-        const sweepMs = (performance.now() - startedAt) / 3;
-        process.stderr.write(`[#810] trial ${trial + 1}/${TRIALS}: sweep ${sweepMs.toFixed(1)} ms avg, event_loop_delay_max ${maxMs.toFixed(1)} ms\n`);
-        return maxMs;
+        return delay.max / 1e6;
       },
     });
+    result.attempts.forEach((attempt, index) => {
+      process.stderr.write(`[#810] attempt ${index + 1}: control ${attempt.controlMs.toFixed(1)} ms, trial event_loop_delay_max ${attempt.trialMs.toFixed(1)} ms${attempt.valid ? "" : " (void: runner stalled while idle)"}\n`);
+    });
+    if (result.verdict === "skip") {
+      process.stderr.write(`[#810] SKIP: ${result.reason}\n`);
+      ctx.skip(result.reason);
+      return;
+    }
     expect(
-      loopHeldInEveryTrial(trialMaxMs, BUDGET_MS),
-      `every trial exceeded ${BUDGET_MS} ms: ${trialMaxMs.map((ms) => ms.toFixed(1)).join(", ")}`,
-    ).toBe(false);
+      result.verdict,
+      `every valid trial exceeded ${BUDGET_MS} ms with a quiet control`,
+    ).toBe("pass");
   }, 30_000);
 });
