@@ -29,7 +29,11 @@ import {
   makeSelfRegistrationSessionLookup,
   makeSelfRegistrationSessionResolver,
 } from "./self-registration.js";
-import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
+import {
+  defaultOutboxDrain,
+  httpDeliver,
+  type NotifyPayload,
+} from "./outbox-drainer.js";
 import {
   defaultMonitorRegistryPath,
   httpNotifyMonitorDeadman,
@@ -81,7 +85,6 @@ import {
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
 const DEFAULT_MONITOR_RECONCILE_INTERVAL_MS = 15_000;
-const DEFAULT_NOTIFY_URL = "http://127.0.0.1:3847/notify";
 const MONITOR_REARM_INBOX_HEARTBEAT_MAX_AGE_MS = 60_000;
 const LISTEN_FD_START = 3;
 
@@ -1373,6 +1376,8 @@ export async function runDaemon(
   const fleet = loadFleetConfig();
   const legacyWarning = testProcess ? null : legacyCoordinationWarning(fleet);
   if (legacyWarning) (opts.logger ?? console).error(legacyWarning);
+  const fleetNotify = (notification: NotifyPayload) =>
+    httpDeliver(notification, fleet.notifyUrl);
   let exitStarted = false;
   const exitAfterShutdown = (
     reason: DaemonShutdownReason,
@@ -1390,7 +1395,7 @@ export async function runDaemon(
       opts.outboxDrain ??
       (testProcess
         ? async () => undefined
-        : () => drainOutbox({ deliver: httpDeliver })),
+        : (defaultOutboxDrain(fleet) ?? (async () => undefined))),
     monitorRegistryNotify:
       opts.monitorRegistryNotify ??
       (testProcess ? async () => undefined : httpNotifyMonitorDeadman),
@@ -1402,14 +1407,10 @@ export async function runDaemon(
       (testProcess ? async () => undefined : httpNotifyWatch),
     monitorOwnerPtyDeadNotify:
       opts.monitorOwnerPtyDeadNotify ??
-      (testProcess
-        ? async () => false
-        : (notification) => httpDeliver(notification, DEFAULT_NOTIFY_URL)),
+      (testProcess ? async () => false : fleetNotify),
     monitorOwnerWedgedNotify:
       opts.monitorOwnerWedgedNotify ??
-      (testProcess
-        ? async () => false
-        : (notification) => httpDeliver(notification, DEFAULT_NOTIFY_URL)),
+      (testProcess ? async () => false : fleetNotify),
     onRetire: async (reason, result) => {
       await opts.onRetire?.(reason, result);
       exitAfterShutdown(reason, result);

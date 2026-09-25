@@ -1,8 +1,9 @@
-// Notify/outbox drainer (LANE-OUTBOX). Nothing drained `~/.golems-zikaron/outbox.md`
-// (imp9) — pending operator messages piled up and were never delivered. This is
-// cmuxlayer's notify half: read pending outbox entries and POST them to the local
-// notify listener (127.0.0.1:3847/notify — the same endpoint the RAM watchdog uses),
-// remembering what was delivered so a restart never double-sends.
+// Notify/outbox drainer (LANE-OUTBOX). Nothing drained the fleet outbox
+// (`<coordinationDir>/outbox.md`, imp9) — pending operator messages piled up and
+// were never delivered. This is cmuxlayer's notify half: read pending outbox
+// entries and POST them to the fleet config's `notifyUrl`, remembering what was
+// delivered so a restart never double-sends. It runs only when the fleet config
+// sets `outbox: true` (see fleet-config.ts).
 //
 // AIDEV-NOTE: idempotency is by a NON-DESTRUCTIVE sidecar (`.outbox-drained.json`),
 // never by mutating outbox.md. Each entry's id is `hash(body)#occurrence` — a
@@ -18,7 +19,7 @@
 // AIDEV-NOTE: the `deliver` transport defaults to a NO-OP. Only the real MCP
 // entrypoints (index.ts / daemon.ts / app-server-runtime.ts) inject `httpDeliver`,
 // so the test suite — and any caller that forgets to wire a transport — never posts
-// to 127.0.0.1:3847. This is the incident guard: a real-default once fired ~20 live
+// to the notify listener. This is the incident guard: a real-default once fired ~20 live
 // notifications during `bun run test`.
 
 import {
@@ -29,10 +30,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { loadFleetConfig } from "./fleet-config.js";
 import { dirname, join } from "node:path";
+import { loadFleetConfig, type FleetConfig } from "./fleet-config.js";
 
-/** Payload shape accepted by the 3847 notify listener (matches the RAM watchdog). */
+/** Payload shape accepted by the fleet notify listener (matches the RAM watchdog). */
 export interface NotifyPayload {
   title: string;
   body: string;
@@ -92,9 +93,9 @@ export interface OutboxDrainerOptions {
    * history survives when the live outbox.md is later trimmed/rotated.
    */
   archivePath?: string;
-  /** Notify listener URL. Defaults to `http://127.0.0.1:3847/notify`. */
-  notifyUrl?: string;
-  /** Notification title. */
+  /** Notify listener URL. Defaults to the fleet config's `notifyUrl` (null skips). */
+  notifyUrl?: string | null;
+  /** Notification title. Defaults to the fleet config's `outboxTitle`. */
   title?: string;
   /** Notification source tag. */
   source?: string;
@@ -106,7 +107,7 @@ export interface OutboxDrainerOptions {
    * NO-OP (delivers nothing) so tests never hit the network; the real MCP
    * entrypoints inject `httpDeliver` to POST to `notifyUrl`.
    */
-  deliver?: (payload: NotifyPayload, url: string) => Promise<boolean>;
+  deliver?: (payload: NotifyPayload, url: string | null) => Promise<boolean>;
   /** Clock for the `at` timestamp in persisted state / archive. */
   now?: () => number;
 }
@@ -121,8 +122,6 @@ interface DrainState {
   drained: DrainedRecord[];
 }
 
-const DEFAULT_NOTIFY_URL = "http://127.0.0.1:3847/notify";
-const DEFAULT_TITLE = "golems outbox";
 const DEFAULT_SOURCE = "cmuxlayer-outbox";
 const DEFAULT_PRIORITY = "default";
 // v1 → v2: #240 changed the dedup id from byte-position → `sha256(body)#occurrence`.
@@ -132,6 +131,20 @@ const STATE_VERSION = 2;
 
 export function defaultOutboxPath(): string {
   return join(loadFleetConfig().coordinationDir, "outbox.md");
+}
+
+/** The drainer production entrypoints wire in, or undefined when the fleet has no outbox. */
+export function defaultOutboxDrain(
+  config: FleetConfig = loadFleetConfig(),
+): (() => Promise<DrainResult>) | undefined {
+  if (!config.outbox) return undefined;
+  return () =>
+    drainOutbox({
+      deliver: httpDeliver,
+      outboxPath: join(config.coordinationDir, "outbox.md"),
+      notifyUrl: config.notifyUrl,
+      title: config.outboxTitle,
+    });
 }
 
 export function defaultStatePath(outboxPath: string): string {
@@ -241,8 +254,12 @@ function appendArchive(
  */
 export async function httpDeliver(
   payload: NotifyPayload,
-  url: string,
+  url: string | null,
 ): Promise<boolean> {
+  if (!url) return false;
+  const backoff = notifyBackoff.get(url);
+  if (backoff && Date.now() < backoff.retryAtMs) return false;
+  let failure: string;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -250,10 +267,31 @@ export async function httpDeliver(
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(3000),
     });
-    return res.ok;
-  } catch {
-    return false;
+    if (res.ok) {
+      notifyBackoff.delete(url);
+      return true;
+    }
+    failure = `HTTP ${res.status}`;
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
   }
+  // AIDEV-NOTE: a fleet may configure a listener that runs on only one of its
+  // machines. Fail soft: log once per outage, then skip POSTs for a window
+  // instead of hammering a dead port from every sweep.
+  if (!backoff) {
+    console.error(
+      `[cmuxlayer] notify listener ${url} unreachable (${failure}); skipping notifications, retrying every ${NOTIFY_BACKOFF_MS / 1000}s`,
+    );
+  }
+  notifyBackoff.set(url, { retryAtMs: Date.now() + NOTIFY_BACKOFF_MS });
+  return false;
+}
+
+const NOTIFY_BACKOFF_MS = 60_000;
+const notifyBackoff = new Map<string, { retryAtMs: number }>();
+
+export function resetNotifyBackoffForTests(): void {
+  notifyBackoff.clear();
 }
 
 /** Default transport: deliver nothing. Prevents any accidental network I/O. */
@@ -271,8 +309,13 @@ export async function drainOutbox(
   const outboxPath = opts.outboxPath ?? defaultOutboxPath();
   const statePath = opts.statePath ?? defaultStatePath(outboxPath);
   const archivePath = opts.archivePath ?? defaultArchivePath(outboxPath);
-  const notifyUrl = opts.notifyUrl ?? DEFAULT_NOTIFY_URL;
-  const title = opts.title ?? DEFAULT_TITLE;
+  const fleet =
+    opts.notifyUrl === undefined || opts.title === undefined
+      ? loadFleetConfig()
+      : null;
+  const notifyUrl =
+    opts.notifyUrl !== undefined ? opts.notifyUrl : (fleet?.notifyUrl ?? null);
+  const title = opts.title ?? fleet?.outboxTitle ?? "cmuxlayer outbox";
   const source = opts.source ?? DEFAULT_SOURCE;
   const priority = opts.priority ?? DEFAULT_PRIORITY;
   const deliver = opts.deliver ?? noopDeliver;

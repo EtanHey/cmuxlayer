@@ -781,10 +781,10 @@ export interface AgentEngineOptions {
   seatRegistryPath?: string;
   /**
    * Best-effort drain of the shared operator outbox, invoked at the end of each
-   * sweep so any live agent's cmuxlayer flushes `~/.golems-zikaron/outbox.md` to
-   * the notify path without an explicit trigger. Defaults to a NO-OP so bare
+   * sweep so any live agent's cmuxlayer flushes the fleet outbox to the notify
+   * path without an explicit trigger. Defaults to a NO-OP so bare
    * construction (tests, libraries) never touches the real outbox or network;
-   * production entrypoints inject `() => drainOutbox()`.
+   * production entrypoints inject `defaultOutboxDrain()`.
    */
   outboxDrain?: () => Promise<unknown>;
   /**

@@ -204,7 +204,6 @@ export class WatchArmError extends Error {
 }
 
 const STATE_VERSION = 1 as const;
-const DEFAULT_NOTIFY_URL = "http://127.0.0.1:3847/notify";
 const WRITE_LOCK_TIMEOUT_MS = 5_000;
 const WRITE_LOCK_STALE_MS = 30_000;
 const WRITE_LOCK_RETRY_MS = 5;
@@ -1648,10 +1647,12 @@ export async function sweepWatches(
 
 export async function httpNotifyWatch(
   event: WatchNotification,
-  notifyUrl = DEFAULT_NOTIFY_URL,
+  notifyUrl: string | null = loadFleetConfig().notifyUrl,
   deliver: typeof httpDeliver = httpDeliver,
 ): Promise<boolean> {
   if (event.notify !== true) return true;
+  // No fleet listener configured: same as no notifier wired, nothing to retry.
+  if (!notifyUrl) return true;
   return deliver(
     {
       title: "Declared watch changed",
