@@ -4,7 +4,7 @@ import type {
   AgentTopologyHealthInput,
   CollapsedMonitorHealthInput,
 } from "./agent-health.js";
-import type { WorkerHarvestability } from "./agent-engine.js";
+import type { WorkerHarvestability } from "./engine/types.js";
 import type { SurfaceWriteLivenessObservation } from "./surface-write-liveness.js";
 import type {
   ParsedControlPlaneState,

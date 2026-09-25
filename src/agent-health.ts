@@ -1,5 +1,5 @@
 import type { AgentRecord, AgentRole, AgentState } from "./agent-types.js";
-import type { WorkerHarvestability } from "./agent-engine.js";
+import type { WorkerHarvestability } from "./engine/types.js";
 import type { SurfaceWriteLivenessObservation } from "./surface-write-liveness.js";
 import type {
   ParsedControlPlaneState,

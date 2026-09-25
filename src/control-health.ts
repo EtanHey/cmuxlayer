@@ -19,7 +19,7 @@ import {
   daemonLifecycleSnapshot,
   type DaemonLifecycleSnapshot,
 } from "./daemon-lifecycle-state.js";
-import type { LifecycleLockState } from "./agent-engine.js";
+import type { LifecycleLockState } from "./engine/types.js";
 
 const MAX_SELF_HEAL_DETAILS = 100;
 const MAX_MONITOR_REGISTRY_BYTES = 1024 * 1024;
