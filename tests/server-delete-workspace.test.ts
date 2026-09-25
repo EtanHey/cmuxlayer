@@ -9,6 +9,22 @@ import {
   runWithCallerContext,
 } from "../src/caller-context.js";
 
+// delete_workspace is a plain function behind close_surface scope="workspace"
+// since CX-3 S6; this adapter keeps each case's call shape.
+function deleteWorkspaceTool(server: unknown) {
+  const closeSurface = (server as any)._registeredTools.close_surface;
+  return {
+    handler: (
+      args: { workspace: string; force?: boolean },
+      extra: unknown,
+    ) =>
+      closeSurface.handler(
+        { scope: "workspace", workspace: args.workspace, force: args.force },
+        extra,
+      ),
+  };
+}
+
 const roots: string[] = [];
 
 afterEach(() => {
@@ -92,29 +108,14 @@ function mockClient(opts?: { callerTarget?: boolean; surface?: boolean }) {
   };
 }
 
-describe("delete_workspace", () => {
-  it("is registered off-default for deferred ToolSearch loading", async () => {
-    const { client } = mockClient();
-    const server = createServer({
-      client: client as any,
-      skipAgentLifecycle: true,
-    });
-    const tool = (server as any)._registeredTools.delete_workspace;
-
-    expect(tool._meta).toMatchObject({
-      defer_loading: true,
-      "cmuxlayer/interim": true,
-    });
-    await server.close();
-  });
-
+describe("delete_workspace (close_surface scope=workspace)", () => {
   it("removes an empty workspace and returns the removed diff", async () => {
     const { client } = mockClient();
     const server = createServer({
       client: client as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools.delete_workspace;
+    const tool = deleteWorkspaceTool(server);
 
     const result = await tool.handler({ workspace: "workspace:7" }, {} as any);
 
@@ -139,7 +140,7 @@ describe("delete_workspace", () => {
       stateDir: root,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools.delete_workspace;
+    const tool = deleteWorkspaceTool(server);
 
     const result = await tool.handler({ workspace: "workspace:7" }, {} as any);
 
@@ -164,7 +165,7 @@ describe("delete_workspace", () => {
         stateDir: root,
         skipAgentLifecycle: true,
       });
-      const tool = (server as any)._registeredTools.delete_workspace;
+      const tool = deleteWorkspaceTool(server);
 
       const result = await tool.handler(
         { workspace: workspaceAlias },
@@ -191,7 +192,7 @@ describe("delete_workspace", () => {
       stateDir: root,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools.delete_workspace;
+    const tool = deleteWorkspaceTool(server);
 
     const result = await tool.handler(
       { workspace: "workspace:7", force: true },
@@ -206,7 +207,7 @@ describe("delete_workspace", () => {
   it("refuses the caller workspace without force", async () => {
     const { client } = mockClient({ callerTarget: true });
     const server = createServer({ client: client as any, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools.delete_workspace;
+    const tool = deleteWorkspaceTool(server);
 
     const result = await runWithCallerContext(
       { workspaceId: "workspace:7" },
@@ -232,7 +233,7 @@ describe("delete_workspace", () => {
       skipAgentLifecycle: true,
       safetyCallerContextProvider: () => callerContextFromEnv(),
     });
-    const tool = (server as any)._registeredTools.delete_workspace;
+    const tool = deleteWorkspaceTool(server);
 
     try {
       const result = await tool.handler(
@@ -263,7 +264,7 @@ describe("delete_workspace", () => {
         client: client as any,
         skipAgentLifecycle: true,
       });
-      const tool = (server as any)._registeredTools.delete_workspace;
+      const tool = deleteWorkspaceTool(server);
 
       const result = await runWithCallerContext(
         { workspaceId: "workspace:7" },

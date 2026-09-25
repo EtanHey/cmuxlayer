@@ -899,7 +899,7 @@ describe("CmuxLayerDaemon", () => {
     await daemon.start();
 
     await expect(rawToolsList(path, 100)).resolves.toMatchObject({
-      toolCount: 11,
+      toolCount: 8,
     });
 
     await daemon.shutdown();
