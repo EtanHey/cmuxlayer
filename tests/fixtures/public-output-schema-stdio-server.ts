@@ -13,7 +13,6 @@ const server = createServer({
   lifecycleInitializer: async () => {},
   disableSpawnPreflight: true,
   controlHealthIntervalMs: 0,
-  exposeInternalToolsForTests: false,
   sessionIdentityResolver: () => null,
 });
 

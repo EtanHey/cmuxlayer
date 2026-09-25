@@ -71,7 +71,7 @@ To keep only a per-session resident subset of tools, set
 `CMUXLAYER_DEFAULT_PALETTE` to comma-separated bare tool names, for example
 `list_surfaces,spawn_agent,send_to`. The server also exposes `expand_palette`,
 which registers the rest of the 10 public tools for the rest of that MCP
-session; it never exposes the internal definitions.
+session.
 When unset or blank, the signed 10-tool thin-core default applies. When set, the
 environment value overrides that default for the session. Unknown names are
 warned and ignored while valid names still load.
@@ -118,7 +118,7 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 | `update_surface` | Move or rename one terminal surface |
 | `list_surfaces` | List all surfaces across workspaces |
 
-These 10 are the whole public surface. The internal definitions are not callable over MCP.
+These 10 are the whole surface: no other tool is registered.
 
 ## Supported agents
 

@@ -13330,7 +13330,6 @@ Session ID: ${sessionId}`,
         client: mockClient,
         stateDir: serverStateDir,
         disableSpawnPreflight: true,
-        exposeInternalToolsForTests: false,
       });
       const toolServer = server as unknown as ToolServer;
       const inspectableEngine = engine as unknown as HaltInspectableEngine;

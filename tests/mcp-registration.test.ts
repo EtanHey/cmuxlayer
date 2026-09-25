@@ -6,17 +6,15 @@ const text = (value: string) => ({
   content: [{ type: "text" as const, text: value }],
 });
 
-function install(exposeInternalToolsForTests: boolean) {
+function install() {
   const server = new McpServer({ name: "registration-test", version: "0.0.0" });
   const registration = installToolRegistration(server, {
     client: {},
     palette: null,
-    exposeInternalToolsForTests,
     resolveCallerAgentId: () => null,
   });
   const tool = (server as unknown as { tool: (...args: unknown[]) => unknown })
     .tool;
-  tool("internal_probe", "internal", async () => text("internal"));
   tool("read_screen", "public", async () => text("public"));
   const registered = (
     server as unknown as { _registeredTools: Record<string, unknown> }
@@ -25,28 +23,18 @@ function install(exposeInternalToolsForTests: boolean) {
 }
 
 describe("installToolRegistration (mcp/registration.ts)", () => {
-  it("hides non-public tools from the MCP surface but keeps their handlers dispatchable", async () => {
-    const { registration, registered } = install(false);
+  it("registers a tool on the MCP surface", () => {
+    const { registered } = install();
     expect(Object.keys(registered)).toEqual(["read_screen"]);
-    const handler = registration.toolHandlersByName.get("internal_probe");
+  });
+
+  // Every registration is public since CX-3 S7; the name map remains for
+  // close_surface's scope=agent -> scope=surface self-dispatch.
+  it("tracks the wrapped handler by name and keeps it dispatchable", async () => {
+    const { registration } = install();
+    const handler = registration.toolHandlersByName.get("read_screen");
     expect(handler).toBeTypeOf("function");
     const result = await handler!({}, {});
-    expect(result.content[0]).toEqual({ type: "text", text: "internal" });
-  });
-
-  it("registers non-public tools only when exposeInternalToolsForTests is set", () => {
-    const { registered } = install(true);
-    expect(Object.keys(registered).sort()).toEqual([
-      "internal_probe",
-      "read_screen",
-    ]);
-  });
-
-  it("tracks public handlers by name as well", () => {
-    const { registration } = install(false);
-    expect([...registration.toolHandlersByName.keys()].sort()).toEqual([
-      "internal_probe",
-      "read_screen",
-    ]);
+    expect(result.content[0]).toEqual({ type: "text", text: "public" });
   });
 });

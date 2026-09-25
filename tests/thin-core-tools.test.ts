@@ -130,7 +130,6 @@ describe("thin-core tool palette", () => {
       exec: makeExec(),
       disableSpawnPreflight: true,
       controlHealthIntervalMs: 0,
-      exposeInternalToolsForTests: false,
     }) as any;
     const tools = server._registeredTools as Record<
       string,
@@ -147,7 +146,6 @@ describe("thin-core tool palette", () => {
       exec: makeExec(),
       disableSpawnPreflight: true,
       controlHealthIntervalMs: 0,
-      exposeInternalToolsForTests: false,
     });
     expect(engineForTests(server)).toBeInstanceOf(AgentEngine);
     expect(
@@ -166,7 +164,6 @@ describe("thin-core tool palette", () => {
       exec: makeExec(),
       disableSpawnPreflight: true,
       controlHealthIntervalMs: 0,
-      exposeInternalToolsForTests: false,
     }) as any;
     const tools = server._registeredTools as Record<
       string,
@@ -200,7 +197,7 @@ describe("send_to consolidated modes", () => {
   it("#636 raw sends from an unknown caller preserve legacy RPCs despite lifecycle failure", async () => {
     const exec = makeExec();
     const context = createServerContext({ exec, controlHealthIntervalMs: 0 });
-    const server = createServer({ context, exec, controlHealthIntervalMs: 0, exposeInternalToolsForTests: true }) as any;
+    const server = createServer({ context, exec, controlHealthIntervalMs: 0 }) as any;
     await context.lifecycleStartPromise;
     context.lifecycleStartError = new Error("lifecycle unavailable");
     const args = { surface: "surface:1", text: "raw compatibility", press_enter: false };

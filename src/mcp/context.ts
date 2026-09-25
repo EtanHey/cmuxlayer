@@ -66,8 +66,6 @@ export interface CreateServerOptions {
   safetyCallerContextProvider?: () => CallerContext | undefined;
   /** Override the per-session resident-tool palette (primarily for entry wiring/tests). */
   defaultPalette?: string;
-  /** Keep retired handlers registered only for direct unit coverage. Never set in production. */
-  exposeInternalToolsForTests?: boolean;
   /** Override spawn preflight checks (primarily for tests). */
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   /** Explicitly disable spawn preflight checks (primarily for mocked tests). */
