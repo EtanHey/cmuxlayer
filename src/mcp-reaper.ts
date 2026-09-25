@@ -26,6 +26,7 @@
  * It only considers already-orphaned MCP server child processes.
  */
 
+import { processLiveness } from "./util/pid-alive.js";
 import { execFile } from "node:child_process";
 import { mkdir, appendFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
@@ -238,23 +239,6 @@ export function signalProcessBatch(
       };
     }
   });
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      (error as { code?: unknown }).code === "ESRCH"
-    ) {
-      return false;
-    }
-    return true;
-  }
 }
 
 function signalErrorCode(error: unknown): string {
@@ -491,7 +475,9 @@ export async function runReaper(
   const writeStderr = deps.writeStderr ?? ((line: string) => console.error(line));
   const sleepFor = deps.sleep ?? sleep;
   const killProcess = deps.killProcess ?? process.kill;
-  const isAlive = deps.isProcessAlive ?? processAlive;
+  // Only ESRCH proves a killed pid is gone; EPERM and friends keep it "alive".
+  const isAlive =
+    deps.isProcessAlive ?? ((pid: number) => processLiveness(pid) !== "gone");
 
   const processes = await readTable();
   const reapable = selectReapableProcesses(processes, opts);

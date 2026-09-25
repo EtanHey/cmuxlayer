@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { AgentRecord } from "./agent-types.js";
+import type { AgentRecord } from "../agent-types.js";
 
 export type ProcessLiveness = "alive" | "gone" | "unknown";
 

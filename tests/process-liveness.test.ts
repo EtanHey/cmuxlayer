@@ -8,7 +8,7 @@ import type { AgentRecord } from "../src/agent-types.js";
 import {
   processStartedAtMs,
   qualifyAgentProcessLiveness,
-} from "../src/process-liveness.js";
+} from "../src/util/pid-alive.js";
 
 function processRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {

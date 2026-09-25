@@ -30,7 +30,7 @@ import {
 } from "../model-policy.js";
 import { buildTitle } from "../naming.js";
 import { matchReadyPattern } from "../pattern-registry.js";
-import { agentProcessLiveness } from "../process-liveness.js";
+import { agentProcessLiveness } from "../util/pid-alive.js";
 import {
   antigravityScreenIsActive,
   isAntigravityScreen,

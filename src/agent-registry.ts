@@ -36,7 +36,7 @@ import { validateSurfaceIdentityBijection } from "./surface-topology.js";
 import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
 import { inferRepoFromDirectory } from "./repo-workspace.js";
 import { resumeArtifactStatus } from "./resume-verification.js";
-import { agentProcessMayBeAlive } from "./process-liveness.js";
+import { agentProcessMayBeAlive } from "./util/pid-alive.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 

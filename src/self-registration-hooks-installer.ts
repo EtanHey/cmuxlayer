@@ -7,6 +7,7 @@ import {
   realpath,
   stat,
 } from "node:fs/promises";
+import { shellQuote } from "./shell-safe.js";
 import { atomicWriteFile } from "./util/atomic-write.js";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,8 +29,21 @@ function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function shellQuote(value: string): string {
+/**
+ * AIDEV-NOTE: installers before CX-2 U1b quoted with the `'"'"'` spelling. It is
+ * the same shell word as shellQuote's `'\''`, and identical text for any path
+ * without an apostrophe; matching it keeps a re-install from adding a second
+ * copy of an already-installed hook.
+ */
+function legacyInstallerQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function hookCommandSpellings(hookPath: string): string[] {
+  return [
+    `exec python3 ${shellQuote(hookPath)}`,
+    `exec python3 ${legacyInstallerQuote(hookPath)}`,
+  ];
 }
 
 function parseJsonObject(path: string, text: string): JsonObject {
@@ -68,7 +82,7 @@ function sessionStartGroups(config: JsonObject, path: string): JsonObject[] {
   return groups;
 }
 
-function hasCommand(groups: JsonObject[], expectedCommand: string): boolean {
+function hasCommand(groups: JsonObject[], spellings: readonly string[]): boolean {
   return groups.some((group) => {
     const handlers = group.hooks;
     return (
@@ -77,7 +91,7 @@ function hasCommand(groups: JsonObject[], expectedCommand: string): boolean {
         (handler) =>
           isObject(handler) &&
           typeof handler.command === "string" &&
-          handler.command === expectedCommand,
+          spellings.includes(handler.command),
       )
     );
   });
@@ -85,8 +99,8 @@ function hasCommand(groups: JsonObject[], expectedCommand: string): boolean {
 
 function mergeClaudeSettings(config: JsonObject, path: string, hookPath: string) {
   const groups = sessionStartGroups(config, path);
-  const command = `exec python3 ${shellQuote(hookPath)}`;
-  if (!hasCommand(groups, command)) {
+  const [command] = hookCommandSpellings(hookPath);
+  if (!hasCommand(groups, hookCommandSpellings(hookPath))) {
     groups.push({
       matcher: ".*",
       hooks: [
@@ -103,8 +117,8 @@ function mergeClaudeSettings(config: JsonObject, path: string, hookPath: string)
 
 function mergeCodexHooks(config: JsonObject, path: string, hookPath: string) {
   const groups = sessionStartGroups(config, path);
-  const command = `exec python3 ${shellQuote(hookPath)}`;
-  if (!hasCommand(groups, command)) {
+  const [command] = hookCommandSpellings(hookPath);
+  if (!hasCommand(groups, hookCommandSpellings(hookPath))) {
     groups.push({
       matcher: "startup|resume",
       hooks: [
