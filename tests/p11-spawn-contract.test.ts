@@ -14,6 +14,7 @@ import {
   mkdirSync,
   mkdtempSync,
   existsSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -5153,10 +5154,20 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   });
 
   it("routes server and engine watch-owner reads through the canonical resolver boundary", () => {
-    for (const sourcePath of ["src/server.ts", "src/agent-engine.ts"]) {
-      const source = readFileSync(join(process.cwd(), sourcePath), "utf8");
-      expect(source, sourcePath).not.toMatch(/\b(?:watch|event)\.owner\b/);
-      expect(source, sourcePath).toContain("resolveWatchOwnerFromSources(");
+    // The engine is agent-engine.ts plus its extracted collaborators (CX-3).
+    const engineFiles = [
+      "src/agent-engine.ts",
+      ...readdirSync(join(process.cwd(), "src/engine"))
+        .filter((name) => name.endsWith(".ts"))
+        .map((name) => `src/engine/${name}`),
+    ];
+    for (const sourcePaths of [["src/server.ts"], engineFiles]) {
+      const source = sourcePaths
+        .map((sourcePath) => readFileSync(join(process.cwd(), sourcePath), "utf8"))
+        .join("\n");
+      const label = sourcePaths.join(", ");
+      expect(source, label).not.toMatch(/\b(?:watch|event)\.owner\b/);
+      expect(source, label).toContain("resolveWatchOwnerFromSources(");
     }
   });
 });
