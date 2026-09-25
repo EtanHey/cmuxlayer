@@ -15,6 +15,7 @@ import { CLI_READY_PATTERNS } from "../src/pattern-registry.js";
 import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { engineForTests } from "../src/server.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 let testDir = "";
 
@@ -48,7 +49,7 @@ function bootViaSendCommand(
   args: { boot_prompt_path?: string; boot_prompt_timeout_ms?: number },
   extra: unknown,
 ) {
-  return server._registeredTools.send_command.handler(
+  return internalToolForTests(server, "send_command").handler(
     {
       surface: "surface:2",
       workspace: "workspace:1",
@@ -966,9 +967,9 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
             ? await server._registeredTools.send_to.handler({ text: "later", press_enter: true,
                 targeting: { agent_ids: [agentId] } }, {})
             : mode === "surface"
-              ? await server._registeredTools.send_input.handler({ surface: "surface:new", text: "later",
+              ? await internalToolForTests(server, "send_input").handler({ surface: "surface:new", text: "later",
                   press_enter: true }, {})
-            : await server._registeredTools.send_input.handler({ surface: "surface:new", text: "later",
+            : await internalToolForTests(server, "send_input").handler({ surface: "surface:new", text: "later",
                 press_enter: true, background: true }, {}));
       }
       let pending = engine.listDeliveryReceipts().filter((receipt: any) => receipt.boot_recovery && receipt.agent_id === agentId);

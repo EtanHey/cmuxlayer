@@ -18,6 +18,7 @@ import {
   DELIVERY_TARGET_GONE_CONFIRM_MISSES,
 } from "../src/agent-engine.js";
 import { engineForTests } from "../src/server.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-send-to-v2-verify-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-send-to-v2-verify-test.sock";
@@ -31,7 +32,10 @@ async function callTool(
   name: string,
   args: Record<string, unknown>,
 ) {
-  const tool = server._registeredTools[name];
+  // The former internal tools are plain functions since CX-3 S7.
+  const tool = ["send_input", "send_command", "send_key", "stop_agent"].includes(name)
+    ? internalToolForTests(server, name)
+    : server._registeredTools[name];
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }

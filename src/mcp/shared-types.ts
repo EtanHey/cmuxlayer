@@ -23,3 +23,14 @@ export type FocusRestoreLease = {
   prior: FocusTarget;
   expected: FocusTarget;
 };
+
+export type RawSurfaceMutationRoute = {
+  surface: string;
+  workspace?: string;
+  /** Live cmux tab title for this surface when topology knows it. */
+  title: string | null;
+  stableSurfaceIdentity: string | null;
+  remapped_from?: string;
+  remapped_to?: string;
+  assertCurrent: () => Promise<void>;
+};

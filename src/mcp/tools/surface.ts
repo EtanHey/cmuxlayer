@@ -23,6 +23,7 @@ import { agentProcessMayBeAlive } from "../../util/pid-alive.js";
 import type { WatchOwnerCandidate } from "../../watch-owner.js";
 import type { CmuxLayerClient, CmuxServerContext } from "../context.js";
 import type { ToolHandlerRegistry } from "../registration.js";
+import type { StopAgentCallArgs } from "./stop.js";
 import { ANNOTATIONS } from "../schemas.js";
 import { type ToolReturn, err, okFormatted, readErrorText } from "../tool-result.js";
 
@@ -303,6 +304,10 @@ export interface SurfaceToolDeps {
   resolveRawSurfaceMutationRoute: (requestedSurface: string, requestedWorkspace: string | undefined, operation: string, trustedAgentScopedClose?: boolean) => Promise<{ surface: string; workspace?: string; title: string | null; stableSurfaceIdentity: string | null; remapped_from?: string; remapped_to?: string; assertCurrent: () => Promise<void> }>;
   snapshotWatchOwnerCandidates: () => AgentRecord[];
   stateMgr: StateManager;
+  /** stop_agent, once the agent lifecycle is wired; null without it. */
+  stopAgent: () =>
+    | ((args: StopAgentCallArgs) => Promise<ToolReturn>)
+    | null;
   toolHandlersByName: ToolHandlerRegistry;
   withSurfaceWrite: DeliveryEngine["withSurfaceWrite"];
 }
@@ -834,7 +839,7 @@ export function registerCloseSurfaceTool(
   server: McpServer,
   deps: SurfaceToolDeps,
 ): void {
-  const { agentScopedSurfaceClose, appendCloseEvent, assertSurfaceMutationAllowed, client, collectSurfaceTopology, context, findSurfaceByRef, findSurfaceRefByUuid, lifecycleScheduleChildReportWatchPrune, pruneChildReportWatchesFor, removeOwnedWatchesFor, resolveCloseCaller, resolveRawSurfaceMutationRoute, snapshotWatchOwnerCandidates, stateMgr, toolHandlersByName, withSurfaceWrite } = deps;
+  const { agentScopedSurfaceClose, appendCloseEvent, assertSurfaceMutationAllowed, client, collectSurfaceTopology, context, findSurfaceByRef, findSurfaceRefByUuid, lifecycleScheduleChildReportWatchPrune, pruneChildReportWatchesFor, removeOwnedWatchesFor, resolveCloseCaller, resolveRawSurfaceMutationRoute, snapshotWatchOwnerCandidates, stateMgr, stopAgent, toolHandlersByName, withSurfaceWrite } = deps;
   // 10. close_surface
   server.tool(
     "close_surface",
@@ -862,8 +867,8 @@ export function registerCloseSurfaceTool(
           if (!args.agent_id) {
             throw new Error("close_surface scope=agent requires agent_id");
           }
-          const handler = toolHandlersByName.get("stop_agent");
-          if (!handler)
+          const stop = stopAgent();
+          if (!stop)
             throw new Error("Internal agent close adapter unavailable");
           // AIDEV-NOTE (#485): this used to stop the agent and hand back
           // stop_agent's receipt verbatim -- ok:true, state:"done" -- for a
@@ -905,16 +910,13 @@ export function registerCloseSurfaceTool(
           if (!lifecycleEngine) {
             throw new Error("Agent lifecycle engine is unavailable");
           }
+          const stopArgs = {
+            agent_id: args.agent_id,
+            force: args.force,
+            [OWNED_AGENT_CLOSE_ON_UNKNOWN_PID]: args.force === true,
+          };
           const result = await lifecycleEngine.runLifecycleMutation(
-            () =>
-              handler(
-                {
-                  agent_id: args.agent_id,
-                  force: args.force,
-                  [OWNED_AGENT_CLOSE_ON_UNKNOWN_PID]: args.force === true,
-                },
-                {},
-              ),
+            () => withTransportRetryTracking(() => stop(stopArgs)),
             { label: "close-agent" },
           );
           const agentStopped = result.isError !== true;

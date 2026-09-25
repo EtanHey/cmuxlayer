@@ -30,6 +30,7 @@ import {
   getTool,
   parseToolResult,
 } from "./helpers/mcp-tool-harness.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 type StatusCall = {
   key: string;
@@ -743,7 +744,7 @@ describe("Phase 10 painpoint e2e replay", () => {
     try {
       const engine = getEngine(server);
       await engine.getRegistry().reconstitute();
-      const result = await getTool(server, "stop_agent").handler(
+      const result = await internalToolForTests(server, "stop_agent").handler(
         { agent_id: "agent-force-unknown", force: true },
         {},
       );
@@ -824,7 +825,7 @@ describe("Phase 10 painpoint e2e replay", () => {
     const server = startEngineServer(exec, dir, { skipAgentLifecycle: true });
 
     try {
-      const send = getTool(server, "send_input");
+      const send = internalToolForTests(server, "send_input");
       const read = getTool(server, "read_screen");
       const accepted = parseToolResult<{
         status: string;

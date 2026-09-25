@@ -92,6 +92,48 @@ export function createSuccessfulDispatchRpcMethod(client: unknown) {
       : null;
 }
 
+const INTERNAL_TOOLS = Symbol.for("cmuxlayer.internalTools");
+type InternalToolFn = (args: Record<string, unknown>) => Promise<ToolReturn>;
+
+/**
+ * Record the plain functions that replaced the internally dispatched tool
+ * registrations (CX-3 S7), keyed by their old names, for tests only.
+ */
+export function bindInternalToolsForTests(
+  server: McpServer,
+  tools: Record<string, InternalToolFn>,
+): void {
+  Object.defineProperty(server, INTERNAL_TOOLS, {
+    value: tools,
+    enumerable: false,
+  });
+}
+
+/**
+ * Tests only: a former internal tool as a `{ handler }`, run the way the old
+ * by-name dispatch ran it: inside a surface-topology call scope and a fresh
+ * transport-retry scope.
+ */
+export function internalToolForTests(
+  server: unknown,
+  name: string,
+): { handler: (args: Record<string, unknown>, extra?: unknown) => Promise<ToolReturn> } {
+  const tools =
+    server && typeof server === "object"
+      ? (server as { [INTERNAL_TOOLS]?: Record<string, InternalToolFn> })[
+          INTERNAL_TOOLS
+        ]
+      : undefined;
+  const tool = tools?.[name];
+  if (!tool) throw new Error(`Internal tool not bound: ${name}`);
+  return {
+    handler: (args) =>
+      runWithSurfaceTopologyCallScope(() =>
+        withTransportRetryTracking(() => tool(args)),
+      ),
+  };
+}
+
 export interface ToolRegistrationOptions {
   /** The (topology-invalidating) cmux client whose transport health is reported. */
   client: unknown;

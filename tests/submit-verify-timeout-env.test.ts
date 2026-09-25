@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { AgentRecord } from "../src/agent-types.js";
 import { engineForTests } from "../src/server.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-submit-verify-timeout-env-test");
 const ENV_KEY = "CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS";
@@ -150,7 +151,7 @@ async function runSubmitFailureWithEnv(value: string): Promise<any> {
     disableSpawnPreflight: true,
   });
   registerReadyAgent(server, client);
-  const tool = (server as any)._registeredTools["send_command"];
+  const tool = internalToolForTests(server, "send_command");
 
   const resultPromise = tool.handler(
     { surface: client.surface, command: "ping" },

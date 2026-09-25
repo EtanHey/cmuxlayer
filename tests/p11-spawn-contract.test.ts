@@ -52,6 +52,7 @@ import { StateManager } from "../src/state-manager.js";
 import { isSubjectSideReportWatchPruneEligible } from "../src/agent-engine.js";
 import { engineForTests } from "../src/server.js";
 import { agentStateTool } from "./helpers/mcp-tool-harness.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -893,7 +894,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         writeFileSync(join(inboxDir, canonical, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
 
         const result = route === "stop_agent"
-          ? await server._registeredTools.stop_agent.handler({ agent_id: alias, force: true }, {} as never)
+          ? await internalToolForTests(server, "stop_agent").handler({ agent_id: alias, force: true }, {} as never)
           : await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: alias, force: true }, {} as never);
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         expect(result.structuredContent).toMatchObject({ tail_reaped: true });
@@ -934,7 +935,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         });
 
         const result = route === "stop_agent"
-          ? await server._registeredTools.stop_agent.handler({ agent_id: agentId, force: true }, {} as never)
+          ? await internalToolForTests(server, "stop_agent").handler({ agent_id: agentId, force: true }, {} as never)
           : await server._registeredTools.close_surface.handler({ scope: "agent", agent_id: agentId, force: true }, {} as never);
         expect(result.isError, JSON.stringify(result)).toBe(true);
         expect(result.structuredContent).toMatchObject({ tail_reaped: true });
@@ -970,7 +971,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       writeFileSync(join(inboxDir, agentId, "inbox-tail.pid"), `${tail.pid} ${nonce}\n`, "utf8");
       vi.spyOn(engine, "stopAgent").mockRejectedValueOnce(new Error("Stop post-condition failed"));
 
-      const result = await server._registeredTools.stop_agent.handler({ agent_id: agentId, force: true }, {} as never);
+      const result = await internalToolForTests(server, "stop_agent").handler({ agent_id: agentId, force: true }, {} as never);
       expect(result.isError).toBe(true);
       expect(result.structuredContent).not.toHaveProperty("tail_reaped");
       expect(execFileSync("ps", ["-p", String(tail.pid), "-o", "command="], { encoding: "utf8" }).trim()).toBe(marker);
@@ -1216,7 +1217,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         toolName === "stop_agent"
           ? { agent_id: child.agent_id, force: true }
           : { scope: "surface", surface: child.surface_id, force: true };
-      const result = await server._registeredTools[toolName].handler(
+      const tool =
+        toolName === "stop_agent"
+          ? internalToolForTests(server, "stop_agent")
+          : server._registeredTools[toolName];
+      const result = await tool.handler(
         args,
         {} as never,
       );

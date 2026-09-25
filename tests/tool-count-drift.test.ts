@@ -3,13 +3,13 @@ import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
-const EXPECTED_TOOL_COUNT = 14;
+const EXPECTED_TOOL_COUNT = 10;
 const EXPECTED_DEFAULT_PALETTE_COUNT = 10;
 const EXPECTED_PUBLIC_TOOL_NAMES = [
   "spawn_agent", "report_to_parent", "send_to", "read_screen", "list_agents",
   "wait_for", "control_health", "close_surface", "update_surface", "list_surfaces",
 ];
-// 14 is the internal-definition count; only the exact 10-name public registry
+// 10 is the registration count; only the exact 10-name public registry
 // is callable through MCP.
 const EXPECTED_DOCUMENTED_COUNTS = new Set([
   EXPECTED_TOOL_COUNT,
@@ -148,9 +148,8 @@ describe("tool-count drift guard", () => {
     const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
     const publicLine = readme.split("\n").find((line) => line.startsWith("**Public MCP surface**")) ?? "";
     expect([...publicLine.matchAll(/`([^`]+)`/g)].map((match) => match[1])).toEqual(names);
-    expect(readme).toContain("only 10 are registered and callable through MCP");
-    expect(readme).toContain("other 4 are not exposed through ToolSearch");
-    expect(readme).toContain("retains 14 internal tool definitions");
+    expect(readme).toContain("registers exactly 10 tools, and all 10 are callable through MCP");
+    expect(readme).toContain("there are no hidden internal tool definitions");
 
     // The README documents only the callable surface: one table row per
     // public tool, and no inventory of the internal definitions.

@@ -38,6 +38,7 @@ import { err, surfaceGonePayload } from "../src/mcp/tool-result.js";
 import { createSuccessfulDispatchRpcMethod } from "../src/mcp/registration.js";
 import { buildLaunchCommand } from "../src/engine/launch-command.js";
 import type { CliType } from "../src/agent-types.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 type InputDeliveryTestModule = typeof import("../src/server.js") & {
   SEND_INPUT_PASTE_BATCH_MAX_BYTES: number;
@@ -199,9 +200,6 @@ async function loadInputDeliveryTestModule(): Promise<InputDeliveryTestModule> {
 const EXPECTED_TOOLS = [
   "list_surfaces",
   "control_health",
-  "send_input",
-  "send_command",
-  "send_key",
   "read_screen",
   "update_surface",
   "close_surface",
@@ -920,7 +918,7 @@ describe("input delivery batching helpers", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 8 low-level tools", () => {
+  it("registers all 5 low-level tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
@@ -2477,7 +2475,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: "echo hello" },
@@ -2501,7 +2499,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     await tool.handler(
       { surface: "surface:1", text: "ls", press_enter: true },
@@ -2582,7 +2580,7 @@ describe("tool handler integration", () => {
       client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = registeredTestTool(server, "send_input");
+    const tool = internalToolForTests(server, "send_input");
     const text = "Objective\n\nConstraints\n\nAcceptance criteria";
 
     const result = await tool.handler(
@@ -2628,7 +2626,7 @@ describe("tool handler integration", () => {
       client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = registeredTestTool(server, "send_input");
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -2664,7 +2662,7 @@ describe("tool handler integration", () => {
       client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = registeredTestTool(server, "send_input");
+    const tool = internalToolForTests(server, "send_input");
     const text = "line one\nline two";
 
     const result = await tool.handler(
@@ -2699,7 +2697,7 @@ describe("tool handler integration", () => {
       client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = registeredTestTool(server, "send_input");
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -2730,7 +2728,7 @@ describe("tool handler integration", () => {
       client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = registeredTestTool(server, "send_key");
+    const tool = internalToolForTests(server, "send_key");
 
     const result = await tool.handler(
       { surface: "surface:1", key: "escape" },
@@ -2757,7 +2755,7 @@ describe("tool handler integration", () => {
       client: mockClient as unknown as CreateServerOptions["client"],
       skipAgentLifecycle: true,
     });
-    const tool = registeredTestTool(server, "send_input");
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: "", press_enter: false },
@@ -2808,7 +2806,7 @@ describe("tool handler integration", () => {
       stateDir,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -2835,7 +2833,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       { surface: "surface:6", command: "codex resume 123" },
@@ -2903,7 +2901,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
     const command = "printf 'one'\nprintf 'two'";
 
     const result = await tool.handler(
@@ -2936,7 +2934,7 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
       stateDir,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const result = await tool.handler(
       { surface: "surface:7", text: "hi", background: true },
       {} as any,
@@ -2960,7 +2958,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -3087,7 +3085,7 @@ describe("tool handler integration", () => {
       stateDir,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const result = await tool.handler(
       { surface: "surface:95", text: "hi" },
       {} as any,
@@ -3112,7 +3110,7 @@ describe("tool handler integration", () => {
   it("send_input degrades gracefully when no identity is cached (F8)", async () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const result = await tool.handler(
       { surface: "surface:unknown", text: "hi" },
       {} as any,
@@ -3163,7 +3161,7 @@ describe("tool handler integration", () => {
       stateDir,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
     vi.useFakeTimers();
     try {
       const result = await runWithFakeTimers(
@@ -3299,7 +3297,7 @@ describe("tool handler integration", () => {
       stateDir,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
     const result = await tool.handler(
       { surface: "surface:positive", command: "codex resume verified" },
       {} as any,
@@ -3351,7 +3349,7 @@ describe("tool handler integration", () => {
       "retry_count",
     ];
 
-    const messageResult = await registeredTools.send_input.handler(
+    const messageResult = await internalToolForTests(server, "send_input").handler(
       {
         surface: "surface:receipt-parity",
         text: "echo parity",
@@ -3359,14 +3357,14 @@ describe("tool handler integration", () => {
       },
       {} as any,
     );
-    const commandResult = await registeredTools.send_command.handler(
+    const commandResult = await internalToolForTests(server, "send_command").handler(
       {
         surface: "surface:receipt-parity",
         command: "echo parity",
       },
       {} as any,
     );
-    const keyResult = await registeredTools.send_key.handler(
+    const keyResult = await internalToolForTests(server, "send_key").handler(
       { surface: "surface:receipt-parity", key: "escape" },
       {} as any,
     );
@@ -3471,7 +3469,7 @@ describe("tool handler integration", () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -3528,7 +3526,7 @@ describe("tool handler integration", () => {
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await runWithFakeTimers(
       () =>
@@ -3668,7 +3666,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await runWithFakeTimers(
       () =>
@@ -3738,7 +3736,7 @@ describe("tool handler integration", () => {
         return { stdout: "{}", stderr: "" };
       });
       const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-      const tool = (server as any)._registeredTools["send_command"];
+      const tool = internalToolForTests(server, "send_command");
 
       const result = await runWithFakeTimers(
         () =>
@@ -3809,7 +3807,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await runWithFakeTimers(
       () =>
@@ -3877,7 +3875,7 @@ describe("tool handler integration", () => {
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await runWithFakeTimers(
       () =>
@@ -3929,7 +3927,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -3988,7 +3986,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await runWithFakeTimers(
       () =>
@@ -4044,7 +4042,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -4107,7 +4105,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await runWithFakeTimers(
       () =>
@@ -4164,7 +4162,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await runWithFakeTimers(
       () =>
@@ -4215,7 +4213,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -4269,7 +4267,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -4327,7 +4325,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -4371,7 +4369,7 @@ describe("tool handler integration", () => {
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -4418,7 +4416,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -4479,7 +4477,7 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -4508,7 +4506,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const longText = [
       "abcdef".repeat(20),
       "ghijkl".repeat(20),
@@ -4550,7 +4548,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const longText = ["a".repeat(15_000), "b".repeat(15_000), "c".repeat(5_000)]
       .join("\n");
 
@@ -4627,7 +4625,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const sendTool = registeredTools["send_input"];
+    const sendTool = internalToolForTests(server, "send_input");
     const readTool = registeredTools["read_screen"];
 
     const result = await sendTool.handler(
@@ -4678,7 +4676,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const text = `${"a".repeat(16_000)}\n${"b".repeat(10)}`;
 
     const result = await tool.handler(
@@ -4745,7 +4743,7 @@ describe("tool handler integration", () => {
     });
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const longText = [
       "section-one ".repeat(12),
       "section-two ".repeat(12),
@@ -4791,7 +4789,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const prompt = makePhantomNoBootPrompt();
 
     const result = await tool.handler(
@@ -4833,7 +4831,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const prompt = makePhantomNoBootPrompt();
 
     const result = await tool.handler(
@@ -4865,7 +4863,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const longText = "fallback ".repeat(90);
 
     const result = await tool.handler(
@@ -4894,7 +4892,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -4924,7 +4922,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const longText = "fallback ".repeat(90);
 
     const result = await tool.handler(
@@ -4957,7 +4955,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -5003,7 +5001,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -5042,7 +5040,7 @@ describe("tool handler integration", () => {
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       {
@@ -5110,7 +5108,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const sendTool = registeredTools["send_input"];
+    const sendTool = internalToolForTests(server, "send_input");
     const readTool = registeredTools["read_screen"];
     const longText = [
       "abcdef".repeat(20),
@@ -5261,7 +5259,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true, stateDir });
     const registeredTools = (server as any)._registeredTools;
-    const sendTool = registeredTools["send_input"];
+    const sendTool = internalToolForTests(server, "send_input");
     const readTool = registeredTools["read_screen"];
 
     const result = await sendTool.handler(
@@ -5360,7 +5358,7 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
       stateDir,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const resultPromise = tool.handler(
       {
@@ -5446,7 +5444,7 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
       stateDir,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const resultPromise = tool.handler(
       {
@@ -5525,7 +5523,7 @@ describe("tool handler integration", () => {
       });
 
       const server = createServer({ exec: mockExec, skipAgentLifecycle: true, stateDir });
-      const tool = (server as any)._registeredTools[toolName];
+      const tool = internalToolForTests(server, toolName);
       const resultPromise = tool.handler(
         toolName === "send_input"
           ? { surface: "surface:stale-working", text: "ping codex", press_enter: true }
@@ -5607,7 +5605,7 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
       stateDir,
     });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const resultPromise = tool.handler(
       {
@@ -5635,7 +5633,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const longText = [
       "abcdef".repeat(20),
       "ghijkl".repeat(20),
@@ -5713,7 +5711,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const firstPromise = tool.handler(
       { surface: "surface:1", text: "echo first" },
@@ -5746,8 +5744,8 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const sendInput = registeredTools["send_input"];
-    const sendKey = registeredTools["send_key"];
+    const sendInput = internalToolForTests(server, "send_input");
+    const sendKey = internalToolForTests(server, "send_key");
     const updateSurface = registeredTools["update_surface"];
     const longText = [
       "abcdef".repeat(20),
@@ -5792,7 +5790,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_key"];
+    const tool = internalToolForTests(server, "send_key");
 
     const result = await tool.handler(
       { surface: "surface:1", key: "Ctrl+C" },
@@ -5825,7 +5823,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const resultPromise = tool.handler(
       { surface: "surface:1", text: "echo retry me" },
@@ -5855,7 +5853,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const longText = [
       "abcdef".repeat(20),
       "ghijkl".repeat(20),
@@ -5897,7 +5895,7 @@ describe("tool handler integration", () => {
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const resultPromise = tool.handler(
       { surface: "surface:1", text: "echo fail me" },
@@ -6312,7 +6310,7 @@ describe("tool handler integration", () => {
     });
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
     const result = await runWithFakeTimers(
       () =>
         tool.handler(

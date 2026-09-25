@@ -7,6 +7,7 @@ import { runWithCallerContext } from "../src/caller-context.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { TEST_SURFACE_OBSERVER_OWNER } from "./helpers/test-surface-observer.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 // #805 specimen: orcClaude sent `/mcp reconnect voicelayer` to its OWN live
 // surface and got "Stable surface UUID 4779… changed or disappeared during
@@ -136,7 +137,7 @@ describe("send_command to the caller's own surface (#805)", () => {
       surfaceObserverOwnerIdProvider: () => TEST_SURFACE_OBSERVER_OWNER,
       surfaceObserverEpochProvider: () => epochFor(client),
     });
-    return { client, sendCommand: (mcp as any)._registeredTools["send_command"] };
+    return { client, sendCommand: internalToolForTests(mcp, "send_command") };
   }
 
   it("types and submits the command once, and reports self_target instead of an unverifiable submit", async () => {
