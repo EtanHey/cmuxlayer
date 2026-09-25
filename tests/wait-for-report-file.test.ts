@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, engineForTests } from "../src/server.js";
@@ -43,12 +43,25 @@ function parse(result: any): Record<string, any> {
 
 describe("wait_for file-backed done (#808)", () => {
   let dir = "";
+  let agentDir = "";
+  let outside = "";
   let server: any;
+  const savedHome = process.env.HOME;
   const AGENT = "skill-creatorCursor-h1test";
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "cmuxlayer-wait-report-"));
-    server = createServer({ client: new IdleClient() as any, stateDir: dir, disableSpawnPreflight: true });
+    outside = mkdtempSync(join(tmpdir(), "cmuxlayer-wait-outside-"));
+    // #889: the coordination dir is what ~/.cmux resolves to; point HOME here.
+    process.env.HOME = dir;
+    agentDir = join(dir, ".cmux", "agents", AGENT);
+    mkdirSync(agentDir, { recursive: true });
+    server = createServer({
+      client: new IdleClient() as any,
+      stateDir: dir,
+      inboxBaseDir: join(dir, ".cmux", "agents"),
+      disableSpawnPreflight: true,
+    });
     const engine = engineForTests(server)!;
     const now = new Date().toISOString();
     const record = {
@@ -81,14 +94,16 @@ describe("wait_for file-backed done (#808)", () => {
 
   afterEach(() => {
     engineForTests(server)?.dispose?.();
+    process.env.HOME = savedHome;
     rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   });
 
   const waitFor = (args: Record<string, unknown>) =>
     server._registeredTools["wait_for"].handler(args, {});
 
   it("matches when the report's final line is the done_marker, without the registry reaching done", async () => {
-    const report = join(dir, "report.md");
+    const report = join(agentDir, "report.md");
     writeFileSync(report, "pwd: /x\nStatus: COMPLETE\nDONE_CURSOR_DUMMY_01\n");
     const started = Date.now();
 
@@ -104,7 +119,8 @@ describe("wait_for file-backed done (#808)", () => {
   });
 
   it("does not match a marker that is present but not the final line", async () => {
-    const report = join(dir, "report.md");
+    const report = join(dir, ".cmux", "live-harness", "run-1", "cursor-01.md");
+    mkdirSync(join(dir, ".cmux", "live-harness", "run-1"), { recursive: true });
     writeFileSync(report, "DONE_CURSOR_DUMMY_01\nstill working\n");
 
     const parsed = parse(
@@ -116,12 +132,51 @@ describe("wait_for file-backed done (#808)", () => {
   });
 
   it("requires report_path and done_marker together, with an absolute path", async () => {
-    const onlyPath = await waitFor({ agent_id: AGENT, report_path: join(dir, "r.md"), timeout_ms: 1_000 });
+    const onlyPath = await waitFor({ agent_id: AGENT, report_path: join(agentDir, "r.md"), timeout_ms: 1_000 });
     expect(onlyPath.isError).toBe(true);
     expect(parse(onlyPath).error).toMatch(/report_path and done_marker/);
 
     const relative = await waitFor({ agent_id: AGENT, report_path: "r.md", done_marker: "X", timeout_ms: 1_000 });
     expect(relative.isError).toBe(true);
     expect(parse(relative).error).toMatch(/absolute/);
+  });
+
+  // #889 must-fix 1: containment. Absolute alone let wait_for read any file.
+  it("refuses a report_path outside both the coordination dir and the agent dir", async () => {
+    const report = join(outside, "report.md");
+    writeFileSync(report, "DONE_X\n");
+
+    const refused = await waitFor({ agent_id: AGENT, report_path: report, done_marker: "DONE_X", timeout_ms: 1_000 });
+
+    expect(refused.isError).toBe(true);
+    const error = parse(refused).error as string;
+    expect(error).toMatch(/coordination dir .*\.cmux/);
+    expect(error).toContain(`agents/${AGENT}`);
+  });
+
+  it("refuses a symlink from an allowed root that points outside", async () => {
+    const target = join(outside, "secret.md");
+    writeFileSync(target, "DONE_X\n");
+    const link = join(agentDir, "report.md");
+    symlinkSync(target, link);
+
+    const refused = await waitFor({ agent_id: AGENT, report_path: link, done_marker: "DONE_X", timeout_ms: 1_000 });
+
+    expect(refused.isError).toBe(true);
+    expect(parse(refused).error).toMatch(/must resolve under the coordination dir/);
+  });
+
+  it("refuses a report symlinked out of the root after the wait started", async () => {
+    const target = join(outside, "secret.md");
+    writeFileSync(target, "DONE_X\n");
+    const link = join(agentDir, "late.md");
+    setTimeout(() => symlinkSync(target, link), 200);
+
+    const parsed = parse(
+      await waitFor({ agent_id: AGENT, report_path: link, done_marker: "DONE_X", timeout_ms: 3_000 }),
+    );
+
+    expect(parsed.matched).toBe(false);
+    expect(parsed.error).toMatch(/must resolve under the coordination dir/);
   });
 });

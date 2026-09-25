@@ -1,5 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
 import { shellQuote } from "./shell-safe.js";
 
@@ -372,3 +374,67 @@ export const COORDINATION_CONTRACT_SKIPPED_STERILE_NO_FILE =
  */
 export const COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED =
   "refreshed_not_redelivered: the spawn contract file at contract_path was rewritten on resume (identical bytes -- both strings derive from agent_id alone), and report_path/done_marker are re-issued and re-persisted. The boot POINTER was NOT re-typed into the resuming pane: `--resume` restores the prior session, which already contains it, and typing into a pane mid-resume is a delivery-path change this did not make. If the resumed session did NOT restore its context, the LEAD must point the worker at contract_path.";
+
+// ---------------------------------------------------------------------------
+// H1 round 2 (#889): wait_for's file-backed done may only read a report the
+// coordination layer owns. "Absolute" alone let any caller point it at any file
+// on the machine and have its final line echoed back.
+// ---------------------------------------------------------------------------
+
+/** The coordination root: what `~/.cmux/` is, before symlink resolution. */
+export function coordinationRootDir(): string {
+  return join(homedir(), ".cmux");
+}
+
+/**
+ * realpath of the longest existing prefix, with the missing tail re-appended.
+ * A report that is not written yet still resolves through every symlinked
+ * ancestor, and a symlinked report file resolves to its target.
+ */
+async function resolveThroughSymlinks(path: string): Promise<string> {
+  const missing: string[] = [];
+  let current = path;
+  for (;;) {
+    try {
+      return join(await realpath(current), ...missing);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return path;
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isWithin(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+export type ReportPathContainment =
+  | { ok: true; resolved: string }
+  | { ok: false; resolved: string; reason: string };
+
+/**
+ * A report path is readable only when, after resolving symlinks, it sits under
+ * the coordination root or under this agent's own channel dir. No allow-list
+ * and no env override: the two roots are the whole policy.
+ */
+export async function containReportPath(
+  reportPath: string,
+  agentId: string,
+  opts?: InboxOpts,
+): Promise<ReportPathContainment> {
+  const resolved = await resolveThroughSymlinks(reportPath);
+  const coordinationRoot = await resolveThroughSymlinks(coordinationRootDir());
+  const agentRoot = await resolveThroughSymlinks(agentDir(agentId, opts));
+  if (isWithin(resolved, coordinationRoot) || isWithin(resolved, agentRoot)) {
+    return { ok: true, resolved };
+  }
+  return {
+    ok: false,
+    resolved,
+    reason:
+      `wait_for report_path must resolve under the coordination dir ${coordinationRoot}${sep} ` +
+      `or the agent dir ${agentRoot}${sep}; ${reportPath} resolves to ${resolved}`,
+  };
+}

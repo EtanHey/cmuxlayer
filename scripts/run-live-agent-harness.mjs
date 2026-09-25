@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -33,10 +34,13 @@ Options:
   --server-command <cmd>                    MCP server executable
   --server-arg <arg>                        Repeatable MCP server arg
   --daemon-socket <path>                    Daemon socket for this run (default: a private
-                                            per-run socket, so THIS build's dist/ serves it)
-  --installed-daemon                        Opt out: let the proxy reach the installed daemon
-                                            on the default socket (the run then fails unless
-                                            that daemon is this build)
+                                            per-run socket, so THIS build's dist/ serves it).
+                                            A socket that already exists is inherited: the
+                                            run never stops that daemon
+  --installed-daemon                        Opt out of the build check: run against the
+                                            installed daemon on its default socket; the
+                                            artifact records private:false,
+                                            from_this_build:false
   --help                                    Show help
 `);
 }
@@ -297,9 +301,16 @@ async function ensureGoalFiles(config, specs) {
   await mkdir(join(config.root, "goals"), { recursive: true });
   await mkdir(join(config.root, "reports"), { recursive: true });
   for (const spec of specs) {
+    // #889: the worker reports under the coordination root, the only place
+    // wait_for's file-backed done reads; the runner copies it to spec.report.
+    await mkdir(dirname(spec.coordinationReport), { recursive: true });
     await writeFile(
       spec.goal,
-      harness.buildWorkerGoalContent(spec.name, spec.report, spec.marker),
+      harness.buildWorkerGoalContent(
+        spec.name,
+        spec.coordinationReport,
+        spec.marker,
+      ),
       "utf8",
     );
   }
@@ -415,7 +426,14 @@ async function main() {
         : new RegExp(`${cliOptions.cli}`, "i"),
   };
 
-  const specs = harness.buildWorkerSpecs(config);
+  const specs = harness.buildWorkerSpecs(config).map((spec) => ({
+    ...spec,
+    coordinationReport: harness.harnessCoordinationReportPath(
+      homedir(),
+      basename(config.root),
+      spec.name,
+    ),
+  }));
   await ensureGoalFiles(config, specs);
 
   const server =
@@ -436,14 +454,17 @@ async function main() {
   // #800: the entry is a daemon-first proxy, so without a pinned socket it
   // talks to whatever daemon owns the default socket (the INSTALLED one on a
   // fleet Mac) and "harness green" proves that binary, not this build.
-  const installedSocket = join(homedir(), ".local", "state", "cmux", "cmuxlayer-stated.sock");
-  const socketPath =
-    cliOptions.daemonSocket ||
-    process.env.CMUXLAYER_DAEMON_SOCKET?.trim() ||
-    (cliOptions.installedDaemon
-      ? installedSocket
-      : harness.defaultHarnessDaemonSocket(homedir(), process.pid));
-  const privateSocket = resolve(socketPath) !== resolve(installedSocket);
+  // #889: "private" means this run created the socket and so started the
+  // daemon; an existing socket (inherited or installed) is never ours to stop.
+  const daemonPlan = harness.planHarnessDaemon({
+    daemonSocketArg: cliOptions.daemonSocket,
+    envSocket: process.env.CMUXLAYER_DAEMON_SOCKET,
+    installedDaemon: cliOptions.installedDaemon,
+    home: homedir(),
+    pid: process.pid,
+    socketExists: existsSync,
+  });
+  const socketPath = daemonPlan.socket_path;
   const childEnv = { ...process.env, CMUXLAYER_DAEMON_SOCKET: socketPath };
   const client = new McpStdioClient(server.command, server.args, childEnv);
   const seenAgentIds = new Set();
@@ -452,23 +473,25 @@ async function main() {
   try {
     const initialized = await client.initialize();
 
-    // #808: fail loudly, up front, when a tool this runner needs is gone.
-    const listed = await client.request("tools/list", {});
-    const listedNames = Array.isArray(listed?.tools)
-      ? listed.tools.map((tool) => tool.name)
-      : [];
-    const missing = harness.missingHarnessTools(listedNames);
-    results.preflight = { tools: listedNames, missing };
-    if (missing.length > 0) {
-      throw new Error(
-        `live harness: required tools missing from tools/list: ${missing.join(", ")}`,
-      );
+    // PREFLIGHT, before any spawn_agent: #808 required tools listed, #889 the
+    // calling seat is shallow enough. Fail loudly, up front.
+    let preflightError;
+    try {
+      results.preflight = await harness.runHarnessPreflight(client, {
+        callerSurface: process.env.CMUX_SURFACE_ID,
+      });
+    } catch (error) {
+      preflightError = error;
+      results.preflight = error?.preflight;
     }
-
+    // Identify the daemon even on a red preflight, so a daemon this run
+    // started is still stopped by its recorded PID in finally.
+    if (preflightError && !results.preflight?.tools?.includes("control_health")) {
+      throw preflightError;
+    }
     const health = await client.callTool("control_health", { detail: "full" });
     results.daemon = harness.buildHarnessDaemonBlock({
-      socketPath,
-      privateSocket,
+      plan: daemonPlan,
       serverVersion:
         typeof initialized?.serverInfo?.version === "string"
           ? initialized.serverInfo.version
@@ -480,6 +503,7 @@ async function main() {
     process.stderr.write(
       `live harness daemon: ${JSON.stringify(results.daemon)}\n`,
     );
+    if (preflightError) throw preflightError;
     if (results.daemon_failures.length > 0) {
       throw new Error(
         `live harness: the serving daemon is not this build (${results.daemon.binary ?? "unknown binary"}, expected under ${results.daemon.expected_dist})`,
@@ -530,6 +554,7 @@ async function main() {
           force_new: true,
           boot_prompt_path: spec.goal,
           mcp_profile: config.mcpProfile,
+          report_path: spec.coordinationReport,
         },
         config.waitTimeoutMs,
       );
@@ -549,6 +574,11 @@ async function main() {
       if (worker.agent_id) {
         seenAgentIds.add(worker.agent_id);
       }
+      // #889: wait on the engine-issued report_path from the receipt.
+      worker.issued_report_path =
+        typeof worker.spawn.structured?.report_path === "string"
+          ? worker.spawn.structured.report_path
+          : spec.coordinationReport;
 
       recordEvent(results.events, {
         worker: spec.name,
@@ -604,7 +634,7 @@ async function main() {
               agent_id: worker.agent_id,
               target_state: "done",
               timeout_ms: slice,
-              report_path: spec.report,
+              report_path: worker.issued_report_path,
               done_marker: spec.marker,
             },
             slice + 30_000,
@@ -626,6 +656,8 @@ async function main() {
         ok: worker.wait?.ok === true,
       });
 
+      // Copy the issued report into results/ for the artifact.
+      await copyFile(worker.issued_report_path, spec.report).catch(() => {});
       worker.report_text = await readReportIfExists(spec.report);
       worker.report_missing = worker.report_text == null;
       if (worker.report_text) {
@@ -706,21 +738,24 @@ async function main() {
   } catch (error) {
     results.error = error instanceof Error ? error.message : String(error);
   } finally {
+    // A red path after spawn_agent must not leak the dummy (#889).
+    for (const worker of results.workers) {
+      if (!worker.agent_id || worker.close) continue;
+      worker.close = await client
+        .callTool("close_surface", {
+          agent_id: worker.agent_id,
+          scope: "agent",
+          force: true,
+        })
+        .catch((error) => ({ ok: false, error: String(error) }));
+    }
     results.stderr = client.stderr.trim() || undefined;
     results.finished_at = new Date().toISOString();
     client.close();
-    // Stop the private daemon this run started, by its recorded PID.
-    if (
-      results.daemon?.private === true &&
-      results.daemon.from_this_build === true &&
-      typeof results.daemon.pid === "number"
-    ) {
-      try {
-        process.kill(results.daemon.pid, "SIGTERM");
-        results.daemon.stopped = true;
-      } catch {
-        results.daemon.stopped = false;
-      }
+    // Stop the daemon only if this run started it, by its recorded PID.
+    const stopped = harness.stopHarnessDaemon(results.daemon);
+    if (results.daemon && stopped !== undefined) {
+      results.daemon.stopped = stopped;
     }
   }
 

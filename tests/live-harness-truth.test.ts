@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -11,12 +11,33 @@ import {
   harnessDaemonFailures,
   isStaleManagedRecord,
   missingHarnessTools,
+  planHarnessDaemon,
+  stopHarnessDaemon,
+  harnessCallerSpawnDepth,
+  harnessDepthRefusal,
+  runHarnessPreflight,
+  harnessCoordinationReportPath,
+  type HarnessDaemonPlan,
 } from "../src/live-agent-harness.js";
 
 // H1 (#800 + #808): the live harness must prove THIS build on a private
 // daemon, say which daemon served it, use only public tools, and fail loudly.
 
 const DIST = "/srv/cmuxlayer/.worktrees/h1/dist";
+const HOME = "/home/ci";
+const PRIVATE_PLAN: HarnessDaemonPlan = {
+  socket_path: "/home/ci/.local/state/cmux/cmuxlayer-harness-4242.sock",
+  installed_socket: false,
+  started_by_run: true,
+  build_check: "enforced",
+};
+const INSTALLED_PLAN: HarnessDaemonPlan = {
+  socket_path: "/home/ci/.local/state/cmux/cmuxlayer-stated.sock",
+  installed_socket: true,
+  started_by_run: false,
+  build_check: "enforced",
+};
+const FOREIGN_BINARY = "/opt/homebrew/Cellar/cmuxlayer/0.4.87/libexec/dist/daemon.js";
 
 describe("live harness daemon block (#800)", () => {
   it("defaults to a private socket under the cmux state dir, per run", () => {
@@ -27,8 +48,7 @@ describe("live harness daemon block (#800)", () => {
 
   it("records which daemon served the run and passes a daemon from this build", () => {
     const block = buildHarnessDaemonBlock({
-      socketPath: "/home/ci/.local/state/cmux/cmuxlayer-harness-4242.sock",
-      privateSocket: true,
+      plan: PRIVATE_PLAN,
       serverVersion: "0.4.88-dev",
       controlHealth: {
         health: { current_process: { pid: 5150, script_path: `${DIST}/daemon.js` } },
@@ -39,6 +59,9 @@ describe("live harness daemon block (#800)", () => {
     expect(block).toEqual({
       socket_path: "/home/ci/.local/state/cmux/cmuxlayer-harness-4242.sock",
       private: true,
+      started_by_run: true,
+      installed_socket: false,
+      build_check: "enforced",
       version: "0.4.88-dev",
       binary: `${DIST}/daemon.js`,
       pid: 5150,
@@ -50,16 +73,10 @@ describe("live harness daemon block (#800)", () => {
 
   it("fails the run when the installed daemon served it", () => {
     const block = buildHarnessDaemonBlock({
-      socketPath: "/home/ci/.local/state/cmux/cmuxlayer-stated.sock",
-      privateSocket: false,
+      plan: INSTALLED_PLAN,
       serverVersion: "0.4.87",
       controlHealth: {
-        health: {
-          current_process: {
-            pid: 77,
-            script_path: "/opt/homebrew/Cellar/cmuxlayer/0.4.87/libexec/dist/daemon.js",
-          },
-        },
+        health: { current_process: { pid: 77, script_path: FOREIGN_BINARY } },
       },
       distDir: DIST,
     });
@@ -70,8 +87,7 @@ describe("live harness daemon block (#800)", () => {
 
   it("fails loudly when the daemon cannot be identified", () => {
     const block = buildHarnessDaemonBlock({
-      socketPath: "/s.sock",
-      privateSocket: true,
+      plan: { ...PRIVATE_PLAN, socket_path: "/s.sock" },
       serverVersion: null,
       controlHealth: undefined,
       distDir: DIST,
@@ -128,7 +144,9 @@ describe("live harness tool preflight and public tools (#808)", () => {
       "utf8",
     );
     expect(script).toContain("CMUXLAYER_DAEMON_SOCKET");
-    expect(script).toContain('"tools/list"');
+    // tools/list lives in runHarnessPreflight (src/live-agent-harness.ts, #889).
+    expect(script).toContain("harness.runHarnessPreflight(");
+    expect(readFileSync(join(process.cwd(), "src", "live-agent-harness.ts"), "utf8")).toContain('"tools/list"');
     const called = [...script.matchAll(/callTool\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
     expect(called.length).toBeGreaterThan(0);
     for (const name of called) {
@@ -173,6 +191,9 @@ describe("gate-2 artifact shape (#808)", () => {
         daemon: {
           socket_path: "/home/ci/.local/state/cmux/cmuxlayer-harness-4242.sock",
           private: true,
+          started_by_run: true,
+          installed_socket: false,
+          build_check: "enforced",
           version: "0.4.88-dev",
           binary: `${DIST}/daemon.js`,
           pid: 5150,
@@ -186,7 +207,7 @@ describe("gate-2 artifact shape (#808)", () => {
     expect(md).toContain("## Daemon");
     expect(md).toContain("- Version: `0.4.88-dev`");
     expect(md).toContain(`- Binary: \`${DIST}/daemon.js\` (pid 5150, this build: yes)`);
-    expect(md).toContain("- Socket: `/home/ci/.local/state/cmux/cmuxlayer-harness-4242.sock` (private)");
+    expect(md).toContain("- Socket: `/home/ci/.local/state/cmux/cmuxlayer-harness-4242.sock` (private, started by this run)");
     expect(md).toContain("## Run error");
     expect(md).toContain("required tools missing from tools/list: wait_for");
   });
@@ -238,5 +259,188 @@ describe("harness cleanup owns its dummy (#808 point 2)", () => {
     expect(close).toMatch(/agent_id: worker\.agent_id/);
     expect(close).toMatch(/scope: "agent"/);
     expect(close).toMatch(/force: true/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H1 round 2 (#889). Each block fails on 8234ed43 and passes at head.
+// ---------------------------------------------------------------------------
+
+const script = () =>
+  readFileSync(join(process.cwd(), "scripts", "run-live-agent-harness.mjs"), "utf8");
+
+describe("#889 must-fix 1: the runner waits on the issued report_path under the coordination root", () => {
+  it("issues each worker a report path under ~/.cmux, waits on the receipt's report_path, and copies it into results/", () => {
+    expect(harnessCoordinationReportPath(HOME, "cursor-2026", "cursor-01")).toBe(
+      "/home/ci/.cmux/live-harness/cursor-2026/cursor-01.report.md",
+    );
+    const source = script();
+    expect(source).toMatch(/report_path: spec\.coordinationReport/);
+    expect(source).toMatch(/worker\.spawn\.structured\?\.report_path/);
+    expect(source).toMatch(/report_path: worker\.issued_report_path/);
+    expect(source).toMatch(/copyFile\(worker\.issued_report_path, spec\.report\)/);
+  });
+});
+
+describe("#889 must-fix 2: --installed-daemon is a truthful opt-out", () => {
+  it("a foreign binary with --installed-daemon proceeds, recorded private:false, from_this_build:false", () => {
+    const plan = planHarnessDaemon({
+      daemonSocketArg: "",
+      envSocket: undefined,
+      installedDaemon: true,
+      home: HOME,
+      pid: 4242,
+      socketExists: () => true,
+    });
+    const block = buildHarnessDaemonBlock({
+      plan,
+      serverVersion: "0.4.87",
+      controlHealth: { health: { current_process: { pid: 77, script_path: FOREIGN_BINARY } } },
+      distDir: DIST,
+    });
+
+    expect(block.private).toBe(false);
+    expect(block.from_this_build).toBe(false);
+    expect(block.build_check).toBe("opted_out");
+    expect(harnessDaemonFailures(block)).toEqual([]);
+    const md = buildRunReportMarkdown(
+      {
+        started_at: "s",
+        finished_at: "f",
+        config: { cli: "cursor", repo: "r", workspace: "w", count: 1, root: "/r", mcpProfile: "sterile", cleanupTimeoutMs: 1, finalGreen: "GREEN_X", finalRed: "RED_X" } as any,
+        workers: [{ name: "cursor-01", agent_id: "a-1", failures: [] } as any],
+        events: [],
+        daemon: block,
+        daemon_failures: harnessDaemonFailures(block),
+      } as any,
+      {},
+    );
+    expect(md).toContain("build check opted out");
+    expect(md.trimEnd().endsWith("GREEN_X")).toBe(true);
+  });
+
+  it("the flag reaches the daemon plan and the docs say it opts out of the build check", () => {
+    expect(script()).toMatch(/installedDaemon: cliOptions\.installedDaemon/);
+    const doc = readFileSync(join(process.cwd(), "docs", "testing", "live-agent-harness.md"), "utf8");
+    expect(doc).toMatch(/`--installed-daemon` \*\*opts out of the build check\*\*/);
+  });
+});
+
+describe("#889 must-fix 3: depth preflight", () => {
+  const surface = "7C1D0E2A-SEAT";
+  const fakeClient = (depth: number) => {
+    const calls: string[] = [];
+    return {
+      calls,
+      request: async (method: string) => {
+        calls.push(method);
+        return { tools: REQUIRED_HARNESS_TOOLS.map((name) => ({ name })) };
+      },
+      callTool: async (name: string) => {
+        calls.push(name);
+        return {
+          ok: true,
+          structured: {
+            agents: [
+              { agent_id: "lead-1", state: { value: "ready" }, surface_id: "surface:3", detail: { surface_uuid: "OTHER", spawn_depth: 1 } },
+              { agent_id: "worker-1", state: { value: "working" }, surface_id: "surface:9", detail: { surface_uuid: surface, spawn_depth: depth } },
+            ],
+          },
+        };
+      },
+    };
+  };
+
+  it("depth 2 fails in preflight naming the depth and both sanctioned ways, with zero spawns", async () => {
+    const client = fakeClient(2);
+    await expect(runHarnessPreflight(client, { callerSurface: surface })).rejects.toThrow(
+      /spawn depth 2 .*plain terminal.*lead seat at depth <= 1/,
+    );
+    expect(client.calls).not.toContain("spawn_agent");
+  });
+
+  it("depth 1 (a lead seat) and a plain terminal pass", async () => {
+    await expect(runHarnessPreflight(fakeClient(1), { callerSurface: surface })).resolves.toMatchObject({ caller_depth: 1 });
+    const plain = fakeClient(5);
+    await expect(runHarnessPreflight(plain, { callerSurface: undefined })).resolves.toMatchObject({ caller_depth: null });
+    expect(plain.calls).toEqual(["tools/list"]);
+    expect(harnessDepthRefusal(null)).toBeNull();
+    expect(harnessCallerSpawnDepth({ agents: [] }, surface)).toBeNull();
+  });
+
+  it("the runner runs the preflight before its first spawn_agent call", () => {
+    const source = script();
+    const preflight = source.indexOf("harness.runHarnessPreflight(");
+    const spawn = source.indexOf('"spawn_agent",');
+    expect(preflight).toBeGreaterThan(0);
+    expect(preflight).toBeLessThan(spawn);
+    expect(source).toMatch(/callerSurface: process\.env\.CMUX_SURFACE_ID/);
+  });
+});
+
+describe("#889 must-fix 4: only stop a daemon this run started", () => {
+  const block = (plan: HarnessDaemonPlan) =>
+    buildHarnessDaemonBlock({
+      plan,
+      serverVersion: "0.4.88-dev",
+      controlHealth: { health: { current_process: { pid: 5150, script_path: `${DIST}/daemon.js` } } },
+      distDir: DIST,
+    });
+
+  it("an inherited --daemon-socket is never signalled and says started_by_run:false", () => {
+    const plan = planHarnessDaemon({
+      daemonSocketArg: "/tmp/someone-elses.sock",
+      envSocket: undefined,
+      installedDaemon: false,
+      home: HOME,
+      pid: 4242,
+      socketExists: (path) => path === "/tmp/someone-elses.sock",
+    });
+    const inherited = block(plan);
+    const kill = vi.fn();
+
+    expect(inherited.started_by_run).toBe(false);
+    expect(inherited.private).toBe(false);
+    expect(stopHarnessDaemon(inherited, kill)).toBeUndefined();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("recognises the nightly default socket as installed, never started by the run", () => {
+    const plan = planHarnessDaemon({
+      daemonSocketArg: "",
+      envSocket: "/home/ci/.local/state/cmux/cmuxlayer-stated-nightly.sock",
+      installedDaemon: false,
+      home: HOME,
+      pid: 4242,
+      socketExists: () => false,
+    });
+    expect(plan.installed_socket).toBe(true);
+    expect(plan.started_by_run).toBe(false);
+    const kill = vi.fn();
+    expect(stopHarnessDaemon(block(plan), kill)).toBeUndefined();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("a fresh per-run socket is started by the run and stopped by its recorded PID", () => {
+    const plan = planHarnessDaemon({
+      daemonSocketArg: "",
+      envSocket: undefined,
+      installedDaemon: false,
+      home: HOME,
+      pid: 4242,
+      socketExists: () => false,
+    });
+    expect(plan.socket_path).toBe(defaultHarnessDaemonSocket(HOME, 4242));
+    expect(plan.started_by_run).toBe(true);
+    const kill = vi.fn();
+    expect(stopHarnessDaemon(block(plan), kill)).toBe(true);
+    expect(kill).toHaveBeenCalledWith(5150, "SIGTERM");
+  });
+
+  it("the runner stops the daemon only through stopHarnessDaemon, and closes leaked dummies in finally", () => {
+    const source = script();
+    expect(source).toContain("harness.stopHarnessDaemon(results.daemon)");
+    expect(source).not.toMatch(/process\.kill\(results\.daemon/);
+    expect(source).toMatch(/finally \{\s*\/\/ A red path after spawn_agent[\s\S]*?close_surface[\s\S]*?scope: "agent"/);
   });
 });

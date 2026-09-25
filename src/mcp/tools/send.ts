@@ -7,6 +7,8 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { reportMarkerMatches } from "../../live-agent-harness.js";
+import { containReportPath } from "../../coordination-paths.js";
+import type { InboxOpts } from "../../inbox.js";
 import { toPublicAgent } from "../../agent-facade.js";
 import { RetryableDeliveryError } from "../../agent-engine.js";
 import { type WatchSpec } from "../../watch-spec.js";
@@ -79,6 +81,8 @@ export interface WaitForToolDeps {
   refreshManagedMetadataBestEffort: (agentId?: string) => Promise<void>;
   registry: AgentRegistry;
   resolveCurrentCallerAgent: () => AgentRecord | null;
+  /** Agent channel base dir, so report_path containment matches spawn's issued path. */
+  inboxOpts?: InboxOpts;
 }
 
 export function registerWaitForTool(
@@ -93,6 +97,7 @@ export function registerWaitForTool(
     refreshManagedMetadataBestEffort,
     registry,
     resolveCurrentCallerAgent,
+    inboxOpts,
   } = deps;
   const REPORT_MARKER_POLL_MS = 500;
   const waitForReportMarker = async (
@@ -119,7 +124,13 @@ export function registerWaitForTool(
       };
     };
     while (true) {
-      const text = await readFile(reportPath, "utf8").catch(() => undefined);
+      // Re-checked every poll: a report written later as a symlink out of the
+      // allowed roots is refused, not read (#889).
+      const contained = await containReportPath(reportPath, agentId, inboxOpts);
+      if (!contained.ok) {
+        return snapshot(false, "immediate", contained.reason);
+      }
+      const text = await readFile(contained.resolved, "utf8").catch(() => undefined);
       if (reportMarkerMatches(text, doneMarker)) {
         return snapshot(true, "report_file");
       }
@@ -181,7 +192,7 @@ export function registerWaitForTool(
         .string()
         .optional()
         .describe(
-          "With done_marker and agent_id: file-backed done. Matches when this ABSOLUTE file's final non-empty line equals done_marker, the same report contract spawn_agent issues.",
+          "With done_marker and agent_id: file-backed done. Matches when this ABSOLUTE file's final non-empty line equals done_marker, the same report contract spawn_agent issues. After symlinks resolve it must sit under ~/.cmux/ or ~/.cmux/agents/<agent_id>/, else refused.",
         ),
       done_marker: z
         .string()
@@ -387,6 +398,14 @@ export function registerWaitForTool(
           throw new Error(
             `wait_for report_path must be absolute: ${args.report_path}`,
           );
+        }
+        if (args.report_path !== undefined) {
+          const contained = await containReportPath(
+            args.report_path,
+            args.agent_id,
+            inboxOpts,
+          );
+          if (!contained.ok) throw new Error(contained.reason);
         }
         // #808: file-backed done. A sterile worker is never told the engine
         // report path, so the registry may never reach `done`; the caller's

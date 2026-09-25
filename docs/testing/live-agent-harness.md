@@ -14,29 +14,46 @@ Before any worker, the runner:
   daemon-first proxy: without a pinned socket it talks to whatever daemon owns the
   default socket, which on a fleet Mac is the installed Homebrew build, and a green
   run would prove that binary instead of this one (#800). The private socket makes
-  the proxy start a daemon from this build's `dist/`; the runner stops that daemon
-  by its recorded PID when the run ends.
-- checks `tools/list` for every tool it calls (`spawn_agent`, `list_agents`,
-  `list_surfaces`, `wait_for`, `close_surface`, `control_health`) and fails red
-  naming any that are missing.
+  the proxy start a daemon from this build's `dist/`. "Private" means **this run
+  created the socket and so started the daemon** (`started_by_run:true`), not
+  merely a non-default path: a `--daemon-socket` (or `CMUXLAYER_DAEMON_SOCKET`)
+  whose socket already exists is inherited, and the installed stable and nightly
+  sockets are always installed. The runner stops only a daemon it started, by its
+  recorded PID, even when the run goes red; it never signals an inherited or
+  installed daemon.
+- `--installed-daemon` **opts out of the build check**: the run proves the
+  installed daemon, not this build. The artifact's daemon block then says
+  `private:false, from_this_build:false, build_check:"opted_out"`, and the run
+  does not fail for `daemon_not_from_this_build`.
+- PREFLIGHT, before any `spawn_agent`: checks `tools/list` for every tool it
+  calls (`spawn_agent`, `list_agents`, `list_surfaces`, `wait_for`,
+  `close_surface`, `control_health`) and fails red naming any that are missing;
+  and, when run inside a managed pane, reads that seat's spawn depth
+  (`list_agents({detail:"full"})`, matched on `CMUX_SURFACE_ID`) and exits
+  non-zero at depth 2 or more. Run it from a plain terminal or from a lead seat
+  at depth 1 or less.
 - records **which daemon served the run** from `control_health(detail:"full")`
   (version, binary path, pid, socket) and fails red if that binary is not under
-  this build's `dist/`.
+  this build's `dist/` (unless `--installed-daemon`).
 
 For each sequential worker the runner:
 
-1. writes a tiny read-only goal file
-2. calls `spawn_agent` with `boot_prompt_path`
+1. writes a tiny read-only goal file naming the worker's report path under the
+   coordination root (`~/.cmux/live-harness/<run>/<worker>.report.md`)
+2. calls `spawn_agent` with `boot_prompt_path` and that `report_path`
 3. spawns the worker with a sandboxed MCP profile by default
 4. verifies managed id / launcher-model policy
 5. captures verbose `list_surfaces` topology (`selected`, `column`, `column_count`)
-6. waits for file-backed DONE via `wait_for({agent_id, report_path, done_marker})`:
-   it matches when the report's final non-empty line equals the marker. A sterile
+6. waits for file-backed DONE via `wait_for({agent_id, report_path, done_marker})`
+   on the `report_path` the `spawn_agent` receipt issued: it matches when the
+   report's final non-empty line equals the marker. `wait_for` reads only a path
+   that, after symlinks resolve, sits under `~/.cmux/` or
+   `~/.cmux/agents/<agent_id>/`; anything else is refused. A sterile
    worker is never told the engine's own report path (#782), so the registry may
    stay `ready`; the file is the done signal (#808). The wait runs in 120 s
    slices up to `--wait-timeout-ms`, because the daemon-first proxy fails any
    single request at 300 s
-7. harvests the report marker
+7. copies the report into `reports/<worker>.md` and harvests the marker
 8. stops the worker and closes its pane: `close_surface({agent_id, scope:"agent", force:true})`.
    The harness owns the dummy and has harvested its report; a plain surface close is
    (correctly) refused while the agent is still live
@@ -158,10 +175,11 @@ CMUX_LIVE_HARNESS=1 node scripts/run-live-agent-harness.mjs --root /tmp/cmux-har
 Under `--root`:
 
 - `goals/<worker>.md`
-- `reports/<worker>.md` (written by live workers)
-- `mcp-run-results.json`: includes `daemon` (`socket_path`, `private`, `version`,
-  `binary`, `pid`, `expected_dist`, `from_this_build`, `stopped`), `preflight`
-  (`tools`, `missing`) and, on a run-level failure, `error`
+- `reports/<worker>.md` (copied from the issued report path)
+- `mcp-run-results.json`: includes `daemon` (`socket_path`, `private`,
+  `started_by_run`, `installed_socket`, `build_check`, `version`, `binary`, `pid`,
+  `expected_dist`, `from_this_build`, `stopped`), `preflight` (`tools`, `missing`,
+  `caller_depth`) and, on a run-level failure, `error`
 - `run-report.md`: includes a `## Daemon` section and, on failure, `## Run error`
 
 The default `results/live-agent-harness/` tree is local scratch and is ignored
@@ -182,10 +200,12 @@ Exit code `0` only when every worker is green and the final marker matches
 The runner fails red on:
 
 - a required tool missing from `tools/list`
+- a calling seat at spawn depth 2 or more (refused in preflight, before any spawn)
 - any run-level error (recorded as `error` in the JSON and `## Run error` in the
   report), and any worker the runner never classified (`worker_not_classified`);
   the exit code and final marker come from this run-level verdict
-- a serving daemon that is not this build (`daemon_not_from_this_build`)
+- a serving daemon that is not this build (`daemon_not_from_this_build`), unless
+  `--installed-daemon` opted out of that check
 - `spawn_agent` `ok:false`
 - boot prompt typed but not submitted
 - missing report file or wrong DONE marker
