@@ -9096,6 +9096,67 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  // #863: skill-creator's 03:13-03:44Z seat read `state:"working"` for 31
+  // minutes while its boot draft sat unsubmitted (prompt_delivered:false,
+  // submit_verified:false, screen composer_dirty). A screen may only promote
+  // a managed boot past `booting` once the registry verifies the submit.
+  it.each(["summary", "full"] as const)(
+    "#863 list_agents (%s) renders an unsubmitted boot as booting over a working screen",
+    async (detail) => {
+      const server = createLifecycleServer(mockExec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const list = (server as any)._registeredTools["list_agents"];
+      const spawned = parseToolResult(await spawn.handler(
+        { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+        {} as any,
+      ));
+      const engine = engineForTests(server) as AgentEngine;
+      const stuck = engine.stateMgr.updateRecord(spawned.agent_id, {
+        state: "booting", boot_prompt_pending: true,
+        prompt_delivered: false, submit_verified: false,
+      } as any);
+      engine.getRegistry().set(stuck.agent_id, stuck);
+
+      const parsed = parseToolResult(await list.handler({ detail }, {} as any));
+      const row = parsed.agents.find((a: any) => a.agent_id === spawned.agent_id);
+      if (detail === "summary") {
+        expect(row).toMatchObject({ state: "booting", boot: "unsubmitted", closure: "pending" });
+      } else {
+        expect(row).toMatchObject({
+          state: { value: "booting", source: "registry" },
+          boot: "unsubmitted",
+          closure: "pending",
+          health: { issue_codes: expect.arrayContaining(["boot_prompt_unsubmitted"]) },
+        });
+        expect(row.health.reconciled_state).toBeUndefined();
+        expect(row.health.status).not.toBe("healthy");
+      }
+      const filtered = parseToolResult(await list.handler({ state: "working" }, {} as any));
+      expect(filtered.agents.map((a: any) => a.agent_id)).not.toContain(spawned.agent_id);
+    },
+  );
+
+  it("#863 list_agents keeps a verified-submitted boot as working with no boot field", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const list = (server as any)._registeredTools["list_agents"];
+    const spawned = parseToolResult(await spawn.handler(
+      { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+      {} as any,
+    ));
+    const engine = engineForTests(server) as AgentEngine;
+    const verified = engine.stateMgr.updateRecord(spawned.agent_id, {
+      state: "booting", boot_prompt_pending: false,
+      prompt_delivered: true, submit_verified: true,
+    } as any);
+    engine.getRegistry().set(verified.agent_id, verified);
+
+    const parsed = parseToolResult(await list.handler({}, {} as any));
+    const row = parsed.agents.find((a: any) => a.agent_id === spawned.agent_id);
+    expect(row.state).toBe("working");
+    expect(row).not.toHaveProperty("boot");
+  });
+
   it("list_agents does not invert a UUID-backed row from its recycled cached ref", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([
