@@ -3117,12 +3117,6 @@ async function executeBenchmark(
         "state",
         "cmux-agents",
       ),
-      monitor_registry_path: join(
-        socketReservation.ownerDirectory,
-        "home",
-        ".golems-zikaron",
-        "monitor-registry.json",
-      ),
       watch_registry_path: join(
         socketReservation.ownerDirectory,
         "home",

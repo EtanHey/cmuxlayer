@@ -35,8 +35,6 @@ import {
   defaultWatchRegistryPath,
   httpNotifyWatch,
 } from "./watch-spec.js";
-import {
-} from "./inbox.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxServerContext, CreateServerOptions } from "./server.js";
