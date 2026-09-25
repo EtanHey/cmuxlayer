@@ -122,12 +122,26 @@ describe("fleet config", () => {
     });
   });
 
+  it("reads a set worktreeBootstrap and expands ~", () => {
+    const home = tempHome();
+    const path = join(home, "fleet.json");
+    writeFileSync(
+      path,
+      JSON.stringify({ worktreeBootstrap: "~/bin/worktree-bootstrap.sh" }),
+    );
+
+    expect(
+      loadFleetConfig({ CMUXLAYER_FLEET_CONFIG: path }, home).worktreeBootstrap,
+    ).toBe(join(home, "bin", "worktree-bootstrap.sh"));
+  });
+
   it.each([
     ["invalid JSON", "{", /not valid JSON/],
     ["a non-object", "[]", /must be a JSON object/],
     ["an unknown key", '{"coordDir":"/x"}', /unknown key "coordDir"/],
     ["a wrong type", '{"outbox":"yes"}', /"outbox" must be a boolean/],
     ["an empty path", '{"coordinationDir":" "}', /"coordinationDir" must be a non-empty string/],
+    ["a non-string worktreeBootstrap", '{"worktreeBootstrap":3}', /"worktreeBootstrap" must be a non-empty string/],
   ])("rejects %s and names the file", (_label, body, message) => {
     const home = tempHome();
     const path = join(home, "fleet.json");

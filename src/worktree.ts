@@ -1,6 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { loadFleetConfig } from "./fleet-config.js";
 import {
+  accessSync,
+  constants as fsConstants,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -68,6 +70,8 @@ export interface PreparedWorktree {
   reused: boolean;
   node_modules_bootstrapped: NodeModulesBootstrap;
   node_modules_bootstrap_error?: string;
+  /** Set on `skipped` when the configured bootstrap script is missing or not executable. */
+  node_modules_bootstrap_reason?: "script_missing";
   mcp_json_copied: boolean;
 }
 
@@ -75,10 +79,70 @@ function defaultExec(cmd: string, args: string[]) {
   return execFileAsync(cmd, args);
 }
 
-const BOOTSTRAP_TIMEOUT_MS = 180_000;
+export const BOOTSTRAP_TIMEOUT_MS = 180_000;
+const BOOTSTRAP_STDERR_TAIL = 2_000;
 
-function defaultBootstrapExec(cmd: string, args: string[]) {
-  return execFileAsync(cmd, args, { timeout: BOOTSTRAP_TIMEOUT_MS });
+/**
+ * AIDEV-NOTE (#807): the bootstrap runs in its own process group so a timeout
+ * kills the install it started too; killing only the script would leave
+ * `bun install` (or npm) writing into the worktree after we report `failed`.
+ * Resolution is on `exit`, not `close`, so a grandchild holding the pipes
+ * cannot stall the spawn.
+ */
+export function runBootstrap(
+  cmd: string,
+  args: string[],
+  timeoutMs: number = BOOTSTRAP_TIMEOUT_MS,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(cmd, args, {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-BOOTSTRAP_STDERR_TAIL);
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // Group already gone.
+        }
+      }
+    }, timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${cmd} timed out after ${timeoutMs} ms`));
+      } else if (code === 0) {
+        resolvePromise({ stdout, stderr });
+      } else {
+        const status = code === null ? `signal ${signal}` : `code ${code}`;
+        reject(new Error(`${cmd} exited with ${status}: ${stderr.trim()}`));
+      }
+    });
+  });
+}
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function safeName(input: string): string {
@@ -192,31 +256,47 @@ export function formatMcpProfileEnv(profile?: McpProfile): string {
 /**
  * AIDEV-NOTE (#807): per-worktree dependency install, never a symlink. A
  * symlinked node_modules inherits whatever a sibling installed and breaks when
- * that sibling goes stale. The fleet's bootstrap script is preferred (it
- * detects the lockfile type); otherwise a bun lockfile gets a frozen install
- * from bun's global cache (no re-download). Failure is reported, not thrown:
+ * that sibling goes stale. A configured bootstrap script wins (it detects the
+ * lockfile type); if it is missing or not executable the result is `skipped`
+ * with reason `script_missing`, never a silent fall-through to another
+ * install. With no script, a bun lockfile gets a frozen install from bun's
+ * global cache (no re-download). Failure is reported, not thrown:
  * the worktree stays usable and the receipt says why deps are missing.
  */
 async function bootstrapWorktreeDeps(
   worktreePath: string,
   script: string | null,
   exec: WorktreeExec,
-): Promise<Pick<PreparedWorktree, "node_modules_bootstrapped" | "node_modules_bootstrap_error">> {
+): Promise<
+  Pick<
+    PreparedWorktree,
+    | "node_modules_bootstrapped"
+    | "node_modules_bootstrap_error"
+    | "node_modules_bootstrap_reason"
+  >
+> {
+  // Unlink a reused worktree's stale node_modules symlink (the link only,
+  // never its target) before choosing a path: a script would install through
+  // it into the sibling checkout, and `skipped` would leave the agent running
+  // on the sibling's deps.
+  const nodeModules = join(worktreePath, "node_modules");
+  if (lstatSync(nodeModules, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    unlinkSync(nodeModules);
+  }
+  if (script !== null && !isExecutable(script)) {
+    return {
+      node_modules_bootstrapped: "skipped",
+      node_modules_bootstrap_reason: "script_missing",
+    };
+  }
   const hasBunLock =
     existsSync(join(worktreePath, "bun.lock")) ||
     existsSync(join(worktreePath, "bun.lockb"));
-  const useScript = script !== null && existsSync(script);
-  if (!useScript && !hasBunLock) return { node_modules_bootstrapped: "skipped" };
+  if (script === null && !hasBunLock) return { node_modules_bootstrapped: "skipped" };
   try {
-    if (useScript && script !== null) {
+    if (script !== null) {
       await exec(script, [worktreePath]);
       return { node_modules_bootstrapped: "script" };
-    }
-    const nodeModules = join(worktreePath, "node_modules");
-    if (lstatSync(nodeModules, { throwIfNoEntry: false })?.isSymbolicLink()) {
-      // Remove the link only; installing through it would write into the
-      // sibling checkout's node_modules.
-      unlinkSync(nodeModules);
     }
     await exec("bun", ["install", "--frozen-lockfile", "--cwd", worktreePath]);
     return { node_modules_bootstrapped: "inline" };
@@ -308,7 +388,7 @@ export async function prepareWorktree(
   const homeGitsDir = resolve(input.homeGitsDir ?? join(homedir(), "Gits"));
   const repoRoot = resolve(input.repoRoot ?? join(homeGitsDir, repo));
   const exec = input.exec ?? defaultExec;
-  const bootstrapExec = input.bootstrapExec ?? defaultBootstrapExec;
+  const bootstrapExec = input.bootstrapExec ?? runBootstrap;
   const bootstrapScript =
     input.bootstrapScript !== undefined
       ? input.bootstrapScript

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -10,9 +11,11 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  BOOTSTRAP_TIMEOUT_MS,
   formatMcpProfileEnv,
   prepareWorktree,
   rollbackPreparedWorktree,
+  runBootstrap,
 } from "../src/worktree.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-worktree-test");
@@ -368,7 +371,7 @@ describe("worktree helpers", () => {
       const repoRoot = join(TEST_ROOT, "repo");
       const script = join(TEST_ROOT, "worktree-bootstrap.sh");
       mkdirSync(TEST_ROOT, { recursive: true });
-      writeFileSync(script, "#!/bin/sh\n");
+      writeFileSync(script, "#!/bin/sh\n", { mode: 0o755 });
       const bootstrapExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
 
       const result = await prepareWorktree({
@@ -401,7 +404,7 @@ describe("worktree helpers", () => {
         homeGitsDir: TEST_ROOT,
         worktree: { name: "deps-inline" },
         exec,
-        bootstrapScript: join(TEST_ROOT, "missing-bootstrap.sh"),
+        bootstrapScript: null,
         bootstrapExec,
       });
 
@@ -425,7 +428,7 @@ describe("worktree helpers", () => {
         homeGitsDir: TEST_ROOT,
         worktree: { name: "deps-none" },
         exec: createdWorktree(repoRoot, "deps-none"),
-        bootstrapScript: join(TEST_ROOT, "missing-bootstrap.sh"),
+        bootstrapScript: null,
         bootstrapExec,
       });
 
@@ -433,6 +436,37 @@ describe("worktree helpers", () => {
       expect(result.node_modules_bootstrapped).toBe("skipped");
       expect(existsSync(join(result.path, "node_modules"))).toBe(false);
       expect(result).not.toHaveProperty("node_modules_linked");
+      expect(result).not.toHaveProperty("node_modules_bootstrap_reason");
+    });
+
+    it.each([
+      ["missing", false],
+      ["not executable", true],
+    ])("skips a configured script that is %s with reason script_missing, even with a bun lockfile", async (_label, create) => {
+      const repoRoot = join(TEST_ROOT, "repo");
+      const script = join(TEST_ROOT, "worktree-bootstrap.sh");
+      if (create) writeFileSync(script, "#!/bin/sh\n", { mode: 0o644 });
+      const exec = vi.fn().mockImplementation(async () => {
+        const path = join(repoRoot, ".worktrees", "deps-script-missing");
+        mkdirSync(path, { recursive: true });
+        writeFileSync(join(path, "bun.lock"), "{}\n");
+        return { stdout: "", stderr: "" };
+      });
+      const bootstrapExec = vi.fn();
+
+      const result = await prepareWorktree({
+        repo: "cmuxlayer",
+        repoRoot,
+        homeGitsDir: TEST_ROOT,
+        worktree: { name: "deps-script-missing" },
+        exec,
+        bootstrapScript: script,
+        bootstrapExec,
+      });
+
+      expect(bootstrapExec).not.toHaveBeenCalled();
+      expect(result.node_modules_bootstrapped).toBe("skipped");
+      expect(result.node_modules_bootstrap_reason).toBe("script_missing");
     });
 
     it("runs no script by default: without a fleet worktreeBootstrap only the bun lockfile path applies", async () => {
@@ -464,7 +498,7 @@ describe("worktree helpers", () => {
       const repoRoot = join(TEST_ROOT, "repo");
       const script = join(TEST_ROOT, "worktree-bootstrap.sh");
       mkdirSync(TEST_ROOT, { recursive: true });
-      writeFileSync(script, "#!/bin/sh\n");
+      writeFileSync(script, "#!/bin/sh\n", { mode: 0o755 });
       const exec = createdWorktree(repoRoot, "deps-failed");
       const bootstrapExec = vi.fn().mockRejectedValue(new Error("frozen lockfile mismatch"));
 
@@ -484,19 +518,35 @@ describe("worktree helpers", () => {
       expect(exec).not.toHaveBeenCalledWith("git", expect.arrayContaining(["remove"]));
     });
 
-    it("unlinks a stale node_modules symlink (not its target) before an inline install on reuse", async () => {
+    it.each([
+      ["script", "script", false],
+      ["inline", null, true],
+      ["skipped", null, false],
+    ] as const)("unlinks a stale node_modules symlink (not its target) on reuse before the %s path", async (outcome, scriptName, bunLock) => {
       const repoRoot = join(TEST_ROOT, "repo");
       const sibling = join(repoRoot, "node_modules");
       mkdirSync(join(sibling, "keep-me"), { recursive: true });
       const worktreePath = join(repoRoot, ".worktrees", "deps-reuse");
       mkdirSync(worktreePath, { recursive: true });
-      writeFileSync(join(worktreePath, "bun.lock"), "{}\n");
-      symlinkSync(sibling, join(worktreePath, "node_modules"), "dir");
+      if (bunLock) writeFileSync(join(worktreePath, "bun.lock"), "{}\n");
+      const link = join(worktreePath, "node_modules");
+      symlinkSync(sibling, link, "dir");
+      let script: string | null = null;
+      if (scriptName) {
+        script = join(TEST_ROOT, "worktree-bootstrap.sh");
+        writeFileSync(script, "#!/bin/sh\n", { mode: 0o755 });
+      }
       const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) =>
         args.includes("list")
           ? { stdout: worktreeListOutput([repoRoot, worktreePath]), stderr: "" }
           : { stdout: "true\n", stderr: "" });
-      const bootstrapExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+      // The link must already be gone when the install runs: an install
+      // through it would write into the sibling's node_modules.
+      const linkAtInstall: boolean[] = [];
+      const bootstrapExec = vi.fn().mockImplementation(async () => {
+        linkAtInstall.push(lstatSync(link, { throwIfNoEntry: false }) !== undefined);
+        return { stdout: "", stderr: "" };
+      });
 
       const result = await prepareWorktree({
         repo: "cmuxlayer",
@@ -504,13 +554,63 @@ describe("worktree helpers", () => {
         homeGitsDir: TEST_ROOT,
         worktree: { name: "deps-reuse", reuse: true },
         exec,
-        bootstrapScript: join(TEST_ROOT, "missing-bootstrap.sh"),
+        bootstrapScript: script,
         bootstrapExec,
       });
 
-      expect(result.node_modules_bootstrapped).toBe("inline");
-      expect(existsSync(join(worktreePath, "node_modules"))).toBe(false);
+      expect(result.node_modules_bootstrapped).toBe(outcome);
+      expect(linkAtInstall).toEqual(outcome === "skipped" ? [] : [false]);
+      expect(lstatSync(link, { throwIfNoEntry: false })).toBeUndefined();
       expect(existsSync(join(sibling, "keep-me"))).toBe(true);
+    });
+  });
+
+  describe("runBootstrap (#807)", () => {
+    it("is bounded at 180 s", () => {
+      expect(BOOTSTRAP_TIMEOUT_MS).toBe(180_000);
+    });
+
+    it("kills the whole process group on timeout, not just the script", async () => {
+      const pidFile = join(TEST_ROOT, "grandchild.pid");
+      const script = join(TEST_ROOT, "slow-bootstrap.sh");
+      writeFileSync(
+        script,
+        `#!/bin/sh\nsleep 30 &\necho $! > "${pidFile}"\nwait\n`,
+        { mode: 0o755 },
+      );
+
+      await expect(runBootstrap(script, [], 500)).rejects.toThrow(
+        "timed out after 500 ms",
+      );
+
+      const grandchild = Number(readFileSync(pidFile, "utf8").trim());
+      expect(grandchild).toBeGreaterThan(0);
+      const alive = () => {
+        try {
+          process.kill(grandchild, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 2_000 });
+    });
+
+    it("rejects with the exit code and stderr when the command fails", async () => {
+      const script = join(TEST_ROOT, "failing-bootstrap.sh");
+      writeFileSync(script, "#!/bin/sh\necho lockfile mismatch >&2\nexit 3\n", {
+        mode: 0o755,
+      });
+
+      await expect(runBootstrap(script, [], 5_000)).rejects.toThrow(
+        /exited with code 3: lockfile mismatch/,
+      );
+    });
+
+    it("resolves with stdout when the command succeeds", async () => {
+      await expect(runBootstrap("/bin/echo", ["ok"], 5_000)).resolves.toMatchObject({
+        stdout: "ok\n",
+      });
     });
   });
 
