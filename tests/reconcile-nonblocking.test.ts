@@ -4,7 +4,7 @@
  * blocks for hundreds of milliseconds delays every concurrent send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -47,34 +47,30 @@ const MAX_ATTEMPTS = 6;
 const HOSTED = Boolean(process.env.CI) && process.env.CI !== "false";
 
 /**
- * #817 (#883 @96766a23): on a hosted runner the idle control can read quiet and every
- * trial still go over, while the same head passes locally. The runner was
- * descheduled mid-sweep, and delay alone reads the same as a held loop. So a
- * hosted fail also needs a second, independent signal: the CPU this process
- * burned inside the trial's longest loop gap. A held loop is this process
- * running JS, so it burns about as much CPU as the gap lasts; a descheduled
- * process burns next to none. A trial confirms a held loop when that CPU
- * exceeds the budget AND covers at least half the gap. (The sweep's own
- * `loop_stall_max_ms` is the same wall-clock gap as the delay histogram, so it
- * cannot tell the two apart.) Locally (no `CI`) delay alone still fails hard.
+ * #817 (#883 @96766a23): on a hosted runner the idle control can read quiet and
+ * every trial still go over, while the same head passes locally. Delay alone
+ * cannot tell a held loop from a runner that left this thread waiting for a CPU.
+ * The main thread's run-queue wait (`/proc/self/task/<tid>/schedstat`) can: it
+ * grows only while the thread is runnable but not running. So each trial also
+ * reports `heldMs`, the longest loop gap minus the run-queue wait inside it:
+ * the time this process itself held the loop, whether running JS or blocked in
+ * a synchronous wait (`Atomics.wait`, sync I/O), which burn no CPU. On a hosted
+ * runner a fail needs `heldMs` over budget in every trial; when the run queue
+ * explains the gaps the verdict is inconclusive (skip with the timings). With
+ * no scheduler stats (non-Linux) `heldMs` falls back to the delay, so the guard
+ * fails as before. Locally (no `CI`) delay alone still fails hard.
  */
 interface TrialReading {
   delayMs: number;
-  /** Longest wall-clock gap between 1 ms probe ticks during the trial. */
-  gapMs?: number;
-  /** CPU ms this process burned inside that gap (all threads). */
-  gapCpuMs?: number;
+  /** Longest loop gap minus the main thread's run-queue wait inside it. */
+  heldMs?: number;
 }
 
-interface ControlledAttempt extends Omit<TrialReading, "delayMs"> {
+interface ControlledAttempt {
   controlMs: number;
   trialMs: number;
+  heldMs?: number;
   valid: boolean;
-}
-
-function confirmsHeldLoop(attempt: ControlledAttempt, budgetMs: number): boolean {
-  if (attempt.gapMs === undefined || attempt.gapCpuMs === undefined) return false;
-  return attempt.gapCpuMs > budgetMs && attempt.gapCpuMs >= attempt.gapMs / 2;
 }
 
 async function runControlledTrials(input: {
@@ -82,7 +78,7 @@ async function runControlledTrials(input: {
   maxAttempts: number;
   pauseMs: number;
   budgetMs: number;
-  /** Hosted CI runner: a delay-only fail is inconclusive without CPU proof. */
+  /** Hosted CI runner: run-queue wait that explains every trial is inconclusive. */
   hosted: boolean;
   /** Idle for `ms` and return the loop delay observed while idle. */
   pause: (ms: number) => Promise<number>;
@@ -97,8 +93,8 @@ async function runControlledTrials(input: {
   while (valid().length < input.needed && attempts.length < input.maxAttempts) {
     const controlMs = await input.pause(input.pauseMs);
     const reading = await input.runTrial(attempts.length);
-    const { delayMs, ...gap } = typeof reading === "number" ? { delayMs: reading } : reading;
-    attempts.push({ controlMs, trialMs: delayMs, ...gap, valid: controlMs <= input.budgetMs });
+    const { delayMs, heldMs } = typeof reading === "number" ? { delayMs: reading } : reading;
+    attempts.push({ controlMs, trialMs: delayMs, heldMs, valid: controlMs <= input.budgetMs });
   }
   const validAttempts = valid();
   const validTrials = validAttempts.map((attempt) => attempt.trialMs);
@@ -114,49 +110,58 @@ async function runControlledTrials(input: {
   if (!loopHeldInEveryTrial(validTrials, input.budgetMs)) {
     return { verdict: "pass", attempts };
   }
-  const confirmed = validAttempts.every((attempt) => confirmsHeldLoop(attempt, input.budgetMs));
-  if (input.hosted && !confirmed) {
-    const fmt = (values: Array<number | undefined>) =>
-      values.map((value) => (value === undefined ? "n/a" : value.toFixed(1))).join(", ");
+  const held = validAttempts.map((attempt) => attempt.heldMs ?? attempt.trialMs);
+  if (input.hosted && !loopHeldInEveryTrial(held, input.budgetMs)) {
+    const fmt = (values: number[]) => values.map((value) => value.toFixed(1)).join(", ");
     return {
       verdict: "skip",
       attempts,
       reason:
         `inconclusive on a hosted runner: quiet controls ` +
         `(${fmt(validAttempts.map((attempt) => attempt.controlMs))} ms) but every trial over ` +
-        `${input.budgetMs} ms (${fmt(validTrials)} ms), and CPU in the longest gap ` +
-        `(${fmt(validAttempts.map((attempt) => attempt.gapCpuMs))} ms of ` +
-        `${fmt(validAttempts.map((attempt) => attempt.gapMs))} ms) does not confirm a held loop`,
+        `${input.budgetMs} ms (${fmt(validTrials)} ms); run-queue wait leaves held ` +
+        `(${fmt(held)} ms), not over budget in every trial`,
     };
   }
   return { verdict: "fail", attempts };
 }
 
+/** Main thread's cumulative run-queue wait in ms, or null without schedstat. */
+function runQueueWaitMs(): number | null {
+  try {
+    const fields = readFileSync(`/proc/self/task/${process.pid}/schedstat`, "utf8").split(" ");
+    const waitNs = Number(fields[1]);
+    return Number.isFinite(waitNs) ? waitNs / 1e6 : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Tick every 1 ms and remember the CPU this process burned across the longest
- * wall-clock gap between ticks: the second signal for a hosted fail.
+ * Tick every 1 ms; for each gap between ticks subtract the main thread's
+ * run-queue wait inside it, and keep the longest remainder (`heldMs`). The gap
+ * before the first tick is skipped, as the delay histogram skips it too.
  */
-function startGapCpuProbe(): () => { gapMs: number; gapCpuMs: number } {
+function startHeldLoopProbe(): () => number | undefined {
   let lastWall = performance.now();
-  let lastCpu = process.cpuUsage();
-  let maxGapMs = -1;
-  let gapCpuMs = 0;
+  let lastWait = runQueueWaitMs();
+  let heldMs = 0;
+  let ticked = false;
   const observe = () => {
     const wall = performance.now();
-    const cpu = process.cpuUsage();
-    const gapMs = wall - lastWall;
-    if (gapMs > maxGapMs) {
-      maxGapMs = gapMs;
-      gapCpuMs = (cpu.user - lastCpu.user + cpu.system - lastCpu.system) / 1000;
+    const wait = runQueueWaitMs();
+    if (ticked && wait !== null && lastWait !== null) {
+      heldMs = Math.max(heldMs, wall - lastWall - (wait - lastWait));
     }
     lastWall = wall;
-    lastCpu = cpu;
+    lastWait = wait;
+    ticked = true;
   };
   const timer = setInterval(observe, 1);
   return () => {
     clearInterval(timer);
     observe();
-    return { gapMs: maxGapMs, gapCpuMs };
+    return lastWait === null ? undefined : heldMs;
   };
 }
 
@@ -287,65 +292,49 @@ describe("runControlledTrials (#817: a stalled runner is not a held loop)", () =
 
   // #817 (#883 @96766a23, job 107991923748): the controls read quiet and every
   // trial still went over on a hosted runner, while the same head passed 3/3
-  // locally. Delay alone cannot tell that from a held loop there. Trial delays
-  // borrow the hosted stall shape of #845 run 36089255730.
+  // locally. Trial delays borrow the hosted stall shape of #845 run 36089255730.
   const residual = [104.5, 248.9, 167.2];
-  const residualTrial = (gapCpuMs: number) => {
+  const residualTrial = (heldMs: number) => {
     let index = 0;
-    return () => {
-      const delayMs = residual[index++ % residual.length]!;
-      return { delayMs, gapMs: delayMs, gapCpuMs };
-    };
+    return () => ({ delayMs: residual[index++ % residual.length]!, heldMs });
   };
 
-  it("hosted: quiet controls with every trial over budget are inconclusive, not a fail", async () => {
+  it("hosted: quiet controls, every trial over, gaps explained by run-queue wait: inconclusive", async () => {
+    const result = await simulate({ control: always(12), trial: residualTrial(12), hosted: true });
+    expect(result.verdict).toBe("skip");
+    expect(result.reason).toMatch(/inconclusive/);
+    expect(result.reason).toContain("104.5, 248.9, 167.2");
+    expect(result.reason).toContain("12.0, 12.0, 12.0");
+  });
+
+  it("hosted: fails when the loop was held (running or blocked) in every trial", async () => {
+    const result = await simulate({ control: always(12), trial: residualTrial(95), hosted: true });
+    expect(result.verdict).toBe("fail");
+  });
+
+  it("hosted: without scheduler stats the delay alone still fails", async () => {
     let index = 0;
     const result = await simulate({
       control: always(12),
       trial: () => residual[index++]!,
       hosted: true,
     });
-    expect(result.verdict).toBe("skip");
-    expect(result.reason).toMatch(/inconclusive/);
-    expect(result.reason).toContain("104.5, 248.9, 167.2");
-  });
-
-  it("hosted: a descheduled gap (CPU under half of it) is inconclusive", async () => {
-    const result = await simulate({
-      control: always(12),
-      trial: residualTrial(40),
-      hosted: true,
-    });
-    expect(result.verdict).toBe("skip");
-    expect(result.reason).toContain("40.0, 40.0, 40.0");
-  });
-
-  it("hosted: fails when CPU fills every longest gap (a held loop)", async () => {
-    const result = await simulate({
-      control: always(12),
-      trial: () => ({ delayMs: 120, gapMs: 120, gapCpuMs: 118 }),
-      hosted: true,
-    });
     expect(result.verdict).toBe("fail");
   });
 
-  it("hosted: one unconfirmed trial is enough to call it inconclusive", async () => {
+  it("hosted: one trial explained by the run queue is enough to call it inconclusive", async () => {
     let index = 0;
-    const cpu = [118, 118, 3];
+    const held = [95, 95, 3];
     const result = await simulate({
       control: always(12),
-      trial: () => ({ delayMs: 120, gapMs: 120, gapCpuMs: cpu[index++]! }),
+      trial: () => ({ delayMs: 120, heldMs: held[index++]! }),
       hosted: true,
     });
     expect(result.verdict).toBe("skip");
   });
 
   it("local: quiet controls with every trial over budget still fail hard", async () => {
-    const result = await simulate({
-      control: always(12),
-      trial: residualTrial(3),
-      hosted: false,
-    });
+    const result = await simulate({ control: always(12), trial: residualTrial(3), hosted: false });
     expect(result.verdict).toBe("fail");
   });
 
@@ -413,16 +402,14 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it(`a ${AGENTS}-agent sweep never holds the loop for ${BUDGET_MS} ms`, async (ctx) => {
-    await engine.getRegistry().reconstitute();
-    await engine.runSweep(); // warm module and JIT state; measure steady state
+  const measure = (hosted: boolean) => {
     const readScreen = client.readScreen as ReturnType<typeof vi.fn>;
-    const result = await runControlledTrials({
+    return runControlledTrials({
       needed: TRIALS,
       maxAttempts: MAX_ATTEMPTS,
       pauseMs: TRIAL_PAUSE_MS,
       budgetMs: BUDGET_MS,
-      hosted: HOSTED,
+      hosted,
       pause: async (ms) => {
         const idle = monitorEventLoopDelay({ resolution: 1 });
         idle.enable();
@@ -434,26 +421,36 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
         const readsBefore = readScreen.mock.calls.length;
         const delay = monitorEventLoopDelay({ resolution: 1 });
         delay.enable();
-        const stopProbe = startGapCpuProbe();
-        let gap: { gapMs: number; gapCpuMs: number };
+        const stopProbe = startHeldLoopProbe();
+        let heldMs: number | undefined;
         try {
           await engine.runSweep();
           await engine.runSweep();
           await engine.runSweep();
         } finally {
-          gap = stopProbe();
+          heldMs = stopProbe();
           delay.disable();
         }
         // Proof of work: every sweep read every agent's screen (not a no-op sweep).
         expect(readScreen.mock.calls.length - readsBefore).toBeGreaterThanOrEqual(
           AGENTS * 3,
         );
-        return { delayMs: delay.max / 1e6, ...gap };
+        return { delayMs: delay.max / 1e6, heldMs };
       },
     });
-    result.attempts.forEach((attempt, index) => {
-      process.stderr.write(`[#810] attempt ${index + 1}: control ${attempt.controlMs.toFixed(1)} ms, trial event_loop_delay_max ${attempt.trialMs.toFixed(1)} ms, cpu ${attempt.gapCpuMs?.toFixed(1) ?? "n/a"} ms in longest gap ${attempt.gapMs?.toFixed(1) ?? "n/a"} ms${attempt.valid ? "" : " (void: runner stalled while idle)"}\n`);
+  };
+
+  const report = (attempts: ControlledAttempt[]) => {
+    attempts.forEach((attempt, index) => {
+      process.stderr.write(`[#810] attempt ${index + 1}: control ${attempt.controlMs.toFixed(1)} ms, trial event_loop_delay_max ${attempt.trialMs.toFixed(1)} ms, held ${attempt.heldMs?.toFixed(1) ?? "n/a"} ms${attempt.valid ? "" : " (void: runner stalled while idle)"}\n`);
     });
+  };
+
+  it(`a ${AGENTS}-agent sweep never holds the loop for ${BUDGET_MS} ms`, async (ctx) => {
+    await engine.getRegistry().reconstitute();
+    await engine.runSweep(); // warm module and JIT state; measure steady state
+    const result = await measure(HOSTED);
+    report(result.attempts);
     if (result.verdict === "skip") {
       process.stderr.write(`[#810] SKIP: ${result.reason}\n`);
       ctx.skip(result.reason);
@@ -462,7 +459,28 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     expect(
       result.verdict,
       `every valid trial exceeded ${BUDGET_MS} ms with a quiet control` +
-        (HOSTED ? " and CPU in the longest gap confirming a held loop" : ""),
+        (HOSTED ? " and the loop held (not run-queue wait) in every trial" : ""),
     ).toBe("pass");
   }, 30_000);
+
+  // #895 review: a synchronous wait holds the loop without burning CPU. On a
+  // hosted runner that must still fail, never read as an inconclusive runner.
+  it.runIf(runQueueWaitMs() !== null)(
+    "hosted: a sweep blocked in Atomics.wait fails, not inconclusive",
+    async () => {
+      const readScreen = client.readScreen as ReturnType<typeof vi.fn>;
+      const cell = new Int32Array(new SharedArrayBuffer(4));
+      readScreen.mockImplementation(async (surface: string) => {
+        if (surface === "surface:3") Atomics.wait(cell, 0, 0, 150);
+        return { surface, text: SCREEN, lines: 200, scrollback_used: false };
+      });
+      await engine.getRegistry().reconstitute();
+      await engine.runSweep();
+      const result = await measure(true);
+      report(result.attempts);
+      expect(result.reason ?? "").not.toMatch(/inconclusive/);
+      expect(result.verdict).not.toBe("pass");
+    },
+    30_000,
+  );
 });
