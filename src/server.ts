@@ -1290,6 +1290,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // ownership, surface-write locks, boot-prompt and background delivery) lives
   // in src/delivery/engine.ts; these are its bindings, names unchanged.
   const {
+    callerOwnsTypedDraft,
     getSurfaceDelivery,
     withSurfaceWrite,
     observedSurfaceUuid,
@@ -6021,6 +6022,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       assertWorkspaceMutationAllowed,
       awaitLifecycleStart,
       buildBootContractInjection,
+      callerOwnsTypedDraft,
       canonicalWorkspaceRef,
       capturePostCreationFocus,
       captureSpawnSessionBestEffort,

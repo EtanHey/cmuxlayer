@@ -179,7 +179,8 @@ describe("spawn response shaping", () => {
       for (const verbose of [false, true]) {
         const result = buildSpawnToolReturn({ ...base,
           spawn_state: "boot_unsubmitted",
-          boot_prompt_receipt: { submit_verified } }, verbose, "legacy");
+          boot_prompt_receipt: { submit_verified } }, verbose, "legacy", undefined,
+          { callerOwnsBootDraft: true });
         expect(result.structuredContent).toMatchObject({ ok: true,
           spawn_state: "boot_unsubmitted", agent_id: "agent-1",
           surface_id: "surface:1", workspace_id: "workspace:1",
@@ -192,6 +193,22 @@ describe("spawn response shaping", () => {
           /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
         );
       }
+    }
+  });
+
+  it("#793 advises the key Return only when the spawning caller owns the draft", () => {
+    const unsubmitted = { ...base, spawn_state: "boot_unsubmitted",
+      boot_prompt_receipt: { typed: true, submit_dispatched: false, submit_verified: false } };
+    const owned = buildSpawnToolReturn(unsubmitted, false, undefined, undefined,
+      { callerOwnsBootDraft: true }).structuredContent.next_action as string;
+    expect(owned).toContain('send_to({mode:"key",surface:"surface:1",text:"return"})');
+    expect(owned).toMatch(/within 5 minutes/);
+    for (const opts of [undefined, { callerOwnsBootDraft: false }]) {
+      const unowned = buildSpawnToolReturn(unsubmitted, false, undefined, undefined, opts)
+        .structuredContent.next_action as string;
+      expect(unowned).not.toContain('mode:"key"');
+      expect(unowned).toContain('read_screen({surface:"surface:1"})');
+      expect(unowned).toMatch(/report boot_unsubmitted .* never re-spawn/);
     }
   });
 

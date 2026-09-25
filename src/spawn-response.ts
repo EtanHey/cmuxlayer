@@ -60,7 +60,11 @@ function record(value: unknown): JsonObject | null {
     : null;
 }
 
-function bootUnsubmittedNextAction(surface: unknown, receipt: unknown): string {
+function bootUnsubmittedNextAction(
+  surface: unknown,
+  receipt: unknown,
+  callerOwnsDraft: boolean,
+): string {
   const surfaceRef = typeof surface === "string" ? surface : "<surface_id>";
   const evidence = record(receipt);
   const retryCount = typeof evidence?.retry_count === "number"
@@ -74,7 +78,12 @@ function bootUnsubmittedNextAction(surface: unknown, receipt: unknown): string {
       : evidence?.submit_dispatched === true
         ? "Return was dispatched, but boot prompt submission was not verified."
         : "Boot prompt submission was not verified.";
-  return `${status} Read the pane with read_screen({surface:"${surfaceRef}"}); if the exact boot prompt still occupies the composer, the spawning caller may submit its owned draft with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}). Otherwise stop and report boot_unsubmitted with this agent ID to the lead using the contract collab path. Keep the existing brief intact; never re-spawn.`;
+  // #793: advise the key-Return only when the engine recorded this caller as
+  // the draft's owner; otherwise the ownership guard refuses it.
+  const recovery = callerOwnsDraft
+    ? `if the exact boot prompt still occupies the composer, submit your owned draft with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}) within 5 minutes (ownership lapses after that, or if the draft changes). Otherwise stop and`
+    : "this caller does not own the draft, so do not send a key Return (the ownership guard refuses it); stop and";
+  return `${status} Read the pane with read_screen({surface:"${surfaceRef}"}); ${recovery} report boot_unsubmitted with this agent ID to the lead using the contract collab path. Keep the existing brief intact; never re-spawn.`;
 }
 
 function leanHealth(value: unknown): JsonObject | undefined {
@@ -177,12 +186,14 @@ export function buildSpawnToolReturn(
   verbose = false,
   legacyText?: string,
   leanData?: JsonObject,
+  opts: { callerOwnsBootDraft?: boolean } = {},
 ): SpawnToolReturn {
   const state = data.spawn_state;
   const stateFields = state
     ? { spawn_state: state,
         ...(state === "boot_unsubmitted"
-          ? { next_action: bootUnsubmittedNextAction(data.surface_id, data.boot_prompt_receipt) }
+          ? { next_action: bootUnsubmittedNextAction(
+              data.surface_id, data.boot_prompt_receipt, opts.callerOwnsBootDraft === true) }
           : {}) }
     : {};
   const full = { ok: true, ...stateFields, ...data };
