@@ -54,6 +54,8 @@ import { recordCliFallback } from "../src/transport-retry-context.js";
 import { RAISE_NOFILE_SOFT_LIMIT, withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { engineForTests } from "../src/server.js";
 import { agentStateTool } from "./helpers/mcp-tool-harness.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
+import { sendInputArgsShape } from "../src/mcp/tools/raw-send.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -119,7 +121,6 @@ const AGENT_TOOLS = [
   "send_to",
   "wait_for",
   "list_agents",
-  "stop_agent",
 ] as const;
 
 function makeLifecycleExec(opts?: {
@@ -2392,7 +2393,7 @@ function readCloseEvents(stateDir: string): Array<Record<string, unknown>> {
 }
 
 describe("agent lifecycle tool registration", () => {
-  it("registers all 5 phase-5 lifecycle tools when lifecycle is enabled", () => {
+  it("registers all 4 phase-5 lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
@@ -2424,7 +2425,7 @@ describe("agent lifecycle tool registration", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(14);
+    expect(Object.keys(registeredTools)).toHaveLength(10);
   });
 
 });
@@ -3752,7 +3753,7 @@ describe("agent lifecycle tool handlers", () => {
 
   it("stop_agent logs a durable close entry carrying caller, force, and target", async () => {
     const server = createLifecycleServer(mockExec);
-    const stopTool = (server as any)._registeredTools["stop_agent"];
+    const stopTool = internalToolForTests(server, "stop_agent");
     const engine = engineForTests(server);
     // Seed a terminal agent so stopAgent short-circuits (no surface teardown),
     // isolating the handler's own close-event emission.
@@ -5150,7 +5151,7 @@ describe("agent lifecycle tool handlers", () => {
       seatManifestNow: () => "2026-07-12T12:00:00.000Z",
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const sendInput = (server as any)._registeredTools["send_input"];
+    const sendInput = internalToolForTests(server, "send_input");
     await spawn.handler(
       { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
@@ -5213,7 +5214,7 @@ describe("agent lifecycle tool handlers", () => {
     });
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const stop = (server as any)._registeredTools["stop_agent"];
+    const stop = internalToolForTests(server, "stop_agent");
 
     const result = await spawn.handler(
       {
@@ -5246,7 +5247,7 @@ describe("agent lifecycle tool handlers", () => {
     mockExec = makeLifecycleExec({ closeKeepsSurface: true });
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const stop = (server as any)._registeredTools["stop_agent"];
+    const stop = internalToolForTests(server, "stop_agent");
 
     const result = await spawn.handler(
       {
@@ -8331,7 +8332,7 @@ describe("agent lifecycle tool handlers", () => {
       client.sendKey.mockRejectedValue(new Error("Buffer not found"));
 
       const accepted = parseToolResult(
-        await registeredTestTool(server, "send_input").handler(
+        await internalToolForTests(server, "send_input").handler(
           {
             surface: record.surface_id,
             text: "already pasted\ninto the composer",
@@ -8397,7 +8398,7 @@ describe("agent lifecycle tool handlers", () => {
       });
 
       const accepted = parseToolResult(
-        await registeredTestTool(server, "send_input").handler(
+        await internalToolForTests(server, "send_input").handler(
           {
             surface: record.surface_id,
             text: "submit this",
@@ -9221,9 +9222,9 @@ describe("agent lifecycle tool handlers", () => {
         },
       ),
     );
-    const sendInput = (server as any)._registeredTools["send_input"];
+    const sendInput = internalToolForTests(server, "send_input");
     const listAgents = (server as any)._registeredTools["list_agents"];
-    const sendArgs = sendInput.inputSchema.parse({
+    const sendArgs = sendInputArgsShape.parse({
       surface: record.surface_id,
       text: "ping",
       press_enter: false,
@@ -11549,7 +11550,7 @@ codex>
         surfaceObserverEpochProvider: () => "stable-test-epoch",
       });
 
-      const accepted = await registeredTestTool(server, "send_input").handler(
+      const accepted = await internalToolForTests(server, "send_input").handler(
         {
           surface: "surface:230",
           text: "fail after observer capture",
@@ -11989,7 +11990,7 @@ codex>
     }) as typeof process.kill);
 
     try {
-      const directStop = await registeredTestTool(server, "stop_agent").handler(
+      const directStop = await internalToolForTests(server, "stop_agent").handler(
         { agent_id: record.agent_id, force: true },
         {} as any,
       );
@@ -12920,7 +12921,7 @@ codex>
       ]);
 
       const args = { agent_id: record.agent_id, force: false };
-      const result = await registeredTestTool(server, toolName).handler(
+      const result = await internalToolForTests(server, toolName).handler(
         args,
         {} as any,
       );
@@ -12995,7 +12996,7 @@ codex>
       ]);
 
       const args = { agent_id: record.agent_id, force };
-      const result = await registeredTestTool(server, toolName).handler(
+      const result = await internalToolForTests(server, toolName).handler(
         args,
         {} as any,
       );

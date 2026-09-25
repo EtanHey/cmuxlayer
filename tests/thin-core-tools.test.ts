@@ -9,6 +9,7 @@ import {
 import { AgentEngine } from "../src/agent-engine.js";
 import { runWithCallerContext } from "../src/caller-context.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 const CORE_TOOL_NAMES = [
   "spawn_agent",
@@ -205,7 +206,7 @@ describe("send_to consolidated modes", () => {
     const args = { surface: "surface:1", text: "raw compatibility", press_enter: false };
     try {
       vi.mocked(exec).mockClear();
-      const legacy = await server._registeredTools.send_input.handler(args, {});
+      const legacy = await internalToolForTests(server, "send_input").handler(args, {});
       expect(legacy.isError).toBeUndefined();
       const legacyCalls = vi.mocked(exec).mock.calls.map(call => [...call[1]]);
       vi.mocked(exec).mockClear();
@@ -452,7 +453,7 @@ describe("consolidated compatibility", () => {
     }) as any;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const result = await server._registeredTools.send_input.handler(
+    const result = await internalToolForTests(server, "send_input").handler(
       { surface: "surface:1", text: "legacy", press_enter: false },
       {},
     );
@@ -464,7 +465,7 @@ describe("consolidated compatibility", () => {
       typed: true,
       delivery_state: "typed",
     });
-    const second = await server._registeredTools.send_input.handler(
+    const second = await internalToolForTests(server, "send_input").handler(
       { surface: "surface:1", text: "legacy again", press_enter: false },
       {},
     );

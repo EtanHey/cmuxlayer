@@ -6,6 +6,13 @@ import { randomUUID } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { RetryableDeliveryError } from "../../agent-engine.js";
 import { type WatchSpec } from "../../watch-spec.js";
+import { withTransportRetryTracking } from "../../transport-retry-context.js";
+import type {
+  SendCommandArgs,
+  SendInputArgs,
+  SendKeyArgs,
+} from "./raw-send.js";
+import type { ToolReturn } from "../tool-result.js";
 import type { AgentRecord, AgentState } from "../../agent-types.js";
 import { formatOk } from "../../format.js";
 import { sanitizeTerminalInput } from "../../sanitize.js";
@@ -47,7 +54,6 @@ import type {
   AgentHealthStatus,
 } from "../../agent-health.js";
 import type { AgentRegistry } from "../../agent-registry.js";
-import type { LifecycleAgentInputDeliverer } from "../context.js";
 import type { LiveAgentState } from "../../live-agent-state.js";
 import type {
   ParsedControlPlaneState,
@@ -56,7 +62,6 @@ import type {
 } from "../../types.js";
 import type { ServerAgentHealthEvaluator } from "./agent.js";
 import type { SurfaceTopologySnapshot } from "../../surface-topology.js";
-import type { ToolHandlerRegistry } from "../registration.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { DeliveryEventType } from "../../agent-types.js";
 import type {
@@ -389,8 +394,13 @@ export interface SendToToolDeps {
   deliverAgentInput: (args: { agent_id: string; text: string; press_enter: boolean; allow_busy?: boolean; source_event: DeliveryEventType; delivery_id?: string; timings?: DeliveryPhaseTimings; }) => Promise<{ queued_behind_turn: boolean; delivered: boolean; terminal: boolean; typed: boolean; submit_attempted: boolean; submit_dispatched?: boolean; submit_verified: boolean | null; submitted: boolean; submit_evidence?: SubmitEvidence | null; retry_count: number; rpc_methods: Array<"surface.send_text" | "surface.send_key">; delivery?: PublicDeliveryState; delivery_state?: PublicDeliveryState; delivery_id?: string; duplicate_of?: string; needs_attention?: boolean; attention_reason?: string; timings_ms?: DeliveryPhaseTimings; observation?: { status: ParsedScreenResult["status"]; composer_empty: boolean; prompt_echoed: boolean; last_10_lines: string[]; }; WARNING?: string; bytes: number; key_dispatched?: boolean; submit_verification_reason?: SubmitKeyVerificationReason | null; }>;
   engine: AgentEngine;
   observePausedTarget: (agent: AgentRecord | null | undefined) => Promise<{ paused: boolean; source: string; }>;
+  /** send_input / send_command / send_key as plain functions (CX-3 S7). */
+  rawSend: {
+    sendInput: (args: SendInputArgs) => Promise<ToolReturn>;
+    sendCommand: (args: SendCommandArgs) => Promise<ToolReturn>;
+    sendKey: (args: SendKeyArgs) => Promise<ToolReturn>;
+  };
   registry: AgentRegistry;
-  toolHandlersByName: ToolHandlerRegistry;
 }
 
 export function registerSendToTool(
@@ -407,8 +417,8 @@ export function registerSendToTool(
     deliverAgentInput,
     engine,
     observePausedTarget,
+    rawSend,
     registry,
-    toolHandlersByName,
   } = deps;
   // 17. send_to
   server.tool(
@@ -480,35 +490,30 @@ export function registerSendToTool(
           }
           assertCanonicalSurfaceRef(surface);
           assertWorkerUpwardChannel(surface);
-          const legacyHandler = (name: string) => {
-            const handler = toolHandlersByName.get(name);
-            if (!handler) {
-              throw new Error(`Internal tool handler unavailable: ${name}`);
-            }
-            return handler;
-          };
+          // Direct calls replace the by-name hop; each runs in its own
+          // transport-retry scope, as the dispatched handler did.
           if (mode === "surface") {
             if (args.text === undefined) {
               throw new Error("send_to mode=surface requires text");
             }
             const deliveryId = randomUUID();
             const timings = createDeliveryPhaseTimings();
+            const sendInputArgs = {
+              surface,
+              workspace: args.workspace,
+              text: args.text,
+              chunk_size: args.chunk_size,
+              background: args.background,
+              press_enter: args.press_enter,
+              rename_to_task: args.rename_to_task,
+              allow_long_inline: args.allow_long_inline,
+              _cmuxlayer_source_event: "send_to",
+              _cmuxlayer_delivery_id: deliveryId,
+              _cmuxlayer_timings: timings,
+            };
             return withSurfaceDeliveryTimings(
-              await legacyHandler("send_input")(
-                {
-                  surface,
-                  workspace: args.workspace,
-                  text: args.text,
-                  chunk_size: args.chunk_size,
-                  background: args.background,
-                  press_enter: args.press_enter,
-                  rename_to_task: args.rename_to_task,
-                  allow_long_inline: args.allow_long_inline,
-                  _cmuxlayer_source_event: "send_to",
-                  _cmuxlayer_delivery_id: deliveryId,
-                  _cmuxlayer_timings: timings,
-                },
-                {},
+              await withTransportRetryTracking(() =>
+                rawSend.sendInput(sendInputArgs),
               ),
               timings,
             );
@@ -518,24 +523,23 @@ export function registerSendToTool(
             if (command === undefined) {
               throw new Error("send_to mode=command requires text");
             }
-            return legacyHandler("send_command")(
-              {
+            return withTransportRetryTracking(() =>
+              rawSend.sendCommand({
                 surface,
                 workspace: args.workspace,
                 command,
                 boot_prompt_path: args.boot_prompt_path,
                 boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
                 allow_long_inline: args.allow_long_inline,
-              },
-              {},
+              }),
             );
           }
           if (!args.text) {
             throw new Error("send_to mode=key requires text");
           }
-          return legacyHandler("send_key")(
-            { surface, workspace: args.workspace, key: args.text },
-            {},
+          const key = args.text;
+          return withTransportRetryTracking(() =>
+            rawSend.sendKey({ surface, workspace: args.workspace, key }),
           );
         }
 

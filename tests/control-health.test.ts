@@ -20,6 +20,7 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
 import { runWithCallerContext } from "../src/caller-context.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-control-health-test");
 const ACCESS_CONTROL_DENIED_TEXT =
@@ -452,7 +453,7 @@ describe("control health", () => {
       surfaceWriteLiveness: tracker,
       controlHealthCollector: async () => rawHealth,
     });
-    const sendKey = (server as any)._registeredTools["send_key"];
+    const sendKey = internalToolForTests(server, "send_key");
     const controlHealth = (server as any)._registeredTools["control_health"];
 
     try {

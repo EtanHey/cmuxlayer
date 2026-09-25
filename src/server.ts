@@ -3,8 +3,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {appendFile, mkdir, } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,7 +20,6 @@ import { extractPrefix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
 import {
 } from "./model-policy.js";
-import { StateManager } from "./state-manager.js";
 import { shellQuote } from "./agent-command.js";
 import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import { agentProcessLiveness } from "./util/pid-alive.js";
@@ -92,12 +90,8 @@ import type {
 import {
 } from "./agent-types.js";
 import {
-  formatReadScreen,
-  formatOk,
-  formatDelivery,
 } from "./format.js";
 import {
-  cleanScreenText,
   parseScreen,
   screenShowsPaused,
 } from "./screen-parser.js";
@@ -116,7 +110,6 @@ import {
   type InboxOpts,
 } from "./inbox.js";
 import {
-  applyHarnessState,
 } from "./harness-session.js";
 import {
   type CodexRolloutFill,
@@ -155,7 +148,6 @@ import {
 import {
   collectSelfHealHealth,
   collectControlHealth,
-  formatControlHealth,
   type ControlHealth,
   type LifecycleStartHealth,
 } from "./control-health.js";
@@ -163,7 +155,6 @@ import {
   collectSurfaceTopology as collectCmuxSurfaceTopology,
   enumerateAllWindowWorkspacesWithRetry,
   invalidateSurfaceTopologyCallScope,
-  EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   resolveAgentSurfaceBinding,
@@ -200,24 +191,14 @@ import {
   composeBootDeliveryText,
 } from "./delivery/composer-screen.js";
 import {
-  ANNOTATIONS,
-  BOOT_PROMPT_TIMEOUT_MS,
 } from "./mcp/schemas.js";
 import {
   timeDeliveryPhase,
   buildPublicDeliveryReceipt,
   pausedTargetWarning,
-  DeliveryError,
-  SubmitVerificationError,
   AmbiguousBootRecoveryReturnError,
-  DeliverySafetyGateError,
   ManualModeMutationError,
   PLACEMENT_WORKSPACE_UNRESOLVED,
-  BootPromptTimeoutError,
-  BootPromptDeliveryError,
-  BootComposerResidueError,
-  BootPromptUpdateMenuBlockedError,
-  SurfaceGoneError,
 } from "./delivery/receipts.js";
 import type {
   SubmitEvidence,
@@ -227,18 +208,13 @@ import type {
 } from "./delivery/receipts.js";
 import {
   controlModeFromStatusEntries,
-  surfaceGonePayload,
   ok,
-  okFormatted,
-  err,
   LifecycleStartTimeoutError,
 } from "./mcp/tool-result.js";
 import type {
 } from "./mcp/tool-result.js";
 import {
   SEND_INPUT_CHUNK_THRESHOLD,
-  PANE_INPUT_BREAKAGE_GUIDANCE,
-  ZSH_BANG_INLINE_WARNING,
   SEND_INPUT_PASTE_BATCH_MAX_BYTES,
   SEND_INPUT_CHUNK_DELAY_MS,
   SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
@@ -248,12 +224,7 @@ import {
   BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS,
   INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,
   chunkTerminalInput,
-  limitInputChunksByUtf8ByteSize,
   buildInputDeliveryBatches,
-  assertInteractiveMultilineInputAllowed,
-  getBootPromptPath,
-  assertInlineInputAllowed,
-  assertDenseInlineInputAllowed,
 } from "./delivery/input-policy.js";
 import {
   DEFAULT_REPORT_WATCH_DEADLINE_MS,
@@ -270,10 +241,6 @@ import type {
   LifecycleAgentInputDeliverer,
 } from "./mcp/context.js";
 import {
-  pickLatestSurfaceModel,
-  resolveHarnessStateForSurface,
-  resolveLatestSurfaceAgentRecord,
-  enrichParsedScreen,
 } from "./delivery/surface-state.js";
 import {
   createDeliveryEngine,
@@ -312,14 +279,28 @@ export type {
 } from "./delivery/input-policy.js";
 
 
+import { registerControlHealthTool } from "./mcp/tools/health.js";
 import {
-  OWNED_AGENT_CLOSE_ON_UNKNOWN_PID,
+  type RawSendDeps,
+  type SendCommandArgs,
+  type SendInputArgs,
+  type SendKeyArgs,
+  sendCommand,
+  sendInput,
+  sendKey,
+} from "./mcp/tools/raw-send.js";
+import { registerReadScreenTool } from "./mcp/tools/screen.js";
+import { type StopAgentCallArgs, stopAgent } from "./mcp/tools/stop.js";
+import type { ToolReturn } from "./mcp/tool-result.js";
+import type { RawSurfaceMutationRoute } from "./mcp/shared-types.js";
+import {
   registerCloseSurfaceTool,
   registerListSurfacesTool,
   registerUpdateSurfaceTool,
   type SurfaceToolDeps,
 } from "./mcp/tools/surface.js";
 import {
+  bindInternalToolsForTests,
   bindToolDeps,
   createSuccessfulDispatchRpcMethod,
   installToolRegistration,
@@ -336,7 +317,6 @@ import {
   registerReportToParentTool,
 } from "./mcp/tools/agent.js";
 import {
-  preflightBootPromptFile,
 } from "./mcp/tool-input.js";
 import type {
   FocusRestoreLease,
@@ -402,21 +382,6 @@ export { sanitizeTerminalInput } from "./sanitize.js";
  */
 const defaultStaleBuildWarner = createStaleBuildWarner();
 
-function inferLauncherCli(command: string): CliType | null {
-  if (!/(^|\s)-s(?:\s|$)/.test(command)) {
-    return null;
-  }
-
-  const match = command.match(
-    /(?:^|\s)[A-Za-z0-9_.-]+(Claude|Codex|Cursor|Gemini|Kiro)\b/,
-  );
-  if (!match) {
-    return null;
-  }
-
-  return match[1].toLowerCase() as CliType;
-}
-
 function inferLauncherFromTitle(
   title?: string,
 ): { repo: string; cli: CliType; launcherName: string } | null {
@@ -451,35 +416,6 @@ export const __submitEvidenceTestHooks = {
   requiredBootReadyObservations,
   composeBootDeliveryText,
 };
-
-export interface TargetIdentity {
-  surface: string;
-  title?: string;
-  model?: string;
-  agent_type?: string;
-}
-
-// Best-effort target-agent identity for delivery responses (send_input /
-// send_command). `title` is the live cmux tab/surface title when known — never
-// the boot prompt / task_summary. Model/cli come from the in-memory registry.
-function resolveTargetIdentity(
-  stateMgr: StateManager,
-  surfaceRef: string,
-  surfaceTitle?: string | null,
-  stableSurfaceIdentity?: string | null,
-): TargetIdentity {
-  const identity: TargetIdentity = { surface: surfaceRef };
-  const title = surfaceTitle?.trim();
-  if (title) identity.title = title;
-  const record = resolveLatestSurfaceAgentRecord(
-    stateMgr,
-    surfaceRef,
-    stableSurfaceIdentity,
-  );
-  if (record?.model) identity.model = record.model;
-  if (record?.cli) identity.agent_type = record.cli;
-  return identity;
-}
 
 // Map a live screen status onto a healthy AgentState. Only running/idle states are "healthy"
 // enough to override a stale registry error — "done"/"frozen" are left to the registry.
@@ -1653,17 +1589,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
   };
 
-  type RawSurfaceMutationRoute = {
-    surface: string;
-    workspace?: string;
-    /** Live cmux tab title for this surface when topology knows it. */
-    title: string | null;
-    stableSurfaceIdentity: string | null;
-    remapped_from?: string;
-    remapped_to?: string;
-    assertCurrent: () => Promise<void>;
-  };
-
   const remapFields = (
     route: RawSurfaceMutationRoute,
   ): Pick<RawSurfaceMutationRoute, "remapped_from" | "remapped_to"> =>
@@ -2293,6 +2218,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   // CX-3 S6: the surface tools live in src/mcp/tools/surface.ts.
+  // Set once the agent lifecycle is wired; close_surface scope="agent" reads
+  // it live, exactly as it used to look up the stop_agent handler by name.
+  let stopAgentFn:
+    | ((args: StopAgentCallArgs) => Promise<ToolReturn>)
+    | null = null;
   const surfaceToolDeps: SurfaceToolDeps = {
     agentScopedSurfaceClose,
     appendCloseEvent,
@@ -2317,985 +2247,62 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     resolveRawSurfaceMutationRoute,
     snapshotWatchOwnerCandidates,
     stateMgr,
+    stopAgent: () => stopAgentFn,
     toolHandlersByName,
     withSurfaceWrite,
   };
   registerListSurfacesTool(server, surfaceToolDeps);
 
-  server.tool(
-    "control_health",
-    "Report terse control-path health by default; pass detail=full for diagnostics.",
-    {
-      detail: z.enum(["terse", "full"]).optional().default("terse"),
-    },
-    ANNOTATIONS.readOnly,
-    async (args) => {
-      try {
-        const health = await appendControlHealthSnapshot();
-        const staleWarning = staleBuildWarning();
-        const healthWithStale = staleWarning
-          ? { ...health, warnings: [...health.warnings, staleWarning] }
-          : health;
-        if (args.detail === "full") {
-          return okFormatted(formatControlHealth(healthWithStale), {
-            health: healthWithStale,
-          });
-        }
-        const caller = resolveCurrentCallerAgent();
-        const callerCanonicalId = caller
-          ? canonicalAgentId(caller.agent_id)
-          : null;
-        const callerWatchOwnerCandidates = caller
-          ? snapshotWatchOwnerCandidates()
-          : [];
-        const watches = caller
-          ? readWatchRegistry({
-              registryPath:
-                opts?.watchRegistryPath ??
-                join(context.stateDir, "watch-specs.json"),
-            }).watches
-              .filter(
-                (watch) => {
-                  const ownerResolution = resolveWatchOwner(
-                    watchRecordOwner(watch),
-                    callerWatchOwnerCandidates,
-                  );
-                  return (
-                    callerCanonicalId !== null &&
-                    ownerResolution.kind === "resolved" &&
-                    watchOwnerIncludesCanonical(
-                      ownerResolution,
-                      callerCanonicalId,
-                    ) &&
-                    (watch.state === "armed" || watch.state === "firing")
-                  );
-                },
-              )
-              .map(({ watch_id, target, state }) => ({
-                watch_id,
-                target,
-                state,
-              }))
-          : [];
-        const terse = {
-          transport: healthWithStale.selected_transport,
-          warnings: healthWithStale.warnings,
-          daemon_lifecycle: healthWithStale.daemon_lifecycle,
-          self_heal: {
-            pane_pty_dead:
-              healthWithStale.self_heal.pane_pty_dead.count,
-          },
-          caller_live_watches: {
-            count: watches.length,
-            watches,
-          },
-        };
-        return okFormatted(JSON.stringify(terse), { health: terse });
-      } catch (e) {
-        return err(e);
+  registerControlHealthTool(server, {
+    appendControlHealthSnapshot,
+    context,
+    opts,
+    resolveCurrentCallerAgent,
+    snapshotWatchOwnerCandidates,
+    staleBuildWarning,
+  });
+
+  // CX-3 S7: send_input / send_command / send_key are plain functions in
+  // src/mcp/tools/raw-send.ts; send_to calls them directly.
+  const rawSendDeps: RawSendDeps = {
+    assertSurfaceMutationAllowed,
+    context,
+    deliverBootPrompt,
+    executeDeliveryEngine,
+    isBootPromptDelivered,
+    remapFields,
+    resolveRawSurfaceMutationRoute,
+    sendLauncherCommandToSurface,
+    shouldVerifyRawSurfaceSubmit,
+    startBackgroundDelivery,
+    stateMgr,
+    withSurfaceWrite,
+  };
+  bindInternalToolsForTests(server, {
+    send_input: (args) => sendInput(rawSendDeps, args as SendInputArgs),
+    send_command: (args) => sendCommand(rawSendDeps, args as SendCommandArgs),
+    send_key: (args) => sendKey(rawSendDeps, args as SendKeyArgs),
+    stop_agent: (args) => {
+      if (!stopAgentFn) {
+        throw new Error("Internal agent close adapter unavailable");
       }
+      return stopAgentFn(args as StopAgentCallArgs);
     },
-  );
+  });
 
-  // 5. send_input
-  server.tool(
-    "send_input",
-    `${PANE_INPUT_BREAKAGE_GUIDANCE} Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxlayer resolves the current backing surface. WARNING — DO NOT include a bare \`@word\` (e.g. \`@narration-lead\`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats \`@\` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (\`narration-lead:\`) for pane-to-pane addressing; reserve \`@<name>\` for collab-file posts where monitors match it. If a literal \`@\` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} UTF-8 bytes by default (CMUXLAYER_MAX_INLINE_CHARS, a byte count >= ${SEND_INPUT_CHUNK_THRESHOLD}); tracked Codex/Claude/Cursor/Gemini agents also refuse multi-paragraph inline text by default. Pass allow_long_inline:true only for deliberate raw sends. Text over ${SEND_INPUT_CHUNK_THRESHOLD} characters that is allowed is split into line-aligned logical chunks and coalesced into bounded paste batches; each physical paste waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Paste failure returns an error without pressing Return. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically. ${ZSH_BANG_INLINE_WARNING}`,
-    {
-      surface: z.string().describe("Target surface ref"),
-      text: z
-        .string()
-        .describe(
-          `${PANE_INPUT_BREAKAGE_GUIDANCE} Text to send. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline UTF-8 bytes by default.`,
-        ),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      chunk_size: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .default(200)
-        .describe("Chunk size for automatic long-text delivery"),
-      background: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe(
-          "Return immediately with a delivery_id and continue chunked delivery in the background",
-        ),
-      press_enter: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Press return once after all chunks have landed."),
-      rename_to_task: z
-        .string()
-        .optional()
-        .describe("Rename tab suffix to this task name"),
-      allow_long_inline: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe(
-          "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
-        ),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        const internalArgs = args as typeof args & {
-          _cmuxlayer_source_event?: DeliveryEventType;
-          _cmuxlayer_delivery_id?: string;
-          _cmuxlayer_timings?: DeliveryPhaseTimings;
-        };
-        const sourceEvent =
-          internalArgs._cmuxlayer_source_event ?? "send_input";
-        const requestedDeliveryId = internalArgs._cmuxlayer_delivery_id;
-        const timings = internalArgs._cmuxlayer_timings;
-        assertInlineInputAllowed({
-          tool: "send_input",
-          arg: "text",
-          value: args.text,
-          allowLongInline: args.allow_long_inline,
-        });
-        assertDenseInlineInputAllowed({
-          tool: "send_input",
-          arg: "text",
-          value: args.text,
-          allowLongInline: args.allow_long_inline,
-        });
-        const sanitizedText = sanitizeTerminalInput(args.text);
-        const effectiveChunkSize = Math.min(
-          args.chunk_size,
-          SEND_INPUT_PASTE_BATCH_MAX_BYTES,
-        );
-        const chunks =
-          sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
-            ? limitInputChunksByUtf8ByteSize(
-                chunkTerminalInput(sanitizedText, effectiveChunkSize),
-              )
-            : [sanitizedText];
-        const route = await timeDeliveryPhase(timings, "enumerate", () =>
-          resolveRawSurfaceMutationRoute(
-            args.surface,
-            args.workspace,
-            "send_input",
-          ),
-        );
-        const targetRecord = resolveLatestSurfaceAgentRecord(
-          stateMgr,
-          route.surface,
-          route.stableSurfaceIdentity,
-        );
-        // A public delivery_id is a promise that wait_for can resolve. Raw,
-        // unmanaged surfaces have no lifecycle identity for the verifier, so
-        // keep their truthful queued receipt ID-free instead of exposing an
-        // orphaned handle.
-        const deliveryId = targetRecord ? requestedDeliveryId : undefined;
-        assertInteractiveMultilineInputAllowed({
-          tool: "send_input",
-          value: args.text,
-          cli: targetRecord?.cli,
-          allowLongInline: args.allow_long_inline,
-        });
-        if (args.background) {
-          const shouldVerifySubmit =
-            args.press_enter &&
-            (await shouldVerifyRawSurfaceSubmit(
-              targetRecord,
-              route.surface,
-              route.workspace,
-            ));
-          await assertSurfaceMutationAllowed(
-            "send_input",
-            route.surface,
-            route.workspace,
-          );
-          await route.assertCurrent();
-          const record: DeliveryRecord = {
-            delivery_id: deliveryId ?? randomUUID(),
-            surface: route.surface,
-            workspace: route.workspace,
-            status: "delivering",
-            total_chunks: chunks.length,
-            sent_chunks: 0,
-            chunk_size: effectiveChunkSize,
-            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-            chunks,
-            press_enter: args.press_enter,
-            verify_submit: shouldVerifySubmit,
-            submit_verified: null,
-            retry_count: 0,
-            rpc_methods: [],
-            typed: false,
-            submit_dispatched: false,
-            rename_to_task: args.rename_to_task,
-            started_at: new Date().toISOString(),
-            stableSurfaceIdentity: route.stableSurfaceIdentity,
-            beforeMutation: route.assertCurrent,
-          };
-          const receiptEngine = context.lifecycleSweepEngine;
-          const backgroundLifecycle =
-            targetRecord && receiptEngine
-              ? {
-                  engine: receiptEngine,
-                  agent_id: targetRecord.agent_id,
-                  text: sanitizedText,
-                  source_event: sourceEvent,
-                }
-              : undefined;
-          if (backgroundLifecycle) {
-            backgroundLifecycle.engine.registerExternalDelivery({
-              delivery_id: record.delivery_id,
-              agent_id: backgroundLifecycle.agent_id,
-              text: sanitizedText,
-              press_enter: args.press_enter,
-              source_event: sourceEvent,
-              rpc_methods: [],
-            });
-          }
-          startBackgroundDelivery(record, backgroundLifecycle);
-          const publicBackgroundDeliveryId =
-            backgroundLifecycle || sourceEvent !== "send_to"
-              ? record.delivery_id
-              : undefined;
-
-          const identity = resolveTargetIdentity(
-            stateMgr,
-            route.surface,
-            route.title,
-            route.stableSurfaceIdentity,
-          );
-          const data = {
-            ...identity,
-            ...buildPublicDeliveryReceipt({
-              delivery_state: "queued",
-              delivery_id: publicBackgroundDeliveryId,
-              typed: false,
-              submit_attempted: args.press_enter,
-              submit_verified: record.submit_verified,
-              retry_count: record.retry_count,
-            }),
-            status: record.status,
-            ...remapFields(route),
-          };
-          return okFormatted(
-            formatDelivery("send_input", {
-              ...identity,
-              delivered: false,
-              pending: true,
-            }) +
-              (publicBackgroundDeliveryId
-                ? ` (background ${record.delivery_id})`
-                : " (background started; no wait_for receipt for unmanaged surface)"),
-            data,
-          );
-        }
-
-        const delivery = await withSurfaceWrite(
-          route.surface,
-          async () => {
-            await route.assertCurrent();
-            return executeDeliveryEngine({
-              surface: route.surface,
-              workspace: route.workspace,
-              chunks,
-              chunk_size: effectiveChunkSize,
-              chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-              press_enter: args.press_enter,
-              rename_to_task: args.rename_to_task,
-              stableSurfaceIdentity: route.stableSurfaceIdentity,
-              source_event: sourceEvent,
-              delivery_id: deliveryId,
-              verify_submit:
-                args.press_enter &&
-                !!targetRecord &&
-                INTERACTIVE_AGENT_STATES.has(targetRecord.state),
-              verify_submit_for_tracked_surface:
-                args.press_enter ? targetRecord : undefined,
-              beforeMutation: route.assertCurrent,
-              timings,
-            });
-          },
-          {
-            toolName: "send_input",
-            workspace: route.workspace,
-            observePtyWrite: true,
-            stableSurfaceIdentity: route.stableSurfaceIdentity,
-            timings,
-          },
-        );
-
-        const receiptEngine = context.lifecycleSweepEngine;
-        if (
-          sourceEvent === "send_to" &&
-          deliveryId &&
-          targetRecord &&
-          receiptEngine
-        ) {
-          if (
-            delivery.delivery === "queued" ||
-            delivery.delivery === "queued_followup"
-          ) {
-            receiptEngine.acceptComposerQueue({
-              delivery_id: deliveryId,
-              agent_id: targetRecord.agent_id,
-              text: sanitizedText,
-              press_enter: args.press_enter,
-              source_event: "send_to",
-              retry_count: delivery.retry_count,
-              rpc_methods: delivery.rpc_methods,
-              typed: delivery.typed,
-              submit_dispatched: delivery.submit_dispatched,
-              delivery_state: delivery.delivery,
-            });
-          } else if (delivery.delivery === "pending_verify") {
-            receiptEngine.acceptPendingVerify({
-              delivery_id: deliveryId,
-              agent_id: targetRecord.agent_id,
-              text: sanitizedText,
-              press_enter: args.press_enter,
-              source_event: "send_to",
-              retry_count: delivery.retry_count,
-              rpc_methods: delivery.rpc_methods,
-              typed: delivery.typed,
-              submit_dispatched: delivery.submit_dispatched,
-            });
-          } else {
-            receiptEngine.resolveDelivery({
-              delivery_id: deliveryId,
-              agent_id: targetRecord.agent_id,
-              text: sanitizedText,
-              press_enter: args.press_enter,
-              source_event: "send_to",
-              delivery_state:
-                delivery.delivery === "rescued"
-                  ? "rescued"
-                  : delivery.delivery === "typed"
-                    ? "typed"
-                    : "submitted",
-              terminal: true,
-              retry_count: delivery.retry_count,
-              rpc_methods: delivery.rpc_methods,
-              typed: delivery.typed,
-              submit_dispatched: delivery.submit_dispatched,
-              submit_verified: delivery.submit_verified,
-              error:
-                delivery.delivery === "rescued"
-                  ? "Prompt appeared only after an external interrupt"
-                  : null,
-            });
-          }
-        }
-
-        const identity = resolveTargetIdentity(
-          stateMgr,
-          route.surface,
-          route.title,
-          route.stableSurfaceIdentity,
-        );
-        const data = {
-          ...identity,
-          ...delivery,
-          ...remapFields(route),
-        };
-        return okFormatted(
-          formatDelivery("send_input", {
-            ...identity,
-            delivered: delivery.delivered,
-            pending: delivery.delivery === "queued",
-            typed: delivery.typed,
-            submit_attempted: delivery.submit_attempted,
-            submit_verified: delivery.submit_verified,
-          }),
-          data,
-        );
-      } catch (e) {
-        if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e));
-        }
-        if (e instanceof DeliverySafetyGateError) {
-          return err(e, {
-            error_code: e.error_code,
-            submit_verified: e.submit_verified,
-            screen: e.screen,
-          });
-        }
-        if (e instanceof SubmitVerificationError) {
-          return err(e, {
-            ...(e.receipt ?? {}),
-            submit_verified: false,
-            retry_count: e.retry_count,
-          });
-        }
-        if (e instanceof DeliveryError) {
-          return err(e, { failed_chunk: e.failed_chunk ?? null });
-        }
-        return err(e);
-      }
-    },
-  );
-
-  // 7. send_command
-  server.tool(
-    "send_command",
-    `${PANE_INPUT_BREAKAGE_GUIDANCE} Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command only when it fits the ${SEND_INPUT_MAX_INLINE_CHARS}-byte inline cap. WARNING — never include a bare \`@word\` in text destined for an interactive agent composer: it fires the receiver's file-reference picker and corrupts delivery (use the bare name; \`@<name>\` belongs in collab files, not pane keystrokes). For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path is checked before launch and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness; use it instead of embedding a multi-paragraph boot prompt in pane keystrokes. Passing boot_prompt_path for plain shell commands is rejected. Pass allow_long_inline:true only for deliberate raw long commands. ${ZSH_BANG_INLINE_WARNING}`,
-    {
-      surface: z.string().describe("Target surface ref"),
-      command: z
-        .string()
-        .describe(
-          `${PANE_INPUT_BREAKAGE_GUIDANCE} Command text to send before pressing return. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline UTF-8 bytes by default; for agent boot prompts, pass boot_prompt_path.`,
-        ),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      boot_prompt_path: z
-        .string()
-        .nullable()
-        .optional()
-        .describe(
-          "Optional readable prompt-file path for launcher commands matching <repo>Codex|Claude|Cursor|Gemini|Kiro with -s. Checked before launch; multiline or over-cap files are submitted as one `Read and follow <path>` pointer after readiness.",
-        ),
-      boot_prompt_timeout_ms: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .default(BOOT_PROMPT_TIMEOUT_MS)
-        .describe("Timeout in milliseconds waiting for the agent ready prompt"),
-      allow_long_inline: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe(
-          "Bypass the inline command length cap for a deliberate raw send.",
-        ),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        assertInlineInputAllowed({
-          tool: "send_command",
-          arg: "command",
-          value: args.command,
-          allowLongInline: args.allow_long_inline,
-        });
-        assertDenseInlineInputAllowed({
-          tool: "send_command",
-          arg: "command",
-          value: args.command,
-          allowLongInline: args.allow_long_inline,
-        });
-        const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
-        const launcherCli = bootPromptPath
-          ? inferLauncherCli(args.command)
-          : null;
-        if (bootPromptPath && !launcherCli) {
-          throw new Error(
-            "boot_prompt_path is only supported for agent launcher commands with -s",
-          );
-        }
-        if (bootPromptPath) {
-          await preflightBootPromptFile(bootPromptPath);
-        }
-
-        const sanitizedCommand = sanitizeTerminalInput(args.command);
-        const chunks =
-          sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
-            ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
-            : [sanitizedCommand];
-        const route = await resolveRawSurfaceMutationRoute(
-          args.surface,
-          args.workspace,
-          "send_command",
-        );
-        const targetRecord = resolveLatestSurfaceAgentRecord(
-          stateMgr,
-          route.surface,
-        );
-        // #805: a seat sending to its OWN surface (e.g. `/mcp reconnect x`) is
-        // blocked inside this very tool call, so its composer only queues the
-        // input until the turn ends: submit evidence cannot appear, and
-        // verifying would poll topology to a timeout. Deliver, skip that
-        // verification, and say so on the receipt.
-        // Match on the stable UUID whenever the route has one; the mutable ref
-        // is only the fallback for ref-only connectors (a ref-shaped caller id
-        // must not match a UUID-bound route by ref).
-        const callerSurface = currentCallerContext()?.surfaceId?.trim().toLowerCase();
-        const routeUuid = route.stableSurfaceIdentity?.trim().toLowerCase();
-        const selfTarget = Boolean(callerSurface) &&
-          (routeUuid
-            ? routeUuid === callerSurface
-            : route.surface.toLowerCase() === callerSurface);
-        const delivery = await withSurfaceWrite(
-          route.surface,
-          async () => {
-            await route.assertCurrent();
-            return executeDeliveryEngine({
-              surface: route.surface,
-              workspace: route.workspace,
-              chunks,
-              chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-              chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-              press_enter: true,
-              stableSurfaceIdentity: route.stableSurfaceIdentity,
-              source_event: "send_command",
-              verify_submit:
-                !bootPromptPath &&
-                !selfTarget &&
-                !!targetRecord &&
-                INTERACTIVE_AGENT_STATES.has(targetRecord.state),
-              verify_submit_for_tracked_surface:
-                bootPromptPath || selfTarget ? undefined : targetRecord,
-              beforeMutation: route.assertCurrent,
-            });
-          },
-          {
-            toolName: "send_command",
-            workspace: route.workspace,
-            observePtyWrite: true,
-            stableSurfaceIdentity: route.stableSurfaceIdentity,
-          },
-        );
-
-        let bootPromptDelivery:
-          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
-        if (bootPromptPath && launcherCli) {
-          bootPromptDelivery = await deliverBootPrompt({
-            surface: route.surface,
-            stableSurfaceIdentity: route.stableSurfaceIdentity,
-            workspace: route.workspace,
-            cli: launcherCli,
-            boot_prompt_path: bootPromptPath,
-            timeout_ms: args.boot_prompt_timeout_ms,
-            resolveRoute: async () => {
-              await route.assertCurrent();
-              return { surface: route.surface, workspace: route.workspace };
-            },
-            onUpdateShellRelaunch: () =>
-              sendLauncherCommandToSurface({
-                surface: route.surface,
-                stableSurfaceIdentity: route.stableSurfaceIdentity,
-                workspace: route.workspace,
-                command: sanitizedCommand,
-                relaunch: true,
-                assertSurfaceBindingCurrent: route.assertCurrent,
-              }),
-          });
-        }
-
-        const identity = resolveTargetIdentity(
-          stateMgr,
-          route.surface,
-          route.title,
-          route.stableSurfaceIdentity,
-        );
-        const data = {
-          ...identity,
-          command: sanitizedCommand,
-          ...delivery,
-          ...(selfTarget
-            ? {
-                self_target: true,
-                self_target_note:
-                  "Typed into the caller's own surface: the caller's turn is blocked in this call, so the command is expected to run when that turn ends; submit is not verifiable from inside it.",
-              }
-            : {}),
-          ...remapFields(route),
-          boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
-          boot_prompt_receipt: bootPromptDelivery,
-          boot_prompt_bytes: bootPromptDelivery?.bytes,
-          boot_prompt_submit_verified:
-            bootPromptDelivery?.submit_verified ?? null,
-          boot_prompt_warning: bootPromptDelivery?.prompt_warning ?? null,
-        };
-        return okFormatted(
-          formatDelivery("send_command", {
-            ...identity,
-            delivered: delivery.delivered,
-            pending: delivery.delivery === "queued",
-            typed: delivery.typed,
-            submit_attempted: delivery.submit_attempted,
-            submit_verified: delivery.submit_verified,
-          }),
-          data,
-        );
-      } catch (e) {
-        if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e));
-        }
-        if (e instanceof DeliverySafetyGateError) {
-          return err(e, {
-            error_code: e.error_code,
-            submit_verified: e.submit_verified,
-            screen: e.screen,
-          });
-        }
-        if (e instanceof SubmitVerificationError) {
-          return err(e, {
-            ...(e.receipt ?? {}),
-            submit_verified: false,
-            retry_count: e.retry_count,
-          });
-        }
-        if (e instanceof BootPromptTimeoutError) {
-          return err(e, { last_10_lines: e.last_10_lines });
-        }
-        if (e instanceof BootPromptUpdateMenuBlockedError) {
-          return err(e, {
-            error_code: e.error_code,
-            last_10_lines: e.last_10_lines,
-            recovery: e.recovery,
-          });
-        }
-        if (e instanceof BootComposerResidueError) {
-          return err(e, {
-            delivered_chars: e.delivered_chars,
-            error_code: e.error_code,
-            composer_residue: e.composer_residue,
-            typed: e.typed,
-            submit_dispatched: e.submit_dispatched,
-            rpc_methods: e.rpc_methods,
-          });
-        }
-        if (e instanceof BootPromptDeliveryError) {
-          return err(e, { delivered_chars: e.delivered_chars });
-        }
-        if (e instanceof DeliveryError) {
-          return err(e, { failed_chunk: e.failed_chunk ?? null });
-        }
-        return err(e);
-      }
-    },
-  );
-
-  // 8. send_key
-  server.tool(
-    "send_key",
-    "Send a key press to a terminal surface. Accepted Ctrl+C aliases are normalized automatically: ctrl-c, C-c, ^c, Ctrl+C, Ctrl-C.",
-    {
-      surface: z.string().describe("Target surface ref"),
-      key: z
-        .string()
-        .describe("Key name (e.g. 'return', 'escape', 'tab', 'ctrl-c')"),
-      workspace: z.string().optional().describe("Target workspace ref"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        const key = normalizeKeyName(args.key);
-        const route = await resolveRawSurfaceMutationRoute(
-          args.surface,
-          args.workspace,
-          "send_key",
-        );
-        const delivery = await withSurfaceWrite(
-          route.surface,
-          async () => {
-            await route.assertCurrent();
-            return executeDeliveryEngine({
-              surface: route.surface,
-              workspace: route.workspace,
-              chunks: [],
-              key,
-              chunk_size: 0,
-              chunk_delay_ms: 0,
-              press_enter: false,
-              // A submit key is the documented recovery for a typed-but-unsent
-              // message. It has to prove it landed rather than assert it.
-              verify_submit: true,
-              stableSurfaceIdentity: route.stableSurfaceIdentity,
-              source_event: "send_key",
-              beforeMutation: route.assertCurrent,
-            });
-          },
-          {
-            toolName: "send_key",
-            workspace: route.workspace,
-            observePtyWrite: true,
-            stableSurfaceIdentity: route.stableSurfaceIdentity,
-          },
-        );
-        const data = {
-          surface: route.surface,
-          key,
-          ...delivery,
-          ...remapFields(route),
-        };
-        if (delivery.submit_verified === false) {
-          return err(
-            new Error(
-              `send_key ${key} reached ${route.surface} but the submit did not land (${delivery.submit_verification_reason}). The composer still holds its unsent contents — nothing was delivered. Read the surface and resolve the pending input before relaying this as sent.`,
-            ),
-            data,
-          );
-        }
-        return okFormatted(formatOk("send_key", data), data);
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  // 9. read_screen
-  server.tool(
-    "read_screen",
-    "Read a terminal screen and parsed harness status. Use raw=true for full text or parsed_only=true for monitoring.",
-    {
-      surface: z.string().optional().describe("Target surface ref"),
-      // AIDEV-NOTE (#611): `surface_id` is accepted because WE taught it. Our
-      // own spawn_agent output schema and every list_agents row EMIT
-      // `surface_id`, so the natural workflow -- list_agents, then read the
-      // surface it named -- hands that key straight back and got a validation
-      // error. The value was always right; only the name was, and the tool that
-      // taught the wrong name was ours. This is an alias for that reason, not
-      // for backwards compatibility.
-      surface_id: z
-        .string()
-        .optional()
-        .describe("Alias for `surface`, as emitted by list_agents/spawn_agent."),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      lines: z
-        .number()
-        .int()
-        .min(1)
-        .max(500)
-        .optional()
-        .default(20)
-        .describe("Number of lines to read"),
-      scrollback: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Include scrollback buffer"),
-      parsed_only: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe(
-          "If true, return only parsed fields (omit screen content). Best for agent monitoring.",
-        ),
-      raw: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe(
-          "If true, include the full untrimmed terminal content (separators, status-bar art, all lines). Default false returns a compact de-chromed screen_preview instead.",
-        ),
-    },
-    ANNOTATIONS.readOnly,
-    async (args) => {
-      try {
-        // #611: accept either spelling, then use one resolved value below.
-        const surfaceRef = args.surface ?? args.surface_id;
-        if (!surfaceRef) {
-          throw new Error(
-            'read_screen requires a surface. Example: read_screen({ surface: "surface:122" }) -- the surface_id from list_agents is accepted too.',
-          );
-        }
-        let codexAgentBeforeRead: AgentRecord | null = null;
-        const hasCodexRolloutCandidate = stateMgr
-          .listStates()
-          .some(
-            (agent) =>
-              agent.cli === "codex" &&
-              Boolean(agent.surface_uuid?.trim()) &&
-              Boolean(agent.cli_session_path),
-          );
-        if (hasCodexRolloutCandidate) {
-          const topologyBeforeRead = await collectSurfaceTopology(
-            args.workspace,
-          ).catch(() => null);
-          codexAgentBeforeRead = resolveCodexAgentForSurface(
-            surfaceRef,
-            topologyBeforeRead,
-          );
-        }
-        let result: ReadScreenSnapshot["result"];
-        let topology: ReadScreenSnapshot["topology"];
-        let screenRemap: Pick<
-          RawSurfaceMutationRoute,
-          "remapped_from" | "remapped_to"
-        > = {};
-        const snapshotOpts = {
-          surface: surfaceRef,
-          workspace: args.workspace,
-          lines: Math.max(args.lines ?? 20, 80),
-          scrollback: args.scrollback,
-        };
-        try {
-          ({ result, topology } = await readScreenSnapshot(snapshotOpts));
-        } catch (readError) {
-          const route = await resolveRawSurfaceMutationRoute(
-            surfaceRef,
-            args.workspace,
-            "read_screen",
-          );
-          if (
-            route.surface === surfaceRef &&
-            (route.workspace ?? null) === (args.workspace ?? null)
-          ) {
-            throw readError;
-          }
-          screenRemap = remapFields(route);
-          ({ result, topology } = await readScreenSnapshot({
-            ...snapshotOpts,
-            surface: route.surface,
-            workspace: route.workspace ?? args.workspace,
-          }));
-          if (hasCodexRolloutCandidate) {
-            codexAgentBeforeRead = resolveCodexAgentForSurface(
-              route.surface,
-              topology,
-            );
-          }
-        }
-        const requestedIsLive =
-          topology?.workspaceBySurface.has(surfaceRef) === true ||
-          topology?.surfaceIdByRef.has(surfaceRef) === true;
-        if (
-          topology?.complete === true &&
-          !requestedIsLive &&
-          !screenRemap.remapped_from
-        ) {
-          const route = await resolveRawSurfaceMutationRoute(
-            surfaceRef,
-            args.workspace,
-            "read_screen",
-          );
-          screenRemap = remapFields(route);
-          if (route.surface !== surfaceRef) {
-            const remapped = await readScreenSnapshot({
-              ...snapshotOpts,
-              surface: route.surface,
-              workspace: route.workspace ?? args.workspace,
-            });
-            result = remapped.result;
-            topology = remapped.topology;
-            if (hasCodexRolloutCandidate) {
-              codexAgentBeforeRead = resolveCodexAgentForSurface(
-                route.surface,
-                topology,
-              );
-            }
-          }
-        }
-        const title = topology?.titleBySurface.get(result.surface) ?? null;
-        const { column, column_count } =
-          topology?.topologyBySurface.get(result.surface) ??
-          EMPTY_SURFACE_TOPOLOGY;
-        const codexAgent = sameCodexSessionBinding(
-          codexAgentBeforeRead,
-          resolveCodexAgentForSurface(result.surface, topology),
-        );
-        const codexFill = await validateCodexRolloutFill(
-          codexAgent,
-          result.surface,
-          await readCodexRolloutFill(codexAgent),
-        );
-        const parsed = applyCodexRolloutFill(
-          applyHarnessState(
-            enrichParsedScreen(
-              parseScreen(result.text),
-              result.text,
-              pickLatestSurfaceModel(stateMgr, result.surface),
-            ),
-            resolveHarnessStateForSurface(stateMgr, result.surface, codexAgent),
-          ),
-          codexFill,
-        );
-        // The lean and parsed-only variants are separate reads. A caller may
-        // compare parsed fields only when these hashes identify the same frame.
-        const snapshot_hash = createHash("sha256").update(result.text).digest("hex");
-
-        if (args.parsed_only) {
-          const data = {
-            surface: result.surface,
-            snapshot_hash,
-            title,
-            column,
-            column_count,
-            parsed,
-            delivery: getSurfaceDelivery(result.surface),
-            ...screenRemap,
-          };
-          const formatted = formatReadScreen(
-            result.surface,
-            title,
-            null,
-            parsed,
-            false,
-            0,
-            column,
-            column_count,
-          );
-          return okFormatted(formatted, data);
-        }
-
-        if (args.raw) {
-          // Full untrimmed terminal content on explicit request.
-          const rawText = result.text
-            .split("\n")
-            .slice(-(args.lines ?? 20))
-            .join("\n");
-          const data = {
-            surface: result.surface,
-            snapshot_hash,
-            title,
-            column,
-            column_count,
-            lines: rawText.split("\n").length,
-            content: rawText,
-            scrollback_used: result.scrollback_used,
-            parsed,
-            delivery: getSurfaceDelivery(result.surface),
-            ...screenRemap,
-          };
-          const formatted = formatReadScreen(
-            result.surface,
-            title,
-            rawText,
-            parsed,
-            result.scrollback_used,
-            rawText.split("\n").length,
-            column,
-            column_count,
-          );
-          return okFormatted(formatted, data);
-        }
-
-        // LEAN DEFAULT: response returned once (parsed.response); no raw dump. Show a
-        // compact de-chromed preview ONLY when there's no response, so non-agent panes
-        // (shell prompts, menus) still surface something without duplicating the response.
-        const screenPreview = parsed.response
-          ? null
-          : cleanScreenText(result.text, 12) || null;
-        const data = {
-          surface: result.surface,
-          snapshot_hash,
-          title,
-          column,
-          column_count,
-          parsed,
-          ...(screenPreview ? { screen_preview: screenPreview } : {}),
-          delivery: getSurfaceDelivery(result.surface),
-          ...screenRemap,
-        };
-        const formatted = formatReadScreen(
-          result.surface,
-          title,
-          screenPreview,
-          parsed,
-          false,
-          screenPreview ? screenPreview.split("\n").length : 0,
-          column,
-          column_count,
-        );
-        return okFormatted(formatted, data);
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
+  registerReadScreenTool(server, {
+    applyCodexRolloutFill,
+    collectSurfaceTopology,
+    getSurfaceDelivery,
+    readCodexRolloutFill,
+    readScreenSnapshot,
+    remapFields,
+    resolveCodexAgentForSurface,
+    resolveRawSurfaceMutationRoute,
+    sameCodexSessionBinding,
+    stateMgr,
+    validateCodexRolloutFill,
+  });
 
   registerUpdateSurfaceTool(server, surfaceToolDeps);
 
@@ -4760,56 +3767,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (!target?.pid || agentProcessLiveness(target) !== "gone") return {};
       return reapInboxTail(target.agent_id, inboxOpts);
     };
-    server.tool(
-      "stop_agent",
-      "Stop an agent gracefully (Ctrl+C) or forcefully (kill process).",
-      {
-        agent_id: z.string().describe("Agent ID to stop"),
-        force: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe("Force kill instead of graceful Ctrl+C"),
-      },
-      ANNOTATIONS.destructive,
-      async (args) => {
-        const target = engine.getAgentState(args.agent_id);
-        try {
-          await engine.stopAgent(args.agent_id, args.force, {
-            allowUnknownPidOwnedSurfaceClose:
-              (args as typeof args & {
-                [OWNED_AGENT_CLOSE_ON_UNKNOWN_PID]?: boolean;
-              })[OWNED_AGENT_CLOSE_ON_UNKNOWN_PID] === true,
-            beforeSurfaceMutation: (route) =>
-              assertSurfaceMutationAllowed(
-                "stop_agent",
-                route.surface_id,
-                route.workspace_id ?? undefined,
-              ),
-          });
-          const tailOutcome = await reapInboxTail(target?.agent_id ?? args.agent_id, inboxOpts);
-          pruneChildReportWatchesFor(args.agent_id);
-          const state = engine.getAgentState(args.agent_id);
-          appendCloseEvent({
-            event: "stop_agent",
-            target: args.agent_id,
-            caller: resolveCloseCaller("stop_agent"),
-            force: args.force ?? false,
-            reason: `state after stop: ${state?.state ?? "done"}`,
-            refused: false,
-          });
-          const data = {
-            agent_id: args.agent_id,
-            state: state?.state ?? "done",
-            ...tailOutcome,
-          };
-          return okFormatted(formatOk("stop_agent", data), data);
-        } catch (e) {
-          const tailOutcome = await reapTailAfterConfirmedExit(target).catch(() => ({}));
-          return err(e, tailOutcome);
-        }
-      },
-    );
+    stopAgentFn = (args) =>
+      stopAgent(
+        {
+          appendCloseEvent,
+          assertSurfaceMutationAllowed,
+          engine,
+          inboxOpts,
+          pruneChildReportWatchesFor,
+          reapTailAfterConfirmedExit,
+          resolveCloseCaller,
+        },
+        args,
+      );
 
     const observePausedTarget = async (
       agent: AgentRecord | null | undefined,
@@ -4842,6 +3812,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     // send_to (src/mcp/tools/send.ts, CX-3b S10b)
     registerSendToTool(server, {
+      rawSend: {
+        sendInput: (args) => sendInput(rawSendDeps, args),
+        sendCommand: (args) => sendCommand(rawSendDeps, args),
+        sendKey: (args) => sendKey(rawSendDeps, args),
+      },
       assertWorkerUpwardChannel,
       awaitLifecycleStart,
       broadcastSkipReason,
@@ -4852,10 +3827,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       engine,
       observePausedTarget,
       registry,
-      toolHandlersByName,
     });
-
-    // --- V2 Public API: interact + kill ---
 
   } // end skipAgentLifecycle guard
 

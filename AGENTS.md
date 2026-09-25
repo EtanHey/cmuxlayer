@@ -59,7 +59,7 @@ Commands (bun, as in CI):
 
 `src/` is flat; the layers are:
 
-- MCP tools: `server.ts` (all tool handlers), `control-health.ts`, `palette.ts`.
+- MCP tools: `mcp/tools/*.ts` (one module per tool family), `mcp/registration.ts`, `mcp/schemas.ts`; `server.ts` builds the per-connection state and wires them. Also `control-health.ts`, `palette.ts`.
 - Engine: `agent-engine.ts` (spawn, monitor, resume, teardown) and its support files (`agent-*`, `launcher-registry.ts`, `model-policy.ts`, `permission-mode.ts`, `worktree.ts`).
 - Daemon and proxy: `daemon*.ts`, `proxy.ts`, `entry.ts`, `stdio-lifecycle.ts`.
 - cmux transport: `cmux-*.ts` (persistent socket, CLI fallback, version compatibility).

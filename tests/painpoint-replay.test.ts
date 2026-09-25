@@ -18,6 +18,7 @@ import type {
   AgentState,
   CliType,
 } from "../src/agent-types.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 type PainpointFixture = {
   id: string;
@@ -285,7 +286,7 @@ describe("Phase 0 painpoint replay corpus", () => {
           skipAgentLifecycle: true,
         });
 
-        const result = await getTool(server, "send_input").handler(
+        const result = await internalToolForTests(server, "send_input").handler(
           {
             surface: "surface:long-inline",
             text: overCapText,
@@ -346,7 +347,7 @@ describe("Phase 0 painpoint replay corpus", () => {
           skipAgentLifecycle: true,
         });
 
-        const result = await getTool(server, "send_input").handler(
+        const result = await internalToolForTests(server, "send_input").handler(
           {
             surface: "surface:multiline",
             text: fixture.payload ?? "line one\nline two\nline three",

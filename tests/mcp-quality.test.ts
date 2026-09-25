@@ -12,6 +12,7 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-mcp-quality-test");
 
@@ -295,7 +296,7 @@ describe("stale surface refs return clear errors", () => {
     });
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:gone", text: "hello" },

@@ -11,6 +11,11 @@ import type { ExecFn } from "../src/cmux-client.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { engineForTests } from "../src/server.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
+import {
+  sendCommandArgsShape,
+  sendInputArgsShape,
+} from "../src/mcp/tools/raw-send.js";
 
 const previousMaxInlineChars = process.env.CMUXLAYER_MAX_INLINE_CHARS;
 let testDir = "";
@@ -269,7 +274,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: "x".repeat(601) },
@@ -291,8 +296,8 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
-    expect(tool.inputSchema.shape.allow_long_inline).toBeDefined();
+    const tool = internalToolForTests(server, "send_input");
+    expect(sendInputArgsShape.shape.allow_long_inline).toBeDefined();
 
     const result = await tool.handler(
       {
@@ -327,7 +332,7 @@ describe("pane input pointer discipline", () => {
       exec: mockExec,
       skipAgentLifecycle: true,
     });
-    let tool = (server as any)._registeredTools["send_input"];
+    let tool = internalToolForTests(server, "send_input");
 
     let result = await tool.handler(
       { surface: "surface:1", text: "x".repeat(701) },
@@ -342,7 +347,7 @@ describe("pane input pointer discipline", () => {
     module = await loadServerModule();
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     server = module.createServer({ exec: mockExec, skipAgentLifecycle: true });
-    tool = (server as any)._registeredTools["send_input"];
+    tool = internalToolForTests(server, "send_input");
 
     // An invalid override falls back to the 500-byte default (#837).
     result = await tool.handler(
@@ -370,7 +375,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: "x".repeat(600) },
@@ -389,7 +394,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: denseIncidentPayload },
@@ -416,7 +421,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: lineBrokenIncidentPayload },
@@ -436,7 +441,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: "x".repeat(1_500) },
@@ -453,7 +458,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
     const text = "😀".repeat(751);
 
     const result = await tool.handler(
@@ -470,7 +475,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: `${"x".repeat(1_500)}\r\nok` },
@@ -487,7 +492,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = makeStaticScreenExec(overlayText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: "new task", press_enter: true },
@@ -585,7 +590,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = makeStaticScreenExec(proseText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_input"];
+    const tool = internalToolForTests(server, "send_input");
 
     const result = await tool.handler(
       { surface: "surface:1", text: "new task", press_enter: false },
@@ -653,7 +658,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = makeStaticScreenExec(permissionText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       { surface: "surface:1", command: "codex resume 123" },
@@ -682,8 +687,8 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
-    expect(tool.inputSchema.shape.allow_long_inline).toBeDefined();
+    const tool = internalToolForTests(server, "send_command");
+    expect(sendCommandArgsShape.shape.allow_long_inline).toBeDefined();
 
     let result = await tool.handler(
       { surface: "surface:1", command: "x".repeat(601) },
@@ -721,7 +726,7 @@ describe("pane input pointer discipline", () => {
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       { surface: "surface:1", command: denseIncidentPayload },
@@ -1207,22 +1212,14 @@ describe("pane input pointer discipline", () => {
 
     const breakageWarning =
       "Max 2-3 short lines. Longer payloads BREAK the receiving pane — write the payload to a file and send one line: `Read and follow <path>`.";
-    for (const toolName of [
-      "send_input",
-      "send_command",
-    ]) {
-      const description = server._registeredTools[toolName].description;
-      expect(description.startsWith(breakageWarning), toolName).toBe(true);
-    }
-
     const fields = [
       [
         "send_input.text",
-        server._registeredTools.send_input.inputSchema.shape.text,
+        sendInputArgsShape.shape.text,
       ],
       [
         "send_command.command",
-        server._registeredTools.send_command.inputSchema.shape.command,
+        sendCommandArgsShape.shape.command,
       ],
       [
         "spawn_agent.prompt",

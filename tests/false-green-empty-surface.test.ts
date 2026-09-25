@@ -7,6 +7,7 @@ import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { internalToolForTests } from "../src/mcp/registration.js";
 
 let testDir = "";
 
@@ -48,7 +49,7 @@ describe("false-green empty surface protection", () => {
       skipAgentLifecycle: true,
       stateDir: testDir,
     });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -93,7 +94,7 @@ describe("false-green empty surface protection", () => {
       skipAgentLifecycle: true,
       stateDir: testDir,
     });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       {
@@ -136,7 +137,7 @@ describe("false-green empty surface protection", () => {
       skipAgentLifecycle: true,
       stateDir: testDir,
     });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const result = await tool.handler(
       { surface: "surface:2", command: longCommand },
@@ -198,7 +199,7 @@ describe("false-green empty surface protection", () => {
       skipAgentLifecycle: true,
       stateDir: testDir,
     });
-    const tool = (server as any)._registeredTools["send_command"];
+    const tool = internalToolForTests(server, "send_command");
 
     const resultPromise = tool.handler(
       { surface: "surface:2", command: longCommand },
