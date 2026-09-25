@@ -215,6 +215,8 @@ export interface TypedDraftOwner {
   workspace: string | null; fp: string; seen: boolean;
   /** #793: the managed agent whose unsubmitted boot draft this is. */
   bootAgentId?: string;
+  /** #793: that agent's boot instance, bound once spawn has settled its record. */
+  bootInstanceId?: string;
 }
 
 export interface CmuxServerContext {

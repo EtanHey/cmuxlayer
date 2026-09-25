@@ -175,6 +175,43 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
+  // #879 r1 (w63): the null->X tolerance must pin X. A later X->Y session
+  // change is a restarted harness, and #636 revokes ownership for it.
+  it("refuses the key-Return after the session changes X->Y once spawn learned X", async () => {
+    const t = await setup();
+    try {
+      t.setSession("11111111-2222-4333-8444-555555555555");
+      const spawned = await t.spawn(LEAD_UUID);
+      expect(spawned.next_action).toContain('send_to({mode:"key"');
+      const changed = t.engine.stateMgr.updateRecord(spawned.agent_id, {
+        cli_session_id: "99999999-8888-4777-8666-555555555555",
+      } as any);
+      t.engine.getRegistry().set(changed.agent_id, changed);
+      t.pane.state.rendered = true;
+      const refused = await t.keyReturn(LEAD_UUID, spawned.surface_id);
+      expect(refused.error_code).toBe("blocked_by_foreign_draft");
+      expect(t.pane.state.submitted).toHaveLength(0);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("refuses the key-Return when a newer boot instance replaced the one that typed the draft", async () => {
+    const t = await setup();
+    try {
+      t.setSession("11111111-2222-4333-8444-555555555555");
+      const spawned = await t.spawn(LEAD_UUID);
+      expect(spawned.next_action).toContain('send_to({mode:"key"');
+      const reboot = t.engine.stateMgr.updateRecord(spawned.agent_id, {
+        boot_instance_id: "22222222-3333-4444-8555-666666666666",
+      } as any);
+      t.engine.getRegistry().set(reboot.agent_id, reboot);
+      t.pane.state.rendered = true;
+      const refused = await t.keyReturn(LEAD_UUID, spawned.surface_id);
+      expect(refused.error_code).toBe("blocked_by_foreign_draft");
+      expect(t.pane.state.submitted).toHaveLength(0);
+      expect(t.engine.stateMgr.readState(spawned.agent_id)).toMatchObject({ prompt_delivered: false });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
   it("does not advise a key-Return the guard would refuse when the caller is unattributable", async () => {
     const t = await setup();
     try {

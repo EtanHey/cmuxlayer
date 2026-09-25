@@ -710,6 +710,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   // Tokens authorize a single manual Return after an observed-empty text-only
   // send. Identical clear/retype entirely between snapshots is unobservable.
   const typedDraftOwners = context.typedDraftOwners;
+  const DRAFT_OWNER_TTL_MS = 300_000;
   const draftOwnerKey = (surface: string, workspace?: string, uuid?: string | null) =>
     JSON.stringify([workspace ?? null, uuid ?? surface]);
   const draftTargetFingerprint = (surface: string, uuid?: string | null) => {
@@ -719,14 +720,24 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   // AIDEV-NOTE (#793): spawn captures the session id right AFTER typing its
   // boot draft (captureSpawnSessionBestEffort), so a boot token's fingerprint
   // was taken with cli_session_id:null. Learning that first id is the same
-  // process, not a changed session; any other drift still revokes ownership.
+  // process, not a changed session: the first null->X match PINS X into the
+  // token, so a later X->Y (a restarted harness) revokes ownership as #636
+  // requires. Any other drift revokes it outright.
   const draftOwnerFingerprintMatches = (token: TypedDraftOwner, surface: string, uuid?: string | null): boolean => {
     const current = draftTargetFingerprint(surface, uuid);
     if (current === token.fp) return true;
     if (!token.bootAgentId) return false;
     const [agentId, cli, session] = JSON.parse(token.fp) as [string | null, string | null, string | null];
     const [currentAgentId, currentCli] = JSON.parse(current) as [string | null, string | null, string | null];
-    return session === null && agentId === token.bootAgentId && currentAgentId === agentId && currentCli === cli;
+    const firstCapture = session === null && agentId === token.bootAgentId && currentAgentId === agentId && currentCli === cli;
+    if (firstCapture) token.fp = current;
+    return firstCapture;
+  };
+  // A boot token also belongs to one boot instance once spawn binds it; a
+  // newer boot of the same agent cannot inherit the draft or its settle.
+  const bootTokenInstanceCurrent = (token: TypedDraftOwner): boolean => {
+    if (!token.bootAgentId || !token.bootInstanceId) return true;
+    return stateMgr.readState(token.bootAgentId)?.boot_instance_id === token.bootInstanceId;
   };
   const observedSurfaceUuid = (surface: string): string | null =>
     context.capturedSurfaceUuidByRef.get(surface) ?? (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(surface) ? surface : null);
@@ -820,9 +831,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   // through valid transitions so later work is tracked as working instead of
   // leaving the record stuck in booting (and later errored by the sweep's
   // pending-input timeout). A boot that already settled is left alone.
-  const settleVerifiedBootSubmit = (agentId: string): void => {
+  const settleVerifiedBootSubmit = (agentId: string, bootInstanceId: string): void => {
     const record = stateMgr.readState(agentId);
-    if (!record || record.boot_prompt_pending !== true || record.prompt_delivered === true) return;
+    if (!record || record.boot_instance_id !== bootInstanceId ||
+      record.boot_prompt_pending !== true || record.prompt_delivered === true) return;
     let updated = stateMgr.updateRecord(agentId, {
       boot_prompt_pending: false,
       prompt_delivered: true,
@@ -1586,16 +1598,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         typedDraftOwners.delete(ownerKey);
         throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
       }
-      // #793: set only when this Return submits the caller's own boot draft.
-      let ownedBootAgentId: string | undefined;
+      // #793: set only when this Return submits the caller's own bound boot draft.
+      let ownedBoot: { agentId: string; instanceId: string } | undefined;
       if (callerSubmit && submitBaseline &&
           submitBaseline.parsed.control_state !== "permission_prompt" &&
           !isPickerOrMenuScreen(submitBaseline.text)) {
         const owner = typedDraftOwners.get(ownerKey);
         const caller = resolveCurrentCallerAgent()?.agent_id;
-        const ownerCurrent = !!caller && owner?.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000;
+        const ownerCurrent = !!caller && owner?.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < DRAFT_OWNER_TTL_MS && bootTokenInstanceCurrent(owner);
         const ownedText = ownerCurrent ? owner!.text : (ownedQueuedReceipt?.text ?? "");
-        if (ownerCurrent) ownedBootAgentId = owner!.bootAgentId;
+        if (ownerCurrent && owner!.bootAgentId && owner!.bootInstanceId) {
+          ownedBoot = { agentId: owner!.bootAgentId, instanceId: owner!.bootInstanceId };
+        }
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
         if ((!ownedQueuedReceipt || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
@@ -1634,7 +1648,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           : { submit_verified: null, submit_verification_reason: null };
       if (verification.submit_verified === true) {
         typedDraftOwners.delete(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
-        if (ownedBootAgentId) settleVerifiedBootSubmit(ownedBootAgentId);
+        if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
       }
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
@@ -1823,7 +1837,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             new Error("Managed boot changed after recovered Return"),
           );
         }
-        settleVerifiedBootSubmit(pendingBootAgent.agent_id);
+        settleVerifiedBootSubmit(pendingBootAgent.agent_id, recoveryBootInstanceId);
       }
     }
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
@@ -3579,7 +3593,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     }, 0);
   };
 
-  /** #793: does the current caller hold a live ownership token for this draft? */
+  /**
+   * #793: does the current caller hold a live ownership token for this draft?
+   * Spawn calls this after it has captured the session and stamped the boot
+   * record, so a boot token is bound to that boot instance here (once).
+   */
   const callerOwnsTypedDraft = (opts: {
     surface: string;
     workspace?: string;
@@ -3587,8 +3605,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   }): boolean => {
     const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
     const caller = resolveCurrentCallerAgent()?.agent_id;
-    return !!caller && owner?.caller === caller &&
-      draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity);
+    const owned = !!caller && owner?.caller === caller &&
+      draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) &&
+      Date.now() - owner.at < DRAFT_OWNER_TTL_MS && bootTokenInstanceCurrent(owner);
+    if (owned && owner!.bootAgentId && !owner!.bootInstanceId) {
+      owner!.bootInstanceId = stateMgr.readState(owner!.bootAgentId)?.boot_instance_id ?? undefined;
+    }
+    return owned;
   };
 
   return {
