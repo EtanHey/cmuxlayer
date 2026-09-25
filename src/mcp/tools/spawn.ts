@@ -102,6 +102,7 @@ export interface SpawnAgentToolDeps {
   assertWorkspaceMutationAllowed: (toolName: string, workspace?: string) => Promise<void>;
   awaitLifecycleStart: () => Promise<void>;
   buildBootContractInjection: (agentId: string, monitorBoot: MonitorBootResult, coordination: CoordinationContract | null) => { text: string; contract_path: string | null; };
+  callerOwnsTypedDraft: DeliveryEngine["callerOwnsTypedDraft"];
   canonicalWorkspaceRef: (candidate?: string) => Promise<string | undefined>;
   capturePostCreationFocus: (lease: FocusRestoreLease | null, created?: { surface: string; workspace?: string; }) => Promise<FocusRestoreLease | null>;
   captureSpawnSessionBestEffort: <T extends { agent_id: string; surface_id: string; }>(result: T) => Promise<AgentRecord | null>;
@@ -147,6 +148,7 @@ export function registerSpawnAgentTool(
     assertWorkspaceMutationAllowed,
     awaitLifecycleStart,
     buildBootContractInjection,
+    callerOwnsTypedDraft,
     canonicalWorkspaceRef,
     capturePostCreationFocus,
     captureSpawnSessionBestEffort,
@@ -1087,6 +1089,11 @@ export function registerSpawnAgentTool(
           }
         }
         const spawnedBinding = engine.getAgentState(result.agent_id);
+        const callerOwnsSpawnedDraft = () => callerOwnsTypedDraft({
+          surface: result.surface_id,
+          workspace: spawnDeliveryWorkspace(result, spawnWorkspace),
+          stableSurfaceIdentity: spawnedBinding?.surface_uuid,
+        });
         appendStaleBuildWarning(result);
         const placementWarnings = [
           ...targetResolution.warnings,
@@ -1352,6 +1359,9 @@ export function registerSpawnAgentTool(
                 boot_prompt_submit_verified: false,
               },
               args.verbose,
+              undefined,
+              undefined,
+              { callerOwnsBootDraft: callerOwnsSpawnedDraft() },
             );
           }
           return err(e, extra);
@@ -1459,6 +1469,8 @@ export function registerSpawnAgentTool(
           },
           args.verbose,
           formatOk("spawn_agent", formattedData),
+          undefined,
+          { callerOwnsBootDraft: callerOwnsSpawnedDraft() },
         );
       } catch (e) {
         const caught = creation.attach(e);

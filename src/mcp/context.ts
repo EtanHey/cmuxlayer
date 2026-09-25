@@ -213,6 +213,8 @@ export async function awaitBoundedLifecycleStart(
 export interface TypedDraftOwner {
   caller: string; text: string; at: number; ref: string; uuid: string | null;
   workspace: string | null; fp: string; seen: boolean;
+  /** #793: the managed agent whose unsubmitted boot draft this is. */
+  bootAgentId?: string;
 }
 
 export interface CmuxServerContext {

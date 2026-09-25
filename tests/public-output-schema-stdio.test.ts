@@ -160,8 +160,9 @@ describe("public tool output schemas over stdio", () => {
             agent_id: "cmuxlayerCodex-test", surface_id: "surface:test",
             workspace_id: "workspace:test", delivered_chars: 42,
             boot_prompt_receipt: { submit_verified: false } });
-          expect(String(result.structuredContent?.next_action)).toContain(
-            'send_to({mode:"key"',
+          // #793: the fixture has no attributed caller, so no key Return.
+          expect(String(result.structuredContent?.next_action)).not.toContain(
+            'mode:"key"',
           );
           expect(String(result.structuredContent?.next_action)).toMatch(
             /Boot prompt submission was not verified/i,

@@ -156,7 +156,7 @@ import {
   resolveLatestSurfaceAgentRecord,
   enrichParsedScreen,
 } from "./surface-state.js";
-import type { CmuxServerContext } from "../mcp/context.js";
+import type { CmuxServerContext, TypedDraftOwner } from "../mcp/context.js";
 
 export function tailLines(text: string, count: number): string[] {
   return text.split(/\r?\n/).filter(Boolean).slice(-count);
@@ -716,6 +716,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const record = resolveLatestSurfaceAgentRecord(stateMgr, surface, uuid);
     return JSON.stringify([record?.agent_id ?? null, record?.cli ?? null, record?.cli_session_id ?? null]);
   };
+  // AIDEV-NOTE (#793): spawn captures the session id right AFTER typing its
+  // boot draft (captureSpawnSessionBestEffort), so a boot token's fingerprint
+  // was taken with cli_session_id:null. Learning that first id is the same
+  // process, not a changed session; any other drift still revokes ownership.
+  const draftOwnerFingerprintMatches = (token: TypedDraftOwner, surface: string, uuid?: string | null): boolean => {
+    const current = draftTargetFingerprint(surface, uuid);
+    if (current === token.fp) return true;
+    if (!token.bootAgentId) return false;
+    const [agentId, cli, session] = JSON.parse(token.fp) as [string | null, string | null, string | null];
+    const [currentAgentId, currentCli] = JSON.parse(current) as [string | null, string | null, string | null];
+    return session === null && agentId === token.bootAgentId && currentAgentId === agentId && currentCli === cli;
+  };
   const observedSurfaceUuid = (surface: string): string | null =>
     context.capturedSurfaceUuidByRef.get(surface) ?? (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(surface) ? surface : null);
   const observeDraftOwnership = (surface: string, workspace: string | undefined, text: string, uuid: string | null): void => {
@@ -729,7 +741,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       if (region === null) continue;
       const unchanged = region === normalizeTerminalText(token.text).trimEnd();
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
-      if (draftTargetFingerprint(surface, uuid) !== token.fp || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
+      if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
     }
   };
@@ -802,6 +814,27 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     // tracked surface. A live ready composer warrants that read even when the
     // lifecycle registry has not advanced past booting yet.
     return !!snapshot && screenConfirmedAgentState(snapshot.parsed) === "ready";
+  };
+
+  // Recovery has verified the managed boot submission. Complete its lifecycle
+  // through valid transitions so later work is tracked as working instead of
+  // leaving the record stuck in booting (and later errored by the sweep's
+  // pending-input timeout). A boot that already settled is left alone.
+  const settleVerifiedBootSubmit = (agentId: string): void => {
+    const record = stateMgr.readState(agentId);
+    if (!record || record.boot_prompt_pending !== true || record.prompt_delivered === true) return;
+    let updated = stateMgr.updateRecord(agentId, {
+      boot_prompt_pending: false,
+      prompt_delivered: true,
+      submit_verified: true,
+    });
+    if (updated.state === "booting") {
+      updated = stateMgr.transition(updated.agent_id, "ready");
+    }
+    if (updated.state === "ready") {
+      updated = stateMgr.transition(updated.agent_id, "working");
+    }
+    context.lifecycleSweepEngine?.getRegistry().set(updated.agent_id, updated);
   };
 
   const assertDeliveryTargetIsSafe = async (opts: {
@@ -1553,12 +1586,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         typedDraftOwners.delete(ownerKey);
         throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
       }
+      // #793: set only when this Return submits the caller's own boot draft.
+      let ownedBootAgentId: string | undefined;
       if (callerSubmit && submitBaseline &&
           submitBaseline.parsed.control_state !== "permission_prompt" &&
           !isPickerOrMenuScreen(submitBaseline.text)) {
         const owner = typedDraftOwners.get(ownerKey);
         const caller = resolveCurrentCallerAgent()?.agent_id;
-        const ownedText = caller && owner?.caller === caller && owner.fp === draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000 ? owner.text : (ownedQueuedReceipt?.text ?? "");
+        const ownerCurrent = !!caller && owner?.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < 300_000;
+        const ownedText = ownerCurrent ? owner!.text : (ownedQueuedReceipt?.text ?? "");
+        if (ownerCurrent) ownedBootAgentId = owner!.bootAgentId;
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
         if ((!ownedQueuedReceipt || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
@@ -1597,6 +1634,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           : { submit_verified: null, submit_verification_reason: null };
       if (verification.submit_verified === true) {
         typedDraftOwners.delete(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+        if (ownedBootAgentId) settleVerifiedBootSubmit(ownedBootAgentId);
       }
       const receipt = buildPublicDeliveryReceipt({
         typed: false,
@@ -1785,21 +1823,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             new Error("Managed boot changed after recovered Return"),
           );
         }
-        let updated = stateMgr.updateRecord(pendingBootAgent.agent_id, {
-          boot_prompt_pending: false,
-          prompt_delivered: true,
-          submit_verified: true,
-        });
-        // Recovery has verified the managed boot submission. Complete its
-        // lifecycle through valid transitions so the followup can be tracked
-        // as working instead of leaving the record stuck in booting.
-        if (updated.state === "booting") {
-          updated = stateMgr.transition(updated.agent_id, "ready");
-        }
-        if (updated.state === "ready") {
-          updated = stateMgr.transition(updated.agent_id, "working");
-        }
-        context.lifecycleSweepEngine?.getRegistry().set(updated.agent_id, updated);
+        settleVerifiedBootSubmit(pendingBootAgent.agent_id);
       }
     }
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe({
@@ -2034,6 +2058,24 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
     if (submit_verified === true) typedDraftOwners.delete(ownerKey);
     else if (
+      // #793: the boot payload was typed but never observed in time, so no
+      // Return went out. The draft is the spawning caller's to submit.
+      textDispatched && opts.press_enter && !submitDispatched &&
+      opts.source_event === "boot_prompt" && caller && pendingBootAgent
+    ) {
+      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
+      typedDraftOwners.set(ownerKey, {
+        caller,
+        text: submittedText,
+        at: Date.now(),
+        ref: opts.surface,
+        uuid: opts.stableSurfaceIdentity ?? null,
+        workspace: opts.workspace ?? null,
+        fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity),
+        seen: false,
+        bootAgentId: pendingBootAgent.agent_id,
+      });
+    } else if (
       textDispatched &&
       opts.press_enter &&
       ownedDraftPending &&
@@ -3218,6 +3260,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "boot_prompt",
+            // #793: key the boot draft's owner token by the stable UUID, the
+            // same key a UUID-routed send_to key-Return looks it up by.
+            stableSurfaceIdentity: opts.stableSurfaceIdentity,
             onChunkDelivered: (count) => {
               sentChunks = count;
             },
@@ -3534,7 +3579,20 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     }, 0);
   };
 
+  /** #793: does the current caller hold a live ownership token for this draft? */
+  const callerOwnsTypedDraft = (opts: {
+    surface: string;
+    workspace?: string;
+    stableSurfaceIdentity?: string | null;
+  }): boolean => {
+    const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+    const caller = resolveCurrentCallerAgent()?.agent_id;
+    return !!caller && owner?.caller === caller &&
+      draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity);
+  };
+
   return {
+    callerOwnsTypedDraft,
     getSurfaceDelivery,
     withSurfaceWrite,
     observedSurfaceUuid,

@@ -7906,7 +7906,8 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed).toMatchObject({ ok: true, spawn_state: "boot_unsubmitted",
         next_action: expect.stringContaining("never re-spawn"),
         delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
-      expect(parsed.next_action).toContain('send_to({mode:"key"');
+      // #793: no attributed caller here, so no key Return is advised.
+      expect(parsed.next_action).not.toContain('mode:"key"');
       expect(parsed.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
       const call = parsed.next_action.match(/read_screen\((\{.*?\})\)/)?.[1];
       const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
