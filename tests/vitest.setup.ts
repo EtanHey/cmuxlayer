@@ -19,7 +19,8 @@ process.env.CMUXLAYER_SEAT_REGISTRY_PATH = join(
 
 // AIDEV-NOTE: same rule for the fleet config (~/.config/cmuxlayer/fleet.json):
 // a test must never inherit the host fleet's coordination dir, notify URL, or
-// doctor checks. Pin an empty config: generic defaults, legacy guard quiet.
+// doctor checks. Pin an empty config: generic defaults, legacy guard quiet (and
+// no worktreeBootstrap, so a test spawn never runs the host's bootstrap, #807).
 process.env.CMUXLAYER_FLEET_CONFIG = join(
   __dirname,
   "fixtures",

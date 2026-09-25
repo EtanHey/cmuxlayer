@@ -166,3 +166,25 @@ matters:
   sent: both lanes carry an approval bypass in launch *and* resume, the receipt
   claims a model pin only when the command applied one, the tab title is
   `<repo><Cli>` in both lanes, and the public agent id survives a resume.
+
+## Worktree dependencies
+
+When `spawn_agent` creates or reuses a worktree (`worktree:`), cmuxlayer installs
+that worktree's own dependencies. It never symlinks `node_modules` from another
+checkout: a symlinked tree inherits whatever a sibling installed and breaks when
+that sibling goes stale (#807).
+
+1. If the fleet config sets `worktreeBootstrap` and that script exists,
+   cmuxlayer runs `<script> <worktree>`. The script detects the lockfile type.
+   There is no default script.
+2. Otherwise, if the worktree has `bun.lock` or `bun.lockb`, it runs
+   `bun install --frozen-lockfile --cwd <worktree>`. This is served from bun's
+   global cache, so nothing is re-downloaded. A reused worktree's stale
+   `node_modules` symlink is unlinked first; its target is never touched.
+3. Otherwise dependencies are left alone.
+
+The spawn receipt's `worktree.node_modules_bootstrapped` records the result:
+`script`, `inline`, `skipped`, or `failed`. On `failed`,
+`node_modules_bootstrap_error` carries the error. The worktree is kept and the
+agent still starts. The install is bounded at 180 s.
+

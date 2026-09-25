@@ -58,6 +58,7 @@ describe("fleet config", () => {
       notifyUrl: null,
       mcpLauncher: null,
       sleepGuardLabel: null,
+      worktreeBootstrap: null,
     });
     expect(fleetConfigPath({}, home)).toBe(
       join(home, ".config", "cmuxlayer", "fleet.json"),
@@ -96,6 +97,7 @@ describe("fleet config", () => {
       notifyUrl: "http://127.0.0.1:3847/notify",
       mcpLauncher: "~/.golems/bin/cmuxlayer-mcp",
       sleepGuardLabel: "com.golems.cmux-caffeinate",
+      worktreeBootstrap: null,
     });
   });
 

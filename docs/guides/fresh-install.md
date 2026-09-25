@@ -240,6 +240,7 @@ reports the problem instead of failing.
 | `seatRegistryPath` | `~/.config/cmuxlayer/seats.yaml` (a missing file means no seat registry) | The seat registry. `CMUXLAYER_SEAT_REGISTRY_PATH` still takes precedence. |
 | `mcpLauncher` | unset: `doctor` skips its launcher checks | The MCP launcher shim that `doctor` expects `.mcp.json` entries to reference. |
 | `sleepGuardLabel` | unset: `doctor` skips the sleep-guard check | launchd label of an optional sleep guard. `doctor` reports it as info, never as a failure. |
+| `worktreeBootstrap` | unset: no script; a bun lockfile gets an inline frozen install | Script run as `<script> <worktree>` to install a new worktree's dependencies. See [registry-optional-spawn.md](registry-optional-spawn.md#worktree-dependencies). |
 
 Example:
 
