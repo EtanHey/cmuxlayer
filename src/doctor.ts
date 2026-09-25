@@ -58,7 +58,7 @@ import {
   type LoadedConfigFile,
 } from "./config-file.js";
 import { resolveSpawnPermissionMode } from "./permission-mode.js";
-import { launcherRegistryRequired } from "./agent-engine.js";
+import { launcherRegistryRequired } from "./engine/launch-command.js";
 import {
   assessCmuxVersionCompatibility,
   type CmuxVersionCompatibilityReport,
