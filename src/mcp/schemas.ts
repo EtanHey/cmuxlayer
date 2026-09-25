@@ -166,8 +166,6 @@ export const SendToArgsSchema = z.object({
 // One source for the public tool list: the palette owns it (CX-2 S2 dedupe).
 export const PUBLIC_TOOL_NAMES = REGISTERED_TOOL_NAMES;
 
-export const PUBLIC_TOOL_NAME_SET = new Set<string>(PUBLIC_TOOL_NAMES);
-
 export const BaseOutputShape = {
   ok: z.boolean(),
   retry_count: z.number().int().nonnegative(),
