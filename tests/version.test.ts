@@ -1,13 +1,15 @@
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   assertBuildVersion,
@@ -19,8 +21,16 @@ import {
 } from "../src/version.js";
 
 describe("release version", () => {
-  it("reports v0.4.87 from package metadata", () => {
-    expect(readVersion()).toBe("0.4.87");
+  it("reports the version from package.json", () => {
+    const packageJsonPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "package.json",
+    );
+    const { version } = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      version: string;
+    };
+    expect(readVersion()).toBe(version);
   });
 });
 

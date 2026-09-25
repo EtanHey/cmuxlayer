@@ -5,7 +5,7 @@ export default defineConfig({
     exclude: [
       ...configDefaults.exclude,
       "**/.worktrees/**",
-      "**/docs.local/scratch/**",
+      "**/docs.local/**",
     ],
     globalSetup: ["./tests/global-setup.ts"],
     setupFiles: ["./tests/vitest.setup.ts"],

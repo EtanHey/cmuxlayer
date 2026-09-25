@@ -1671,9 +1671,9 @@ describe("daemon performance budget", () => {
     expect(source).toContain("increase_reason");
   });
 
-  it("keeps scratch artifacts out of default Vitest collection", () => {
+  it("keeps local artifacts out of default Vitest collection", () => {
     const config = readFileSync(join(repoRoot, "vitest.config.ts"), "utf8");
-    expect(config).toContain('"**/docs.local/scratch/**"');
+    expect(config).toContain('"**/docs.local/**"');
   });
 
   it("contains fake-socket teardown resets inside the benchmark connection", () => {
