@@ -44,11 +44,37 @@ function loopHeldInEveryTrial(trialMaxMs: number[], budgetMs: number): boolean {
  */
 const TRIAL_PAUSE_MS = 250;
 const MAX_ATTEMPTS = 6;
+const HOSTED = Boolean(process.env.CI) && process.env.CI !== "false";
 
-interface ControlledAttempt {
+/**
+ * #817 (#883 @96766a23): on a hosted runner the idle control can read quiet and every
+ * trial still go over, while the same head passes locally. The runner was
+ * descheduled mid-sweep, and delay alone reads the same as a held loop. So a
+ * hosted fail also needs a second, independent signal: the CPU this process
+ * burned inside the trial's longest loop gap. A held loop is this process
+ * running JS, so it burns about as much CPU as the gap lasts; a descheduled
+ * process burns next to none. A trial confirms a held loop when that CPU
+ * exceeds the budget AND covers at least half the gap. (The sweep's own
+ * `loop_stall_max_ms` is the same wall-clock gap as the delay histogram, so it
+ * cannot tell the two apart.) Locally (no `CI`) delay alone still fails hard.
+ */
+interface TrialReading {
+  delayMs: number;
+  /** Longest wall-clock gap between 1 ms probe ticks during the trial. */
+  gapMs?: number;
+  /** CPU ms this process burned inside that gap (all threads). */
+  gapCpuMs?: number;
+}
+
+interface ControlledAttempt extends Omit<TrialReading, "delayMs"> {
   controlMs: number;
   trialMs: number;
   valid: boolean;
+}
+
+function confirmsHeldLoop(attempt: ControlledAttempt, budgetMs: number): boolean {
+  if (attempt.gapMs === undefined || attempt.gapCpuMs === undefined) return false;
+  return attempt.gapCpuMs > budgetMs && attempt.gapCpuMs >= attempt.gapMs / 2;
 }
 
 async function runControlledTrials(input: {
@@ -56,9 +82,11 @@ async function runControlledTrials(input: {
   maxAttempts: number;
   pauseMs: number;
   budgetMs: number;
+  /** Hosted CI runner: a delay-only fail is inconclusive without CPU proof. */
+  hosted: boolean;
   /** Idle for `ms` and return the loop delay observed while idle. */
   pause: (ms: number) => Promise<number>;
-  runTrial: (attempt: number) => Promise<number>;
+  runTrial: (attempt: number) => Promise<number | TrialReading>;
 }): Promise<{
   verdict: "pass" | "fail" | "skip";
   attempts: ControlledAttempt[];
@@ -68,10 +96,12 @@ async function runControlledTrials(input: {
   const valid = () => attempts.filter((attempt) => attempt.valid);
   while (valid().length < input.needed && attempts.length < input.maxAttempts) {
     const controlMs = await input.pause(input.pauseMs);
-    const trialMs = await input.runTrial(attempts.length);
-    attempts.push({ controlMs, trialMs, valid: controlMs <= input.budgetMs });
+    const reading = await input.runTrial(attempts.length);
+    const { delayMs, ...gap } = typeof reading === "number" ? { delayMs: reading } : reading;
+    attempts.push({ controlMs, trialMs: delayMs, ...gap, valid: controlMs <= input.budgetMs });
   }
-  const validTrials = valid().map((attempt) => attempt.trialMs);
+  const validAttempts = valid();
+  const validTrials = validAttempts.map((attempt) => attempt.trialMs);
   if (validTrials.length < input.needed) {
     return {
       verdict: "skip",
@@ -81,9 +111,52 @@ async function runControlledTrials(input: {
         `had a quiet ${input.pauseMs} ms control in ${input.maxAttempts}`,
     };
   }
-  return {
-    verdict: loopHeldInEveryTrial(validTrials, input.budgetMs) ? "fail" : "pass",
-    attempts,
+  if (!loopHeldInEveryTrial(validTrials, input.budgetMs)) {
+    return { verdict: "pass", attempts };
+  }
+  const confirmed = validAttempts.every((attempt) => confirmsHeldLoop(attempt, input.budgetMs));
+  if (input.hosted && !confirmed) {
+    const fmt = (values: Array<number | undefined>) =>
+      values.map((value) => (value === undefined ? "n/a" : value.toFixed(1))).join(", ");
+    return {
+      verdict: "skip",
+      attempts,
+      reason:
+        `inconclusive on a hosted runner: quiet controls ` +
+        `(${fmt(validAttempts.map((attempt) => attempt.controlMs))} ms) but every trial over ` +
+        `${input.budgetMs} ms (${fmt(validTrials)} ms), and CPU in the longest gap ` +
+        `(${fmt(validAttempts.map((attempt) => attempt.gapCpuMs))} ms of ` +
+        `${fmt(validAttempts.map((attempt) => attempt.gapMs))} ms) does not confirm a held loop`,
+    };
+  }
+  return { verdict: "fail", attempts };
+}
+
+/**
+ * Tick every 1 ms and remember the CPU this process burned across the longest
+ * wall-clock gap between ticks: the second signal for a hosted fail.
+ */
+function startGapCpuProbe(): () => { gapMs: number; gapCpuMs: number } {
+  let lastWall = performance.now();
+  let lastCpu = process.cpuUsage();
+  let maxGapMs = -1;
+  let gapCpuMs = 0;
+  const observe = () => {
+    const wall = performance.now();
+    const cpu = process.cpuUsage();
+    const gapMs = wall - lastWall;
+    if (gapMs > maxGapMs) {
+      maxGapMs = gapMs;
+      gapCpuMs = (cpu.user - lastCpu.user + cpu.system - lastCpu.system) / 1000;
+    }
+    lastWall = wall;
+    lastCpu = cpu;
+  };
+  const timer = setInterval(observe, 1);
+  return () => {
+    clearInterval(timer);
+    observe();
+    return { gapMs: maxGapMs, gapCpuMs };
   };
 }
 
@@ -154,7 +227,8 @@ describe("runControlledTrials (#817: a stalled runner is not a held loop)", () =
   // stalled over that span: 120 ms of delay if so, 12 ms if not.
   const simulate = async (model: {
     control: (from: number, to: number) => number;
-    trial: (from: number, to: number) => number;
+    trial: (from: number, to: number) => number | TrialReading;
+    hosted?: boolean;
   }) => {
     let clock = 0;
     const pauses: number[] = [];
@@ -163,6 +237,7 @@ describe("runControlledTrials (#817: a stalled runner is not a held loop)", () =
       maxAttempts: MAX_ATTEMPTS,
       pauseMs: TRIAL_PAUSE_MS,
       budgetMs: BUDGET_MS,
+      hosted: model.hosted ?? false,
       pause: async (ms) => {
         pauses.push(ms);
         const from = clock;
@@ -208,6 +283,70 @@ describe("runControlledTrials (#817: a stalled runner is not a held loop)", () =
     });
     expect(result.attempts.filter((attempt) => !attempt.valid)).toHaveLength(2);
     expect(result.verdict).toBe("pass");
+  });
+
+  // #817 (#883 @96766a23, job 107991923748): the controls read quiet and every
+  // trial still went over on a hosted runner, while the same head passed 3/3
+  // locally. Delay alone cannot tell that from a held loop there. Trial delays
+  // borrow the hosted stall shape of #845 run 36089255730.
+  const residual = [104.5, 248.9, 167.2];
+  const residualTrial = (gapCpuMs: number) => {
+    let index = 0;
+    return () => {
+      const delayMs = residual[index++ % residual.length]!;
+      return { delayMs, gapMs: delayMs, gapCpuMs };
+    };
+  };
+
+  it("hosted: quiet controls with every trial over budget are inconclusive, not a fail", async () => {
+    let index = 0;
+    const result = await simulate({
+      control: always(12),
+      trial: () => residual[index++]!,
+      hosted: true,
+    });
+    expect(result.verdict).toBe("skip");
+    expect(result.reason).toMatch(/inconclusive/);
+    expect(result.reason).toContain("104.5, 248.9, 167.2");
+  });
+
+  it("hosted: a descheduled gap (CPU under half of it) is inconclusive", async () => {
+    const result = await simulate({
+      control: always(12),
+      trial: residualTrial(40),
+      hosted: true,
+    });
+    expect(result.verdict).toBe("skip");
+    expect(result.reason).toContain("40.0, 40.0, 40.0");
+  });
+
+  it("hosted: fails when CPU fills every longest gap (a held loop)", async () => {
+    const result = await simulate({
+      control: always(12),
+      trial: () => ({ delayMs: 120, gapMs: 120, gapCpuMs: 118 }),
+      hosted: true,
+    });
+    expect(result.verdict).toBe("fail");
+  });
+
+  it("hosted: one unconfirmed trial is enough to call it inconclusive", async () => {
+    let index = 0;
+    const cpu = [118, 118, 3];
+    const result = await simulate({
+      control: always(12),
+      trial: () => ({ delayMs: 120, gapMs: 120, gapCpuMs: cpu[index++]! }),
+      hosted: true,
+    });
+    expect(result.verdict).toBe("skip");
+  });
+
+  it("local: quiet controls with every trial over budget still fail hard", async () => {
+    const result = await simulate({
+      control: always(12),
+      trial: residualTrial(3),
+      hosted: false,
+    });
+    expect(result.verdict).toBe("fail");
   });
 
   it("idles at least 250 ms before every attempt, capped at six attempts", () => {
@@ -283,6 +422,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
       maxAttempts: MAX_ATTEMPTS,
       pauseMs: TRIAL_PAUSE_MS,
       budgetMs: BUDGET_MS,
+      hosted: HOSTED,
       pause: async (ms) => {
         const idle = monitorEventLoopDelay({ resolution: 1 });
         idle.enable();
@@ -294,22 +434,25 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
         const readsBefore = readScreen.mock.calls.length;
         const delay = monitorEventLoopDelay({ resolution: 1 });
         delay.enable();
+        const stopProbe = startGapCpuProbe();
+        let gap: { gapMs: number; gapCpuMs: number };
         try {
           await engine.runSweep();
           await engine.runSweep();
           await engine.runSweep();
         } finally {
+          gap = stopProbe();
           delay.disable();
         }
         // Proof of work: every sweep read every agent's screen (not a no-op sweep).
         expect(readScreen.mock.calls.length - readsBefore).toBeGreaterThanOrEqual(
           AGENTS * 3,
         );
-        return delay.max / 1e6;
+        return { delayMs: delay.max / 1e6, ...gap };
       },
     });
     result.attempts.forEach((attempt, index) => {
-      process.stderr.write(`[#810] attempt ${index + 1}: control ${attempt.controlMs.toFixed(1)} ms, trial event_loop_delay_max ${attempt.trialMs.toFixed(1)} ms${attempt.valid ? "" : " (void: runner stalled while idle)"}\n`);
+      process.stderr.write(`[#810] attempt ${index + 1}: control ${attempt.controlMs.toFixed(1)} ms, trial event_loop_delay_max ${attempt.trialMs.toFixed(1)} ms, cpu ${attempt.gapCpuMs?.toFixed(1) ?? "n/a"} ms in longest gap ${attempt.gapMs?.toFixed(1) ?? "n/a"} ms${attempt.valid ? "" : " (void: runner stalled while idle)"}\n`);
     });
     if (result.verdict === "skip") {
       process.stderr.write(`[#810] SKIP: ${result.reason}\n`);
@@ -318,7 +461,8 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     }
     expect(
       result.verdict,
-      `every valid trial exceeded ${BUDGET_MS} ms with a quiet control`,
+      `every valid trial exceeded ${BUDGET_MS} ms with a quiet control` +
+        (HOSTED ? " and CPU in the longest gap confirming a held loop" : ""),
     ).toBe("pass");
   }, 30_000);
 });
