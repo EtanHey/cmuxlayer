@@ -3,13 +3,13 @@ import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
-const EXPECTED_TOOL_COUNT = 45;
+const EXPECTED_TOOL_COUNT = 32;
 const EXPECTED_DEFAULT_PALETTE_COUNT = 10;
 const EXPECTED_PUBLIC_TOOL_NAMES = [
   "spawn_agent", "report_to_parent", "send_to", "read_screen", "list_agents",
   "wait_for", "control_health", "close_surface", "update_surface", "list_surfaces",
 ];
-// 45 is the internal-definition count; only the exact 10-name public registry
+// 32 is the internal-definition count; only the exact 10-name public registry
 // is callable through MCP.
 const EXPECTED_DOCUMENTED_COUNTS = new Set([
   EXPECTED_TOOL_COUNT,
@@ -149,8 +149,8 @@ describe("tool-count drift guard", () => {
     const publicLine = readme.split("\n").find((line) => line.startsWith("**Public MCP surface**")) ?? "";
     expect([...publicLine.matchAll(/`([^`]+)`/g)].map((match) => match[1])).toEqual(names);
     expect(readme).toContain("only 10 are registered and callable through MCP");
-    expect(readme).toContain("other 35 are not exposed through ToolSearch");
-    expect(readme).toContain("retains 45 internal tool definitions");
+    expect(readme).toContain("other 22 are not exposed through ToolSearch");
+    expect(readme).toContain("retains 32 internal tool definitions");
 
     // The README documents only the callable surface: one table row per
     // public tool, and no inventory of the internal definitions.
@@ -167,8 +167,8 @@ describe("tool-count drift guard", () => {
   });
 
   it("goes red when a fixture count is mutated", () => {
-    const fixture = "The server exposes 45 tools.\n";
-    const mutatedFixture = fixture.replace("45", "44");
+    const fixture = `The server exposes ${EXPECTED_TOOL_COUNT} tools.\n`;
+    const mutatedFixture = fixture.replace(String(EXPECTED_TOOL_COUNT), "44");
 
     expect(() =>
       assertDocumentedCounts(
@@ -176,7 +176,7 @@ describe("tool-count drift guard", () => {
         EXPECTED_TOOL_COUNT,
       ),
     ).toThrow(
-      "fixtures/tool-count.md:1 documents 44; source registers 45 (The server exposes 44 tools.)",
+      `fixtures/tool-count.md:1 documents 44; source registers ${EXPECTED_TOOL_COUNT} (The server exposes 44 tools.)`,
     );
   });
 
@@ -189,7 +189,7 @@ describe("tool-count drift guard", () => {
         }],
         EXPECTED_TOOL_COUNT,
       ),
-    ).toThrow("fixtures/tool-count-badge.md:1 documents 44; source registers 45");
+    ).toThrow(`fixtures/tool-count-badge.md:1 documents 44; source registers ${EXPECTED_TOOL_COUNT}`);
   });
 
   it("recognizes hyphenated singular tool counts", () => {
@@ -198,6 +198,6 @@ describe("tool-count drift guard", () => {
         [{ path: "fixtures/tool-count-hyphen.md", content: "The server exposes 44-tool default.\n" }],
         EXPECTED_TOOL_COUNT,
       ),
-    ).toThrow("fixtures/tool-count-hyphen.md:1 documents 44; source registers 45");
+    ).toThrow(`fixtures/tool-count-hyphen.md:1 documents 44; source registers ${EXPECTED_TOOL_COUNT}`);
   });
 });

@@ -39,27 +39,17 @@ describe("B1: ToolAnnotations on all tools", () => {
     "my_agents",
     "read_agent_output",
     "inbox_check",
-    "list_monitors",
-    "query_monitor_registry",
   ];
 
   const DESTRUCTIVE_TOOLS = ["kill", "close_surface", "stop_agent"];
 
   const MUTATING_TOOLS = [
-    "select_workspace",
-    "create_workspace",
     "delete_workspace",
-    "new_split",
-    "new_surface",
     "move_surface",
     "send_input",
     "send_command",
     "send_key",
     "rename_tab",
-    "notify",
-    "set_status",
-    "set_progress",
-    "browser_surface",
     "spawn_agent",
     "spawn_in_workspace",
     "list_agents",
@@ -71,9 +61,6 @@ describe("B1: ToolAnnotations on all tools", () => {
     "wait_for_all",
     "interact",
     "dispatch_to_agent",
-    "register_monitor",
-    "signal_monitor",
-    "deregister_monitor",
   ];
 
   let tools: Record<string, { annotations?: Record<string, unknown> }>;
@@ -93,7 +80,7 @@ describe("B1: ToolAnnotations on all tools", () => {
 
   it("all registered test-mode tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(45);
+    expect(toolNames.length).toBe(32);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,

@@ -188,26 +188,6 @@ describe("workspace spawn tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("create_workspace tool returns a workspace ref", async () => {
-    const client = makeWorkspaceClient();
-    const server = createServer({
-      client: client as any,
-      skipAgentLifecycle: true,
-    });
-    const tool = (server as any)._registeredTools["create_workspace"];
-
-    const result = await tool.handler({ title: "red-team" }, {} as any);
-
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(client.createWorkspace).toHaveBeenCalledWith("red-team");
-    expect(parsed).toMatchObject({
-      ok: true,
-      workspace: "workspace:grid",
-      title: "red-team",
-    });
-  });
-
   it("spawn_in_workspace spawns agents into the created workspace", async () => {
     const client = makeWorkspaceClient();
     const inboxDir = join(TEST_DIR, "inbox");

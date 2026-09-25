@@ -17,7 +17,7 @@ import {
   createFileSystemSeatManifestWriter,
   type SeatManifestWriter,
 } from "./seat-manifest.js";
-import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
+import { assertMutationAllowed } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
 import { buildSpawnToolReturn, shapeSpawnResponse } from "./spawn-response.js";
@@ -52,13 +52,8 @@ import {
   type CoordinationContract,
 } from "./coordination-paths.js";
 import {
-  deregisterMonitor,
-  queryMonitorRegistryForGates,
   readMonitorRegistry,
-  registerMonitor,
-  signalMonitor,
   type MonitorRegistryOptions,
-  type RegisterMonitorInput,
 } from "./monitor-registry.js";
 import {
   readWatchRegistry,
@@ -152,7 +147,6 @@ import {
 } from "./codex-rollout-fill.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import {
-  canInferAgentRole,
   collectRoleSurfaceIds,
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
@@ -162,8 +156,6 @@ import {
   launcherNameForCli,
 } from "./layout-policy.js";
 import type {
-  CmuxNewSplitResult,
-  CmuxNewSurfaceResult,
   CmuxPane,
   CmuxSurface,
   CmuxTerminalMetadata,
@@ -186,7 +178,6 @@ import {
 } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
-  buildSurfaceBindingObservation,
   isPaneSurfaceEnumerationComplete,
   resolveObservedAgentSurfaceRef,
   type SurfaceBindingObservation,
@@ -199,20 +190,16 @@ import {
   type LifecycleStartHealth,
 } from "./control-health.js";
 import {
-  captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology as collectCmuxSurfaceTopology,
   enumerateAllWindowWorkspacesWithRetry,
   invalidateSurfaceTopologyCallScope,
   EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
-  isSurfaceObserverEpochCurrent,
   resolveAgentSurfaceBinding,
   withSurfaceTopologyMutationInvalidation,
-  type SurfaceObserverEpoch,
   type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
-  type SurfaceTopology,
   type TopologyRpcObserver,
 } from "./surface-topology.js";
 import {
@@ -247,9 +234,6 @@ import {
 } from "./delivery/composer-screen.js";
 import {
   ANNOTATIONS,
-  RegisterMonitorArgsSchema,
-  MonitorIdArgsSchema,
-  QueryMonitorRegistryArgsSchema,
   WatchSpecArgsSchema,
   BOOT_PROMPT_TIMEOUT_MS,
   SendToArgsSchema,
@@ -294,7 +278,6 @@ import {
   LifecycleStartTimeoutError,
 } from "./mcp/tool-result.js";
 import type {
-  ToolReturn,
 } from "./mcp/tool-result.js";
 import {
   SEND_INPUT_CHUNK_THRESHOLD,
@@ -1305,196 +1288,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : {}),
     ...(opts?.monitorRegistryNow ? { now: opts.monitorRegistryNow } : {}),
   });
-  const monitorRegistryError = (
-    reason: string,
-    monitorId?: string | null,
-    message = reason,
-  ): ToolReturn =>
-    err(new Error(message), {
-      reason,
-      monitor_id: monitorId ?? "<missing-monitor-id>",
-    });
-  const validateRegisterMonitorArgs = (
-    args: Record<string, unknown>,
-  ): RegisterMonitorInput | ToolReturn => {
-    const monitorId = nonEmptyString(args.monitor_id);
-    if (!monitorId) {
-      return monitorRegistryError("missing-monitor-id", null);
-    }
-    const ownerSeat = nonEmptyString(args.owner_seat);
-    if (!ownerSeat || /^(?:unknown|none|null|n\/a)$/i.test(ownerSeat)) {
-      return monitorRegistryError("missing-or-unknown-owner-seat", monitorId);
-    }
-    const watchTargets = Array.isArray(args.watch_targets)
-      ? args.watch_targets.map(nonEmptyString)
-      : null;
-    if (
-      !watchTargets ||
-      watchTargets.length === 0 ||
-      watchTargets.some((target) => target === null)
-    ) {
-      return monitorRegistryError("invalid-watch-targets", monitorId);
-    }
-    if (args.mechanism !== "event" && args.mechanism !== "offset-poll") {
-      return monitorRegistryError("invalid-mechanism", monitorId);
-    }
-    const watermarkKey = nonEmptyString(args.watermark_key);
-    if (args.mechanism === "offset-poll" && !watermarkKey) {
-      return monitorRegistryError(
-        "offset-poll-missing-watermark-key",
-        monitorId,
-      );
-    }
-    const dedupe =
-      args.dedupe === "offset" ||
-      args.dedupe === "seen-set" ||
-      args.dedupe === "header-keyed"
-        ? args.dedupe
-        : undefined;
-    if (args.dedupe !== undefined && !dedupe) {
-      return monitorRegistryError("invalid-dedupe", monitorId);
-    }
-    if (
-      typeof args.deadman_timeout_s !== "number" ||
-      !Number.isFinite(args.deadman_timeout_s) ||
-      args.deadman_timeout_s <= 0
-    ) {
-      return monitorRegistryError("invalid-deadman-timeout", monitorId);
-    }
-    const addressee = nonEmptyString(args.addressee);
-    if (args.addressee !== undefined && !addressee) {
-      return monitorRegistryError("invalid-addressee", monitorId);
-    }
-    const rearmCommand = nonEmptyString(args.rearm_command);
-    if (args.rearm_command !== undefined && !rearmCommand) {
-      return monitorRegistryError("invalid-rearm-command", monitorId);
-    }
-    if (
-      rearmCommand &&
-      (watchTargets as string[]).some(
-        (target) =>
-          target !== "~" && !target.startsWith("~/") && !isAbsolute(target),
-      )
-    ) {
-      return monitorRegistryError("rearm-watch-target-not-absolute", monitorId);
-    }
-
-    return {
-      monitor_id: monitorId,
-      owner_seat: ownerSeat,
-      watch_targets: watchTargets as string[],
-      mechanism: args.mechanism,
-      ...(nonEmptyString(args.pattern)
-        ? { pattern: nonEmptyString(args.pattern)! }
-        : {}),
-      ...(watermarkKey ? { watermark_key: watermarkKey } : {}),
-      ...(dedupe ? { dedupe } : {}),
-      ...(addressee ? { addressee } : {}),
-      ...(rearmCommand ? { rearm_command: rearmCommand } : {}),
-      deadman_timeout_s: args.deadman_timeout_s,
-    };
-  };
-  const isToolReturn = (
-    value: RegisterMonitorInput | ToolReturn,
-  ): value is ToolReturn => "content" in value;
-  const collectMonitorIds = (args: {
-    monitor_id?: string;
-    monitor_ids?: string[];
-    claimed_monitor_ids?: string[];
-  }): string[] => {
-    const ids = [
-      ...(nonEmptyString(args.monitor_id)
-        ? [nonEmptyString(args.monitor_id)!]
-        : []),
-      ...(Array.isArray(args.monitor_ids) ? args.monitor_ids : []),
-      ...(Array.isArray(args.claimed_monitor_ids)
-        ? args.claimed_monitor_ids
-        : []),
-    ]
-      .map(nonEmptyString)
-      .filter((id): id is string => id !== null);
-    return [...new Set(ids)];
-  };
-  const filterMonitorRegistryRecords = <
-    T extends { monitor_id: string; owner_seat?: string; state?: string },
-  >(
-    records: T[],
-    args: {
-      owner_seat?: string;
-      include_dead?: boolean;
-      monitor_id?: string;
-      monitor_ids?: string[];
-      claimed_monitor_ids?: string[];
-    },
-    includeDeadByDefault: boolean,
-  ): T[] => {
-    const ownerSeat = nonEmptyString(args.owner_seat);
-    const ids = collectMonitorIds(args);
-    const idSet = new Set(ids);
-    const includeDead = args.include_dead ?? includeDeadByDefault;
-    return records.filter((record) => {
-      if (!includeDead && record.state === "dead") return false;
-      if (ownerSeat && record.owner_seat !== ownerSeat) return false;
-      if (idSet.size > 0 && !idSet.has(record.monitor_id)) return false;
-      return true;
-    });
-  };
-  const queryMonitorRegistryTool = (
-    args: {
-      gate?: "gate-9" | "gate-10";
-      owner_seat?: string;
-      monitor_id?: string;
-      monitor_ids?: string[];
-      claimed_monitor_ids?: string[];
-      include_dead?: boolean;
-    },
-    toolName: "list_monitors" | "query_monitor_registry",
-  ): ToolReturn => {
-    const gate = args.gate;
-    if (!gate) {
-      const registry = readMonitorRegistry(monitorRegistryOptions());
-      const monitors = filterMonitorRegistryRecords(
-        registry.monitors,
-        args,
-        false,
-      );
-      return ok({
-        tool: toolName,
-        version: registry.version,
-        monitors,
-      });
-    }
-
-    const claimedMonitorIds = collectMonitorIds(args);
-    const query = queryMonitorRegistryForGates({
-      ...monitorRegistryOptions(),
-      ...(claimedMonitorIds.length > 0 ? { claimedMonitorIds } : {}),
-    });
-    const requestedIds = new Set(claimedMonitorIds);
-    const monitors = filterMonitorRegistryRecords(query.monitors, args, true);
-    const monitorById = new Map(
-      query.monitors.map((monitor) => [monitor.monitor_id, monitor]),
-    );
-    const violations = query.violations.filter((violation) => {
-      if (violation.gate !== gate) return false;
-      if (requestedIds.size > 0 && !requestedIds.has(violation.monitor_id)) {
-        return false;
-      }
-      const ownerSeat = nonEmptyString(args.owner_seat);
-      if (!ownerSeat) return true;
-      const monitor = monitorById.get(violation.monitor_id);
-      return !monitor || monitor.owner_seat === ownerSeat;
-    });
-    return ok({
-      tool: toolName,
-      gate,
-      verdict: violations.length > 0 ? "fire" : "pass",
-      queried_at: query.queried_at,
-      latency_ms: query.latency_ms,
-      monitors,
-      violations,
-    });
-  };
 
   const server = new McpServer({
     name: "cmuxlayer",
@@ -1851,11 +1644,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : undefined;
   };
 
-  /** Per-request caller workspace only; shared-daemon env/focus are not caller identity. */
-  const currentCallerWorkspace = async (): Promise<string | undefined> => {
-    return callerWorkspaceStrict();
-  };
-
   /**
    * Caller workspace for mutation safety only. In-process runtimes have no
    * transport metadata, so their process-local env can supplement the strict
@@ -1995,91 +1783,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
   };
 
-  const resolveAnchorWorkspace = async (opts: {
-    pane?: string;
-    surface?: string;
-  }): Promise<string> => {
-    if (opts.surface) {
-      try {
-        const identified = await client.identify(opts.surface);
-        const workspace = identified.caller?.workspace_ref;
-        if (workspace) {
-          return (await canonicalWorkspaceRef(workspace)) ?? workspace;
-        }
-      } catch (error) {
-        const message = error instanceof Error ? `: ${error.message}` : "";
-        throw new PlacementWorkspaceError(
-          `Unable to resolve current workspace for surface anchor ${opts.surface}${message}`,
-        );
-      }
-      throw new PlacementWorkspaceError(
-        `Unable to resolve current workspace for surface anchor ${opts.surface}`,
-      );
-    }
-
-    if (!opts.pane) {
-      throw new PlacementWorkspaceError(
-        "Anchored split requires a pane or surface anchor",
-      );
-    }
-
-    try {
-      const { workspaces } = await listAllWorkspaces();
-      const paneLists = await Promise.all(
-        workspaces.map(async (workspace) => ({
-          workspace: workspace.ref,
-          panes: (await client.listPanes({ workspace: workspace.ref })).panes,
-        })),
-      );
-      const matches = paneLists
-        .filter(({ panes }) =>
-          panes.some((pane) => pane.ref === opts.pane || pane.id === opts.pane),
-        )
-        .map(({ workspace }) => workspace);
-      if (matches.length === 1) {
-        return matches[0]!;
-      }
-      if (matches.length > 1) {
-        throw new PlacementWorkspaceError(
-          `Pane anchor ${opts.pane} is ambiguous across workspaces: ${matches.join(", ")}`,
-        );
-      }
-    } catch (error) {
-      if (error instanceof PlacementWorkspaceError) throw error;
-      const message = error instanceof Error ? `: ${error.message}` : "";
-      throw new PlacementWorkspaceError(
-        `Unable to resolve current workspace for pane anchor ${opts.pane}${message}`,
-      );
-    }
-    throw new PlacementWorkspaceError(
-      `Unable to resolve current workspace for pane anchor ${opts.pane}`,
-    );
-  };
-
-  const resolveAnchoredPlacement = async (opts: {
-    explicitWorkspace?: string;
-    pane?: string;
-    surface?: string;
-    repo?: string | null;
-  }): Promise<{ workspace: string; warnings: string[] }> => {
-    const anchor = opts.surface ?? opts.pane ?? "anchor";
-    const anchorWorkspace = await resolveAnchorWorkspace({
-      pane: opts.pane,
-      surface: opts.surface,
-    });
-    const targetResolution = await resolvePlacementWorkspace({
-      explicitWorkspace: opts.explicitWorkspace,
-      repo: opts.repo,
-    });
-    const validatedWorkspace = targetResolution.workspace;
-    if (!validatedWorkspace || anchorWorkspace !== validatedWorkspace) {
-      throw new PlacementWorkspaceError(
-        `Refused ${anchor} anchored placement: anchor currently resolves to ${anchorWorkspace}, but validated placement workspace is ${validatedWorkspace ?? "unresolved"}`,
-      );
-    }
-    return { ...targetResolution, workspace: anchorWorkspace };
-  };
-
   /** Capture origin focus, select the placement workspace, and record the
    * exact focus state caused by that selection. The expected state is refreshed
    * immediately after pane creation so restoration never depends on whether a
@@ -2171,20 +1874,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  /** Explicit focus:true is best-effort so the created handle is never lost. */
-  const focusCreatedSurface = async (
-    surface: string,
-    workspace: string | undefined,
-  ): Promise<string | null> => {
-    try {
-      await client.focusSurface(surface, { workspace });
-      return null;
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      return `Focus request failed: ${message}`;
-    }
-  };
-
   const findSurfaceByRef = async (
     surfaceRef: string,
     workspace?: string,
@@ -2221,20 +1910,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const surfaceObserverEpochProvider =
     (): SurfaceObserverIdProvider | undefined => () =>
       context.surfaceObserverEpoch;
-
-  const assertSurfaceObserverEpochCurrent = (
-    observerEpoch: SurfaceObserverEpoch,
-    operation: string,
-  ): void => {
-    const provider = surfaceObserverEpochProvider();
-    if (isSurfaceObserverEpochCurrent(observerEpoch, provider)) return;
-    const currentObserverEpoch = captureObserverEpoch(provider);
-    throw new Error(
-      `Surface observer changed or became unavailable during ${operation} ` +
-        `(${observerEpoch ?? "unknown"} -> ${currentObserverEpoch ?? "unknown"}); ` +
-        `refusing to mutate a different cmux instance.`,
-    );
-  };
 
   const collectSurfaceTopology = async (workspace?: string) =>
     collectCmuxSurfaceTopology(
@@ -2600,25 +2275,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     }
   };
-
-  // Resolve a surface's 0-based column + the workspace column_count using the
-  // SAME reliable post-F5 logic as list_surfaces: derive columns from pane
-  // geometry, then attribute the surface to its pane by membership (pane_id),
-  // NOT the unfiltered surface.list. Best-effort: returns nulls on any failure
-  // so callers (e.g. read_screen) never break when geometry is unavailable.
-  const resolveSurfaceColumn = async (
-    surfaceRef: string,
-    workspace?: string,
-  ): Promise<SurfaceTopology> =>
-    (await collectSurfaceTopology(workspace))?.topologyBySurface.get(
-      surfaceRef,
-    ) ?? EMPTY_SURFACE_TOPOLOGY;
-
-  const resolveSurfaceWorkspace = async (
-    surfaceRef: string,
-  ): Promise<string | null> =>
-    (await collectSurfaceTopology())?.workspaceBySurface.get(surfaceRef) ??
-    null;
 
   const resolveAuthorizedAgentSurfaceBinding = (
     agent: AgentRecord,
@@ -3263,174 +2919,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  server.tool(
-    "register_monitor",
-    "Register or re-arm a shared monitor-registry deadman record. Offset-poll monitors require a watermark_key; fired monitor ids cannot be reused.",
-    RegisterMonitorArgsSchema,
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        const inputOrError = validateRegisterMonitorArgs(args);
-        if (isToolReturn(inputOrError)) {
-          return inputOrError;
-        }
-        const existing = readMonitorRegistry(
-          monitorRegistryOptions(),
-        ).monitors.find(
-          (record) => record.monitor_id === inputOrError.monitor_id,
-        );
-        if (existing?.state === "deadman-fired") {
-          return monitorRegistryError(
-            "cannot-rearm-fired-monitor-id",
-            inputOrError.monitor_id,
-            "cannot re-arm a fired monitor_id; use a new id",
-          );
-        }
-        const record = await registerMonitor(
-          inputOrError,
-          monitorRegistryOptions(),
-        );
-        return ok({ record });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        if (/cannot re-arm a fired monitor_id/i.test(message)) {
-          return monitorRegistryError(
-            "cannot-rearm-fired-monitor-id",
-            nonEmptyString(args.monitor_id),
-            message,
-          );
-        }
-        return err(e);
-      }
-    },
-  );
-
-  server.tool(
-    "signal_monitor",
-    "Signal a registered monitor's liveness heartbeat by updating last_signal_at.",
-    MonitorIdArgsSchema,
-    ANNOTATIONS.idempotentMutating,
-    async (args) => {
-      try {
-        const monitorId = nonEmptyString(args.monitor_id);
-        if (!monitorId) {
-          return monitorRegistryError("missing-monitor-id", null);
-        }
-        const record = await signalMonitor(monitorId, monitorRegistryOptions());
-        if (!record) {
-          return monitorRegistryError(
-            "monitor-id-absent-or-not-alive",
-            monitorId,
-            `Monitor not found or not alive: ${monitorId}`,
-          );
-        }
-        return ok({ record });
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  server.tool(
-    "deregister_monitor",
-    "Mark a monitor as intentionally stopped so later signals do not revive it.",
-    MonitorIdArgsSchema,
-    ANNOTATIONS.idempotentMutating,
-    async (args) => {
-      try {
-        const monitorId = nonEmptyString(args.monitor_id);
-        if (!monitorId) {
-          return monitorRegistryError("missing-monitor-id", null);
-        }
-        const record = await deregisterMonitor(
-          monitorId,
-          monitorRegistryOptions(),
-        );
-        if (!record) {
-          return monitorRegistryError(
-            "monitor-id-absent",
-            monitorId,
-            `Monitor not found: ${monitorId}`,
-          );
-        }
-        return ok({ record });
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  server.tool(
-    "list_monitors",
-    "List monitor-registry records, optionally filtering by gate, owner_seat, or monitor id.",
-    QueryMonitorRegistryArgsSchema,
-    ANNOTATIONS.readOnly,
-    async (args) => {
-      try {
-        return queryMonitorRegistryTool(args, "list_monitors");
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  server.tool(
-    "query_monitor_registry",
-    "Query the monitor registry for gate-9/gate-10 pass/fire verdicts and monitor metadata.",
-    QueryMonitorRegistryArgsSchema,
-    ANNOTATIONS.readOnly,
-    async (args) => {
-      try {
-        return queryMonitorRegistryTool(args, "query_monitor_registry");
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  server.tool(
-    "select_workspace",
-    "Focus a workspace tab so subsequent terminal input is delivered to the intended workspace.",
-    {
-      workspace: z.string().describe("Target workspace ref"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        await client.selectWorkspace(args.workspace);
-        const data = { workspace: args.workspace };
-        return okFormatted(formatOk("select_workspace", data), data);
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  server.tool(
-    "create_workspace",
-    "Create a new workspace tab. Returns the new workspace ref and title.",
-    {
-      title: z.string().describe("Workspace title"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        await assertWorkspaceMutationAllowed(
-          "create_workspace",
-          await currentSafetyCallerWorkspace(),
-        );
-        const result = await client.createWorkspace(args.title);
-        const data = {
-          workspace: result.workspace,
-          title: result.title,
-        };
-        return okFormatted(formatOk("create_workspace", data), data);
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
   // Deferred layout/UI tool: keep beside create_workspace so the thin-core
   // palette classifies both workspace-management tools together off-default.
   const deleteWorkspaceTool = server.tool(
@@ -3537,524 +3025,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       "cmuxlayer/interim": true,
     },
   });
-
-  // 2. new_split
-  server.tool(
-    "new_split",
-    `${PANE_INPUT_BREAKAGE_GUIDANCE} Create a new split pane (terminal or browser). PLACEMENT IS BY ROLE, NOT BY HAND: pass \`role\` (or let it infer from the launcher title) and the layout policy enforces the two-column invariant — leads/orchestrators land in the LEFT column, workers land in the RIGHT column, and extra workers dock as tabs in the rightmost worker pane (never a third column). Workspace-targeted splits auto-focus the target before splitting and restore your prior focus after the new pane renders, so you do not hand-run focus-pane around splits. For terminal panes that boot an agent, boot_prompt_path safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after the agent reaches a ready prompt.`,
-    {
-      direction: z
-        .enum(["left", "right", "up", "down"])
-        .optional()
-        .default("right")
-        .describe(
-          "Split-direction hint for direct placement; role-based placement may override it. Defaults to right.",
-        ),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      surface: z.string().optional().describe("Target surface ref"),
-      pane: z.string().optional().describe("Target pane ref"),
-      type: z
-        .enum(["terminal", "browser"])
-        .optional()
-        .default("terminal")
-        .describe("Surface type"),
-      url: z.string().optional().describe("URL for browser surfaces"),
-      title: z.string().optional().describe("Tab title"),
-      role: legacyCompatibleAgentRoleSchema()
-        .optional()
-        .describe(
-          "Agent role drives deterministic column placement: orchestrator → LEFT column (leads, the Claude that coordinates), worker → RIGHT column (Codex/Cursor that implement/gather). Defaults from title launcher suffix: *Claude=orchestrator, *Codex/*Cursor=worker. Pass this instead of trying to control left/right via direction.",
-        ),
-      focus: z
-        .boolean()
-        .optional()
-        .describe(
-          "Set true to focus the new pane and leave focus there; otherwise cmuxlayer restores the exact origin after render",
-        ),
-      boot_prompt_path: z
-        .string()
-        .nullable()
-        .optional()
-        .describe(
-          `${PANE_INPUT_BREAKAGE_GUIDANCE} Pass the readable prompt-file path here. It is checked before pane creation and delivered as one \`Read and follow <path>\` pointer after readiness when multiline or over-cap; shorter files retain direct delivery. Mutually exclusive with inline prompt fields.`,
-        ),
-      boot_prompt_timeout_ms: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .default(BOOT_PROMPT_TIMEOUT_MS)
-        .describe("Timeout in milliseconds waiting for the agent ready prompt"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      let result: CmuxNewSplitResult | undefined;
-      let focusRestoreLease: FocusRestoreLease | null = null;
-      const creation = new CreatedIdentityScope();
-      try {
-        const normalizedRole = normalizeToolAgentRole(args.role, "role");
-        const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
-        const shouldInferRole =
-          Boolean(normalizedRole.role) ||
-          (!args.pane &&
-            !args.surface &&
-            canInferAgentRole({ title: args.title }));
-        const inferredRole = shouldInferRole
-          ? inferAgentRole({ role: normalizedRole.role, title: args.title })
-          : null;
-        if (
-          inferredRole &&
-          (args.type ?? "terminal") === "terminal" &&
-          (args.pane || args.surface)
-        ) {
-          throw new Error(
-            "pane/surface cannot be combined with role-based new_split; omit the explicit target or omit role",
-          );
-        }
-        if (bootPromptPath) {
-          if ((args.type ?? "terminal") !== "terminal") {
-            throw new Error(
-              "boot_prompt_path is only supported for terminal surfaces",
-            );
-          }
-          await preflightBootPromptFile(bootPromptPath);
-        }
-        const rolePlacementObserverEpoch =
-          inferredRole && (args.type ?? "terminal") === "terminal"
-            ? captureObserverEpoch(surfaceObserverEpochProvider())
-            : undefined;
-        if (inferredRole && (args.type ?? "terminal") === "terminal") {
-          assertSurfaceObserverEpochCurrent(
-            rolePlacementObserverEpoch,
-            "role-based new_split placement",
-          );
-        }
-        const placementRepo = inferRepoFromLauncherTitle(args.title);
-        const targetResolution =
-          args.pane || args.surface
-            ? await resolveAnchoredPlacement({
-                explicitWorkspace: args.workspace,
-                pane: args.pane,
-                surface: args.surface,
-                repo: placementRepo,
-              })
-            : await resolvePlacementWorkspace({
-                explicitWorkspace: args.workspace,
-                repo: placementRepo,
-              });
-        if (inferredRole && (args.type ?? "terminal") === "terminal") {
-          assertSurfaceObserverEpochCurrent(
-            rolePlacementObserverEpoch,
-            "role-based new_split placement",
-          );
-        }
-        const targetWorkspace = targetResolution.workspace;
-        if (args.surface) {
-          await assertSurfaceMutationAllowed(
-            "new_split",
-            args.surface,
-            targetWorkspace,
-          );
-        } else {
-          await assertWorkspaceMutationAllowed("new_split", targetWorkspace);
-        }
-
-        // Auto-focus only applies to workspace-targeted splits (no explicit
-        // pane/surface anchor). Captured right before creation, AFTER all
-        // validation, so a rejected request has no focus side effects.
-        let focusRequestWarning: string | null = null;
-        let actualPlacement: "split" | "surface" = "split";
-        let actualDirection: string | null = args.direction;
-        if (inferredRole && (args.type ?? "terminal") === "terminal") {
-          assertSurfaceObserverEpochCurrent(
-            rolePlacementObserverEpoch,
-            "role-based new_split placement",
-          );
-          const panes = await client.listPanes({ workspace: targetWorkspace });
-          const rawPaneSurfaces = await Promise.all(
-            panes.panes.map(async (pane) => {
-              const ps = await client.listPaneSurfaces({
-                workspace: targetWorkspace,
-                pane: pane.ref,
-              });
-              // cmux socket omits pane_ref; inject it so describePaneLayouts
-              // can match panes to their surfaces for role-based placement.
-              return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
-            }),
-          );
-          const paneSurfaces = partitionPaneSurfacesByMembership(
-            panes.panes,
-            rawPaneSurfaces,
-            {
-              workspace_ref: panes.workspace_ref ?? targetWorkspace,
-              window_ref: panes.window_ref,
-            },
-          );
-          const surfaceObservation = buildSurfaceBindingObservation(
-            panes.panes,
-            paneSurfaces,
-          );
-          assertSurfaceObserverEpochCurrent(
-            rolePlacementObserverEpoch,
-            "role-based new_split placement",
-          );
-          const liveSurfaceIds = surfaceObservation.liveSurfaceRefs;
-          const placement = chooseAgentSpawnPlacement(
-            panes.panes,
-            paneSurfaces,
-            collectServerRoleSurfaceIds(
-              liveSurfaceIds,
-              targetWorkspace,
-              surfaceObservation,
-            ),
-            { role: inferredRole },
-          );
-          actualPlacement = placement.kind;
-          actualDirection =
-            placement.kind === "split" ? placement.direction : null;
-          // Role-based placement has no explicit pane/surface (validated above),
-          // so it is always a workspace-targeted split — apply auto-focus.
-          assertSurfaceObserverEpochCurrent(
-            rolePlacementObserverEpoch,
-            "role-based new_split placement",
-          );
-          focusRestoreLease = await focusTargetBeforeSplit(
-            targetWorkspace,
-            args.focus !== true,
-          );
-          assertSurfaceObserverEpochCurrent(
-            rolePlacementObserverEpoch,
-            "role-based new_split placement",
-          );
-          result =
-            placement.kind === "surface"
-              ? await client.newSurface({
-                  pane: placement.pane,
-                  workspace: targetWorkspace,
-                  type: "terminal",
-                })
-              : await client.newSplit(placement.direction, {
-                  workspace: targetWorkspace,
-                  ...(placement.pane ? { pane: placement.pane } : {}),
-                  surface: args.surface,
-                  type: args.type,
-                  url: args.url,
-                  title: args.title,
-                });
-          creation.record({
-            surface: result.surface,
-            workspace: result.workspace,
-            ...(result.surface_id ? { surface_id: result.surface_id } : {}),
-          });
-          assertSurfaceObserverEpochCurrent(
-            rolePlacementObserverEpoch,
-            "role-based new_split placement",
-          );
-        } else {
-          // Only workspace-targeted splits need auto-focus; an explicit
-          // pane/surface anchor already pins the destination workspace.
-          if (!args.pane && !args.surface) {
-            focusRestoreLease = await focusTargetBeforeSplit(
-              targetWorkspace,
-              args.focus !== true,
-            );
-          }
-          result = await client.newSplit(args.direction, {
-            workspace: targetWorkspace,
-            surface: args.surface,
-            pane: args.pane,
-            type: args.type,
-            url: args.url,
-            title: args.title,
-          });
-          creation.record({
-            surface: result.surface,
-            workspace: result.workspace,
-            ...(result.surface_id ? { surface_id: result.surface_id } : {}),
-          });
-        }
-        if (args.focus === true) {
-          focusRequestWarning = await focusCreatedSurface(
-            result.surface,
-            result.workspace || targetWorkspace,
-          );
-        } else {
-          focusRestoreLease = await capturePostCreationFocus(focusRestoreLease);
-        }
-        if (args.title) {
-          await client.renameTab(result.surface, args.title, {
-            workspace: result.workspace || targetWorkspace,
-          });
-          result.title = args.title;
-        }
-        if (inferredRole && (args.type ?? "terminal") === "terminal") {
-          roleSurfaceOverrides.set(result.surface, {
-            role: inferredRole,
-            workspace: result.workspace ?? targetWorkspace ?? null,
-            surfaceUuid: result.surface_id ?? null,
-          });
-        }
-        let bootPromptDelivery:
-          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
-        if (bootPromptPath) {
-          const launcher = inferLauncherFromTitle(args.title ?? result.title);
-          bootPromptDelivery = await deliverBootPrompt({
-            surface: result.surface,
-            workspace: result.workspace || targetWorkspace,
-            cli: launcher?.cli,
-            boot_prompt_path: bootPromptPath,
-            timeout_ms: args.boot_prompt_timeout_ms,
-            onUpdateShellRelaunch: launcher
-              ? () =>
-                  sendLauncherCommandToSurface({
-                    surface: result!.surface,
-                    workspace: result!.workspace || targetWorkspace,
-                    command: buildLaunchCommand(
-                      launcher.cli,
-                      launcher.repo,
-                      undefined,
-                      launcher.launcherName,
-                    ),
-                    relaunch: true,
-                  })
-              : undefined,
-          });
-        }
-        const focusRestoreWarning = await restoreFocusAfterRender(
-          focusRestoreLease,
-          result.surface,
-          result.workspace || targetWorkspace,
-          { waitForReady: !bootPromptPath },
-        );
-        const data: Record<string, unknown> = { ...result };
-        data.placement = actualPlacement;
-        data.direction = actualDirection;
-        const responseWarnings = [
-          ...targetResolution.warnings,
-          ...(normalizedRole.warning ? [normalizedRole.warning] : []),
-          ...(focusRequestWarning ? [focusRequestWarning] : []),
-          ...(focusRestoreWarning ? [focusRestoreWarning] : []),
-        ];
-        if (responseWarnings.length > 0) {
-          data.warning = responseWarnings.join(" | ");
-          data.warnings = responseWarnings;
-        }
-        if (inferredRole) {
-          data.role = inferredRole;
-        }
-        if (bootPromptDelivery) {
-          data.boot_prompt_delivered =
-            isBootPromptDelivered(bootPromptDelivery);
-          data.boot_prompt_receipt = bootPromptDelivery;
-          data.boot_prompt_bytes = bootPromptDelivery.bytes;
-          data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
-        }
-        return okFormatted(
-          formatOk("new_split", {
-            surface: result.surface,
-            direction: actualDirection,
-            placement: actualPlacement,
-            type: args.type,
-            title: result.title,
-            role: inferredRole ?? undefined,
-            boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
-          }),
-          data,
-        );
-      } catch (e) {
-        const caught = creation.attach(e);
-        // Creation or boot delivery may fail after cmuxlayer selected a target
-        // workspace. Return focus when the user has not moved since then.
-        await restoreFocusAfterRender(
-          focusRestoreLease,
-          result?.surface,
-          result?.workspace,
-          { waitForReady: false },
-        );
-        const createdIdentity = result
-          ? {
-              surface: result.surface,
-              workspace: result.workspace,
-              ...(result.surface_id ? { surface_id: result.surface_id } : {}),
-            }
-          : {};
-        if (caught instanceof SurfaceGoneError) {
-          return err(caught, surfaceGonePayload(caught, createdIdentity));
-        }
-        if (caught instanceof BootPromptTimeoutError) {
-          return err(caught, {
-            ...createdIdentity,
-            last_10_lines: caught.last_10_lines,
-          });
-        }
-        if (caught instanceof BootPromptUpdateMenuBlockedError) {
-          return err(caught, {
-            ...createdIdentity,
-            error_code: caught.error_code,
-            last_10_lines: caught.last_10_lines,
-            recovery: caught.recovery,
-          });
-        }
-        if (caught instanceof BootPromptDeliveryError) {
-          return err(caught, {
-            ...createdIdentity,
-            delivered_chars: caught.delivered_chars,
-          });
-        }
-        return err(caught, createdIdentity);
-      }
-    },
-  );
-
-  // 3. new_surface
-  server.tool(
-    "new_surface",
-    `${PANE_INPUT_BREAKAGE_GUIDANCE} Create a new surface (tab) in an existing pane. For terminal tabs that boot an agent, boot_prompt_path safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after the agent reaches a ready prompt.`,
-    {
-      pane: z.string().describe("Target pane ref"),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      type: z
-        .enum(["terminal", "browser"])
-        .optional()
-        .default("terminal")
-        .describe("Surface type"),
-      title: z.string().optional().describe("Tab title"),
-      url: z.string().optional().describe("URL for browser surfaces"),
-      boot_prompt_path: z
-        .string()
-        .nullable()
-        .optional()
-        .describe(
-          `${PANE_INPUT_BREAKAGE_GUIDANCE} Pass the readable prompt-file path here. It is checked before tab creation and delivered as one \`Read and follow <path>\` pointer after readiness when multiline or over-cap; shorter files retain direct delivery.`,
-        ),
-      boot_prompt_timeout_ms: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .default(BOOT_PROMPT_TIMEOUT_MS)
-        .describe("Timeout in milliseconds waiting for the agent ready prompt"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      let result: CmuxNewSurfaceResult | undefined;
-      const creation = new CreatedIdentityScope();
-      try {
-        const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
-        if (bootPromptPath) {
-          if ((args.type ?? "terminal") !== "terminal") {
-            throw new Error(
-              "boot_prompt_path is only supported for terminal surfaces",
-            );
-          }
-          await preflightBootPromptFile(bootPromptPath);
-        }
-
-        const targetResolution = await resolveAnchoredPlacement({
-          explicitWorkspace: args.workspace,
-          pane: args.pane,
-          repo: inferRepoFromLauncherTitle(args.title),
-        });
-        const targetWorkspace = targetResolution.workspace;
-        await assertWorkspaceMutationAllowed("new_surface", targetWorkspace);
-
-        result = await client.newSurface({
-          pane: args.pane,
-          workspace: targetWorkspace,
-          type: args.type,
-          url: args.url,
-        });
-        creation.record({
-          surface: result.surface,
-          workspace: result.workspace,
-          ...(result.surface_id ? { surface_id: result.surface_id } : {}),
-        });
-        if (args.title) {
-          await client.renameTab(result.surface, args.title, {
-            workspace: result.workspace || targetWorkspace,
-          });
-          result.title = args.title;
-        }
-        let bootPromptDelivery:
-          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
-        if (bootPromptPath) {
-          const launcher = inferLauncherFromTitle(args.title ?? result.title);
-          bootPromptDelivery = await deliverBootPrompt({
-            surface: result.surface,
-            workspace: result.workspace || targetWorkspace,
-            cli: launcher?.cli,
-            boot_prompt_path: bootPromptPath,
-            timeout_ms: args.boot_prompt_timeout_ms,
-            onUpdateShellRelaunch: launcher
-              ? () =>
-                  sendLauncherCommandToSurface({
-                    surface: result!.surface,
-                    workspace: result!.workspace || targetWorkspace,
-                    command: buildLaunchCommand(
-                      launcher.cli,
-                      launcher.repo,
-                      undefined,
-                      launcher.launcherName,
-                    ),
-                    relaunch: true,
-                  })
-              : undefined,
-          });
-        }
-        const data: Record<string, unknown> = { ...result };
-        if (bootPromptDelivery) {
-          data.boot_prompt_delivered =
-            isBootPromptDelivered(bootPromptDelivery);
-          data.boot_prompt_receipt = bootPromptDelivery;
-          data.boot_prompt_bytes = bootPromptDelivery.bytes;
-          data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
-        }
-        return okFormatted(
-          formatOk("new_surface", {
-            pane: args.pane,
-            surface: result.surface,
-            type: result.type,
-            title: result.title,
-            boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
-          }),
-          data,
-        );
-      } catch (e) {
-        const caught = creation.attach(e);
-        const createdIdentity = result
-          ? {
-              surface: result.surface,
-              workspace: result.workspace,
-              ...(result.surface_id ? { surface_id: result.surface_id } : {}),
-            }
-          : {};
-        if (caught instanceof SurfaceGoneError) {
-          return err(caught, surfaceGonePayload(caught, createdIdentity));
-        }
-        if (caught instanceof BootPromptTimeoutError) {
-          return err(caught, {
-            ...createdIdentity,
-            last_10_lines: caught.last_10_lines,
-          });
-        }
-        if (caught instanceof BootPromptUpdateMenuBlockedError) {
-          return err(caught, {
-            ...createdIdentity,
-            error_code: caught.error_code,
-            last_10_lines: caught.last_10_lines,
-            recovery: caught.recovery,
-          });
-        }
-        if (caught instanceof BootPromptDeliveryError) {
-          return err(caught, {
-            ...createdIdentity,
-            delivered_chars: caught.delivered_chars,
-          });
-        }
-        return err(caught, createdIdentity);
-      }
-    },
-  );
 
   // 4. move_surface
   server.tool(
@@ -5138,110 +4108,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 7. notify
-  server.tool(
-    "notify",
-    "Show a cmux notification banner for a workspace or specific surface.",
-    {
-      title: z
-        .string()
-        .optional()
-        .describe(
-          'Notification title; omit to use cmux CLI default ("Notification")',
-        ),
-      subtitle: z.string().optional().describe("Notification subtitle"),
-      body: z.string().optional().describe("Notification body"),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      surface: z.string().optional().describe("Target surface ref"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        await client.notify({
-          title: args.title,
-          subtitle: args.subtitle,
-          body: args.body,
-          workspace: args.workspace,
-          surface: args.surface,
-        });
-        const data = {
-          title: args.title ?? null,
-          subtitle: args.subtitle ?? null,
-          body: args.body ?? null,
-          workspace: args.workspace ?? null,
-          surface: args.surface ?? null,
-        };
-        return okFormatted(formatOk("notify", data), data);
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  // 8. set_status
-  server.tool(
-    "set_status",
-    "Set a sidebar status key-value pair",
-    {
-      key: z.string().describe("Status key"),
-      value: z.string().describe("Status value"),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      surface: z.string().optional().describe("Target surface ref"),
-      icon: z.string().max(8).optional().describe("Icon name"),
-      color: z
-        .string()
-        .regex(/^#[0-9a-fA-F]{6}$/)
-        .optional()
-        .describe("Hex color"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        parseReservedModeKey(args.key, args.value);
-        await client.setStatus(args.key, args.value, {
-          icon: args.icon,
-          color: args.color,
-          workspace: args.workspace,
-          surface: args.surface,
-        });
-        const data = { key: args.key, value: args.value };
-        return okFormatted(formatOk("set_status", data), data);
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  // 9. set_progress
-  server.tool(
-    "set_progress",
-    "Set sidebar progress indicator (0.0 to 1.0)",
-    {
-      value: z
-        .number()
-        .min(0)
-        .max(1)
-        .describe("Progress value between 0 and 1"),
-      label: z.string().optional().describe("Progress label text"),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      surface: z.string().optional().describe("Target surface ref"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        await client.setProgress(args.value, {
-          label: args.label,
-          workspace: args.workspace,
-          surface: args.surface,
-        });
-        const data = { value: args.value, label: args.label };
-        return okFormatted(formatOk("set_progress", data), data);
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
   // 10. close_surface
   server.tool(
     "close_surface",
@@ -5875,120 +4741,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : formatOk("close_surface", data),
           data,
         );
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  // 11. browser_surface
-  server.tool(
-    "browser_surface",
-    "Interact with a browser surface (open, navigate, snapshot, click, type, eval, wait)",
-    {
-      action: z
-        .enum([
-          "open",
-          "goto",
-          "snapshot",
-          "click",
-          "type",
-          "eval",
-          "wait",
-          "url",
-        ])
-        .describe("Browser action to perform"),
-      surface: z.string().optional().describe("Target surface ref"),
-      workspace: z.string().optional().describe("Target workspace ref"),
-      url: z.string().optional().describe("URL for open/goto actions"),
-      selector: z
-        .string()
-        .optional()
-        .describe("CSS selector for click/type/wait actions"),
-      text: z.string().optional().describe("Text for type action"),
-      script: z.string().optional().describe("JavaScript for eval action"),
-      timeout_ms: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Timeout for wait action"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        const browserArgs: string[] = [];
-        if (args.surface) {
-          browserArgs.push("--surface", args.surface);
-        }
-
-        switch (args.action) {
-          case "open":
-            browserArgs.push("open");
-            if (args.url) {
-              browserArgs.push(args.url);
-            }
-            break;
-          case "goto":
-            requireValue(args.surface, "surface is required for goto");
-            requireValue(args.url, "url is required for goto");
-            browserArgs.push("goto", args.url);
-            break;
-          case "snapshot":
-            requireValue(args.surface, "surface is required for snapshot");
-            browserArgs.push("snapshot");
-            break;
-          case "click":
-            requireValue(args.surface, "surface is required for click");
-            requireValue(args.selector, "selector is required for click");
-            browserArgs.push("click", args.selector);
-            break;
-          case "type":
-            requireValue(args.surface, "surface is required for type");
-            requireValue(args.selector, "selector is required for type");
-            requireValue(args.text, "text is required for type");
-            browserArgs.push("type", args.selector, args.text);
-            break;
-          case "eval":
-            requireValue(args.surface, "surface is required for eval");
-            requireValue(args.script, "script is required for eval");
-            browserArgs.push("eval", args.script);
-            break;
-          case "wait":
-            requireValue(args.surface, "surface is required for wait");
-            if (!args.selector && !args.text && !args.timeout_ms) {
-              throw new Error(
-                "wait requires at least one of selector, text, or timeout_ms",
-              );
-            }
-            browserArgs.push("wait");
-            if (args.selector) {
-              browserArgs.push("--selector", args.selector);
-            }
-            if (args.text) {
-              browserArgs.push("--text", args.text);
-            }
-            if (args.timeout_ms) {
-              browserArgs.push("--timeout-ms", String(args.timeout_ms));
-            }
-            break;
-          case "url":
-            requireValue(args.surface, "surface is required for url");
-            browserArgs.push("url");
-            break;
-        }
-
-        if (args.surface) {
-          await assertSurfaceMutationAllowed(
-            "browser_surface",
-            args.surface,
-            args.workspace,
-          );
-        }
-        const result = await client.browser(browserArgs);
-        // browser_surface actions map to cmux browser-surface subcommands
-        const data = { action: args.action, surface: args.surface, result };
-        return okFormatted(formatOk("browser_surface", data), data);
       } catch (e) {
         return err(e);
       }

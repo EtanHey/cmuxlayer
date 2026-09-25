@@ -3,7 +3,7 @@
  * Manual surfaces are read-only for mutating tools.
  */
 
-import type { ControlMode, IntentMode } from "./types.js";
+import type { ControlMode } from "./types.js";
 
 /** Tools that only read state — always allowed */
 const READ_ONLY_TOOLS = new Set([
@@ -15,7 +15,6 @@ const READ_ONLY_TOOLS = new Set([
 /** Tools that mutate state — blocked in manual mode */
 const MUTATING_TOOLS = new Set([
   "select_workspace",
-  "create_workspace",
   "delete_workspace",
   "new_split",
   "new_surface",
@@ -27,7 +26,6 @@ const MUTATING_TOOLS = new Set([
   "rename_tab",
   "focus_surface",
   "close_surface",
-  "browser_surface",
   "spawn_agent",
   "new_worktree_split",
   "spawn_in_workspace",
@@ -39,9 +37,6 @@ const MUTATING_TOOLS = new Set([
   "kill",
   "agent_engine",
 ]);
-
-const VALID_CONTROL_MODES = new Set<string>(["autonomous", "manual"]);
-const VALID_INTENT_MODES = new Set<string>(["chat", "audit"]);
 
 export function isReadOnlyTool(toolName: string): boolean {
   return READ_ONLY_TOOLS.has(toolName);
@@ -64,29 +59,3 @@ export function assertMutationAllowed(
   }
 }
 
-/**
- * Parse reserved mode keys from set_status calls.
- * Returns the mode update if the key is a reserved mode key, null otherwise.
- */
-export function parseReservedModeKey(
-  key: string,
-  value: string,
-): { control?: ControlMode; intent?: IntentMode } | null {
-  if (key === "mode.control") {
-    if (!VALID_CONTROL_MODES.has(value)) {
-      throw new Error(
-        `Invalid control mode "${value}". Must be "autonomous" or "manual"`,
-      );
-    }
-    return { control: value as ControlMode };
-  }
-  if (key === "mode.intent") {
-    if (!VALID_INTENT_MODES.has(value)) {
-      throw new Error(
-        `Invalid intent mode "${value}". Must be "chat" or "audit"`,
-      );
-    }
-    return { intent: value as IntentMode };
-  }
-  return null;
-}

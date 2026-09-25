@@ -1343,8 +1343,6 @@ describe("pane input pointer discipline", () => {
     for (const toolName of [
       "send_input",
       "send_command",
-      "new_split",
-      "new_surface",
       "new_worktree_split",
       "spawn_in_workspace",
       "broadcast",
@@ -1366,14 +1364,6 @@ describe("pane input pointer discipline", () => {
       [
         "spawn_agent.prompt",
         server._registeredTools.spawn_agent.inputSchema.shape.prompt,
-      ],
-      [
-        "new_split.boot_prompt_path",
-        server._registeredTools.new_split.inputSchema.shape.boot_prompt_path,
-      ],
-      [
-        "new_surface.boot_prompt_path",
-        server._registeredTools.new_surface.inputSchema.shape.boot_prompt_path,
       ],
       [
         "new_worktree_split.prompt",

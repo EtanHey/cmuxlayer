@@ -327,7 +327,7 @@ describe("V2 tool registration", () => {
     });
     const server = createV2Server(mockExec);
     const count = Object.keys((server as any)._registeredTools).length;
-    expect(count).toBe(45);
+    expect(count).toBe(32);
   });
 });
 

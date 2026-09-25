@@ -43,8 +43,8 @@ describe("interactive tool transport retry metadata", () => {
     ]);
 
     const call = client.callTool({
-      name: "set_status",
-      arguments: { key: "build", value: "retrying" },
+      name: "update_surface",
+      arguments: { action: "rename", surface: "surface:1", title: "retrying" },
     });
     await vi.advanceTimersByTimeAsync(100);
     const result = await call;
@@ -53,7 +53,11 @@ describe("interactive tool transport retry metadata", () => {
       ok: true,
       retry_count: 1,
     });
-    expect(exec).toHaveBeenCalledTimes(2);
+    const argv = exec.mock.calls.map((call) => call[1] as string[]);
+    // The broken-pipe RPC is retried once with the same argv, and the
+    // mutation itself is sent exactly once.
+    expect(argv[1]).toEqual(argv[0]);
+    expect(argv.filter((args) => args.includes("rename-tab"))).toHaveLength(1);
     retryClient.stop();
     await client.close();
     await server.close();
