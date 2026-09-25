@@ -86,13 +86,12 @@ key.
 
 Tell your AI agent things like:
 
-- *"Split a pane to the right and run my test suite there"*
+- *"Run my test suite in the pane to the right"*
 - *"Spawn a Claude Code agent in a new pane to refactor auth.ts"*
 - *"Read the screen of surface:2 and tell me if the build passed"*
 - *"Wait for all agents to finish, then read their output"*
-- *"Set the sidebar status to show our deploy progress"*
 
-cmuxLayer retains 32 internal tool definitions; only 10 are registered and callable through MCP. The other 22 are not exposed through ToolSearch or any other MCP path. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+cmuxLayer retains 17 internal tool definitions; only 10 are registered and callable through MCP. The other 7 are not exposed through ToolSearch or any other MCP path. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent routing workflow
 

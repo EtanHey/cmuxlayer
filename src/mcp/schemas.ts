@@ -376,13 +376,6 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
     .passthrough(),
 };
 
-export const BroadcastRoleSchema = z.enum(["leads", "workers", "all"]);
-
-export const legacyCompatibleAgentRoleSchema = () =>
-  z
-    .enum(["orchestrator", "worker"])
-    .catch((context) => context.input as AgentRole);
-
 export const spawnFunctionSchema = () =>
   z
     .enum(["orchestrator", "worker", "implementor", "reviewer", "gatherer"])
@@ -503,14 +496,6 @@ export function normalizeSpawnAxes(input: {
     warning: legacy?.warning,
   };
 }
-
-export const BroadcastArgsSchema = z.object({
-  text: z.string(),
-  role: BroadcastRoleSchema.optional().default("leads"),
-  exclude: z.array(z.string()).optional().default([]),
-  workspace: z.string().optional(),
-  press_enter: z.boolean().optional().default(true),
-});
 
 // Spawn-tool argument schemas, moved from createServer (CX-3b S10b).
 export const worktreeArgSchema = z.union([

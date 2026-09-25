@@ -196,9 +196,7 @@ Kiro has no screen parser: only the ready pattern above, and it is never reporte
 
 ## Slash commands
 
-- cmuxlayer's public tools send no slash commands of their own. The internal `interact` handler,
-  which is not callable over MCP, can send `/model <m>` and `/resume [id]`
-  (`src/server.ts:20318`, `:20339-20341`).
+- cmuxlayer's tools send no slash commands of their own.
 - **Reloading MCP after an upgrade.** In each Claude Code session, run `/mcp reconnect cmuxlayer`
   (`scripts/post-release-reconnect-sweep.sh:67`); cmuxlayer prints that advice when a session runs
   a stale build (`src/version.ts:259`). To drive the `/mcp` menu in another agent's pane, see the

@@ -61,3 +61,45 @@ export async function closeToolServer(server: unknown): Promise<void> {
   if (!close) throw new Error("Tool server does not expose close()");
   await close();
 }
+
+/**
+ * The retired get_agent_state tool's view of one agent, read through the
+ * public list_agents tool at detail=full (CX-3 S8a-2): the full registry
+ * record plus harvestability, health and Codex fill, or a not-found error.
+ */
+export function agentStateTool(server: unknown): RegisteredTool {
+  return {
+    async handler(args, extra) {
+      const agentId = String(args.agent_id);
+      const result = await getTool(server, "list_agents").handler(
+        { agent_ids: [agentId], detail: "full" },
+        extra,
+      );
+      if (result.isError) return result;
+      const payload = parsePayload<{
+        agents?: Array<Record<string, unknown>>;
+      }>(result);
+      const row = payload.agents?.find((agent) => agent.agent_id === agentId);
+      if (!row) {
+        const error = `Agent not found: ${agentId}`;
+        return {
+          isError: true,
+          content: [{ text: error }],
+          structuredContent: { ok: false, error },
+        };
+      }
+      const state = {
+        ok: true,
+        ...(row.detail as Record<string, unknown>),
+        health: row.health,
+        token_count: row.token_count ?? null,
+        context_window: row.context_window ?? null,
+        context_pct: row.context_pct ?? null,
+      };
+      return {
+        content: [{ text: JSON.stringify(state) }],
+        structuredContent: state,
+      };
+    },
+  };
+}

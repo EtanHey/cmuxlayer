@@ -68,7 +68,7 @@ describe("WatchSpec production wiring", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("boots the production daemon, arms through MCP, and heartbeats on its lifecycle sweep", async () => {
+  it("boots the production daemon, arms on its engine, and heartbeats on its lifecycle sweep", async () => {
     mkdirSync(TEST_DIR, { recursive: true });
     originalHome = process.env.HOME;
     process.env.HOME = TEST_DIR;
@@ -86,31 +86,37 @@ describe("WatchSpec production wiring", () => {
       staleCheckIntervalMs: 60_000,
     });
 
+    // The engine is wired when the first MCP connection creates its server.
     const socket = net.createConnection(socketPath);
     mcpClient = new Client({ name: "watch-production-test", version: "0.1.0" });
     await mcpClient.connect(new SocketJsonRpcTransport(socket));
-    const armed = await mcpClient.callTool({
-      name: "arm_watch",
-      arguments: {
-        owner: "lead-a",
-        target,
-        marker: "DONE",
-        deadline: 10_000,
-      },
+    await mcpClient.listTools();
+    const context = await (
+      daemon as unknown as {
+        getContext(): Promise<{
+          lifecycleSweepEngine: {
+            runSweep(): Promise<void>;
+            armWatch(spec: Record<string, unknown>): Promise<unknown>;
+          } | null;
+        }>;
+      }
+    ).getContext();
+    // The arm_watch tool was retired (CX-3 S8a-2); arm on the daemon's own
+    // lifecycle engine, which is what that tool called.
+    const engine = context.lifecycleSweepEngine;
+    expect(engine).not.toBeNull();
+    await engine!.armWatch({
+      owner: "lead-a",
+      target,
+      marker: "DONE",
+      deadline: 10_000,
+      provenance: "public",
     });
-    expect(armed.isError).not.toBe(true);
     expect(
       readWatchRegistry({ registryPath }).watches[0]?.last_heartbeat_at_ms,
     ).toBe(1_000);
 
     now = 2_000;
-    const context = await (
-      daemon as unknown as {
-        getContext(): Promise<{
-          lifecycleSweepEngine: { runSweep(): Promise<void> } | null;
-        }>;
-      }
-    ).getContext();
     await context.lifecycleSweepEngine?.runSweep();
 
     expect(readWatchRegistry({ registryPath }).watches[0]).toMatchObject({

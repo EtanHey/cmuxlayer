@@ -12,8 +12,8 @@ Use the agent-first facade whenever the target is a tracked CLI agent.
 2. Pick the target `agent_id`.
 3. Send work with `send_to`.
 4. Wait for completion with `wait_for` when the caller needs a finished result.
-5. Read detailed state only when needed with `get_agent_state` or
-   `read_agent_output`.
+5. Read detailed state only when needed with `list_agents` at
+   `detail:"full"` (scope it with `agent_ids`) or `read_screen`.
 
 This path keeps pane, tab, and surface refs as transport details. Surface refs
 can change after respawns, moves, reconnects, or stale terminal cleanup; an
@@ -26,7 +26,7 @@ can change after respawns, moves, reconnects, or stale terminal cleanup; an
 | Find available agents | `list_agents` | `list_surfaces` plus title guessing |
 | Send a prompt to a managed agent | `send_to` | A remembered surface when an `agent_id` is healthy |
 | Wait for agent completion | `wait_for` | Polling `read_screen` only |
-| Inspect internal route/session data | `get_agent_state` | Adding topology fields to `list_agents` |
+| Inspect internal route/session data | `list_agents` with `agent_ids` and `detail:"full"` | Guessing from `list_surfaces` |
 | Start a new managed agent | `spawn_agent` with `placement`, `workspace`, or `worktree` | A raw split unless you need a shell |
 | Launch or resume with an exact shell command | `send_to(mode:"command")` | Separate text and key sends |
 | Operate a raw terminal/shell | `send_to(mode:"surface"|"command"|"key")` | Agent mode without an `agent_id` |

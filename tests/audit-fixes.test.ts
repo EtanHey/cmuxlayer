@@ -1,6 +1,5 @@
 /**
  * Tests for Phase 5 audit fixes:
- * 1. CRITICAL: read_agent_output must use .text (not .content) from readScreen
  * 2. HIGH: CmuxPersistentSocket reconnection with exponential backoff + jitter
  * 3. MEDIUM: spawn_agent MCP schema exposes parent_agent_id and max_cost_per_agent
  */
@@ -12,7 +11,6 @@ import * as net from "node:net";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { CmuxPersistentSocket } from "../src/cmux-persistent-socket.js";
-import { CmuxSocketError } from "../src/cmux-socket-client.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-audit-fixes-test");
@@ -63,96 +61,6 @@ function makeSpawnReadyExec(): ExecFn {
     };
   });
 }
-
-// ── 1. CRITICAL: read_agent_output uses .text ──────────────────────────
-
-describe("read_agent_output uses CmuxReadScreenResult.text", () => {
-  beforeEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-  });
-  afterEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
-  });
-
-  it("extracts delimited content from readScreen .text field", async () => {
-    const screenText =
-      "some preamble\nOUTPUT_START\nhello world\nOUTPUT_END\ntrailing";
-
-    const mockClient = {
-      readScreen: vi.fn().mockResolvedValue({
-        surface: "surface:1",
-        text: screenText,
-        lines: 5,
-        scrollback_used: true,
-      }),
-      // Stubs for other client methods used during server init
-      listSurfaces: vi.fn().mockResolvedValue([]),
-      send: vi.fn(),
-      sendKey: vi.fn(),
-      newSplit: vi.fn(),
-      renameTab: vi.fn(),
-      closeSurface: vi.fn(),
-      run: vi.fn(),
-    };
-
-    const mockExec: ExecFn = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ workspaces: [] }),
-      stderr: "",
-    });
-
-    const server = createAuditServer(mockExec, mockClient);
-    const tool = (server as any)._registeredTools["read_agent_output"];
-    expect(tool).toBeDefined();
-
-    const result = await tool.handler(
-      { surface: "surface:1", tag: "OUTPUT", lines: 200 },
-      {} as any,
-    );
-
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.found).toBe(true);
-    expect(parsed.content).toBe("hello world");
-  });
-
-  it("returns found:false when markers are absent", async () => {
-    const mockClient = {
-      readScreen: vi.fn().mockResolvedValue({
-        surface: "surface:1",
-        text: "no markers here",
-        lines: 1,
-        scrollback_used: false,
-      }),
-      listSurfaces: vi.fn().mockResolvedValue([]),
-      send: vi.fn(),
-      sendKey: vi.fn(),
-      newSplit: vi.fn(),
-      renameTab: vi.fn(),
-      closeSurface: vi.fn(),
-      run: vi.fn(),
-    };
-
-    const mockExec: ExecFn = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ workspaces: [] }),
-      stderr: "",
-    });
-
-    const server = createAuditServer(mockExec, mockClient);
-    const tool = (server as any)._registeredTools["read_agent_output"];
-
-    const result = await tool.handler(
-      { surface: "surface:1", tag: "OUTPUT", lines: 200 },
-      {} as any,
-    );
-
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.found).toBe(false);
-  });
-});
 
 // ── 2. HIGH: CmuxPersistentSocket exponential backoff + jitter ─────────
 

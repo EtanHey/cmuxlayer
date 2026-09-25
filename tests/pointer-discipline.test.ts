@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -911,7 +910,7 @@ describe("pane input pointer discipline", () => {
 
   it.each([
     {
-      toolName: "new_worktree_split",
+      toolName: "spawn_agent",
       expectedError: "CMUXLAYER_MAX_INLINE_CHARS",
       args: {
         repo: "brainlayer",
@@ -922,7 +921,7 @@ describe("pane input pointer discipline", () => {
       },
     },
     {
-      toolName: "new_worktree_split",
+      toolName: "spawn_agent",
       expectedError: "routing policy threshold 1500",
       args: {
         repo: "brainlayer",
@@ -933,7 +932,7 @@ describe("pane input pointer discipline", () => {
       },
     },
     {
-      toolName: "new_worktree_split",
+      toolName: "spawn_agent",
       expectedError: "multi-paragraph inline text",
       args: {
         repo: "brainlayer",
@@ -941,51 +940,6 @@ describe("pane input pointer discipline", () => {
         cli: "codex",
         prompt: "first paragraph\n\nsecond paragraph",
         worktree: false,
-      },
-    },
-    {
-      toolName: "spawn_in_workspace",
-      expectedError: "CMUXLAYER_MAX_INLINE_CHARS",
-      args: {
-        workspace_title: "prompt-guard",
-        agents: [
-          {
-            repo: "brainlayer",
-            model: "codex",
-            cli: "codex",
-            prompt: "x".repeat(1_801),
-          },
-        ],
-      },
-    },
-    {
-      toolName: "spawn_in_workspace",
-      expectedError: "routing policy threshold 1500",
-      args: {
-        workspace_title: "prompt-guard",
-        agents: [
-          {
-            repo: "brainlayer",
-            model: "codex",
-            cli: "codex",
-            prompt: denseIncidentPayload,
-          },
-        ],
-      },
-    },
-    {
-      toolName: "spawn_in_workspace",
-      expectedError: "multi-paragraph inline text",
-      args: {
-        workspace_title: "prompt-guard",
-        agents: [
-          {
-            repo: "brainlayer",
-            model: "codex",
-            cli: "codex",
-            prompt: "first paragraph\n\nsecond paragraph",
-          },
-        ],
       },
     },
   ])(
@@ -1209,66 +1163,6 @@ describe("pane input pointer discipline", () => {
     context.dispose();
   });
 
-  it("send_to_agent refuses over-threshold text unless explicitly opted out", async () => {
-    process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
-    const { createServer, createServerContext } = await loadServerModule();
-    const mockExec = makeLifecycleExec();
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const agentId = await spawnReadyAgent(server);
-    const sendToAgent = (server as any)._registeredTools["send_to_agent"];
-    expect(sendToAgent.inputSchema.shape.allow_long_inline).toBeDefined();
-    mockExec.mockClear();
-
-    let result = await sendToAgent.handler(
-      {
-        mode: "agent",
-        agent_id: agentId,
-        text: "x".repeat(601),
-        press_enter: true,
-      },
-      {} as any,
-    );
-
-    let parsed = parseToolResult(result);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("send_to_agent.text");
-    expect(parsed.error).toContain("allow_long_inline");
-    expect(mockExec).not.toHaveBeenCalled();
-
-    result = await sendToAgent.handler(
-      {
-        mode: "agent",
-        agent_id: agentId,
-        text: "x".repeat(2_000),
-        press_enter: true,
-        allow_long_inline: true,
-      },
-      {} as any,
-    );
-
-    parsed = parseToolResult(result);
-    expect(parsed.ok).toBe(true);
-    const setBufferCalls = mockExec.mock.calls.filter(([, args]) =>
-      args.includes("set-buffer"),
-    );
-    const pasteBufferCalls = mockExec.mock.calls.filter(([, args]) =>
-      args.includes("paste-buffer"),
-    );
-    expect(setBufferCalls).toHaveLength(1);
-    expect(pasteBufferCalls).toHaveLength(1);
-    expect(setBufferCalls[0][1][setBufferCalls[0][1].length - 1]).toBe(
-      "x".repeat(2_000),
-    );
-    context.dispose();
-  });
-
   it("CMUXLAYER_MAX_INLINE_CHARS changes the send_to cap", async () => {
     process.env.CMUXLAYER_MAX_INLINE_CHARS = "700";
     const { createServer, createServerContext } = await loadServerModule();
@@ -1301,33 +1195,6 @@ describe("pane input pointer discipline", () => {
     context.dispose();
   });
 
-  it("send_to_agent refuses the dense incident below the general inline cap", async () => {
-    const { createServer, createServerContext } = await loadServerModule();
-    const mockExec = makeLifecycleExec();
-    const context = createServerContext({
-      exec: mockExec,
-      stateDir: testDir,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
-    const server = createServer({ context });
-    const agentId = await spawnReadyAgent(server);
-    const sendToAgent = (server as any)._registeredTools["send_to_agent"];
-    mockExec.mockClear();
-
-    const result = await sendToAgent.handler(
-      { agent_id: agentId, text: denseIncidentPayload, press_enter: true },
-      {} as any,
-    );
-
-    const parsed = parseToolResult(result);
-    expect(result.isError).toBe(true);
-    expect(parsed.error).toContain("send_to_agent.text");
-    expect(parsed.error).toContain("routing policy threshold 1500");
-    expect(mockExec).not.toHaveBeenCalled();
-    context.dispose();
-  });
-
   it("pane-writing tool descriptions lead with the pane-breakage consequence", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     const context = createServerContext({
@@ -1343,10 +1210,6 @@ describe("pane input pointer discipline", () => {
     for (const toolName of [
       "send_input",
       "send_command",
-      "new_worktree_split",
-      "spawn_in_workspace",
-      "broadcast",
-      "send_to_agent",
     ]) {
       const description = server._registeredTools[toolName].description;
       expect(description.startsWith(breakageWarning), toolName).toBe(true);
@@ -1365,24 +1228,7 @@ describe("pane input pointer discipline", () => {
         "spawn_agent.prompt",
         server._registeredTools.spawn_agent.inputSchema.shape.prompt,
       ],
-      [
-        "new_worktree_split.prompt",
-        server._registeredTools.new_worktree_split.inputSchema.shape.prompt,
-      ],
-      [
-        "broadcast.text",
-        server._registeredTools.broadcast.inputSchema.shape.text,
-      ],
       ["send_to.text", server._registeredTools.send_to.inputSchema.shape.text],
-      [
-        "send_to_agent.text",
-        server._registeredTools.send_to_agent.inputSchema.shape.text,
-      ],
-      [
-        "spawn_in_workspace.agents[].prompt",
-        server._registeredTools.spawn_in_workspace.inputSchema.shape.agents
-          .element.shape.prompt,
-      ],
     ] as const;
 
     for (const [fieldName, schema] of fields) {

@@ -7,18 +7,11 @@
 
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../agent-health-input.js";
 import type {
-  AgentRecord,
-  AgentRole,
   CliType,
 } from "../agent-types.js";
 import {
-  inferAgentRole,
-  inferRecordRoleOrNull,
-  isAgentRoleInferenceError,
-  launcherNameForCli,
 } from "../layout-policy.js";
 import { hasInlinePrompt } from "./composer-screen.js";
-import type { BroadcastRole } from "./receipts.js";
 
 export const SEND_INPUT_CHUNK_THRESHOLD = 500;
 
@@ -503,48 +496,6 @@ export function assertSpawnPromptInputAllowed(opts: {
     allowLongInline: opts.allowLongInline,
     allowLongInlineSupported: opts.allowLongInlineSupported,
   });
-}
-
-export function assertBroadcastInlineInputAllowed(text: string): void {
-  if (inlineByteLength(text) > SEND_INPUT_MAX_INLINE_CHARS) {
-    throw new Error(
-      `broadcast.text is ${inlineByteLength(text)} bytes (UTF-8), above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS} bytes. ` +
-        `Broadcasts are capped to one-line pointers: write the payload to a file and broadcast "Read and follow <path>" instead. ` +
-        `CMUXLAYER_MAX_INLINE_CHARS may be set to a byte count >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
-    );
-  }
-
-  assertDenseInlineInputAllowed({
-    tool: "broadcast",
-    arg: "text",
-    value: text,
-  });
-}
-
-export function broadcastRoleMatches(
-  requestedRole: BroadcastRole,
-  agentRole: AgentRole | null,
-): boolean {
-  if (requestedRole === "all") return true;
-  if (requestedRole === "workers") return agentRole === "worker";
-  return agentRole === "orchestrator";
-}
-
-export function inferBroadcastRecordRole(agent: AgentRecord): AgentRole | null {
-  try {
-    return inferAgentRole({
-      role: agent.role,
-      cli: agent.cli,
-      launcherName:
-        agent.launcher_name ?? launcherNameForCli(agent.repo, agent.cli),
-      title: agent.task_summary,
-    });
-  } catch (error) {
-    if (isAgentRoleInferenceError(error)) {
-      return inferRecordRoleOrNull(agent);
-    }
-    throw error;
-  }
 }
 
 export function assertBootPromptMode(

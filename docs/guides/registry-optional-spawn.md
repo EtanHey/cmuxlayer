@@ -134,7 +134,7 @@ that would silently start a *new* session. Codex reads a global session store
 and needs no cwd to find the session.
 
 `resumeInvocationForAgent` in `src/agent-facade.ts` is the **single authority**
-for this: `list_agents`, `get_agent_state`, `resolveAgentRoute`, and
+for this: `list_agents`, `resolveAgentRoute`, and
 `spawn_agent({resume_agent_id})` all go through it, so what the tools advertise
 and what the engine sends can never disagree. It returns either a command or a
 *reason*, and the engine surfaces that reason — a malformed session id, a

@@ -263,19 +263,6 @@ function normalizeExplicitRole(
   return role === "ic" ? "worker" : role;
 }
 
-export function canInferAgentRole(input: {
-  role?: AgentRole;
-  launcherName?: string;
-  title?: string;
-  cli?: string;
-}): boolean {
-  return Boolean(
-    input.role ||
-    roleFromLauncherLabel(input.launcherName) ||
-    roleFromLauncherLabel(input.title),
-  );
-}
-
 export function inferAgentRole(input: {
   role?: AgentRole;
   launcherName?: string;

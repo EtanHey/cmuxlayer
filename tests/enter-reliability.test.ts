@@ -1790,32 +1790,6 @@ describe("enter reliability", () => {
     });
   }, 10_000);
 
-  it("routes send_to_agent through the truthful queued receipt path", async () => {
-    const client = new FakeClaudeSurfaceClient();
-    client.requiredReturns = 99;
-    client.cli = "codex";
-    client.keepWorkingStatusWhilePending = true;
-    client.postReturnPendingScreenText =
-      CODEX_PR343_LIVE_QUEUED_FOLLOWUP_SCREEN;
-    server = createReliabilityServer(client);
-    registerAgent(server, { state: "ready", cli: "codex" });
-
-    const result = await callToolInTimerSteps(server, "send_to_agent", {
-      agent_id: "agent-1",
-      text: PR343_LIVE_QUEUE_PAYLOAD,
-      press_enter: true,
-    });
-    const parsed = parseResult(result);
-
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
-    expect(parsed.terminal).toBe(false);
-    expect(parsed.submit_verified).toBeNull();
-    expect(parsed.deprecation_warning).toBeUndefined();
-  }, 10_000);
-
   it("accepts a correlated live Codex queue on the first verification frame within 600ms", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
@@ -2465,36 +2439,6 @@ describe("enter reliability", () => {
     );
     expect(events).toHaveLength(1);
     expect(events[0]?.submit_verified).toBeNull();
-  });
-
-  it("uses the verified send path for interact(action=send)", async () => {
-    const client = new FakeClaudeSurfaceClient();
-    client.requiredReturns = 1;
-    server = createReliabilityServer(client);
-    registerAgent(server);
-
-    const result = await callTool(server, "interact", {
-      agent: "agent-1",
-      action: "send",
-      text: "z".repeat(2000),
-    });
-    const parsed = parseResult(result);
-    const events = readEventLog();
-
-    expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBe(true);
-    expect(parsed.retry_count).toBe(0);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
-    );
-    expect(
-      events.some(
-        (event) =>
-          event.event_type === "interact" &&
-          event.submit_verified === true &&
-          event.retry_count === 0,
-      ),
-    ).toBe(true);
   });
 
   it("verifies each back-to-back send_to instead of assuming the previous submit pattern holds", async () => {

@@ -20,6 +20,7 @@ import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import type { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { engineForTests } from "../src/server.js";
+import { agentStateTool } from "./helpers/mcp-tool-harness.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-t1b-closure-probe-divergence-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-t1b-closure-probe.sock";
@@ -311,7 +312,7 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     expect(reads).toBe(Object.keys(client.screens).length);
   });
 
-  it("get_agent_state does not render artifact_missing beside a working screen", async () => {
+  it("list_agents detail:full does not render artifact_missing beside a working screen", async () => {
     registerAgent(
       server,
       makeAgent({
@@ -330,9 +331,9 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     poisonProbeCold(server);
 
     const parsed = parseResult(
-      await callTool(server, "get_agent_state", {
+      await agentStateTool(server).handler({
         agent_id: "cmuxlayerCodex-t1b-getstate",
-      }),
+      }, {}),
     );
     expect(parsed.health?.reconciled_state, JSON.stringify(parsed)).toBe(
       "working",
@@ -370,7 +371,7 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     expect(result.closure).toBe("pending");
   });
 
-  it("the deadlock signal survives on ALL THREE emitters, not just list_agents", async () => {
+  it("the deadlock signal survives on every emitter (list_agents summary and full detail, wait_for)", async () => {
     // The false-negative the reviewer named: narrowing `artifact_missing` must
     // not silence the case it exists for. Done evidence, ready prompt, report
     // never written -- every path that emits closure must still say so.
@@ -388,9 +389,9 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
 
     const listed = parseResult(await callTool(server, "list_agents", {}));
     const state = parseResult(
-      await callTool(server, "get_agent_state", {
+      await agentStateTool(server).handler({
         agent_id: "cmuxlayerCodex-t1b-realdeadlock",
-      }),
+      }, {}),
     );
     const waited = parseResult(
       await callTool(server, "wait_for", {
@@ -429,9 +430,9 @@ describe("T1b (#488) — closure and state resolve from ONE observation", () => 
     );
 
     const parsed = parseResult(
-      await callTool(server, "get_agent_state", {
+      await agentStateTool(server).handler({
         agent_id: "cmuxlayerCodex-t1b-unobserved",
-      }),
+      }, {}),
     );
     expect(parsed.harvestability.closure, JSON.stringify(parsed)).toBe(
       "pending",

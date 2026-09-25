@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
-import { inboxPath, monitorAlive, readInbox } from "../src/inbox.js";
+import { inboxPath, monitorAlive } from "../src/inbox.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const STATE_DIR = join(tmpdir(), "cmuxlayer-spawn-monitor-boot-state");
@@ -126,12 +126,6 @@ function makeExec(): ExecFn {
 
 function parseToolResult(result: any): Record<string, any> {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
-}
-
-function sendCalls(exec: ExecFn): string[][] {
-  return (exec as ReturnType<typeof vi.fn>).mock.calls
-    .filter(([, args]: [string, string[]]) => args.includes("send"))
-    .map(([, args]: [string, string[]]) => args);
 }
 
 function deliveredInput(exec: ExecFn): string {
@@ -288,46 +282,4 @@ describe("spawn monitor boot", () => {
     }
   });
 
-  it("reports success when the verified nudge submits before the agent heartbeats", async () => {
-    const spawn = server._registeredTools["spawn_agent"];
-    const dispatch = server._registeredTools["dispatch_to_agent"];
-
-    const spawnResult = await spawn.handler(
-      {
-        repo: "brainlayer",
-        model: "sonnet",
-        cli: "claude",
-        role: "orchestrator",
-        workspace: "workspace:1",
-      },
-      {} as any,
-    );
-    const agentId = parseToolResult(spawnResult).agent_id as string;
-    const beforeDispatchSendCount = sendCalls(exec).length;
-
-    const result = await dispatch.handler(
-      {
-        agent_id: agentId,
-        task: "GO",
-        from: "orc",
-        tag: "dispatch",
-        persist: false,
-      },
-      {} as any,
-    );
-
-    const parsed = parseToolResult(result);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.monitor_state).toBe("never-armed");
-    expect(parsed.delivery_status).toBe("queued_monitor_never_armed");
-    expect(parsed.durable).toBe(true);
-    expect(parsed.monitor_alive).toBe(false);
-    expect(parsed.health.issue_codes).toContain("inbox_monitor_not_alive");
-    expect(parsed.nudge.attempted).toBe(true);
-    expect(parsed.nudge.sent).toBe(true);
-    expect(sendCalls(exec)).toHaveLength(beforeDispatchSendCount + 1);
-    expect(readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task)).toEqual(
-      ["GO"],
-    );
-  });
 });

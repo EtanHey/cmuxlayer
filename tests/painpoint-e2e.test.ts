@@ -24,6 +24,7 @@ import {
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord, AgentState, CliType } from "../src/agent-types.js";
 import {
+  agentStateTool,
   closeToolServer,
   getEngine,
   getTool,
@@ -513,7 +514,7 @@ describe("Phase 10 painpoint e2e replay", () => {
     try {
       const engine = getEngine(server);
       await engine.getRegistry().reconstitute();
-      const getState = getTool(server, "get_agent_state");
+      const getState = agentStateTool(server);
       const first = parseToolResult<{
         harvestability: {
           closeable: boolean;
@@ -695,7 +696,7 @@ describe("Phase 10 painpoint e2e replay", () => {
         harvestability: { closure_artifact_verified: boolean; closeable: boolean };
         health: { issue_codes: string[] };
       }>(
-        await getTool(server, "get_agent_state").handler(
+        await agentStateTool(server).handler(
           { agent_id: "worker-without-artifact" },
           {},
         ),

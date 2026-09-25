@@ -63,9 +63,6 @@ describe("inline cap: 500 UTF-8 bytes (#837)", () => {
     expect(() =>
       policy.assertInlineInputAllowed({ tool: "send_to", arg: "text", value: text }),
     ).toThrow(/send_to\.text is 750 bytes/);
-    expect(() => policy.assertBroadcastInlineInputAllowed(text)).toThrow(
-      /broadcast\.text is 750 bytes/,
-    );
   });
 
   it("keeps allow_long_inline and the env override (floor 500)", async () => {

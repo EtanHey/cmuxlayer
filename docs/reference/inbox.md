@@ -3,17 +3,17 @@
 This page has two parts: the inbox channel itself (files, dispatch, the agent-side boot policy), and
 the wake transport that gets an agent to read its inbox.
 
-`dispatch_to_agent` and `inbox_check` below are internal handlers, not part of the 10 public MCP
-tools; they are reachable through the `src/inbox.ts` library and the server internals.
+The inbox is written and read through the `src/inbox.ts` library. The former `dispatch_to_agent` and
+`inbox_check` MCP handlers were deleted in CX-3 S8a-2; `report_to_parent` is the public tool that writes
+into another agent's inbox (a child's escalation to its parent).
 
 ## Part 1: the inbox channel
 
 > Sterile, deterministic dispatch that replaces raw `send_to(mode:"surface")`/TUI typing. Pairs with the READ
-> channel (`harness-session.ts`). Library: `src/inbox.ts`. Handlers: `dispatch_to_agent`,
-> `inbox_check`.
+> channel (`harness-session.ts`). Library: `src/inbox.ts`.
 >
 > **Raw-surface `send_to` is KEPT as the fallback** — this channel is additive (belt-and-suspenders) until
-> proven in production. Fall back to `send_to(mode:"surface")` whenever `inbox_check` shows a wedged monitor.
+> proven in production. Fall back to `send_to(mode:"surface")` whenever the monitor state shows a wedged monitor.
 
 ### Files (per agent, EPHEMERAL plumbing — NOT BrainLayer)
 - `~/.cmux/agents/<agent-id>/inbox.jsonl` — append-only dispatches.
@@ -24,11 +24,11 @@ Do NOT auto-ingest these into BrainLayer. Only messages with `persist:true` are 
 `brain_store`, at the caller's discretion. Keep the channel dir off any BrainLayer watch path.
 
 ### orc / lead side (the write)
-- Dispatch: the internal `dispatch_to_agent { agent_id, task, from?, tag?, persist? }` handler (or append a line via
-  the `dispatch()` lib). One record: `{ id, ts_ms, from, to, tag, task, persist? }`.
+- Dispatch: the `dispatch()` lib (or append a line to `inbox.jsonl`). One record:
+  `{ id, ts_ms, from, to, tag, task, persist? }`.
 - **FM#4 — keep dispatch low-rate / batched** so the agent's Monitor doesn't trip its flood auto-stop.
-- **FM#3 — detect wedged agents:** `inbox_check { agent_id, ack_timeout_ms, heartbeat_max_age_ms }`
-  → `{ monitor_alive, undelivered, stale }`. Non-empty `stale` (un-acked past the timeout) or
+- **FM#3 — detect wedged agents:** `monitorAlive()` / `inboxMonitorState()` and `pendingDispatches()`
+  from `src/inbox.ts`. Non-empty `stale` (un-acked past the timeout) or
   `monitor_alive:false` ⇒ the channel is down → **fall back to `send_to(mode:"surface")`** for that agent.
 - Triage: when an agent needs orc, it dispatches to `to:"orc"`; orc's own inbox monitor + its
   existing cron-tick loop catch it. No firehose, no separate buddy/local-model.
@@ -73,15 +73,14 @@ cadence — fine for coordination, not for sub-second control.
 
 ### Two layers
 
-#### 1. `dispatch_to_agent` nudge (server-side, live by default)
+#### 1. `report_to_parent` wake (server-side)
 
-`dispatch_to_agent` now reports `monitor_alive` and, when the recipient's
-inbox-monitor heartbeat is stale/absent (`nudge: "auto"`, the default),
-best-effort types a one-line inbox pointer **directly into the agent's
-surface** — resolved from the registry record regardless of lifecycle state
-(error/done included; no `INTERACTIVE_STATES` gate). `nudge: "never"` restores
-pure file-append semantics. A failed nudge never fails the dispatch: the inbox
-file is the durable queue.
+`report_to_parent` appends the escalation to the parent's inbox, then types a
+one-line inbox pointer into the parent's pane (`deliverReportInboxPointer` in
+`src/mcp/tools/agent.ts`), escalating to the nearest reachable ancestor when
+that wake fails. A failed wake never loses the message: the inbox file is the
+durable queue. (The general `dispatch_to_agent` nudge was deleted with that
+handler in CX-3 S8a-2.)
 
 #### 2. Claude Code hook script (opt-in, NOT auto-registered)
 
@@ -121,7 +120,7 @@ project's `.claude/settings.json` (or `settings.local.json`):
 
 - Hooks cannot wake a **fully idle** session (no timer events; `FileChanged`
   and `Stop` fire only around session activity). For truly idle agents the
-  `dispatch_to_agent` nudge (layer 1) or manual `send_to(mode:"surface")` remains the
+  `report_to_parent` wake (layer 1) or a manual `send_to(mode:"surface")` remains the
   wake of last resort. The durable queue is always the inbox file.
 - Codex/Cursor have no hook system — they keep the poll-on-turn convention
   (`replayUndelivered()` at turn start; see `recommendedCodexWatch`).

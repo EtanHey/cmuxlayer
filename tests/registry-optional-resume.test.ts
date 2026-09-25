@@ -180,6 +180,21 @@ describe("resumeCommandForAgent (public agent payload)", () => {
       resumeCommandForAgent({ ...base, launcher_name: "brainlayerClaude" }),
     ).toBe(`brainlayerClaude -s --resume ${SESSION}`);
   });
+
+  // Moved from the retired formatAgentState test (CX-3 S8a-2): a legacy
+  // short Codex session id has no runnable resume command, and asking must
+  // not throw.
+  it("returns no command for a legacy short Codex session id instead of throwing", () => {
+    expect(
+      resumeCommandForAgent({
+        ...base,
+        cli: "codex",
+        repo: "cmuxlayer",
+        cli_session_id: "019d9aa5",
+        launch_cwd: null,
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("advertised resumability and actual resume never disagree", () => {
