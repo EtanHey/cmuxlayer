@@ -44,6 +44,15 @@ export const TAIL_ROW_SAMPLE_MULTIPLIER = Object.freeze({
 });
 
 /** Samples one run of `operation` must carry under the canonical replay. */
+/**
+ * AIDEV-NOTE (#791 P1b): list_agents' lock_hold_ms is p95 of per-call elapsed
+ * since P1, i.e. the same number as its p95_ms row but against a looser ceiling
+ * (baseline 141.67 vs 119.43), so it could never fail first. No row is emitted
+ * for it; the baseline field stays (validated, unused) so the committed baseline
+ * and its green-main history are untouched.
+ */
+export const LOCK_HOLD_ROW_EXCLUDED = new Set(["list_agents"]);
+
 export function canonicalSamplesPerRun(
   operation,
   clients = CANONICAL_CLIENTS,
@@ -781,6 +790,7 @@ export function compareBenchmark(
     }
   }
   for (const operation of baseline.replay.operations) {
+    if (LOCK_HOLD_ROW_EXCLUDED.has(operation)) continue;
     const metadata = baseline.replay.row_metadata[operation];
     const marginMs = operationMargin(
       baseline,

@@ -31,6 +31,22 @@ maximum. With eight concurrent callers queuing on the lifecycle lock, the
 maximum was one client's worst wait, including queueing, rather than the scan's
 lock occupancy.
 
+That made the `list_agents` lock-hold value identical to its p95, checked
+against a looser ceiling (baseline 141.67 ms against 119.43 ms), so it could
+never fail before the p95 row did. The checker therefore emits no `list_agents`
+`lock_hold_ms` row. The baseline keeps the field, so neither the baseline nor
+its history changed. Every other operation still has its lock-hold row.
+
+**History window after this change.** CI keys the green-main history cache on
+the hash of `benchmarks/daemon-baseline.json`. P1 changed that file's
+`samples_per_run` metadata, so history restarted empty. For the first five
+green `main` runs afterwards, each sampled row's margin is the spread rule alone
+(`2 × (p95 − p50)` of the baseline), because the 3σ-of-history term needs five
+runs. A row that goes red in that window only because its ceiling briefly
+tightened is this side effect, not a regression. Do not rerun for it: the next
+green `main` run adds to the history. `list_agents` is unaffected, because its
+spread term already dominates.
+
 ## Refresh after a legitimate speedup
 
 Dispatch the `CI` workflow on the commit whose performance should become the new floor:

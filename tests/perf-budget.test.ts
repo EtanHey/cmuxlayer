@@ -702,6 +702,19 @@ describe("daemon performance budget", () => {
     expect(warmRow(withRawPercentiles(shifted))).toMatchObject({ passed: false });
   });
 
+  it("emits no list_agents lock_hold_ms row: since #791 it equals the p95 row with a looser ceiling", () => {
+    const rows = compareBenchmark(baseline, result).rows;
+    expect(rows.find((entry) =>
+      entry.operation === "list_agents" && entry.metric === "lock_hold_ms",
+    )).toBeUndefined();
+    expect(rows.find((entry) =>
+      entry.operation === "list_agents" && entry.metric === "p95_ms",
+    )).toBeDefined();
+    // Every other operation still gets its lock-hold row.
+    expect(rows.filter((entry) => entry.metric === "lock_hold_ms").map((entry) => entry.operation))
+      .toEqual(baseline.replay.operations.filter((operation: string) => operation !== "list_agents"));
+  });
+
   it("reports a cold-start alert without turning it into a blocking verdict", () => {
     const hosted = structuredClone(p6Hosted.fail_747.sampled);
     const cold = hosted.paired_control.samples[0];
