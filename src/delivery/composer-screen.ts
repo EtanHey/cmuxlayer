@@ -652,148 +652,120 @@ export function screenShowsFreshCursorResponseAfterSubmittedInput(
   return false;
 }
 
+type CodexQueuedItem = { rows: string[]; exact: string | null };
+
+const CODEX_QUEUE_HEADING_RE =
+  /^(?:messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?|queued follow-up inputs)$/i;
+
+/**
+ * The start row of a Codex queue heading ending at `index`, or -1. A heading
+ * can wrap onto up to four rows.
+ */
+function codexQueueHeadingStart(lines: string[], index: number): number {
+  let wrappedHeading = "";
+  for (let rows = 0; index >= 0 && rows < 4; rows += 1, index -= 1) {
+    const row = stripCodexQueueGutter(lines[index] ?? "").trim().replace(/^•\s*/, "");
+    if (!row) break;
+    wrappedHeading = `${row} ${wrappedHeading}`.replace(/\s+/g, " ").trim();
+    if (CODEX_QUEUE_HEADING_RE.test(wrappedHeading)) return index;
+  }
+  return -1;
+}
+
+/**
+ * Queued items shown above the Codex composer, or null when no composer is
+ * visible. Codex 0.157 can stack two blocks there: "Messages to be submitted
+ * after next tool call" (Return during a turn, drains at the next tool call)
+ * and "Queued follow-up inputs" (Tab, drains when the turn ends). A block is
+ * counted only once its heading is found.
+ */
+function codexQueuedItems(screenText: string): CodexQueuedItem[] | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let cursor = lines.length - 1;
+  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
+  if (cursor < 0) return null;
+  cursor -= 1;
+  const skipBlank = () => {
+    while (cursor >= 0 && !stripCodexQueueGutter(lines[cursor] ?? "").trim()) cursor -= 1;
+  };
+  while (
+    cursor >= 0 &&
+    (!stripCodexQueueGutter(lines[cursor] ?? "").trim() ||
+      /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(stripCodexQueueGutter(lines[cursor] ?? "")))
+  ) cursor -= 1;
+  const items: CodexQueuedItem[] = [];
+  for (;;) {
+    const block: CodexQueuedItem[] = [];
+    let wrappedRows: string[] = [];
+    let headingStart = -1;
+    while (cursor >= 0) {
+      const rawLine = lines[cursor] ?? "";
+      const activeLine = stripCodexQueueGutter(rawLine).trim();
+      if (!activeLine) break;
+      if (/^⌥\+↑ edit last queued message$/.test(activeLine)) {
+        cursor -= 1;
+        continue;
+      }
+      const itemMatch = /^↳(?:\s+(.*)|\s*$)/.exec(activeLine);
+      if (itemMatch) {
+        block.unshift({
+          rows: [itemMatch[1] ?? "", ...wrappedRows],
+          exact: wrappedRows.length === 0 ? (/^↳ (.*)$/.exec(activeLine)?.[1] ?? null) : null,
+        });
+        wrappedRows = [];
+        cursor -= 1;
+        skipBlank();
+        headingStart = codexQueueHeadingStart(lines, cursor);
+        if (headingStart >= 0) break;
+        continue;
+      }
+      if (!/^\s*[│┃║┆┊]/.test(rawLine) && !/^\s{2,}\S/.test(rawLine)) break;
+      wrappedRows.unshift(activeLine);
+      cursor -= 1;
+    }
+    if (headingStart < 0 || block.length === 0) return items;
+    items.unshift(...block);
+    cursor = headingStart - 1;
+    skipBlank();
+  }
+}
+
 export function screenShowsQueuedAgentInput(
   screenText: string,
   submittedText: string,
   opts: { exact?: boolean } = {},
 ): boolean {
-  const lines = normalizeTerminalText(screenText).split("\n");
   if (inferComposerCli(screenText) !== "codex") {
     return false;
   }
-
-  let composerIndex = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (matchComposerPromptLine(stripCodexQueueGutter(lines[index] ?? ""))) {
-      composerIndex = index;
-      break;
-    }
-  }
-  if (composerIndex < 0) {
-    return false;
-  }
-
-  let index = composerIndex - 1;
-  while (
-    index >= 0 &&
-    (!stripCodexQueueGutter(lines[index] ?? "").trim() ||
-      /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(
-        stripCodexQueueGutter(lines[index] ?? ""),
-      ))
-  ) {
-    index -= 1;
-  }
-
-  const queuedItemRows: string[] = [];
-  let foundQueuedItem = false;
-  let exactQueuedItemText: string | null = null;
-  while (index >= 0) {
-    const rawLine = lines[index] ?? "";
-    const activeLine = stripCodexQueueGutter(rawLine).trim();
-    const itemMatch = /^↳(?:\s+(.*)|\s*$)/.exec(activeLine);
-    if (itemMatch) {
-      queuedItemRows.unshift(itemMatch[1] ?? "");
-      exactQueuedItemText = /^↳ (.*)$/.exec(activeLine)?.[1] ?? null;
-      foundQueuedItem = true;
-      index -= 1;
-      break;
-    }
-    const isWrappedItemRow =
-      /^\s*[│┃║┆┊]/.test(rawLine) || /^\s{2,}\S/.test(rawLine);
-    if (!activeLine || !isWrappedItemRow) {
-      return false;
-    }
-    queuedItemRows.unshift(activeLine);
-    index -= 1;
-  }
-  if (!foundQueuedItem) {
-    return false;
-  }
-
-  while (index >= 0 && !stripCodexQueueGutter(lines[index] ?? "").trim()) {
-    index -= 1;
-  }
-  const queueHeadingPattern =
-    /^messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?$/i;
-  let wrappedHeading = "";
-  let foundHeading = false;
-  for (let headingRows = 0; index >= 0 && headingRows < 4; headingRows += 1) {
-    const headingRow = stripCodexQueueGutter(lines[index] ?? "")
-      .trim()
-      .replace(/^•\s*/, "");
-    if (!headingRow) {
-      break;
-    }
-    wrappedHeading = `${headingRow} ${wrappedHeading}`
-      .replace(/\s+/g, " ")
-      .trim();
-    if (queueHeadingPattern.test(wrappedHeading)) {
-      foundHeading = true;
-      break;
-    }
-    index -= 1;
-  }
-  if (!foundHeading) {
-    return false;
-  }
-
+  const items = codexQueuedItems(screenText) ?? [];
   if (opts.exact) {
     // A wrapped or partially rendered item cannot prove ownership. Preserve
     // authored spaces; only CR line endings and terminal right padding vary.
-    if (queuedItemRows.length !== 1 || exactQueuedItemText === null) {
-      return false;
-    }
     const stripRightPadding = (text: string): string =>
       normalizeTerminalText(text).replace(/[ \t]+$/, "");
-    const visible = stripRightPadding(exactQueuedItemText);
-    return visible.length > 0 && visible === submittedText;
+    return items.some((item) => {
+      if (item.rows.length !== 1 || item.exact === null) return false;
+      const visible = stripRightPadding(item.exact);
+      return visible.length > 0 && visible === submittedText;
+    });
   }
-
-  const visiblePrefix = compactQueueCorrelationText(
-    queuedItemRows.join(" ").replace(/(?:…|\.\.\.)+\s*$/, ""),
-  );
   const submitted = compactQueueCorrelationText(submittedText.trim());
-  return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
+  return items.some((item) => {
+    const visiblePrefix = compactQueueCorrelationText(
+      item.rows.join(" ").replace(/(?:…|\.\.\.)+\s*$/, ""),
+    );
+    return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
+  });
 }
 
 export function countVisibleExactQueuedRows(
   screenText: string,
   authoredText: string,
 ): number | null {
-  const lines = normalizeTerminalText(screenText).split("\n");
-  let cursor = lines.length - 1;
-  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
-  if (cursor < 0) return null;
-  cursor -= 1;
-  while (cursor >= 0 && (!stripCodexQueueGutter(lines[cursor] ?? "").trim() || /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(stripCodexQueueGutter(lines[cursor] ?? "")))) cursor -= 1;
-  const queueRow = (index: number): RegExpExecArray | null => /^↳ (.*)$/.exec(stripCodexQueueGutter(lines[index] ?? "").trimStart());
-  const queueHeadingStart = (index: number): number => {
-    let wrappedHeading = "";
-    for (let rows = 0; index >= 0 && rows < 4; rows += 1, index -= 1) {
-      const row = stripCodexQueueGutter(lines[index] ?? "").trim().replace(/^•\s*/, "");
-      if (!row) break;
-      wrappedHeading = `${row} ${wrappedHeading}`.replace(/\s+/g, " ").trim();
-      if (/^messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?$/i.test(wrappedHeading)) return index;
-    }
-    return -1;
-  };
-  let count: number | null = null;
-  while (cursor >= 0) {
-    const blockEnd = cursor;
-    let blockCount = 0;
-    let row: RegExpExecArray | null;
-    while (cursor >= 0 && (row = queueRow(cursor))) {
-      if (row[1] === authoredText) blockCount += 1;
-      cursor -= 1;
-    }
-    if (cursor === blockEnd) return count;
-    while (cursor >= 0 && !stripCodexQueueGutter(lines[cursor] ?? "").trim()) cursor -= 1;
-    const headingStart = queueHeadingStart(cursor);
-    if (headingStart < 0) return count;
-    count = (count ?? 0) + blockCount;
-    cursor = headingStart - 1;
-  }
-  return count;
+  const items = codexQueuedItems(screenText);
+  if (items === null || items.length === 0) return null;
+  return items.filter((item) => item.exact === authoredText).length;
 }
 
 export function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {
