@@ -3,10 +3,15 @@ import { buildHarnessDaemonBlock, finalizeHarnessDaemon, reportMarkerMatches } f
 const race = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | (() => void),
   afterOpen: undefined as undefined | (() => void),
+  afterLstat: undefined as undefined | ((path: unknown) => void),
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+  return { ...actual, lstat: async (...args: Parameters<typeof actual.lstat>) => {
+    const stat = await actual.lstat(...args);
+    race.afterLstat?.(args[0]);
+    return stat;
+  }, open: async (...args: Parameters<typeof actual.open>) => {
     const swap = race.beforeOpen;
     race.beforeOpen = undefined;
     swap?.();
@@ -203,7 +208,9 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
     };
     const result = parse(await waitFor({ agent_id: AGENT, report_path: report, done_marker: "OUTSIDE_SENTINEL_903", timeout_ms: 1000 }));
     expect(result.matched).toBe(false);
-    expect(result.error).toMatch(/changed while it was opened/);
+    // macOS refuses the swapped lookup (ELOOP); Linux's anchored walk opens
+    // "/" first, so the restored real dir is walked and the inside file read.
+    if (result.error) expect(result.error).toMatch(/symlinked component/);
   });
 
   it("the tail keeps a whole last line and refuses one longer than the tail", async () => {
@@ -256,4 +263,39 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
     expect(kill).not.toHaveBeenCalled();
   });
 
+
+  // #906: Codex Sol round-2 reproductions (docs.local/lanes/2026-09-27-review-903-r2-extra.test.ts).
+  it("R2 rejects a parent reswapped after that ancestor was lstatted", async () => {
+    const parent = join(agentDir, "nested");
+    mkdirSync(parent);
+    const report = join(parent, "report.md");
+    writeFileSync(report, "still working\n");
+    writeFileSync(join(outside, "report.md"), "OUTSIDE_SENTINEL_R2\n");
+    race.beforeOpen = () => {
+      renameSync(parent, parent + "-old");
+      symlinkSync(outside, parent);
+    };
+    race.afterOpen = () => {
+      rmSync(parent);
+      renameSync(parent + "-old", parent);
+    };
+    race.afterLstat = (path) => {
+      if (String(path).endsWith("/nested")) {
+        race.afterLstat = undefined;
+        renameSync(parent, parent + "-old");
+        symlinkSync(outside, parent);
+      }
+    };
+    const result = parse(await waitFor({agent_id:AGENT,report_path:report,done_marker:"OUTSIDE_SENTINEL_R2",timeout_ms:1000}));
+    console.log("R2 reswap handler", JSON.stringify({matched:result.matched,source:result.source}));
+    expect(result.matched).toBe(false);
+  });
+
+  it("R2 rejects a non-Node process whose preceding argument is named node", () => {
+    const plan = {socket_path:"/tmp/review903.sock",installed_socket:false,started_by_run:true,build_check:"enforced" as const};
+    const kill = vi.fn();
+    const result = finalizeHarnessDaemon({plan,block:undefined,receiptText:"5150\n",distDir:"/review903/dist"}, {kill,commandOf:()=>"vim /tmp/node /review903/dist/daemon.js"});
+    console.log("R2 non-node process", JSON.stringify({signals:kill.mock.calls,result}));
+    expect(kill).not.toHaveBeenCalled();
+  });
 });

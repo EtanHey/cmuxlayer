@@ -1,5 +1,5 @@
-import { constants, mkdirSync, writeFileSync } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { constants, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { open, realpath, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
@@ -465,38 +465,81 @@ export type ReportTailRead =
   | { ok: false; reason: string };
 
 /**
- * #903 round 2 (P1): open() resolves the path again, so a parent directory
- * swapped for a symlink between containment and open lands the read outside
- * the roots. Node has no openat(), so the OPENED handle is proven instead: every
- * ancestor of the canonical path must still be a real directory (not a
- * symlink), and the leaf must be the very inode the handle holds. A swap before
- * open either leaves a symlink ancestor or a different inode at the path.
+ * macOS open(2) flag (sys/fcntl.h, macOS 11+; absent from Node's
+ * fs.constants): fail with ELOOP if ANY component of the path is a symlink.
  */
-async function handleIsAtPath(
-  resolved: string,
-  handleStat: { dev: number; ino: number },
-): Promise<boolean> {
-  const parts = resolved.split(sep).filter((part) => part.length > 0);
-  let current: string = sep;
-  for (const [index, part] of parts.entries()) {
-    current = join(current, part);
-    const stat = await lstat(current).catch(() => undefined);
-    if (!stat || stat.isSymbolicLink()) return false;
-    if (index < parts.length - 1) {
-      if (!stat.isDirectory()) return false;
-    } else if (stat.dev !== handleStat.dev || stat.ino !== handleStat.ino) {
-      return false;
+const O_NOFOLLOW_ANY_DARWIN = 0x20000000;
+
+const REPORT_LEAF_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW;
+
+type SecureOpen =
+  | { ok: true; handle: FileHandle }
+  | { ok: false; code: string | undefined };
+
+function errnoCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException).code;
+}
+
+/**
+ * #906: open the canonical report path so that no component can be a symlink
+ * AT OPEN TIME. A pathname re-check after open only moves the race (#903 r2:
+ * 5 outside reads in 1,937 attempts), so the kernel has to refuse the symlink
+ * during the lookup itself. Node has no openat(), so per platform:
+ *  - macOS: one open() with O_NOFOLLOW_ANY -- the kernel fails the whole
+ *    lookup with ELOOP if any component is a symlink.
+ *  - Linux: anchored traversal. Hold a directory fd from "/" down, and open
+ *    each next component through /proc/self/fd/<held>/<name> with O_NOFOLLOW
+ *    (the magic link resolves to the held directory, so this is openat()).
+ *  - anything else: refuse. There is no safe fallback.
+ */
+async function openReportNoSymlinks(resolved: string): Promise<SecureOpen> {
+  if (!isAbsolute(resolved)) return { ok: false, code: "EINVAL" };
+  if (process.platform === "darwin") {
+    try {
+      // O_NOFOLLOW_ANY covers the leaf too; macOS rejects it combined with
+      // O_NOFOLLOW (EINVAL).
+      return {
+        ok: true,
+        handle: await open(resolved, constants.O_RDONLY | constants.O_NONBLOCK | O_NOFOLLOW_ANY_DARWIN),
+      };
+    } catch (error) {
+      return { ok: false, code: errnoCode(error) };
     }
   }
-  return true;
+  if (process.platform !== "linux" || !existsSync("/proc/self/fd")) {
+    return { ok: false, code: "ENOTSUP" };
+  }
+  const parts = resolved.split(sep).filter((part) => part.length > 0);
+  const leaf = parts.pop();
+  if (!leaf || [...parts, leaf].some((part) => part === "." || part === "..")) {
+    return { ok: false, code: "EINVAL" };
+  }
+  let dir: FileHandle | undefined;
+  try {
+    dir = await open(sep, constants.O_RDONLY | constants.O_DIRECTORY);
+    for (const part of parts) {
+      const next = await open(
+        `/proc/self/fd/${dir.fd}/${part}`,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      await dir.close();
+      dir = next;
+    }
+    return { ok: true, handle: await open(`/proc/self/fd/${dir.fd}/${leaf}`, REPORT_LEAF_FLAGS) };
+  } catch (error) {
+    return { ok: false, code: errnoCode(error) };
+  } finally {
+    await dir?.close().catch(() => {});
+  }
 }
 
 const NEWLINE = 0x0a;
 
 /**
  * Read the tail of a contained report without ever blocking (#898 item 2).
- * O_NONBLOCK makes open() return at once on a FIFO, O_NOFOLLOW refuses a
- * symlinked leaf, and fstat on the open handle -- not a separate stat --
+ * O_NONBLOCK makes open() return at once on a FIFO, openReportNoSymlinks
+ * refuses a symlink in any component at open time (#906), and fstat on the
+ * open handle -- not a separate stat --
  * decides "regular file". A missing file is "not written yet".
  *
  * The returned text starts on a line boundary, so its final non-empty line is
@@ -505,25 +548,20 @@ const NEWLINE = 0x0a;
  * is refused rather than matched from a fragment.
  */
 export async function readReportTail(resolved: string): Promise<ReportTailRead> {
-  let handle;
-  try {
-    handle = await open(
-      resolved,
-      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
-    );
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { ok: true, text: undefined };
-    return { ok: false, reason: `wait_for report_path could not be opened (${code ?? "error"}): ${resolved}` };
+  const opened = await openReportNoSymlinks(resolved);
+  if (!opened.ok) {
+    if (opened.code === "ENOENT") return { ok: true, text: undefined };
+    if (opened.code === "ELOOP") {
+      return { ok: false, reason: `wait_for report_path has a symlinked component at open time: ${resolved}` };
+    }
+    if (opened.code === "ENOTSUP") {
+      return { ok: false, reason: `wait_for report_path: no symlink-safe open on ${process.platform}; file-backed done is refused` };
+    }
+    return { ok: false, reason: `wait_for report_path could not be opened (${opened.code ?? "error"}): ${resolved}` };
   }
+  const handle = opened.handle;
   try {
     const stat = await handle.stat();
-    if (!(await handleIsAtPath(resolved, stat))) {
-      return {
-        ok: false,
-        reason: `wait_for report_path changed while it was opened (a symlinked or swapped component): ${resolved}`,
-      };
-    }
     if (!stat.isFile()) {
       return { ok: false, reason: `wait_for report_path is not a regular file: ${resolved}` };
     }

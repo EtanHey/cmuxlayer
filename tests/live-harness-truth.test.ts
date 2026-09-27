@@ -406,7 +406,7 @@ describe("#889 must-fix 4: only stop a daemon this run started", () => {
 
     expect(inherited.started_by_run).toBe(false);
     expect(inherited.private).toBe(false);
-    finalizeHarnessDaemon({ plan, block: inherited, receiptText: "5150\n", distDir: DIST }, { kill, commandOf: () => `node ${DIST}/daemon.js` });
+    finalizeHarnessDaemon({ plan, block: inherited, receiptText: "5150\n", distDir: DIST }, { kill, commandOf: () => `${process.execPath} ${DIST}/daemon.js` });
     expect(kill).not.toHaveBeenCalled();
   });
 
@@ -422,7 +422,7 @@ describe("#889 must-fix 4: only stop a daemon this run started", () => {
     expect(plan.installed_socket).toBe(true);
     expect(plan.started_by_run).toBe(false);
     const kill = vi.fn();
-    finalizeHarnessDaemon({ plan, block: block(plan), receiptText: "5150\n", distDir: DIST }, { kill, commandOf: () => `node ${DIST}/daemon.js` });
+    finalizeHarnessDaemon({ plan, block: block(plan), receiptText: "5150\n", distDir: DIST }, { kill, commandOf: () => `${process.execPath} ${DIST}/daemon.js` });
     expect(kill).not.toHaveBeenCalled();
   });
 
@@ -438,7 +438,7 @@ describe("#889 must-fix 4: only stop a daemon this run started", () => {
     expect(plan.socket_path).toBe(defaultHarnessDaemonSocket(HOME, 4242));
     expect(plan.started_by_run).toBe(true);
     const kill = vi.fn();
-    const commandOf = () => `node ${DIST}/daemon.js`;
+    const commandOf = () => `${process.execPath} ${DIST}/daemon.js`;
     const daemon = finalizeHarnessDaemon({ plan, block: block(plan), receiptText: "5150\n", distDir: DIST }, { kill, commandOf });
     expect(daemon).toMatchObject({ stopped: true, stopped_pids: [5150] });
     expect(kill).toHaveBeenCalledWith(5150, "SIGTERM");
@@ -515,16 +515,19 @@ describe("#898 item 4: re-check the PID's command before SIGTERM", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
-  // #903 round 2 (P1): whole-path identity of the LAST argument, not a substring.
-  it("matches only <node> <dist>/daemon.js, whole paths, spaces included", () => {
+  // #903 r2 / #906 (P1): identity is the whole launch command, not a suffix
+  // plus a basename-guessed interpreter.
+  it("matches only the exact launch <node> <dist>/daemon.js, spaces included", () => {
     const script = "/srv/a b/cmuxlayer/dist/daemon.js";
-    expect(commandRunsDaemon(`node ${script}`, script)).toBe(true);
+    const node = "/opt/node 22/bin/node";
+    expect(commandRunsDaemon(`${node} ${script}`, script, node)).toBe(true);
     expect(commandRunsDaemon(`${process.execPath} ${script}`, script)).toBe(true);
-    expect(commandRunsDaemon(`/opt/node 22/bin/node ${script}`, script)).toBe(true);
-    expect(commandRunsDaemon(`node ${script}.backup`, script)).toBe(false);
-    expect(commandRunsDaemon(`vim ${script}`, script)).toBe(false);
-    expect(commandRunsDaemon(`node ${script} --flag`, script)).toBe(false);
-    expect(commandRunsDaemon(`node /other${script}`, script)).toBe(false);
+    expect(commandRunsDaemon(`node ${script}`, script, node)).toBe(false);
+    expect(commandRunsDaemon(`vim /tmp/node ${script}`, script, node)).toBe(false);
+    expect(commandRunsDaemon(`vim ${node} ${script}`, script, node)).toBe(false);
+    expect(commandRunsDaemon(`${node} ${script}.backup`, script, node)).toBe(false);
+    expect(commandRunsDaemon(`${node} ${script} --flag`, script, node)).toBe(false);
+    expect(commandRunsDaemon(`${node} --inspect ${script}`, script, node)).toBe(false);
   });
 });
 
@@ -561,7 +564,7 @@ describe("#898 item 8: a failed close_surface is retried in finally", () => {
 });
 
 describe("#898 items 9-10: the run stops the daemon it spawned, even on a red preflight", () => {
-  const command = (pid: number) => (pid === 4321 || pid === 5150 ? `node ${DIST}/daemon.js` : "/usr/sbin/cron");
+  const command = (pid: number) => (pid === 4321 || pid === 5150 ? `${process.execPath} ${DIST}/daemon.js` : "/usr/sbin/cron");
 
   it("reads every PID from the spawn receipt", () => {
     expect(harnessDaemonPidsFromReceipt("4321\n\n4400\nnope\n4321\n")).toEqual([4321, 4400]);
