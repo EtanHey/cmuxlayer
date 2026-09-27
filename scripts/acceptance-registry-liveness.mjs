@@ -76,7 +76,7 @@ export function agentRowFromList(list, agentId) {
 export function sendToReceipt(agentId, reply) {
   return {
     agent_id: agentId,
-    delivered: typeof reply?.delivered === "boolean" ? reply.delivered : reply?.ok !== false,
+    delivered: typeof reply?.delivered === "boolean" ? reply.delivered : reply?.ok === true,
     ...(typeof reply?.skipped === "string" ? { skipped: reply.skipped } : {}),
     ...(reply?.ok === false && reply?.error ? { error: reply.error } : {}),
   };

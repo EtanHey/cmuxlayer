@@ -1,3 +1,6 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { MAX_SPAWN_DEPTH, type CliType } from "./agent-types.js";
 import {
   DAEMON_SOCKET_FILENAME,
@@ -439,12 +442,13 @@ export function planHarnessDaemon(input: {
   socketExists: (path: string) => boolean;
 }): HarnessDaemonPlan {
   const installedSockets = installedHarnessDaemonSockets(input.home);
+  // An explicit --daemon-socket wins; --installed-daemon then outranks an
+  // inherited CMUXLAYER_DAEMON_SOCKET, which is ambient, not a choice (#898).
   const socketPath =
     input.daemonSocketArg ||
-    input.envSocket?.trim() ||
     (input.installedDaemon
       ? installedSockets[0]
-      : defaultHarnessDaemonSocket(input.home, input.pid));
+      : input.envSocket?.trim() || defaultHarnessDaemonSocket(input.home, input.pid));
   const installedSocket = installedSockets.includes(socketPath);
   return {
     socket_path: socketPath,
@@ -497,8 +501,14 @@ export function buildHarnessDaemonBlock(input: {
     pid,
     expected_dist: dist,
     // Opted out, the run does not claim this build served it (#889 must-fix 2).
-    from_this_build: !optedOut && binary !== null && binary.startsWith(`${dist}/`),
+    from_this_build: !optedOut && binary !== null && isInsideDir(binary, dist),
   };
+}
+
+/** Path containment, not a string prefix: `dist/../../other` is outside (#898). */
+function isInsideDir(path: string, dir: string): boolean {
+  const rel = relative(resolve(dir), resolve(path));
+  return rel.length > 0 && !isAbsolute(rel) && rel.split(sep)[0] !== "..";
 }
 
 export function harnessDaemonFailures(block: HarnessDaemonBlock): string[] {
@@ -506,14 +516,64 @@ export function harnessDaemonFailures(block: HarnessDaemonBlock): string[] {
   return block.from_this_build ? [] : ["daemon_not_from_this_build"];
 }
 
+export type HarnessDaemonStopSkip = "pid_reused" | "not_running" | "pid_unknown";
+
+export interface HarnessDaemonStop {
+  stopped: boolean;
+  stop_skipped?: HarnessDaemonStopSkip;
+}
+
+export interface HarnessDaemonStopDeps {
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** The PID's command line now, or null when no such process exists. */
+  commandOf?: (pid: number) => string | null;
+}
+
+function processCommand(pid: number): string | null {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The binary a daemon this run started must still be running (#898 item 4). */
+function expectedDaemonBinary(block: HarnessDaemonBlock): string {
+  return block.binary ?? `${block.expected_dist}/daemon.js`;
+}
+
+function stopRecordedPid(
+  pid: number,
+  binary: string,
+  deps: HarnessDaemonStopDeps,
+): HarnessDaemonStop {
+  // The PID was recorded earlier; if the daemon exited and the OS reused the
+  // number, the process there now is someone else's (#898 item 4).
+  const command = (deps.commandOf ?? processCommand)(pid);
+  if (command === null) return { stopped: false, stop_skipped: "not_running" };
+  if (!command.includes(binary)) return { stopped: false, stop_skipped: "pid_reused" };
+  try {
+    (deps.kill ?? process.kill)(pid, "SIGTERM");
+    return { stopped: true };
+  } catch {
+    return { stopped: false };
+  }
+}
+
 /**
  * Stop the daemon only when this run started it, by its recorded PID (never a
- * pattern). An inherited or installed daemon is never signalled.
+ * pattern), and only while that PID still runs the daemon binary. An inherited
+ * or installed daemon is never signalled.
  */
 export function stopHarnessDaemon(
   block: HarnessDaemonBlock | undefined,
   kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
-): boolean | undefined {
+  commandOf: (pid: number) => string | null = processCommand,
+): HarnessDaemonStop | undefined {
   if (
     !block ||
     block.started_by_run !== true ||
@@ -522,12 +582,128 @@ export function stopHarnessDaemon(
   ) {
     return undefined;
   }
-  try {
-    kill(block.pid, "SIGTERM");
-    return true;
-  } catch {
-    return false;
+  return stopRecordedPid(block.pid, expectedDaemonBinary(block), { kill, commandOf });
+}
+
+/**
+ * PIDs the spawner appended to CMUXLAYER_DAEMON_PID_RECEIPT (one per spawn),
+ * deduplicated in order.
+ */
+export function harnessDaemonPidsFromReceipt(text: string | null | undefined): number[] {
+  const pids: number[] = [];
+  for (const line of (text ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!/^\d+$/.test(trimmed)) continue;
+    const pid = Number(trimmed);
+    if (pid > 0 && !pids.includes(pid)) pids.push(pid);
   }
+  return pids;
+}
+
+export type FinalizedHarnessDaemon = HarnessDaemonBlock & {
+  spawned_pids?: number[];
+  stopped?: boolean;
+  stopped_pids?: number[];
+  stop_skipped?: HarnessDaemonStopSkip;
+};
+
+/**
+ * #898 items 9-10: the proxy spawns the daemon detached and unref'd
+ * (daemon-spawn.ts), so it outlives the runner. The runner owns that spawn, so
+ * it learns the PID from the spawner's receipt -- not from control_health,
+ * which a red preflight may never reach -- and stops exactly the PIDs it
+ * spawned. Falls back to control_health's PID when no receipt was written.
+ */
+export function finalizeHarnessDaemon(
+  input: {
+    plan: HarnessDaemonPlan;
+    block: HarnessDaemonBlock | undefined;
+    receiptText: string | null;
+    distDir: string;
+  },
+  deps: HarnessDaemonStopDeps = {},
+): FinalizedHarnessDaemon | undefined {
+  if (!input.plan.started_by_run || input.plan.installed_socket) return input.block;
+  const block: FinalizedHarnessDaemon =
+    input.block ??
+    buildHarnessDaemonBlock({
+      plan: input.plan,
+      serverVersion: null,
+      controlHealth: undefined,
+      distDir: input.distDir,
+    });
+  const spawned = harnessDaemonPidsFromReceipt(input.receiptText);
+  const targets = spawned.length > 0 ? spawned : typeof block.pid === "number" ? [block.pid] : [];
+  block.spawned_pids = spawned;
+  block.stopped_pids = [];
+  if (targets.length === 0) block.stop_skipped = "pid_unknown";
+  for (const pid of targets) {
+    const stop = stopRecordedPid(pid, expectedDaemonBinary(block), deps);
+    if (stop.stopped) block.stopped_pids.push(pid);
+    if (stop.stop_skipped) block.stop_skipped ??= stop.stop_skipped;
+  }
+  block.stopped = block.stopped_pids.length > 0;
+  return block;
+}
+
+/**
+ * #898 item 8: a close that did not return ok:true (refused, errored, or a
+ * red path that never reached it) is retried in finally.
+ */
+export function harnessWorkersToClose<T extends { agent_id?: string; close?: { ok?: boolean } }>(
+  workers: readonly T[],
+): T[] {
+  return workers.filter((worker) => Boolean(worker.agent_id) && worker.close?.ok !== true);
+}
+
+/**
+ * #898 item 3: another wait_for slice only follows a slice that timed out. A
+ * terminal non-match (an agent in error, a refused report) returns
+ * source:"immediate", and re-calling it back to back until the deadline only
+ * hammers the shared daemon and the cmux socket.
+ */
+export async function runHarnessWaitSlices(
+  callTool: (
+    name: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
+  ) => Promise<ToolCallRecord>,
+  input: {
+    agentId: string;
+    reportPath: string;
+    marker: string;
+    waitTimeoutMs: number;
+    sliceMs: number;
+    /** Request timeout headroom over the slice, under the proxy's 300 s cap. */
+    requestSlackMs?: number;
+    now?: () => number;
+  },
+): Promise<{ wait: ToolCallRecord | undefined; slices: number }> {
+  const now = input.now ?? Date.now;
+  const deadline = now() + input.waitTimeoutMs;
+  let wait: ToolCallRecord | undefined;
+  let slices = 0;
+  do {
+    const slice = Math.max(1_000, Math.min(input.sliceMs, deadline - now()));
+    slices += 1;
+    wait = await callTool(
+      "wait_for",
+      {
+        agent_id: input.agentId,
+        target_state: "done",
+        timeout_ms: slice,
+        report_path: input.reportPath,
+        done_marker: input.marker,
+      },
+      slice + (input.requestSlackMs ?? 30_000),
+    );
+  } while (
+    wait?.ok === true &&
+    wait.structured?.source === "timeout" &&
+    !waitIsDone(wait) &&
+    now() < deadline
+  );
+  return { wait, slices };
 }
 
 const TERMINAL_ROW_STATES = new Set(["done", "error"]);
@@ -556,8 +732,11 @@ export function harnessCallerSpawnDepth(
         ? (rawState as { value?: unknown }).value
         : rawState;
     if (typeof state === "string" && TERMINAL_ROW_STATES.has(state)) continue;
+    // Case-insensitive: a server that normalises a uuid's case must not let a
+    // deep seat fail open past this preflight (#898 item 12).
+    const wanted = surface.toLowerCase();
     const surfaces = [r.surface_id, r.surface_uuid, detail.surface_id, detail.surface_uuid];
-    if (!surfaces.includes(surface)) continue;
+    if (!surfaces.some((s) => typeof s === "string" && s.toLowerCase() === wanted)) continue;
     const depth = detail.spawn_depth ?? r.spawn_depth;
     if (typeof depth === "number") return depth;
   }
@@ -622,6 +801,17 @@ export async function runHarnessPreflight(
  * place wait_for's file-backed done may read), one file per worker per run;
  * the runner copies it into its results/ dir afterwards.
  */
+/**
+ * #898 item 7: the coordination id for a run. The basename alone let runs at
+ * /tmp/a/run and /tmp/b/run share ~/.cmux/live-harness/run/ and overwrite each
+ * other's reports; a short hash of the full resolved root separates them.
+ */
+export function harnessCoordinationRunId(root: string): string {
+  const resolved = resolve(root);
+  const hash = createHash("sha256").update(resolved).digest("hex").slice(0, 12);
+  return `${basename(resolved)}-${hash}`;
+}
+
 export function harnessCoordinationReportPath(
   home: string,
   runId: string,

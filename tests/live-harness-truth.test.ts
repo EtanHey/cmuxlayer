@@ -17,6 +17,11 @@ import {
   harnessDepthRefusal,
   runHarnessPreflight,
   harnessCoordinationReportPath,
+  harnessCoordinationRunId,
+  harnessWorkersToClose,
+  harnessDaemonPidsFromReceipt,
+  finalizeHarnessDaemon,
+  runHarnessWaitSlices,
   type HarnessDaemonPlan,
 } from "../src/live-agent-harness.js";
 
@@ -277,7 +282,7 @@ describe("#889 must-fix 1: the runner waits on the issued report_path under the 
     const source = script();
     expect(source).toMatch(/report_path: spec\.coordinationReport/);
     expect(source).toMatch(/worker\.spawn\.structured\?\.report_path/);
-    expect(source).toMatch(/report_path: worker\.issued_report_path/);
+    expect(source).toMatch(/reportPath: worker\.issued_report_path/);
     expect(source).toMatch(/copyFile\(worker\.issued_report_path, spec\.report\)/);
   });
 });
@@ -433,14 +438,190 @@ describe("#889 must-fix 4: only stop a daemon this run started", () => {
     expect(plan.socket_path).toBe(defaultHarnessDaemonSocket(HOME, 4242));
     expect(plan.started_by_run).toBe(true);
     const kill = vi.fn();
-    expect(stopHarnessDaemon(block(plan), kill)).toBe(true);
+    const commandOf = () => `node ${DIST}/daemon.js`;
+    expect(stopHarnessDaemon(block(plan), kill, commandOf)).toEqual({ stopped: true });
     expect(kill).toHaveBeenCalledWith(5150, "SIGTERM");
   });
 
   it("the runner stops the daemon only through stopHarnessDaemon, and closes leaked dummies in finally", () => {
     const source = script();
-    expect(source).toContain("harness.stopHarnessDaemon(results.daemon)");
+    expect(source).toContain("harness.finalizeHarnessDaemon(");
     expect(source).not.toMatch(/process\.kill\(results\.daemon/);
     expect(source).toMatch(/finally \{\s*\/\/ A red path after spawn_agent[\s\S]*?close_surface[\s\S]*?scope: "agent"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #898 (H1 follow-up). Each block fails on main (863d2211) and passes at head.
+// ---------------------------------------------------------------------------
+
+describe("#898 item 3: a terminal non-match ends the wait after one slice", () => {
+  const reply = (structured: Record<string, unknown>) => ({ ok: true, structured });
+  const input = { agentId: "w-1", reportPath: "/r.md", marker: "DONE_W", waitTimeoutMs: 60_000, sliceMs: 5_000 };
+
+  it("an error agent (source immediate) is called once, not re-sliced until the deadline", async () => {
+    const callTool = vi.fn(async () => reply({ matched: false, source: "immediate", state: "error" }));
+    const out = await runHarnessWaitSlices(callTool, input);
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(out.slices).toBe(1);
+    expect(out.wait?.structured?.state).toBe("error");
+  });
+
+  it("only a timeout slice starts another, and a report_file match stops", async () => {
+    const replies = [
+      reply({ matched: false, source: "timeout", state: "working" }),
+      reply({ matched: true, source: "report_file", state: "working" }),
+    ];
+    const callTool = vi.fn(async () => replies.shift() ?? reply({ source: "timeout" }));
+    const out = await runHarnessWaitSlices(callTool, input);
+    expect(out.slices).toBe(2);
+    expect(callTool).toHaveBeenLastCalledWith(
+      "wait_for",
+      expect.objectContaining({ agent_id: "w-1", report_path: "/r.md", done_marker: "DONE_W" }),
+      expect.any(Number),
+    );
+  });
+
+  it("the runner waits through runHarnessWaitSlices", () => {
+    expect(script()).toContain("harness.runHarnessWaitSlices(");
+  });
+});
+
+describe("#898 item 4: re-check the PID's command before SIGTERM", () => {
+  const plan: HarnessDaemonPlan = { ...PRIVATE_PLAN };
+  const block = buildHarnessDaemonBlock({
+    plan,
+    serverVersion: "0.4.89-dev",
+    controlHealth: { health: { current_process: { pid: 5150, script_path: `${DIST}/daemon.js` } } },
+    distDir: DIST,
+  });
+
+  it("a PID now running something else is not signalled and records pid_reused", () => {
+    const kill = vi.fn();
+    expect(stopHarnessDaemon(block, kill, () => "/usr/bin/vim notes.txt")).toEqual({
+      stopped: false,
+      stop_skipped: "pid_reused",
+    });
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("a PID that is gone is not signalled", () => {
+    const kill = vi.fn();
+    expect(stopHarnessDaemon(block, kill, () => null)).toEqual({ stopped: false, stop_skipped: "not_running" });
+    expect(kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("#898 item 7: concurrent runs never share a coordination id", () => {
+  it("roots with the same basename get different ids that still name the run", () => {
+    const a = harnessCoordinationRunId("/tmp/a/run");
+    const b = harnessCoordinationRunId("/tmp/b/run");
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^run-[0-9a-f]{8,}$/);
+    expect(harnessCoordinationRunId("/tmp/a/run/")).toBe(a);
+  });
+
+  it("the runner derives the report dir from the full root", () => {
+    const source = script();
+    expect(source).toContain("harness.harnessCoordinationRunId(config.root)");
+    expect(source).not.toMatch(/basename\(config\.root\)/);
+  });
+});
+
+describe("#898 item 8: a failed close_surface is retried in finally", () => {
+  it("retries unless the close returned ok:true", () => {
+    const workers = [
+      { agent_id: "a", close: { ok: false, error: "refused" } },
+      { agent_id: "b", close: { ok: true } },
+      { agent_id: "c" },
+      { name: "never-spawned" },
+    ];
+    expect(harnessWorkersToClose(workers).map((w) => w.agent_id)).toEqual(["a", "c"]);
+  });
+
+  it("the runner's finally uses it", () => {
+    expect(script()).toMatch(/finally \{[\s\S]*?harness\.harnessWorkersToClose\(results\.workers\)/);
+  });
+});
+
+describe("#898 items 9-10: the run stops the daemon it spawned, even on a red preflight", () => {
+  const command = (pid: number) => (pid === 4321 || pid === 5150 ? `node ${DIST}/daemon.js` : "/usr/sbin/cron");
+
+  it("reads every PID from the spawn receipt", () => {
+    expect(harnessDaemonPidsFromReceipt("4321\n\n4400\nnope\n4321\n")).toEqual([4321, 4400]);
+    expect(harnessDaemonPidsFromReceipt(null)).toEqual([]);
+  });
+
+  it("a preflight that failed before control_health still stops the spawned daemon by its receipt PID", () => {
+    const kill = vi.fn();
+    const daemon = finalizeHarnessDaemon(
+      { plan: PRIVATE_PLAN, block: undefined, receiptText: "4321\n", distDir: DIST },
+      { kill, commandOf: command },
+    );
+    expect(kill).toHaveBeenCalledWith(4321, "SIGTERM");
+    expect(daemon).toMatchObject({ spawned_pids: [4321], stopped: true, stopped_pids: [4321], from_this_build: false });
+  });
+
+  it("stops exactly what the run spawned: a reused receipt PID is skipped", () => {
+    const kill = vi.fn();
+    const daemon = finalizeHarnessDaemon(
+      { plan: PRIVATE_PLAN, block: undefined, receiptText: "4321\n4400\n", distDir: DIST },
+      { kill, commandOf: command },
+    );
+    expect(kill.mock.calls).toEqual([[4321, "SIGTERM"]]);
+    expect(daemon).toMatchObject({ stopped: true, stopped_pids: [4321], stop_skipped: "pid_reused" });
+  });
+
+  it("never signals a daemon the run did not start, receipt or not", () => {
+    const kill = vi.fn();
+    finalizeHarnessDaemon(
+      { plan: INSTALLED_PLAN, block: undefined, receiptText: "4321\n", distDir: DIST },
+      { kill, commandOf: command },
+    );
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("the runner has the spawner write a PID receipt when it owns the socket, and finalizes in finally", () => {
+    const source = script();
+    expect(source).toMatch(/if \(daemonPlan\.started_by_run\)[\s\S]{0,200}CMUXLAYER_DAEMON_PID_RECEIPT/);
+    expect(source).toMatch(/finally \{[\s\S]*?harness\.finalizeHarnessDaemon\(/);
+  });
+});
+
+describe("#898 item 11: from_this_build is a path containment, not a string prefix", () => {
+  it("a binary that escapes dist through .. is not from this build", () => {
+    const at = (binary: string) =>
+      buildHarnessDaemonBlock({
+        plan: PRIVATE_PLAN,
+        serverVersion: null,
+        controlHealth: { health: { current_process: { pid: 1, script_path: binary } } },
+        distDir: DIST,
+      }).from_this_build;
+    expect(at(`${DIST}/../../other/dist/daemon.js`)).toBe(false);
+    expect(at(`${DIST}/daemon.js`)).toBe(true);
+  });
+});
+
+describe("#898 item 12: the depth preflight matches the caller's surface case-insensitively", () => {
+  it("finds the seat when the server reports its uuid in another case", () => {
+    const agents = {
+      agents: [{ agent_id: "w", state: "working", detail: { surface_uuid: "7c1d0e2a-seat", spawn_depth: 2 } }],
+    };
+    expect(harnessCallerSpawnDepth(agents, "7C1D0E2A-SEAT")).toBe(2);
+  });
+});
+
+describe("#898 minor: --installed-daemon beats an inherited CMUXLAYER_DAEMON_SOCKET", () => {
+  it("uses the installed stable socket, not the inherited one", () => {
+    const plan = planHarnessDaemon({
+      daemonSocketArg: "",
+      envSocket: "/tmp/inherited.sock",
+      installedDaemon: true,
+      home: HOME,
+      pid: 4242,
+      socketExists: () => true,
+    });
+    expect(plan.socket_path).toBe("/home/ci/.local/state/cmux/cmuxlayer-stated.sock");
+    expect(plan.installed_socket).toBe(true);
   });
 });

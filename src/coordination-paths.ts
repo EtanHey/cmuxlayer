@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { constants, mkdirSync, writeFileSync } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
@@ -376,14 +376,21 @@ export const COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED =
   "refreshed_not_redelivered: the spawn contract file at contract_path was rewritten on resume (identical bytes -- both strings derive from agent_id alone), and report_path/done_marker are re-issued and re-persisted. The boot POINTER was NOT re-typed into the resuming pane: `--resume` restores the prior session, which already contains it, and typing into a pane mid-resume is a delivery-path change this did not make. If the resumed session did NOT restore its context, the LEAD must point the worker at contract_path.";
 
 // ---------------------------------------------------------------------------
-// H1 round 2 (#889): wait_for's file-backed done may only read a report the
-// coordination layer owns. "Absolute" alone let any caller point it at any file
-// on the machine and have its final line echoed back.
+// H1 round 2 (#889), narrowed in #898: wait_for's file-backed done may only
+// read a report the coordination layer issued for THIS agent. "Absolute" alone
+// let any caller point it at any file on the machine and have its final line
+// echoed back; the whole ~/.cmux tree still admitted other agents' reports and
+// gitignored files inside ~/.cmux/worktrees/.
 // ---------------------------------------------------------------------------
 
 /** The coordination root: what `~/.cmux/` is, before symlink resolution. */
 export function coordinationRootDir(): string {
   return join(homedir(), ".cmux");
+}
+
+/** Where the live harness issues its workers' reports (#889). */
+export function liveHarnessReportDir(): string {
+  return join(coordinationRootDir(), "live-harness");
 }
 
 /**
@@ -416,25 +423,86 @@ export type ReportPathContainment =
 
 /**
  * A report path is readable only when, after resolving symlinks, it sits under
- * the coordination root or under this agent's own channel dir. No allow-list
- * and no env override: the two roots are the whole policy.
+ * this agent's own channel dir or the live-harness dir. No allow-list and no
+ * env override: the two roots are the whole policy (#898).
  */
 export async function containReportPath(
   reportPath: string,
   agentId: string,
   opts?: InboxOpts,
 ): Promise<ReportPathContainment> {
+  // agentDir joins the id, so "../worktrees" would name a sibling of the
+  // agents dir as "this agent's" root.
+  if (agentId.length === 0 || agentId === "." || agentId === ".." || agentId.includes("/") || agentId.includes(sep)) {
+    return {
+      ok: false,
+      resolved: reportPath,
+      reason: `wait_for agent_id must be a single path segment to scope report_path: ${agentId}`,
+    };
+  }
   const resolved = await resolveThroughSymlinks(reportPath);
-  const coordinationRoot = await resolveThroughSymlinks(coordinationRootDir());
   const agentRoot = await resolveThroughSymlinks(agentDir(agentId, opts));
-  if (isWithin(resolved, coordinationRoot) || isWithin(resolved, agentRoot)) {
+  const harnessRoot = await resolveThroughSymlinks(liveHarnessReportDir());
+  if (isWithin(resolved, agentRoot) || isWithin(resolved, harnessRoot)) {
     return { ok: true, resolved };
   }
   return {
     ok: false,
     resolved,
     reason:
-      `wait_for report_path must resolve under the coordination dir ${coordinationRoot}${sep} ` +
-      `or the agent dir ${agentRoot}${sep}; ${reportPath} resolves to ${resolved}`,
+      `wait_for report_path must resolve under the agent dir ${agentRoot}${sep} ` +
+      `or the live-harness dir ${harnessRoot}${sep}; ${reportPath} resolves to ${resolved}`,
   };
+}
+
+/** A report larger than this is refused rather than polled (#898). */
+export const REPORT_READ_MAX_BYTES = 1024 * 1024;
+/** Only this much of the file's end is read: the final line lives there. */
+export const REPORT_READ_TAIL_BYTES = 64 * 1024;
+
+export type ReportTailRead =
+  | { ok: true; text: string | undefined }
+  | { ok: false; reason: string };
+
+/**
+ * Read the tail of a contained report without ever blocking (#898 item 2).
+ * O_NONBLOCK makes open() return at once on a FIFO, O_NOFOLLOW refuses a final
+ * component swapped for a symlink after containment, and fstat on the open
+ * handle -- not a separate stat -- decides "regular file", so there is no
+ * window between check and read. A missing file is "not written yet".
+ */
+export async function readReportTail(resolved: string): Promise<ReportTailRead> {
+  let handle;
+  try {
+    handle = await open(
+      resolved,
+      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { ok: true, text: undefined };
+    return { ok: false, reason: `wait_for report_path could not be opened (${code ?? "error"}): ${resolved}` };
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      return { ok: false, reason: `wait_for report_path is not a regular file: ${resolved}` };
+    }
+    if (stat.size > REPORT_READ_MAX_BYTES) {
+      return {
+        ok: false,
+        reason: `wait_for report_path exceeds ${REPORT_READ_MAX_BYTES} bytes (${stat.size}): ${resolved}`,
+      };
+    }
+    const length = Math.min(stat.size, REPORT_READ_TAIL_BYTES);
+    const start = stat.size - length;
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    let text = buffer.subarray(0, bytesRead).toString("utf8");
+    // A tail that starts mid-line must not offer its partial first line.
+    if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+    return { ok: true, text };
+  } finally {
+    await handle.close();
+  }
 }

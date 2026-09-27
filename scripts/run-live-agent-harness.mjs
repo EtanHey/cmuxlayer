@@ -2,8 +2,8 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -430,7 +430,7 @@ async function main() {
     ...spec,
     coordinationReport: harness.harnessCoordinationReportPath(
       homedir(),
-      basename(config.root),
+      harness.harnessCoordinationRunId(config.root),
       spec.name,
     ),
   }));
@@ -466,6 +466,15 @@ async function main() {
   });
   const socketPath = daemonPlan.socket_path;
   const childEnv = { ...process.env, CMUXLAYER_DAEMON_SOCKET: socketPath };
+  // #898 items 9-10: the proxy spawns the daemon detached, so it outlives this
+  // run. When the run owns the socket, the spawner records each PID it starts
+  // here, and finally stops exactly those -- even if preflight is red before
+  // control_health ever names the daemon.
+  const daemonPidReceipt = join(config.root, "daemon-pids.txt");
+  if (daemonPlan.started_by_run) {
+    await rm(daemonPidReceipt, { force: true });
+    childEnv.CMUXLAYER_DAEMON_PID_RECEIPT = daemonPidReceipt;
+  }
   const client = new McpStdioClient(server.command, server.args, childEnv);
   const seenAgentIds = new Set();
   let baselineWorkerSurfaceCount = 0;
@@ -620,30 +629,19 @@ async function main() {
 
       recordEvent(results.events, { worker: spec.name, step: "wait_start" });
       if (worker.agent_id) {
-        const waitDeadline = Date.now() + config.waitTimeoutMs;
-        worker.wait_slices = 0;
-        do {
-          const slice = Math.max(
-            1_000,
-            Math.min(WAIT_SLICE_MS, waitDeadline - Date.now()),
-          );
-          worker.wait_slices += 1;
-          worker.wait = await client.callTool(
-            "wait_for",
-            {
-              agent_id: worker.agent_id,
-              target_state: "done",
-              timeout_ms: slice,
-              report_path: worker.issued_report_path,
-              done_marker: spec.marker,
-            },
-            slice + 30_000,
-          );
-        } while (
-          worker.wait?.ok === true &&
-          !harness.waitIsDone(worker.wait) &&
-          Date.now() < waitDeadline
+        // #898: only a timed-out slice starts another one.
+        const waited = await harness.runHarnessWaitSlices(
+          (name, args, timeoutMs) => client.callTool(name, args, timeoutMs),
+          {
+            agentId: worker.agent_id,
+            reportPath: worker.issued_report_path,
+            marker: spec.marker,
+            waitTimeoutMs: config.waitTimeoutMs,
+            sliceMs: WAIT_SLICE_MS,
+          },
         );
+        worker.wait = waited.wait;
+        worker.wait_slices = waited.slices;
       }
 
       recordEvent(results.events, {
@@ -739,8 +737,8 @@ async function main() {
     results.error = error instanceof Error ? error.message : String(error);
   } finally {
     // A red path after spawn_agent must not leak the dummy (#889).
-    for (const worker of results.workers) {
-      if (!worker.agent_id || worker.close) continue;
+    // #898: a close that did not return ok:true is retried too.
+    for (const worker of harness.harnessWorkersToClose(results.workers)) {
       worker.close = await client
         .callTool("close_surface", {
           agent_id: worker.agent_id,
@@ -752,11 +750,15 @@ async function main() {
     results.stderr = client.stderr.trim() || undefined;
     results.finished_at = new Date().toISOString();
     client.close();
-    // Stop the daemon only if this run started it, by its recorded PID.
-    const stopped = harness.stopHarnessDaemon(results.daemon);
-    if (results.daemon && stopped !== undefined) {
-      results.daemon.stopped = stopped;
-    }
+    // Stop the daemon only if this run started it, by the PIDs it spawned.
+    results.daemon = harness.finalizeHarnessDaemon({
+      plan: daemonPlan,
+      block: results.daemon,
+      receiptText: daemonPlan.started_by_run
+        ? await readFile(daemonPidReceipt, "utf8").catch(() => null)
+        : null,
+      distDir: join(REPO_ROOT, "dist"),
+    });
   }
 
   const summary = harness.summarizeHarnessRun(results.workers);

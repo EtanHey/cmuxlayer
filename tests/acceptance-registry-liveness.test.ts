@@ -104,6 +104,10 @@ describe("registry-liveness acceptance calls public tools only (#889)", () => {
     expect(sendToReceipt("a-1", { ok: true, delivery_state: "submitted" }).delivered).toBe(true);
     expect(sendToReceipt("a-1", { ok: false, error: "dead" }).delivered).toBe(false);
     expect(sendToReceipt("a-1", { ok: true, delivered: false, skipped: "dead:error" })).toMatchObject({ delivered: false, skipped: "dead:error" });
+    // #898 item 5: an isError reply with no structured payload reaches here as
+    // { _text } -- it is not a delivery.
+    expect(sendToReceipt("a-1", { _text: "MCP error -32602: Input validation error" }).delivered).toBe(false);
+    expect(sendToReceipt("a-1", undefined).delivered).toBe(false);
   });
 
   it("exits RED in preflight naming a tool the server does not list, before any spawn", () => {
