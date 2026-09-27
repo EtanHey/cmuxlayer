@@ -706,7 +706,11 @@ function codexQueuedItems(screenText: string): CodexQueuedItem[] | null {
         cursor -= 1;
         continue;
       }
-      const itemMatch = /^↳(?:\s+(.*)|\s*$)/.exec(activeLine);
+      // An item starts at the block's two-space indent. A deeper row is a
+      // continuation of the item above it, even when its text begins with `↳`,
+      // so classify on the raw indent before trimming.
+      const itemIndent = /^ */.exec(stripCodexQueueGutter(rawLine))?.[0].length ?? 0;
+      const itemMatch = itemIndent < 4 ? /^↳(?:\s+(.*)|\s*$)/.exec(activeLine) : null;
       if (itemMatch) {
         block.unshift({
           rows: [itemMatch[1] ?? "", ...wrappedRows],

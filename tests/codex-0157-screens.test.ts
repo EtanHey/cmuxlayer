@@ -31,6 +31,16 @@ describe("#905 Codex 0.157 queue blocks", () => {
     expect(countVisibleExactQueuedRows(screen, DATE)).toBe(1);
   });
 
+  // Round 2 (review finding 3): an indented `↳` row continues the item above
+  // it; it was never queued on its own.
+  it("treats an indented arrow row as a continuation, not a second item", () => {
+    const screen = "OpenAI Codex\n• Queued follow-up inputs\n  ↳ Other text\n    ↳ Then print the current date.\n\n" +
+      "› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n";
+    expect(screenShowsQueuedAgentInput(screen, DATE, { exact: true })).toBe(false);
+    expect(countVisibleExactQueuedRows(screen, DATE)).toBe(0);
+    expect(screenShowsQueuedAgentInput(screen, `Other text ↳ ${DATE}`)).toBe(true);
+  });
+
   it("keeps the pre-0.157 single steer block working", () => {
     expect(screenShowsQueuedAgentInput(fixture("midturn-steer-queued"), LIST)).toBe(true);
     expect(screenShowsQueuedAgentInput(fixture("midturn-wrapped-steer-queued"), LONG)).toBe(true);
