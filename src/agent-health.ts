@@ -517,6 +517,9 @@ export function evaluateAgentHealth(
     bootUnsubmitted &&
     !TERMINAL_HEALTH_STATES.has(agent.state) &&
     !(screenConfirmedState && TERMINAL_HEALTH_STATES.has(screenConfirmedState));
+  // The mask replaces the screen's `working` verdict, so that verdict is not
+  // reported either: the rendered state is not the screen's (r2).
+  const draftMasked = !bootMasked && input.screen_status === "draft_pending";
   if (bootMasked) {
     addIssue(
       issueCodes,
@@ -525,22 +528,22 @@ export function evaluateAgentHealth(
       "boot prompt not verified as submitted (prompt_delivered is not true); the agent is still booting, not working",
     );
     if (agent.state !== "booting") reconciledState = "booting";
-  } else if (
-    input.screen_status === "draft_pending" &&
-    !TERMINAL_HEALTH_STATES.has(agent.state)
-  ) {
+  } else if (draftMasked) {
     // AIDEV-NOTE (#905): the non-boot twin of #863. live-agent-state keeps a
     // draft out of the ready/idle delivery paths by calling it `working`, but
     // a list row that says `working` told leads an idle Codex pane had picked
     // up a message still sitting in its composer. The row says `idle`, and
-    // this issue says why.
+    // this issue says why. A terminal record keeps its own state: an unsent
+    // draft does not revive a done or errored agent (r2).
     addIssue(
       issueCodes,
       issues,
       "composer_draft_pending",
       "composer holds text that was never submitted; the agent is not working on it",
     );
-    if (agent.state !== "idle") reconciledState = "idle";
+    if (!TERMINAL_HEALTH_STATES.has(agent.state) && agent.state !== "idle") {
+      reconciledState = "idle";
+    }
   } else if (screenConfirmedState && screenConfirmedState !== agent.state) {
     // Reconcile SILENTLY. The screen is authoritative and we are correcting the
     // registry from it right here -- the caller's request succeeded and nothing
@@ -719,7 +722,7 @@ export function evaluateAgentHealth(
     issues,
     ...(issueCodes.length > 0 ? { issue_severities: issueSeverities } : {}),
     ...(reconciledState ? { reconciled_state: reconciledState } : {}),
-    ...(screenConfirmedState
+    ...(screenConfirmedState && !draftMasked
       ? { screen_confirmed_state: screenConfirmedState }
       : {}),
     ...(recommendedActions.length > 0

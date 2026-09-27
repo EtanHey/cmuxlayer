@@ -1044,8 +1044,10 @@ export function registerListAgentsTool(
                   ...toObservedPublicAgent(agent, {
                     derivedAtMs: registryObservedAt,
                     state: reconciledState,
+                    // #905 r2: a masked draft row is not the screen's verdict either.
                     stateSource:
-                      health.screen_confirmed_state && !bootUnsubmitted
+                      health.screen_confirmed_state && !bootUnsubmitted &&
+                      !health.issue_codes.includes("composer_draft_pending")
                         ? "screen"
                         : "registry",
                     screenObservedAtMs: screenObservation?.observed_at_ms,
