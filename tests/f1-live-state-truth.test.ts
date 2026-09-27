@@ -136,7 +136,7 @@ class LiveSurfaceClient {
     const lines = this.screens[surface].split("\n");
     lines.splice(lines.length - 1, 0, /Working/.test(this.screens[surface])
       ? `• Messages to be submitted after next tool call\n  ↳ ${typed}`
-      : typed);
+      : `› ${typed}`);
     this.screens[surface] = lines.join("\n");
   }
 

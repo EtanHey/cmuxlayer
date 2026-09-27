@@ -1179,7 +1179,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const codexSubmitEchoed =
         codexScreen &&
         !hasPendingSubmitEvidence &&
-        (composerInput === null || composerInput.trim() === "") &&
+        composerInput !== null &&
+        composerInput.trim() === "" &&
         codexTranscriptEchoCount(snapshot.text, opts.text) > codexEchoBaseline;
       const bootHasTranscriptEcho =
         opts.require_attributable_submit_evidence === true &&
@@ -1213,12 +1214,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ((opts.require_attributable_submit_evidence !== true &&
           !codexScreen &&
           isSubmitVerifiedStatus(snapshot.parsed.status)) ||
-          bootHasTokenOrCostDelta ||
+          (bootHasTokenOrCostDelta && !codexScreen) ||
           bootHasTranscriptEcho ||
           codexSubmitEchoed ||
           cursorShowsSubmittedResponse)
       ) {
-        const submitEvidence: SubmitEvidence = bootHasTokenOrCostDelta
+        const submitEvidence: SubmitEvidence = bootHasTokenOrCostDelta && !codexScreen
           ? "token_delta"
           : bootHasTranscriptEcho || codexSubmitEchoed || cursorShowsSubmittedResponse
             ? "transcript_echo"
@@ -1897,8 +1898,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     // turns a Return that lands inside it into a newline. Wait until the whole
     // payload has painted before Return. If it never paints, Return still
     // goes out; the transcript-echo verifier and its one retry catch a lost one.
+    // Every route that types text and presses Return (agent relay, surface
+    // mode, background) observes it, not only callers that set the relay
+    // flag (r2). The launcher line and boot keep their own paths.
     const observeCodexPayloadBeforeEnter =
-      opts.require_observed_payload_before_enter === true &&
+      opts.press_enter &&
+      opts.source_event !== "spawn_agent" &&
       !requireObservedPayloadBeforeEnter &&
       deliverySafetySnapshot !== null &&
       inferComposerCli(deliverySafetySnapshot.text, deliverySafetySnapshot.parsed) === "codex";
@@ -1963,7 +1968,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
-        (requireObservedPayloadBeforeEnter || observeCodexPayloadBeforeEnter) && verifySubmit
+        (requireObservedPayloadBeforeEnter ? verifySubmit : observeCodexPayloadBeforeEnter)
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
               workspace: opts.workspace,

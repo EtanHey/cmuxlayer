@@ -1844,8 +1844,10 @@ describe("boot-submit readiness and attributable evidence", () => {
                     ...(opts.interruptAfterReturn
                       ? ["Conversation interrupted"]
                       : []),
-                    "• Read and follow the brief",
+                    // #905: a user row above the (empty) composer, as real Codex renders it.
+                    "› Read and follow the brief",
                     "Working (1s • esc to interrupt)",
+                    "› Ask Codex to do anything",
                     "gpt-5.6-sol high · ~/Gits/cmuxlayer",
                   ].join("\n")
             : opts.payloadAppears &&

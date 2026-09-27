@@ -125,7 +125,10 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       await server._registeredTools.send_to.handler({ agent_id: spawned.agent_id, text, press_enter: true }, {})));
     const keyReturn = (uuid: string) => as(uuid, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "key", surface: spawned.surface_id, text: "return" }, {})));
-    return { pane, context, spawned, send, keyReturn };
+    const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler(
+        { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
+    return { pane, context, spawned, send, keyReturn, surfaceSend };
   }
 
   it("idle: reports submitted only once the message is in the transcript", async () => {
@@ -198,6 +201,53 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       });
       expect(t.pane.submitted[0]).toContain(brief);
       expect(t.spawned.spawn_state, JSON.stringify(t.spawned)).toBe("started");
+    } finally { t.context.dispose(); }
+  }, 30_000);
+  // Round 2 (review findings 1 and 2): the reviewer's integration probes.
+  it("r2: a lost Return plus a new assistant echo stays unsubmitted", async () => {
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: () => fixture("idle-empty").replace("› Ask", "• ok\n\n› Ask"),
+      draft: () => fixture("idle-draft").replace(PONG, "ok"), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("ok");
+      expect(t.pane.submitted).toEqual([]);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("r2: an inline-space edit to the sender's draft revokes its Return", async () => {
+    const own = "review foo bar";
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: () => fixture("idle-draft").replace(PONG, own), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      await t.send(own);
+      t.pane.frames.draft = fixture("idle-draft").replace(PONG, "review foobar");
+      t.pane.text = "review foobar";
+      t.pane.swallow = 0;
+      const before = t.pane.returns;
+      const receipt = await t.keyReturn(LEAD_UUID);
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(t.pane.returns).toBe(before);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // Round 2 (review finding 6): surface-mode and background sends observe the
+  // payload before Return too, so one Return lands after the burst.
+  it.each([false, true])("r2: a surface-mode send (background=%s) waits for the payload before Return", async (background) => {
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("burst-return-placeholder-frame"),
+      draft: fixture("idle-draft"), after: fixture("idle-submitted-working"),
+    });
+    try {
+      const receipt = await t.surfaceSend(PONG, background);
+      expect(receipt.ok, JSON.stringify(receipt)).toBe(true);
+      await vi.waitFor(() => expect(t.pane.submitted).toEqual([PONG]), { timeout: 10_000 });
+      expect(t.pane.returns).toBe(1);
     } finally { t.context.dispose(); }
   }, 30_000);
 });

@@ -121,7 +121,7 @@ class DualCodexSurfaceClient {
     const typed = this.typed[surface];
     if (key !== "return" || !typed) return;
     delete this.typed[surface];
-    this.screens[surface] = this.screens[surface].replace(/codex>$/, `${typed}\ncodex>`);
+    this.screens[surface] = this.screens[surface].replace(/codex>$/, `› ${typed}\ncodex>`);
   }
 
   async readScreen(surface: string, opts?: { lines?: number }) {

@@ -98,7 +98,8 @@ function makeLifecycleExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        readyText = `${pendingText}\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)`;
+        // #905: real Codex keeps the message as a `› ` user row above the composer.
+        readyText = `${pendingText.split("\n").map((line, i) => (i === 0 ? `› ${line}` : line ? `  ${line}` : " ")).join("\n")}\n\nWorking (1s - esc to interrupt)\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\ncodex> `;
         promptPending = false;
         pendingText = "";
         submissionObservationPending = true;

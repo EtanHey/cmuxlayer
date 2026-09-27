@@ -123,6 +123,10 @@ const AGENT_TOOLS = [
   "list_agents",
 ] as const;
 
+/** #905: Codex renders a message as `› first` plus two-space rows. */
+const codexUserRows = (text: string): string =>
+  text.split("\n").map((line, i) => (i === 0 ? `› ${line}` : line ? `  ${line}` : " ")).join("\n");
+
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
@@ -195,7 +199,9 @@ function makeLifecycleExec(opts?: {
         }
         readyText =
           activeCli === "codex"
-            ? `${pendingText}\n${workingText()}`
+            ? // #905: real Codex keeps the message as a `› ` user row above
+              // an empty composer.
+              `>_ OpenAI Codex\n${codexUserRows(pendingText)}\n\n${workingText()}\n\n› \n\n  gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`
             : activeCli === "cursor"
               ? `Cursor Agent\n${pendingText}\nWorking (1s • esc to interrupt)\ncursor> `
               : workingText();
@@ -234,7 +240,7 @@ function makeLifecycleExec(opts?: {
         if (activeCli === "codex") {
           readyText = [
             ">_ OpenAI Codex",
-            `› ${text}`,
+            codexUserRows(text),
             "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
           ].join("\n");
         } else if (activeCli === "cursor") {
@@ -919,7 +925,9 @@ describe("lean spawn tool responses", () => {
       });
       expect(existsSync(worktreePath)).toBe(true);
       expect(screen.parsed.status).toBe("working");
-      expect(screen.content).not.toContain(`› ${prompt}`);
+      // #905: submitted = a transcript row above an empty composer.
+      expect(screen.content).toContain(`› ${prompt}`);
+      expect(screen.content.split("\n").filter((row: string) => row.startsWith("›")).at(-1)).toBe("› ");
     } finally {
       client.stop();
     }
@@ -970,7 +978,9 @@ describe("lean spawn tool responses", () => {
       agent_type: "codex",
       status: "working",
     });
-    expect(screen.content).not.toContain(`› ${prompt}`);
+    // #905: submitted = a transcript row above an empty composer.
+    expect(screen.content).toContain(`› ${prompt}`);
+    expect(screen.content.split("\n").filter((row: string) => row.startsWith("›")).at(-1)).toBe("› ");
   }, 10_000);
 
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {
@@ -2147,7 +2157,7 @@ function makeBroadcastClient(
       // #905: Codex shows the submitted message in its transcript.
       return record?.cli === "claude"
         ? "Claude Code\nWorking\n"
-        : `${pendingTextBySurface.get(surface) ?? ""}\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)`;
+        : `${codexUserRows(pendingTextBySurface.get(surface) ?? "")}\n\nWorking (1s - esc to interrupt)\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\ncodex> `;
     }
     if (record?.cli === "claude") {
       return "Claude Code\nWhat can I help you with?\n>";
@@ -3174,7 +3184,7 @@ describe("agent lifecycle tool handlers", () => {
         text: !pendingBootText
           ? "OpenAI Codex\ncodex> "
           : bootSubmitted
-            ? `${pendingBootText}\nOpenAI Codex\nWorking (1s)`
+            ? `OpenAI Codex\n${codexUserRows(pendingBootText)}\nWorking (1s)\n› \ngpt-5.5 high · ~/repo`
             : `OpenAI Codex\n› ${pendingBootText}\ngpt-5.5 high · ~/repo`,
         lines: 20,
         scrollback_used: false,
@@ -3296,7 +3306,7 @@ describe("agent lifecycle tool handlers", () => {
           text: !pendingBootText
             ? "OpenAI Codex\ncodex> "
             : bootSubmitted
-              ? `${pendingBootText}\nOpenAI Codex\nWorking (1s)`
+              ? `OpenAI Codex\n${codexUserRows(pendingBootText)}\nWorking (1s)\n› \ngpt-5.5 high · ~/repo`
               : `OpenAI Codex\n› ${pendingBootText}\ngpt-5.5 high · ~/repo`,
           lines: 20,
           scrollback_used: false,
@@ -4256,7 +4266,7 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text: promptSubmitted
-              ? `${pastedPrompt}\ngpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)`
+              ? `>_ OpenAI Codex\n${codexUserRows(pastedPrompt)}\n\nWorking (1s • esc to interrupt)\n\n› \n\n  gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`
               : [
                   ">_ OpenAI Codex",
                   `› ${pastedPrompt}`,
@@ -10221,7 +10231,7 @@ codex>
           pendingBootText && !bootSubmitted
             ? `OpenAI Codex\n› ${pendingBootText}\ngpt-5.5 high · ~/repo`
             : bootSubmitted
-              ? `OpenAI Codex\n• ${pendingBootText}\nWorking\n${blockerScreen}`
+              ? `OpenAI Codex\n${codexUserRows(pendingBootText)}\nWorking\n${blockerScreen}`
               : blockerScreen,
         lines: 20,
         scrollback_used: false,
@@ -13233,8 +13243,9 @@ codex>
             : [
                 ">_ OpenAI Codex",
                 "■ Conversation interrupted - tell the model what to do differently",
-                `• ${message}`,
+                `› ${message}`,
                 "Working (1s • esc to interrupt)",
+                "›",
                 "gpt-5.6-sol medium · ~/Gits/brainlayer",
               ].join("\n");
         return {
@@ -13324,8 +13335,9 @@ codex>
             : [
                 ">_ OpenAI Codex",
                 "■ Conversation interrupted - tell the model what to do differently",
-                `• ${message}`,
+                `› ${message}`,
                 "Working (1s • esc to interrupt)",
+                "›",
                 "gpt-5.6-sol medium · ~/Gits/brainlayer",
               ].join("\n");
         return {

@@ -469,13 +469,50 @@ export function composerPromptLineInput(screenText: string, knownCli?: CliType, 
 }
 
 /**
- * Whether a composer region is exactly this payload as the CLI renders it.
+ * Whether Codex's rendering of a message (its first row without the `› `
+ * prefix, then continuation rows) is exactly this payload.
  *
- * AIDEV-NOTE (#905): Codex 0.157 soft-wraps a long draft onto rows indented by
- * two spaces, and indents every row after the first paragraph the same way,
- * so the region never equals the typed text byte for byte. For Codex only,
- * the comparison ignores whitespace. Any other visible character still makes
- * the draft foreign (#802/#636).
+ * AIDEV-NOTE (#905 r2): Codex soft-wraps a long message onto rows indented by
+ * two spaces and indents every row after a paragraph break the same way. Only
+ * those renderer-added breaks are forgiven: each row break may stand for one
+ * space or none (a wrap at a space consumes it; a wrap after a hyphen does
+ * not), and a blank row stands for a paragraph break. Inside a row, text must
+ * match with only runs of spaces collapsed, so `review foobar` never matches
+ * `review foo bar` (#802/#636).
+ */
+function codexRenderedRowsMatch(rows: string[], payload: string): boolean {
+  const squeeze = (text: string) => text.replace(/[ \t]+/g, " ").trim();
+  const paragraphs: string[][] = [[]];
+  for (const row of rows) {
+    if (!row.trim()) {
+      if (paragraphs[paragraphs.length - 1]!.length > 0) paragraphs.push([]);
+      continue;
+    }
+    paragraphs[paragraphs.length - 1]!.push(squeeze(row));
+  }
+  if (paragraphs[paragraphs.length - 1]!.length === 0) paragraphs.pop();
+  if (paragraphs.length === 0) return false;
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = paragraphs
+    .map((paragraph) => paragraph.map(escape).join(" ?"))
+    .join("\n");
+  const expected = normalizeTerminalText(payload)
+    .split(/\n[ \t]*\n\s*/)
+    .map((paragraph) => squeeze(paragraph.replace(/\n/g, " ")))
+    .filter(Boolean)
+    .join("\n");
+  return new RegExp(`^${pattern}$`).test(expected);
+}
+
+/** Composer or transcript rows after the first: drop the two-space wrap indent. */
+function codexContinuationRows(first: string, following: string[]): string[] {
+  return [first, ...following.map((row) => row.replace(/^ {1,2}/, ""))];
+}
+
+/**
+ * Whether a composer region is exactly this payload as the CLI renders it.
+ * For Codex, soft-wrap and paragraph indentation are forgiven; inline text,
+ * including its spaces, must still match (see codexRenderedRowsMatch).
  */
 export function composerRegionMatchesPayload(
   region: string,
@@ -484,31 +521,39 @@ export function composerRegionMatchesPayload(
 ): boolean {
   if (region === normalizeTerminalText(payload).trimEnd()) return true;
   if (cli !== "codex") return false;
-  const compactRegion = region.replace(/\s+/g, "");
-  return compactRegion.length > 0 && compactRegion === payload.replace(/\s+/g, "");
+  const [first = "", ...following] = region.split("\n");
+  return codexRenderedRowsMatch(codexContinuationRows(first, following), payload);
 }
 
 /**
- * How many times this payload appears above the Codex composer: in the
- * transcript, where Codex renders a submitted message as a `› ` row plus
- * two-space continuation rows. The composer is the last prompt row and is
- * excluded; with no composer on screen, the whole frame is searched.
+ * How many Codex user-message rows above the visible composer are exactly
+ * this payload. Codex renders a submitted message as a `› ` row at column 0
+ * plus two-space continuation rows; the composer is the last prompt row. With
+ * no composer on screen, nothing counts.
  *
  * AIDEV-NOTE (#905): this is the Codex submit proof, compared against the
  * pre-type frame. An empty composer is not: when Return lands inside a paste
  * burst, 0.157 briefly paints only its placeholder, then repaints the same
- * text with the Return as a newline. Neither frame shows the text above it.
+ * text with the Return as a newline. Assistant output (`• …`), status chrome
+ * (`Working`, `Thinking`) and queue rows (`↳ …`) are never user rows, so an
+ * assistant that happens to say the payload cannot forge a submit (r2).
  */
 export function codexTranscriptEchoCount(screenText: string, submittedText: string): number {
-  const compactPayload = submittedText.replace(/\s+/g, "");
-  if (!compactPayload) return 0;
+  if (!submittedText.trim()) return 0;
   const lines = normalizeTerminalText(screenText).split("\n");
   let composerIndex = lines.length - 1;
   while (composerIndex >= 0 && !matchComposerPromptLine(lines[composerIndex] ?? "")) composerIndex -= 1;
-  const above = lines.slice(0, composerIndex < 0 ? lines.length : composerIndex).join("").replace(/\s+/g, "");
   let count = 0;
-  for (let at = above.indexOf(compactPayload); at >= 0; at = above.indexOf(compactPayload, at + compactPayload.length)) {
-    count += 1;
+  for (let index = 0; index < composerIndex; index += 1) {
+    const first = /^› (.*)$/.exec(lines[index] ?? "");
+    if (!first) continue;
+    const following: string[] = [];
+    while (index + 1 < composerIndex && /^(?:\s*$| {2}\S)/.test(lines[index + 1] ?? "")) {
+      index += 1;
+      following.push(lines[index] ?? "");
+    }
+    while (following.length > 0 && !following[following.length - 1]!.trim()) following.pop();
+    if (codexRenderedRowsMatch(codexContinuationRows(first[1] ?? "", following), submittedText)) count += 1;
   }
   return count;
 }

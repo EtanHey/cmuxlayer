@@ -46,3 +46,30 @@ describe("#905 Codex submit evidence is the message in the transcript", () => {
     expect(codexTranscriptEchoCount(fixture("midturn-steer-drained-draft-pending"), BRANCH)).toBe(0);
   });
 });
+
+// Round 2 (review findings 1 and 2): the reviewer's direct probes.
+describe("#905 r2: proof is a user-message row; ownership keeps inline spaces", () => {
+  const frame = (body: string) =>
+    `OpenAI Codex\n${body}\n\n› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n`;
+
+  it("never counts assistant output, status chrome, or a frame with no composer", () => {
+    expect(codexTranscriptEchoCount(frame("• ok"), "ok")).toBe(0);
+    expect(codexTranscriptEchoCount(frame("Thinking (1s • esc to interrupt)"), "Thinking")).toBe(0);
+    expect(codexTranscriptEchoCount("OpenAI Codex\n› ok\nWorking (1s • esc to interrupt)", "ok")).toBe(0);
+    expect(codexTranscriptEchoCount(frame("› ok and more"), "ok")).toBe(0);
+    expect(codexTranscriptEchoCount(frame("› ok"), "ok")).toBe(1);
+  });
+
+  it("counts a soft-wrapped user row, including a mid-word hyphen wrap", () => {
+    expect(codexTranscriptEchoCount(fixture("midturn-steer-drained-draft-pending"), LONG)).toBe(1);
+  });
+
+  it("refuses a draft that differs only by an inline space", () => {
+    const draft = (text: string) => `OpenAI Codex\n› ${text}\n  gpt-6-sol medium · ~/Gits/cmuxlayer`;
+    expect(composerHoldsForeignDraft(draft("review foobar"), "review foo bar", { cli: "codex", exact: true })).toBe(true);
+    expect(composerHoldsForeignDraft(draft("review foo bar"), "review foobar", { cli: "codex", exact: true })).toBe(true);
+    expect(composerHoldsForeignDraft(draft("review foo"), "review foo bar", { cli: "codex", exact: true })).toBe(true);
+    expect(composerHoldsForeignDraft(draft("review  foo bar"), "review foo bar", { cli: "codex", exact: true })).toBe(false);
+  });
+});
+

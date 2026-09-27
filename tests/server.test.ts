@@ -178,11 +178,14 @@ const codexComposerFrame = (text: string): string =>
     "gpt-5.6-sol high · ~/Gits/cmuxlayer",
   ].join("\n");
 
+// #905: real Codex keeps a submitted message as a `› ` user row (two-space
+// continuation rows) above its empty composer.
 const codexSubmittedFrame = (text: string): string =>
   [
     "OpenAI Codex",
-    `• ${text}`,
+    text.split("\n").map((line, i) => (i === 0 ? `› ${line}` : line ? `  ${line}` : " ")).join("\n"),
     "Working (1s • esc to interrupt)",
+    "› Ask Codex to do anything",
     "gpt-5.6-sol high · ~/Gits/cmuxlayer",
   ].join("\n");
 
@@ -3286,8 +3289,8 @@ describe("tool handler integration", () => {
             // #905: the submitted command shows in the Codex transcript.
             text: `${mockExec.mock.calls
               .filter(([, a]: [string, string[]]) => a.includes("send"))
-              .map(([, a]: [string, string[]]) => `${a.at(-1)}\n`)
-              .join("")}gpt-5.5 xhigh · 99% left\nWorking (1s • esc to interrupt)`,
+              .map(([, a]: [string, string[]]) => `› ${a.at(-1)}\n`)
+              .join("")}Working (1s • esc to interrupt)\n› \ngpt-5.5 xhigh · 99% left`,
             lines: 30,
             scrollback_used: false,
           }),
@@ -5434,7 +5437,7 @@ describe("tool handler integration", () => {
             text:
               textSent && returnPresses > 0
                 ? // #905: Codex proof is the message above an empty composer.
-                  "OpenAI Codex\nping codex\ncodex> \ngpt-5 · idle\n"
+                  "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · idle\n"
                 : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
             lines: 4,
           }),
@@ -5517,7 +5520,7 @@ describe("tool handler integration", () => {
               surface_ref: "surface:stale-working",
               text:
                 textSent && returnPresses > 0
-                  ? "OpenAI Codex\nping codex\ncodex> \ngpt-5 · idle\n"
+                  ? "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · idle\n"
                   : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
               lines: 4,
             }),
