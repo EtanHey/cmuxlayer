@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, mkdirSync, mkdtempSync, openSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, engineForTests } from "../src/server.js";
@@ -150,8 +151,8 @@ describe("wait_for file-backed done (#808)", () => {
 
     expect(refused.isError).toBe(true);
     const error = parse(refused).error as string;
-    expect(error).toMatch(/coordination dir .*\.cmux/);
     expect(error).toContain(`agents/${AGENT}`);
+    expect(error).toMatch(/live-harness/);
   });
 
   it("refuses a symlink from an allowed root that points outside", async () => {
@@ -163,7 +164,7 @@ describe("wait_for file-backed done (#808)", () => {
     const refused = await waitFor({ agent_id: AGENT, report_path: link, done_marker: "DONE_X", timeout_ms: 1_000 });
 
     expect(refused.isError).toBe(true);
-    expect(parse(refused).error).toMatch(/must resolve under the coordination dir/);
+    expect(parse(refused).error).toMatch(/must resolve under the agent dir/);
   });
 
   it("refuses a report symlinked out of the root after the wait started", async () => {
@@ -177,6 +178,116 @@ describe("wait_for file-backed done (#808)", () => {
     );
 
     expect(parsed.matched).toBe(false);
-    expect(parsed.error).toMatch(/must resolve under the coordination dir/);
+    expect(parsed.error).toMatch(/must resolve under the agent dir/);
+  });
+
+  // #898 item 1: the roots are this agent's own dir and ~/.cmux/live-harness/,
+  // not the whole ~/.cmux tree.
+  it("refuses another agent's report and a file under ~/.cmux/worktrees/", async () => {
+    const other = join(dir, ".cmux", "agents", "someone-else", "report.md");
+    mkdirSync(join(dir, ".cmux", "agents", "someone-else"), { recursive: true });
+    writeFileSync(other, "DONE_X\n");
+    const secret = join(dir, ".cmux", "worktrees", "x", ".env");
+    mkdirSync(join(dir, ".cmux", "worktrees", "x"), { recursive: true });
+    writeFileSync(secret, "DONE_X\n");
+
+    for (const report of [other, secret]) {
+      const refused = await waitFor({ agent_id: AGENT, report_path: report, done_marker: "DONE_X", timeout_ms: 1_000 });
+      expect(refused.isError).toBe(true);
+      expect(parse(refused).error).toMatch(/must resolve under the agent dir/);
+    }
+  });
+
+  it("refuses a symlink from the live-harness root into another agent's dir", async () => {
+    mkdirSync(join(dir, ".cmux", "agents", "someone-else"), { recursive: true });
+    const target = join(dir, ".cmux", "agents", "someone-else", "report.md");
+    writeFileSync(target, "DONE_X\n");
+    mkdirSync(join(dir, ".cmux", "live-harness", "run-1"), { recursive: true });
+    const link = join(dir, ".cmux", "live-harness", "run-1", "w.md");
+    symlinkSync(target, link);
+
+    const refused = await waitFor({ agent_id: AGENT, report_path: link, done_marker: "DONE_X", timeout_ms: 1_000 });
+
+    expect(refused.isError).toBe(true);
+    expect(parse(refused).error).toMatch(/must resolve under the agent dir/);
+  });
+
+  it("refuses an agent_id that walks out of the agents dir", async () => {
+    const secret = join(dir, ".cmux", "worktrees", "x", ".env");
+    mkdirSync(join(dir, ".cmux", "worktrees", "x"), { recursive: true });
+    writeFileSync(secret, "DONE_X\n");
+
+    const refused = await waitFor({ agent_id: "../worktrees", report_path: secret, done_marker: "DONE_X", timeout_ms: 1_000 });
+
+    expect(refused.isError).toBe(true);
+    expect(parse(refused).error).toMatch(/agent_id/);
+  });
+
+  // #898 item 2: a FIFO used to block readFile on a libuv thread forever.
+  it("refuses a FIFO at an allowed path within timeout_ms", async () => {
+    const fifo = join(agentDir, "report.md");
+    execFileSync("mkfifo", [fifo]);
+    const started = Date.now();
+    try {
+      const parsed = parse(
+        await Promise.race([
+          waitFor({ agent_id: AGENT, report_path: fifo, done_marker: "DONE_X", timeout_ms: 1_000 }),
+          new Promise((resolveHang) =>
+            setTimeout(() => resolveHang({ structuredContent: { hung: true } }), 4_000),
+          ),
+        ]),
+      );
+      expect(parsed.hung).toBeUndefined();
+      expect(parsed.matched).toBe(false);
+      expect(parsed.error).toMatch(/not a regular file/);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      // Release a reader blocked in open() (the pre-fix path) so the pool frees.
+      try {
+        closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK));
+      } catch {}
+    }
+  }, 10_000);
+
+  it("refuses a report over the size cap instead of re-reading it every poll", async () => {
+    const report = join(agentDir, "report.md");
+    writeFileSync(report, `${"x".repeat(2 * 1024 * 1024)}\nDONE_X\n`);
+
+    const parsed = parse(
+      await waitFor({ agent_id: AGENT, report_path: report, done_marker: "DONE_X", timeout_ms: 1_000 }),
+    );
+
+    expect(parsed.matched).toBe(false);
+    expect(parsed.error).toMatch(/exceeds/);
+  });
+
+  it("reads only the tail: a long report whose final line is the marker still matches", async () => {
+    const report = join(agentDir, "report.md");
+    writeFileSync(report, `${"line\n".repeat(100_000)}DONE_X\n`);
+
+    const parsed = parse(
+      await waitFor({ agent_id: AGENT, report_path: report, done_marker: "DONE_X", timeout_ms: 1_000 }),
+    );
+
+    expect(parsed.matched).toBe(true);
+  });
+
+  // #898 item 6: error wins. A matched:true is read as a clean done by every
+  // existing consumer, so a failed worker must not produce one.
+  it("an error agent whose report ends with the marker is not matched, and says the marker was seen", async () => {
+    const engine = engineForTests(server)!;
+    const record = { ...engine.getRegistry().get(AGENT)!, state: "error", error: "pane died" } as AgentRecord;
+    engine.getRegistry().set(AGENT, record);
+    const report = join(agentDir, "report.md");
+    writeFileSync(report, "DONE_X\n");
+
+    const parsed = parse(
+      await waitFor({ agent_id: AGENT, report_path: report, done_marker: "DONE_X", timeout_ms: 1_000 }),
+    );
+
+    expect(parsed.matched).toBe(false);
+    expect(parsed.state).toBe("error");
+    expect(parsed.report_marker_seen).toBe(true);
+    expect(parsed.error).toBe("pane died");
   });
 });

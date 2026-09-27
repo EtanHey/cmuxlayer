@@ -20,11 +20,21 @@ Before any worker, the runner:
   whose socket already exists is inherited, and the installed stable and nightly
   sockets are always installed. The runner stops only a daemon it started, by its
   recorded PID, even when the run goes red; it never signals an inherited or
-  installed daemon.
+  installed daemon. The proxy spawns that daemon detached, so it outlives the
+  runner: the runner sets `CMUXLAYER_DAEMON_PID_RECEIPT=<root>/daemon-pids.txt`,
+  the spawner records each PID it starts there, and the runner stops exactly
+  those PIDs, even when preflight fails before `control_health`. The receipt is
+  the only authority: with no valid receipt PID nothing is signalled
+  (`stop_skipped:"no_receipt"`, `started_by_run:false`), never the PID
+  `control_health` reports. Before each SIGTERM the runner re-reads the PID's
+  command line, which must be exactly `<node> <this build's dist>/daemon.js`;
+  anything else is skipped (`stop_skipped:"pid_reused"`).
 - `--installed-daemon` **opts out of the build check**: the run proves the
   installed daemon, not this build. The artifact's daemon block then says
   `private:false, from_this_build:false, build_check:"opted_out"`, and the run
-  does not fail for `daemon_not_from_this_build`.
+  does not fail for `daemon_not_from_this_build`. It uses the installed stable
+  socket even when `CMUXLAYER_DAEMON_SOCKET` is inherited; only an explicit
+  `--daemon-socket` overrides it.
 - PREFLIGHT, before any `spawn_agent`: checks `tools/list` for every tool it
   calls (`spawn_agent`, `list_agents`, `list_surfaces`, `wait_for`,
   `close_surface`, `control_health`) and fails red naming any that are missing;
@@ -39,20 +49,24 @@ Before any worker, the runner:
 For each sequential worker the runner:
 
 1. writes a tiny read-only goal file naming the worker's report path under the
-   coordination root (`~/.cmux/live-harness/<run>/<worker>.report.md`)
+   coordination root (`~/.cmux/live-harness/<run>-<hash of the full root>/<worker>.report.md`,
+   so two runs whose roots share a basename never share a report dir)
 2. calls `spawn_agent` with `boot_prompt_path` and that `report_path`
 3. spawns the worker with a sandboxed MCP profile by default
 4. verifies managed id / launcher-model policy
 5. captures verbose `list_surfaces` topology (`selected`, `column`, `column_count`)
 6. waits for file-backed DONE via `wait_for({agent_id, report_path, done_marker})`
    on the `report_path` the `spawn_agent` receipt issued: it matches when the
-   report's final non-empty line equals the marker. `wait_for` reads only a path
-   that, after symlinks resolve, sits under `~/.cmux/` or
-   `~/.cmux/agents/<agent_id>/`; anything else is refused. A sterile
+   report's final non-empty line equals the marker. `wait_for` reads only a
+   regular file of at most 1 MiB that, after symlinks resolve, sits under
+   `~/.cmux/agents/<agent_id>/` or `~/.cmux/live-harness/`; anything else
+   (another agent's report, `~/.cmux/worktrees/`, a FIFO) is refused. An agent
+   in `error` never matches, even if its report ends with the marker. A sterile
    worker is never told the engine's own report path (#782), so the registry may
    stay `ready`; the file is the done signal (#808). The wait runs in 120 s
    slices up to `--wait-timeout-ms`, because the daemon-first proxy fails any
-   single request at 300 s
+   single request at 300 s. Only a slice that timed out starts another one; a
+   terminal non-match (an agent in `error`, a refused report) ends the wait
 7. copies the report into `reports/<worker>.md` and harvests the marker
 8. stops the worker and closes its pane: `close_surface({agent_id, scope:"agent", force:true})`.
    The harness owns the dummy and has harvested its report; a plain surface close is
@@ -178,7 +192,8 @@ Under `--root`:
 - `reports/<worker>.md` (copied from the issued report path)
 - `mcp-run-results.json`: includes `daemon` (`socket_path`, `private`,
   `started_by_run`, `installed_socket`, `build_check`, `version`, `binary`, `pid`,
-  `expected_dist`, `from_this_build`, `stopped`), `preflight` (`tools`, `missing`,
+  `expected_dist`, `from_this_build`, `spawned_pids`, `stopped`, `stopped_pids`,
+  `stop_skipped`), `preflight` (`tools`, `missing`,
   `caller_depth`) and, on a run-level failure, `error`
 - `run-report.md`: includes a `## Daemon` section and, on failure, `## Run error`
 

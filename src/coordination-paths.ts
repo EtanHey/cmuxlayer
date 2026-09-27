@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { constants, mkdirSync, writeFileSync } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
@@ -376,14 +376,21 @@ export const COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED =
   "refreshed_not_redelivered: the spawn contract file at contract_path was rewritten on resume (identical bytes -- both strings derive from agent_id alone), and report_path/done_marker are re-issued and re-persisted. The boot POINTER was NOT re-typed into the resuming pane: `--resume` restores the prior session, which already contains it, and typing into a pane mid-resume is a delivery-path change this did not make. If the resumed session did NOT restore its context, the LEAD must point the worker at contract_path.";
 
 // ---------------------------------------------------------------------------
-// H1 round 2 (#889): wait_for's file-backed done may only read a report the
-// coordination layer owns. "Absolute" alone let any caller point it at any file
-// on the machine and have its final line echoed back.
+// H1 round 2 (#889), narrowed in #898: wait_for's file-backed done may only
+// read a report the coordination layer issued for THIS agent. "Absolute" alone
+// let any caller point it at any file on the machine and have its final line
+// echoed back; the whole ~/.cmux tree still admitted other agents' reports and
+// gitignored files inside ~/.cmux/worktrees/.
 // ---------------------------------------------------------------------------
 
 /** The coordination root: what `~/.cmux/` is, before symlink resolution. */
 export function coordinationRootDir(): string {
   return join(homedir(), ".cmux");
+}
+
+/** Where the live harness issues its workers' reports (#889). */
+export function liveHarnessReportDir(): string {
+  return join(coordinationRootDir(), "live-harness");
 }
 
 /**
@@ -416,25 +423,140 @@ export type ReportPathContainment =
 
 /**
  * A report path is readable only when, after resolving symlinks, it sits under
- * the coordination root or under this agent's own channel dir. No allow-list
- * and no env override: the two roots are the whole policy.
+ * this agent's own channel dir or the live-harness dir. No allow-list and no
+ * env override: the two roots are the whole policy (#898).
  */
 export async function containReportPath(
   reportPath: string,
   agentId: string,
   opts?: InboxOpts,
 ): Promise<ReportPathContainment> {
+  // agentDir joins the id, so "../worktrees" would name a sibling of the
+  // agents dir as "this agent's" root.
+  if (agentId.length === 0 || agentId === "." || agentId === ".." || agentId.includes("/") || agentId.includes(sep)) {
+    return {
+      ok: false,
+      resolved: reportPath,
+      reason: `wait_for agent_id must be a single path segment to scope report_path: ${agentId}`,
+    };
+  }
   const resolved = await resolveThroughSymlinks(reportPath);
-  const coordinationRoot = await resolveThroughSymlinks(coordinationRootDir());
   const agentRoot = await resolveThroughSymlinks(agentDir(agentId, opts));
-  if (isWithin(resolved, coordinationRoot) || isWithin(resolved, agentRoot)) {
+  const harnessRoot = await resolveThroughSymlinks(liveHarnessReportDir());
+  if (isWithin(resolved, agentRoot) || isWithin(resolved, harnessRoot)) {
     return { ok: true, resolved };
   }
   return {
     ok: false,
     resolved,
     reason:
-      `wait_for report_path must resolve under the coordination dir ${coordinationRoot}${sep} ` +
-      `or the agent dir ${agentRoot}${sep}; ${reportPath} resolves to ${resolved}`,
+      `wait_for report_path must resolve under the agent dir ${agentRoot}${sep} ` +
+      `or the live-harness dir ${harnessRoot}${sep}; ${reportPath} resolves to ${resolved}`,
   };
+}
+
+/** A report larger than this is refused rather than polled (#898). */
+export const REPORT_READ_MAX_BYTES = 1024 * 1024;
+/** Only this much of the file's end is read: the final line lives there. */
+export const REPORT_READ_TAIL_BYTES = 64 * 1024;
+
+export type ReportTailRead =
+  | { ok: true; text: string | undefined }
+  | { ok: false; reason: string };
+
+/**
+ * #903 round 2 (P1): open() resolves the path again, so a parent directory
+ * swapped for a symlink between containment and open lands the read outside
+ * the roots. Node has no openat(), so the OPENED handle is proven instead: every
+ * ancestor of the canonical path must still be a real directory (not a
+ * symlink), and the leaf must be the very inode the handle holds. A swap before
+ * open either leaves a symlink ancestor or a different inode at the path.
+ */
+async function handleIsAtPath(
+  resolved: string,
+  handleStat: { dev: number; ino: number },
+): Promise<boolean> {
+  const parts = resolved.split(sep).filter((part) => part.length > 0);
+  let current: string = sep;
+  for (const [index, part] of parts.entries()) {
+    current = join(current, part);
+    const stat = await lstat(current).catch(() => undefined);
+    if (!stat || stat.isSymbolicLink()) return false;
+    if (index < parts.length - 1) {
+      if (!stat.isDirectory()) return false;
+    } else if (stat.dev !== handleStat.dev || stat.ino !== handleStat.ino) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const NEWLINE = 0x0a;
+
+/**
+ * Read the tail of a contained report without ever blocking (#898 item 2).
+ * O_NONBLOCK makes open() return at once on a FIFO, O_NOFOLLOW refuses a
+ * symlinked leaf, and fstat on the open handle -- not a separate stat --
+ * decides "regular file". A missing file is "not written yet".
+ *
+ * The returned text starts on a line boundary, so its final non-empty line is
+ * the file's (#903 round 2, P2): the byte before the tail decides whether the
+ * tail's first line is whole, and a final line that does not fit in the tail
+ * is refused rather than matched from a fragment.
+ */
+export async function readReportTail(resolved: string): Promise<ReportTailRead> {
+  let handle;
+  try {
+    handle = await open(
+      resolved,
+      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { ok: true, text: undefined };
+    return { ok: false, reason: `wait_for report_path could not be opened (${code ?? "error"}): ${resolved}` };
+  }
+  try {
+    const stat = await handle.stat();
+    if (!(await handleIsAtPath(resolved, stat))) {
+      return {
+        ok: false,
+        reason: `wait_for report_path changed while it was opened (a symlinked or swapped component): ${resolved}`,
+      };
+    }
+    if (!stat.isFile()) {
+      return { ok: false, reason: `wait_for report_path is not a regular file: ${resolved}` };
+    }
+    if (stat.size > REPORT_READ_MAX_BYTES) {
+      return {
+        ok: false,
+        reason: `wait_for report_path exceeds ${REPORT_READ_MAX_BYTES} bytes (${stat.size}): ${resolved}`,
+      };
+    }
+    const length = Math.min(stat.size, REPORT_READ_TAIL_BYTES);
+    const start = stat.size - length;
+    // One extra byte before the tail says whether its first line is whole.
+    const readStart = start > 0 ? start - 1 : 0;
+    const buffer = Buffer.alloc(length + (start > 0 ? 1 : 0));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, readStart);
+    let body = buffer.subarray(0, bytesRead);
+    if (start > 0) {
+      const precededByNewline = body[0] === NEWLINE;
+      body = body.subarray(1);
+      if (!precededByNewline) {
+        const firstNewline = body.indexOf(NEWLINE);
+        body = firstNewline < 0 ? body.subarray(body.length) : body.subarray(firstNewline + 1);
+      }
+    }
+    const text = body.toString("utf8");
+    if (start > 0 && text.trim().length === 0) {
+      return {
+        ok: false,
+        reason: `wait_for report_path's final line is not within its last ${REPORT_READ_TAIL_BYTES} bytes: ${resolved}`,
+      };
+    }
+    return { ok: true, text };
+  } finally {
+    await handle.close();
+  }
 }

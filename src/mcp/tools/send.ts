@@ -4,10 +4,9 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { reportMarkerMatches } from "../../live-agent-harness.js";
-import { containReportPath } from "../../coordination-paths.js";
+import { containReportPath, readReportTail } from "../../coordination-paths.js";
 import type { InboxOpts } from "../../inbox.js";
 import { toPublicAgent } from "../../agent-facade.js";
 import { RetryableDeliveryError } from "../../agent-engine.js";
@@ -115,7 +114,12 @@ export function registerWaitForTool(
       throw new Error(`Agent not found: ${agentId}`);
     }
     const startedAt = Date.now();
-    const snapshot = (matched: boolean, source: "report_file" | "timeout" | "immediate", error?: string) => {
+    const snapshot = (
+      matched: boolean,
+      source: "report_file" | "timeout" | "immediate",
+      error?: string,
+      extra?: { report_marker_seen: boolean },
+    ) => {
       const agent = registry.get(agentId);
       return {
         matched,
@@ -126,6 +130,7 @@ export function registerWaitForTool(
         done_marker: doneMarker,
         agent: agent ? toPublicAgent(agent) : undefined,
         ...(error ? { error } : {}),
+        ...extra,
       };
     };
     while (true) {
@@ -135,12 +140,23 @@ export function registerWaitForTool(
       if (!contained.ok) {
         return snapshot(false, "immediate", contained.reason);
       }
-      const text = await readFile(contained.resolved, "utf8").catch(() => undefined);
-      if (reportMarkerMatches(text, doneMarker)) {
-        return snapshot(true, "report_file");
+      // #898: never a blocking or unbounded read -- a FIFO or a huge file is
+      // refused here instead of hanging a libuv worker past timeout_ms.
+      const read = await readReportTail(contained.resolved);
+      if (!read.ok) {
+        return snapshot(false, "immediate", read.reason);
       }
+      const markerSeen = reportMarkerMatches(read.text, doneMarker);
+      // #898 item 6: error wins. matched:true reads as a clean done to every
+      // existing consumer, so a failed worker never produces one; the caller
+      // still learns the report ended with the marker.
       if (registry.get(agentId)?.state === "error") {
-        return snapshot(false, "immediate", registry.get(agentId)?.error ?? "Agent is in error state");
+        return snapshot(false, "immediate", registry.get(agentId)?.error ?? "Agent is in error state", {
+          report_marker_seen: markerSeen,
+        });
+      }
+      if (markerSeen) {
+        return snapshot(true, "report_file");
       }
       if (Date.now() - startedAt >= timeoutMs) {
         return snapshot(false, "timeout");
@@ -197,7 +213,7 @@ export function registerWaitForTool(
         .string()
         .optional()
         .describe(
-          "With done_marker and agent_id: file-backed done. Matches when this ABSOLUTE file's final non-empty line equals done_marker, the same report contract spawn_agent issues. After symlinks resolve it must sit under ~/.cmux/ or ~/.cmux/agents/<agent_id>/, else refused.",
+          "With done_marker and agent_id: file-backed done. Matches when this ABSOLUTE file's final non-empty line equals done_marker, the same report contract spawn_agent issues. After symlinks resolve it must be a regular file (max 1 MiB) under ~/.cmux/agents/<agent_id>/ or ~/.cmux/live-harness/, else refused. An agent in error never matches.",
         ),
       done_marker: z
         .string()
