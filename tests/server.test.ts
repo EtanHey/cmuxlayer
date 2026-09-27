@@ -6017,7 +6017,7 @@ describe("tool handler integration", () => {
           string
         >;
       };
-      const workerLauncherCommand = withRaisedNofileSoftLimit(fixture.launcher_command.replace(
+      const workerLauncherCommand = withRaisedNofileSoftLimit("GOLEM_ROLE=worker " + fixture.launcher_command.replace(
         " -s ",
         " -s --worker ",
       ));
@@ -6353,7 +6353,7 @@ describe("tool handler integration", () => {
       corrupted_command: string;
       screen: string;
     };
-    const workerLauncherCommand = withRaisedNofileSoftLimit(`${fixture.launcher_command} --worker`);
+    const workerLauncherCommand = withRaisedNofileSoftLimit(`GOLEM_ROLE=worker ${fixture.launcher_command} --worker`);
 
     let composer = "";
     let launcherSendAttempts = 0;
@@ -6532,7 +6532,7 @@ describe("tool handler integration", () => {
         pending_probe_screen: string;
       };
     };
-    const workerLauncherCommand = withRaisedNofileSoftLimit(`${fixture.launcher_command} --worker`);
+    const workerLauncherCommand = withRaisedNofileSoftLimit(`GOLEM_ROLE=worker ${fixture.launcher_command} --worker`);
     const workerCorruptedCommand =
       workerLauncherCommand + workerLauncherCommand;
     const workerPendingProbeScreen = fixture.replay.pending_probe_screen.replace(

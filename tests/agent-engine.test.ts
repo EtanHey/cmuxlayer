@@ -851,7 +851,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe(withRaisedNofileSoftLimit("brainlayerClaude -s -S"));
+      expect(launchCmd).toBe(withRaisedNofileSoftLimit("GOLEM_ROLE=worker brainlayerClaude -s -S"));
     });
 
     it("launches with the launcher name resolved by preflight", async () => {
@@ -873,7 +873,7 @@ describe("AgentEngine", () => {
 
       const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
-      expect(launchCmd).toBe(withRaisedNofileSoftLimit("agenthtmlhostCursor -s"));
+      expect(launchCmd).toBe(withRaisedNofileSoftLimit("GOLEM_ROLE=worker agenthtmlhostCursor -s"));
       const state = resolvingEngine.getAgentState(result.agent_id);
       expect(state?.launcher_name).toBe("agenthtmlhostCursor");
       expect(state?.launch_cwd).toBe("/home/test-user/Gits/agent-html-host");
@@ -13817,7 +13817,7 @@ Session ID: ${sessionId}`,
           .calls[0];
         expect(launchCmd).toBe(withRaisedNofileSoftLimit(
           `cd '${join(repoHome, "freshrepo")}' && ` +
-            "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
+            "GOLEM_ROLE=worker MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
         ));
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBeNull();
@@ -13880,7 +13880,7 @@ Session ID: ${sessionId}`,
 
         const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(launchCmd).toBe(withRaisedNofileSoftLimit("mmClaude -s"));
+        expect(launchCmd).toBe(withRaisedNofileSoftLimit("GOLEM_ROLE=worker mmClaude -s"));
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBe("mmClaude");
         expect(state?.launch_cwd).toBe(registeredRoot);
@@ -16574,7 +16574,7 @@ describe("buildLaunchCommand", () => {
       buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
         authority: "worker",
       }),
-    ).toBe("brainlayerCodex -s --worker");
+    ).toBe("GOLEM_ROLE=worker brainlayerCodex -s --worker");
   });
 
   it("leaves lead-authority Codex launches out of launcher worker mode", () => {
