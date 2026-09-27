@@ -151,6 +151,8 @@ class FakeClaudeSurfaceClient {
   postReturnScreenText: string | null = null;
   postReturnPendingScreenText: string | null = null;
   private pendingText = "";
+  /** Submitted messages: real Codex keeps each as a `› ` transcript row (#905). */
+  private codexTranscript: string[] = [];
   private returnCount = 0;
   private queuedCodexReadsRemaining = 0;
   private mode: "idle" | "working" = "idle";
@@ -254,6 +256,7 @@ class FakeClaudeSurfaceClient {
     this.returnCount += 1;
     this.queuedCodexReadsRemaining = this.queuedCodexReadsAfterReturn;
     if (this.returnCount >= this.requiredReturns) {
+      if (this.cli === "codex") this.codexTranscript.push(this.pendingText);
       this.pendingText = "";
       this.mode = this.completionMode;
       return;
@@ -344,9 +347,11 @@ class FakeClaudeSurfaceClient {
         return `OpenAI Codex\n${status}\n\n${renderedHeading}\n${renderedItem}\n\n› \n\n  gpt-5.6-sol xhigh`;
       }
       if (!this.pendingText && this.staleCodexQueueTranscriptAfterReturn) {
-        return `OpenAI Codex\n\n› Quote this historical UI exactly:\n  Messages to be submitted after next tool call\n    ↳ already submitted transcript text\n\n• The quoted lines above are transcript prose, not live queue chrome.\n\n${status}\n\n› \n\n  gpt-5.6-sol xhigh`;
+        const transcript = this.codexTranscript.map((sent) => `› ${sent}\n\n`).join("");
+        return `OpenAI Codex\n\n› Quote this historical UI exactly:\n  Messages to be submitted after next tool call\n    ↳ already submitted transcript text\n\n• The quoted lines above are transcript prose, not live queue chrome.\n\n${transcript}${status}\n\n› \n\n  gpt-5.6-sol xhigh`;
       }
-      return `OpenAI Codex\n${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
+      const transcript = this.codexTranscript.map((sent) => `› ${sent}\n\n`).join("");
+      return `OpenAI Codex\n${transcript}${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
     }
 
     if (this.mode === "working") {
@@ -712,7 +717,7 @@ describe("enter reliability", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.delivery).toBe("submitted");
     expect(parsed.submit_verified).toBe(true);
-    expect(parsed.submit_evidence).toBe("cleared_composer");
+    expect(parsed.submit_evidence).toBe("transcript_echo");
     expect(parsed.retry_count).toBe(1);
     expect(client.sendCalls.join("")).toBe(text);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
@@ -2341,7 +2346,13 @@ describe("enter reliability", () => {
   it.each([
     {
       cli: "codex" as const,
-      screen: CODEX_PLACEHOLDER_SCREEN,
+      // #905: an empty Codex composer alone is not submit proof; the message
+      // must also be in the transcript, as real Codex renders it.
+      screen: CODEX_PLACEHOLDER_SCREEN.replace(
+        "\n› Implement {feature}",
+        "\n› new codex request after placeholder\n\n› Implement {feature}",
+      ),
+      before: CODEX_PLACEHOLDER_SCREEN,
       placeholder: "Implement {feature}",
     },
     {
@@ -2351,11 +2362,12 @@ describe("enter reliability", () => {
     },
   ])(
     "treats the real $cli placeholder composer as cleared submit evidence",
-    async ({ cli, screen, placeholder }) => {
+    async ({ cli, screen, placeholder, ...rest }) => {
       const client = new FakeClaudeSurfaceClient();
       client.requiredReturns = 1;
       client.cli = cli;
       client.postReturnScreenText = screen;
+      if ("before" in rest) client.preReturnScreenText = rest.before;
       server = createReliabilityServer(client);
       registerAgent(server, { state: "ready", cli });
 
