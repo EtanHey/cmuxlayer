@@ -143,13 +143,17 @@ describe("launch authority controls the worker persona gate", () => {
   const clis = ["claude", "codex", "cursor", "gemini", "kiro"] as const;
   for (const launchMode of ["launcher", "raw"] as const) {
     for (const cli of clis) {
-      it(`${launchMode} ${cli} workers carry GOLEM_ROLE without unsupported flags`, () => {
+      it(`${launchMode} ${cli} workers preserve the intended persona and effort policy`, () => {
         const command = buildLaunchCommand(cli, "alpha", undefined, undefined, {
           authority: "worker",
           launchMode,
           envPrefix: "CALLER_ENV=kept",
         });
-        expect(command).toContain("GOLEM_ROLE=worker ");
+        if (cli === "claude") {
+          expect(command).not.toContain("GOLEM_ROLE");
+        } else {
+          expect(command).toContain("GOLEM_ROLE=worker ");
+        }
         expect(command).toContain("CALLER_ENV=kept ");
         if (cli === "codex" && launchMode === "launcher") {
           expect(command).toContain(" --worker");

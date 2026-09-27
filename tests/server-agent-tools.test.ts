@@ -3914,7 +3914,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.requested_model).toBe("");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", withRaisedNofileSoftLimit("GOLEM_ROLE=worker brainlayerClaude -s")]),
+      expect.arrayContaining(["send", withRaisedNofileSoftLimit("brainlayerClaude -s")]),
     );
 
     const stateTool = agentStateTool(server);

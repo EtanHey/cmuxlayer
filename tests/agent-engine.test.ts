@@ -851,7 +851,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe(withRaisedNofileSoftLimit("GOLEM_ROLE=worker brainlayerClaude -s -S"));
+      expect(launchCmd).toBe(withRaisedNofileSoftLimit("brainlayerClaude -s -S"));
     });
 
     it("launches with the launcher name resolved by preflight", async () => {
@@ -13817,7 +13817,7 @@ Session ID: ${sessionId}`,
           .calls[0];
         expect(launchCmd).toBe(withRaisedNofileSoftLimit(
           `cd '${join(repoHome, "freshrepo")}' && ` +
-            "GOLEM_ROLE=worker MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
+            "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
         ));
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBeNull();
@@ -13880,7 +13880,7 @@ Session ID: ${sessionId}`,
 
         const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(launchCmd).toBe(withRaisedNofileSoftLimit("GOLEM_ROLE=worker mmClaude -s"));
+        expect(launchCmd).toBe(withRaisedNofileSoftLimit("mmClaude -s"));
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBe("mmClaude");
         expect(state?.launch_cwd).toBe(registeredRoot);
