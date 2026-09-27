@@ -569,6 +569,38 @@ export function harnessDaemonPidsFromReceipt(text: string | null | undefined): n
   return pids;
 }
 
+/**
+ * The exact launch argv the spawner recorded per PID (`{"pid","argv"}` lines
+ * beside the bare PID lines). Malformed lines are ignored; a PID's first
+ * well-formed launch wins.
+ */
+export function harnessDaemonLaunchesFromReceipt(
+  text: string | null | undefined,
+): Map<number, string[]> {
+  const launches = new Map<number, string[]>();
+  for (const line of (text ?? "").split(/\r?\n/)) {
+    if (!line.trim().startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line) as { pid?: unknown; argv?: unknown };
+      const { pid, argv } = parsed;
+      if (
+        typeof pid === "number" &&
+        Number.isInteger(pid) &&
+        pid > 0 &&
+        Array.isArray(argv) &&
+        argv.length > 0 &&
+        argv.every((arg) => typeof arg === "string" && arg.length > 0) &&
+        !launches.has(pid)
+      ) {
+        launches.set(pid, argv as string[]);
+      }
+    } catch {
+      // not a launch line
+    }
+  }
+  return launches;
+}
+
 export type FinalizedHarnessDaemon = HarnessDaemonBlock & {
   spawned_pids?: number[];
   stopped?: boolean;
@@ -613,6 +645,10 @@ export function finalizeHarnessDaemon(
   block.stopped_pids = [];
   if (spawned.length === 0) block.stop_skipped = "no_receipt";
   const daemonScript = `${resolve(input.distDir)}/daemon.js`;
+  // #907 r2: a custom --server-command runs the proxy, and so the daemon, on
+  // its own node. The receipt's recorded launch for a PID is its identity;
+  // without one, the default launch of this runner's node and dist.
+  const launches = harnessDaemonLaunchesFromReceipt(input.receiptText);
   const commandOf = deps.commandOf ?? processCommand;
   const kill = deps.kill ?? process.kill;
   for (const pid of spawned) {
@@ -623,7 +659,11 @@ export function finalizeHarnessDaemon(
       block.stop_skipped ??= "not_running";
       continue;
     }
-    if (!commandRunsDaemon(command, daemonScript, input.nodeExecutable)) {
+    const launch = launches.get(pid);
+    const matches = launch
+      ? command === launch.join(" ")
+      : commandRunsDaemon(command, daemonScript, input.nodeExecutable);
+    if (!matches) {
       block.stop_skipped ??= "pid_reused";
       continue;
     }

@@ -4,6 +4,8 @@ const race = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | (() => void),
   afterOpen: undefined as undefined | (() => void),
   afterLstat: undefined as undefined | ((path: unknown) => void),
+  beforeOpenTarget: undefined as string | undefined,
+  afterOpenTarget: undefined as string | undefined,
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -12,13 +14,21 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     race.afterLstat?.(args[0]);
     return stat;
   }, open: async (...args: Parameters<typeof actual.open>) => {
-    const swap = race.beforeOpen;
-    race.beforeOpen = undefined;
+    // #907 r2: a hook may target one path (e.g. Linux's per-component walk);
+    // an untargeted hook fires on the first open, as before.
+    const hit = (target: string | undefined) => !target || String(args[0]).endsWith(target);
+    const swap = hit(race.beforeOpenTarget) ? race.beforeOpen : undefined;
+    if (swap) race.beforeOpen = undefined;
     swap?.();
     const handle = await actual.open(...args);
-    const restore = race.afterOpen;
-    race.afterOpen = undefined;
-    restore?.();
+    const restore = hit(race.afterOpenTarget) ? race.afterOpen : undefined;
+    if (restore) race.afterOpen = undefined;
+    try {
+      restore?.();
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
     return handle;
   }};
 });
@@ -117,6 +127,15 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
   });
 
   afterEach(() => {
+    // #907 r2 hygiene: a hook left armed by a refused open must not fire in a
+    // later test (it used to, and leaked that test's handle).
+    Object.assign(race, {
+      beforeOpen: undefined,
+      afterOpen: undefined,
+      afterLstat: undefined,
+      beforeOpenTarget: undefined,
+      afterOpenTarget: undefined,
+    });
     engineForTests(server)?.dispose?.();
     process.env.HOME = savedHome;
     rmSync(dir, { recursive: true, force: true });
@@ -222,6 +241,40 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
     expect(reportMarkerMatches((await readReportTail(report) as { text?: string }).text, "DONE_X")).toBe(true);
     writeFileSync(report, "z".repeat(REPORT_READ_TAIL_BYTES + 10) + "DONE_X\n");
     expect(await readReportTail(report)).toMatchObject({ ok: false, reason: expect.stringMatching(/final line is not within/) });
+  });
+
+  // #907 r2 (CodeRabbit 4115181449): schedule the swap at the component that
+  // matters on each platform. On Linux the walk opens ".../nested" through the
+  // held parent fd; on macOS the single open is of the report itself.
+  it("refuses a parent swapped right before its own component is opened, and never reads outside after acquiring it", async () => {
+    const parent = join(agentDir, "nested");
+    mkdirSync(parent);
+    const report = join(parent, "report.md");
+    writeFileSync(report, "still working\n");
+    writeFileSync(join(outside, "report.md"), "OUTSIDE_SENTINEL_907\n");
+    const swapIn = () => {
+      renameSync(parent, parent + "-old");
+      symlinkSync(outside, parent);
+    };
+    const target = process.platform === "linux" ? "/nested" : "/nested/report.md";
+
+    race.beforeOpenTarget = target;
+    race.beforeOpen = swapIn;
+    const refused = parse(await waitFor({ agent_id: AGENT, report_path: report, done_marker: "OUTSIDE_SENTINEL_907", timeout_ms: 600 }));
+    expect(refused.matched).toBe(false);
+    expect(refused.error).toMatch(/symlinked component|could not be opened/);
+
+    // Restore, then swap only AFTER the nested component is held (Linux): the
+    // leaf is opened relative to the held real directory, never the symlink.
+    rmSync(parent);
+    renameSync(parent + "-old", parent);
+    if (process.platform === "linux") {
+      race.afterOpenTarget = "/nested";
+      race.afterOpen = swapIn;
+      const held = parse(await waitFor({ agent_id: AGENT, report_path: report, done_marker: "OUTSIDE_SENTINEL_907", timeout_ms: 600 }));
+      expect(held.matched).toBe(false);
+      expect(held.error ?? "").not.toMatch(/OUTSIDE/);
+    }
   });
 
   it("REVIEW must preserve a complete marker exactly at tail boundary", async () => {

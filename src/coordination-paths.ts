@@ -1,6 +1,6 @@
 import { constants, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { open, realpath, type FileHandle } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdir, mkdtemp, open, realpath, rm, symlink, writeFile, type FileHandle } from "node:fs/promises";
+import { homedir, release, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
 import { shellQuote } from "./shell-safe.js";
@@ -472,6 +472,50 @@ const O_NOFOLLOW_ANY_DARWIN = 0x20000000;
 
 const REPORT_LEAF_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW;
 
+/**
+ * #907 r2 (P2): a kernel that predates O_NOFOLLOW_ANY (macOS < 11, Darwin < 20)
+ * does not reject the unknown bit -- XNU's open1() ignores it and FOLLOWS
+ * symlinks, which would silently turn the secure open into a plain one. So
+ * the flag is trusted only after it is seen working, once per process: in a
+ * scratch dir, a plain file must open with the flag and the same file through
+ * a symlinked parent must fail with ELOOP. Anything else means unsupported,
+ * and file-backed done is refused -- never a fallback to a plain open.
+ */
+let noFollowAnyProbe: Promise<boolean> | undefined;
+
+async function probeNoFollowAny(): Promise<boolean> {
+  if (Number.parseInt(release().split(".")[0] ?? "", 10) < 20) return false;
+  let dir: string | undefined;
+  try {
+    dir = await realpath(await mkdtemp(join(tmpdir(), "cmuxlayer-nofollow-probe-")));
+    await mkdir(join(dir, "real"));
+    await writeFile(join(dir, "real", "f"), "");
+    await symlink(join(dir, "real"), join(dir, "link"));
+    const flags = constants.O_RDONLY | constants.O_NONBLOCK | O_NOFOLLOW_ANY_DARWIN;
+    await (await open(join(dir, "real", "f"), flags)).close();
+    try {
+      await (await open(join(dir, "link", "f"), flags)).close();
+      return false; // followed the symlink: the bit was ignored
+    } catch (error) {
+      return errnoCode(error) === "ELOOP";
+    }
+  } catch {
+    return false;
+  } finally {
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function noFollowAnySupported(): Promise<boolean> {
+  noFollowAnyProbe ??= probeNoFollowAny();
+  return noFollowAnyProbe;
+}
+
+/** Test seam: re-run the capability probe (each fault model needs a fresh one). */
+export function __resetNoFollowAnyProbeForTests(): void {
+  noFollowAnyProbe = undefined;
+}
+
 type SecureOpen =
   | { ok: true; handle: FileHandle }
   | { ok: false; code: string | undefined };
@@ -486,7 +530,8 @@ function errnoCode(error: unknown): string | undefined {
  * 5 outside reads in 1,937 attempts), so the kernel has to refuse the symlink
  * during the lookup itself. Node has no openat(), so per platform:
  *  - macOS: one open() with O_NOFOLLOW_ANY -- the kernel fails the whole
- *    lookup with ELOOP if any component is a symlink.
+ *    lookup with ELOOP if any component is a symlink -- once a probe has seen
+ *    this kernel honour the flag (#907 r2).
  *  - Linux: anchored traversal. Hold a directory fd from "/" down, and open
  *    each next component through /proc/self/fd/<held>/<name> with O_NOFOLLOW
  *    (the magic link resolves to the held directory, so this is openat()).
@@ -495,6 +540,7 @@ function errnoCode(error: unknown): string | undefined {
 async function openReportNoSymlinks(resolved: string): Promise<SecureOpen> {
   if (!isAbsolute(resolved)) return { ok: false, code: "EINVAL" };
   if (process.platform === "darwin") {
+    if (!(await noFollowAnySupported())) return { ok: false, code: "ENOTSUP" };
     try {
       // O_NOFOLLOW_ANY covers the leaf too; macOS rejects it combined with
       // O_NOFOLLOW (EINVAL).
@@ -522,8 +568,11 @@ async function openReportNoSymlinks(resolved: string): Promise<SecureOpen> {
         `/proc/self/fd/${dir.fd}/${part}`,
         constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
       );
-      await dir.close();
+      // #907 r2: own `next` before closing its parent, so a failing close
+      // cannot orphan it (finally closes whatever `dir` holds).
+      const parent = dir;
       dir = next;
+      await parent.close();
     }
     return { ok: true, handle: await open(`/proc/self/fd/${dir.fd}/${leaf}`, REPORT_LEAF_FLAGS) };
   } catch (error) {
@@ -555,7 +604,10 @@ export async function readReportTail(resolved: string): Promise<ReportTailRead> 
       return { ok: false, reason: `wait_for report_path has a symlinked component at open time: ${resolved}` };
     }
     if (opened.code === "ENOTSUP") {
-      return { ok: false, reason: `wait_for report_path: no symlink-safe open on ${process.platform}; file-backed done is refused` };
+      return {
+        ok: false,
+        reason: `wait_for report_path: no symlink-safe open on ${process.platform} ${release()} (needs macOS 11+ O_NOFOLLOW_ANY or Linux /proc/self/fd); file-backed done is refused`,
+      };
     }
     return { ok: false, reason: `wait_for report_path could not be opened (${opened.code ?? "error"}): ${resolved}` };
   }

@@ -128,7 +128,38 @@ describe("spawnDaemonProcess", () => {
         daemonScriptPath,
       });
 
-      expect(readFileSync(receiptPath, "utf8")).toBe(`${child.pid}\n`);
+      // Line 1 stays the bare PID (existing readers parse Number(line)); line
+      // 2 records the exact post-exec launch argv for that PID (#907 r2).
+      expect(readFileSync(receiptPath, "utf8")).toBe(
+        `${child.pid}\n${JSON.stringify({ pid: child.pid, argv: [process.execPath, daemonScriptPath] })}\n`,
+      );
+    } finally {
+      child?.kill("SIGKILL");
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("the receipt's launch argv is exactly what ps shows for that pid once the wrapper execs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-daemon-launch-"));
+    const receiptPath = join(root, "daemon-pids.txt");
+    let child: Awaited<ReturnType<typeof spawnDaemonProcess>> | undefined;
+    try {
+      const daemonScriptPath = join(root, "waiting-daemon.js");
+      writeFileSync(daemonScriptPath, "setTimeout(() => {}, 60_000);\n");
+      child = await spawnDaemonProcess({
+        socketPath: join(root, "daemon.sock"),
+        env: { CMUXLAYER_DAEMON_PID_RECEIPT: receiptPath },
+        logger: { error: vi.fn() },
+        daemonScriptPath,
+      });
+      const launch = JSON.parse(readFileSync(receiptPath, "utf8").split("\n")[1] ?? "{}");
+      const ps = () => spawnSync("ps", ["-ww", "-p", String(child?.pid), "-o", "command="], { encoding: "utf8" }).stdout.trim();
+      const deadline = Date.now() + 3_000;
+      while (ps() !== launch.argv.join(" ") && Date.now() < deadline) {
+        await new Promise((resolveTick) => setTimeout(resolveTick, 25));
+      }
+      expect(launch.pid).toBe(child.pid);
+      expect(ps()).toBe(launch.argv.join(" "));
     } finally {
       child?.kill("SIGKILL");
       rmSync(root, { recursive: true, force: true });

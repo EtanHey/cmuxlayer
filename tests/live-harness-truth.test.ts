@@ -20,6 +20,7 @@ import {
   harnessCoordinationRunId,
   harnessWorkersToClose,
   harnessDaemonPidsFromReceipt,
+  harnessDaemonLaunchesFromReceipt,
   finalizeHarnessDaemon,
   runHarnessWaitSlices,
   type HarnessDaemonPlan,
@@ -662,5 +663,57 @@ describe("#898 minor: --installed-daemon beats an inherited CMUXLAYER_DAEMON_SOC
     });
     expect(plan.socket_path).toBe("/home/ci/.local/state/cmux/cmuxlayer-stated.sock");
     expect(plan.installed_socket).toBe(true);
+  });
+});
+
+// #907 round 2 (Medium): a custom --server-command runs the proxy (and so the
+// daemon) on another node. The spawner records the exact launch argv per PID
+// in the receipt, and that -- not the runner's own node -- is the identity.
+describe("#907 r2: the run recognises its own daemon from the receipt's launch", () => {
+  const customNode = "/opt/node 20/bin/node";
+  const customScript = "/srv/custom build/dist/daemon.js";
+  const receipt = `4321\n${JSON.stringify({ pid: 4321, argv: [customNode, customScript] })}\n`;
+
+  it("parses one launch per PID, ignoring malformed or foreign lines", () => {
+    const launches = harnessDaemonLaunchesFromReceipt(
+      `${receipt}{"pid":"x","argv":[]}\n{"pid":77,"argv":[1,2]}\nnot json\n`,
+    );
+    expect([...launches.entries()]).toEqual([[4321, [customNode, customScript]]]);
+    expect(harnessDaemonLaunchesFromReceipt(null).size).toBe(0);
+  });
+
+  it("stops a custom-node daemon whose command is exactly its recorded launch", () => {
+    const kill = vi.fn();
+    const daemon = finalizeHarnessDaemon(
+      { plan: PRIVATE_PLAN, block: undefined, receiptText: receipt, distDir: DIST },
+      { kill, commandOf: () => `${customNode} ${customScript}` },
+    );
+    expect(kill).toHaveBeenCalledWith(4321, "SIGTERM");
+    expect(daemon).toMatchObject({ stopped: true, stopped_pids: [4321] });
+  });
+
+  it("keeps no-false-accept: anything but the exact recorded launch is skipped", () => {
+    for (const command of [
+      `vim /tmp/node ${customScript}`,
+      `${customNode} ${customScript}.backup`,
+      `${process.execPath} ${DIST}/daemon.js`,
+    ]) {
+      const kill = vi.fn();
+      const daemon = finalizeHarnessDaemon(
+        { plan: PRIVATE_PLAN, block: undefined, receiptText: receipt, distDir: DIST },
+        { kill, commandOf: () => command },
+      );
+      expect(kill).not.toHaveBeenCalled();
+      expect(daemon).toMatchObject({ stopped: false, stop_skipped: "pid_reused" });
+    }
+  });
+
+  it("a launch line never authorises a PID the receipt did not list", () => {
+    const kill = vi.fn();
+    finalizeHarnessDaemon(
+      { plan: PRIVATE_PLAN, block: undefined, receiptText: `${JSON.stringify({ pid: 999, argv: [customNode, customScript] })}\n`, distDir: DIST },
+      { kill, commandOf: () => `${customNode} ${customScript}` },
+    );
+    expect(kill).not.toHaveBeenCalled();
   });
 });
