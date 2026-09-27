@@ -873,7 +873,7 @@ describe("AgentEngine", () => {
 
       const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
-      expect(launchCmd).toBe(withRaisedNofileSoftLimit("agenthtmlhostCursor -s"));
+      expect(launchCmd).toBe(withRaisedNofileSoftLimit("GOLEM_ROLE=worker agenthtmlhostCursor -s"));
       const state = resolvingEngine.getAgentState(result.agent_id);
       expect(state?.launcher_name).toBe("agenthtmlhostCursor");
       expect(state?.launch_cwd).toBe("/home/test-user/Gits/agent-html-host");
@@ -16574,7 +16574,7 @@ describe("buildLaunchCommand", () => {
       buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
         authority: "worker",
       }),
-    ).toBe("brainlayerCodex -s --worker");
+    ).toBe("GOLEM_ROLE=worker brainlayerCodex -s --worker");
   });
 
   it("leaves lead-authority Codex launches out of launcher worker mode", () => {

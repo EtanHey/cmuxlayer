@@ -314,7 +314,7 @@ export function buildLaunchCommand(
     allowModelOverride?: boolean;
     effort?: CodexEffort;
     launchMode?: AgentLaunchMode;
-    /** Worker-authority Codex launches use repoGolem's light worker prompt. */
+    /** Non-Claude worker authority skips launcher persona injection. */
     authority?: AgentAuthority;
     /** Approval handling for this launch; defaults to the machine's setting. */
     permissionMode?: SpawnPermissionMode;
@@ -343,6 +343,8 @@ export function buildLaunchCommand(
   const codexModelOverride =
     cli === "codex" && modelFlag !== null && modelFlag !== "codex";
   const envParts = [
+    // Claude maps GOLEM_ROLE=worker to medium effort; preserve its existing effort.
+    opts?.authority === "worker" && cli !== "claude" ? "GOLEM_ROLE=worker" : null,
     codexModelOverride ? `${MODEL_OVERRIDE_ENV}=1` : null,
     opts?.envPrefix ?? null,
   ].filter((part): part is string => Boolean(part));
@@ -356,6 +358,8 @@ export function buildLaunchCommand(
     // REPOGOLEM_ALLOW_MODEL is a launcher-only escape hatch; it means nothing
     // to a raw binary, so raw mode carries only the harness + caller env.
     const rawEnvParts = [
+      // Claude maps GOLEM_ROLE=worker to medium effort; preserve its existing effort.
+      opts?.authority === "worker" && cli !== "claude" ? "GOLEM_ROLE=worker" : null,
       cli === "claude" || cli === "gemini" ? AGENT_ENV : null,
       opts?.envPrefix ?? null,
     ].filter((part): part is string => Boolean(part));

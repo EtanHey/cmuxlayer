@@ -138,3 +138,37 @@ describe("resume honours the permission mode", () => {
     );
   });
 });
+
+describe("launch authority controls the worker persona gate", () => {
+  const clis = ["claude", "codex", "cursor", "gemini", "kiro"] as const;
+  for (const launchMode of ["launcher", "raw"] as const) {
+    for (const cli of clis) {
+      it(`${launchMode} ${cli} workers preserve the intended persona and effort policy`, () => {
+        const command = buildLaunchCommand(cli, "alpha", undefined, undefined, {
+          authority: "worker",
+          launchMode,
+          envPrefix: "CALLER_ENV=kept",
+        });
+        if (cli === "claude") {
+          expect(command).not.toContain("GOLEM_ROLE");
+        } else {
+          expect(command).toContain("GOLEM_ROLE=worker ");
+        }
+        expect(command).toContain("CALLER_ENV=kept ");
+        if (cli === "codex" && launchMode === "launcher") {
+          expect(command).toContain(" --worker");
+        } else {
+          expect(command).not.toContain("--worker");
+        }
+      });
+
+      it(`${launchMode} ${cli} leads do not set GOLEM_ROLE`, () => {
+        const command = buildLaunchCommand(cli, "alpha", undefined, undefined, {
+          authority: "lead",
+          launchMode,
+        });
+        expect(command).not.toContain("GOLEM_ROLE");
+      });
+    }
+  }
+});

@@ -146,10 +146,11 @@ const RESUMABLE_CLIS = CLIS.filter(
 );
 
 function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string {
+  const workerEnv = cli === "claude" ? "" : "GOLEM_ROLE=worker ";
   if (path === "registry") {
-    return `${EXPECTED_LAUNCHER_NAME[cli]} -s${cli === "codex" ? " --worker" : ""}`;
+    return `${workerEnv}${EXPECTED_LAUNCHER_NAME[cli]} -s${cli === "codex" ? " --worker" : ""}`;
   }
-  const cd = `cd '${root}' && `;
+  const cd = `cd '${root}' && ${workerEnv}`;
   switch (cli) {
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions`;
