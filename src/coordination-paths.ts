@@ -1,5 +1,5 @@
 import { constants, mkdirSync, writeFileSync } from "node:fs";
-import { open, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
@@ -465,11 +465,44 @@ export type ReportTailRead =
   | { ok: false; reason: string };
 
 /**
+ * #903 round 2 (P1): open() resolves the path again, so a parent directory
+ * swapped for a symlink between containment and open lands the read outside
+ * the roots. Node has no openat(), so the OPENED handle is proven instead: every
+ * ancestor of the canonical path must still be a real directory (not a
+ * symlink), and the leaf must be the very inode the handle holds. A swap before
+ * open either leaves a symlink ancestor or a different inode at the path.
+ */
+async function handleIsAtPath(
+  resolved: string,
+  handleStat: { dev: number; ino: number },
+): Promise<boolean> {
+  const parts = resolved.split(sep).filter((part) => part.length > 0);
+  let current: string = sep;
+  for (const [index, part] of parts.entries()) {
+    current = join(current, part);
+    const stat = await lstat(current).catch(() => undefined);
+    if (!stat || stat.isSymbolicLink()) return false;
+    if (index < parts.length - 1) {
+      if (!stat.isDirectory()) return false;
+    } else if (stat.dev !== handleStat.dev || stat.ino !== handleStat.ino) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const NEWLINE = 0x0a;
+
+/**
  * Read the tail of a contained report without ever blocking (#898 item 2).
- * O_NONBLOCK makes open() return at once on a FIFO, O_NOFOLLOW refuses a final
- * component swapped for a symlink after containment, and fstat on the open
- * handle -- not a separate stat -- decides "regular file", so there is no
- * window between check and read. A missing file is "not written yet".
+ * O_NONBLOCK makes open() return at once on a FIFO, O_NOFOLLOW refuses a
+ * symlinked leaf, and fstat on the open handle -- not a separate stat --
+ * decides "regular file". A missing file is "not written yet".
+ *
+ * The returned text starts on a line boundary, so its final non-empty line is
+ * the file's (#903 round 2, P2): the byte before the tail decides whether the
+ * tail's first line is whole, and a final line that does not fit in the tail
+ * is refused rather than matched from a fragment.
  */
 export async function readReportTail(resolved: string): Promise<ReportTailRead> {
   let handle;
@@ -485,6 +518,12 @@ export async function readReportTail(resolved: string): Promise<ReportTailRead> 
   }
   try {
     const stat = await handle.stat();
+    if (!(await handleIsAtPath(resolved, stat))) {
+      return {
+        ok: false,
+        reason: `wait_for report_path changed while it was opened (a symlinked or swapped component): ${resolved}`,
+      };
+    }
     if (!stat.isFile()) {
       return { ok: false, reason: `wait_for report_path is not a regular file: ${resolved}` };
     }
@@ -496,11 +535,26 @@ export async function readReportTail(resolved: string): Promise<ReportTailRead> 
     }
     const length = Math.min(stat.size, REPORT_READ_TAIL_BYTES);
     const start = stat.size - length;
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, start);
-    let text = buffer.subarray(0, bytesRead).toString("utf8");
-    // A tail that starts mid-line must not offer its partial first line.
-    if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+    // One extra byte before the tail says whether its first line is whole.
+    const readStart = start > 0 ? start - 1 : 0;
+    const buffer = Buffer.alloc(length + (start > 0 ? 1 : 0));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, readStart);
+    let body = buffer.subarray(0, bytesRead);
+    if (start > 0) {
+      const precededByNewline = body[0] === NEWLINE;
+      body = body.subarray(1);
+      if (!precededByNewline) {
+        const firstNewline = body.indexOf(NEWLINE);
+        body = firstNewline < 0 ? body.subarray(body.length) : body.subarray(firstNewline + 1);
+      }
+    }
+    const text = body.toString("utf8");
+    if (start > 0 && text.trim().length === 0) {
+      return {
+        ok: false,
+        reason: `wait_for report_path's final line is not within its last ${REPORT_READ_TAIL_BYTES} bytes: ${resolved}`,
+      };
+    }
     return { ok: true, text };
   } finally {
     await handle.close();

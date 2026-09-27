@@ -516,16 +516,11 @@ export function harnessDaemonFailures(block: HarnessDaemonBlock): string[] {
   return block.from_this_build ? [] : ["daemon_not_from_this_build"];
 }
 
-export type HarnessDaemonStopSkip = "pid_reused" | "not_running" | "pid_unknown";
-
-export interface HarnessDaemonStop {
-  stopped: boolean;
-  stop_skipped?: HarnessDaemonStopSkip;
-}
+export type HarnessDaemonStopSkip = "pid_reused" | "not_running" | "no_receipt";
 
 export interface HarnessDaemonStopDeps {
   kill?: (pid: number, signal: NodeJS.Signals) => void;
-  /** The PID's command line now, or null when no such process exists. */
+  /** The PID's command line now (`ps -o command=`), or null when it is gone. */
   commandOf?: (pid: number) => string | null;
 }
 
@@ -541,48 +536,19 @@ function processCommand(pid: number): string | null {
   }
 }
 
-/** The binary a daemon this run started must still be running (#898 item 4). */
-function expectedDaemonBinary(block: HarnessDaemonBlock): string {
-  return block.binary ?? `${block.expected_dist}/daemon.js`;
-}
-
-function stopRecordedPid(
-  pid: number,
-  binary: string,
-  deps: HarnessDaemonStopDeps,
-): HarnessDaemonStop {
-  // The PID was recorded earlier; if the daemon exited and the OS reused the
-  // number, the process there now is someone else's (#898 item 4).
-  const command = (deps.commandOf ?? processCommand)(pid);
-  if (command === null) return { stopped: false, stop_skipped: "not_running" };
-  if (!command.includes(binary)) return { stopped: false, stop_skipped: "pid_reused" };
-  try {
-    (deps.kill ?? process.kill)(pid, "SIGTERM");
-    return { stopped: true };
-  } catch {
-    return { stopped: false };
-  }
-}
-
 /**
- * Stop the daemon only when this run started it, by its recorded PID (never a
- * pattern), and only while that PID still runs the daemon binary. An inherited
- * or installed daemon is never signalled.
+ * #903 round 2 (P1): the spawner runs `<node> <dist>/daemon.js` (daemon-spawn.ts,
+ * after the nofile wrapper execs), so that is the whole command a daemon this
+ * run spawned can have. The script must be the LAST argument, compared as a
+ * whole path -- `daemon.js.backup` or `vim <dist>/daemon.js` is not it -- and
+ * everything before it must be a node executable. Comparing whole strings
+ * keeps a space inside either path from splitting it.
  */
-export function stopHarnessDaemon(
-  block: HarnessDaemonBlock | undefined,
-  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
-  commandOf: (pid: number) => string | null = processCommand,
-): HarnessDaemonStop | undefined {
-  if (
-    !block ||
-    block.started_by_run !== true ||
-    block.installed_socket ||
-    typeof block.pid !== "number"
-  ) {
-    return undefined;
-  }
-  return stopRecordedPid(block.pid, expectedDaemonBinary(block), { kill, commandOf });
+export function commandRunsDaemon(command: string, daemonScript: string): boolean {
+  const suffix = ` ${daemonScript}`;
+  if (!command.endsWith(suffix)) return false;
+  const interpreter = command.slice(0, -suffix.length);
+  return interpreter === process.execPath || basename(interpreter) === "node";
 }
 
 /**
@@ -608,11 +574,13 @@ export type FinalizedHarnessDaemon = HarnessDaemonBlock & {
 };
 
 /**
- * #898 items 9-10: the proxy spawns the daemon detached and unref'd
- * (daemon-spawn.ts), so it outlives the runner. The runner owns that spawn, so
- * it learns the PID from the spawner's receipt -- not from control_health,
- * which a red preflight may never reach -- and stops exactly the PIDs it
- * spawned. Falls back to control_health's PID when no receipt was written.
+ * #898 items 9-10, tightened in #903 round 2: the proxy spawns the daemon
+ * detached and unref'd (daemon-spawn.ts), so it outlives the runner. The ONLY
+ * authority to signal is the spawner's receipt: no valid receipt PID means no
+ * signal (`no_receipt`) -- never control_health's PID, which can belong to a
+ * daemon another proxy started on the same socket first. `started_by_run` is
+ * rewritten from that receipt, and each PID is signalled only while it still
+ * runs exactly this build's daemon script.
  */
 export function finalizeHarnessDaemon(
   input: {
@@ -624,23 +592,42 @@ export function finalizeHarnessDaemon(
   deps: HarnessDaemonStopDeps = {},
 ): FinalizedHarnessDaemon | undefined {
   if (!input.plan.started_by_run || input.plan.installed_socket) return input.block;
-  const block: FinalizedHarnessDaemon =
-    input.block ??
-    buildHarnessDaemonBlock({
-      plan: input.plan,
-      serverVersion: null,
-      controlHealth: undefined,
-      distDir: input.distDir,
-    });
+  const block: FinalizedHarnessDaemon = {
+    ...(input.block ??
+      buildHarnessDaemonBlock({
+        plan: input.plan,
+        serverVersion: null,
+        controlHealth: undefined,
+        distDir: input.distDir,
+      })),
+  };
   const spawned = harnessDaemonPidsFromReceipt(input.receiptText);
-  const targets = spawned.length > 0 ? spawned : typeof block.pid === "number" ? [block.pid] : [];
   block.spawned_pids = spawned;
+  block.started_by_run = spawned.length > 0;
+  block.private = block.build_check !== "opted_out" && block.started_by_run;
   block.stopped_pids = [];
-  if (targets.length === 0) block.stop_skipped = "pid_unknown";
-  for (const pid of targets) {
-    const stop = stopRecordedPid(pid, expectedDaemonBinary(block), deps);
-    if (stop.stopped) block.stopped_pids.push(pid);
-    if (stop.stop_skipped) block.stop_skipped ??= stop.stop_skipped;
+  if (spawned.length === 0) block.stop_skipped = "no_receipt";
+  const daemonScript = `${resolve(input.distDir)}/daemon.js`;
+  const commandOf = deps.commandOf ?? processCommand;
+  const kill = deps.kill ?? process.kill;
+  for (const pid of spawned) {
+    // The PID was recorded at spawn; if that daemon exited and the OS reused
+    // the number, the process there now is someone else's (#898 item 4).
+    const command = commandOf(pid);
+    if (command === null) {
+      block.stop_skipped ??= "not_running";
+      continue;
+    }
+    if (!commandRunsDaemon(command, daemonScript)) {
+      block.stop_skipped ??= "pid_reused";
+      continue;
+    }
+    try {
+      kill(pid, "SIGTERM");
+      block.stopped_pids.push(pid);
+    } catch {
+      // Exited between the check and the signal: nothing left to stop.
+    }
   }
   block.stopped = block.stopped_pids.length > 0;
   return block;

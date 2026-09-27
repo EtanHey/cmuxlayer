@@ -23,9 +23,12 @@ Before any worker, the runner:
   installed daemon. The proxy spawns that daemon detached, so it outlives the
   runner: the runner sets `CMUXLAYER_DAEMON_PID_RECEIPT=<root>/daemon-pids.txt`,
   the spawner records each PID it starts there, and the runner stops exactly
-  those PIDs, even when preflight fails before `control_health`. Before each
-  SIGTERM it re-reads the PID's command line and skips a PID that no longer runs
-  the daemon binary (`stop_skipped:"pid_reused"`).
+  those PIDs, even when preflight fails before `control_health`. The receipt is
+  the only authority: with no valid receipt PID nothing is signalled
+  (`stop_skipped:"no_receipt"`, `started_by_run:false`), never the PID
+  `control_health` reports. Before each SIGTERM the runner re-reads the PID's
+  command line, which must be exactly `<node> <this build's dist>/daemon.js`;
+  anything else is skipped (`stop_skipped:"pid_reused"`).
 - `--installed-daemon` **opts out of the build check**: the run proves the
   installed daemon, not this build. The artifact's daemon block then says
   `private:false, from_this_build:false, build_check:"opted_out"`, and the run
