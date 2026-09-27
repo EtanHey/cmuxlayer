@@ -113,16 +113,31 @@ class LiveSurfaceClient {
     };
   }
 
+  private readonly typed: Record<string, string> = {};
+
   async send(surface: string, text: string) {
     if (!(surface in this.screens))
       throw new Error(`Unknown surface: ${surface}`);
     this.sendCalls.push(`${surface}:${text}`);
+    this.typed[surface] = (this.typed[surface] ?? "") + text;
   }
 
+  /**
+   * #905: Return behaves like Codex 0.157. At a prompt the message becomes a
+   * transcript row; mid-turn it waits in the steer queue above the prompt.
+   */
   async sendKey(surface: string, key: string) {
     if (!(surface in this.screens))
       throw new Error(`Unknown surface: ${surface}`);
     this.sendKeyCalls.push(`${surface}:${key}`);
+    const typed = this.typed[surface];
+    if (key !== "return" || !typed) return;
+    delete this.typed[surface];
+    const lines = this.screens[surface].split("\n");
+    lines.splice(lines.length - 1, 0, /Working/.test(this.screens[surface])
+      ? `• Messages to be submitted after next tool call\n  ↳ ${typed}`
+      : typed);
+    this.screens[surface] = lines.join("\n");
   }
 
   async readScreen(surface: string, opts?: { lines?: number }) {
@@ -446,9 +461,10 @@ describe("F1 — live state, not the stale registry record", () => {
     });
     const parsed = parseResult(result);
 
-    expect(parsed.terminal, JSON.stringify(parsed)).toBe(true);
-    expect(parsed.delivery_state ?? parsed.delivery).toBe("submitted");
-    expect(parsed.submit_verified).toBe(true);
+    // #905: queued behind the turn is not submitted.
+    expect(parsed.terminal, JSON.stringify(parsed)).toBe(false);
+    expect(parsed.delivery_state ?? parsed.delivery).toBe("queued");
+    expect(parsed.submitted).toBe(false);
     expect(parsed.queued_behind_turn).toBe(true);
   });
 

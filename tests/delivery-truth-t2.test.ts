@@ -1189,7 +1189,11 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     let screenText =
       ">_ OpenAI Codex\n› Implement {feature}\n" +
       "gpt-5.6-sol high · ~/Gits/cmuxlayer\n";
-    const mockExec = makeLifecycleExec(() => screenText);
+    // #905: once Return lands, Codex shows the message in its transcript.
+    const returned = () => mockExec.mock.calls.some(([, args]: [string, string[]]) =>
+      args.includes("send-key") && args.includes("return"));
+    const mockExec: any = makeLifecycleExec(() =>
+      returned() ? screenText.replace("› Ask", "› fleet message\n\n› Ask") : screenText);
     const context = createServerContext({
       exec: mockExec,
       stateDir: testDir,

@@ -102,11 +102,14 @@ class DualCodexSurfaceClient {
     };
   }
 
+  private readonly typed: Record<string, string> = {};
+
   async send(surface: string, text: string) {
     if (!(surface in this.screens)) {
       throw new Error(`Unknown surface: ${surface}`);
     }
     this.sendCalls.push(`${surface}:${text}`);
+    this.typed[surface] = (this.typed[surface] ?? "") + text;
   }
 
   async sendKey(surface: string, key: string) {
@@ -114,6 +117,11 @@ class DualCodexSurfaceClient {
       throw new Error(`Unknown surface: ${surface}`);
     }
     this.sendKeyCalls.push(`${surface}:${key}`);
+    // #905: a submitted message shows in the Codex transcript above the prompt.
+    const typed = this.typed[surface];
+    if (key !== "return" || !typed) return;
+    delete this.typed[surface];
+    this.screens[surface] = this.screens[surface].replace(/codex>$/, `${typed}\ncodex>`);
   }
 
   async readScreen(surface: string, opts?: { lines?: number }) {

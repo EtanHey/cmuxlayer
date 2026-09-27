@@ -469,6 +469,51 @@ export function composerPromptLineInput(screenText: string, knownCli?: CliType, 
 }
 
 /**
+ * Whether a composer region is exactly this payload as the CLI renders it.
+ *
+ * AIDEV-NOTE (#905): Codex 0.157 soft-wraps a long draft onto rows indented by
+ * two spaces, and indents every row after the first paragraph the same way,
+ * so the region never equals the typed text byte for byte. For Codex only,
+ * the comparison ignores whitespace. Any other visible character still makes
+ * the draft foreign (#802/#636).
+ */
+export function composerRegionMatchesPayload(
+  region: string,
+  payload: string,
+  cli: CliType | null | undefined,
+): boolean {
+  if (region === normalizeTerminalText(payload).trimEnd()) return true;
+  if (cli !== "codex") return false;
+  const compactRegion = region.replace(/\s+/g, "");
+  return compactRegion.length > 0 && compactRegion === payload.replace(/\s+/g, "");
+}
+
+/**
+ * How many times this payload appears above the Codex composer: in the
+ * transcript, where Codex renders a submitted message as a `› ` row plus
+ * two-space continuation rows. The composer is the last prompt row and is
+ * excluded; with no composer on screen, the whole frame is searched.
+ *
+ * AIDEV-NOTE (#905): this is the Codex submit proof, compared against the
+ * pre-type frame. An empty composer is not: when Return lands inside a paste
+ * burst, 0.157 briefly paints only its placeholder, then repaints the same
+ * text with the Return as a newline. Neither frame shows the text above it.
+ */
+export function codexTranscriptEchoCount(screenText: string, submittedText: string): number {
+  const compactPayload = submittedText.replace(/\s+/g, "");
+  if (!compactPayload) return 0;
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let composerIndex = lines.length - 1;
+  while (composerIndex >= 0 && !matchComposerPromptLine(lines[composerIndex] ?? "")) composerIndex -= 1;
+  const above = lines.slice(0, composerIndex < 0 ? lines.length : composerIndex).join("").replace(/\s+/g, "");
+  let count = 0;
+  for (let at = above.indexOf(compactPayload); at >= 0; at = above.indexOf(compactPayload, at + compactPayload.length)) {
+    count += 1;
+  }
+  return count;
+}
+
+/**
  * True when the target composer holds text that this delivery did not put
  * there -- a human's half-written draft, or an earlier message still unflushed.
  *
@@ -507,7 +552,7 @@ export function composerHoldsForeignDraft(
   const promptLine = composerPromptLineInput(screenText, options?.cli, true);
   if (options?.exact) {
     const region = extractComposerInputRegion(screenText, submittedText, options.cli);
-    return region !== null && region !== normalizeTerminalText(submittedText).trimEnd();
+    return region !== null && !composerRegionMatchesPayload(region, submittedText, cli);
   }
   // Antigravity has no prompt prefix (a bare `>` under a rule), so the prefix
   // reader sees nothing; read its composer structurally (#809 review F7).

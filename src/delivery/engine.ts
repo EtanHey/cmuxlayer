@@ -63,6 +63,8 @@ import {
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
   countVisibleExactQueuedRows,
+  codexTranscriptEchoCount,
+  composerRegionMatchesPayload,
   screenShowsCursorFollowupNeedsEnter,
   screenShowsQueuedCursorFollowup,
   screenShowsPendingShellInput,
@@ -750,7 +752,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const region = extractComposerInputRegion(text, token.text, record?.cli, true);
       // A truncated read without a composer anchor observes no draft state.
       if (region === null) continue;
-      const unchanged = region === normalizeTerminalText(token.text).trimEnd();
+      const unchanged = composerRegionMatchesPayload(region, token.text, record?.cli);
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
@@ -1048,6 +1050,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let sawNewInterrupt = false;
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
+    const codexEchoBaseline = codexTranscriptEchoCount(opts.pre_type_screen ?? "", opts.text);
 
     while (Date.now() - startedAt < timeoutMs) {
       await opts.beforeMutation?.();
@@ -1164,11 +1167,25 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
           opts.pre_return_metrics,
         );
+      // AIDEV-NOTE (#905): on Codex the only submit proof is the message as a
+      // new transcript row with the composer empty. Codex 0.157 turns a Return
+      // that lands inside a paste burst into a newline and briefly paints just
+      // its placeholder; that frame was read as a cleared composer (idle) or
+      // as `working` status (mid-turn), and receipts said submitted while the
+      // text sat in the composer.
+      // The launcher line (spawn_agent) is a shell command: Codex painting at
+      // all is its evidence, and the rule below is for agent payloads.
+      const codexScreen = screenCli === "codex" && opts.source_event !== "spawn_agent";
+      const codexSubmitEchoed =
+        codexScreen &&
+        !hasPendingSubmitEvidence &&
+        (composerInput === null || composerInput.trim() === "") &&
+        codexTranscriptEchoCount(snapshot.text, opts.text) > codexEchoBaseline;
       const bootHasTranscriptEcho =
         opts.require_attributable_submit_evidence === true &&
         bootFrameAdvanced &&
         !hasPendingSubmitEvidence &&
-        screenIncludesSubmittedText(snapshot.text);
+        (codexScreen ? codexSubmitEchoed : screenIncludesSubmittedText(snapshot.text));
       const interruptedHasTranscriptEcho =
         bootHasTranscriptEcho ||
         (opts.require_attributable_submit_evidence !== true &&
@@ -1194,14 +1211,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         !hasPendingSubmitEvidence &&
         !bootConsumptionRefuted &&
         ((opts.require_attributable_submit_evidence !== true &&
+          !codexScreen &&
           isSubmitVerifiedStatus(snapshot.parsed.status)) ||
           bootHasTokenOrCostDelta ||
           bootHasTranscriptEcho ||
+          codexSubmitEchoed ||
           cursorShowsSubmittedResponse)
       ) {
         const submitEvidence: SubmitEvidence = bootHasTokenOrCostDelta
           ? "token_delta"
-          : bootHasTranscriptEcho || cursorShowsSubmittedResponse
+          : bootHasTranscriptEcho || codexSubmitEchoed || cursorShowsSubmittedResponse
             ? "transcript_echo"
             : "status_only";
         return {
@@ -1213,6 +1232,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         };
       }
       const hasClearedAgentComposer =
+        !codexScreen &&
         composerInput !== null &&
         composerInput.trim() === "" &&
         !hasPendingSubmitEvidence &&
@@ -1873,6 +1893,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       opts.require_observed_payload_before_enter === true &&
       (opts.source_event === "boot_prompt" ||
         /Conversation interrupted/i.test(deliverySafetySnapshot?.text ?? ""));
+    // AIDEV-NOTE (#905): Codex 0.157 buffers fast input as a paste burst and
+    // turns a Return that lands inside it into a newline. Wait until the whole
+    // payload has painted before Return. If it never paints, Return still
+    // goes out; the transcript-echo verifier and its one retry catch a lost one.
+    const observeCodexPayloadBeforeEnter =
+      opts.require_observed_payload_before_enter === true &&
+      !requireObservedPayloadBeforeEnter &&
+      deliverySafetySnapshot !== null &&
+      inferComposerCli(deliverySafetySnapshot.text, deliverySafetySnapshot.parsed) === "codex";
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,
@@ -1934,7 +1963,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
       const preReturnBootEvidence =
-        requireObservedPayloadBeforeEnter && verifySubmit
+        (requireObservedPayloadBeforeEnter || observeCodexPayloadBeforeEnter) && verifySubmit
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
               workspace: opts.workspace,
@@ -2014,8 +2043,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               timeout_ms: opts.submit_verify_timeout_ms,
               cursor_response_baseline: cursorResponseBaseline,
               pre_type_screen: deliverySafetySnapshot?.text,
-              pre_return_screen: preReturnBootEvidence?.screenText,
-              pre_return_metrics: preReturnBootEvidence?.metrics,
+              pre_return_screen: requireObservedPayloadBeforeEnter
+                ? preReturnBootEvidence?.screenText
+                : undefined,
+              pre_return_metrics: requireObservedPayloadBeforeEnter
+                ? preReturnBootEvidence?.metrics
+                : undefined,
               require_attributable_submit_evidence:
                 requireObservedPayloadBeforeEnter,
               require_working_status: opts.source_event === "boot_prompt",
@@ -2102,7 +2135,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       textDispatched &&
       opts.press_enter &&
       ownedDraftPending &&
-      targetCli === "claude" &&
+      (targetCli === "claude" || targetCli === "codex") &&
       caller
     ) {
       if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);

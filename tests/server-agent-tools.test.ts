@@ -2144,9 +2144,10 @@ function makeBroadcastClient(
           "gpt-5.6-sol medium · ~/Gits/cmuxlayer",
         ].join("\n");
       }
+      // #905: Codex shows the submitted message in its transcript.
       return record?.cli === "claude"
         ? "Claude Code\nWorking\n"
-        : "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
+        : `${pendingTextBySurface.get(surface) ?? ""}\ngpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)`;
     }
     if (record?.cli === "claude") {
       return "Claude Code\nWhat can I help you with?\n>";
@@ -8539,7 +8540,8 @@ describe("agent lifecycle tool handlers", () => {
           typed: true,
           terminal: true,
           submit_verified: true,
-          submit_evidence: "status_only",
+          // #905: status alone is not Codex submit proof.
+          submit_evidence: "transcript_echo",
           rpc_methods: ["surface.send_text", "surface.send_key"],
         }),
         expect.objectContaining({

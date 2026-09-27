@@ -3283,7 +3283,11 @@ describe("tool handler integration", () => {
         return {
           stdout: JSON.stringify({
             surface: "surface:positive",
-            text: "gpt-5.5 xhigh · 99% left\nWorking (1s • esc to interrupt)",
+            // #905: the submitted command shows in the Codex transcript.
+            text: `${mockExec.mock.calls
+              .filter(([, a]: [string, string[]]) => a.includes("send"))
+              .map(([, a]: [string, string[]]) => `${a.at(-1)}\n`)
+              .join("")}gpt-5.5 xhigh · 99% left\nWorking (1s • esc to interrupt)`,
             lines: 30,
             scrollback_used: false,
           }),
@@ -5429,7 +5433,8 @@ describe("tool handler integration", () => {
             surface_ref: "surface:codex-cleared",
             text:
               textSent && returnPresses > 0
-                ? "OpenAI Codex\ncodex> \ngpt-5 · idle\n"
+                ? // #905: Codex proof is the message above an empty composer.
+                  "OpenAI Codex\nping codex\ncodex> \ngpt-5 · idle\n"
                 : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
             lines: 4,
           }),
@@ -5512,7 +5517,7 @@ describe("tool handler integration", () => {
               surface_ref: "surface:stale-working",
               text:
                 textSent && returnPresses > 0
-                  ? "OpenAI Codex\ncodex> \ngpt-5 · idle\n"
+                  ? "OpenAI Codex\nping codex\ncodex> \ngpt-5 · idle\n"
                   : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
               lines: 4,
             }),
