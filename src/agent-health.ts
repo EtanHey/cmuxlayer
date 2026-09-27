@@ -30,6 +30,7 @@ export type AgentHealthIssueCode =
   | "harness_api_error"
   | "registry_screen_disagreement"
   | "boot_prompt_unsubmitted"
+  | "composer_draft_pending"
   | "registry_surface_workspace_mismatch"
   | "closure_without_artifact"
   | "pr_loop_incomplete"
@@ -86,6 +87,8 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   // #863: the pane is live, but its managed boot prompt was never verified
   // as submitted -- the agent has not been tasked, whatever the screen says.
   boot_prompt_unsubmitted: "degraded",
+  // #905: text sits unsent in the composer; nobody is working on it.
+  composer_draft_pending: "degraded",
 };
 
 export interface AgentTopologyHealthInput {
@@ -522,6 +525,22 @@ export function evaluateAgentHealth(
       "boot prompt not verified as submitted (prompt_delivered is not true); the agent is still booting, not working",
     );
     if (agent.state !== "booting") reconciledState = "booting";
+  } else if (
+    input.screen_status === "draft_pending" &&
+    !TERMINAL_HEALTH_STATES.has(agent.state)
+  ) {
+    // AIDEV-NOTE (#905): the non-boot twin of #863. live-agent-state keeps a
+    // draft out of the ready/idle delivery paths by calling it `working`, but
+    // a list row that says `working` told leads an idle Codex pane had picked
+    // up a message still sitting in its composer. The row says `idle`, and
+    // this issue says why.
+    addIssue(
+      issueCodes,
+      issues,
+      "composer_draft_pending",
+      "composer holds text that was never submitted; the agent is not working on it",
+    );
+    if (agent.state !== "idle") reconciledState = "idle";
   } else if (screenConfirmedState && screenConfirmedState !== agent.state) {
     // Reconcile SILENTLY. The screen is authoritative and we are correcting the
     // registry from it right here -- the caller's request succeeded and nothing

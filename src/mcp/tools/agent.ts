@@ -718,6 +718,8 @@ export function registerListAgentsTool(
     closure: ClosureState;
     /** #863: present only while the managed boot prompt is unsubmitted. */
     boot?: "unsubmitted";
+    /** #905: present only while the composer holds unsent text. */
+    composer?: "draft_pending";
     parsed_cli_mismatch?: true;
     health?: AgentHealth;
   };
@@ -865,6 +867,7 @@ export function registerListAgentsTool(
                 send_via: agent.send_via,
                 closure: agent.closure,
                 ...(agent.boot ? { boot: agent.boot } : {}),
+                ...(agent.composer ? { composer: agent.composer } : {}),
                 ...(agent.parsed_cli_mismatch === true
                   ? { parsed_cli_mismatch: true }
                   : {}),
@@ -1080,6 +1083,9 @@ export function registerListAgentsTool(
                   // boolean made both of those `false`; that was the S3 bug.
                   closure: rowHarvestability.closure,
                   ...(bootUnsubmitted ? { boot: "unsubmitted" as const } : {}),
+                  ...(health.issue_codes.includes("composer_draft_pending")
+                    ? { composer: "draft_pending" as const }
+                    : {}),
                   ...(args.detail === "full"
                     ? {
                         health: {

@@ -9122,6 +9122,42 @@ describe("agent lifecycle tool handlers", () => {
     },
   );
 
+  // #905: the non-boot twin. An idle Codex pane with a draft sitting unsent in
+  // its composer rendered `working`, so leads thought a message had landed.
+  it.each(["summary", "full"] as const)(
+    "#905 list_agents (%s) renders a pending Codex draft as idle, never working",
+    async (detail) => {
+      const draftScreen = readFileSync(
+        new URL("./fixtures/codex-0.157/idle-wrapped-draft.txt", import.meta.url), "utf8");
+      const baseExec = makeLifecycleExec();
+      let drafted = false;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) =>
+        drafted && args.includes("read-screen")
+          ? { stdout: JSON.stringify({ surface: "surface:new", text: draftScreen, lines: 30, scrollback_used: false }), stderr: "" }
+          : baseExec(cmd, args));
+      const server = createLifecycleServer(exec);
+      const spawned = parseToolResult(await (server as any)._registeredTools["spawn_agent"].handler(
+        { repo: "brainlayer", model: "codex", cli: "codex" }, {} as any));
+      const engine = engineForTests(server) as AgentEngine;
+      engine.getRegistry().set(spawned.agent_id, engine.stateMgr.updateRecord(spawned.agent_id, { state: "working" } as any));
+      drafted = true;
+
+      const list = (server as any)._registeredTools["list_agents"];
+      const row = parseToolResult(await list.handler({ detail }, {} as any))
+        .agents.find((a: any) => a.agent_id === spawned.agent_id);
+      if (detail === "summary") {
+        expect(row).toMatchObject({ state: "idle", composer: "draft_pending" });
+      } else {
+        expect(row).toMatchObject({
+          state: { value: "idle" }, composer: "draft_pending",
+          health: { issue_codes: expect.arrayContaining(["composer_draft_pending"]) },
+        });
+      }
+      const filtered = parseToolResult(await list.handler({ state: "working" }, {} as any));
+      expect(filtered.agents.map((a: any) => a.agent_id)).not.toContain(spawned.agent_id);
+    },
+  );
+
   // #881 r1 (w63): a registry-terminal record is not a booting seat, whatever
   // its stale boot fields say. The mask applies only while nothing is terminal.
   it("#863 list_agents does not mask a registry-terminal record as booting", async () => {
