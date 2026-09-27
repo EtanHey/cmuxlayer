@@ -3,17 +3,32 @@ import { buildHarnessDaemonBlock, finalizeHarnessDaemon, reportMarkerMatches } f
 const race = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | (() => void),
   afterOpen: undefined as undefined | (() => void),
+  afterLstat: undefined as undefined | ((path: unknown) => void),
+  beforeOpenTarget: undefined as string | undefined,
+  afterOpenTarget: undefined as string | undefined,
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
-    const swap = race.beforeOpen;
-    race.beforeOpen = undefined;
+  return { ...actual, lstat: async (...args: Parameters<typeof actual.lstat>) => {
+    const stat = await actual.lstat(...args);
+    race.afterLstat?.(args[0]);
+    return stat;
+  }, open: async (...args: Parameters<typeof actual.open>) => {
+    // #907 r2: a hook may target one path (e.g. Linux's per-component walk);
+    // an untargeted hook fires on the first open, as before.
+    const hit = (target: string | undefined) => !target || String(args[0]).endsWith(target);
+    const swap = hit(race.beforeOpenTarget) ? race.beforeOpen : undefined;
+    if (swap) race.beforeOpen = undefined;
     swap?.();
     const handle = await actual.open(...args);
-    const restore = race.afterOpen;
-    race.afterOpen = undefined;
-    restore?.();
+    const restore = hit(race.afterOpenTarget) ? race.afterOpen : undefined;
+    if (restore) race.afterOpen = undefined;
+    try {
+      restore?.();
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
     return handle;
   }};
 });
@@ -112,6 +127,15 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
   });
 
   afterEach(() => {
+    // #907 r2 hygiene: a hook left armed by a refused open must not fire in a
+    // later test (it used to, and leaked that test's handle).
+    Object.assign(race, {
+      beforeOpen: undefined,
+      afterOpen: undefined,
+      afterLstat: undefined,
+      beforeOpenTarget: undefined,
+      afterOpenTarget: undefined,
+    });
     engineForTests(server)?.dispose?.();
     process.env.HOME = savedHome;
     rmSync(dir, { recursive: true, force: true });
@@ -203,7 +227,9 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
     };
     const result = parse(await waitFor({ agent_id: AGENT, report_path: report, done_marker: "OUTSIDE_SENTINEL_903", timeout_ms: 1000 }));
     expect(result.matched).toBe(false);
-    expect(result.error).toMatch(/changed while it was opened/);
+    // macOS refuses the swapped lookup (ELOOP); Linux's anchored walk opens
+    // "/" first, so the restored real dir is walked and the inside file read.
+    if (result.error) expect(result.error).toMatch(/symlinked component/);
   });
 
   it("the tail keeps a whole last line and refuses one longer than the tail", async () => {
@@ -215,6 +241,40 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
     expect(reportMarkerMatches((await readReportTail(report) as { text?: string }).text, "DONE_X")).toBe(true);
     writeFileSync(report, "z".repeat(REPORT_READ_TAIL_BYTES + 10) + "DONE_X\n");
     expect(await readReportTail(report)).toMatchObject({ ok: false, reason: expect.stringMatching(/final line is not within/) });
+  });
+
+  // #907 r2 (CodeRabbit 4115181449): schedule the swap at the component that
+  // matters on each platform. On Linux the walk opens ".../nested" through the
+  // held parent fd; on macOS the single open is of the report itself.
+  it("refuses a parent swapped right before its own component is opened, and never reads outside after acquiring it", async () => {
+    const parent = join(agentDir, "nested");
+    mkdirSync(parent);
+    const report = join(parent, "report.md");
+    writeFileSync(report, "still working\n");
+    writeFileSync(join(outside, "report.md"), "OUTSIDE_SENTINEL_907\n");
+    const swapIn = () => {
+      renameSync(parent, parent + "-old");
+      symlinkSync(outside, parent);
+    };
+    const target = process.platform === "linux" ? "/nested" : "/nested/report.md";
+
+    race.beforeOpenTarget = target;
+    race.beforeOpen = swapIn;
+    const refused = parse(await waitFor({ agent_id: AGENT, report_path: report, done_marker: "OUTSIDE_SENTINEL_907", timeout_ms: 600 }));
+    expect(refused.matched).toBe(false);
+    expect(refused.error).toMatch(/symlinked component|could not be opened/);
+
+    // Restore, then swap only AFTER the nested component is held (Linux): the
+    // leaf is opened relative to the held real directory, never the symlink.
+    rmSync(parent);
+    renameSync(parent + "-old", parent);
+    if (process.platform === "linux") {
+      race.afterOpenTarget = "/nested";
+      race.afterOpen = swapIn;
+      const held = parse(await waitFor({ agent_id: AGENT, report_path: report, done_marker: "OUTSIDE_SENTINEL_907", timeout_ms: 600 }));
+      expect(held.matched).toBe(false);
+      expect(held.error ?? "").not.toMatch(/OUTSIDE/);
+    }
   });
 
   it("REVIEW must preserve a complete marker exactly at tail boundary", async () => {
@@ -256,4 +316,39 @@ describe("#903 review: wait_for report containment and harness PID safety", () =
     expect(kill).not.toHaveBeenCalled();
   });
 
+
+  // #906: Codex Sol round-2 reproductions (docs.local/lanes/2026-09-27-review-903-r2-extra.test.ts).
+  it("R2 rejects a parent reswapped after that ancestor was lstatted", async () => {
+    const parent = join(agentDir, "nested");
+    mkdirSync(parent);
+    const report = join(parent, "report.md");
+    writeFileSync(report, "still working\n");
+    writeFileSync(join(outside, "report.md"), "OUTSIDE_SENTINEL_R2\n");
+    race.beforeOpen = () => {
+      renameSync(parent, parent + "-old");
+      symlinkSync(outside, parent);
+    };
+    race.afterOpen = () => {
+      rmSync(parent);
+      renameSync(parent + "-old", parent);
+    };
+    race.afterLstat = (path) => {
+      if (String(path).endsWith("/nested")) {
+        race.afterLstat = undefined;
+        renameSync(parent, parent + "-old");
+        symlinkSync(outside, parent);
+      }
+    };
+    const result = parse(await waitFor({agent_id:AGENT,report_path:report,done_marker:"OUTSIDE_SENTINEL_R2",timeout_ms:1000}));
+    console.log("R2 reswap handler", JSON.stringify({matched:result.matched,source:result.source}));
+    expect(result.matched).toBe(false);
+  });
+
+  it("R2 rejects a non-Node process whose preceding argument is named node", () => {
+    const plan = {socket_path:"/tmp/review903.sock",installed_socket:false,started_by_run:true,build_check:"enforced" as const};
+    const kill = vi.fn();
+    const result = finalizeHarnessDaemon({plan,block:undefined,receiptText:"5150\n",distDir:"/review903/dist"}, {kill,commandOf:()=>"vim /tmp/node /review903/dist/daemon.js"});
+    console.log("R2 non-node process", JSON.stringify({signals:kill.mock.calls,result}));
+    expect(kill).not.toHaveBeenCalled();
+  });
 });

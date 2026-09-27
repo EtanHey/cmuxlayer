@@ -278,7 +278,11 @@ export async function spawnDaemonProcess(
   if (pidReceipt && child.pid) {
     try {
       await mkdir(dirname(pidReceipt), { recursive: true });
-      await appendFile(pidReceipt, `${child.pid}\n`, "utf8");
+      // Line 1: the bare PID (readers parse Number(line)). Line 2: the exact
+      // argv that PID runs once the nofile wrapper execs, so an owner can
+      // recognise its own daemon by the launch it really made (#907 r2).
+      const launch = { pid: child.pid, argv: [process.execPath, daemonScriptPath] };
+      await appendFile(pidReceipt, `${child.pid}\n${JSON.stringify(launch)}\n`, "utf8");
     } catch (error) {
       child.kill("SIGKILL");
       throw error;

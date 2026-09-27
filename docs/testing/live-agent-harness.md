@@ -27,8 +27,12 @@ Before any worker, the runner:
   the only authority: with no valid receipt PID nothing is signalled
   (`stop_skipped:"no_receipt"`, `started_by_run:false`), never the PID
   `control_health` reports. Before each SIGTERM the runner re-reads the PID's
-  command line, which must be exactly `<node> <this build's dist>/daemon.js`;
-  anything else is skipped (`stop_skipped:"pid_reused"`).
+  command line (`ps -ww`), which must be exactly the launch the spawner recorded
+  for that PID in the receipt (a `{"pid","argv"}` line beside the bare PID), or,
+  without one, `<the runner's node> <this build's dist>/daemon.js`, compared as
+  one whole string. A `--server-command` on another node is therefore still
+  recognised as the run's own daemon; anything else is skipped
+  (`stop_skipped:"pid_reused"`).
 - `--installed-daemon` **opts out of the build check**: the run proves the
   installed daemon, not this build. The artifact's daemon block then says
   `private:false, from_this_build:false, build_check:"opted_out"`, and the run
