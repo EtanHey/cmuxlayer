@@ -651,6 +651,15 @@ describe("control health", () => {
       env: { PATH: "" },
       execFile: async () => ({ stdout: "" }),
     });
+    rawHealth.cmux_instances.production.processes = [{
+      pid: 25528,
+      command: "/Applications/cmux.app/Contents/MacOS/cmux",
+      fd_pressure: {
+        pid: 25528, open_fds: 22, udp_fds: 6,
+        by_type: { REG: 10, PIPE: 4, KQUEUE: 0, UDP: 6, ptmx: 2, unix: 0, other: 0 },
+        warn: false, warn_threshold: 4096, sampled_at: rawHealth.generated_at,
+      },
+    }];
     const stateMgr = new StateManager(TEST_ROOT);
     stateMgr.writeState({
       agent_id: "caller-agent",
@@ -750,6 +759,7 @@ describe("control health", () => {
         },
       ],
     });
+    expect(terse.structuredContent.health.cmux_fds).toBe("22 (udp 6)");
     expect(unscopedTerse.structuredContent.health.caller_live_watches).toEqual({
       count: 0,
       watches: [],
