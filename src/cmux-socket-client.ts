@@ -84,7 +84,10 @@ export interface CmuxSocketClientOptions {
   cliFallback?: CmuxClient;
   /** Re-resolve a live socket when the current path stops accepting requests */
   socketPathResolver?: () => Promise<string | null>;
-  /** Polling budget for cmux read-plane methods (defaults match cmux 0.64.24+). */
+  /**
+   * Polling budget for cmux read-plane methods (defaults match cmux 0.64.24+).
+   * Pacing engages once cmux answers rate_limited unless `budget` says always.
+   */
   polling?: PollingOptions;
 }
 
@@ -113,7 +116,8 @@ export class CmuxSocketClient {
     this.authPassword = opts?.password;
     this.cliFallback = opts?.cliFallback;
     this.maxInFlight = opts?.maxInFlight;
-    this.polling = opts?.polling;
+    // #938: cmux 0.64.22 has no limiter; pace reads only once cmux says so.
+    this.polling = { budget: "on_rate_limit", ...opts?.polling };
     this.socketPathResolver = opts?.socketPathResolver;
     this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
@@ -121,7 +125,7 @@ export class CmuxSocketClient {
       capability: this.capability,
       timeoutMs: this.timeoutMs,
       maxInFlight: opts?.maxInFlight,
-      polling: opts?.polling,
+      polling: this.polling,
     });
   }
 

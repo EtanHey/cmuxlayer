@@ -61,6 +61,13 @@ export interface PollingOptions {
   rateLimitBackoffMaxMs?: number;
   /** Apply jitter to limiter backoff (default: true). */
   jitter?: boolean;
+  /**
+   * When to pace polling calls through the budget. "always" (default) paces
+   * from the first call; "on_rate_limit" paces only once cmux has answered
+   * rate_limited on this socket (cmux < 0.64.23 has no limiter to respect).
+   * rate_limited responses are retried either way.
+   */
+  budget?: "always" | "on_rate_limit";
 }
 
 export interface CmuxCallOptions {
@@ -149,6 +156,9 @@ export class CmuxPersistentSocket {
   private rateLimitBackoffBaseMs: number;
   private rateLimitBackoffMaxMs: number;
   private rateLimitJitter: boolean;
+  private pollingBudgetAlways: boolean;
+  /** #938: cmux has answered rate_limited at least once on this socket. */
+  private rateLimitObserved = false;
   private pollingTokens: number;
   private pollingLastRefillAt = Date.now();
   private pollingActive = 0;
@@ -200,6 +210,7 @@ export class CmuxPersistentSocket {
       this.rateLimitBackoffBaseMs,
     );
     this.rateLimitJitter = opts?.polling?.jitter ?? true;
+    this.pollingBudgetAlways = (opts?.polling?.budget ?? "always") === "always";
     this.pollingTokens = this.pollingBurst;
     this.createConnection = opts?.createConnection ?? net.createConnection;
   }
@@ -763,7 +774,10 @@ export class CmuxPersistentSocket {
     const pollingGeneration = this.pollingCancellationGeneration;
     try {
       for (let attempt = 0; ; attempt += 1) {
-        const release = await this.acquirePollingSlot();
+        const release =
+          this.pollingBudgetAlways || this.rateLimitObserved
+            ? await this.acquirePollingSlot()
+            : () => {};
         try {
           return await this.callOnce<T>(method, params, pollingGeneration);
         } catch (error) {
@@ -773,6 +787,7 @@ export class CmuxPersistentSocket {
           ) {
             throw error;
           }
+          this.rateLimitObserved = true;
           if (attempt >= this.maxRateLimitRetries) {
             // #938: say how hard we tried; `retry_count: undefined` made the
             // exhausted limiter look like an unbudgeted call.

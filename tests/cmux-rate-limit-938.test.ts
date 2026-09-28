@@ -262,6 +262,21 @@ describe("#938 cmux polling reads go through the budget and the rate_limited ret
     expect(retries).toBeGreaterThan(0);
   });
 
+  it("does not pace reads against a cmux without a limiter (0.64.22)", async () => {
+    // Paced from the first call, 40 reads at cmux's budget (8 burst, then
+    // one per 100ms) would take about 3.2s.
+    const cmux = await startFakeCmux({ burst: 1_000, refillMs: 100 });
+    const client = socketClient(cmux.path);
+
+    const startedAt = Date.now();
+    await Promise.all(
+      Array.from({ length: 40 }, () => client.listPanes()),
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(cmux.requests.every((request) => !request.limited)).toBe(true);
+  });
+
   it("an exhausted read carries a numeric retry_count, not undefined", async () => {
     const cmux = await startFakeCmux({
       burst: 9,
