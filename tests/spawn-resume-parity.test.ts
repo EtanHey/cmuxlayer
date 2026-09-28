@@ -27,6 +27,7 @@ import { RAISE_NOFILE_SOFT_LIMIT } from "../src/nofile-limit.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient, CmuxNewSplitResult } from "../src/cmux-client.js";
 import type { CliType } from "../src/agent-types.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 import type { CmuxSurface } from "../src/types.js";
 import { useHarnessHome } from "./helpers/harness-home.js";
 
@@ -331,6 +332,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const updated = stateMgr.updateRecord(spawned.agent_id, {
           state: "done",
           cli_session_id: SESSION,
+          pid: DEAD_PID,
         });
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
@@ -378,6 +380,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const updated = stateMgr.updateRecord(spawned.agent_id, {
           state: "done",
           cli_session_id: SESSION,
+          pid: DEAD_PID,
         });
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
@@ -405,6 +408,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const updated = stateMgr.updateRecord(spawned.agent_id, {
           state: "done",
           cli_session_id: SESSION,
+          pid: DEAD_PID,
         });
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();

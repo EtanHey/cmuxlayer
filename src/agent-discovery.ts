@@ -305,18 +305,19 @@ export class AgentDiscovery {
     return result;
   }
 
-  async scan(force = false): Promise<DiscoveredAgent[]> {
+  /** Classify a supplied, already validated topology without reading it again. */
+  async scan(force = false, surfacesOverride?: readonly CmuxSurface[]): Promise<DiscoveredAgent[]> {
     const observerScoped = typeof this.deps.observerIdProvider === "function";
     const observerId = this.getObserverId();
     const canCache = !observerScoped || observerId !== null;
     if (!canCache || (this.cache && this.cache.observerId !== observerId)) {
       this.cache = null;
     }
-    if (!force && this.cache && Date.now() - this.cache.at < this.ttlMs) {
+    if (!surfacesOverride && !force && this.cache && Date.now() - this.cache.at < this.ttlMs) {
       return this.cache.result;
     }
 
-    const surfaces = (await this.deps.listSurfaces()).filter(
+    const surfaces = (surfacesOverride ?? await this.deps.listSurfaces()).filter(
       (surface) => surface.type === "terminal",
     );
     const result = await Promise.all(
@@ -331,7 +332,7 @@ export class AgentDiscovery {
       );
     }
 
-    const completedSurfaces = (await this.deps.listSurfaces()).filter(
+    const completedSurfaces = (surfacesOverride ?? await this.deps.listSurfaces()).filter(
       (surface) => surface.type === "terminal",
     );
     const uuidKey = (value: string | null | undefined): string | null =>
@@ -368,7 +369,7 @@ export class AgentDiscovery {
       );
     }
 
-    this.cache = canCache ? { at: Date.now(), observerId, result } : null;
+    this.cache = !surfacesOverride && canCache ? { at: Date.now(), observerId, result } : null;
     return result;
   }
 }

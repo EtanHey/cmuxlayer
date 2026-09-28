@@ -29,7 +29,7 @@ import {
   SURFACE_EVICTION_CONFIRMATION_MS,
   type AgentFilter,
 } from "./agent-registry.js";
-import type { AgentDiscovery } from "./agent-discovery.js";
+import { AgentDiscovery, type DiscoveredAgent } from "./agent-discovery.js";
 import {
   INTERACTIVE_AGENT_STATES,
   isLiveActive,
@@ -158,7 +158,9 @@ import {
   agentProcessLiveness,
   agentProcessMayBeAlive,
   processLiveness,
+  scanSessionProcesses,
   type ProcessLiveness,
+  type SessionProcessScanner,
 } from "./util/pid-alive.js";
 import {
   AgentLaunchError,
@@ -359,6 +361,9 @@ export class AgentEngine {
   private selfRegistrationSessionLookup:
     | ((sessionId: string) => SelfRegistrationSessionEntry | null)
     | null;
+  private sessionProcessScanner: SessionProcessScanner;
+  /** The server's discovery, once initialized; resume attributes panes with it. */
+  private resumeDiscovery: AgentDiscovery | null = null;
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -533,6 +538,8 @@ export class AgentEngine {
       opts?.selfRegistrationSessionResolver ?? null;
     this.selfRegistrationSessionLookup =
       opts?.selfRegistrationSessionLookup ?? null;
+    this.sessionProcessScanner =
+      opts?.sessionProcessScanner ?? scanSessionProcesses;
     const fallbackSessionIdentityResolver = opts?.sessionIdentityResolver;
     this.sessionIdentityResolver = (agent) =>
       this.resolveSessionIdentityWithSelfRegistration(
@@ -3773,6 +3780,7 @@ export class AgentEngine {
    * reconcile, so a fresh process cannot publish an empty first paint.
    */
   initialize(discovery: AgentDiscovery): Promise<void> {
+    this.resumeDiscovery = discovery;
     if (this.startupInitializePromise === null) {
       this.startupInitializePromise = this.initializeOnce(discovery);
     }
@@ -4497,6 +4505,36 @@ export class AgentEngine {
   private assertSessionNotRunningElsewhere(...args: Parameters<typeof lifecycleImpl.assertSessionNotRunningElsewhere>): ReturnType<typeof lifecycleImpl.assertSessionNotRunningElsewhere> {
     return lifecycleImpl.assertSessionNotRunningElsewhere.call(this.lifecycleHost(), ...args);
   }
+
+  /**
+   * #926: live panes that may run `cli` but that no agent record claims by
+   * UUID (unreadable panes included), or `null` when the topology cannot
+   * support attribution. After a crash these are the restored panes.
+   */
+  private async unattributedAgentPanes(cli: string): Promise<string[] | null> {
+    const snapshot = await this.registry.attributionSnapshot();
+    if (!snapshot) return null;
+    const discovery =
+      this.resumeDiscovery ??
+      new AgentDiscovery({
+        listSurfaces: async () => snapshot.surfaces,
+        readScreen: (surface, opts) => this.client.readScreen(surface, opts),
+      });
+    let rows: DiscoveredAgent[];
+    try {
+      rows = await discovery.scan(true, snapshot.surfaces);
+    } catch {
+      return null;
+    }
+    return rows
+      .filter((row) => {
+        const uuid = row.surface_uuid?.trim().toLowerCase();
+        if (uuid && snapshot.attributedUuids.has(uuid)) return false;
+        if (row.read_error) return true;
+        return row.cli === cli || (row.has_agent && row.cli === "unknown");
+      })
+      .map((row) => row.surface_id);
+  }
   cascadeKill(...args: Parameters<typeof lifecycleImpl.cascadeKill>): ReturnType<typeof lifecycleImpl.cascadeKill> {
     return lifecycleImpl.cascadeKill.call(this.lifecycleHost(), ...args);
   }
@@ -4523,6 +4561,8 @@ export class AgentEngine {
       get registry() { return engine.registry; },
       get seatRegistry() { return engine.seatRegistry; },
       get selfRegistrationSessionLookup() { return engine.selfRegistrationSessionLookup; },
+      get sessionProcessScanner() { return engine.sessionProcessScanner; },
+      unattributedAgentPanes: (...args) => engine.unattributedAgentPanes(...args),
       get selfRegistrationSessionResolver() { return engine.selfRegistrationSessionResolver; },
       get spawnGuard() { return engine.spawnGuard; },
       get spawnPreflight() { return engine.spawnPreflight; },

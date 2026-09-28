@@ -26,6 +26,7 @@ import {
   getTool,
   type ToolCallResult,
 } from "./helpers/mcp-tool-harness.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 
 /**
  * Both defects are about what a FAILING receipt says, so these tests read the
@@ -592,6 +593,8 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
       const record = seedAgent(server, {
         cli: "codex",
         model: "gpt-5.6-sol",
+        // #926: resume needs the recorded process confirmed gone.
+        pid: DEAD_PID,
         cli_session_id: sessionId,
         cli_session_path: join(
           sessionDir,

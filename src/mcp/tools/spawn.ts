@@ -209,7 +209,7 @@ export function registerSpawnAgentTool(
         .optional()
         .default(false)
         .describe(
-          "With resume_agent_id only: override inconclusive recorded-process liveness after the caller deliberately verifies the old agent is gone. Does not bypass session or terminal-state requirements.",
+          "With resume_agent_id only: override missing or inconclusive proof that the old session is not running (no recorded pid, an unproven pid, an unreadable topology or process table) after the caller deliberately verifies the old agent is gone. Does not bypass session or terminal-state requirements.",
         ),
       repo: z
         .string()

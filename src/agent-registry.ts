@@ -2252,6 +2252,39 @@ export class AgentRegistry {
     return null;
   }
 
+  /**
+   * #926: a coherent, non-empty topology plus the surface UUIDs that real
+   * (non-placeholder) agent records claim, or `null` when the topology cannot
+   * support attribution. Discovery's `auto-` and stale `-pending-` rows are
+   * not identities: a pane only they claim is still unattributed.
+   */
+  async attributionSnapshot(): Promise<{
+    surfaces: CmuxSurface[];
+    attributedUuids: Set<string>;
+  } | null> {
+    const observerSnapshot = this.captureObserverSnapshot();
+    let surfaces: readonly CmuxSurface[];
+    try {
+      surfaces = await this.observedSurfaces();
+    } catch {
+      return null;
+    }
+    if (
+      !this.isObserverSnapshotCurrent(observerSnapshot) ||
+      surfaces.length === 0 ||
+      !hasCoherentSurfaceIdentity(surfaces)
+    ) {
+      return null;
+    }
+    const attributedUuids = new Set<string>();
+    for (const record of this.agents.values()) {
+      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) continue;
+      const key = surfaceUuidKey(record.surface_uuid);
+      if (key) attributedUuids.add(key);
+    }
+    return { surfaces: [...surfaces], attributedUuids };
+  }
+
   private canPurgeAtStartup(agent: AgentRecord): boolean {
     if (!this.enforceObserverOwnership) {
       return true;
