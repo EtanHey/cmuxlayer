@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   codexTranscriptEchoCount,
+  codexTranscriptShowsNewEcho,
   composerHoldsForeignDraft,
 } from "../src/delivery/composer-screen.js";
 
@@ -117,3 +118,41 @@ describe("#917 own-draft match is exact", () => {
   });
 });
 
+
+// #917 (review of #913): the submit proof is a matching user row below
+// everything the pre-type frame showed, not a rising count of matching rows.
+describe("#917 a new user row is proven by position", () => {
+  const frame = (body: string) =>
+    `OpenAI Codex\n${body}\n\n› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n`;
+  const pre = frame("› again\n\n• old response\n\n  14:06\n\n› status?\n\n• all green");
+
+  it("never verifies an unchanged stale row, or the burst frame that repaints it", () => {
+    expect(codexTranscriptShowsNewEcho(pre, pre, "again")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(pre, pre.replace("› Ask", "Working (0s • esc to interrupt)\n\n› Ask"), "again")).toBe(false);
+  });
+
+  it("verifies a repeated message whose predecessor scrolled out", () => {
+    const post = frame("  14:06\n\n› status?\n\n• all green\n\n› again\n\nWorking (0s • esc to interrupt)");
+    expect(codexTranscriptEchoCount(post, "again")).toBe(codexTranscriptEchoCount(pre, "again"));
+    expect(codexTranscriptShowsNewEcho(pre, post, "again")).toBe(true);
+  });
+
+  it("verifies a repeated message appended with nothing scrolled", () => {
+    const post = pre.replace("› Ask", "› again\n\n› Ask");
+    expect(codexTranscriptShowsNewEcho(pre, post, "again")).toBe(true);
+    expect(codexTranscriptShowsNewEcho(pre, post, "status?")).toBe(false);
+  });
+
+  it("reads a footer above the composer as chrome, never as the anchor", () => {
+    const footer = "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\ncodex> ";
+    expect(codexTranscriptShowsNewEcho(footer, `› again\n\nWorking (1s)\n${footer}`, "again")).toBe(true);
+    const stale = `› again\n• ok\n${footer}`;
+    expect(codexTranscriptShowsNewEcho(stale, stale, "again")).toBe(false);
+  });
+
+  it("finds the fixture's submitted message below the idle frame", () => {
+    const PONG = "Reply with the single word pong and nothing else.";
+    expect(codexTranscriptShowsNewEcho(fixture("idle-empty"), fixture("idle-submitted-working"), PONG)).toBe(true);
+    expect(codexTranscriptShowsNewEcho(fixture("idle-submitted-working"), fixture("idle-submitted-working"), PONG)).toBe(false);
+  });
+});

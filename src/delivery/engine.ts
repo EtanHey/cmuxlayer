@@ -63,7 +63,7 @@ import {
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
   countVisibleExactQueuedRows,
-  codexTranscriptEchoCount,
+  codexTranscriptShowsNewEcho,
   composerRegionMatchesPayload,
   screenShowsCursorFollowupNeedsEnter,
   screenShowsQueuedCursorFollowup,
@@ -752,7 +752,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const region = extractComposerInputRegion(text, token.text, record?.cli, true);
       // A truncated read without a composer anchor observes no draft state.
       if (region === null) continue;
-      const unchanged = composerRegionMatchesPayload(region, token.text, record?.cli);
+      const unchanged = composerRegionMatchesPayload(region, token.text, record?.cli, text);
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
@@ -1050,7 +1050,6 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let sawNewInterrupt = false;
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
-    const codexEchoBaseline = codexTranscriptEchoCount(opts.pre_type_screen ?? "", opts.text);
 
     while (Date.now() - startedAt < timeoutMs) {
       await opts.beforeMutation?.();
@@ -1181,7 +1180,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         !hasPendingSubmitEvidence &&
         composerInput !== null &&
         composerInput.trim() === "" &&
-        codexTranscriptEchoCount(snapshot.text, opts.text) > codexEchoBaseline;
+        codexTranscriptShowsNewEcho(opts.pre_type_screen, snapshot.text, opts.text);
       const bootHasTranscriptEcho =
         opts.require_attributable_submit_evidence === true &&
         bootFrameAdvanced &&
