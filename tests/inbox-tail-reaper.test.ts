@@ -357,6 +357,62 @@ describe("#911 inbox tailer reaping", () => {
     expect(alive(tailer.tail)).toBe(true);
   });
 
+  // #930 round 2 (Codex): another runtime (the daemon beside an in-process
+  // MCP runtime) persists the resume; this runtime's registry is stale.
+  it("an owner resumed by ANOTHER runtime during the tailer probe keeps its tailer", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-resume04";
+    const tailer = armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid(), version: 1 }));
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+    const otherRuntime = new StateManager(stateMgr.getBaseDir());
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    const probe = vi.fn(async (pid: number) => {
+      otherRuntime.writeState(record(agentId, { state: "working", pid: seat.pid!, version: 2 }));
+      return probeProcess(pid);
+    });
+    const kill = vi.fn();
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ...engine.inboxTailOwnerJudge(new Map()),
+      reap: true,
+      deps: { probe, kill },
+    });
+
+    expect(probe).toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+    expect(result.reaped).toEqual([{ agent_id: agentId, outcome: "owner_changed" }]);
+    expect(alive(tailer.tail)).toBe(true);
+  });
+
+  it("an owner another runtime already resumed is not judged gone from a stale registry", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-resume05";
+    armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid(), version: 1 }));
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    new StateManager(stateMgr.getBaseDir()).writeState(
+      record(agentId, { state: "working", pid: seat.pid!, version: 2 }),
+    );
+    const kill = vi.fn();
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ...engine.inboxTailOwnerJudge(new Map()),
+      reap: true,
+      deps: { kill },
+    });
+
+    expect(result.orphaned).toEqual([]);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
   it("a gone owner that stays gone is still reaped through the recheck", async () => {
     const { inboxOpts, stateMgr } = scratch();
     const agentId = "fleetWorker-staygone";

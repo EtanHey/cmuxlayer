@@ -845,22 +845,30 @@ export async function inboxTailOwnerState(
 }
 
 /**
- * #922 follow-up: the owner record as it stands, read synchronously
- * (registry, else disk): "absent", the fields a resume or a close changes,
- * or null when it cannot be read.
+ * #922 follow-up: the owner record as it stands, read synchronously from
+ * DISK, the state every runtime shares: "absent", the fields a resume or a
+ * close changes, or null when it cannot be read. This runtime's registry can
+ * only veto: if it holds a record that disagrees with disk (another runtime
+ * wrote since it last reconciled), the answer is null, never the stale copy.
  */
 function inboxTailOwnerFingerprint(this: SweepHost, agentId: string): string | null {
-  let record = this.registry.get(agentId);
-  if (!record) {
-    try {
-      if (!this.stateMgr.hasStateFile(agentId)) return "absent";
-    } catch {
-      return null;
+  const fields = (record: AgentRecord): string =>
+    JSON.stringify([record.version, record.updated_at, record.pid, record.state, record.user_killed]);
+  let disk: string;
+  try {
+    if (!this.stateMgr.hasStateFile(agentId)) {
+      disk = "absent";
+    } else {
+      const record = this.stateMgr.readState(agentId);
+      if (!record) return null;
+      disk = fields(record);
     }
-    record = this.stateMgr.readState(agentId);
-    if (!record) return null;
+  } catch {
+    return null;
   }
-  return JSON.stringify([record.version, record.updated_at, record.pid, record.state, record.user_killed]);
+  const local = this.registry.get(agentId);
+  if (local && fields(local) !== disk) return null;
+  return disk;
 }
 
 /**
