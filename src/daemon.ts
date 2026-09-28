@@ -25,6 +25,11 @@ import {
 } from "./cmux-client-factory.js";
 import { createServer, createServerContext } from "./server.js";
 import {
+  awaitLifecycleFirstOutcome,
+  lifecycleNotReadyError,
+  resolveLifecycleConnectionGateMs,
+} from "./mcp/context.js";
+import {
   makeSelfRegistrationSessionLookup,
   makeSelfRegistrationSessionResolver,
 } from "./self-registration.js";
@@ -642,7 +647,11 @@ export class CmuxLayerDaemon {
     let context: CmuxServerContext;
     try {
       context = await this.getContext();
-    } catch {
+    } catch (error) {
+      this.logger.error(
+        "[cmuxlayer-daemon] dropping connection: server context creation failed",
+        error,
+      );
       clearPendingSocket();
       socket.destroy();
       return;
@@ -656,16 +665,22 @@ export class CmuxLayerDaemon {
       watchRegistryNow: this.opts.watchRegistryNow,
       watchNotify: this.opts.watchNotify,
     });
-    try {
-      await (context.lifecycleStartPromise ?? Promise.resolve());
-      if (context.lifecycleStartError) {
-        throw context.lifecycleStartError;
+    // #938: hold the connection only until lifecycle is ready or its first
+    // attempt has an outcome (bounded). A failed or slow lifecycle no longer
+    // drops the client: it is served, and lifecycle-gated tools answer with
+    // the named cause while initialization retries.
+    await awaitLifecycleFirstOutcome(
+      context,
+      resolveLifecycleConnectionGateMs(),
+    );
+    if (!context.lifecycleReady && context.lifecycleStarted) {
+      const notReady =
+        lifecycleNotReadyError(context) ?? context.lifecycleStartError;
+      if (notReady) {
+        this.logger.error(
+          `[cmuxlayer-daemon] serving connection before lifecycle is ready: ${notReady.message}`,
+        );
       }
-    } catch {
-      clearPendingSocket();
-      socket.destroy();
-      await mcpServer.close().catch(() => {});
-      return;
     }
     if (this.draining || socket.destroyed || !socket.readable) {
       clearPendingSocket();

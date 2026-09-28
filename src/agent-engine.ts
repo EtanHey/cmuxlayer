@@ -3788,7 +3788,15 @@ export class AgentEngine {
   initialize(discovery: AgentDiscovery): Promise<void> {
     this.resumeDiscovery = discovery;
     if (this.startupInitializePromise === null) {
-      this.startupInitializePromise = this.initializeOnce(discovery);
+      const attempt = this.initializeOnce(discovery);
+      this.startupInitializePromise = attempt;
+      // #938: a failed attempt (e.g. cmux rate_limited during discovery) must
+      // not be cached, or the lifecycle retry loop replays the same rejection.
+      attempt.catch(() => {
+        if (this.startupInitializePromise === attempt) {
+          this.startupInitializePromise = null;
+        }
+      });
     }
     return this.startupInitializePromise;
   }

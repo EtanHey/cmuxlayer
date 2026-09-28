@@ -12,6 +12,7 @@ import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { isCmuxSidebarStatusFrame } from "./cmux-status-frame.js";
+import { recordTransportRetry } from "./transport-retry-context.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 2_000;
@@ -768,14 +769,20 @@ export class CmuxPersistentSocket {
         } catch (error) {
           if (
             !(error instanceof CmuxSocketError) ||
-            error.code !== "rate_limited" ||
-            attempt >= this.maxRateLimitRetries
+            error.code !== "rate_limited"
           ) {
+            throw error;
+          }
+          if (attempt >= this.maxRateLimitRetries) {
+            // #938: say how hard we tried; `retry_count: undefined` made the
+            // exhausted limiter look like an unbudgeted call.
+            error.retry_count = attempt;
             throw error;
           }
         } finally {
           release();
         }
+        recordTransportRetry();
         await this.waitForPollingBackoff(this.rateLimitBackoffMs(attempt));
       }
     } finally {

@@ -41,6 +41,28 @@ const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
 const RETRY_SAFE_V2_METHODS = new Set([
   "system.ping",
 ]);
+// AIDEV-NOTE (#938): cmux 0.64.23+ charges exactly these read-plane methods to
+// a per-connection token bucket (ControlCommandExecutionPolicy.pollingMethods,
+// cmux v0.64.25) and refuses them with rate_limited BEFORE executing; every
+// other method is always admitted. Only these go through the polling budget
+// and its rate_limited retry, so a mutation is never retried blindly.
+export const CMUX_POLLING_METHODS: ReadonlySet<string> = new Set([
+  "system.top",
+  "system.memory",
+  "system.tree",
+  "system.identify",
+  "window.list",
+  "window.current",
+  "window.displays",
+  "workspace.list",
+  "workspace.current",
+  "surface.list",
+  "surface.current",
+  "surface.read_text",
+  "surface.read_selection",
+  "pane.list",
+  "pane.surfaces",
+]);
 
 interface V1RawArg {
   raw: string;
@@ -157,7 +179,9 @@ export class CmuxSocketClient {
     return this.withConnectionRetry(
       async () => {
         await this.ensureAuthenticated();
-        return this.transport.call<T>(method, params);
+        return this.transport.call<T>(method, params, {
+          polling: CMUX_POLLING_METHODS.has(method),
+        });
       },
       RETRY_SAFE_V2_METHODS.has(method),
     );

@@ -138,6 +138,12 @@ export interface LifecycleStartHealth {
   waiting_for_ms: number | null;
   timeout_ms: number;
   error: string | null;
+  /** #938: initializing | ready | retrying (idle before lifecycle starts). */
+  state?: "idle" | "initializing" | "ready" | "retrying";
+  /** #938: lifecycle initialization attempts so far. */
+  attempt?: number;
+  /** #938: the last failed attempt's error; null once ready. */
+  last_error?: string | null;
   /**
    * #530 review P2-4: how many callers gave up on the bound this PR added.
    * Without it the new timeout was itself silent — the exact defect class.
@@ -624,7 +630,9 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   }
   if (lifecycle?.lifecycle_start?.error) {
     warnings.push(
-      `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
+      lifecycle.lifecycle_start.state === "retrying"
+        ? `lifecycle initializing: ${lifecycle.lifecycle_start.error}, retrying (attempt ${lifecycle.lifecycle_start.attempt ?? "?"}); lifecycle-gated tools are degraded.`
+        : `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
     );
   }
   // #530 final pass F5: gating on `timeouts > 0` alone latched the warning
@@ -1021,7 +1029,7 @@ function formatDaemonLifecycle(
   const start = lifecycle.lifecycle_start;
   if (start) {
     lines.push(
-      `lifecycle start: started=${start.started} settled=${start.settled} timeouts=${start.timeouts}${
+      `lifecycle start: ${start.state ? `state=${start.state} attempt=${start.attempt ?? 0} ` : ""}started=${start.started} settled=${start.settled} timeouts=${start.timeouts}${
         start.waiting_for_ms === null
           ? ""
           : ` waiting_for_ms=${start.waiting_for_ms}`
