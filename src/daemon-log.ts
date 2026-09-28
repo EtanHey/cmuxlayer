@@ -80,10 +80,12 @@ export function daemonLogPath(): string | null {
 const SECRET_ASSIGNMENT =
   /\b([A-Za-z0-9_.-]*(?:TOKEN|SECRET|KEY|PASSWORD|PASSWD|CAPABILITY|AUTH)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)/gi;
 const BEARER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
-// A 32+ char base64/hex-shaped run containing a digit. `=` only as trailing
-// padding and the digit requirement keep `key=value` fields and plain paths
-// (e.g. `local/state/cmux/cmuxlayer-stated`) readable.
-const TOKEN_SHAPED_RUN = /(?=[A-Za-z+/_-]*\d)[A-Za-z0-9+/_-]{32,}={0,2}/g;
+// Long token-shaped runs, letters-only included. Without `/` any 32+ run is
+// masked (path segments are split by `/` and `.`, so paths stay readable);
+// with `/` (standard base64) a 32+ run is masked when it holds a digit.
+// `=` only as trailing padding, so structured `key=value` fields survive.
+const TOKEN_SHAPED_RUN = /[A-Za-z0-9+_-]{32,}={0,2}/g;
+const SLASHED_TOKEN_RUN = /(?=[A-Za-z+/_-]*\d)[A-Za-z0-9+/_-]{32,}={0,2}/g;
 
 /**
  * Mask anything secret-shaped in free text (error messages, causes): the
@@ -97,7 +99,8 @@ export function redactLogText(text: string): string {
   // "Bearer" after `Authorization:` and leave the credential behind.
   redacted = redacted.replace(BEARER, "$1 [REDACTED]");
   redacted = redacted.replace(SECRET_ASSIGNMENT, "$1$2[REDACTED]");
-  return redacted.replace(TOKEN_SHAPED_RUN, "[REDACTED]");
+  redacted = redacted.replace(TOKEN_SHAPED_RUN, "[REDACTED]");
+  return redacted.replace(SLASHED_TOKEN_RUN, "[REDACTED]");
 }
 
 /**

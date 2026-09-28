@@ -209,19 +209,30 @@ describe("#938 persistent daemon log", () => {
     const logPath = uniquePath("broad-redact", ".log");
     enableDaemonLog({ path: logPath });
     const hex = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4";
+    const lettersOnly = "QwErTyUiOpAsDfGhJkLzXcVbNmQwErTyUiOpAsDf";
+    const slashedBase64 = "ab12/CD34efGH56ij+KL78mnOP90qrST/uvWX==";
 
     appendDaemonLog(
       "lifecycle_attempt_failed",
-      `error=boom FOO_TOKEN=abc123secret api_key: "k-9" Authorization: Bearer eyJhbGciOi.payload.sig id=${hex}`,
+      `error=boom FOO_TOKEN=abc123secret api_key: "k-9" Authorization: Bearer eyJhbGciOi.payload.sig id=${hex} bare ${lettersOnly} b64 ${slashedBase64} path /home/someone/.local/state/cmux/cmuxlayer-stated.sock`,
     );
     await flushDaemonLog();
 
     const log = readLog(logPath);
-    for (const secret of ["abc123secret", "k-9", "eyJhbGciOi", hex]) {
+    for (const secret of [
+      "abc123secret",
+      "k-9",
+      "eyJhbGciOi",
+      hex,
+      lettersOnly,
+      slashedBase64,
+    ]) {
       expect(log).not.toContain(secret);
     }
     expect(log).toContain("FOO_TOKEN=[REDACTED]");
     expect(log).toContain("error=boom");
+    // Plain paths stay readable.
+    expect(log).toContain("/home/someone/.local/state/cmux/cmuxlayer-stated.sock");
   });
 
   it("runDaemon in a test process writes no log unless the test asks", async () => {
