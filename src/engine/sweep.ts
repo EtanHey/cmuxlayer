@@ -13,6 +13,14 @@ import {
 import type { AgentRecord, CloseForensicsEvent } from "../agent-types.js";
 import { getTransportHealth } from "../cmux-transport-self-heal.js";
 import {
+  type ProcessRow,
+  type TailOwnerState,
+  probeProcess,
+  snapshotProcessRows,
+  sweepInboxTailers,
+} from "../inbox-tail-reaper.js";
+import { qualifyAgentProcessLiveness } from "../util/pid-alive.js";
+import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
   agentDir,
   reapOrphanedPendingChannelMarkers,
@@ -35,6 +43,7 @@ import {
 import {
   CHANNEL_MARKER_REAP_INTERVAL_MS,
   CHANNEL_MARKER_REAP_RETRY_MS,
+  INBOX_TAIL_REAP_INTERVAL_MS,
   DEFAULT_SWEEP_ACTIVE_INTERVAL_MS,
   DEFAULT_SWEEP_IDLE_AFTER_SWEEPS,
   DEFAULT_SWEEP_IDLE_INTERVAL_MS,
@@ -116,6 +125,9 @@ export interface SweepHost {
   readonly inboxOpts: AgentEngine["inboxOpts"];
   lastChannelMarkerReapAt: AgentEngine["lastChannelMarkerReapAt"];
   lastChannelMarkerReapFailureAt: AgentEngine["lastChannelMarkerReapFailureAt"];
+  lastInboxTailReapAt: AgentEngine["lastInboxTailReapAt"];
+  readonly inboxTailReaper: AgentEngine["inboxTailReaper"];
+  inboxTailReapInFlight: AgentEngine["inboxTailReapInFlight"];
   lastSweepSignature: AgentEngine["lastSweepSignature"];
   readonly lifecycleLockHolder: AgentEngine["lifecycleLockHolder"];
   readonly outboxDrain: AgentEngine["outboxDrain"];
@@ -153,6 +165,7 @@ export interface SweepHost {
   purgeStartupTerminalAgents: AgentEngine["purgeStartupTerminalAgents"];
   purgeTerminalForSweep: AgentEngine["purgeTerminalForSweep"];
   reapChannelMarkersBestEffort: AgentEngine["reapChannelMarkersBestEffort"];
+  reapInboxTailsBestEffort: AgentEngine["reapInboxTailsBestEffort"];
   reconcileAgents: AgentEngine["reconcileAgents"];
   reconcileRolePlacements: AgentEngine["reconcileRolePlacements"];
   recordSweepStability: AgentEngine["recordSweepStability"];
@@ -666,6 +679,9 @@ export async function runSweepOnce(
         }),
       );
     }
+    // After terminal purge, so a record removed this sweep is reaped this
+    // sweep. Detached: the sweep never waits on `ps` or on a lingering tailer.
+    void this.reapInboxTailsBestEffort();
     await yieldToWaiters();
     if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
       await time("placements_ms", () =>
@@ -767,6 +783,184 @@ export async function reapChannelMarkersBestEffort(this: SweepHost): Promise<voi
   } catch {
     this.lastChannelMarkerReapFailureAt = now;
     // Marker cleanup is maintenance; lifecycle reconciliation must continue.
+  }
+}
+
+const PENDING_AGENT_ID_RE = /-pending-\d+-[a-z0-9]+$/i;
+
+/**
+ * #911. The reaper signals only on POSITIVE PROOF OF DEATH; every uncertainty
+ * resolves to "unknown", which keeps the tailer. Gone means one of:
+ * - the record is confirmed absent (no state file, read cleanly) and this
+ *   registry is the verified fleet registry for the inbox dir;
+ * - a FRESH probe, taken after the record was read, finds the recorded pid
+ *   dead or running a different process;
+ * - a pid-less record an operator closed.
+ * The sweep's `ps` snapshot may only prove an owner live: a pid absent from
+ * an older snapshot may belong to an agent that resumed since. A read or
+ * parse failure is not absence. `done` alone is not gone: a lead that wrote
+ * DONE keeps its pane, its process and its mailbox until something closes it.
+ */
+export async function inboxTailOwnerState(
+  this: SweepHost,
+  agentId: string,
+  processes: ReadonlyMap<number, ProcessRow>,
+  probe: (pid: number) => Promise<ProcessRow | null> = probeProcess,
+): Promise<TailOwnerState> {
+  // A provisional id is renamed in place once the real one is known.
+  if (PENDING_AGENT_ID_RE.test(agentId)) return "unknown";
+  let record = this.registry.get(agentId);
+  if (!record) {
+    let hasFile: boolean;
+    try {
+      hasFile = this.stateMgr.hasStateFile(agentId);
+    } catch {
+      return "unknown";
+    }
+    if (!hasFile) return this.inboxTailReaper?.recordAuthority ? "gone" : "unknown";
+    record = this.stateMgr.readState(agentId);
+    // Present on disk but unreadable or malformed: not proof of anything.
+    if (!record) return "unknown";
+  }
+  if (record.pid) {
+    const judge = (row: ProcessRow): TailOwnerState => {
+      const startedAtMs = Date.parse(row.started_at);
+      return qualifyAgentProcessLiveness(
+        record,
+        "alive",
+        Number.isFinite(startedAtMs) ? startedAtMs : null,
+      ) === "gone"
+        ? "gone"
+        : "live";
+    };
+    const seen = processes.get(record.pid);
+    if (seen && judge(seen) === "live") return "live";
+    let fresh: ProcessRow | null;
+    try {
+      fresh = await probe(record.pid);
+    } catch {
+      return "unknown";
+    }
+    // The probe awaited: an owner that resumed meanwhile has a new pid. The
+    // probe proves nothing about a record that is no longer the current one.
+    const current = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    if (current?.pid !== record.pid) return "unknown";
+    return fresh === null ? "gone" : judge(fresh);
+  }
+  return TERMINAL_STATES.has(record.state) && record.user_killed === true ? "gone" : "live";
+}
+
+/**
+ * #922 follow-up: the owner record as it stands, read synchronously from
+ * DISK, the state every runtime shares: "absent", the fields a resume or a
+ * close changes, or null when it cannot be read. This runtime's registry can
+ * only veto: if it holds a record that disagrees with disk (another runtime
+ * wrote since it last reconciled), the answer is null, never the stale copy.
+ */
+function inboxTailOwnerFingerprint(this: SweepHost, agentId: string): string | null {
+  const fields = (record: AgentRecord): string =>
+    JSON.stringify([record.version, record.updated_at, record.pid, record.state, record.user_killed]);
+  let disk: string;
+  try {
+    if (!this.stateMgr.hasStateFile(agentId)) {
+      disk = "absent";
+    } else {
+      const record = this.stateMgr.readState(agentId);
+      if (!record) return null;
+      disk = fields(record);
+    }
+  } catch {
+    return null;
+  }
+  const local = this.registry.get(agentId);
+  if (local && fields(local) !== disk) return null;
+  return disk;
+}
+
+/**
+ * #922 follow-up: judge owners for one reap. An owner is gone only if its
+ * record did not change while it was judged, and each signal is preceded by
+ * `ownerStillGone`, which requires that same record to still stand. It is
+ * synchronous, so nothing interleaves between the final check and the kill.
+ */
+export function inboxTailOwnerJudge(
+  this: SweepHost,
+  processes: ReadonlyMap<number, ProcessRow>,
+  probe?: (pid: number) => Promise<ProcessRow | null>,
+): {
+  ownerState: (agentId: string) => Promise<TailOwnerState>;
+  ownerStillGone: (agentId: string) => boolean;
+} {
+  const judged = new Map<string, string>();
+  return {
+    ownerState: async (agentId) => {
+      const before = inboxTailOwnerFingerprint.call(this, agentId);
+      const state = await inboxTailOwnerState.call(this, agentId, processes, probe);
+      if (state !== "gone") return state;
+      if (before === null || inboxTailOwnerFingerprint.call(this, agentId) !== before) return "unknown";
+      judged.set(agentId, before);
+      return "gone";
+    },
+    ownerStillGone: (agentId) => {
+      const before = judged.get(agentId);
+      return before !== undefined && inboxTailOwnerFingerprint.call(this, agentId) === before;
+    },
+  };
+}
+
+/** Reap the mailbox tailers of agents that are gone. Best-effort, at most once a minute. */
+export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
+  if (!this.inboxOpts || !this.inboxTailReaper || this.inboxTailReapInFlight) return;
+  const now = Date.now();
+  if (
+    this.lastInboxTailReapAt !== null &&
+    now - this.lastInboxTailReapAt < INBOX_TAIL_REAP_INTERVAL_MS
+  ) {
+    return;
+  }
+  this.lastInboxTailReapAt = now;
+  this.inboxTailReapInFlight = true;
+  try {
+    const rows = await snapshotProcessRows();
+    const processes = new Map(rows.map((row) => [row.pid, row]));
+    const result = await sweepInboxTailers({
+      rows,
+      inboxOpts: this.inboxOpts,
+      ...inboxTailOwnerJudge.call(this, processes),
+      reap: true,
+    });
+    for (const tailer of result.live) {
+      if (!tailer.recorded) continue;
+      const record = this.registry.get(tailer.agent_id);
+      if (!record) continue;
+      const owned = {
+        wrapper_pid: tailer.wrapper_pid,
+        tail_pid: tailer.tail_pid,
+        started_at: tailer.wrapper_started_at ?? tailer.tail_started_at,
+        inbox_path: tailer.inbox_path,
+      };
+      if (JSON.stringify(record.inbox_tail ?? null) === JSON.stringify(owned)) continue;
+      try {
+        this.registry.set(
+          tailer.agent_id,
+          this.stateMgr.updateRecord(tailer.agent_id, { inbox_tail: owned }),
+        );
+      } catch {
+        // Adoption is bookkeeping; the record may have just been purged.
+      }
+    }
+    if (result.reaped.length > 0) {
+      await this.client.log(
+        `inbox-tail reaper: ${result.reaped
+          .map((entry) => `${entry.agent_id}=${entry.outcome}`)
+          .join(" ")} live=${result.live.length}`,
+        { level: "info", source: "agent-engine" },
+      );
+    }
+  } catch {
+    // Tailer cleanup is maintenance; lifecycle reconciliation must continue.
+  } finally {
+    this.inboxTailReapInFlight = false;
   }
 }
 

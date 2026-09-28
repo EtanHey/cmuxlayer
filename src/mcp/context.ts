@@ -5,9 +5,10 @@
  * verbatim from server.ts (CX-2 S4); imports nothing from the server.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { inboxBaseDir as inboxBaseDirOf } from "../inbox.js";
 import { CmuxClient, type ExecFn } from "../cmux-client.js";
 import type { CmuxSocketClient } from "../cmux-socket-client.js";
 import { type SeatManifestWriter } from "../seat-manifest.js";
@@ -457,6 +458,40 @@ export function createServerContext(
   };
 
   return context;
+}
+
+/**
+ * #911: the registry may call a record-less tailer an orphan only when it is
+ * the VERIFIED fleet registry for that inbox dir: the state dir IS the
+ * production state dir and the inbox dir IS the production inbox dir, judged
+ * by filesystem identity (realpath, then device+inode), never by spelling. A
+ * scratch state dir, even one beside a symlink to the real inbox, is not.
+ * Anything that cannot be resolved has no authority.
+ */
+export function hasInboxTailRecordAuthority(
+  stateDir: string,
+  inboxBaseDir: string | undefined,
+  production: { stateDir: string; inboxBaseDir: string } = {
+    stateDir: join(homedir(), ".local", "state", "cmux-agents"),
+    inboxBaseDir: inboxBaseDirOf(),
+  },
+): boolean {
+  const identity = (path: string): string | null => {
+    try {
+      const stat = statSync(realpathSync(path));
+      return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
+    } catch {
+      return null;
+    }
+  };
+  const same = (left: string, right: string): boolean => {
+    const leftId = identity(left);
+    return leftId !== null && leftId === identity(right);
+  };
+  return (
+    same(stateDir, production.stateDir) &&
+    same(inboxBaseDir ?? production.inboxBaseDir, production.inboxBaseDir)
+  );
 }
 
 export function resolveServerInboxBaseDir(input: {

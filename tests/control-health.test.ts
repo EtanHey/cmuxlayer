@@ -307,6 +307,19 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("#911: reports inbox tailers under their own key", async () => {
+    const health = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "home-911"),
+      tmpDir: join(TEST_ROOT, "tmp-911"),
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      inboxTailers: async () => ({ live: 11, orphaned: 82 }),
+    });
+
+    expect(health.tailers).toEqual({ live: 11, orphaned: 82 });
+    expect(formatControlHealth(health)).toContain("inbox tailers: live=11 orphaned=82");
+  });
+
   it("#911: an inbox tailer is never listed as a cmux production pid", async () => {
     // Observed at the v0.4.90 install: a legacy tailer's ps line runs on into
     // its environment (CMUX_BUNDLED_CLI_PATH=/Applications/cmux.app/...), so
@@ -651,6 +664,15 @@ describe("control health", () => {
       env: { PATH: "" },
       execFile: async () => ({ stdout: "" }),
     });
+    rawHealth.cmux_instances.production.processes = [{
+      pid: 25528,
+      command: "/Applications/cmux.app/Contents/MacOS/cmux",
+      fd_pressure: {
+        pid: 25528, open_fds: 22, udp_fds: 6,
+        by_type: { REG: 10, PIPE: 4, KQUEUE: 0, UDP: 6, ptmx: 2, unix: 0, other: 0 },
+        warn: false, warn_threshold: 4096, sampled_at: rawHealth.generated_at,
+      },
+    }];
     const stateMgr = new StateManager(TEST_ROOT);
     stateMgr.writeState({
       agent_id: "caller-agent",
@@ -750,6 +772,7 @@ describe("control health", () => {
         },
       ],
     });
+    expect(terse.structuredContent.health.cmux_fds).toBe("22 (udp 6)");
     expect(unscopedTerse.structuredContent.health.caller_live_watches).toEqual({
       count: 0,
       watches: [],

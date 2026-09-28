@@ -118,6 +118,11 @@ function baseDirOf(opts: InboxOpts | undefined): string {
   return opts?.baseDir ?? join(homedir(), ".cmux", "agents");
 }
 
+/** The directory that holds one subdirectory per agent's mailbox. */
+export function inboxBaseDir(opts?: InboxOpts): string {
+  return baseDirOf(opts);
+}
+
 function nowOf(opts: InboxOpts | undefined): number {
   return (opts?.now ?? Date.now)();
 }

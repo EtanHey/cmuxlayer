@@ -91,6 +91,17 @@ export interface AgentRecord {
    */
   boot_prompt_text?: string | null;
   pid: number | null;
+  /**
+   * #911: the mailbox tailer this agent armed, as the sweep last adopted it
+   * from `inbox-tail.pid` and `ps`. Reaping never trusts this alone; it
+   * re-probes the PID's start time and command line before any signal.
+   */
+  inbox_tail?: {
+    wrapper_pid: number | null;
+    tail_pid: number | null;
+    started_at: string | null;
+    inbox_path: string;
+  } | null;
   /** Hook registration time that binds `pid` to this launch generation. */
   pid_registered_at?: string | null;
   version: number;

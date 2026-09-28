@@ -417,6 +417,15 @@ export interface AgentEngineOptions {
     assertSurfaceBindingCurrent: () => Promise<void>;
   }) => Promise<void>;
   inboxOpts?: InboxOpts;
+  /**
+   * #911: reap the mailbox tailers of gone agents from the sweep. Unset (bare
+   * and test construction) runs no reaper and no `ps`. `recordAuthority`: this
+   * registry is the fleet's registry for `inboxOpts`, so a tailer whose agent
+   * has no record at all is an orphan. False where the state dir and inbox dir
+   * are not a pair (a bench daemon on a scratch state dir must never read the
+   * real fleet's tailers as orphans).
+   */
+  inboxTailReaper?: { recordAuthority: boolean };
   seatRegistry?: SeatRegistry | null;
   seatRegistryPath?: string;
   /**
@@ -552,6 +561,9 @@ export const SPAWN_SESSION_CAPTURE_POLL_MS = 50;
 export const CHANNEL_MARKER_REAP_INTERVAL_MS = 60 * 60 * 1_000;
 
 export const CHANNEL_MARKER_REAP_RETRY_MS = 60 * 1_000;
+
+/** #911: one `ps` per minute, plus the first sweep after a daemon start. */
+export const INBOX_TAIL_REAP_INTERVAL_MS = 60 * 1_000;
 
 export const STOP_POST_CONDITION_POLL_MS = 50;
 
