@@ -25,6 +25,11 @@ import {
 } from "./cmux-client-factory.js";
 import { createServer, createServerContext } from "./server.js";
 import {
+  appendDaemonLog,
+  describeLogError,
+  enableDaemonLog,
+} from "./daemon-log.js";
+import {
   awaitLifecycleFirstOutcome,
   lifecycleNotReadyError,
   resolveLifecycleConnectionGateMs,
@@ -628,6 +633,7 @@ export class CmuxLayerDaemon {
 
   private async acceptConnection(socket: net.Socket): Promise<void> {
     if (this.draining) {
+      appendDaemonLog("connection_refused", "cause=daemon draining");
       socket.destroy();
       return;
     }
@@ -651,6 +657,10 @@ export class CmuxLayerDaemon {
       this.logger.error(
         "[cmuxlayer-daemon] dropping connection: server context creation failed",
         error,
+      );
+      appendDaemonLog(
+        "connection_refused",
+        `cause=server context creation failed: ${describeLogError(error)}`,
       );
       clearPendingSocket();
       socket.destroy();
@@ -681,9 +691,16 @@ export class CmuxLayerDaemon {
         this.logger.error(
           `[cmuxlayer-daemon] serving connection before lifecycle is ready: ${notReady.message}`,
         );
+        appendDaemonLog("connection_gated", `cause=${notReady.message}`);
       }
     }
     if (this.draining || socket.destroyed || !socket.readable) {
+      appendDaemonLog(
+        "connection_closed",
+        this.draining
+          ? "cause=daemon draining before the lifecycle gate opened"
+          : "cause=client left before the lifecycle gate opened",
+      );
       clearPendingSocket();
       socket.destroy();
       await mcpServer.close().catch(() => {});
@@ -816,6 +833,7 @@ export class CmuxLayerDaemon {
     if (this.retirementPromise) {
       return;
     }
+    appendDaemonLog("daemon_retiring", `reason=${reason}`);
     if (reason === "stale-build" && stale) {
       this.logger.error(
         `[cmuxlayer-daemon] installed version bump detected (running v${stale.running}, installed v${stale.installed}); retiring`,
@@ -1038,6 +1056,9 @@ export async function runDaemon(
 ): Promise<CmuxLayerDaemon> {
   ensureNodeMaxOldSpaceEnv();
   installHeapGuard();
+  // #938: only the daemon process writes the persistent log.
+  enableDaemonLog();
+  appendDaemonLog("daemon_starting", `node=${process.version}`);
   const configuredStateDir = process.env.CMUXLAYER_STATE_DIR?.trim() || undefined;
   const configuredInboxBaseDir =
     process.env.CMUXLAYER_INBOX_BASE_DIR?.trim() || undefined;
@@ -1099,6 +1120,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   process.stderr.on("error", () => {});
   runDaemon().catch((error) => {
     console.error("[cmuxlayer-daemon] fatal", error);
+    appendDaemonLog("daemon_fatal", describeLogError(error));
     process.exit(1);
   });
 }
