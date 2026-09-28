@@ -31,6 +31,8 @@ export interface DiscoveredAgent {
   actions?: string[];
   errors?: string[];
   has_agent: boolean;
+  /** A successfully read screen with harness activity even when its CLI is unidentified. */
+  agent_screen?: boolean;
   read_error: boolean;
 }
 
@@ -214,6 +216,9 @@ export class AgentDiscovery {
         actions: parsed.actions ?? [],
         errors: parsed.errors,
         has_agent: cli !== "unknown",
+        agent_screen: cli !== "unknown" ||
+          (parsed.control_state === "busy" &&
+            (parsed.status === "thinking" || parsed.status === "working")),
         read_error: false,
       };
     } catch (error) {
@@ -243,6 +248,7 @@ export class AgentDiscovery {
         context_pct: null,
         errors: [],
         has_agent: false,
+        agent_screen: false,
         read_error: true,
       };
     }
@@ -305,12 +311,13 @@ export class AgentDiscovery {
     return result;
   }
 
-  /** Classify a supplied, already validated topology without reading it again. */
+  /** Classify a supplied topology, then validate its bindings against a live re-list. */
   async scan(force = false, surfacesOverride?: readonly CmuxSurface[]): Promise<DiscoveredAgent[]> {
     const observerScoped = typeof this.deps.observerIdProvider === "function";
     const observerId = this.getObserverId();
     const canCache = !observerScoped || observerId !== null;
-    if (!canCache || (this.cache && this.cache.observerId !== observerId)) {
+    if (!surfacesOverride &&
+      (!canCache || (this.cache && this.cache.observerId !== observerId))) {
       this.cache = null;
     }
     if (!surfacesOverride && !force && this.cache && Date.now() - this.cache.at < this.ttlMs) {
@@ -326,17 +333,23 @@ export class AgentDiscovery {
 
     const completedObserverId = this.getObserverId();
     if (completedObserverId !== observerId) {
-      this.cache = null;
+      if (!surfacesOverride) this.cache = null;
       throw new Error(
         `Surface observer changed during discovery (${observerId ?? "unknown"} -> ${completedObserverId ?? "unknown"})`,
       );
     }
 
-    const completedSurfaces = (surfacesOverride ?? await this.deps.listSurfaces()).filter(
+    const completedSurfaces = (await this.deps.listSurfaces()).filter(
       (surface) => surface.type === "terminal",
     );
     const uuidKey = (value: string | null | undefined): string | null =>
       value?.trim().toLowerCase() || null;
+    if (surfacesOverride &&
+      (surfaces.length === 0 || completedSurfaces.length !== surfaces.length)) {
+      throw new SurfaceBindingChangedDuringDiscoveryError(
+        "Surface topology changed during override discovery; refusing stale screen evidence",
+      );
+    }
     for (const surface of surfaces) {
       const expectedUuid = uuidKey(surface.id);
       const currentMatches = expectedUuid
@@ -351,9 +364,10 @@ export class AgentDiscovery {
       if (
         currentMatches.length !== 1 ||
         current?.ref !== surface.ref ||
+        completedSurfaces.filter((candidate) => candidate.ref === surface.ref).length !== 1 ||
         (current.workspace_ref ?? null) !== (surface.workspace_ref ?? null)
       ) {
-        this.cache = null;
+        if (!surfacesOverride) this.cache = null;
         throw new SurfaceBindingChangedDuringDiscoveryError(
           `Surface binding changed during discovery for ${surface.ref}` +
             `${surface.id ? ` (UUID ${surface.id})` : ""}; refusing stale screen evidence`,
@@ -363,13 +377,15 @@ export class AgentDiscovery {
 
     const validatedObserverId = this.getObserverId();
     if (validatedObserverId !== observerId) {
-      this.cache = null;
+      if (!surfacesOverride) this.cache = null;
       throw new Error(
         `Surface observer changed during discovery (${observerId ?? "unknown"} -> ${validatedObserverId ?? "unknown"})`,
       );
     }
 
-    this.cache = !surfacesOverride && canCache ? { at: Date.now(), observerId, result } : null;
+    if (!surfacesOverride) {
+      this.cache = canCache ? { at: Date.now(), observerId, result } : null;
+    }
     return result;
   }
 }

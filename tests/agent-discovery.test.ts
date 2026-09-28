@@ -324,6 +324,43 @@ describe("AgentDiscovery", () => {
     );
   });
 
+  it("rejects an override scan when its ref is recycled during the screen read", async () => {
+    const original = { id: "11111111-2222-4333-8444-555555555555",
+      ref: "surface:1", title: "worker", type: "terminal" as const,
+      index: 0, selected: true };
+    let current = original;
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [current],
+      readScreen: async (surface) => {
+        current = { ...original, id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" };
+        return { surface, text: "Thinking...", lines: 1, scrollback_used: false };
+      },
+    });
+
+    await expect(discovery.scan(true, [original])).rejects.toThrow(
+      /surface binding changed during discovery/i,
+    );
+  });
+
+  it("preserves a full scan cache after an override scan", async () => {
+    const full = { ref: "surface:full", title: "worker", type: "terminal" as const,
+      index: 0, selected: true };
+    const override = { ...full, ref: "surface:override" };
+    let current = [full];
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => current,
+      readScreen: async (surface) => ({
+        surface, text: "Thinking...", lines: 1, scrollback_used: false,
+      }),
+    });
+
+    await discovery.scan(true);
+    expect(discovery.cachedScan()?.rows[0]?.surface_id).toBe(full.ref);
+    current = [override];
+    await discovery.scan(true, [override]);
+    expect(discovery.cachedScan()?.rows[0]?.surface_id).toBe(full.ref);
+  });
+
   it("does not cache scans while a configured observer identity is unknown", async () => {
     let surfaceRef = "surface:first";
     const listSurfaces = vi.fn(async () => [
