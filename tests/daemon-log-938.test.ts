@@ -24,7 +24,9 @@ import {
   appendDaemonLog,
   daemonLogPath,
   defaultDaemonLogPath,
-  describeLogError,
+  logErrorCode,
+  logErrorName,
+  redactLogText,
   disableDaemonLog,
   enableDaemonLog,
   flushDaemonLog,
@@ -127,9 +129,11 @@ describe("#938 persistent daemon log", () => {
 
     const log = readLog(logPath);
     expect(log).toMatch(
-      /lifecycle_attempt_failed attempt=1 retry_in_ms=\d+ error_code=rate_limited error=CmuxSocketError: rate_limited/,
+      /lifecycle_attempt_failed attempt=1 retry_in_ms=\d+ error_code=rate_limited error_name=CmuxSocketError/,
     );
     expect(log).toMatch(/lifecycle_ready attempts=2/);
+    // Structured fields only: the error message never reaches the file.
+    expect(log).not.toContain("Polling rate limited");
   });
 
   it("names refused-or-gated connections and the log path in control_health", async () => {
@@ -190,7 +194,7 @@ describe("#938 persistent daemon log", () => {
       appendCoalescedDaemonLog(
         "connection_gated",
         "lifecycle_not_ready:retrying:rate_limited",
-        `cause=lifecycle_not_ready attempt=${index}`,
+        { cause: "lifecycle_not_ready", attempt: index },
         30,
       );
     }
@@ -205,20 +209,55 @@ describe("#938 persistent daemon log", () => {
     );
   });
 
-  it("masks secret-shaped free text, not only the exact capability", async () => {
-    const logPath = uniquePath("broad-redact", ".log");
+  it("never writes an error message: secrets in it cannot reach the file", async () => {
+    vi.stubEnv("CMUXLAYER_LIFECYCLE_RETRY_BASE_MS", "5");
+    vi.stubEnv("CMUXLAYER_LIFECYCLE_RETRY_MAX_MS", "20");
+    const logPath = uniquePath("no-message", ".log");
     enableDaemonLog({ path: logPath });
-    const hex = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4";
+    const slashTail = `${"QwErTyUiOpAsDfGhJkLzXcVbNmQwErTy"}/a1b2`;
     const lettersOnly = "QwErTyUiOpAsDfGhJkLzXcVbNmQwErTyUiOpAsDf";
-    const slashedBase64 = "ab12/CD34efGH56ij+KL78mnOP90qrST/uvWX==";
-
-    appendDaemonLog(
-      "lifecycle_attempt_failed",
-      `error=boom FOO_TOKEN=abc123secret api_key: "k-9" Authorization: Bearer eyJhbGciOi.payload.sig id=${hex} bare ${lettersOnly} b64 ${slashedBase64} path /home/someone/.local/state/cmux/cmuxlayer-stated.sock`,
+    let calls = 0;
+    const context = createProductionServerContext(
+      withTestObserver({
+        exec: emptyExec(),
+        stateDir: uniquePath("state"),
+        disableSpawnPreflight: true,
+        lifecycleInitializer: async () => {
+          calls += 1;
+          if (calls === 1) {
+            throw new CmuxSocketError(
+              `boom ${slashTail} FOO_TOKEN=abc123secret ${lettersOnly}`,
+              "rate_limited",
+            );
+          }
+        },
+      }),
     );
+    cleanups.push(() => context.dispose());
+    createServer({ context });
+
+    await context.lifecycleReadyPromise;
     await flushDaemonLog();
 
     const log = readLog(logPath);
+    expect(log).toMatch(
+      /lifecycle_attempt_failed attempt=1 retry_in_ms=\d+ error_code=rate_limited error_name=CmuxSocketError/,
+    );
+    for (const secret of ["boom", slashTail, "a1b2", "abc123secret", lettersOnly]) {
+      expect(log).not.toContain(secret);
+    }
+  });
+
+  it("the backstop redactor masks secret shapes, including a slash tail", () => {
+    const hex = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4";
+    const lettersOnly = "QwErTyUiOpAsDfGhJkLzXcVbNmQwErTyUiOpAsDf";
+    const slashedBase64 = "ab12/CD34efGH56ij+KL78mnOP90qrST/uvWX==";
+    const slashTail = `${"QwErTyUiOpAsDfGhJkLzXcVbNmQwErTy"}/a1b2`;
+
+    const redacted = redactLogText(
+      `FOO_TOKEN=abc123secret api_key: "k-9" Authorization: Bearer eyJhbGciOi.payload.sig id=${hex} bare ${lettersOnly} b64 ${slashedBase64} tail ${slashTail} path /home/someone/.local/state/cmux/cmuxlayer-stated.sock`,
+    );
+
     for (const secret of [
       "abc123secret",
       "k-9",
@@ -226,13 +265,12 @@ describe("#938 persistent daemon log", () => {
       hex,
       lettersOnly,
       slashedBase64,
+      "/a1b2",
     ]) {
-      expect(log).not.toContain(secret);
+      expect(redacted).not.toContain(secret);
     }
-    expect(log).toContain("FOO_TOKEN=[REDACTED]");
-    expect(log).toContain("error=boom");
-    // Plain paths stay readable.
-    expect(log).toContain("/home/someone/.local/state/cmux/cmuxlayer-stated.sock");
+    expect(redacted).toContain("FOO_TOKEN=[REDACTED]");
+    expect(redacted).toContain("/home/someone/.local/state/cmux/cmuxlayer-stated.sock");
   });
 
   it("runDaemon in a test process writes no log unless the test asks", async () => {
@@ -259,7 +297,7 @@ describe("#938 persistent daemon log", () => {
     enableDaemonLog({ path: logPath, maxBytes: 400 });
 
     for (let index = 0; index < 60; index += 1) {
-      appendDaemonLog("lifecycle_attempt_failed", `attempt=${index} error=x`);
+      appendDaemonLog("lifecycle_attempt_failed", { attempt: index, error_code: "x" });
     }
     await flushDaemonLog();
 
@@ -273,7 +311,7 @@ describe("#938 persistent daemon log", () => {
     const logPath = uniquePath("redact", ".log");
     enableDaemonLog({ path: logPath });
 
-    appendDaemonLog("connection_refused", "cause=cap-secret-938 failed\nsecond line");
+    appendDaemonLog("connection_refused", { cause: "cap-secret-938\nsecond line" });
     await flushDaemonLog();
 
     const log = readLog(logPath);
@@ -286,7 +324,7 @@ describe("#938 persistent daemon log", () => {
     const logPath = uniquePath("disabled", ".log");
     vi.stubEnv("CMUXLAYER_DAEMON_LOG_PATH", logPath);
 
-    appendDaemonLog("connection_refused", "cause=test");
+    appendDaemonLog("connection_refused", { cause: "test" });
     await flushDaemonLog();
 
     expect(existsSync(logPath)).toBe(false);
@@ -297,7 +335,7 @@ describe("#938 persistent daemon log", () => {
     enableDaemonLog({ path: logPath });
 
     for (let index = 0; index < 5_000; index += 1) {
-      appendDaemonLog("connection_gated", `cause=storm ${index}`);
+      appendDaemonLog("connection_gated", { cause: `storm_${index}` });
     }
     // Nothing is written synchronously: the file appears only after the
     // async writer runs.
@@ -305,7 +343,7 @@ describe("#938 persistent daemon log", () => {
 
     await flushDaemonLog();
     const log = readLog(logPath);
-    expect(log).toContain("cause=storm 0");
+    expect(log).toContain("cause=storm_0");
     expect(log).toMatch(/daemon_log_dropped lines=\d+/);
   });
 
@@ -314,10 +352,11 @@ describe("#938 persistent daemon log", () => {
     enableDaemonLog({ path: logPath, maxBytes: 50 });
 
     for (let index = 0; index < 20; index += 1) {
-      appendDaemonLog(
-        "lifecycle_attempt_failed",
-        `attempt=${index} error=${"x".repeat(400)}`,
-      );
+      appendDaemonLog("lifecycle_attempt_failed", {
+        attempt: index,
+        error_code: "x".repeat(128),
+        error_name: "y".repeat(128),
+      });
     }
     await flushDaemonLog();
 
@@ -338,16 +377,16 @@ describe("#938 persistent daemon log", () => {
     const logPath = uniquePath("forge", ".log");
     enableDaemonLog({ path: logPath });
 
-    appendDaemonLog(
-      "connection_refused",
-      "cause=a\r2026-01-01T00:00:00.000Z pid=1 daemon_fatal forged\u2028x\u0085y\u0007z",
-    );
+    appendDaemonLog("connection_refused", {
+      cause: "a\r2026-01-01T00:00:00.000Z pid=1 daemon_fatal forged\u2028x\u0085y\u0007z",
+    });
     await flushDaemonLog();
 
     const log = readLog(logPath);
     expect(log.split("\n").filter(Boolean)).toHaveLength(1);
     expect(log).not.toMatch(/[\r\u2028\u0085\u0007]/);
-    expect(log).toContain("cause=a | 2026-01-01T00:00:00.000Z pid=1 daemon_fatal forged | x | yz");
+    expect(log).toMatch(/^\S+ pid=\d+ connection_refused cause=a_/);
+    expect(log).not.toMatch(/\n\S* ?pid=1 daemon_fatal/);
   });
 
   it("a writer still busy with an old log never strands the next log's queue", async () => {
@@ -355,12 +394,12 @@ describe("#938 persistent daemon log", () => {
     const newPath = uniquePath("new-log", ".log");
     enableDaemonLog({ path: oldPath });
     // Starts the old log's async writer; it is still in flight below.
-    appendDaemonLog("daemon_stopped", "reason=test");
+    appendDaemonLog("daemon_stopped", { reason: "test" });
     // What a timed-out close followed by a new daemon does: switch logs
     // while the old write has not finished.
     disableDaemonLog();
     enableDaemonLog({ path: newPath });
-    appendDaemonLog("daemon_starting", "node=test");
+    appendDaemonLog("daemon_starting", { node: "test" });
 
     await waitUntil(() => readLog(newPath).includes("daemon_starting"), 2_000);
   });
@@ -378,7 +417,19 @@ describe("#938 persistent daemon log", () => {
       },
     };
 
-    expect(describeLogError(hostile)).toBe("<unprintable error>");
-    expect(describeLogError(hostileString)).toBe("<unprintable error>");
+    Object.defineProperty(hostile, "name", {
+      get() {
+        throw new Error("getter");
+      },
+    });
+    const hostileCode = Object.defineProperty({}, "code", {
+      get() {
+        throw new Error("getter");
+      },
+    });
+
+    expect(logErrorName(hostile)).toBe("unknown");
+    expect(logErrorCode(hostileCode)).toBe("unknown");
+    expect(logErrorName(hostileString)).toBe("non_error_object");
   });
 });
