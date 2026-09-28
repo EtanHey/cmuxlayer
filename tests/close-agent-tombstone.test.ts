@@ -12,7 +12,7 @@ import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { StateManager } from "../src/state-manager.js";
-import type { AgentRecord } from "../src/agent-types.js";
+import { UNBOUND_SURFACE_REF, type AgentRecord } from "../src/agent-types.js";
 import { alive, armTailer, waitGone } from "./helpers/inbox-tailer.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-v2");
@@ -282,6 +282,40 @@ describe("force-stopped agent tombstone", () => {
         (agent: { agent_id: string }) => agent.agent_id,
       ),
     ).toContain("surfaceless-done-agent");
+  });
+  it("hides an unbound resumable done row from the default summary but keeps it addressable (#926)", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "unbound-done-lead",
+        surface_id: UNBOUND_SURFACE_REF,
+        surface_uuid: null,
+        state: "done",
+        cli_session_id: "019ec0e6-9260-2222-3333-444455556666",
+        role: "worker",
+        updated_at: new Date().toISOString(),
+      }),
+    );
+    const ids = (parsed: { agents: Array<{ agent_id: string }> }) =>
+      parsed.agents.map((agent) => agent.agent_id);
+
+    const listed = parseResult(await callTool(server, "list_agents", {}));
+    expect(ids(listed)).not.toContain("unbound-done-lead");
+    const filtered = parseResult(
+      await callTool(server, "list_agents", { state: "done" }),
+    );
+    expect(ids(filtered)).toContain("unbound-done-lead");
+    const explicitlyRequested = parseResult(
+      await callTool(server, "list_agents", {
+        agent_ids: ["unbound-done-lead"],
+      }),
+    );
+    expect(ids(explicitlyRequested)).toContain("unbound-done-lead");
+    // Listing ran the surfaceless eviction; the row is still on disk.
+    expect(stateMgr.readState("unbound-done-lead")).toMatchObject({
+      state: "done",
+      surface_id: UNBOUND_SURFACE_REF,
+    });
   });
 });
 

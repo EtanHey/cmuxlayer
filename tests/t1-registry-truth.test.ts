@@ -487,6 +487,9 @@ describe("T1 #481 — the seat proof reaches a path callers actually use", () =>
         state: "working",
         surface_id: "surface:lead",
         surface_uuid: "LEAD-UUID",
+        // #926: only a successor running the ghost's own session supersedes
+        // a recent session row; a different session never deletes it.
+        cli_session_id: "5f1d0c6a-1f2b-4a3c-8d4e-9f0a1b2c3d4e",
       }),
       makeRecord({
         ...seatFields,

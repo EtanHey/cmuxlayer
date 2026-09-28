@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import type { AgentRecord } from "../agent-types.js";
 
 export type ProcessLiveness = "alive" | "gone" | "unknown";
@@ -62,19 +62,21 @@ export function qualifyAgentProcessLiveness(
   agent: AgentProcessRecord,
   observed: ProcessLiveness,
   startedAtMs: number | null,
+  opts?: { ignoreCreationLowerBound?: boolean },
 ): ProcessLiveness {
   if (observed !== "alive") return observed;
   const createdAtMs = Date.parse(agent.created_at);
   const registeredAtMs = Date.parse(agent.pid_registered_at ?? "");
   if (
-    !Number.isFinite(createdAtMs) ||
+    (!opts?.ignoreCreationLowerBound && !Number.isFinite(createdAtMs)) ||
     !Number.isFinite(registeredAtMs) ||
     startedAtMs === null
   ) {
     return "unknown";
   }
   if (
-    startedAtMs < createdAtMs - PROCESS_START_SKEW_MS ||
+    (!opts?.ignoreCreationLowerBound &&
+      startedAtMs < createdAtMs - PROCESS_START_SKEW_MS) ||
     startedAtMs > registeredAtMs
   ) {
     return "gone";
@@ -93,6 +95,7 @@ export function qualifyAgentProcessLiveness(
 
 export function agentProcessLiveness(
   agent: AgentProcessRecord,
+  opts?: { ignoreCreationLowerBound?: boolean },
 ): ProcessLiveness {
   const observed = processLiveness(agent.pid);
   if (observed !== "alive" || !agent.pid) return observed;
@@ -100,9 +103,62 @@ export function agentProcessLiveness(
     agent,
     observed,
     processStartedAtMs(agent.pid),
+    opts,
   );
 }
 
 export function agentProcessMayBeAlive(agent: AgentProcessRecord): boolean {
   return Boolean(agent.pid) && agentProcessLiveness(agent) !== "gone";
 }
+
+export interface SessionProcess {
+  pid: number;
+  command: string;
+}
+
+/** Finds live processes whose argv carries a CLI session id, or `null` when unreadable. */
+export type SessionProcessScanner = (
+  sessionId: string,
+) => Promise<SessionProcess[] | null>;
+
+const SESSION_PROCESS_SCAN_TIMEOUT_MS = 2_000;
+
+/**
+ * #926: live processes whose argv carries `sessionId` (`claude --resume <id>`,
+ * `codex resume <id>`, ...). This process is excluded. `null` means the table
+ * could not be read, which is never proof of absence. Async with a timeout:
+ * it runs on the resume request path and must not block the event loop.
+ * Only a veto -- a live CLI may carry no id in argv at all.
+ */
+export const scanSessionProcesses: SessionProcessScanner = (sessionId) => {
+  const needle = sessionId.trim().toLowerCase();
+  if (!needle) return Promise.resolve([]);
+  return new Promise((resolveScan) => {
+    execFile(
+      "ps",
+      ["-axww", "-o", "pid=,command="],
+      {
+        encoding: "utf8",
+        timeout: SESSION_PROCESS_SCAN_TIMEOUT_MS,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+      (error, stdout) => {
+        if (error || typeof stdout !== "string") {
+          resolveScan(null);
+          return;
+        }
+        const carriers: SessionProcess[] = [];
+        for (const line of stdout.split("\n")) {
+          const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+          if (!match) continue;
+          const pid = Number(match[1]);
+          if (pid === process.pid || !match[2].toLowerCase().includes(needle)) {
+            continue;
+          }
+          carriers.push({ pid, command: match[2] });
+        }
+        resolveScan(carriers);
+      },
+    );
+  });
+};

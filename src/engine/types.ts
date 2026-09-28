@@ -44,6 +44,7 @@ import type {
 } from "../surface-topology.js";
 import type { TransportHealthSignal } from "../cmux-transport-self-heal.js";
 import type { InboxOpts } from "../inbox.js";
+import type { SessionProcessScanner } from "../util/pid-alive.js";
 
 /** Live-derived state for a record, injected by the server (F1). */
 export type LiveStateResolver = (agent: AgentRecord) => LiveAgentState | null;
@@ -400,6 +401,8 @@ export interface AgentEngineOptions {
   selfRegistrationSessionLookup?: (
     sessionId: string,
   ) => SelfRegistrationSessionEntry | null;
+  /** #926: resume's process-table proof; defaults to a `ps` argv scan. */
+  sessionProcessScanner?: SessionProcessScanner;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,

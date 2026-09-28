@@ -403,8 +403,14 @@ export async function purgeStartupTerminalAgents(
       retainedAgentIds.add(agent.agent_id);
     }
   }
+  // #926: the fresh topology lets a retained row keep a UUID-proven binding.
+  const surfaces =
+    ctx.surfaceTopology?.complete === true
+      ? ctx.surfaceTopology.surfaces
+      : undefined;
   const purgedIds = this.registry.purgeAllTerminal({
     retainAgentIds: retainedAgentIds,
+    ...(surfaces ? { surfaces } : {}),
   });
   this.startupPurgeRetainedAgentIds.clear();
   try {

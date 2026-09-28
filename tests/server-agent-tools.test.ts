@@ -37,6 +37,7 @@ import {
 } from "../src/coordination-paths.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
 import type { CodexRolloutFill } from "../src/codex-rollout-fill.js";
 import { readInbox } from "../src/inbox.js";
@@ -2781,6 +2782,7 @@ describe("agent lifecycle tool handlers", () => {
         repo: "brainlayer",
         cli: "codex",
         state: "done",
+        pid: DEAD_PID,
         surface_id: "surface:old",
         cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       }),
@@ -2842,6 +2844,7 @@ describe("agent lifecycle tool handlers", () => {
         parent_agent_id: parentId,
         spawn_depth: 1,
         report_path: customReportPath,
+        pid: DEAD_PID,
       }),
     );
     const expected = issueCoordinationContract(agentId, {

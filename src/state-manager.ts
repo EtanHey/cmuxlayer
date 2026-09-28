@@ -19,6 +19,7 @@ import { atomicWriteJson } from "./util/atomic-write.js";
 import {
   assertValidTransition,
   isFailedSpawnTombstone,
+  UNBOUND_SURFACE_REF,
   type AgentRecord,
   type AgentRole,
   type AgentState,
@@ -542,6 +543,53 @@ export class StateManager {
     const stateFile = this.stateFilePath(dirName!);
     atomicWriteJson(stateFile, updated, 2);
     this.surfaceSessionIndex.persistRecord(updated);
+    return updated;
+  }
+
+  /**
+   * #926: detach a retained terminal row from a surface (and workspace) it no
+   * longer owns. Keeps state, id and session, and does not refresh lifecycle age: the
+   * retention window counts from the agent's last real update, not from the
+   * restart that unbound it.
+   */
+  unbindSurface(agentId: string, source: string): AgentRecord {
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
+    if (!current) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (
+      current.surface_id === UNBOUND_SURFACE_REF &&
+      !current.surface_uuid &&
+      !current.workspace_id
+    ) {
+      return current;
+    }
+
+    // Workspace refs recycle across a restart exactly like surface refs, so
+    // resume must not aim at the old one: it falls back to placement rules.
+    const updated: AgentRecord = {
+      ...current,
+      surface_id: UNBOUND_SURFACE_REF,
+      surface_uuid: null,
+      workspace_id: null,
+      version: current.version + 1,
+    };
+    const stateFile = this.stateFilePath(dirName!);
+    atomicWriteJson(stateFile, updated, 2);
+    this.surfaceSessionIndex.persistRecord(updated);
+
+    this.eventLog.append({
+      ts: new Date().toISOString(),
+      agent_id: agentId,
+      event: "transition",
+      from_state: current.state,
+      to_state: current.state,
+      surface_id: UNBOUND_SURFACE_REF,
+      source,
+      error: null,
+    });
+
     return updated;
   }
 
