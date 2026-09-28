@@ -340,7 +340,9 @@ export function startLifecycleInitialization(
       .then(initialize)
       .then(
         () => {
-          if (!current()) return;
+          // A disposed context never goes ready, but its first-outcome
+          // waiters must still wake.
+          if (!current()) return resolveFirstOutcome();
           context.lifecycleStartError = null;
           context.lifecycleReady = true;
           context.lifecycleStartSettledAtMs = Date.now();
@@ -350,7 +352,7 @@ export function startLifecycleInitialization(
           resolveFirstOutcome();
         },
         (error: unknown) => {
-          if (!current()) return;
+          if (!current()) return resolveFirstOutcome();
           context.lifecycleStartError =
             error instanceof Error ? error : new Error(String(error));
           context.lifecycleStartSettledAtMs = null;

@@ -234,7 +234,6 @@ import {
   awaitBoundedLifecycleStart,
   assertLifecycleReadyForTool,
   lifecycleInitState,
-  lifecycleNotReadyError,
   startLifecycleInitialization,
   registerAutoVitestTempDir,
   createServerContext,
@@ -2564,12 +2563,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
      * set lifecycleStartError: init may still be in flight and succeed.
      */
     const awaitLifecycleStart = async (): Promise<void> => {
-      // #938: while the retry loop is backing off, answer at once with the
-      // named cause instead of holding the caller for the whole bound.
-      const retrying = context.lifecycleStartError
-        ? lifecycleNotReadyError(context)
-        : null;
-      if (retrying) throw retrying;
       if (context.lifecycleStartPromise) {
         try {
           await awaitBoundedLifecycleStart(
@@ -2584,8 +2577,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw error;
         }
       }
-      const notReady = lifecycleNotReadyError(context);
-      if (notReady) throw notReady;
+      // #938: while lifecycle retries this is the last attempt's error, not
+      // a latch; it clears when a retry succeeds.
       if (context.lifecycleStartError) {
         throw context.lifecycleStartError;
       }
