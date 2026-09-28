@@ -943,8 +943,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
       ),
       resolveCallerAgentId: () => resolveCurrentCallerAgent()?.agent_id ?? null,
-      lifecycleGate: () =>
-        assertLifecycleReadyForTool(context, resolveLifecycleStartTimeoutMs()),
+      ...(opts?.gateLifecycleTools
+        ? {
+            lifecycleGate: () =>
+              assertLifecycleReadyForTool(
+                context,
+                resolveLifecycleStartTimeoutMs(),
+              ),
+          }
+        : {}),
     });
   // AIDEV-NOTE: handlers leaving this closure take their dependencies from
   // here (CX-3 S6+); the lifecycle block below fills engine and registry.
@@ -2564,12 +2571,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : null;
       if (retrying) throw retrying;
       if (context.lifecycleStartPromise) {
-        const firstOutcome = context.lifecycleStartFirstOutcome;
         try {
           await awaitBoundedLifecycleStart(
-            firstOutcome
-              ? Promise.race([context.lifecycleStartPromise, firstOutcome])
-              : context.lifecycleStartPromise,
+            context.lifecycleStartPromise,
             lifecycleStartTimeoutMs,
           );
         } catch (error) {
@@ -3642,7 +3646,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? lifecycleInitializer()
           : engine.initialize(discovery),
       );
-      void (context.lifecycleStartPromise ?? Promise.resolve()).then(() => {
+      void (context.lifecycleReadyPromise ?? Promise.resolve()).then(() => {
         if (
           !context.lifecycleStartError &&
           context.lifecycleStarted &&
@@ -3656,7 +3660,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // The daemon may immediately use this relay for monitor recovery. Publish
     // it only after persisted lifecycle state has been reconstituted so route
     // resolution is ready, then wake any boot-time recovery claim.
-    void (context.lifecycleStartPromise ?? Promise.resolve()).then(() => {
+    void (
+      context.lifecycleReadyPromise ??
+      context.lifecycleStartPromise ??
+      Promise.resolve()
+    ).then(() => {
       if (
         !context.lifecycleStartError &&
         context.lifecycleStarted &&

@@ -319,7 +319,7 @@ describe("#938 lifecycle init never latches a transient error", () => {
     createServer({ context });
 
     await waitUntil(() => lifecycleInitializer.mock.calls.length >= 3);
-    await context.lifecycleStartPromise;
+    await context.lifecycleReadyPromise;
 
     expect(lifecycleInitializer).toHaveBeenCalledTimes(3);
     expect(context.lifecycleStartError).toBeNull();
@@ -348,7 +348,7 @@ describe("#938 lifecycle init never latches a transient error", () => {
         cmux.requests.some((r) => !r.limited),
       10_000,
     );
-    await context.lifecycleStartPromise;
+    await context.lifecycleReadyPromise;
 
     expect(context.lifecycleStartError).toBeNull();
   }, 20_000);
@@ -376,8 +376,9 @@ describe("#938 a connection during lifecycle retry gets an answer, not a drop", 
       await daemon.shutdown();
       context.dispose();
     });
-    await waitUntil(() => lifecycleInitializer.mock.calls.length >= 2);
 
+    // Lifecycle starts with the first connection's server; on main that
+    // first failed attempt latched and this connect was dropped.
     const socket = net.createConnection(path);
     const client = new Client({ name: "938-test", version: "0.1.0" });
     await client.connect(new SocketJsonRpcTransport(socket));
@@ -405,7 +406,7 @@ describe("#938 a connection during lifecycle retry gets an answer, not a drop", 
     });
 
     release = true;
-    await context.lifecycleStartPromise;
+    await context.lifecycleReadyPromise;
     const served = await client.callTool({
       name: "list_agents",
       arguments: {},

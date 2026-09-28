@@ -958,7 +958,9 @@ describe("CmuxLayerDaemon", () => {
     await daemon.shutdown();
   });
 
-  it("keeps the gate closed when production lifecycle initialization failed", async () => {
+  // #938: a failed lifecycle no longer drops the client. The connection is
+  // served, and lifecycle-gated tools answer with the named cause instead.
+  it("serves, rather than drops, a connection when lifecycle initialization failed", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("boot-topology-failed");
     const context = createServerContext({
@@ -974,14 +976,17 @@ describe("CmuxLayerDaemon", () => {
     await daemon.start();
     const socket = net.createConnection(path);
     await once(socket, "connect");
-    await once(socket, "close");
+    await waitUntil(() => daemon.activeConnectionCount() === 1);
 
-    expect(daemon.activeConnectionCount()).toBe(0);
+    expect(socket.destroyed).toBe(false);
+    socket.destroy();
     await daemon.shutdown();
   });
 
-  it("keeps the gate closed when boot pane discovery rejects", async () => {
+  it("retries lifecycle after boot pane discovery rejects and serves the client meanwhile", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
+    vi.stubEnv("CMUXLAYER_LIFECYCLE_RETRY_BASE_MS", "5");
+    vi.stubEnv("CMUXLAYER_LIFECYCLE_RETRY_MAX_MS", "20");
     const path = socketPath("boot-topology-discovery-rejects");
     const scan = vi
       .spyOn(AgentDiscovery.prototype, "scan")
@@ -997,15 +1002,16 @@ describe("CmuxLayerDaemon", () => {
       await daemon.start();
       const socket = net.createConnection(path);
       await once(socket, "connect");
-      await once(socket, "close");
-      await context.lifecycleStartPromise;
+      await waitUntil(() => daemon.activeConnectionCount() === 1);
+      await context.lifecycleReadyPromise;
 
-      expect(context.lifecycleStartError).toMatchObject({
-        message: "boot pane discovery failed",
-      });
-      expect(daemon.activeConnectionCount()).toBe(0);
+      expect(context.lifecycleStartAttempts).toBeGreaterThanOrEqual(2);
+      expect(context.lifecycleStartError).toBeNull();
+      expect(context.lifecycleReady).toBe(true);
+      socket.destroy();
     } finally {
       scan.mockRestore();
+      vi.unstubAllEnvs();
       await daemon.shutdown();
     }
   });

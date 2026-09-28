@@ -659,6 +659,7 @@ export class CmuxLayerDaemon {
 
     const mcpServer = createServer({
       context,
+      gateLifecycleTools: true,
       inboxBaseDir: this.opts.inboxBaseDir,
       outboxDrain: this.opts.outboxDrain,
       watchRegistryPath: this.opts.watchRegistryPath,

@@ -857,7 +857,12 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
   });
 
   it("reuses one socket connection for 100 concurrent listPaneSurfaces calls", async () => {
-    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+    // #938: surface.list is a cmux polling read, so it is paced by the
+    // polling budget; a fast refill keeps this about connection reuse.
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      polling: { refillMs: 1 },
+    });
 
     const startedAt = Date.now();
     await Promise.all(

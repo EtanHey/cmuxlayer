@@ -25,7 +25,10 @@ import type {
 } from "./types.js";
 import { CmuxClient } from "./cmux-client.js";
 import { normalizeKeyName } from "./key-names.js";
-import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
+import {
+  CmuxPersistentSocket,
+  type PollingOptions,
+} from "./cmux-persistent-socket.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
@@ -81,6 +84,8 @@ export interface CmuxSocketClientOptions {
   cliFallback?: CmuxClient;
   /** Re-resolve a live socket when the current path stops accepting requests */
   socketPathResolver?: () => Promise<string | null>;
+  /** Polling budget for cmux read-plane methods (defaults match cmux 0.64.24+). */
+  polling?: PollingOptions;
 }
 
 // ── The Client ─────────────────────────────────────────────────────────
@@ -94,6 +99,7 @@ export class CmuxSocketClient {
   private cliFallback?: CmuxClient;
   private transport: CmuxPersistentSocket;
   private maxInFlight?: number;
+  private polling?: PollingOptions;
   private socketPathResolver?: () => Promise<string | null>;
   private reconnecting?: Promise<void>;
   private transportSerial = 0;
@@ -107,6 +113,7 @@ export class CmuxSocketClient {
     this.authPassword = opts?.password;
     this.cliFallback = opts?.cliFallback;
     this.maxInFlight = opts?.maxInFlight;
+    this.polling = opts?.polling;
     this.socketPathResolver = opts?.socketPathResolver;
     this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
@@ -114,6 +121,7 @@ export class CmuxSocketClient {
       capability: this.capability,
       timeoutMs: this.timeoutMs,
       maxInFlight: opts?.maxInFlight,
+      polling: opts?.polling,
     });
   }
 
@@ -230,6 +238,7 @@ export class CmuxSocketClient {
       capability: this.capability,
       timeoutMs: this.timeoutMs,
       maxInFlight: this.maxInFlight,
+      polling: this.polling,
     });
   }
 

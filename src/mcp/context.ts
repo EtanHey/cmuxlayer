@@ -62,6 +62,12 @@ export interface CreateServerOptions {
   lifecycleRegistry?: AgentRegistry;
   /** Override persisted-state reconstitution at lifecycle startup (primarily for tests). */
   lifecycleInitializer?: () => Promise<void>;
+  /**
+   * #938: answer lifecycle-engine tools with the named not-ready cause while
+   * initialization retries. The daemon sets this, because it serves
+   * connections before lifecycle is ready.
+   */
+  gateLifecycleTools?: boolean;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
   /**
@@ -301,9 +307,9 @@ export function lifecycleNotReadyError(
 /**
  * #938: run lifecycle initialization until it succeeds. A failed attempt is
  * recorded (never latched) and retried after jittered exponential backoff.
- * `lifecycleStartPromise` resolves once, on the first success;
- * `lifecycleStartFirstOutcome` resolves on the first success or failure so a
- * waiter can stop waiting and name the cause.
+ * `lifecycleStartPromise` keeps its meaning (the first attempt settled:
+ * success, or a failure recorded in `lifecycleStartError`);
+ * `lifecycleReadyPromise` resolves once, on the first success.
  */
 export function startLifecycleInitialization(
   context: CmuxServerContext,
@@ -318,10 +324,10 @@ export function startLifecycleInitialization(
   context.lifecycleStartAttempts = 0;
   context.lifecycleStartStartedAtMs = Date.now();
   context.lifecycleStartSettledAtMs = null;
-  context.lifecycleStartPromise = new Promise<void>((resolve) => {
+  context.lifecycleReadyPromise = new Promise<void>((resolve) => {
     resolveReady = resolve;
   });
-  context.lifecycleStartFirstOutcome = new Promise<void>((resolve) => {
+  context.lifecycleStartPromise = new Promise<void>((resolve) => {
     resolveFirstOutcome = resolve;
   });
   const current = () => context.lifecycleStartGeneration === generation;
@@ -338,17 +344,23 @@ export function startLifecycleInitialization(
           context.lifecycleStartError = null;
           context.lifecycleReady = true;
           context.lifecycleStartSettledAtMs = Date.now();
-          resolveFirstOutcome();
+          // Ready first: its continuations (sweep start, deliverer publish)
+          // must run before anyone awaiting the first outcome resumes.
           resolveReady();
+          resolveFirstOutcome();
         },
         (error: unknown) => {
           if (!current()) return;
           context.lifecycleStartError =
             error instanceof Error ? error : new Error(String(error));
+          context.lifecycleStartSettledAtMs = null;
           const delayMs = resolveLifecycleRetryDelayMs(attemptNumber);
           console.error(
-            `[cmuxlayer] lifecycle initialization attempt ${attemptNumber} failed; retrying in ${delayMs}ms:`,
+            "[cmuxlayer] lifecycle initialization failed:",
             context.lifecycleStartError,
+          );
+          console.error(
+            `[cmuxlayer] lifecycle initialization attempt ${attemptNumber} failed; retrying in ${delayMs}ms`,
           );
           resolveFirstOutcome();
           const timer = setTimeout(attempt, delayMs);
@@ -361,20 +373,16 @@ export function startLifecycleInitialization(
 }
 
 /**
- * Wait until lifecycle is ready or its first attempt has an outcome, bounded
- * by `timeoutMs`. Never throws; callers read the state afterwards.
+ * Wait until lifecycle's first attempt has settled, bounded by `timeoutMs`.
+ * Never throws; callers read the state afterwards.
  */
 export async function awaitLifecycleFirstOutcome(
   context: CmuxServerContext,
   timeoutMs: number,
 ): Promise<void> {
-  const ready = context.lifecycleStartPromise;
-  if (!ready) return;
-  const first = context.lifecycleStartFirstOutcome;
-  await awaitBoundedLifecycleStart(
-    first ? Promise.race([ready, first]) : ready,
-    timeoutMs,
-  ).catch(() => {});
+  const settled = context.lifecycleStartPromise;
+  if (!settled) return;
+  await awaitBoundedLifecycleStart(settled, timeoutMs).catch(() => {});
 }
 
 /**
@@ -464,8 +472,8 @@ export interface CmuxServerContext {
   lifecycleReady: boolean;
   /** #938: lifecycle initialization attempts started by the retry loop. */
   lifecycleStartAttempts: number;
-  /** #938: resolves on the first success or first failed attempt. */
-  lifecycleStartFirstOutcome: Promise<void> | null;
+  /** #938: resolves once lifecycle initialization has succeeded. */
+  lifecycleReadyPromise: Promise<void> | null;
   /** #938: the pending backoff before the next attempt. */
   lifecycleRetryTimer: NodeJS.Timeout | null;
   /** #938: bumped on dispose so a stale retry loop stops. */
@@ -627,7 +635,7 @@ export function createServerContext(
     lifecycleStartError: null,
     lifecycleReady: false,
     lifecycleStartAttempts: 0,
-    lifecycleStartFirstOutcome: null,
+    lifecycleReadyPromise: null,
     lifecycleRetryTimer: null,
     lifecycleStartGeneration: 0,
     lifecycleStartStartedAtMs: null,
@@ -669,7 +677,7 @@ export function createServerContext(
       context.lifecycleStarted = false;
       context.lifecycleReady = false;
       context.lifecycleStartAttempts = 0;
-      context.lifecycleStartFirstOutcome = null;
+      context.lifecycleReadyPromise = null;
       context.lifecycleStartPromise = null;
       context.lifecycleStartError = null;
       context.lifecycleStartStartedAtMs = null;
