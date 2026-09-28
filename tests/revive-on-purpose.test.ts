@@ -234,9 +234,19 @@ describe("revive on purpose (#492)", () => {
     }
   }
 
-  /** #926: resume needs the recorded pid confirmed gone; record an exited one. */
+  /**
+   * #926: resume needs positive proof the session is not running: the
+   * recorded pid confirmed gone, and a topology in which every live agent pane
+   * is attributed. Record an exited pid, and when the fixture lists no panes,
+   * show one live shell (no agent) so the topology is conclusive.
+   */
   function confirmProcessGone(agentId = "cmuxlayerCodex-revive"): void {
     registry.set(agentId, stateMgr.updateRecord(agentId, { pid: DEAD_PID }));
+    if (liveSurfaces.length === 0) {
+      liveSurfaces = [
+        { ...makeSurface("surface:shell-witness"), workspace_ref: "ws:witness" },
+      ];
+    }
   }
 
   it("never respawns a pane the operator closed in the UI", async () => {
@@ -1022,7 +1032,7 @@ describe("revive on purpose (#492)", () => {
         spawnPreflight: async () => {},
         sessionIdentityResolver: () => null,
         inboxOpts: { baseDir: TEST_DIR },
-        sessionProcessScanner: (sessionId) => [
+        sessionProcessScanner: async (sessionId) => [
           { pid: 4242, command: `codex resume ${sessionId}` },
         ],
       });
@@ -1034,6 +1044,91 @@ describe("revive on purpose (#492)", () => {
       } finally {
         scanEngine.dispose();
       }
+    });
+
+    // #931 r2: an empty argv scan is not proof (a live CLI may carry no id in
+    // argv), so a live agent pane no record claims blocks a non-forced resume.
+    const CODEX_ACTIVE_SCREEN =
+      "gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer\nWorking (1m 02s • esc to interrupt)";
+
+    it("refuses while a live codex pane is attributed to no agent, even with a dead pid and a clean argv scan", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(
+        makeRecord({
+          state: "done",
+          surface_id: UNBOUND_SURFACE_REF,
+          surface_uuid: null,
+          workspace_id: null,
+          pid: DEAD_PID,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      // The restored pane runs the session with no id in argv and no registration.
+      liveSurfaces = [LIVE_PANE];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => ({
+          surface,
+          text: CODEX_ACTIVE_SCREEN,
+          lines: 20,
+          scrollback_used: false,
+        }),
+      );
+      await registry.reconstitute();
+      const argvlessEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        inboxOpts: { baseDir: TEST_DIR },
+        sessionProcessScanner: async () => [],
+      });
+      try {
+        await expect(
+          argvlessEngine.resumeAgent("cmuxlayerCodex-revive"),
+        ).rejects.toThrow(/1 live codex pane is not attributed to any agent \(surface:12\).*force:true/s);
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        expect(mockClient.newSurface).not.toHaveBeenCalled();
+        expect(mockClient.send).not.toHaveBeenCalled();
+      } finally {
+        argvlessEngine.dispose();
+      }
+    });
+
+    it("still resumes without force when every live codex pane is attributed to an agent", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(
+        makeRecord({
+          state: "done",
+          surface_id: UNBOUND_SURFACE_REF,
+          surface_uuid: null,
+          workspace_id: null,
+          pid: DEAD_PID,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-neighbour",
+          cli_session_id: "019faccc-9999-7222-8333-444455556666",
+          state: "working",
+          surface_id: LIVE_PANE.ref,
+          surface_uuid: LIVE_PANE.id,
+          workspace_id: "ws:1",
+        }),
+      );
+      liveSurfaces = [LIVE_PANE];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => ({
+          surface,
+          text: CODEX_ACTIVE_SCREEN,
+          lines: 20,
+          scrollback_used: false,
+        }),
+      );
+      await registry.reconstitute();
+      withFakeRightSplitClient(mockClient);
+
+      await expect(
+        engine.resumeAgent("cmuxlayerCodex-revive"),
+      ).resolves.toMatchObject({ surface_id: "surface:new" });
     });
 
     it("resumes a worker whose pane died and whose pid is confirmed dead, without force", async () => {

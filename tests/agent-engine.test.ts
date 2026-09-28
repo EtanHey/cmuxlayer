@@ -314,7 +314,7 @@ describe("AgentEngine", () => {
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       // #926: `node:child_process` is mocked here; no process carries a session.
-      sessionProcessScanner: () => [],
+      sessionProcessScanner: async () => [],
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts: { baseDir: TEST_DIR },
@@ -4829,6 +4829,8 @@ describe("AgentEngine", () => {
       harnessHome.give("codex", "019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
       await engine.getRegistry().reconstitute();
 
+      // #926: a conclusive topology (the old pane is gone) is part of the proof.
+      liveSurfaces = [makeSurface("surface:witness")];
       const resumed = await engine.resumeAgent("agent-stable-resume");
 
       expect(resumed.agent_id).toBe("agent-stable-resume");
@@ -4984,6 +4986,8 @@ describe("AgentEngine", () => {
       harnessHome.give("claude", "019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
       await engine.getRegistry().reconstitute();
 
+      // #926: a conclusive topology (the old pane is gone) is part of the proof.
+      liveSurfaces = [makeSurface("surface:witness")];
       const resumed = await engine.resumeAgent("agent-stable-resume-raw");
 
       expect(resumed.agent_id).toBe("agent-stable-resume-raw");
@@ -15551,6 +15555,69 @@ Session ID: ${sessionId}`,
           // #926: the pid the stop post-condition proved gone stays on the
           // tombstone; it is the proof a later resume needs.
           pid,
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
+    it("does not keep a tombstone pid whose death was never proven with identity (#926)", async () => {
+      const agentId = "terminal-unknown-liveness";
+      const pid = 54322;
+      const signals: Array<NodeJS.Signals | 0 | undefined> = [];
+      let killed = false;
+      // Identity-alive before the kill; afterwards the probe is only
+      // inconclusive (EPERM), never proof the process is gone.
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        targetPid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        expect(targetPid).toBe(pid);
+        signals.push(signal);
+        if (signal && signal !== 0) {
+          killed = true;
+          return true;
+        }
+        if (killed) {
+          throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+        }
+        return true;
+      }) as typeof process.kill);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:terminal-unknown",
+          surface_uuid: null,
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3f",
+          pid,
+          created_at: "2026-08-23T11:00:00.000Z",
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:terminal-unknown")];
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          liveSurfaces = [makeSurface("surface:witness")];
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+            workspace_ref: "",
+            window_ref: "window:1",
+            panes: [],
+          });
+        },
+      );
+      await engine.getRegistry().reconstitute();
+      // Started inside the launch-to-registration window: the original process.
+      execFileSyncMock.mockReturnValue("2026-08-23T11:00:02.000Z\n");
+
+      try {
+        await engine.stopAgent(agentId, true);
+        // The force stop signalled and counted "unknown" as gone to finish,
+        expect(signals.some((signal) => signal && signal !== 0)).toBe(true);
+        // but that is not proof, so the tombstone must not carry the pid.
+        expect(stateMgr.readState(agentId)).toMatchObject({
+          user_killed: true,
+          pid: null,
         });
       } finally {
         killSpy.mockRestore();

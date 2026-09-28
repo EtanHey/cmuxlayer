@@ -36,7 +36,6 @@ import { matchReadyPattern } from "../pattern-registry.js";
 import {
   agentProcessLiveness,
   processLiveness,
-  type SessionProcessScanner,
 } from "../util/pid-alive.js";
 import {
   antigravityScreenIsActive,
@@ -107,6 +106,7 @@ export interface LifecycleHost {
   readonly seatRegistry: AgentEngine["seatRegistry"];
   readonly selfRegistrationSessionLookup: AgentEngine["selfRegistrationSessionLookup"];
   readonly sessionProcessScanner: AgentEngine["sessionProcessScanner"];
+  unattributedAgentPanes: AgentEngine["unattributedAgentPanes"];
   readonly selfRegistrationSessionResolver: AgentEngine["selfRegistrationSessionResolver"];
   readonly spawnGuard: AgentEngine["spawnGuard"];
   readonly spawnPreflight: AgentEngine["spawnPreflight"];
@@ -777,7 +777,7 @@ export async function assertSessionNotRunningElsewhere(
     );
   }
   if (!occupant) {
-    if (!force) assertPositiveAbsenceProof(agent, this.sessionProcessScanner);
+    if (!force) await assertPositiveAbsenceProof.call(this, agent);
     return agent;
   }
   const { surface, via } = occupant;
@@ -800,24 +800,42 @@ export async function assertSessionNotRunningElsewhere(
   );
 }
 
-function assertPositiveAbsenceProof(
+async function assertPositiveAbsenceProof(
+  this: LifecycleHost,
   agent: AgentRecord,
-  scan: SessionProcessScanner,
-): void {
+): Promise<void> {
   const sessionId = agent.cli_session_id ?? "";
-  const carriers = scan(sessionId);
+  const cli = agent.cli ?? "unknown";
   let missing: string | null = null;
-  if (carriers && carriers.length > 0) {
-    const [first] = carriers;
-    missing =
-      `a live process carries session ${sessionId} ` +
-      `(pid ${first!.pid}: ${first!.command.slice(0, 120)})`;
-  } else if (!agent.pid) {
+  if (!agent.pid) {
     missing = "it has no recorded pid, so its process cannot be proven gone";
   } else if (agentProcessLiveness(agent) !== "gone") {
+    // Identity-qualified: unknown is never gone.
     missing = `its recorded pid ${agent.pid} is not proven gone`;
-  } else if (carriers === null) {
-    missing = "the process table could not be read";
+  } else {
+    const carriers = await this.sessionProcessScanner(sessionId);
+    if (carriers === null) {
+      missing = "the process table could not be read";
+    } else if (carriers.length > 0) {
+      const [first] = carriers;
+      missing =
+        `a live process carries session ${sessionId} ` +
+        `(pid ${first!.pid}: ${first!.command.slice(0, 120)})`;
+    } else {
+      // No per-session absence signal exists (a live CLI need not carry its
+      // id in argv, nor hold its transcript open), so attribution decides:
+      // a live pane of this CLI that no agent claims may be running it.
+      const panes = await this.unattributedAgentPanes(cli);
+      if (panes === null) {
+        missing =
+          "the cmux topology is empty or inconclusive, so live panes cannot be attributed";
+      } else if (panes.length > 0) {
+        missing =
+          `${panes.length} live ${cli} pane${panes.length === 1 ? " is" : "s are"} ` +
+          `not attributed to any agent (${panes.join(", ")}); one may already ` +
+          `run this session`;
+      }
+    }
   }
   if (!missing) return;
   throw new Error(
@@ -1856,10 +1874,12 @@ export async function stopAgent(
       this.registry.evictExplicit(canonicalAgentId);
       return;
     }
-    // #926: the post-condition proved this pid gone; resume needs that proof.
+    // #926: keep the pid only when its death is proven with identity; the
+    // post-condition may have counted an unknown liveness as gone, and
+    // resume must never take unknown for gone.
     const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
       user_killed: true,
-      pid: stopResult.processGone ? (agent.pid ?? null) : null,
+      pid: this.isProcessConfirmedGone(agent) ? agent.pid : null,
     });
     this.registry.set(canonicalAgentId, tombstone);
     if (!TERMINAL_STATES.has(current.state)) {
