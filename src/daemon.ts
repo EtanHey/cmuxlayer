@@ -8,7 +8,7 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, basename } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
   Transport,
@@ -28,10 +28,10 @@ import {
   appendCoalescedDaemonLog,
   appendDaemonLog,
   closeDaemonLog,
-  describeLogError,
   enableDaemonLog,
   flushDaemonLog,
   logErrorCode,
+  logErrorName,
 } from "./daemon-log.js";
 import {
   awaitLifecycleFirstOutcome,
@@ -555,7 +555,10 @@ export class CmuxLayerDaemon {
     if (this.opts.daemonLog) {
       enableDaemonLog({ path: this.opts.daemonLog.path });
       this.ownsDaemonLog = true;
-      appendDaemonLog("daemon_starting", `node=${process.version}`);
+      appendDaemonLog("daemon_starting", {
+        node: process.version,
+        socket: basename(this.socketPath),
+      });
     }
 
     if (this.listenFd === undefined) {
@@ -595,7 +598,7 @@ export class CmuxLayerDaemon {
     this.shutdownPromise = this.doShutdown(signal).finally(async () => {
       if (this.ownsDaemonLog) {
         this.ownsDaemonLog = false;
-        appendDaemonLog("daemon_stopped", `reason=${signal}`);
+        appendDaemonLog("daemon_stopped", { reason: signal });
         await closeDaemonLog();
       }
     });
@@ -658,7 +661,7 @@ export class CmuxLayerDaemon {
       appendCoalescedDaemonLog(
         "connection_refused",
         "daemon_draining",
-        "cause=daemon_draining",
+        { cause: "daemon_draining" },
       );
       socket.destroy();
       return;
@@ -689,7 +692,11 @@ export class CmuxLayerDaemon {
       appendCoalescedDaemonLog(
         "connection_refused",
         `context_creation_failed:${logErrorCode(error)}`,
-        `cause=context_creation_failed error_code=${logErrorCode(error)} error=${describeLogError(error)}`,
+        {
+          cause: "context_creation_failed",
+          error_code: logErrorCode(error),
+          error_name: logErrorName(error),
+        },
       );
       return;
     }
@@ -722,7 +729,12 @@ export class CmuxLayerDaemon {
       appendCoalescedDaemonLog(
         "connection_gated",
         `lifecycle_not_ready:${state}:${lastErrorCode}`,
-        `cause=lifecycle_not_ready state=${state} attempt=${context.lifecycleStartAttempts} last_error_code=${lastErrorCode}`,
+        {
+          cause: "lifecycle_not_ready",
+          state,
+          attempt: context.lifecycleStartAttempts,
+          last_error_code: lastErrorCode,
+        },
       );
     }
     if (this.draining || socket.destroyed || !socket.readable) {
@@ -732,7 +744,7 @@ export class CmuxLayerDaemon {
       appendCoalescedDaemonLog(
         "connection_closed",
         closedCause,
-        `cause=${closedCause}`,
+        { cause: closedCause },
       );
       clearPendingSocket();
       socket.destroy();
@@ -866,7 +878,7 @@ export class CmuxLayerDaemon {
     if (this.retirementPromise) {
       return;
     }
-    appendDaemonLog("daemon_retiring", `reason=${reason}`);
+    appendDaemonLog("daemon_retiring", { reason });
     if (reason === "stale-build" && stale) {
       this.logger.error(
         `[cmuxlayer-daemon] installed version bump detected (running v${stale.running}, installed v${stale.installed}); retiring`,
@@ -1153,7 +1165,10 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   process.stderr.on("error", () => {});
   runDaemon().catch(async (error) => {
     console.error("[cmuxlayer-daemon] fatal", error);
-    appendDaemonLog("daemon_fatal", describeLogError(error));
+    appendDaemonLog("daemon_fatal", {
+      error_code: logErrorCode(error),
+      error_name: logErrorName(error),
+    });
     // Bounded: a wedged disk must not keep a failed daemon alive.
     await Promise.race([
       flushDaemonLog(),
