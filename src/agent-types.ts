@@ -285,6 +285,11 @@ export function shouldRetainForExplicitResume(
 export const RESUMABLE_SESSION_RETENTION_DAYS = 14;
 export const RESUMABLE_SESSION_RETENTION_MS =
   RESUMABLE_SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+/**
+ * How far in the future an `updated_at` may sit and still count (clock steps,
+ * not skewed writers): a later timestamp must not extend retention.
+ */
+export const RESUMABLE_SESSION_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 /**
  * The surface ref of a retained row that no longer owns a pane (#926).
@@ -314,6 +319,7 @@ export function isRetainedResumableSession(
   const updatedAt = Date.parse(agent.updated_at);
   return (
     Number.isFinite(updatedAt) &&
+    updatedAt <= now + RESUMABLE_SESSION_CLOCK_SKEW_MS &&
     now - updatedAt < RESUMABLE_SESSION_RETENTION_MS
   );
 }

@@ -57,6 +57,7 @@ import { dispatch, readInbox, writeHeartbeat } from "../src/inbox.js";
 import { readWatchRegistry } from "../src/watch-spec.js";
 import { useHarnessHome } from "./helpers/harness-home.js";
 import { persistProductionProcessRecord } from "./helpers/production-process-record.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 import type { SurfaceTopologySnapshot } from "../src/surface-topology.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
@@ -312,6 +313,8 @@ describe("AgentEngine", () => {
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
+      // #926: `node:child_process` is mocked here; no process carries a session.
+      sessionProcessScanner: () => [],
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts: { baseDir: TEST_DIR },
@@ -4814,6 +4817,7 @@ describe("AgentEngine", () => {
         makeRecord({
           agent_id: "agent-stable-resume",
           state: "done",
+          pid: DEAD_PID,
           surface_id: "surface:old",
           workspace_id: "ws:1",
           repo: "brainlayer",
@@ -4967,6 +4971,7 @@ describe("AgentEngine", () => {
         makeRecord({
           agent_id: "agent-stable-resume-raw",
           state: "done",
+          pid: DEAD_PID,
           surface_id: "surface:old-raw",
           workspace_id: "ws:1",
           repo: "brainlayer",
@@ -15543,7 +15548,9 @@ Session ID: ${sessionId}`,
         expect(stateMgr.readState(agentId)).toMatchObject({
           state: "done",
           user_killed: true,
-          pid: null,
+          // #926: the pid the stop post-condition proved gone stays on the
+          // tombstone; it is the proof a later resume needs.
+          pid,
         });
       } finally {
         killSpy.mockRestore();

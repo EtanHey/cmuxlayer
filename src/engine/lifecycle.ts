@@ -33,7 +33,11 @@ import {
 } from "../model-policy.js";
 import { buildTitle } from "../naming.js";
 import { matchReadyPattern } from "../pattern-registry.js";
-import { agentProcessLiveness, processLiveness } from "../util/pid-alive.js";
+import {
+  agentProcessLiveness,
+  processLiveness,
+  type SessionProcessScanner,
+} from "../util/pid-alive.js";
 import {
   antigravityScreenIsActive,
   isAntigravityScreen,
@@ -102,6 +106,7 @@ export interface LifecycleHost {
   readonly registry: AgentEngine["registry"];
   readonly seatRegistry: AgentEngine["seatRegistry"];
   readonly selfRegistrationSessionLookup: AgentEngine["selfRegistrationSessionLookup"];
+  readonly sessionProcessScanner: AgentEngine["sessionProcessScanner"];
   readonly selfRegistrationSessionResolver: AgentEngine["selfRegistrationSessionResolver"];
   readonly spawnGuard: AgentEngine["spawnGuard"];
   readonly spawnPreflight: AgentEngine["spawnPreflight"];
@@ -738,7 +743,12 @@ export async function resumeAgent(
  * this also requires that neither the row's own pane nor the pane its session
  * self-registered on is live. A live registered pane is proof the agent is
  * running there, so the row is rebound to it (reachable by id again) and the
- * resume is refused. `force` only overrides an inconclusive topology.
+ * resume is refused.
+ *
+ * Absent a live pane, resume still needs POSITIVE proof: the recorded pid is
+ * confirmed gone (a null pid is never proof) and no live process carries the
+ * session id in its argv. Anything short of that refuses, naming what is
+ * missing; `force` overrides once the caller has checked by hand.
  */
 export async function assertSessionNotRunningElsewhere(
   this: LifecycleHost,
@@ -766,7 +776,10 @@ export async function assertSessionNotRunningElsewhere(
         }); retry once cmux lists its surfaces, or pass force`,
     );
   }
-  if (!occupant) return agent;
+  if (!occupant) {
+    if (!force) assertPositiveAbsenceProof(agent, this.sessionProcessScanner);
+    return agent;
+  }
   const { surface, via } = occupant;
   if (via === "binding") {
     throw new Error(
@@ -784,6 +797,33 @@ export async function assertSessionNotRunningElsewhere(
   throw new Error(
     `Agent "${agent.agent_id}" cannot resume: session ${agent.cli_session_id} ` +
       `is running on ${surface.ref}; rebound the agent to that pane, send_to it`,
+  );
+}
+
+function assertPositiveAbsenceProof(
+  agent: AgentRecord,
+  scan: SessionProcessScanner,
+): void {
+  const sessionId = agent.cli_session_id ?? "";
+  const carriers = scan(sessionId);
+  let missing: string | null = null;
+  if (carriers && carriers.length > 0) {
+    const [first] = carriers;
+    missing =
+      `a live process carries session ${sessionId} ` +
+      `(pid ${first!.pid}: ${first!.command.slice(0, 120)})`;
+  } else if (!agent.pid) {
+    missing = "it has no recorded pid, so its process cannot be proven gone";
+  } else if (agentProcessLiveness(agent) !== "gone") {
+    missing = `its recorded pid ${agent.pid} is not proven gone`;
+  } else if (carriers === null) {
+    missing = "the process table could not be read";
+  }
+  if (!missing) return;
+  throw new Error(
+    `Agent "${agent.agent_id}" cannot resume without proof that session ` +
+      `${sessionId} is not already running: ${missing}. Check that no pane ` +
+      `or process runs it, then resume with force:true`,
   );
 }
 
@@ -1543,9 +1583,10 @@ export async function stopAgent(
         surfaceGone &&
         (this.isProcessConfirmedGone(agent) || agent.pid == null)
       ) {
+        // #926: keep a pid proven gone; resume accepts nothing weaker.
         const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
           user_killed: true,
-          pid: null,
+          pid: this.isProcessConfirmedGone(agent) ? agent.pid : null,
         });
         this.registry.set(canonicalAgentId, tombstone);
         return;
@@ -1815,9 +1856,10 @@ export async function stopAgent(
       this.registry.evictExplicit(canonicalAgentId);
       return;
     }
+    // #926: the post-condition proved this pid gone; resume needs that proof.
     const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
       user_killed: true,
-      pid: null,
+      pid: stopResult.processGone ? (agent.pid ?? null) : null,
     });
     this.registry.set(canonicalAgentId, tombstone);
     if (!TERMINAL_STATES.has(current.state)) {

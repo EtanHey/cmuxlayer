@@ -106,3 +106,45 @@ export function agentProcessLiveness(
 export function agentProcessMayBeAlive(agent: AgentProcessRecord): boolean {
   return Boolean(agent.pid) && agentProcessLiveness(agent) !== "gone";
 }
+
+export interface SessionProcess {
+  pid: number;
+  command: string;
+}
+
+/** Finds live processes whose argv carries a CLI session id, or `null` when unreadable. */
+export type SessionProcessScanner = (
+  sessionId: string,
+) => SessionProcess[] | null;
+
+const SESSION_PROCESS_SCAN_TIMEOUT_MS = 2_000;
+
+/**
+ * #926: live processes whose argv carries `sessionId` (`claude --resume <id>`,
+ * `codex resume <id>`, ...). This process is excluded. `null` means the table
+ * could not be read, which is never proof of absence.
+ */
+export const scanSessionProcesses: SessionProcessScanner = (sessionId) => {
+  const needle = sessionId.trim().toLowerCase();
+  if (!needle) return [];
+  let output: string;
+  try {
+    output = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
+      encoding: "utf8",
+      timeout: SESSION_PROCESS_SCAN_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+  if (typeof output !== "string") return null;
+  const carriers: SessionProcess[] = [];
+  for (const line of output.split("\n")) {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || !match[2].toLowerCase().includes(needle)) continue;
+    carriers.push({ pid, command: match[2] });
+  }
+  return carriers;
+};

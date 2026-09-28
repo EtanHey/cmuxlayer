@@ -158,7 +158,9 @@ import {
   agentProcessLiveness,
   agentProcessMayBeAlive,
   processLiveness,
+  scanSessionProcesses,
   type ProcessLiveness,
+  type SessionProcessScanner,
 } from "./util/pid-alive.js";
 import {
   AgentLaunchError,
@@ -359,6 +361,7 @@ export class AgentEngine {
   private selfRegistrationSessionLookup:
     | ((sessionId: string) => SelfRegistrationSessionEntry | null)
     | null;
+  private sessionProcessScanner: SessionProcessScanner;
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -533,6 +536,8 @@ export class AgentEngine {
       opts?.selfRegistrationSessionResolver ?? null;
     this.selfRegistrationSessionLookup =
       opts?.selfRegistrationSessionLookup ?? null;
+    this.sessionProcessScanner =
+      opts?.sessionProcessScanner ?? scanSessionProcesses;
     const fallbackSessionIdentityResolver = opts?.sessionIdentityResolver;
     this.sessionIdentityResolver = (agent) =>
       this.resolveSessionIdentityWithSelfRegistration(
@@ -4523,6 +4528,7 @@ export class AgentEngine {
       get registry() { return engine.registry; },
       get seatRegistry() { return engine.seatRegistry; },
       get selfRegistrationSessionLookup() { return engine.selfRegistrationSessionLookup; },
+      get sessionProcessScanner() { return engine.sessionProcessScanner; },
       get selfRegistrationSessionResolver() { return engine.selfRegistrationSessionResolver; },
       get spawnGuard() { return engine.spawnGuard; },
       get spawnPreflight() { return engine.spawnPreflight; },

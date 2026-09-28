@@ -20,8 +20,10 @@ import { withFakeRightSplitClient } from "./helpers/fake-right-split-topology.js
 import { UNBOUND_SURFACE_REF, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
 import { resetResumeArtifactResolver } from "../src/resume-verification.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-revive-on-purpose");
+
 const CODEX_SESSION = "019faccc-1111-7222-8333-444455556666";
 
 function makeSurface(ref: string): CmuxSurface {
@@ -232,6 +234,11 @@ describe("revive on purpose (#492)", () => {
     }
   }
 
+  /** #926: resume needs the recorded pid confirmed gone; record an exited one. */
+  function confirmProcessGone(agentId = "cmuxlayerCodex-revive"): void {
+    registry.set(agentId, stateMgr.updateRecord(agentId, { pid: DEAD_PID }));
+  }
+
   it("never respawns a pane the operator closed in the UI", async () => {
     writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
     stateMgr.writeState(
@@ -299,6 +306,7 @@ describe("revive on purpose (#492)", () => {
     await runConfirmedSurfaceAbsenceSweep();
 
     withFakeRightSplitClient(mockClient);
+    confirmProcessGone();
     const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
     expect(resumed.agent_id).toBe("cmuxlayerCodex-revive");
     expect(resumed.surface_id).toBe("surface:new");
@@ -315,6 +323,7 @@ describe("revive on purpose (#492)", () => {
     );
     await engine.getRegistry().reconstitute();
 
+    confirmProcessGone();
     const result = await engine.resumeAgent("cmuxlayerCodex-revive");
 
     expect(result.agent_id).toBe("cmuxlayerCodex-revive");
@@ -352,6 +361,7 @@ describe("revive on purpose (#492)", () => {
     });
     expect(registry.purgeAllTerminal()).toEqual([]);
     expect(stateMgr.readState("cmuxlayerCodex-revive")).not.toBeNull();
+    confirmProcessGone();
     const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
     expect(resumed).toMatchObject({
       agent_id: "cmuxlayerCodex-revive",
@@ -370,6 +380,7 @@ describe("revive on purpose (#492)", () => {
     );
     await engine.getRegistry().reconstitute();
 
+    confirmProcessGone();
     const resumed = await engine.resumeAgent(CODEX_SESSION);
 
     expect(resumed).toMatchObject({
@@ -428,6 +439,7 @@ describe("revive on purpose (#492)", () => {
       { ...makeSurface("surface:witness"), id: "dddddddd-1111-4222-8333-444444444444" },
     ];
 
+    confirmProcessGone();
     const resumed = await engine.resumeAgent(CODEX_SESSION);
 
     expect(resumed.agent_id).toBe("cmuxlayerCodex-revive");
@@ -656,6 +668,7 @@ describe("revive on purpose (#492)", () => {
     );
     await engine.getRegistry().reconstitute();
 
+    confirmProcessGone();
     await engine.resumeAgent("cmuxlayerCodex-revive");
 
     expect(mockClient.renameTab).toHaveBeenCalledWith(
@@ -802,6 +815,7 @@ describe("revive on purpose (#492)", () => {
       return updated;
     });
 
+    confirmProcessGone();
     await expect(engine.resumeAgent("cmuxlayerCodex-revive")).rejects.toThrow(
       /surface observer changed.*resume rename/i,
     );
@@ -846,6 +860,7 @@ describe("revive on purpose (#492)", () => {
       stateMgr.readState("cmuxlayerCodex-revive")?.workspace_id ?? null,
     ).toBeNull();
     withFakeRightSplitClient(mockClient);
+    confirmProcessGone();
     const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
     expect(resumed).toMatchObject({
       agent_id: "cmuxlayerCodex-revive",
@@ -934,6 +949,136 @@ describe("revive on purpose (#492)", () => {
     } finally {
       sessionEngine.dispose();
     }
+  });
+
+  describe("resume needs positive proof the session is not running (#926 follow-up)", () => {
+    const LIVE_PANE = {
+      ...makeSurface("surface:12"),
+      id: "cccccccc-1111-4222-8333-444444444444",
+      workspace_ref: "ws:1",
+    };
+
+    it("refuses an unbound row with no self-registration and no recorded pid (probe a)", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(
+        makeRecord({
+          state: "done",
+          surface_id: UNBOUND_SURFACE_REF,
+          surface_uuid: null,
+          workspace_id: null,
+          pid: null,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      // A restored pane may run the session without having self-registered.
+      liveSurfaces = [LIVE_PANE];
+      await registry.reconstitute();
+
+      await expect(engine.resumeAgent("cmuxlayerCodex-revive")).rejects.toThrow(
+        /no recorded pid.*force/i,
+      );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+    });
+
+    it("refuses a UUID-less ref-bound row when the topology is empty (probe b)", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(
+        makeRecord({
+          state: "done",
+          workspace_id: "ws:1",
+          surface_id: "surface:old",
+          surface_uuid: null,
+          pid: null,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [];
+      await registry.reconstitute();
+
+      await expect(engine.resumeAgent("cmuxlayerCodex-revive")).rejects.toThrow(
+        /cannot resume.*force/i,
+      );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+    });
+
+    it("refuses when a live process carries the session id, even with a dead recorded pid", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(
+        makeRecord({
+          state: "done",
+          surface_id: UNBOUND_SURFACE_REF,
+          surface_uuid: null,
+          workspace_id: null,
+          pid: DEAD_PID,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [LIVE_PANE];
+      await registry.reconstitute();
+      const scanEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        inboxOpts: { baseDir: TEST_DIR },
+        sessionProcessScanner: (sessionId) => [
+          { pid: 4242, command: `codex resume ${sessionId}` },
+        ],
+      });
+      try {
+        await expect(
+          scanEngine.resumeAgent("cmuxlayerCodex-revive"),
+        ).rejects.toThrow(/pid 4242/);
+        expect(mockClient.send).not.toHaveBeenCalled();
+      } finally {
+        scanEngine.dispose();
+      }
+    });
+
+    it("resumes a worker whose pane died and whose pid is confirmed dead, without force", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(
+        makeRecord({
+          state: "done",
+          surface_id: UNBOUND_SURFACE_REF,
+          surface_uuid: null,
+          workspace_id: null,
+          pid: DEAD_PID,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [LIVE_PANE];
+      await registry.reconstitute();
+      withFakeRightSplitClient(mockClient);
+
+      const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
+      expect(resumed).toMatchObject({
+        agent_id: "cmuxlayerCodex-revive",
+        surface_id: "surface:new",
+      });
+    });
+
+    it("force overrides missing proof once the caller has checked", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(
+        makeRecord({
+          state: "done",
+          surface_id: UNBOUND_SURFACE_REF,
+          surface_uuid: null,
+          workspace_id: null,
+          pid: null,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [LIVE_PANE];
+      await registry.reconstitute();
+      withFakeRightSplitClient(mockClient);
+
+      await expect(
+        engine.resumeAgent("cmuxlayerCodex-revive", { force: true }),
+      ).resolves.toMatchObject({ surface_id: "surface:new" });
+    });
   });
 
   it("retains a recoverable crash row when its stale process is gone", async () => {

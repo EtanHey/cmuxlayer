@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import {
+  isRetainedResumableSession,
+  RESUMABLE_SESSION_CLOCK_SKEW_MS,
   RESUMABLE_SESSION_RETENTION_MS,
   UNBOUND_SURFACE_REF,
   type AgentRecord,
@@ -328,5 +330,21 @@ describe("resumable agents survive a cmux restart (#926)", () => {
     await expect(
       registry.evictSurfaceless({ confirmationMs: 0 }),
     ).resolves.toEqual(["cmuxlayerClaude-2c16c8c8"]);
+  });
+  it("a future-dated updated_at does not extend retention (clock-skew allowance only)", () => {
+    const now = Date.now();
+    const future = (ms: number) => ({
+      state: "done" as const,
+      cli_session_id: SESSION,
+      deletion_intent: false,
+      updated_at: new Date(now + ms).toISOString(),
+    });
+    expect(isRetainedResumableSession(future(24 * 60 * 60_000), now)).toBe(false);
+    expect(
+      isRetainedResumableSession(
+        future(RESUMABLE_SESSION_CLOCK_SKEW_MS - 1_000),
+        now,
+      ),
+    ).toBe(true);
   });
 });
