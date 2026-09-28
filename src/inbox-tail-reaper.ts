@@ -146,7 +146,8 @@ export async function snapshotProcessRows(): Promise<ProcessRow[]> {
   return parseProcessRows(stdout);
 }
 
-async function probeProcess(pid: number): Promise<ProcessRow | null> {
+/** One fresh `ps` of one PID; null only when ps reports it absent. */
+export async function probeProcess(pid: number): Promise<ProcessRow | null> {
   try {
     const { stdout } = await execFileAsync(
       "ps",
@@ -234,7 +235,7 @@ export interface TailerSweepResult {
 export async function sweepInboxTailers(input: {
   rows: ProcessRow[];
   inboxOpts?: InboxOpts;
-  ownerState: (agentId: string) => TailOwnerState;
+  ownerState: (agentId: string) => TailOwnerState | Promise<TailOwnerState>;
   reap?: boolean;
   deps?: TailReapDeps;
 }): Promise<TailerSweepResult> {
@@ -243,7 +244,7 @@ export async function sweepInboxTailers(input: {
   for (const tailer of observeInboxTailers(input.rows, input.inboxOpts)) {
     let state = states.get(tailer.agent_id);
     if (state === undefined) {
-      state = input.ownerState(tailer.agent_id);
+      state = await input.ownerState(tailer.agent_id);
       states.set(tailer.agent_id, state);
     }
     if (state !== "gone") {

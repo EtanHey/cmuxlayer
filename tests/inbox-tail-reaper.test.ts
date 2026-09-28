@@ -7,7 +7,7 @@
  * dir, and a FRESH engine per test — which is what a restarted daemon is.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,6 @@ import {
 } from "../src/inbox-tail-reaper.js";
 import { StateManager } from "../src/state-manager.js";
 import { hasInboxTailRecordAuthority } from "../src/mcp/context.js";
-import { homedir } from "node:os";
 import { alive, armTailer as armRealTailer, waitGone } from "./helpers/inbox-tailer.js";
 
 const cleanups: Array<() => void> = [];
@@ -75,7 +74,7 @@ function record(agentId: string, overrides: Partial<AgentRecord>): AgentRecord {
 }
 
 /** What a daemon (re)start builds: a new engine over the persisted registry. */
-async function restartedDaemonSweep(
+async function freshEngine(
   stateMgr: StateManager,
   inboxOpts: { baseDir: string },
   opts: { authority?: boolean } = {},
@@ -90,8 +89,35 @@ async function restartedDaemonSweep(
     inboxTailReaper: { recordAuthority: opts.authority ?? true },
   });
   cleanups.push(() => engine.dispose());
-  await (engine as unknown as { reapInboxTailsBestEffort(): Promise<void> }).reapInboxTailsBestEffort();
   return { engine, log };
+}
+
+async function restartedDaemonSweep(
+  stateMgr: StateManager,
+  inboxOpts: { baseDir: string },
+  opts: { authority?: boolean } = {},
+) {
+  const built = await freshEngine(stateMgr, inboxOpts, opts);
+  await (built.engine as unknown as { reapInboxTailsBestEffort(): Promise<void> }).reapInboxTailsBestEffort();
+  return built;
+}
+
+/** Classify and "reap" against a fake signal sink: never a real kill. */
+async function classifyWithSink(
+  engine: AgentEngine,
+  inboxOpts: { baseDir: string },
+  rows: Awaited<ReturnType<typeof snapshotProcessRows>>,
+) {
+  const processes = new Map(rows.map((row) => [row.pid, row]));
+  const kill = vi.fn();
+  const result = await sweepInboxTailers({
+    rows,
+    inboxOpts,
+    ownerState: (agentId) => engine.inboxTailOwnerState(agentId, processes),
+    reap: true,
+    deps: { kill },
+  });
+  return { kill, result, processes };
 }
 
 describe("#911 inbox tailer reaping", () => {
@@ -161,17 +187,62 @@ describe("#911 inbox tailer reaping", () => {
     expect(alive(tail)).toBe(true);
   });
 
-  it("record authority requires a resolved state/inbox pair, not merely two overrides", () => {
-    const prodState = join(homedir(), ".local", "state", "cmux-agents");
-    const prodInbox = join(homedir(), ".cmux", "agents");
-    expect(hasInboxTailRecordAuthority(prodState, undefined)).toBe(true);
-    // The defaults spelled out are still the production pair.
-    expect(hasInboxTailRecordAuthority(`${prodState}/`, prodInbox)).toBe(true);
-    // A scratch state dir pointed at the real fleet inbox is never a pair.
-    expect(hasInboxTailRecordAuthority("/tmp/bench-state", prodInbox)).toBe(false);
-    expect(hasInboxTailRecordAuthority("/tmp/bench-state", undefined)).toBe(false);
-    expect(hasInboxTailRecordAuthority(prodState, "/tmp/bench-inbox")).toBe(false);
-    expect(hasInboxTailRecordAuthority("/tmp/bench-state", "/tmp/bench-inbox")).toBe(true);
+  // Round 2 (Codex review of #922): the reaper signals only on positive proof
+  // of death. Each case below classified a live owner "gone" at the prior head.
+  it("an agent that resumed after the ps snapshot is never classified gone, and nothing is signalled", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-resume01";
+    armTailer(agentId, inboxOpts);
+    const olderSnapshot = await snapshotProcessRows();
+    // The owner resumes AFTER the snapshot: its new pid is not in it.
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    stateMgr.writeState(record(agentId, { state: "working", pid: seat.pid! }));
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+
+    const { kill, result, processes } = await classifyWithSink(engine, inboxOpts, olderSnapshot);
+
+    expect(await engine.inboxTailOwnerState(agentId, processes)).not.toBe("gone");
+    expect(result.orphaned).toEqual([]);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable state.json is not proof of death: unknown, nothing signalled", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-corrupt1";
+    armTailer(agentId, inboxOpts);
+    mkdirSync(join(stateMgr.getBaseDir(), agentId), { recursive: true });
+    writeFileSync(join(stateMgr.getBaseDir(), agentId, "state.json"), "{ not json");
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+
+    const { kill, result, processes } = await classifyWithSink(engine, inboxOpts, await snapshotProcessRows());
+
+    expect(await engine.inboxTailOwnerState(agentId, processes)).toBe("unknown");
+    expect(result.orphaned).toEqual([]);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("record authority is the verified production pair by filesystem identity, never an alias", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmux-911-authority-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const production = { stateDir: join(root, "prod-state"), inboxBaseDir: join(root, "prod-inbox") };
+    for (const dir of [production.stateDir, production.inboxBaseDir, join(root, "scratch-state"), join(root, "scratch-inbox")]) {
+      mkdirSync(dir);
+    }
+    const alias = join(root, "alias-to-prod-inbox");
+    symlinkSync(production.inboxBaseDir, alias);
+    const authority = (state: string, inbox: string | undefined) =>
+      hasInboxTailRecordAuthority(state, inbox, production);
+
+    expect(authority(production.stateDir, undefined)).toBe(true);
+    expect(authority(`${production.stateDir}/`, production.inboxBaseDir)).toBe(true);
+    expect(authority(production.stateDir, alias)).toBe(true); // same directory
+    // A scratch daemon beside a symlink to the real fleet inbox: never.
+    expect(authority(join(root, "scratch-state"), alias)).toBe(false);
+    expect(authority(join(root, "scratch-state"), undefined)).toBe(false);
+    expect(authority(join(root, "scratch-state"), join(root, "scratch-inbox"))).toBe(false);
+    expect(authority(production.stateDir, join(root, "scratch-inbox"))).toBe(false);
+    expect(authority(join(root, "missing"), join(root, "missing"))).toBe(false);
   });
 
   it("a recorded PID now running something else is never signalled (pid_reused)", async () => {

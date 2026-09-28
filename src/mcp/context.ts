@@ -5,9 +5,9 @@
  * verbatim from server.ts (CX-2 S4); imports nothing from the server.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { inboxBaseDir as inboxBaseDirOf } from "../inbox.js";
 import { CmuxClient, type ExecFn } from "../cmux-client.js";
 import type { CmuxSocketClient } from "../cmux-socket-client.js";
@@ -461,21 +461,37 @@ export function createServerContext(
 }
 
 /**
- * #911: the registry may call a record-less tailer an orphan only when its
- * state dir and the inbox dir are a pair: both the production defaults, or
- * both elsewhere. Compared as resolved paths, not by whether an override was
- * passed, so a scratch state dir over the real inbox dir is never a pair and
- * the defaults spelled out explicitly still are.
+ * #911: the registry may call a record-less tailer an orphan only when it is
+ * the VERIFIED fleet registry for that inbox dir: the state dir IS the
+ * production state dir and the inbox dir IS the production inbox dir, judged
+ * by filesystem identity (realpath, then device+inode), never by spelling. A
+ * scratch state dir, even one beside a symlink to the real inbox, is not.
+ * Anything that cannot be resolved has no authority.
  */
 export function hasInboxTailRecordAuthority(
   stateDir: string,
   inboxBaseDir: string | undefined,
+  production: { stateDir: string; inboxBaseDir: string } = {
+    stateDir: join(homedir(), ".local", "state", "cmux-agents"),
+    inboxBaseDir: inboxBaseDirOf(),
+  },
 ): boolean {
-  const isDefaultState =
-    resolve(stateDir) === resolve(homedir(), ".local", "state", "cmux-agents");
-  const isDefaultInbox =
-    resolve(inboxBaseDir ?? inboxBaseDirOf()) === resolve(inboxBaseDirOf());
-  return isDefaultState === isDefaultInbox;
+  const identity = (path: string): string | null => {
+    try {
+      const stat = statSync(realpathSync(path));
+      return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
+    } catch {
+      return null;
+    }
+  };
+  const same = (left: string, right: string): boolean => {
+    const leftId = identity(left);
+    return leftId !== null && leftId === identity(right);
+  };
+  return (
+    same(stateDir, production.stateDir) &&
+    same(inboxBaseDir ?? production.inboxBaseDir, production.inboxBaseDir)
+  );
 }
 
 export function resolveServerInboxBaseDir(input: {

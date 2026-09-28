@@ -4263,8 +4263,9 @@ export class AgentEngine {
   inboxTailOwnerState(
     agentId: string,
     processes: ReadonlyMap<number, ProcessRow>,
-  ): TailOwnerState {
-    return sweepImpl.inboxTailOwnerState.call(this.sweepHost(), agentId, processes);
+    probe?: (pid: number) => Promise<ProcessRow | null>,
+  ): Promise<TailOwnerState> {
+    return sweepImpl.inboxTailOwnerState.call(this.sweepHost(), agentId, processes, probe);
   }
   private runCloseForensicsBestEffort(...args: Parameters<typeof sweepImpl.runCloseForensicsBestEffort>): ReturnType<typeof sweepImpl.runCloseForensicsBestEffort> {
     return sweepImpl.runCloseForensicsBestEffort.call(this.sweepHost(), ...args);

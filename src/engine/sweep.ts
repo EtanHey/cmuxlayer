@@ -15,6 +15,7 @@ import { getTransportHealth } from "../cmux-transport-self-heal.js";
 import {
   type ProcessRow,
   type TailOwnerState,
+  probeProcess,
   snapshotProcessRows,
   sweepInboxTailers,
 } from "../inbox-tail-reaper.js";
@@ -782,34 +783,59 @@ export async function reapChannelMarkersBestEffort(this: SweepHost): Promise<voi
 const PENDING_AGENT_ID_RE = /-pending-\d+-[a-z0-9]+$/i;
 
 /**
- * #911. A tailer's owner is gone when its record is gone (only where this
- * registry is authoritative for the inbox dir), or when the recorded agent
- * process is proven gone, or when a pid-less record was closed by an operator.
- * `done` alone is NOT gone: a lead that wrote DONE keeps its pane, its process
- * and its mailbox until something closes it.
+ * #911. The reaper signals only on POSITIVE PROOF OF DEATH; every uncertainty
+ * resolves to "unknown", which keeps the tailer. Gone means one of:
+ * - the record is confirmed absent (no state file, read cleanly) and this
+ *   registry is the verified fleet registry for the inbox dir;
+ * - a FRESH probe, taken after the record was read, finds the recorded pid
+ *   dead or running a different process;
+ * - a pid-less record an operator closed.
+ * The sweep's `ps` snapshot may only prove an owner live: a pid absent from
+ * an older snapshot may belong to an agent that resumed since. A read or
+ * parse failure is not absence. `done` alone is not gone: a lead that wrote
+ * DONE keeps its pane, its process and its mailbox until something closes it.
  */
-export function inboxTailOwnerState(
+export async function inboxTailOwnerState(
   this: SweepHost,
   agentId: string,
   processes: ReadonlyMap<number, ProcessRow>,
-): TailOwnerState {
+  probe: (pid: number) => Promise<ProcessRow | null> = probeProcess,
+): Promise<TailOwnerState> {
   // A provisional id is renamed in place once the real one is known.
   if (PENDING_AGENT_ID_RE.test(agentId)) return "unknown";
-  const record = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
-  if (!record) return this.inboxTailReaper?.recordAuthority ? "gone" : "unknown";
+  let record = this.registry.get(agentId);
+  if (!record) {
+    let hasFile: boolean;
+    try {
+      hasFile = this.stateMgr.hasStateFile(agentId);
+    } catch {
+      return "unknown";
+    }
+    if (!hasFile) return this.inboxTailReaper?.recordAuthority ? "gone" : "unknown";
+    record = this.stateMgr.readState(agentId);
+    // Present on disk but unreadable or malformed: not proof of anything.
+    if (!record) return "unknown";
+  }
   if (record.pid) {
-    // Judged from the same `ps` snapshot as the tailers: no per-owner
-    // synchronous probe on the event loop.
-    const row = processes.get(record.pid);
-    if (!row) return "gone";
-    const startedAtMs = Date.parse(row.started_at);
-    return qualifyAgentProcessLiveness(
-      record,
-      "alive",
-      Number.isFinite(startedAtMs) ? startedAtMs : null,
-    ) === "gone"
-      ? "gone"
-      : "live";
+    const judge = (row: ProcessRow): TailOwnerState => {
+      const startedAtMs = Date.parse(row.started_at);
+      return qualifyAgentProcessLiveness(
+        record,
+        "alive",
+        Number.isFinite(startedAtMs) ? startedAtMs : null,
+      ) === "gone"
+        ? "gone"
+        : "live";
+    };
+    const seen = processes.get(record.pid);
+    if (seen && judge(seen) === "live") return "live";
+    let fresh: ProcessRow | null;
+    try {
+      fresh = await probe(record.pid);
+    } catch {
+      return "unknown";
+    }
+    return fresh === null ? "gone" : judge(fresh);
   }
   return TERMINAL_STATES.has(record.state) && record.user_killed === true ? "gone" : "live";
 }
