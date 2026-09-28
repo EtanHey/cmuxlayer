@@ -37,7 +37,11 @@ interface ActiveLog {
 let activeLog: ActiveLog | null = null;
 let queued: string[] = [];
 let droppedLines = 0;
-let writing: Promise<void> | null = null;
+/**
+ * The writer draining the active log. Each log gets its own, so a write that
+ * is still in flight (or wedged) for an old log never holds up a new one.
+ */
+let writer: { log: ActiveLog; done: Promise<void> } | null = null;
 
 export function defaultDaemonLogPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -64,12 +68,15 @@ export function enableDaemonLog(opts: {
   return path;
 }
 
-export function disableDaemonLog(): void {
+export function disableDaemonLog(): number {
+  const unwritten = queued.length + droppedLines;
   activeLog = null;
+  writer = null;
   queued = [];
   droppedLines = 0;
   for (const entry of coalesced.values()) clearTimeout(entry.timer);
   coalesced.clear();
+  return unwritten;
 }
 
 /** The log path when the daemon log is enabled, else null. */
@@ -211,11 +218,23 @@ export function appendDaemonLog(event: string, detail: string): void {
   } else {
     queued.push(line);
   }
-  if (!writing) {
-    writing = drainQueue(log).finally(() => {
-      writing = null;
-    });
-  }
+  ensureDraining();
+}
+
+function ensureDraining(): void {
+  const log = activeLog;
+  if (!log || writer?.log === log) return;
+  if (queued.length === 0 && droppedLines === 0) return;
+  const current: { log: ActiveLog; done: Promise<void> } = {
+    log,
+    done: Promise.resolve(),
+  };
+  current.done = drainQueue(log).finally(() => {
+    if (writer === current) writer = null;
+    // Lines queued while this writer was finishing must not be stranded.
+    ensureDraining();
+  });
+  writer = current;
 }
 
 /** Repeats of one event+cause inside this window become a single count line. */
@@ -269,8 +288,8 @@ export function appendCoalescedDaemonLog(
 
 /** Wait until every queued line has been written (or dropped). */
 export async function flushDaemonLog(): Promise<void> {
-  while (writing) {
-    await writing;
+  while (writer) {
+    await writer.done;
   }
 }
 
@@ -289,7 +308,13 @@ export async function closeDaemonLog(timeoutMs = 500): Promise<void> {
     }),
   ]);
   if (timer) clearTimeout(timer);
-  disableDaemonLog();
+  const unwritten = disableDaemonLog();
+  if (unwritten > 0) {
+    // Never drop the tail silently: a wedged disk is itself worth knowing.
+    console.error(
+      `[cmuxlayer-daemon] daemon log close timed out after ${timeoutMs}ms; ${unwritten} queued line(s) not written`,
+    );
+  }
 }
 
 /** A stable code for a thrown value (e.g. `rate_limited`). Never throws. */

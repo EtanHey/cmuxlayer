@@ -350,6 +350,21 @@ describe("#938 persistent daemon log", () => {
     expect(log).toContain("cause=a | 2026-01-01T00:00:00.000Z pid=1 daemon_fatal forged | x | yz");
   });
 
+  it("a writer still busy with an old log never strands the next log's queue", async () => {
+    const oldPath = uniquePath("old-log", ".log");
+    const newPath = uniquePath("new-log", ".log");
+    enableDaemonLog({ path: oldPath });
+    // Starts the old log's async writer; it is still in flight below.
+    appendDaemonLog("daemon_stopped", "reason=test");
+    // What a timed-out close followed by a new daemon does: switch logs
+    // while the old write has not finished.
+    disableDaemonLog();
+    enableDaemonLog({ path: newPath });
+    appendDaemonLog("daemon_starting", "node=test");
+
+    await waitUntil(() => readLog(newPath).includes("daemon_starting"), 2_000);
+  });
+
   it("describes hostile errors without throwing", () => {
     const hostile = new Error("x");
     Object.defineProperty(hostile, "message", {
