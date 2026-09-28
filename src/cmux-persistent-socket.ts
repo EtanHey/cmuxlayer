@@ -64,7 +64,7 @@ export interface PollingOptions {
   /**
    * When to pace polling calls through the budget. "always" (default) paces
    * from the first call; "on_rate_limit" paces only once cmux has answered
-   * rate_limited on this socket (cmux < 0.64.23 has no limiter to respect).
+   * rate_limited on the current connection (cmux < 0.64.23 has no limiter).
    * rate_limited responses are retried either way.
    */
   budget?: "always" | "on_rate_limit";
@@ -157,7 +157,7 @@ export class CmuxPersistentSocket {
   private rateLimitBackoffMaxMs: number;
   private rateLimitJitter: boolean;
   private pollingBudgetAlways: boolean;
-  /** #938: cmux has answered rate_limited at least once on this socket. */
+  /** #938: cmux has answered rate_limited on the current connection. */
   private rateLimitObserved = false;
   private pollingTokens: number;
   private pollingLastRefillAt = Date.now();
@@ -375,6 +375,9 @@ export class CmuxPersistentSocket {
         this.pollingTimer = null;
         this.pollingTokens = this.pollingBurst;
         this.pollingLastRefillAt = Date.now();
+        // #938 r2: cmux's limiter is per connection, and a restarted cmux may
+        // have none (0.64.22). Pace again only after THIS connection says so.
+        this.rateLimitObserved = false;
         this.pumpPollingQueue();
         resolve();
       });
@@ -453,6 +456,9 @@ export class CmuxPersistentSocket {
         );
         this.pollingCancellationGeneration += 1;
         this.cancelPollingWaiters(disconnected);
+        // #938 r2: the observation belonged to the connection that just
+        // closed; reads issued before the reconnect must not inherit it.
+        this.rateLimitObserved = false;
         // Reject all inflight requests — transport is gone
         this.rejectAllPending(disconnected);
       });
@@ -842,6 +848,7 @@ export class CmuxPersistentSocket {
     );
     this.pollingCancellationGeneration += 1;
     this.cancelPollingWaiters(disconnected);
+    this.rateLimitObserved = false;
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;

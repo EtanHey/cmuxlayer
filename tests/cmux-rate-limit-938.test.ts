@@ -19,6 +19,7 @@ import {
   type CreateServerOptions,
 } from "../src/server.js";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
+import { CmuxPersistentSocket } from "../src/cmux-persistent-socket.js";
 import { CmuxSocketError } from "../src/cmux-socket-error.js";
 import {
   currentTransportRetryCount,
@@ -275,6 +276,81 @@ describe("#938 cmux polling reads go through the budget and the rate_limited ret
 
     expect(Date.now() - startedAt).toBeLessThan(1_500);
     expect(cmux.requests.every((request) => !request.limited)).toBe(true);
+  });
+
+  it("forgets the rate_limited observation when it reconnects to a fresh cmux", async () => {
+    // Connection 1 answers the first read with rate_limited (pacing engages);
+    // every later read on any connection is admitted, like a cmux that was
+    // restarted onto 0.64.22 with no limiter.
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = uniquePath("reconnect");
+    const connections: net.Socket[] = [];
+    const server = net.createServer((conn) => {
+      const index = connections.push(conn);
+      let limitedOnce = false;
+      let buffer = "";
+      conn.on("error", () => {});
+      conn.on("data", (chunk) => {
+        buffer += chunk.toString("utf-8");
+        let newline: number;
+        while ((newline = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          const request = JSON.parse(line) as { id: string; method: string };
+          const limited = index === 1 && !limitedOnce;
+          limitedOnce = true;
+          conn.write(
+            `${JSON.stringify(
+              limited
+                ? {
+                    id: request.id,
+                    ok: false,
+                    error: { code: "rate_limited", message: "limited" },
+                  }
+                : { id: request.id, ok: true, result: fakeResult(request.method) },
+            )}\n`,
+          );
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const conn of connections) conn.destroy();
+          server.close(() => resolve());
+          rmSync(path, { force: true });
+        }),
+    );
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      polling: {
+        budget: "on_rate_limit",
+        burst: 1,
+        refillMs: 300,
+        rateLimitBackoffBaseMs: 1,
+        jitter: false,
+      },
+    });
+    cleanups.push(() => socket.disconnect());
+    const threeReads = async (): Promise<number> => {
+      const startedAt = Date.now();
+      await Promise.all(
+        Array.from({ length: 3 }, () =>
+          socket.call("workspace.list", {}, { polling: true }),
+        ),
+      );
+      return Date.now() - startedAt;
+    };
+
+    await socket.call("workspace.list", {}, { polling: true });
+    expect(await threeReads()).toBeGreaterThanOrEqual(500);
+
+    connections[0]?.destroy();
+    await waitUntil(() => !socket.isConnected());
+    expect(await threeReads()).toBeLessThan(250);
+    expect(connections).toHaveLength(2);
   });
 
   it("an exhausted read carries a numeric retry_count, not undefined", async () => {
