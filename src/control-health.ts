@@ -1,3 +1,4 @@
+import { daemonLogPath } from "./daemon-log.js";
 import { execFile } from "node:child_process";
 import { getTransportHealth } from "./cmux-transport-self-heal.js";
 import {
@@ -155,6 +156,8 @@ export interface LifecycleStartHealth {
 export interface ControlHealthDaemonLifecycle extends DaemonLifecycleSnapshot {
   lifecycle_lock: LifecycleLockState | null;
   lifecycle_start: LifecycleStartHealth | null;
+  /** #938: the persistent daemon log (null outside the daemon process). */
+  log_path: string | null;
 }
 
 export interface ControlHealth {
@@ -949,6 +952,7 @@ export async function collectControlHealth(
       ...(opts.daemonLifecycle ?? daemonLifecycleSnapshot()),
       lifecycle_lock: opts.lifecycleLock ?? null,
       lifecycle_start: opts.lifecycleStart ?? null,
+      log_path: daemonLogPath(),
     },
   };
 
@@ -1025,6 +1029,9 @@ function formatDaemonLifecycle(
         } waited_ms=${lock.last_timeout.waited_ms} at=${lock.last_timeout.at}`,
       );
     }
+  }
+  if (lifecycle.log_path) {
+    lines.push(`daemon log: ${lifecycle.log_path}`);
   }
   const start = lifecycle.lifecycle_start;
   if (start) {
