@@ -40,6 +40,7 @@ function makeCodexPane(frames: Frames) {
   const pane = {
     frames, live: false, phase: "empty" as "empty" | "buffered" | "draft" | "after",
     bufferedReads: 0, repaint: false, swallow: 0, returns: 0, submitted: [] as string[], text: "",
+    failWhileEmpty: false,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
@@ -74,6 +75,7 @@ function makeCodexPane(frames: Frames) {
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("read-screen")) {
+      if (pane.failWhileEmpty && pane.phase === "empty") throw new Error("transient read failure");
       return { stdout: JSON.stringify({ surface: "surface:new", text: read(), lines: 30, scrollback_used: false }), stderr: "" };
     }
     return { stdout: JSON.stringify(listing(args)), stderr: "" };
@@ -335,6 +337,47 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(receipt.ok, JSON.stringify(receipt)).toBe(true);
       await vi.waitFor(() => expect(t.pane.submitted).toEqual([PONG]), { timeout: 10_000 });
       expect(t.pane.returns).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+  // #923 follow-up (r2 review, Macroscope 4122511645): a wrap swallows the
+  // whitespace it breaks at, so two spaces there look like one. The caller's
+  // two-space text cannot be told from a one-space edit, and never owns it.
+  it("#923: a one-space edit at a wrap revokes the sender's Return on a two-space draft", async () => {
+    const row = Array.from({ length: 19 }, () => "word").join(" ");
+    const tail = Array.from({ length: 4 }, () => "word").join(" ");
+    const own = `${row}  ${tail}`;
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: () => fixture("idle-draft").replace(PONG, own), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      await t.send(own);
+      t.pane.frames.draft = fixture("idle-draft").replace(PONG, `${row}\n  ${tail}`);
+      t.pane.text = `${row} ${tail}`;
+      t.pane.swallow = 0;
+      const before = t.pane.returns;
+      const receipt = await t.keyReturn(LEAD_UUID);
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(t.pane.returns).toBe(before);
+      expect(t.pane.submitted).toEqual([]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // #923 follow-up (r2 review): with no pre-type frame there is no baseline,
+  // so an old identical row on screen proves nothing.
+  it("#923: a send whose pre-type reads failed never takes an old row as proof", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      t.pane.failWhileEmpty = true;
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual([]);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
     } finally { t.context.dispose(); }
   }, 30_000);
 });

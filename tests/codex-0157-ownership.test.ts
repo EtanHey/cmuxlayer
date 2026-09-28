@@ -169,3 +169,34 @@ describe("#917 a new user row is proven by position", () => {
     expect(codexTranscriptShowsNewEcho(fixture("idle-submitted-working"), fixture("idle-submitted-working"), PONG)).toBe(false);
   });
 });
+
+// #923 follow-up (r2 review, Macroscope 4122511645): whitespace at a row
+// break is the renderer's only when it is the single space a wrap consumes.
+describe("#923 a wrap consumes exactly one space", () => {
+  const PONG = "Reply with the single word pong and nothing else.";
+  const draft = (text: string) => fixture("idle-draft").replace(PONG, text);
+  const row = Array.from({ length: 19 }, () => "word").join(" ");
+  const tail = Array.from({ length: 4 }, () => "word").join(" ");
+  const wrapped = draft(`${row}\n  ${tail}`);
+
+  it("refuses a two-space draft whose visible wrap could be one space", () => {
+    expect(composerHoldsForeignDraft(wrapped, `${row}  ${tail}`, { cli: "codex", exact: true })).toBe(true);
+    expect(composerHoldsForeignDraft(wrapped, `${row}\t${tail}`, { cli: "codex", exact: true })).toBe(true);
+  });
+
+  it("still owns the one-space draft that wrapped there", () => {
+    expect(composerHoldsForeignDraft(wrapped, `${row} ${tail}`, { cli: "codex", exact: true })).toBe(false);
+  });
+});
+
+// #923 follow-up (r2 review): no pre-type frame, no baseline, no proof.
+describe("#923 a missing pre-type frame proves no new row", () => {
+  const frame = (body: string) =>
+    `OpenAI Codex\n${body}\n\n› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n`;
+
+  it("never verifies against a null or undefined baseline", () => {
+    expect(codexTranscriptShowsNewEcho(null, frame("› again"), "again")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(undefined, frame("› again"), "again")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(null, fixture("idle-submitted-working"), "Reply with the single word pong and nothing else.")).toBe(false);
+  });
+});
