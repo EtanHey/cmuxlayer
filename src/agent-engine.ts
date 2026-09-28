@@ -355,7 +355,8 @@ export class AgentEngine {
   private lastChannelMarkerReapAt: number | null = null;
   private lastChannelMarkerReapFailureAt: number | null = null;
   private lastInboxTailReapAt: number | null = null;
-  private inboxTailRecordAuthority = false;
+  private inboxTailReaper: { recordAuthority: boolean } | null = null;
+  private inboxTailReapInFlight = false;
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
   private selfRegistrationSessionResolver: SessionIdentityResolver | null;
@@ -522,7 +523,7 @@ export class AgentEngine {
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
     this.inboxOpts = opts?.inboxOpts;
-    this.inboxTailRecordAuthority = opts?.inboxTailRecordAuthority === true;
+    this.inboxTailReaper = opts?.inboxTailReaper ?? null;
     this.seatRegistry =
       opts?.seatRegistry !== undefined
         ? opts.seatRegistry
@@ -3883,7 +3884,9 @@ export class AgentEngine {
       set lastChannelMarkerReapFailureAt(value) { engine.lastChannelMarkerReapFailureAt = value; },
       get lastInboxTailReapAt() { return engine.lastInboxTailReapAt; },
       set lastInboxTailReapAt(value) { engine.lastInboxTailReapAt = value; },
-      get inboxTailRecordAuthority() { return engine.inboxTailRecordAuthority; },
+      get inboxTailReaper() { return engine.inboxTailReaper; },
+      get inboxTailReapInFlight() { return engine.inboxTailReapInFlight; },
+      set inboxTailReapInFlight(value) { engine.inboxTailReapInFlight = value; },
       get lastSweepSignature() { return engine.lastSweepSignature; },
       set lastSweepSignature(value) { engine.lastSweepSignature = value; },
       get lifecycleLockHolder() { return engine.lifecycleLockHolder; },

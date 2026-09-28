@@ -430,10 +430,12 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
         selfRegistrationSessionLookup: context.selfRegistrationSessionLookup,
         roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
         inboxOpts,
-        inboxTailRecordAuthority: hasInboxTailRecordAuthority(
-          context.stateDir,
-          inboxOpts.baseDir,
-        ),
+        inboxTailReaper: {
+          recordAuthority: hasInboxTailRecordAuthority(
+            context.stateDir,
+            inboxOpts.baseDir,
+          ),
+        },
         launchCommandSender: async ({
           surface,
           stableSurfaceIdentity,

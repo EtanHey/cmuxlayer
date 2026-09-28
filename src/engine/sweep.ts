@@ -124,7 +124,8 @@ export interface SweepHost {
   lastChannelMarkerReapAt: AgentEngine["lastChannelMarkerReapAt"];
   lastChannelMarkerReapFailureAt: AgentEngine["lastChannelMarkerReapFailureAt"];
   lastInboxTailReapAt: AgentEngine["lastInboxTailReapAt"];
-  readonly inboxTailRecordAuthority: AgentEngine["inboxTailRecordAuthority"];
+  readonly inboxTailReaper: AgentEngine["inboxTailReaper"];
+  inboxTailReapInFlight: AgentEngine["inboxTailReapInFlight"];
   lastSweepSignature: AgentEngine["lastSweepSignature"];
   readonly lifecycleLockHolder: AgentEngine["lifecycleLockHolder"];
   readonly outboxDrain: AgentEngine["outboxDrain"];
@@ -670,11 +671,9 @@ export async function runSweepOnce(
         }),
       );
     }
-    await yieldToWaiters();
-    // After terminal purge, so a record removed this sweep is reaped this sweep.
-    await time("inbox_tails_ms", () =>
-      withUnlocked(() => this.reapInboxTailsBestEffort()),
-    );
+    // After terminal purge, so a record removed this sweep is reaped this
+    // sweep. Detached: the sweep never waits on `ps` or on a lingering tailer.
+    void this.reapInboxTailsBestEffort();
     await yieldToWaiters();
     if (mutationsAreSafe && this.assertSweepInputCurrent(sweepCtx)) {
       await time("placements_ms", () =>
@@ -792,14 +791,14 @@ export function inboxTailOwnerState(this: SweepHost, agentId: string): TailOwner
   // A provisional id is renamed in place once the real one is known.
   if (PENDING_AGENT_ID_RE.test(agentId)) return "unknown";
   const record = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
-  if (!record) return this.inboxTailRecordAuthority ? "gone" : "unknown";
+  if (!record) return this.inboxTailReaper?.recordAuthority ? "gone" : "unknown";
   if (record.pid) return agentProcessLiveness(record) === "gone" ? "gone" : "live";
   return TERMINAL_STATES.has(record.state) && record.user_killed === true ? "gone" : "live";
 }
 
 /** Reap the mailbox tailers of agents that are gone. Best-effort, at most once a minute. */
 export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
-  if (!this.inboxOpts) return;
+  if (!this.inboxOpts || !this.inboxTailReaper || this.inboxTailReapInFlight) return;
   const now = Date.now();
   if (
     this.lastInboxTailReapAt !== null &&
@@ -808,6 +807,7 @@ export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
     return;
   }
   this.lastInboxTailReapAt = now;
+  this.inboxTailReapInFlight = true;
   try {
     const result = await sweepInboxTailers({
       rows: await snapshotProcessRows(),
@@ -845,6 +845,8 @@ export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
     }
   } catch {
     // Tailer cleanup is maintenance; lifecycle reconciliation must continue.
+  } finally {
+    this.inboxTailReapInFlight = false;
   }
 }
 

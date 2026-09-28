@@ -85,7 +85,7 @@ async function restartedDaemonSweep(
     spawnPreflight: async () => {},
     sessionIdentityResolver: () => null,
     inboxOpts,
-    inboxTailRecordAuthority: opts.authority ?? true,
+    inboxTailReaper: { recordAuthority: opts.authority ?? true },
   });
   cleanups.push(() => engine.dispose());
   await (engine as unknown as { reapInboxTailsBestEffort(): Promise<void> }).reapInboxTailsBestEffort();

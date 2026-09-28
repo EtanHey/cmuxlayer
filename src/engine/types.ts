@@ -415,12 +415,14 @@ export interface AgentEngineOptions {
   }) => Promise<void>;
   inboxOpts?: InboxOpts;
   /**
-   * #911: this engine's registry is the fleet's registry for `inboxOpts`, so a
-   * tailer whose agent has no record at all is an orphan. Leave unset where the
-   * state dir and inbox dir are not a pair (a bench daemon on a scratch state
-   * dir must never read the real fleet's tailers as orphans).
+   * #911: reap the mailbox tailers of gone agents from the sweep. Unset (bare
+   * and test construction) runs no reaper and no `ps`. `recordAuthority`: this
+   * registry is the fleet's registry for `inboxOpts`, so a tailer whose agent
+   * has no record at all is an orphan. False where the state dir and inbox dir
+   * are not a pair (a bench daemon on a scratch state dir must never read the
+   * real fleet's tailers as orphans).
    */
-  inboxTailRecordAuthority?: boolean;
+  inboxTailReaper?: { recordAuthority: boolean };
   seatRegistry?: SeatRegistry | null;
   seatRegistryPath?: string;
   /**
