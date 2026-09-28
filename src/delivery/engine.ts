@@ -1880,8 +1880,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         : {}),
     });
     // The pending sweep proves a later Codex submit against this same frame
-    // (#935). Without one, it has no baseline and proves nothing.
-    if (opts.delivery_id && deliverySafetySnapshot) {
+    // (#935). Without one (or with a blank read), it has no baseline and
+    // proves nothing.
+    if (opts.delivery_id && deliverySafetySnapshot?.text.trim()) {
       deliveryPreTypeScreens.delete(opts.delivery_id);
       deliveryPreTypeScreens.set(opts.delivery_id, deliverySafetySnapshot.text);
       while (deliveryPreTypeScreens.size > MAX_REMEMBERED_PRE_TYPE_SCREENS) {
