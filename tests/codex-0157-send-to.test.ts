@@ -424,4 +424,43 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("submitted");
     } finally { t.context.dispose(); }
   }, 30_000);
+  // #935 follow-up (r2 re-verify): a pre-type read that succeeds blank is not
+  // a baseline. Neither the send nor the pending sweep may take the old row
+  // it then repaints as new, and the blank frame is never stored.
+  it("#935: a blank pre-type read never proves an old row, now or in the sweep", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: "", buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual([]);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+      expect(t.context.deliveryPreTypeScreens.has(receipt.delivery_id)).toBe(false);
+      t.pane.repaint = true;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual([]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).not.toBe("submitted");
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#935: the pending sweep never takes a blank stored frame as a baseline", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("again");
+      expect(receipt.delivery_state, JSON.stringify(receipt)).toBe("pending_verify");
+      t.context.deliveryPreTypeScreens.set(receipt.delivery_id, "");
+      t.pane.repaint = true;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual([]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("pending_verify");
+    } finally { t.context.dispose(); }
+  }, 30_000);
 });

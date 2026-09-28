@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  codexScreenShowsSubmit,
   codexTranscriptShowsNewEcho,
   codexTranscriptUserRows,
   composerHoldsForeignDraft,
@@ -191,13 +192,17 @@ describe("#923 a wrap consumes exactly one space", () => {
 });
 
 // #923 follow-up (r2 review): no pre-type frame, no baseline, no proof.
-describe("#923 a missing pre-type frame proves no new row", () => {
+describe("#923 a missing or blank pre-type frame proves no new row", () => {
   const frame = (body: string) =>
     `OpenAI Codex\n${body}\n\n› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n`;
 
-  it("never verifies against a null or undefined baseline", () => {
+  it("never verifies against a null, undefined or blank baseline", () => {
     expect(codexTranscriptShowsNewEcho(null, frame("› again"), "again")).toBe(false);
     expect(codexTranscriptShowsNewEcho(undefined, frame("› again"), "again")).toBe(false);
+    // #935 follow-up: a read that succeeded blank is a failed read, not a baseline.
+    expect(codexTranscriptShowsNewEcho("", frame("› again"), "again")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(" \n\n  ", frame("› again"), "again")).toBe(false);
+    expect(codexScreenShowsSubmit("", fixture("idle-empty").replace("› Ask", "› again\n\n• old response\n\n› Ask"), "again")).toBe(false);
     expect(codexTranscriptShowsNewEcho(null, fixture("idle-submitted-working"), "Reply with the single word pong and nothing else.")).toBe(false);
   });
 });
