@@ -41,6 +41,20 @@ describe("#905 Codex 0.157 queue blocks", () => {
     expect(screenShowsQueuedAgentInput(screen, `Other text ↳ ${DATE}`)).toBe(true);
   });
 
+  // #917: with a `│` gutter the indent is measured from the gutter, so the
+  // deeper row still continues the item above it.
+  it.each(["│", "│ "])("treats an indented arrow row under a %j gutter as a continuation", (gutter) => {
+    const block = ["• Queued follow-up inputs", "  ↳ Other text", `    ↳ ${DATE}`].map((row) => gutter + row).join("\n");
+    const screen = `OpenAI Codex\n${block}\n\n› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n`;
+    expect(screenShowsQueuedAgentInput(screen, DATE, { exact: true })).toBe(false);
+    expect(countVisibleExactQueuedRows(screen, DATE)).toBe(0);
+    expect(screenShowsQueuedAgentInput(screen, `Other text ↳ ${DATE}`)).toBe(true);
+    const twoItems = block.replace(`    ↳ ${DATE}`, `  ↳ ${DATE}`);
+    const twoScreen = screen.replace(block, twoItems);
+    expect(screenShowsQueuedAgentInput(twoScreen, DATE, { exact: true })).toBe(true);
+    expect(countVisibleExactQueuedRows(twoScreen, DATE)).toBe(1);
+  });
+
   it("keeps the pre-0.157 single steer block working", () => {
     expect(screenShowsQueuedAgentInput(fixture("midturn-steer-queued"), LIST)).toBe(true);
     expect(screenShowsQueuedAgentInput(fixture("midturn-wrapped-steer-queued"), LONG)).toBe(true);

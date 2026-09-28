@@ -69,7 +69,51 @@ describe("#905 r2: proof is a user-message row; ownership keeps inline spaces", 
     expect(composerHoldsForeignDraft(draft("review foobar"), "review foo bar", { cli: "codex", exact: true })).toBe(true);
     expect(composerHoldsForeignDraft(draft("review foo bar"), "review foobar", { cli: "codex", exact: true })).toBe(true);
     expect(composerHoldsForeignDraft(draft("review foo"), "review foo bar", { cli: "codex", exact: true })).toBe(true);
-    expect(composerHoldsForeignDraft(draft("review  foo bar"), "review foo bar", { cli: "codex", exact: true })).toBe(false);
+  });
+});
+
+// #917 (review of #913): ownership forgives only what the renderer does. A
+// soft-wrap consumes exactly the space it broke at (or nothing after a
+// hyphen), and only when the row was full at the pane's width; inline spaces
+// and blank-line counts are authored text.
+describe("#917 own-draft match is exact", () => {
+  const draft = (text: string) => `OpenAI Codex\n› ${text}\n  gpt-6-sol medium · ~/Gits/cmuxlayer`;
+  const foreign = (screen: string, own: string) => composerHoldsForeignDraft(screen, own, { cli: "codex", exact: true });
+  const frame = (body: string) =>
+    `OpenAI Codex\n${body}\n\n› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n`;
+  // 30 four-letter words: at the fixtures' 99 columns Codex breaks after 19.
+  const WORDS = Array.from({ length: 30 }, () => "word").join(" ");
+  const wrapped = (first: number, sep = " ") => {
+    const words = WORDS.split(" ");
+    return `${words.slice(0, first).join(" ")}\n  ${words.slice(first).join(sep)}`;
+  };
+
+  it("refuses a foreign double space", () => {
+    expect(foreign(draft("review  foo bar"), "review foo bar")).toBe(true);
+    expect(codexTranscriptEchoCount(frame("› review  foo bar"), "review foo bar")).toBe(0);
+  });
+
+  it("refuses a row break the pane width could not have made", () => {
+    expect(foreign(draft("prefix\n  suffix"), "prefixsuffix")).toBe(true);
+    expect(foreign(draft("review\n  foo bar"), "review foo bar")).toBe(true);
+    expect(codexTranscriptEchoCount(frame("› prefix\n  suffix"), "prefixsuffix")).toBe(0);
+  });
+
+  it("refuses a different number of blank paragraph rows", () => {
+    expect(foreign(draft("foo\n \n \n  bar"), "foo\n\nbar")).toBe(true);
+    expect(foreign(draft("foo\n \n  bar"), "foo\n\n\nbar")).toBe(true);
+    expect(foreign(draft("foo\n  bar"), "foo\n\nbar")).toBe(true);
+  });
+
+  it("still owns a single paragraph break, a hyphen wrap, and a full-row space wrap", () => {
+    expect(foreign(draft("foo\n \n  bar"), "foo\n\nbar")).toBe(false);
+    expect(foreign(fixture("idle-wrapped-draft"), LONG)).toBe(false);
+    const screen = fixture("idle-draft").replace(`› Reply with the single word pong and nothing else.`, `› ${wrapped(19)}`);
+    expect(foreign(screen, WORDS)).toBe(false);
+    // The same rows, one word short of the width: not a wrap Codex makes.
+    const early = fixture("idle-draft").replace(`› Reply with the single word pong and nothing else.`, `› ${wrapped(18)}`);
+    expect(foreign(early, WORDS)).toBe(true);
+    expect(foreign(fixture("idle-draft").replace(`› Reply with the single word pong and nothing else.`, `› ${wrapped(19, "  ")}`), WORDS)).toBe(true);
   });
 });
 

@@ -236,6 +236,70 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
+  // #917 (review of #913): the reviewer's probes. Whitespace-only foreign
+  // edits are foreign; one Return must not submit them under our token.
+  it.each([
+    ["review foo bar", "review  foo bar", "review  foo bar"],
+    ["prefixsuffix", "prefix\n  suffix", "prefix suffix"],
+  ])("#917: an edit from %j to %j revokes the sender's Return", async (own, visible, actual) => {
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: () => fixture("idle-draft").replace(PONG, own), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      await t.send(own);
+      t.pane.frames.draft = fixture("idle-draft").replace(PONG, visible);
+      t.pane.text = actual;
+      t.pane.swallow = 0;
+      const before = t.pane.returns;
+      const receipt = await t.keyReturn(LEAD_UUID);
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(t.pane.returns).toBe(before);
+      expect(t.pane.submitted).toEqual([]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // #917: a repeated message is proven by its position below the pre-type
+  // transcript, not by the count of matching rows rising.
+  const withBody = (body: string) => fixture("idle-empty").replace("› Ask", `${body}\n\n› Ask`);
+  const headerless = (body: string) => withBody(body).replace(/^[\s\S]*?Tip: [^\n]*\n/, "");
+  it.each([
+    // The reviewer's probe: the old exchange is gone and the new row stands above an empty composer.
+    ["the old response is gone", withBody("› again\n\n• old response"), withBody("› again\n\n• new response")],
+    // Scrolled: the header and the first `again` left the window; the rest moved up.
+    [
+      "the first row scrolled out",
+      withBody("› again\n\n• old response\n\n  14:06\n\n› status?\n\n• all green"),
+      headerless("  14:06\n\n› status?\n\n• all green\n\n› again\n\n• new response"),
+    ],
+  ])("#917: sending an identical message again verifies when %s", async (_why, before, after) => {
+    const t = await setup({
+      empty: before, buffered: before,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after,
+    });
+    try {
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual(["again"]);
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ submitted: true });
+      expect(t.pane.returns).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#917: an unchanged stale identical row never verifies", async () => {
+    const stale = fixture("idle-empty").replace("› Ask", "› ok\n\n• old response\n\n› Ask");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "ok"), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("ok");
+      expect(t.pane.submitted).toEqual([]);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
   // Round 2 (review finding 6): surface-mode and background sends observe the
   // payload before Return too, so one Return lands after the burst.
   it.each([false, true])("r2: a surface-mode send (background=%s) waits for the payload before Return", async (background) => {
