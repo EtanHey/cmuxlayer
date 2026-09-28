@@ -727,8 +727,12 @@ export async function collectControlHealth(
 
   const prodSocket = selectSocketPath(prodMarkers, prodDefaultSocket);
   const nightlySocket = selectSocketPath(nightlyMarkers, nightlyDefaultSocket);
-  const allProcesses = parsePgrepOutput(processList.stdout).filter((proc) =>
-    /\/Applications\/cmux|cmux NIGHTLY|cmux\.app/.test(proc.command),
+  // #911: a legacy tailer's retitled ps line runs on into its environment,
+  // which names /Applications/cmux.app; it is ours, not a cmux process.
+  const allProcesses = parsePgrepOutput(processList.stdout).filter(
+    (proc) =>
+      !/^cmuxlayer-inbox-tail[:\s]/.test(proc.command) &&
+      /\/Applications\/cmux|cmux NIGHTLY|cmux\.app/.test(proc.command),
   );
   const envSnapshot = Object.fromEntries(
     ENV_KEYS.map((key) => [key, redactEnvValue(key, env[key])]),
