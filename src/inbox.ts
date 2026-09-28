@@ -202,9 +202,13 @@ export async function reapInboxTail(
   if (!match || !Number.isSafeInteger(pid) || pid <= 1) {
     return { tail_reaped: false, tail_error: "tail_invalid" };
   }
-  const marker = `cmuxlayer-inbox-tail:${match[2]}`;
+  const token = match[2];
+  const legacy = `cmuxlayer-inbox-tail:${token}`;
+  const titled = `cmuxlayer-inbox-tail ${agentId} ${token}`;
   const belongsToTail = (command: string | null) =>
-    command === marker || command?.startsWith(`${marker} `) === true;
+    [legacy, titled].some(
+      (marker) => command === marker || command?.startsWith(`${marker} `) === true,
+    );
   let command: string | null;
   try {
     command = await processCommand(pid);
