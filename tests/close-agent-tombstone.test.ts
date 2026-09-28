@@ -5,7 +5,7 @@
  * stop now goes through the public close_surface scope="agent".
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -13,6 +13,7 @@ import type { ExecFn } from "../src/cmux-client.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { alive, armTailer, waitGone } from "./helpers/inbox-tailer.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-v2");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-v2-test.sock";
@@ -281,5 +282,45 @@ describe("force-stopped agent tombstone", () => {
         (agent: { agent_id: string }) => agent.agent_id,
       ),
     ).toContain("surfaceless-done-agent");
+  });
+});
+
+describe("#911 close_surface scope=surface reaps the closed agent's inbox tailer", () => {
+  const cleanups: Array<() => void> = [];
+  afterEach(() => {
+    while (cleanups.length > 0) cleanups.pop()!();
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("stops the tailer through the PID+token reaper once the pane is confirmed closed", async () => {
+    // 2026-09-27: the skill-creator eval panes and orchestratorCodex-c92208aa
+    // were closed with scope=surface force=true; none reached the reaper.
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const inboxBaseDir = mkdtempSync(join(tmpdir(), "cmux-911-close-"));
+    cleanups.push(() => rmSync(inboxBaseDir, { recursive: true, force: true }));
+    const server = createServer({
+      exec: makeSpawnReadyExec(),
+      stateDir: TEST_DIR,
+      inboxBaseDir,
+      disableSpawnPreflight: true,
+      surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
+      surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
+    });
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({ agent_id: "evalWorker-c911", surface_id: "surface:new" }),
+    );
+    const tailer = armTailer("evalWorker-c911", { baseDir: inboxBaseDir }, cleanups);
+
+    const parsed = parseResult(
+      await callTool(server, "close_surface", { surface: "surface:new", force: true }),
+    );
+
+    expect(parsed.surface_closed, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.inbox_tails).toEqual({ "evalWorker-c911": "reaped" });
+    expect(await waitGone(tailer.wrapper)).toBe(true);
+    expect(await waitGone(tailer.tail)).toBe(true);
+    expect(alive(tailer.tail)).toBe(false);
   });
 });

@@ -459,6 +459,19 @@ export function createServerContext(
   return context;
 }
 
+/**
+ * #911: the registry may call a record-less tailer an orphan only when its
+ * state dir and the inbox dir are a pair: both the production defaults, or
+ * both configured. A scratch state dir over the real inbox dir is not.
+ */
+export function hasInboxTailRecordAuthority(
+  stateDir: string,
+  inboxBaseDir: string | undefined,
+): boolean {
+  const defaultStateDir = join(homedir(), ".local", "state", "cmux-agents");
+  return (stateDir === defaultStateDir) === (inboxBaseDir === undefined);
+}
+
 export function resolveServerInboxBaseDir(input: {
   explicitBaseDir?: string;
   isVitest: boolean;

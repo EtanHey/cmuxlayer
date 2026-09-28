@@ -307,6 +307,19 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("#911: reports inbox tailers under their own key", async () => {
+    const health = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "home-911"),
+      tmpDir: join(TEST_ROOT, "tmp-911"),
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      inboxTailers: async () => ({ live: 11, orphaned: 82 }),
+    });
+
+    expect(health.tailers).toEqual({ live: 11, orphaned: 82 });
+    expect(formatControlHealth(health)).toContain("inbox tailers: live=11 orphaned=82");
+  });
+
   it("reports the daemon spawner's real app ancestry instead of inherited cmux env", async () => {
     const health = await collectControlHealth({
       homeDir: join(TEST_ROOT, "ancestry-home"),

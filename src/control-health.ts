@@ -60,6 +60,15 @@ export interface ControlHealthOptions {
   daemonLifecycle?: DaemonLifecycleSnapshot;
   lifecycleLock?: LifecycleLockState | null;
   lifecycleStart?: LifecycleStartHealth | null;
+  /** #911: mailbox tailers by owner, from the engine's own classification. */
+  inboxTailers?: () => Promise<InboxTailerCounts | null>;
+}
+
+export interface InboxTailerCounts {
+  /** Owner live, or not provably gone (never reaped). */
+  live: number;
+  /** Owner proven gone: the next reaper pass stops these. */
+  orphaned: number;
 }
 
 export interface ControlHealthSelfHeal {
@@ -166,6 +175,8 @@ export interface ControlHealth {
   };
   self_heal: ControlHealthSelfHeal;
   daemon_lifecycle: ControlHealthDaemonLifecycle;
+  /** #911: inbox tailers, kept out of the cmux production/nightly pid sets. */
+  tailers?: InboxTailerCounts | null;
   warnings: string[];
 }
 
@@ -787,6 +798,9 @@ export async function collectControlHealth(
       surfaceIds: opts.surfaceIds,
       panePtyDeadSince: opts.panePtyDeadSince,
     }),
+    tailers: await (opts.inboxTailers?.() ?? Promise.resolve(null)).catch(
+      () => null,
+    ),
     daemon_lifecycle: {
       ...(opts.daemonLifecycle ?? daemonLifecycleSnapshot()),
       lifecycle_lock: opts.lifecycleLock ?? null,
@@ -923,6 +937,9 @@ export function formatControlHealth(health: ControlHealth): string {
       }),
     ...formatInstance(health.cmux_instances.production),
     ...formatInstance(health.cmux_instances.nightly),
+    ...(health.tailers
+      ? [`inbox tailers: live=${health.tailers.live} orphaned=${health.tailers.orphaned}`]
+      : []),
     `pane_pty_dead: ${health.self_heal.pane_pty_dead.count}`,
     ...health.self_heal.pane_pty_dead.surfaces.map(
       (surface) =>

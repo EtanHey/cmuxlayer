@@ -1,0 +1,204 @@
+/**
+ * #911 — inbox tailers are owned and reaped when their agent is gone.
+ *
+ * Measured 2026-09-27: 93 `tail -n0 -F .../inbox.jsonl` processes, 11 for live
+ * agents. Only stop_agent ever reaped one. These tests run the real detached
+ * supervisor from the boot contract against the real `ps`, in a scratch inbox
+ * dir, and a FRESH engine per test — which is what a restarted daemon is.
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AgentEngine } from "../src/agent-engine.js";
+import { AgentRegistry } from "../src/agent-registry.js";
+import type { AgentRecord } from "../src/agent-types.js";
+import { inboxPath } from "../src/inbox.js";
+import {
+  type InboxTailer,
+  reapObservedTailer,
+  snapshotProcessRows,
+  sweepInboxTailers,
+} from "../src/inbox-tail-reaper.js";
+import { StateManager } from "../src/state-manager.js";
+import { alive, armTailer as armRealTailer, waitGone } from "./helpers/inbox-tailer.js";
+
+const cleanups: Array<() => void> = [];
+const armTailer = (agentId: string, inboxOpts: { baseDir: string }) =>
+  armRealTailer(agentId, inboxOpts, cleanups);
+afterEach(() => {
+  while (cleanups.length > 0) cleanups.pop()!();
+});
+
+function scratch() {
+  const root = mkdtempSync(join(tmpdir(), "cmux-911-"));
+  const inboxOpts = { baseDir: join(root, "agents") };
+  const stateMgr = new StateManager(join(root, "state"));
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  return { inboxOpts, stateMgr };
+}
+
+/** A PID that belonged to a process which has exited. */
+function deadPid(): number {
+  const child = spawnSync("/bin/sh", ["-c", "echo $$"], { encoding: "utf8" });
+  const pid = Number(child.stdout.trim());
+  expect(alive(pid)).toBe(false);
+  return pid;
+}
+
+function record(agentId: string, overrides: Partial<AgentRecord>): AgentRecord {
+  const now = new Date().toISOString();
+  return {
+    agent_id: agentId,
+    surface_id: "surface:911",
+    state: "working",
+    repo: "cmuxlayer",
+    model: "opus",
+    cli: "claude",
+    cli_session_id: null,
+    task_summary: "911",
+    pid: null,
+    version: 0,
+    created_at: now,
+    updated_at: now,
+    error: null,
+    parent_agent_id: null,
+    spawn_depth: 0,
+    role: "worker",
+    quality: "unknown",
+    user_killed: false,
+    ...overrides,
+  } as AgentRecord;
+}
+
+/** What a daemon (re)start builds: a new engine over the persisted registry. */
+async function restartedDaemonSweep(
+  stateMgr: StateManager,
+  inboxOpts: { baseDir: string },
+  opts: { authority?: boolean } = {},
+) {
+  const registry = new AgentRegistry(stateMgr, async () => []);
+  await registry.reconstitute().catch(() => undefined);
+  const log = vi.fn(async () => true);
+  const engine = new AgentEngine(stateMgr, registry, { log } as never, {
+    spawnPreflight: async () => {},
+    sessionIdentityResolver: () => null,
+    inboxOpts,
+    inboxTailRecordAuthority: opts.authority ?? true,
+  });
+  cleanups.push(() => engine.dispose());
+  await (engine as unknown as { reapInboxTailsBestEffort(): Promise<void> }).reapInboxTailsBestEffort();
+  return { engine, log };
+}
+
+describe("#911 inbox tailer reaping", () => {
+  it("a restarted daemon stops the tailer of an agent whose record was purged", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const { wrapper, tail } = armTailer("fleetWorker-closed01", inboxOpts);
+
+    await restartedDaemonSweep(stateMgr, inboxOpts);
+
+    expect(await waitGone(tail)).toBe(true);
+    expect(await waitGone(wrapper)).toBe(true);
+  });
+
+  it("a restarted daemon stops the tailer of a closed agent whose process is gone", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-closed02";
+    stateMgr.writeState(record(agentId, { state: "done", pid: deadPid() }));
+    const { wrapper, tail } = armTailer(agentId, inboxOpts);
+
+    await restartedDaemonSweep(stateMgr, inboxOpts);
+
+    expect(await waitGone(tail)).toBe(true);
+    expect(await waitGone(wrapper)).toBe(true);
+  });
+
+  it("a pane closed outside close_surface (record still working, process gone) is reaped by the sweep", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-rawclose";
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid() }));
+    const { tail } = armTailer(agentId, inboxOpts);
+
+    await restartedDaemonSweep(stateMgr, inboxOpts);
+
+    expect(await waitGone(tail)).toBe(true);
+  });
+
+  it("never touches a live agent's tailer — including a lead that already wrote DONE", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    stateMgr.writeState(record("fleetLead-done0001", { state: "done", pid: seat.pid! }));
+    stateMgr.writeState(record("fleetWorker-live0001", { state: "working", pid: seat.pid! }));
+    const lead = armTailer("fleetLead-done0001", inboxOpts);
+    const worker = armTailer("fleetWorker-live0001", inboxOpts);
+
+    const { engine } = await restartedDaemonSweep(stateMgr, inboxOpts);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    for (const pid of [lead.wrapper, lead.tail, worker.wrapper, worker.tail]) {
+      expect(alive(pid)).toBe(true);
+    }
+    // Adopted: the ownership is persisted on the registry record.
+    expect(engine.getAgentState("fleetWorker-live0001")?.inbox_tail).toMatchObject({
+      wrapper_pid: worker.wrapper,
+      tail_pid: worker.tail,
+      inbox_path: inboxPath("fleetWorker-live0001", inboxOpts),
+    });
+  });
+
+  it("without registry authority over the inbox dir, a record-less tailer is left alone", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const { tail } = armTailer("fleetWorker-foreign1", inboxOpts);
+
+    await restartedDaemonSweep(stateMgr, inboxOpts, { authority: false });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(alive(tail)).toBe(true);
+  });
+
+  it("a recorded PID now running something else is never signalled (pid_reused)", async () => {
+    const tailer: InboxTailer = {
+      agent_id: "fleetWorker-reused01",
+      inbox_path: "/x/agents/fleetWorker-reused01/inbox.jsonl",
+      wrapper_pid: 4242,
+      wrapper_started_at: "Mon Sep 28 10:00:00 2026",
+      wrapper_token: "0123456789abcdef",
+      tail_pid: 4243,
+      tail_started_at: "Mon Sep 28 10:00:00 2026",
+      recorded: true,
+    };
+    const kill = vi.fn();
+    const outcome = await reapObservedTailer(tailer, {
+      kill,
+      probe: async (pid) =>
+        pid === 4243
+          ? // Same number, later start: the tail died and the PID was recycled.
+            { pid, ppid: 1, started_at: "Mon Sep 28 11:00:00 2026", command: `tail -n0 -F ${tailer.inbox_path}` }
+          : // Same number and start, different program.
+            { pid, ppid: 1, started_at: "Mon Sep 28 10:00:00 2026", command: "/usr/bin/some-other-daemon" },
+    });
+
+    expect(outcome).toBe("pid_reused");
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("classifies tailers for control_health without signalling anything", async () => {
+    const { inboxOpts } = scratch();
+    const live = armTailer("fleetWorker-count001", inboxOpts);
+    const orphan = armTailer("fleetWorker-count002", inboxOpts);
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ownerState: (agentId) => (agentId.endsWith("001") ? "live" : "gone"),
+    });
+
+    expect(result.live.map((tailer) => tailer.agent_id)).toEqual(["fleetWorker-count001"]);
+    expect(result.orphaned.map((tailer) => tailer.agent_id)).toEqual(["fleetWorker-count002"]);
+    expect(result.orphaned[0]).toMatchObject({ recorded: true, wrapper_pid: orphan.wrapper, tail_pid: orphan.tail });
+    expect(alive(live.tail) && alive(orphan.tail)).toBe(true);
+  });
+});

@@ -86,6 +86,7 @@ export function registerControlHealthTool(
           transport: healthWithStale.selected_transport,
           warnings: healthWithStale.warnings,
           daemon_lifecycle: healthWithStale.daemon_lifecycle,
+          ...(healthWithStale.tailers ? { tailers: healthWithStale.tailers } : {}),
           self_heal: {
             pane_pty_dead:
               healthWithStale.self_heal.pane_pty_dead.count,
