@@ -513,6 +513,12 @@ function codexWrapFragment(text: string, from: number): string {
  * is one empty payload line, so blank-line counts must match too. A short row
  * cannot be a wrap, so `prefix` / `suffix` is not `prefixsuffix` or
  * `prefix suffix` (#802/#636, #917).
+ *
+ * AIDEV-NOTE (#923 follow-up): whitespace at a row end is invisible (a
+ * terminal shows trailing spaces as empty cells), so `a  b` wrapped after `a`
+ * looks exactly like `a b`. Only the single space a wrap consumes is the
+ * renderer's; any other whitespace at a row break (two spaces, a tab, spaces
+ * before a newline) cannot be proven from the screen and never matches.
  */
 function codexRenderedRowsMatch(rows: string[], payload: string, minWidth = 1): boolean {
   const text = normalizeTerminalText(payload).trimEnd();
@@ -535,6 +541,7 @@ function codexRenderedRowsMatch(rows: string[], payload: string, minWidth = 1): 
     const whitespace = /^[ \t]*/.exec(text.slice(position))?.[0] ?? "";
     const next = position + whitespace.length;
     const lastRow = index === visible.length - 1;
+    if (whitespace && whitespace !== " ") return false;
     if (next >= text.length) {
       if (!lastRow) return false;
       position = next;
@@ -542,6 +549,7 @@ function codexRenderedRowsMatch(rows: string[], payload: string, minWidth = 1): 
     }
     if (lastRow) return false;
     if (text[next] === "\n") {
+      if (whitespace) return false;
       position = next + 1;
       continue;
     }
@@ -640,6 +648,17 @@ function codexMatchingUserRows(transcript: CodexTranscript, screenText: string, 
 }
 
 /**
+ * Start rows of the Codex user messages on screen that are exactly this
+ * payload. Classification only, with no claim that a row is new: assistant
+ * output (`• …`), status chrome and queue rows (`↳ …`) are never user rows,
+ * and with no composer on screen nothing counts (#905 r2).
+ */
+export function codexTranscriptUserRows(screenText: string, submittedText: string): number[] {
+  const transcript = codexTranscript(screenText);
+  return transcript ? codexMatchingUserRows(transcript, screenText, submittedText) : [];
+}
+
+/**
  * The first row of `post` that was not already on screen in `pre`, or null
  * when the frames cannot be aligned well enough to say. `preMatches` are the
  * rows of `pre` where this payload already stood as a user message.
@@ -711,12 +730,15 @@ export function codexTranscriptShowsNewEcho(
   screenText: string,
   submittedText: string,
 ): boolean {
+  // No pre-type frame (its read failed) is no baseline: an old identical row
+  // would pass as new, so nothing here is proof (#923 follow-up).
+  if (preTypeScreen === null || preTypeScreen === undefined) return false;
   const post = codexTranscript(screenText);
   if (!post) return false;
   const starts = codexMatchingUserRows(post, screenText, submittedText);
   if (starts.length === 0) return false;
-  const pre = preTypeScreen === null || preTypeScreen === undefined ? null : codexTranscript(preTypeScreen);
-  const preMatches = pre && preTypeScreen ? codexMatchingUserRows(pre, preTypeScreen, submittedText) : [];
+  const pre = codexTranscript(preTypeScreen);
+  const preMatches = pre ? codexMatchingUserRows(pre, preTypeScreen, submittedText) : [];
   const boundary = codexNewTranscriptStart(pre, post, preMatches);
   return boundary !== null && starts.some((start) => start >= boundary);
 }
