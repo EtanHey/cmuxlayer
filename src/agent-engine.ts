@@ -4267,6 +4267,13 @@ export class AgentEngine {
   ): Promise<TailOwnerState> {
     return sweepImpl.inboxTailOwnerState.call(this.sweepHost(), agentId, processes, probe);
   }
+  /** #911: owner judgement for a reap, rechecked right before each signal. */
+  inboxTailOwnerJudge(
+    processes: ReadonlyMap<number, ProcessRow>,
+    probe?: (pid: number) => Promise<ProcessRow | null>,
+  ): ReturnType<typeof sweepImpl.inboxTailOwnerJudge> {
+    return sweepImpl.inboxTailOwnerJudge.call(this.sweepHost(), processes, probe);
+  }
   private runCloseForensicsBestEffort(...args: Parameters<typeof sweepImpl.runCloseForensicsBestEffort>): ReturnType<typeof sweepImpl.runCloseForensicsBestEffort> {
     return sweepImpl.runCloseForensicsBestEffort.call(this.sweepHost(), ...args);
   }

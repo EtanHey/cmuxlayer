@@ -17,6 +17,8 @@ import type { AgentRecord } from "../src/agent-types.js";
 import { inboxPath } from "../src/inbox.js";
 import {
   type InboxTailer,
+  observeInboxTailers,
+  probeProcess,
   reapObservedTailer,
   snapshotProcessRows,
   sweepInboxTailers,
@@ -318,5 +320,128 @@ describe("#911 inbox tailer reaping", () => {
     expect(result.orphaned.map((tailer) => tailer.agent_id)).toEqual(["fleetWorker+count002"]);
     expect(result.orphaned[0]).toMatchObject({ recorded: true, wrapper_pid: orphan.wrapper, tail_pid: orphan.tail });
     expect(alive(live.tail) && alive(orphan.tail)).toBe(true);
+  });
+
+  // #922 follow-up (Codex r2 review): the owner was judged once, then the
+  // tailer identity probe awaited and the signal went out unchecked.
+  it("an owner that resumes during the tailer identity probe keeps its tailer: nothing is signalled", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-resume03";
+    const tailer = armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid() }));
+    const { engine, registry } = await freshEngine(stateMgr, inboxOpts);
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    const judge = engine.inboxTailOwnerJudge(new Map());
+    const probe = vi.fn(async (pid: number) => {
+      // The owner resumes with a new, live pid while its old tailer is probed.
+      const resumed = record(agentId, { state: "working", pid: seat.pid!, version: 1 });
+      stateMgr.writeState(resumed);
+      registry.set(agentId, resumed);
+      return probeProcess(pid);
+    });
+    const kill = vi.fn();
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ...judge,
+      reap: true,
+      deps: { probe, kill },
+    });
+
+    expect(result.orphaned.map((t) => t.agent_id)).toEqual([agentId]);
+    expect(probe).toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+    expect(result.reaped).toEqual([{ agent_id: agentId, outcome: "owner_changed" }]);
+    expect(alive(tailer.tail)).toBe(true);
+  });
+
+  // #930 round 2 (Codex): another runtime (the daemon beside an in-process
+  // MCP runtime) persists the resume; this runtime's registry is stale.
+  it("an owner resumed by ANOTHER runtime during the tailer probe keeps its tailer", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-resume04";
+    const tailer = armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid(), version: 1 }));
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+    const otherRuntime = new StateManager(stateMgr.getBaseDir());
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    const probe = vi.fn(async (pid: number) => {
+      otherRuntime.writeState(record(agentId, { state: "working", pid: seat.pid!, version: 2 }));
+      return probeProcess(pid);
+    });
+    const kill = vi.fn();
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ...engine.inboxTailOwnerJudge(new Map()),
+      reap: true,
+      deps: { probe, kill },
+    });
+
+    expect(probe).toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+    expect(result.reaped).toEqual([{ agent_id: agentId, outcome: "owner_changed" }]);
+    expect(alive(tailer.tail)).toBe(true);
+  });
+
+  it("an owner another runtime already resumed is not judged gone from a stale registry", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-resume05";
+    armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid(), version: 1 }));
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    new StateManager(stateMgr.getBaseDir()).writeState(
+      record(agentId, { state: "working", pid: seat.pid!, version: 2 }),
+    );
+    const kill = vi.fn();
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ...engine.inboxTailOwnerJudge(new Map()),
+      reap: true,
+      deps: { kill },
+    });
+
+    expect(result.orphaned).toEqual([]);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("a gone owner that stays gone is still reaped through the recheck", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-staygone";
+    const tailer = armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid() }));
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+    const kill = vi.fn();
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ...engine.inboxTailOwnerJudge(new Map()),
+      reap: true,
+      deps: { kill },
+    });
+
+    expect(result.reaped).toEqual([{ agent_id: agentId, outcome: "reaped" }]);
+    expect(kill).toHaveBeenCalledWith(tailer.tail, "SIGTERM");
+  });
+
+  // #922 Macroscope (Medium): `inboxPath` normalizes through `join`, so a
+  // configured base dir with a trailing slash hid every tailer.
+  it("a trailing slash on the inbox base dir does not hide tailers", async () => {
+    const { inboxOpts } = scratch();
+    const armed = armTailer("fleetWorker-slash001", inboxOpts);
+    const rows = await snapshotProcessRows();
+
+    const seen = observeInboxTailers(rows, { baseDir: `${inboxOpts.baseDir}/` });
+
+    expect(seen.map((t) => [t.agent_id, t.tail_pid])).toEqual([["fleetWorker-slash001", armed.tail]]);
   });
 });
