@@ -844,6 +844,56 @@ export async function inboxTailOwnerState(
   return TERMINAL_STATES.has(record.state) && record.user_killed === true ? "gone" : "live";
 }
 
+/**
+ * #922 follow-up: the owner record as it stands, read synchronously
+ * (registry, else disk): "absent", the fields a resume or a close changes,
+ * or null when it cannot be read.
+ */
+function inboxTailOwnerFingerprint(this: SweepHost, agentId: string): string | null {
+  let record = this.registry.get(agentId);
+  if (!record) {
+    try {
+      if (!this.stateMgr.hasStateFile(agentId)) return "absent";
+    } catch {
+      return null;
+    }
+    record = this.stateMgr.readState(agentId);
+    if (!record) return null;
+  }
+  return JSON.stringify([record.version, record.updated_at, record.pid, record.state, record.user_killed]);
+}
+
+/**
+ * #922 follow-up: judge owners for one reap. An owner is gone only if its
+ * record did not change while it was judged, and each signal is preceded by
+ * `ownerStillGone`, which requires that same record to still stand. It is
+ * synchronous, so nothing interleaves between the final check and the kill.
+ */
+export function inboxTailOwnerJudge(
+  this: SweepHost,
+  processes: ReadonlyMap<number, ProcessRow>,
+  probe?: (pid: number) => Promise<ProcessRow | null>,
+): {
+  ownerState: (agentId: string) => Promise<TailOwnerState>;
+  ownerStillGone: (agentId: string) => boolean;
+} {
+  const judged = new Map<string, string>();
+  return {
+    ownerState: async (agentId) => {
+      const before = inboxTailOwnerFingerprint.call(this, agentId);
+      const state = await inboxTailOwnerState.call(this, agentId, processes, probe);
+      if (state !== "gone") return state;
+      if (before === null || inboxTailOwnerFingerprint.call(this, agentId) !== before) return "unknown";
+      judged.set(agentId, before);
+      return "gone";
+    },
+    ownerStillGone: (agentId) => {
+      const before = judged.get(agentId);
+      return before !== undefined && inboxTailOwnerFingerprint.call(this, agentId) === before;
+    },
+  };
+}
+
 /** Reap the mailbox tailers of agents that are gone. Best-effort, at most once a minute. */
 export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
   if (!this.inboxOpts || !this.inboxTailReaper || this.inboxTailReapInFlight) return;
@@ -862,7 +912,7 @@ export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
     const result = await sweepInboxTailers({
       rows,
       inboxOpts: this.inboxOpts,
-      ownerState: (agentId) => inboxTailOwnerState.call(this, agentId, processes),
+      ...inboxTailOwnerJudge.call(this, processes),
       reap: true,
     });
     for (const tailer of result.live) {

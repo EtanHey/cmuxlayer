@@ -14,8 +14,9 @@
 
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { promisify } from "node:util";
-import { inboxBaseDir, inboxPath, inboxTailPidPath, type InboxOpts } from "./inbox.js";
+import { agentDir, inboxPath, inboxTailPidPath, type InboxOpts } from "./inbox.js";
 import { sleep } from "./util/sleep.js";
 
 const execFileAsync = promisify(execFile);
@@ -42,7 +43,7 @@ export interface InboxTailer {
 
 export type TailOwnerState = "live" | "gone" | "unknown";
 
-export type TailReapOutcome = "reaped" | "pid_reused" | "signal_failed";
+export type TailReapOutcome = "reaped" | "pid_reused" | "signal_failed" | "owner_changed";
 
 // `ps -o lstart` in the C locale: "Sun Sep 28 10:24:20 2026".
 const ROW_RE =
@@ -86,7 +87,9 @@ function readRecord(agentId: string, opts?: InboxOpts): { pid: number; token: st
 
 /** Group one `ps` snapshot into supervisor+tail pairs keyed by the inbox they tail. */
 export function observeInboxTailers(rows: ProcessRow[], opts?: InboxOpts): InboxTailer[] {
-  const baseDir = inboxBaseDir(opts);
+  // Spelled the way `inboxPath` spells it (through `join`), so a configured
+  // base dir with a trailing or doubled slash still matches the tail command.
+  const baseDir = dirname(agentDir("x", opts));
   const tails = rows.filter((row) => tailAgentId(row.command, baseDir) !== null);
   const tailers: InboxTailer[] = [];
   const claimedTails = new Set<number>();
@@ -164,6 +167,8 @@ export async function probeProcess(pid: number): Promise<ProcessRow | null> {
 export interface TailReapDeps {
   probe?: (pid: number) => Promise<ProcessRow | null>;
   kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Synchronous, immediately before each signal: false keeps the tailer. */
+  beforeSignal?: () => boolean;
 }
 
 /**
@@ -196,6 +201,7 @@ export async function reapObservedTailer(
     const identity = await sameProcess(tailer.tail_pid, tailer.tail_started_at, isTail);
     if (identity === "reused") reused = true;
     if (identity === "same") {
+      if (deps.beforeSignal?.() === false) return "owner_changed";
       try {
         kill(tailer.tail_pid, "SIGTERM");
       } catch {
@@ -212,6 +218,7 @@ export async function reapObservedTailer(
         break;
       }
       if (attempt === 19 || tailer.tail_pid === null) {
+        if (deps.beforeSignal?.() === false) return "owner_changed";
         try {
           kill(tailer.wrapper_pid, "SIGTERM");
         } catch {
@@ -236,11 +243,17 @@ export async function sweepInboxTailers(input: {
   rows: ProcessRow[];
   inboxOpts?: InboxOpts;
   ownerState: (agentId: string) => TailOwnerState | Promise<TailOwnerState>;
+  /**
+   * Re-judges a `gone` owner right before each signal. The identity probes
+   * await, and an owner can resume meanwhile; false keeps the tailer.
+   */
+  ownerStillGone?: (agentId: string) => boolean;
   reap?: boolean;
   deps?: TailReapDeps;
 }): Promise<TailerSweepResult> {
   const result: TailerSweepResult = { live: [], orphaned: [], reaped: [] };
   const states = new Map<string, TailOwnerState>();
+  const { ownerStillGone } = input;
   for (const tailer of observeInboxTailers(input.rows, input.inboxOpts)) {
     let state = states.get(tailer.agent_id);
     if (state === undefined) {
@@ -255,7 +268,12 @@ export async function sweepInboxTailers(input: {
     if (input.reap) {
       result.reaped.push({
         agent_id: tailer.agent_id,
-        outcome: await reapObservedTailer(tailer, input.deps),
+        outcome: await reapObservedTailer(tailer, {
+          ...input.deps,
+          beforeSignal: ownerStillGone
+            ? () => ownerStillGone(tailer.agent_id)
+            : input.deps?.beforeSignal,
+        }),
       });
     }
   }
