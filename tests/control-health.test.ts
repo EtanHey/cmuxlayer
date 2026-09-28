@@ -307,6 +307,32 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("#911: an inbox tailer is never listed as a cmux production pid", async () => {
+    // Observed at the v0.4.90 install: a legacy tailer's ps line runs on into
+    // its environment (CMUX_BUNDLED_CLI_PATH=/Applications/cmux.app/...), so
+    // six tailer PIDs were listed as cmux "production pids".
+    const health = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "home-911"),
+      tmpDir: join(TEST_ROOT, "tmp-911"),
+      env: { PATH: "" },
+      execFile: async (file, args) => {
+        if (file === "ps" && args.join(" ") === "ax -o pid= -o command=") {
+          return {
+            stdout: [
+              "59547 /Applications/cmux.app/Contents/MacOS/cmux",
+              "2770 cmuxlayer-inbox-tail:4f612677f0026e922e65d9c14a014e99      CMUX_BUNDLED_CLI_PATH=/Applications/cmux.app/Contents/Resources/bin/cmux CMUX_CLAUDE_WRAPPER_SHIM=/var/folders/x/claude",
+              "2771 cmuxlayer-inbox-tail fleetWorker-abc 0123456789abcdef",
+            ].join("\n"),
+          };
+        }
+        if (file === "ps") return { stdout: "" };
+        throw new Error(`unexpected execFile: ${file}`);
+      },
+    });
+
+    expect(health.cmux_instances.production.processes.map((proc) => proc.pid)).toEqual([59547]);
+  });
+
   it("reports the daemon spawner's real app ancestry instead of inherited cmux env", async () => {
     const health = await collectControlHealth({
       homeDir: join(TEST_ROOT, "ancestry-home"),
