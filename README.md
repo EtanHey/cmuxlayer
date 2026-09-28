@@ -118,6 +118,8 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 | `update_surface` | Move or rename one terminal surface |
 | `list_surfaces` | List all surfaces across workspaces |
 
+`control_health` reports `cmux_fds` for detected cmux.app processes and warns when open descriptors reach 4096; set `CMUXLAYER_CMUX_FD_WARN` to a positive integer to change that threshold.
+
 These 10 are the whole surface: setting `CMUXLAYER_DEFAULT_PALETTE` adds `expand_palette` and no other tool is registered.
 
 ## Supported agents
