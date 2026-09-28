@@ -910,7 +910,7 @@ export function inboxTailOwnerJudge(
 
 /** Reap the mailbox tailers of agents that are gone. Best-effort, at most once a minute. */
 export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
-  if (!this.inboxOpts || !this.inboxTailReaper || this.inboxTailReapInFlight) return;
+  if (!this.inboxOpts || !this.inboxTailReaper?.recordAuthority || this.inboxTailReapInFlight) return;
   const now = Date.now();
   if (
     this.lastInboxTailReapAt !== null &&
