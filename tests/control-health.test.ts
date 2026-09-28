@@ -307,6 +307,19 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("#911: reports inbox tailers under their own key", async () => {
+    const health = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "home-911"),
+      tmpDir: join(TEST_ROOT, "tmp-911"),
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      inboxTailers: async () => ({ live: 11, orphaned: 82 }),
+    });
+
+    expect(health.tailers).toEqual({ live: 11, orphaned: 82 });
+    expect(formatControlHealth(health)).toContain("inbox tailers: live=11 orphaned=82");
+  });
+
   it("#911: an inbox tailer is never listed as a cmux production pid", async () => {
     // Observed at the v0.4.90 install: a legacy tailer's ps line runs on into
     // its environment (CMUX_BUNDLED_CLI_PATH=/Applications/cmux.app/...), so

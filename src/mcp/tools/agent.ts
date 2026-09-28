@@ -59,6 +59,7 @@ import type {
   CreateServerOptions,
   LifecycleAgentInputDeliverer,
 } from "../context.js";
+import { hasInboxTailRecordAuthority } from "../context.js";
 import type {
   CmuxSurface,
   ParsedControlPlaneState,
@@ -429,6 +430,12 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
         selfRegistrationSessionLookup: context.selfRegistrationSessionLookup,
         roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
         inboxOpts,
+        inboxTailReaper: {
+          recordAuthority: hasInboxTailRecordAuthority(
+            context.stateDir,
+            inboxOpts.baseDir,
+          ),
+        },
         launchCommandSender: async ({
           surface,
           stableSurfaceIdentity,

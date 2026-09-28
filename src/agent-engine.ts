@@ -154,6 +154,7 @@ import {
   removePendingChannelMarkerAfterRegistration,
   type InboxOpts,
 } from "./inbox.js";
+import type { ProcessRow, TailOwnerState } from "./inbox-tail-reaper.js";
 import {
   agentProcessLiveness,
   agentProcessMayBeAlive,
@@ -353,6 +354,9 @@ export class AgentEngine {
   private inboxOpts?: InboxOpts;
   private lastChannelMarkerReapAt: number | null = null;
   private lastChannelMarkerReapFailureAt: number | null = null;
+  private lastInboxTailReapAt: number | null = null;
+  private inboxTailReaper: { recordAuthority: boolean } | null = null;
+  private inboxTailReapInFlight = false;
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
   private selfRegistrationSessionResolver: SessionIdentityResolver | null;
@@ -519,6 +523,7 @@ export class AgentEngine {
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
     this.inboxOpts = opts?.inboxOpts;
+    this.inboxTailReaper = opts?.inboxTailReaper ?? null;
     this.seatRegistry =
       opts?.seatRegistry !== undefined
         ? opts.seatRegistry
@@ -3877,6 +3882,11 @@ export class AgentEngine {
       set lastChannelMarkerReapAt(value) { engine.lastChannelMarkerReapAt = value; },
       get lastChannelMarkerReapFailureAt() { return engine.lastChannelMarkerReapFailureAt; },
       set lastChannelMarkerReapFailureAt(value) { engine.lastChannelMarkerReapFailureAt = value; },
+      get lastInboxTailReapAt() { return engine.lastInboxTailReapAt; },
+      set lastInboxTailReapAt(value) { engine.lastInboxTailReapAt = value; },
+      get inboxTailReaper() { return engine.inboxTailReaper; },
+      get inboxTailReapInFlight() { return engine.inboxTailReapInFlight; },
+      set inboxTailReapInFlight(value) { engine.inboxTailReapInFlight = value; },
       get lastSweepSignature() { return engine.lastSweepSignature; },
       set lastSweepSignature(value) { engine.lastSweepSignature = value; },
       get lifecycleLockHolder() { return engine.lifecycleLockHolder; },
@@ -3926,6 +3936,7 @@ export class AgentEngine {
       purgeStartupTerminalAgents: (...args) => engine.purgeStartupTerminalAgents(...args),
       purgeTerminalForSweep: (...args) => engine.purgeTerminalForSweep(...args),
       reapChannelMarkersBestEffort: (...args) => engine.reapChannelMarkersBestEffort(...args),
+      reapInboxTailsBestEffort: (...args) => engine.reapInboxTailsBestEffort(...args),
       reconcileAgents: (...args) => engine.reconcileAgents(...args),
       reconcileRolePlacements: (...args) => engine.reconcileRolePlacements(...args),
       recordSweepStability: (...args) => engine.recordSweepStability(...args),
@@ -4244,6 +4255,17 @@ export class AgentEngine {
   }
   private reapChannelMarkersBestEffort(...args: Parameters<typeof sweepImpl.reapChannelMarkersBestEffort>): ReturnType<typeof sweepImpl.reapChannelMarkersBestEffort> {
     return sweepImpl.reapChannelMarkersBestEffort.call(this.sweepHost(), ...args);
+  }
+  private reapInboxTailsBestEffort(...args: Parameters<typeof sweepImpl.reapInboxTailsBestEffort>): ReturnType<typeof sweepImpl.reapInboxTailsBestEffort> {
+    return sweepImpl.reapInboxTailsBestEffort.call(this.sweepHost(), ...args);
+  }
+  /** #911: whether a mailbox tailer's owner is live, proven gone, or unknowable. */
+  inboxTailOwnerState(
+    agentId: string,
+    processes: ReadonlyMap<number, ProcessRow>,
+    probe?: (pid: number) => Promise<ProcessRow | null>,
+  ): Promise<TailOwnerState> {
+    return sweepImpl.inboxTailOwnerState.call(this.sweepHost(), agentId, processes, probe);
   }
   private runCloseForensicsBestEffort(...args: Parameters<typeof sweepImpl.runCloseForensicsBestEffort>): ReturnType<typeof sweepImpl.runCloseForensicsBestEffort> {
     return sweepImpl.runCloseForensicsBestEffort.call(this.sweepHost(), ...args);

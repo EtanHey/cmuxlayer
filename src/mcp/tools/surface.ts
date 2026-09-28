@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { AgentRecord, AgentState, CloseTelemetryEvent } from "../../agent-types.js";
 import type { DeliveryEngine } from "../../delivery/engine.js";
 import { formatListSurfaces, formatOk } from "../../format.js";
+import { type InboxOpts, reapInboxTail } from "../../inbox.js";
 import { chooseSurfaceClosePolicy, deriveColumnIndex } from "../../layout-policy.js";
 import { TERMINAL_AGENT_STATES } from "../../live-agent-state.js";
 import { replaceTaskSuffix } from "../../naming.js";
@@ -295,6 +296,7 @@ export interface SurfaceToolDeps {
   currentSafetyCallerWorkspace: () => Promise<string | undefined>;
   findSurfaceByRef: (surfaceRef: string, workspace?: string, opts?: { throwOnError?: boolean }) => Promise<CmuxSurface | null>;
   findSurfaceRefByUuid: (topology: SurfaceTopologySnapshot, surfaceUuid: string) => string | null;
+  inboxOpts: InboxOpts;
   lifecycleScheduleChildReportWatchPrune: (() => void) | null;
   lifecycleSeatManifestPublisher: (input: { agentId?: string; surfaceId?: string; surfaceUuid?: string; tabName?: string; model?: string }) => Promise<void>;
   listAllWorkspaces: (onRpc?: TopologyRpcObserver) => Promise<AllWindowWorkspaceEnumeration>;
@@ -839,7 +841,7 @@ export function registerCloseSurfaceTool(
   server: McpServer,
   deps: SurfaceToolDeps,
 ): void {
-  const { agentScopedSurfaceClose, appendCloseEvent, assertSurfaceMutationAllowed, client, collectSurfaceTopology, context, findSurfaceByRef, findSurfaceRefByUuid, lifecycleScheduleChildReportWatchPrune, pruneChildReportWatchesFor, removeOwnedWatchesFor, resolveCloseCaller, resolveRawSurfaceMutationRoute, snapshotWatchOwnerCandidates, stateMgr, stopAgent, toolHandlersByName, withSurfaceWrite } = deps;
+  const { agentScopedSurfaceClose, appendCloseEvent, assertSurfaceMutationAllowed, client, collectSurfaceTopology, context, findSurfaceByRef, findSurfaceRefByUuid, inboxOpts, lifecycleScheduleChildReportWatchPrune, pruneChildReportWatchesFor, removeOwnedWatchesFor, resolveCloseCaller, resolveRawSurfaceMutationRoute, snapshotWatchOwnerCandidates, stateMgr, stopAgent, toolHandlersByName, withSurfaceWrite } = deps;
   // 10. close_surface
   server.tool(
     "close_surface",
@@ -1398,6 +1400,7 @@ export function registerCloseSurfaceTool(
         // through. If cmux still lists the surface, the receipt says so.
         const surfaceStillPresent =
           (await findSurfaceByRef(route.surface, route.workspace)) !== null;
+        const closedAgentIds: string[] = [];
         for (const record of stateMgr.listStates()) {
           // Stable identity wins whenever cmux exposes it. On a ref-only or
           // unavailable observation, preserve the explicit close intent by
@@ -1428,6 +1431,7 @@ export function registerCloseSurfaceTool(
               context.lifecycleRegistry?.set(record.agent_id, stopped);
             }
             pruneChildReportWatchesFor(record.agent_id);
+            closedAgentIds.push(record.agent_id);
           } catch (error) {
             if (
               error instanceof Error &&
@@ -1436,6 +1440,20 @@ export function registerCloseSurfaceTool(
               continue;
             }
             throw error;
+          }
+        }
+        // #911: this path closed the skill-creator eval panes and
+        // orchestratorCodex-c92208aa on 2026-09-27 without ever reaching the
+        // tail reaper, leaking their mailbox tailers. A confirmed close reaps
+        // here, through the same PID+token check stop_agent uses.
+        const inboxTails: Record<string, string> = {};
+        if (!surfaceStillPresent) {
+          for (const agentId of closedAgentIds) {
+            const outcome = await reapInboxTail(agentId, inboxOpts);
+            if (outcome.tail_reaped !== "absent") {
+              inboxTails[agentId] =
+                outcome.tail_reaped === true ? "reaped" : outcome.tail_error;
+            }
           }
         }
         appendCloseEvent({
@@ -1454,6 +1472,7 @@ export function registerCloseSurfaceTool(
           collapse_pane: collapsePane,
           surface_closed: !surfaceStillPresent,
           stale_registry_done_consolidated: staleRegistryDoneConsolidated,
+          ...(Object.keys(inboxTails).length > 0 ? { inbox_tails: inboxTails } : {}),
           ...(surfaceStillPresent
             ? {
                 WARNING: `cmux accepted the close but ${route.surface} is STILL listed. Do not relay this as closed.`,

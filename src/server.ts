@@ -151,6 +151,7 @@ import {
   type ControlHealth,
   type LifecycleStartHealth,
 } from "./control-health.js";
+import { snapshotProcessRows, sweepInboxTailers } from "./inbox-tail-reaper.js";
 import {
   collectSurfaceTopology as collectCmuxSurfaceTopology,
   enumerateAllWindowWorkspacesWithRetry,
@@ -1140,6 +1141,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           client,
           lifecycleLock: context.lifecycleLockStateProvider?.() ?? null,
           lifecycleStart: describeLifecycleStart(),
+          inboxTailers: async () => {
+            const engine = context.lifecycleSweepEngine;
+            if (!engine) return null;
+            const rows = await snapshotProcessRows();
+            const processes = new Map(rows.map((row) => [row.pid, row]));
+            const result = await sweepInboxTailers({
+              rows,
+              inboxOpts,
+              ownerState: (agentId) => engine.inboxTailOwnerState(agentId, processes),
+            });
+            return { live: result.live.length, orphaned: result.orphaned.length };
+          },
         });
     const knownSurfaceIds = [
       ...stateMgr.listStates().map((record) => record.surface_id),
@@ -2235,6 +2248,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     currentSafetyCallerWorkspace,
     findSurfaceByRef,
     findSurfaceRefByUuid,
+    inboxOpts,
     lifecycleScheduleChildReportWatchPrune: () =>
       lifecycleScheduleChildReportWatchPrune?.(),
     lifecycleSeatManifestPublisher: (input) =>
