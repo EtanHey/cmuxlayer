@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEngine } from "../src/agent-engine.js";
 import { AgentRegistry } from "../src/agent-registry.js";
-import type { AgentRecord } from "../src/agent-types.js";
+import { UNBOUND_SURFACE_REF, type AgentRecord } from "../src/agent-types.js";
 import { inboxPath } from "../src/inbox.js";
 import {
   type InboxTailer,
@@ -238,6 +238,26 @@ describe("#911 inbox tailer reaping", () => {
     expect(probe).toHaveBeenCalled();
     expect(result.orphaned).toEqual([]);
     expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("#926: a retained unbound done row is judged by pid and state, never by its missing surface", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    // What a cmux restart leaves behind: done, session kept, surface unbound.
+    const unbound = { state: "done", surface_id: UNBOUND_SURFACE_REF, surface_uuid: null } as const;
+    stateMgr.writeState(
+      record("fleetLead-unbound1", { ...unbound, cli_session_id: "sess-926-a", pid: null }),
+    );
+    stateMgr.writeState(
+      record("fleetLead-unbound2", { ...unbound, cli_session_id: "sess-926-b", pid: seat.pid! }),
+    );
+    const { engine } = await freshEngine(stateMgr, inboxOpts);
+    const processes = new Map((await snapshotProcessRows()).map((row) => [row.pid, row]));
+
+    // An idle lead that wrote DONE keeps its mailbox; unbinding is not death.
+    expect(await engine.inboxTailOwnerState("fleetLead-unbound1", processes)).toBe("live");
+    expect(await engine.inboxTailOwnerState("fleetLead-unbound2", processes)).toBe("live");
   });
 
   it("an unreadable state.json is not proof of death: unknown, nothing signalled", async () => {
