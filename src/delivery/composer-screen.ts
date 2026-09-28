@@ -731,8 +731,10 @@ export function codexTranscriptShowsNewEcho(
   submittedText: string,
 ): boolean {
   // No pre-type frame (its read failed) is no baseline: an old identical row
-  // would pass as new, so nothing here is proof (#923 follow-up).
-  if (preTypeScreen === null || preTypeScreen === undefined) return false;
+  // would pass as new, so nothing here is proof (#923 follow-up). A blank
+  // frame is a failed read too: a live Codex pane always paints its composer
+  // (#935 follow-up).
+  if (!preTypeScreen?.trim()) return false;
   const post = codexTranscript(screenText);
   if (!post) return false;
   const starts = codexMatchingUserRows(post, screenText, submittedText);
