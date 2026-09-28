@@ -141,34 +141,57 @@ describe("resume honours the permission mode", () => {
 
 describe("launch authority controls the worker persona gate", () => {
   const clis = ["claude", "codex", "cursor", "gemini", "kiro"] as const;
+  const launcherNames = {
+    claude: "alphaClaude",
+    codex: "alphaCodex",
+    cursor: "alphaCursor",
+    gemini: "alphaGemini",
+  };
+  const rawCommands = {
+    claude: "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
+    codex: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c model_reasoning_effort=medium",
+    cursor: "cursor agent --force",
+    gemini: "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini -y",
+    kiro: "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli",
+  };
   for (const launchMode of ["launcher", "raw"] as const) {
     for (const cli of clis) {
-      it(`${launchMode} ${cli} workers preserve the intended persona and effort policy`, () => {
+      it(`${launchMode} ${cli} workers send only the launcher worker flag`, () => {
         const command = buildLaunchCommand(cli, "alpha", undefined, undefined, {
           authority: "worker",
           launchMode,
-          envPrefix: "CALLER_ENV=kept",
+          effort: cli === "codex" ? "medium" : undefined,
         });
-        if (cli === "claude") {
-          expect(command).not.toContain("GOLEM_ROLE");
+        if (launchMode === "launcher" && cli !== "kiro") {
+          expect(command).toBe(`${launcherNames[cli]} -s --worker${cli === "codex" ? " -E medium" : ""}`);
         } else {
-          expect(command).toContain("GOLEM_ROLE=worker ");
+          expect(command).toBe(cli === "kiro" ? `cd ~/Gits/alpha && ${rawCommands[cli]}` : rawCommands[cli]);
         }
-        expect(command).toContain("CALLER_ENV=kept ");
-        if (cli === "codex" && launchMode === "launcher") {
-          expect(command).toContain(" --worker");
-        } else {
-          expect(command).not.toContain("--worker");
-        }
+        expect(command).not.toMatch(/GOLEM_ROLE|ulimit/);
       });
 
-      it(`${launchMode} ${cli} leads do not set GOLEM_ROLE`, () => {
+      it(`${launchMode} ${cli} leads have no worker flag or prelude`, () => {
         const command = buildLaunchCommand(cli, "alpha", undefined, undefined, {
           authority: "lead",
           launchMode,
         });
-        expect(command).not.toContain("GOLEM_ROLE");
+        if (launchMode === "launcher" && cli !== "kiro") {
+          expect(command).toBe(`${launcherNames[cli]} -s`);
+        } else {
+          const raw = cli === "codex" ? rawCommands.codex.replace(" -c model_reasoning_effort=medium", "") : rawCommands[cli];
+          expect(command).toBe(cli === "kiro" ? `cd ~/Gits/alpha && ${raw}` : raw);
+        }
+        expect(command).not.toMatch(/--worker|GOLEM_ROLE|ulimit/);
       });
     }
   }
+
+  it("retains caller environment on launcher and raw paths", () => {
+    expect(buildLaunchCommand("codex", "alpha", undefined, undefined, {
+      authority: "worker", launchMode: "launcher", envPrefix: "CALLER_ENV=kept",
+    })).toBe("CALLER_ENV=kept alphaCodex -s --worker");
+    expect(buildLaunchCommand("codex", "alpha", undefined, undefined, {
+      authority: "worker", launchMode: "raw", envPrefix: "CALLER_ENV=kept",
+    })).toBe("CALLER_ENV=kept codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust");
+  });
 });

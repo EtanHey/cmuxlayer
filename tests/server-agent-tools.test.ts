@@ -52,7 +52,6 @@ import {
   sweepWatches,
 } from "../src/watch-spec.js";
 import { recordCliFallback } from "../src/transport-retry-context.js";
-import { RAISE_NOFILE_SOFT_LIMIT, withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { engineForTests } from "../src/server.js";
 import { agentStateTool } from "./helpers/mcp-tool-harness.js";
 import { internalToolForTests } from "../src/mcp/registration.js";
@@ -213,10 +212,7 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send") || args.includes("set-buffer")) {
       const text = String(args[args.length - 1] ?? "");
-      const nofilePrelude = `${RAISE_NOFILE_SOFT_LIMIT}; `;
-      const launcherText = text.startsWith(nofilePrelude)
-        ? text.slice(nofilePrelude.length)
-        : text;
+      const launcherText = text;
       if (text.includes("Codex")) {
         activeCli = "codex";
         readyText = opts?.codexReadyText ?? "codex> ";
@@ -1591,7 +1587,7 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", withRaisedNofileSoftLimit("GOLEM_ROLE=worker cmuxlayerCodex -s --worker -E medium")]),
+      expect.arrayContaining(["send", "cmuxlayerCodex -s --worker -E medium"]),
     );
   });
 
@@ -3928,7 +3924,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.requested_model).toBe("");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", withRaisedNofileSoftLimit("brainlayerClaude -s")]),
+      expect.arrayContaining(["send", "brainlayerClaude -s --worker"]),
     );
 
     const stateTool = agentStateTool(server);
@@ -4428,7 +4424,7 @@ describe("agent lifecycle tool handlers", () => {
         "send",
         "--surface",
         "surface:new",
-        withRaisedNofileSoftLimit(`GOLEM_ROLE=worker cmuxlayerCodex -s --worker -w '${worktreePath}'`),
+        `cmuxlayerCodex -s --worker -w '${worktreePath}'`,
       ]),
     );
   });
@@ -4828,7 +4824,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherSentAt: number | null = null;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker") {
           launcherSentAt = Date.now();
           return { stdout: "{}", stderr: "" };
         }
@@ -4844,7 +4840,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: elapsed < 800 ? `$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}` : "codex> ",
+              text: elapsed < 800 ? "$ voicelayerCodex -s --worker" : "codex> ",
               lines: 20,
               scrollback_used: false,
             }),
@@ -5384,7 +5380,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (lastSentText === "voicelayerCodex -s --worker") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -5398,7 +5394,7 @@ describe("agent lifecycle tool handlers", () => {
               : lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
-                  ? `$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}`
+                  ? "$ voicelayerCodex -s --worker"
                   : "codex> ",
             lines: 20,
             scrollback_used: false,
@@ -5473,7 +5469,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherReturns = 0;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker") {
           launcherSent = true;
           return { stdout: "{}", stderr: "" };
         }
@@ -5489,7 +5485,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: `bash-5.2$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}`,
+              text: "bash-5.2$ voicelayerCodex -s --worker",
               lines: 20,
               scrollback_used: false,
             }),
@@ -5518,7 +5514,7 @@ describe("agent lifecycle tool handlers", () => {
         "launcher command remained pending after Return",
       );
       expect(parsed.last_10_lines).toContain(
-        `bash-5.2$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}`,
+        "bash-5.2$ voicelayerCodex -s --worker",
       );
       expect(launcherReturns).toBeGreaterThanOrEqual(1);
     } finally {
@@ -5527,7 +5523,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("spawn_agent recovers a human-prefixed launcher line with ctrl-u then retypes", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let humanPrefix = "ng ";
@@ -5591,7 +5587,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a clean pending launcher line", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let launched = false;
@@ -5649,7 +5645,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent treats an empty prompt after human Enter as already submitted", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let launched = false;
     let ctrlUCount = 0;
@@ -5695,7 +5691,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent errors when launcher-line corruption recovery is exhausted", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec({
       closeKeepsSurface: true,
       surfaceUuid: "11111111-2222-4333-8444-555555555555",
@@ -5843,13 +5839,13 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a healthy booting pane with echoed launcher output", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let sent = false;
     let ctrlUCount = 0;
     let readyReads = 0;
     const bootScreen = [
-      "etanheyman ~  $ voicelayerCursor -s",
+      "etanheyman ~  $ voicelayerCursor -s --worker",
       "[4] 55084",
       "Starting Cursor Agent...",
     ].join("\n");
@@ -5902,7 +5898,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent recovers interleaved human characters inside the launcher command", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let launched = false;
@@ -5963,7 +5959,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent clears junk on the shell-readiness prompt before typing the launcher", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "wenfnng";
     let launched = false;
@@ -6028,7 +6024,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent ctrl-u during readiness prevents human Enter from executing typed garbage", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "sjnfjdnsf";
     let launched = false;
@@ -6108,7 +6104,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not claim a clean boot after clearing readiness junk", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let launched = false;
@@ -6160,7 +6156,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent recovers junk in both the readiness window and the typed launcher line", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "wenfnng";
     let launched = false;
@@ -6226,7 +6222,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent falls back to ctrl-c when readiness junk survives ctrl-u", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "gjrbgjbrgjrbgjrbgjrgbjrgbjrgbjrgb";
     let launched = false;
@@ -6341,7 +6337,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not reuse a failed spawn's readiness_recovered on a recycled surface id", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let spawnCount = 0;
     let composer = "";
@@ -6510,7 +6506,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (lastSentText === "voicelayerCodex -s --worker") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -6523,7 +6519,7 @@ describe("agent lifecycle tool handlers", () => {
               ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
               : lastSentText === ""
                 ? "$ "
-                : `$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}\ncodex> `,
+                : "$ voicelayerCodex -s --worker\ncodex> ",
             lines: 20,
             scrollback_used: false,
           }),

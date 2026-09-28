@@ -20,7 +20,6 @@ import {
 } from "node:path";
 import { StateManager } from "./state-manager.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
-import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import {
   buildRawResumeCommand,
 } from "./agent-command.js";
@@ -1598,7 +1597,6 @@ export class AgentEngine {
     timeoutMs?: number,
     bypassLaunchSender = false,
   ): Promise<void> {
-    command = withRaisedNofileSoftLimit(command);
     const expectedRoute = this.resolveAgentRoute(agentId);
     if (surface !== expectedRoute.surface_id) {
       throw new Error(

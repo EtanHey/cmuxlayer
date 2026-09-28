@@ -71,7 +71,7 @@ function makeCodexPane(frames: Frames) {
     }
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
     if (typed !== null) {
-      if (pane.live && !/ulimit -Sn/.test(typed)) { pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2; }
+      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) { pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2; }
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("read-screen")) {

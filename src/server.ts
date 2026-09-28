@@ -21,7 +21,6 @@ import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
 import {
 } from "./model-policy.js";
 import { shellQuote } from "./agent-command.js";
-import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import { agentProcessLiveness } from "./util/pid-alive.js";
 import {
   withTransportRetryTracking,
@@ -2749,6 +2748,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           {
             cwd: launchCwd,
             envPrefix: opts.mcpEnv,
+            authority: record.authority,
+            launchMode: record.launch_mode === "raw" ? "raw" : "launcher",
             allowModelOverride:
               record.cli === "codex"
                 ? Boolean(
@@ -2774,7 +2775,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await sendLauncherCommandToSurface({
         surface: route.surface,
         workspace: route.workspace,
-        command: withRaisedNofileSoftLimit(command),
+        command,
         timeout_ms: opts.timeout_ms,
         relaunch: true,
         assertSurfaceBindingCurrent,
