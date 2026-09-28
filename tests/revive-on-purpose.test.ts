@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEngine, managedPaneTitle } from "../src/agent-engine.js";
+import { AgentDiscovery } from "../src/agent-discovery.js";
 import { StateManager } from "../src/state-manager.js";
 import {
   AgentRegistry,
@@ -1089,6 +1090,104 @@ describe("revive on purpose (#492)", () => {
         expect(mockClient.send).not.toHaveBeenCalled();
       } finally {
         argvlessEngine.dispose();
+      }
+    });
+
+    it("refuses a live pane claimed only by a stale pending row", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(makeRecord({
+        state: "done", surface_id: UNBOUND_SURFACE_REF, surface_uuid: null,
+        workspace_id: null, pid: DEAD_PID,
+      }));
+      liveSurfaces = [LIVE_PANE];
+      await registry.reconstitute();
+      registry.set("cmuxlayerCodex-neighbour-pending-123-abc", makeRecord({
+        agent_id: "cmuxlayerCodex-neighbour-pending-123-abc",
+        cli_session_id: "019faccc-9999-7222-8333-444455556666",
+        surface_id: LIVE_PANE.ref, surface_uuid: LIVE_PANE.id,
+      }));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: LIVE_PANE.ref, text: CODEX_ACTIVE_SCREEN,
+        lines: 20, scrollback_used: false,
+      });
+      const argvlessEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null,
+        inboxOpts: { baseDir: TEST_DIR }, sessionProcessScanner: async () => [],
+      });
+      try {
+        await expect(argvlessEngine.resumeAgent("cmuxlayerCodex-revive"))
+          .rejects.toThrow(/1 live codex pane is not attributed to any agent \(surface:12\).*force:true/s);
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+      } finally {
+        argvlessEngine.dispose();
+      }
+    });
+
+    it("refuses an unparsed pane whose discovered CLI is codex", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(makeRecord({
+        state: "done", surface_id: UNBOUND_SURFACE_REF, surface_uuid: null,
+        workspace_id: null, pid: DEAD_PID,
+      }));
+      liveSurfaces = [LIVE_PANE];
+      await registry.reconstitute();
+      const scan = vi.spyOn(AgentDiscovery.prototype, "scan").mockResolvedValue([{
+        surface_id: LIVE_PANE.ref, surface_uuid: LIVE_PANE.id,
+        surface_title: "cmuxlayerCodex", cli: "codex", has_agent: false,
+        read_error: false, control_state: "unknown", parsed_status: null,
+        model: null, token_count: null, context_pct: null,
+      }]);
+      const argvlessEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null,
+        inboxOpts: { baseDir: TEST_DIR }, sessionProcessScanner: async () => [],
+      });
+      try {
+        await expect(argvlessEngine.resumeAgent("cmuxlayerCodex-revive"))
+          .rejects.toThrow(/1 live codex pane is not attributed to any agent \(surface:12\).*force:true/s);
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+      } finally {
+        argvlessEngine.dispose();
+        scan.mockRestore();
+      }
+    });
+
+    it("refuses when discovery loses the live pane after attribution", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(makeRecord({
+        state: "done", surface_id: UNBOUND_SURFACE_REF, surface_uuid: null,
+        workspace_id: null, pid: DEAD_PID,
+      }));
+      let liveReadsRemaining = Number.POSITIVE_INFINITY;
+      const changingSurfaces = vi.fn(async () =>
+        liveReadsRemaining-- > 0 ? [LIVE_PANE] : [],
+      );
+      const changingRegistry = new AgentRegistry(stateMgr, changingSurfaces);
+      await changingRegistry.reconstitute();
+      changingSurfaces.mockClear();
+      liveReadsRemaining = 1;
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: LIVE_PANE.ref, text: CODEX_ACTIVE_SCREEN,
+        lines: 20, scrollback_used: false,
+      });
+      const discovery = new AgentDiscovery({
+        listSurfaces: changingSurfaces,
+        readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+      });
+      const driftEngine = new AgentEngine(stateMgr, changingRegistry, mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null,
+        inboxOpts: { baseDir: TEST_DIR }, sessionProcessScanner: async () => [],
+      });
+      // Match the server path, where resume uses its initialized discovery.
+      (driftEngine as unknown as { resumeDiscovery: AgentDiscovery }).resumeDiscovery = discovery;
+      try {
+        await expect(driftEngine.resumeAgent("cmuxlayerCodex-revive"))
+          .rejects.toThrow(/surface:12.*force:true/s);
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        expect(mockClient.newSurface).not.toHaveBeenCalled();
+        expect(mockClient.send).not.toHaveBeenCalled();
+        expect(changingSurfaces).toHaveBeenCalledTimes(1);
+      } finally {
+        driftEngine.dispose();
       }
     });
 
