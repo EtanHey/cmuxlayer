@@ -835,6 +835,10 @@ export async function inboxTailOwnerState(
     } catch {
       return "unknown";
     }
+    // The probe awaited: an owner that resumed meanwhile has a new pid. The
+    // probe proves nothing about a record that is no longer the current one.
+    const current = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    if (current?.pid !== record.pid) return "unknown";
     return fresh === null ? "gone" : judge(fresh);
   }
   return TERMINAL_STATES.has(record.state) && record.user_killed === true ? "gone" : "live";

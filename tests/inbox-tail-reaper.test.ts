@@ -89,7 +89,7 @@ async function freshEngine(
     inboxTailReaper: { recordAuthority: opts.authority ?? true },
   });
   cleanups.push(() => engine.dispose());
-  return { engine, log };
+  return { engine, log, registry };
 }
 
 async function restartedDaemonSweep(
@@ -203,6 +203,37 @@ describe("#911 inbox tailer reaping", () => {
     const { kill, result, processes } = await classifyWithSink(engine, inboxOpts, olderSnapshot);
 
     expect(await engine.inboxTailOwnerState(agentId, processes)).not.toBe("gone");
+    expect(result.orphaned).toEqual([]);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("an agent that resumes while its old pid is being probed is never classified gone", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-resume02";
+    armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "working", pid: deadPid() }));
+    const { engine, registry } = await freshEngine(stateMgr, inboxOpts);
+    const seat = spawn("sleep", ["30"], { stdio: "ignore" });
+    cleanups.push(() => seat.kill());
+    // The old pid really is dead, but the owner resumes with a new one while
+    // that probe is in flight.
+    const probe = vi.fn(async () => {
+      const resumed = record(agentId, { state: "working", pid: seat.pid! });
+      stateMgr.writeState(resumed);
+      registry.set(agentId, resumed);
+      return null;
+    });
+    const kill = vi.fn();
+
+    const result = await sweepInboxTailers({
+      rows: await snapshotProcessRows(),
+      inboxOpts,
+      ownerState: (id) => engine.inboxTailOwnerState(id, new Map(), probe),
+      reap: true,
+      deps: { kill },
+    });
+
+    expect(probe).toHaveBeenCalled();
     expect(result.orphaned).toEqual([]);
     expect(kill).not.toHaveBeenCalled();
   });

@@ -45,6 +45,12 @@ export function armTailer(
     for (const pid of [tail, wrapper]) {
       try { process.kill(pid); } catch { /* already reaped */ }
     }
+    // Wait for both to exit: a dying wrapper re-creates its pidfile lock, which
+    // races the scratch dir's removal (ENOTEMPTY) if the dir goes first.
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; attempt < 120 && (alive(tail) || alive(wrapper)); attempt++) {
+      Atomics.wait(pause, 0, 0, 25);
+    }
   });
   return { wrapper, tail };
 }
