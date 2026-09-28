@@ -41,7 +41,14 @@ let droppedLines = 0;
  * The writer draining the active log. Each log gets its own, so a write that
  * is still in flight (or wedged) for an old log never holds up a new one.
  */
-let writer: { log: ActiveLog; done: Promise<void> } | null = null;
+interface LogWriter {
+  log: ActiveLog;
+  done: Promise<void>;
+  /** Lines taken off the queue whose write has not finished yet. */
+  inFlight: number;
+}
+
+let writer: LogWriter | null = null;
 
 export function defaultDaemonLogPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -69,7 +76,9 @@ export function enableDaemonLog(opts: {
 }
 
 export function disableDaemonLog(): number {
-  const unwritten = queued.length + droppedLines;
+  // Lines still being written count too: a close that times out mid-write
+  // must report them rather than claim nothing was lost.
+  const unwritten = queued.length + droppedLines + (writer?.inFlight ?? 0);
   activeLog = null;
   writer = null;
   queued = [];
@@ -181,7 +190,8 @@ async function writeBatch(log: ActiveLog, lines: string[]): Promise<void> {
   }
 }
 
-async function drainQueue(log: ActiveLog): Promise<void> {
+async function drainQueue(self: LogWriter): Promise<void> {
+  const log = self.log;
   while ((queued.length > 0 || droppedLines > 0) && activeLog === log) {
     const lines = queued;
     queued = [];
@@ -191,10 +201,13 @@ async function drainQueue(log: ActiveLog): Promise<void> {
       );
       droppedLines = 0;
     }
+    self.inFlight = lines.length;
     try {
       await writeBatch(log, lines);
     } catch {
       // Best effort by design; stderr still carries the same messages.
+    } finally {
+      self.inFlight = 0;
     }
   }
 }
@@ -225,11 +238,8 @@ function ensureDraining(): void {
   const log = activeLog;
   if (!log || writer?.log === log) return;
   if (queued.length === 0 && droppedLines === 0) return;
-  const current: { log: ActiveLog; done: Promise<void> } = {
-    log,
-    done: Promise.resolve(),
-  };
-  current.done = drainQueue(log).finally(() => {
+  const current: LogWriter = { log, done: Promise.resolve(), inFlight: 0 };
+  current.done = drainQueue(current).finally(() => {
     if (writer === current) writer = null;
     // Lines queued while this writer was finishing must not be stranded.
     ensureDraining();
@@ -312,7 +322,7 @@ export async function closeDaemonLog(timeoutMs = 500): Promise<void> {
   if (unwritten > 0) {
     // Never drop the tail silently: a wedged disk is itself worth knowing.
     console.error(
-      `[cmuxlayer-daemon] daemon log close timed out after ${timeoutMs}ms; ${unwritten} queued line(s) not written`,
+      `[cmuxlayer-daemon] daemon log close timed out after ${timeoutMs}ms; ${unwritten} line(s) queued or in flight may not be written`,
     );
   }
 }
