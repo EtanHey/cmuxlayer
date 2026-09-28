@@ -8,8 +8,10 @@
  * Disabled until `enableDaemonLog()` is called. A daemon enables it only when
  * given `daemonLog`, and `runDaemon` passes that only outside a test process,
  * so in-process servers and tests never write here unless a test asks.
- * Lines carry an event name and a message only: never env values, and the
- * cmux capability token is redacted.
+ * Lines carry STRUCTURED FIELDS ONLY (event, cause/error codes, error names,
+ * attempts, counts, pids, durations, basenames): never an error message or
+ * other free-form text, so secrets cannot reach the file by construction.
+ * `redactLogText` still runs over every field value as a backstop.
  *
  * Appending never touches the disk on the caller's path: lines go into a
  * bounded in-memory queue drained by one async writer, so a reconnect storm
@@ -23,7 +25,8 @@ import { dirname, join } from "node:path";
 export const DAEMON_LOG_FILENAME = "daemon.log";
 /** One live file plus one rotated `.1` file, each at most this size. */
 export const DEFAULT_DAEMON_LOG_MAX_BYTES = 1_000_000;
-const MAX_DETAIL_CHARS = 2_000;
+/** Each structured value is short by design; longer ones are cut. */
+const MAX_FIELD_CHARS = 128;
 /** The smallest usable cap: one bounded entry (timestamp, pid, event) fits. */
 export const MIN_DAEMON_LOG_MAX_BYTES = 256;
 /** Lines held while the writer is busy; beyond this they are counted, not kept. */
@@ -49,6 +52,26 @@ interface LogWriter {
 }
 
 let writer: LogWriter | null = null;
+/**
+ * The last writer per path. A new writer on the same file waits (bounded)
+ * for it, so two writers never stat/rename/append one file concurrently
+ * and double-rotate it; a wedged old write delays the new log at most this.
+ */
+const lastWriterByPath = new Map<string, Promise<void>>();
+const SAME_PATH_WAIT_MS = 1_000;
+
+function waitForPreviousWriter(path: string): Promise<void> {
+  const previous = lastWriterByPath.get(path);
+  if (!previous) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, SAME_PATH_WAIT_MS);
+    timer.unref?.();
+    void previous.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
 
 export function defaultDaemonLogPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -115,8 +138,10 @@ export function redactLogText(text: string): string {
   // "Bearer" after `Authorization:` and leave the credential behind.
   redacted = redacted.replace(BEARER, "$1 [REDACTED]");
   redacted = redacted.replace(SECRET_ASSIGNMENT, "$1$2[REDACTED]");
-  redacted = redacted.replace(TOKEN_SHAPED_RUN, "[REDACTED]");
-  return redacted.replace(SLASHED_TOKEN_RUN, "[REDACTED]");
+  // Slashed runs first: the no-slash rule would otherwise mask only a long
+  // prefix and leave the credential's `/…` tail visible.
+  redacted = redacted.replace(SLASHED_TOKEN_RUN, "[REDACTED]");
+  return redacted.replace(TOKEN_SHAPED_RUN, "[REDACTED]");
 }
 
 /**
@@ -132,11 +157,28 @@ function singleLine(text: string): string {
     .trim();
 }
 
-function sanitizeDetail(detail: string): string {
-  const oneLine = singleLine(redactLogText(detail));
-  return oneLine.length > MAX_DETAIL_CHARS
-    ? `${oneLine.slice(0, MAX_DETAIL_CHARS)}…`
-    : oneLine;
+export type LogFieldValue = string | number | boolean | null;
+export type LogFields = Readonly<Record<string, LogFieldValue>>;
+
+const SAFE_FIELD_KEY = /^[a-z][a-z0-9_]{0,31}$/;
+
+/** A code-like value: one line, redacted, restricted charset, short. */
+function fieldValue(value: LogFieldValue): string {
+  if (value === null) return "null";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "nan";
+  if (typeof value === "boolean") return String(value);
+  const safe = redactLogText(singleLine(String(value)))
+    .replace(/[^A-Za-z0-9._:/+[\]-]/g, "_");
+  return safe.length > MAX_FIELD_CHARS
+    ? `${safe.slice(0, MAX_FIELD_CHARS)}…`
+    : safe;
+}
+
+function formatFields(fields: LogFields): string {
+  return Object.entries(fields)
+    .filter(([key]) => SAFE_FIELD_KEY.test(key))
+    .map(([key, value]) => `${key}=${fieldValue(value)}`)
+    .join(" ");
 }
 
 /** Shorten `text` (with an ellipsis) until it fits `maxBytes` of UTF-8. */
@@ -155,10 +197,11 @@ function truncateToBytes(text: string, maxBytes: number): string {
  * A complete entry that always fits `maxBytes`: the detail is shortened,
  * never the line split, so rotation can hold every entry whole.
  */
-function logLine(event: string, detail: string, maxBytes: number): string {
-  const prefix = `${new Date().toISOString()} pid=${process.pid} ${singleLine(event)} `;
+function logLine(event: string, fields: LogFields, maxBytes: number): string {
+  const safeEvent = singleLine(event).replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
+  const prefix = `${new Date().toISOString()} pid=${process.pid} ${safeEvent} `;
   const room = maxBytes - Buffer.byteLength(prefix) - 1;
-  return `${prefix}${truncateToBytes(sanitizeDetail(detail), Math.max(0, room))}\n`;
+  return `${prefix}${truncateToBytes(formatFields(fields), Math.max(0, room))}\n`;
 }
 
 async function writeBatch(log: ActiveLog, lines: string[]): Promise<void> {
@@ -197,7 +240,7 @@ async function drainQueue(self: LogWriter): Promise<void> {
     queued = [];
     if (droppedLines > 0) {
       lines.push(
-        logLine("daemon_log_dropped", `lines=${droppedLines}`, log.maxBytes),
+        logLine("daemon_log_dropped", { lines: droppedLines }, log.maxBytes),
       );
       droppedLines = 0;
     }
@@ -217,12 +260,12 @@ async function drainQueue(self: LogWriter): Promise<void> {
  * unwritable directory or burst of events must not take the daemon down or
  * stall its connection path.
  */
-export function appendDaemonLog(event: string, detail: string): void {
+export function appendDaemonLog(event: string, fields: LogFields = {}): void {
   const log = activeLog;
   if (!log) return;
   let line: string;
   try {
-    line = logLine(event, detail, log.maxBytes);
+    line = logLine(event, fields, log.maxBytes);
   } catch {
     return;
   }
@@ -239,11 +282,17 @@ function ensureDraining(): void {
   if (!log || writer?.log === log) return;
   if (queued.length === 0 && droppedLines === 0) return;
   const current: LogWriter = { log, done: Promise.resolve(), inFlight: 0 };
-  current.done = drainQueue(current).finally(() => {
-    if (writer === current) writer = null;
-    // Lines queued while this writer was finishing must not be stranded.
-    ensureDraining();
-  });
+  current.done = waitForPreviousWriter(log.path)
+    .then(() => drainQueue(current))
+    .finally(() => {
+      if (lastWriterByPath.get(log.path) === current.done) {
+        lastWriterByPath.delete(log.path);
+      }
+      if (writer === current) writer = null;
+      // Lines queued while this writer was finishing must not be stranded.
+      ensureDraining();
+    });
+  lastWriterByPath.set(log.path, current.done);
   writer = current;
 }
 
@@ -266,10 +315,11 @@ function emitCoalescedSummary(key: string): void {
   clearTimeout(entry.timer);
   coalesced.delete(key);
   if (entry.suppressed > 0) {
-    appendDaemonLog(
-      entry.event,
-      `cause=${entry.cause} repeated=${entry.suppressed} window_ms=${entry.windowMs}`,
-    );
+    appendDaemonLog(entry.event, {
+      cause: entry.cause,
+      repeated: entry.suppressed,
+      window_ms: entry.windowMs,
+    });
   }
 }
 
@@ -280,7 +330,7 @@ function emitCoalescedSummary(key: string): void {
 export function appendCoalescedDaemonLog(
   event: string,
   cause: string,
-  detail: string,
+  fields: LogFields,
   windowMs = DEFAULT_COALESCE_WINDOW_MS,
 ): void {
   if (!activeLog) return;
@@ -290,7 +340,7 @@ export function appendCoalescedDaemonLog(
     existing.suppressed += 1;
     return;
   }
-  appendDaemonLog(event, detail);
+  appendDaemonLog(event, fields);
   const timer = setTimeout(() => emitCoalescedSummary(key), windowMs);
   timer.unref?.();
   coalesced.set(key, { event, cause, suppressed: 0, windowMs, timer });
@@ -327,36 +377,121 @@ export async function closeDaemonLog(timeoutMs = 500): Promise<void> {
   }
 }
 
-/** A stable code for a thrown value (e.g. `rate_limited`). Never throws. */
+/**
+ * Error codes the log may name. `error.code` can be external data (a
+ * `CmuxSocketError` copies cmux's V2 `error.code`), so only codes cmuxlayer
+ * itself knows, or the errno shape, are written; anything else is `other`.
+ */
+export const KNOWN_LOG_ERROR_CODES: ReadonlySet<string> = new Set([
+  // cmux V2 / socket transport
+  "rate_limited",
+  "access_denied",
+  "cmux_unavailable",
+  "connection_closed",
+  "connection_error",
+  "method_not_found",
+  "not_found",
+  "protocol_error",
+  "timeout",
+  "too_many_requests",
+  "unsupported_focus_option",
+  "unsupported_send_option",
+  // daemon and lifecycle
+  "EDAEMONREADINESSTIMEOUT",
+  "EDAEMONSOCKETINUSE",
+  "EDAEMONSOCKETPATHOCCUPIED",
+  "EDAEMONSTARTUPFAILED",
+  "ELIFECYCLELOCKTIMEOUT",
+  "ELIFECYCLENOTREADY",
+  "ELIFECYCLESTARTTIMEOUT",
+  // engine
+  "AGENT_NOT_FOUND",
+  "PLACEMENT_TOPOLOGY_BLOCKED",
+  "PLACEMENT_WORKSPACE_UNRESOLVED",
+  "SPAWN_RATE_LIMITED",
+  "SURFACE_IDENTITY_CONFLICT",
+  "placement_pending",
+  "placement_timeout",
+]);
+
+const ERRNO_SHAPE = /^E[A-Z0-9]{2,15}$/;
+
+/**
+ * Error class names the log may name: JS built-ins and cmuxlayer's own
+ * error classes. Anything else is written as `Error`.
+ */
+export const KNOWN_LOG_ERROR_NAMES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "AbortError",
+  "TimeoutError",
+  "AgentLaunchError",
+  "AgentNotFoundError",
+  "AgentRoleInferenceError",
+  "AmbiguousBootRecoveryReturnError",
+  "BootComposerResidueError",
+  "BootPromptDeliveryError",
+  "BootPromptTimeoutError",
+  "BootPromptUpdateMenuBlockedError",
+  "CmuxSocketError",
+  "DaemonReadinessTimeoutError",
+  "DaemonSocketInUseError",
+  "DaemonSocketPathOccupiedError",
+  "DaemonStartupFailedError",
+  "DeliveryError",
+  "DeliverySafetyGateError",
+  "LauncherReadinessError",
+  "LifecycleLockTimeoutError",
+  "LifecycleNotReadyError",
+  "LifecycleStartTimeoutError",
+  "ManualModeMutationError",
+  "PlacementTopologyError",
+  "PlacementWorkspaceError",
+  "RetryableDeliveryError",
+  "SpawnRateLimitedError",
+  "SubmitVerificationError",
+  "SurfaceBindingChangedDuringDiscoveryError",
+  "SurfaceEnumerationError",
+  "SurfaceGoneError",
+  "SurfaceIdentityConflictError",
+  "SurfaceRuntimeNotStartedError",
+  "WatchArmError",
+]);
+
+/** An allowlisted code for a thrown value (e.g. `rate_limited`), else `other`. Never throws. */
 export function logErrorCode(error: unknown): string {
   try {
     if (error && typeof error === "object" && "code" in error) {
       const code = (error as { code: unknown }).code;
-      if (typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code)) {
+      if (
+        typeof code === "string" &&
+        (KNOWN_LOG_ERROR_CODES.has(code) || ERRNO_SHAPE.test(code))
+      ) {
         return code;
       }
+      return "other";
     }
-    if (error instanceof Error && /^[A-Za-z0-9_]{1,64}$/.test(error.name)) {
-      return error.name;
-    }
+    return "none";
   } catch {
-    // fall through
+    return "other";
   }
-  return "unknown";
 }
 
-/** A short message for an unknown thrown value. Never throws. */
-export function describeLogError(error: unknown): string {
+/** An allowlisted class name for a thrown value, else `Error`. Never throws. */
+export function logErrorName(error: unknown): string {
   try {
     if (error instanceof Error) {
-      const code =
-        "code" in error && typeof (error as { code: unknown }).code === "string"
-          ? ` [${(error as { code: string }).code}]`
-          : "";
-      return `${error.name}: ${error.message}${code}`;
+      return KNOWN_LOG_ERROR_NAMES.has(error.name) ? error.name : "Error";
     }
-    return String(error);
+    if (error === null) return "null";
+    return typeof error === "object" ? "non_error_object" : typeof error;
   } catch {
-    return "<unprintable error>";
+    return "Error";
   }
 }

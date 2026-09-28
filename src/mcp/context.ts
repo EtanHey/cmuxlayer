@@ -40,8 +40,8 @@ import type { PublicDeliveryReceipt, DeliveryRecord } from "../delivery/receipts
 import { CmuxSocketError } from "../cmux-socket-error.js";
 import {
   appendDaemonLog,
-  describeLogError,
   logErrorCode,
+  logErrorName,
 } from "../daemon-log.js";
 import {
   LifecycleNotReadyError,
@@ -350,7 +350,7 @@ export function startLifecycleInitialization(
           if (!current()) return resolveFirstOutcome();
           context.lifecycleStartError = null;
           context.lifecycleReady = true;
-          appendDaemonLog("lifecycle_ready", `attempts=${attemptNumber}`);
+          appendDaemonLog("lifecycle_ready", { attempts: attemptNumber });
           context.lifecycleStartSettledAtMs = Date.now();
           // Ready first: its continuations (sweep start, deliverer publish)
           // must run before anyone awaiting the first outcome resumes.
@@ -370,10 +370,12 @@ export function startLifecycleInitialization(
           console.error(
             `[cmuxlayer] lifecycle initialization attempt ${attemptNumber} failed; retrying in ${delayMs}ms`,
           );
-          appendDaemonLog(
-            "lifecycle_attempt_failed",
-            `attempt=${attemptNumber} retry_in_ms=${delayMs} error_code=${logErrorCode(context.lifecycleStartError)} error=${describeLogError(context.lifecycleStartError)}`,
-          );
+          appendDaemonLog("lifecycle_attempt_failed", {
+            attempt: attemptNumber,
+            retry_in_ms: delayMs,
+            error_code: logErrorCode(context.lifecycleStartError),
+            error_name: logErrorName(context.lifecycleStartError),
+          });
           resolveFirstOutcome();
           const timer = setTimeout(attempt, delayMs);
           timer.unref?.();
