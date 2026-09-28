@@ -32,7 +32,11 @@ import type {
   AgentRole,
   CliType,
 } from "../../agent-types.js";
-import { isDeliberateCloseTombstone, isFailedSpawnTombstone } from "../../agent-types.js";
+import {
+  isDeliberateCloseTombstone,
+  isFailedSpawnTombstone,
+  isUnboundResumableSession,
+} from "../../agent-types.js";
 import { formatListAgents } from "../../format.js";
 import { dispatch } from "../../inbox.js";
 import { inferRecordRoleOrNull } from "../../layout-policy.js";
@@ -957,6 +961,7 @@ export function registerListAgentsTool(
             : records.filter(
                 (agent) =>
                   !isDeliberateCloseTombstone(agent) &&
+                  !isUnboundResumableSession(agent) &&
                   (!isFailedSpawnTombstone(agent) ||
                     failedSpawnSurfaceStillListed(agent)),
               );

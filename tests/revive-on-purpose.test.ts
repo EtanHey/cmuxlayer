@@ -17,7 +17,7 @@ import {
 } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import { withFakeRightSplitClient } from "./helpers/fake-right-split-topology.js";
-import type { AgentRecord } from "../src/agent-types.js";
+import { UNBOUND_SURFACE_REF, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface } from "../src/types.js";
 import { resetResumeArtifactResolver } from "../src/resume-verification.js";
 
@@ -803,6 +803,46 @@ describe("revive on purpose (#492)", () => {
     );
     expect(mockClient.renameTab).not.toHaveBeenCalled();
     expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
+  it("a daemon start keeps a done agent with a session whose ref was recycled, and resume by id works (#926)", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        workspace_id: "ws:1",
+        surface_id: "surface:7",
+        surface_uuid: "aaaaaaaa-1111-4222-8333-444444444444",
+        // Inside the retention window: the lead was idle, not abandoned.
+        updated_at: new Date().toISOString(),
+      }),
+    );
+    // After the cmux restart surface:7 is a different pane.
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:7"),
+        id: "bbbbbbbb-1111-4222-8333-444444444444",
+        workspace_ref: "ws:1",
+      },
+    ];
+    await registry.reconstitute();
+    engine.enableStartupPurge();
+
+    await engine.runSweep();
+
+    expect(stateMgr.readState("cmuxlayerCodex-revive")).toMatchObject({
+      agent_id: "cmuxlayerCodex-revive",
+      state: "done",
+      cli_session_id: CODEX_SESSION,
+      surface_id: UNBOUND_SURFACE_REF,
+      surface_uuid: null,
+    });
+    withFakeRightSplitClient(mockClient);
+    const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
+    expect(resumed).toMatchObject({
+      agent_id: "cmuxlayerCodex-revive",
+      surface_id: "surface:new",
+    });
   });
 
   it("retains a recoverable crash row when its stale process is gone", async () => {

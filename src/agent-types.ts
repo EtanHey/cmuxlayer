@@ -281,6 +281,54 @@ export function shouldRetainForExplicitResume(
   );
 }
 
+/** How long a terminal row with a captured session stays resumable (#926). */
+export const RESUMABLE_SESSION_RETENTION_DAYS = 14;
+export const RESUMABLE_SESSION_RETENTION_MS =
+  RESUMABLE_SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * The surface ref of a retained row that no longer owns a pane (#926).
+ *
+ * AIDEV-NOTE: deliberately NOT "". Both cmux clients drop an empty `surface`
+ * option, so an empty ref would address the focused pane. This ref never
+ * resolves, so any stray write to an unbound row fails instead of landing in
+ * someone else's pane.
+ */
+export const UNBOUND_SURFACE_REF = "surface:unbound";
+
+/**
+ * #926: `done` does not mean gone. An idle lead or a finished worker reads
+ * `done` and still carries the session a lead resumes by id after a crash, so
+ * the purges unbind such a row from its stale surface instead of deleting it.
+ * The window keeps the registry bounded; an explicit delete intent wins.
+ */
+export function isRetainedResumableSession(
+  agent: Pick<
+    AgentRecord,
+    "state" | "cli_session_id" | "updated_at" | "deletion_intent"
+  >,
+  now = Date.now(),
+): boolean {
+  if (agent.state !== "done" && agent.state !== "error") return false;
+  if (!agent.cli_session_id || agent.deletion_intent === true) return false;
+  const updatedAt = Date.parse(agent.updated_at);
+  return (
+    Number.isFinite(updatedAt) &&
+    now - updatedAt < RESUMABLE_SESSION_RETENTION_MS
+  );
+}
+
+/** A retained resumable row that the purges have detached from its pane. */
+export function isUnboundResumableSession(
+  agent: Pick<AgentRecord, "state" | "cli_session_id" | "surface_id">,
+): boolean {
+  return (
+    (agent.state === "done" || agent.state === "error") &&
+    !!agent.cli_session_id &&
+    agent.surface_id === UNBOUND_SURFACE_REF
+  );
+}
+
 export interface StateTransition {
   ts: string;
   agent_id: string;

@@ -14,7 +14,9 @@ import {
 } from "./agent-discovery.js";
 import {
   type MergedAgent,
+  isRetainedResumableSession,
   shouldRetainForExplicitResume,
+  UNBOUND_SURFACE_REF,
   type AgentRecord,
   type AgentRole,
   type AgentState,
@@ -1897,6 +1899,22 @@ export class AgentRegistry {
       ) {
         continue;
       }
+      // #926: same yield as the tombstones above: a live successor on the
+      // same seat supersedes the row; otherwise it stays resumable, unbound.
+      if (
+        isRetainedResumableSession(agent, opts.now ?? Date.now()) &&
+        !this.hasLiveManagedSeatSibling(
+          agent,
+          surfaces,
+          opts.liveSeatProof,
+          observerSnapshot,
+        )
+      ) {
+        if (this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId)) {
+          this.unbindRetainedSession(id, agent, surfaces, "evictSurfaceless");
+        }
+        continue;
+      }
 
       if (!this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId)) {
         continue;
@@ -2092,6 +2110,37 @@ export class AgentRegistry {
     const observerId =
       observerEpoch === undefined ? this.getObserverId() : observerEpoch;
     return Boolean(observerId && agent.surface_observer_id === observerId);
+  }
+
+  /**
+   * #926: keep a retained resumable row but detach it from a surface it can
+   * no longer prove it owns. Only a UUID match in the fresh topology keeps
+   * the binding: after a cmux restart a bare ref can name a different pane.
+   */
+  private unbindRetainedSession(
+    id: string,
+    agent: AgentRecord,
+    surfaces: readonly CmuxSurface[] | undefined,
+    source: string,
+  ): void {
+    if (agent.surface_id === UNBOUND_SURFACE_REF && !agent.surface_uuid) {
+      return;
+    }
+    const uuid = surfaceUuidKey(agent.surface_uuid);
+    if (
+      uuid &&
+      surfaces?.some((surface) => surfaceUuidKey(surface.id) === uuid)
+    ) {
+      return;
+    }
+    try {
+      this.agents.set(id, this.stateMgr.unbindSurface(agent.agent_id, source));
+    } catch {
+      // No state file to rewrite: the in-memory row stays as it was, kept.
+      return;
+    }
+    this.surfacelessObservations.delete(agent.agent_id);
+    this.unclaimedAbsenceObservations.delete(agent.agent_id);
   }
 
   private canPurgeAtStartup(agent: AgentRecord): boolean {
@@ -2643,12 +2692,21 @@ export class AgentRegistry {
    * Callers can retain errors created by surfaceless reconciliation so those
    * ambiguous topology misses still pass through the normal confirmation gate.
    *
+   * #926: a row with a captured session inside the retention window is never
+   * deleted here. It is unbound instead, unless `surfaces` (the fresh
+   * topology) still carries its surface UUID.
+   *
    * Returns purged agent records for sidebar cleanup.
    */
   purgeAllTerminal(
-    opts: { retainAgentIds?: ReadonlySet<string> } = {},
+    opts: {
+      retainAgentIds?: ReadonlySet<string>;
+      surfaces?: readonly CmuxSurface[];
+      now?: number;
+    } = {},
   ): AgentRecord[] {
     const purgedAgents: AgentRecord[] = [];
+    const now = opts.now ?? Date.now();
 
     for (const [id, agent] of this.agents) {
       if (agent.blocked_on_prompt === true) {
@@ -2664,6 +2722,10 @@ export class AgentRegistry {
         continue;
       }
       if (opts.retainAgentIds?.has(agent.agent_id)) {
+        continue;
+      }
+      if (isRetainedResumableSession(agent, now)) {
+        this.unbindRetainedSession(id, agent, opts.surfaces, "startupPurge");
         continue;
       }
       if (TERMINAL_STATES.has(agent.state)) {
@@ -2743,6 +2805,11 @@ export class AgentRegistry {
           observerSnapshot.ownerId,
         )
       ) {
+        // #926: a dead pane is exactly when a lead resumes by id.
+        if (isRetainedResumableSession(agent, opts.now ?? Date.now())) {
+          this.unbindRetainedSession(id, agent, surfaces, "purgeTerminal");
+          continue;
+        }
         const removedAgentId = this.deleteAgentAndAliases(id);
         this.stateMgr.removeState(removedAgentId);
         purged++;
