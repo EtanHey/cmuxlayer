@@ -35,7 +35,6 @@ import { buildTitle } from "../naming.js";
 import { matchReadyPattern } from "../pattern-registry.js";
 import {
   agentProcessLiveness,
-  processLiveness,
 } from "../util/pid-alive.js";
 import {
   antigravityScreenIsActive,
@@ -758,9 +757,21 @@ export async function assertSessionNotRunningElsewhere(
   const registration = agent.cli_session_id
     ? this.selfRegistrationSessionLookup?.(agent.cli_session_id) ?? null
     : null;
+  const registeredAt = registration?.ts !== null &&
+    registration?.ts !== undefined &&
+    Math.abs(registration.ts) <= 8.64e15
+      ? new Date(registration.ts).toISOString()
+      : null;
   const registrationMayRun =
     registration !== null &&
-    (!registration.pid || processLiveness(registration.pid) !== "gone");
+    (!registration.pid || agentProcessLiveness({
+      pid: registration.pid,
+      created_at: agent.created_at,
+      pid_registered_at: registeredAt,
+    }, {
+      // Recovered rows record discovery time, not process launch time.
+      ignoreCreationLowerBound: agent.surface_provenance !== "cmuxlayer_spawn",
+    }) !== "gone");
   let occupant: Awaited<ReturnType<AgentRegistry["findLiveSessionSurface"]>>;
   try {
     occupant = await this.registry.findLiveSessionSurface(

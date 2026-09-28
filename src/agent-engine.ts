@@ -368,6 +368,7 @@ export class AgentEngine {
   private sessionProcessScanner: SessionProcessScanner;
   /** The server's discovery, once initialized; resume attributes panes with it. */
   private resumeDiscovery: AgentDiscovery | null = null;
+  private resumeInProgress = new Set<string>();
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -4525,8 +4526,17 @@ export class AgentEngine {
   spawnAgent(...args: Parameters<typeof lifecycleImpl.spawnAgent>): ReturnType<typeof lifecycleImpl.spawnAgent> {
     return lifecycleImpl.spawnAgent.call(this.lifecycleHost(), ...args);
   }
-  resumeAgent(...args: Parameters<typeof lifecycleImpl.resumeAgent>): ReturnType<typeof lifecycleImpl.resumeAgent> {
-    return lifecycleImpl.resumeAgent.call(this.lifecycleHost(), ...args);
+  async resumeAgent(...args: Parameters<typeof lifecycleImpl.resumeAgent>): ReturnType<typeof lifecycleImpl.resumeAgent> {
+    const agentId = this.resolveResumeAgent(args[0])?.agent_id ?? args[0];
+    if (this.resumeInProgress.has(agentId)) {
+      throw new Error(`Agent "${agentId}" resume_in_progress`);
+    }
+    this.resumeInProgress.add(agentId);
+    try {
+      return await lifecycleImpl.resumeAgent.call(this.lifecycleHost(), ...args);
+    } finally {
+      this.resumeInProgress.delete(agentId);
+    }
   }
   resolveResumeAgent(...args: Parameters<typeof lifecycleImpl.resolveResumeAgent>): ReturnType<typeof lifecycleImpl.resolveResumeAgent> {
     return lifecycleImpl.resolveResumeAgent.call(this.lifecycleHost(), ...args);
@@ -4546,7 +4556,8 @@ export class AgentEngine {
     const discovery =
       this.resumeDiscovery ??
       new AgentDiscovery({
-        listSurfaces: async () => snapshot.surfaces,
+        listSurfaces: async () =>
+          (await this.registry.attributionSnapshot())?.surfaces ?? [],
         readScreen: (surface, opts) => this.client.readScreen(surface, opts),
       });
     let rows: DiscoveredAgent[];
@@ -4560,7 +4571,7 @@ export class AgentEngine {
         const uuid = row.surface_uuid?.trim().toLowerCase();
         if (uuid && snapshot.attributedUuids.has(uuid)) return false;
         if (row.read_error) return true;
-        return row.cli === cli || (row.has_agent && row.cli === "unknown");
+        return row.cli === cli || (row.agent_screen === true && row.cli === "unknown");
       })
       .map((row) => row.surface_id);
   }
