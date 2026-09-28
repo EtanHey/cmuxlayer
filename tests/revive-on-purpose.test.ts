@@ -423,6 +423,10 @@ describe("revive on purpose (#492)", () => {
       }),
     );
     await registry.reconstitute();
+    // #926: the old pane is gone, so the session cannot be running there.
+    liveSurfaces = [
+      { ...makeSurface("surface:witness"), id: "dddddddd-1111-4222-8333-444444444444" },
+    ];
 
     const resumed = await engine.resumeAgent(CODEX_SESSION);
 
@@ -837,12 +841,99 @@ describe("revive on purpose (#492)", () => {
       surface_id: UNBOUND_SURFACE_REF,
       surface_uuid: null,
     });
+    // The recorded workspace ref recycles too; resume must not target it.
+    expect(
+      stateMgr.readState("cmuxlayerCodex-revive")?.workspace_id ?? null,
+    ).toBeNull();
     withFakeRightSplitClient(mockClient);
     const resumed = await engine.resumeAgent("cmuxlayerCodex-revive");
     expect(resumed).toMatchObject({
       agent_id: "cmuxlayerCodex-revive",
       surface_id: "surface:new",
     });
+  });
+
+  it("refuses to resume a done agent whose own pane is still live (#926)", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        workspace_id: "ws:1",
+        surface_id: "surface:7",
+        surface_uuid: "aaaaaaaa-1111-4222-8333-444444444444",
+        updated_at: new Date().toISOString(),
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:7"),
+        id: "aaaaaaaa-1111-4222-8333-444444444444",
+        workspace_ref: "ws:1",
+      },
+    ];
+    await registry.reconstitute();
+
+    await expect(engine.resumeAgent("cmuxlayerCodex-revive")).rejects.toThrow(
+      /surface:7/,
+    );
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
+    expect(mockClient.newSurface).not.toHaveBeenCalled();
+    expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
+  it("refuses a second process for a session a live pane runs, and rebinds the agent to that pane (#926)", async () => {
+    writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+    stateMgr.writeState(
+      makeRecord({
+        state: "done",
+        surface_id: UNBOUND_SURFACE_REF,
+        surface_uuid: null,
+        workspace_id: null,
+        updated_at: new Date().toISOString(),
+      }),
+    );
+    // cmux restored the pane under a new UUID and the CLI self-registered it.
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:12"),
+        id: "cccccccc-1111-4222-8333-444444444444",
+        workspace_ref: "ws:1",
+      },
+    ];
+    await registry.reconstitute();
+    const sessionEngine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts: { baseDir: TEST_DIR },
+      selfRegistrationSessionLookup: (sessionId) =>
+        sessionId === CODEX_SESSION
+          ? {
+              session_id: CODEX_SESSION,
+              surface_uuid: "cccccccc-1111-4222-8333-444444444444",
+              cwd: null,
+              pid: null,
+              cli: "codex",
+              launcher: "cmuxlayerCodex",
+              session_path: null,
+              ts: Date.now(),
+            }
+          : null,
+    });
+    try {
+      await expect(
+        sessionEngine.resumeAgent("cmuxlayerCodex-revive"),
+      ).rejects.toThrow(/surface:12/);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(stateMgr.readState("cmuxlayerCodex-revive")).toMatchObject({
+        state: "done",
+        surface_id: "surface:12",
+        surface_uuid: "cccccccc-1111-4222-8333-444444444444",
+        workspace_id: "ws:1",
+      });
+    } finally {
+      sessionEngine.dispose();
+    }
   });
 
   it("retains a recoverable crash row when its stale process is gone", async () => {

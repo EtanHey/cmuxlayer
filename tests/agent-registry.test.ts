@@ -4174,6 +4174,71 @@ describe("AgentRegistry", () => {
       expect(registry.get("live-coach-record")).not.toBeNull();
     });
 
+    it("keeps a recent session row even when a live same-seat agent runs a different session (#926)", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          state: "done",
+          surface_id: "surface:gone",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          cli_session_id: "older-coach-session",
+          pid: null,
+          updated_at: new Date().toISOString(),
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "live-coach-record",
+          state: "working",
+          surface_id: "surface:coach",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:coach")],
+        {
+          observerId: "cmux:/tmp/test.sock",
+          observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
+      await registry.reconstitute();
+      const proof = registry.createLiveSeatDiscoveryProof(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach",
+            surface_title: "coachClaude",
+            cli: "claude",
+            has_agent: true,
+            read_error: false,
+          }),
+        ],
+        {
+          seatRegistry: REPAIR_SEATS,
+          expectedObserverId: "cmux:/tmp/test.sock",
+          expectedObserverEpoch: "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0, liveSeatProof: proof }),
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        state: "done",
+        cli_session_id: "older-coach-session",
+      });
+    });
+
     it("keeps a recoverable seat ghost when the live sibling surface resolves to another seat", async () => {
       stateMgr.writeState(
         makeRecord({

@@ -6,7 +6,10 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { AgentEngine } from "../agent-engine.js";
 import { resumeInvocationForAgent, toPublicAgent } from "../agent-facade.js";
-import { SURFACE_EVICTION_CONFIRMATION_MS } from "../agent-registry.js";
+import {
+  SURFACE_EVICTION_CONFIRMATION_MS,
+  type AgentRegistry,
+} from "../agent-registry.js";
 import {
   type AgentRecord,
   type AgentRoute,
@@ -30,7 +33,7 @@ import {
 } from "../model-policy.js";
 import { buildTitle } from "../naming.js";
 import { matchReadyPattern } from "../pattern-registry.js";
-import { agentProcessLiveness } from "../util/pid-alive.js";
+import { agentProcessLiveness, processLiveness } from "../util/pid-alive.js";
 import {
   antigravityScreenIsActive,
   isAntigravityScreen,
@@ -129,6 +132,7 @@ export interface LifecycleHost {
   resolveAgentRoute: AgentEngine["resolveAgentRoute"];
   resolveAgentStopIoRoute: AgentEngine["resolveAgentStopIoRoute"];
   resolveResumeAgent: AgentEngine["resolveResumeAgent"];
+  assertSessionNotRunningElsewhere: AgentEngine["assertSessionNotRunningElsewhere"];
   resolveStopSurfaceClosePolicy: AgentEngine["resolveStopSurfaceClosePolicy"];
   resolveUnchangedAgentStopIoRoute: AgentEngine["resolveUnchangedAgentStopIoRoute"];
   sameSurfaceRoute: AgentEngine["sameSurfaceRoute"];
@@ -625,6 +629,11 @@ export async function resumeAgent(
     );
   }
 
+  agent = await this.assertSessionNotRunningElsewhere(
+    agent,
+    opts?.force === true,
+  );
+
   let surface: CreatedAgentSurface | null = null;
   let surfaceBound = false;
   let recordReopened = false;
@@ -721,6 +730,61 @@ export async function resumeAgent(
     }
     throw error;
   }
+}
+
+/**
+ * #926: a record with a session is never resumed onto a second process while
+ * its first may still be running. The recorded pid is checked by the caller;
+ * this also requires that neither the row's own pane nor the pane its session
+ * self-registered on is live. A live registered pane is proof the agent is
+ * running there, so the row is rebound to it (reachable by id again) and the
+ * resume is refused. `force` only overrides an inconclusive topology.
+ */
+export async function assertSessionNotRunningElsewhere(
+  this: LifecycleHost,
+  agent: AgentRecord,
+  force: boolean,
+): Promise<AgentRecord> {
+  const registration = agent.cli_session_id
+    ? this.selfRegistrationSessionLookup?.(agent.cli_session_id) ?? null
+    : null;
+  const registrationMayRun =
+    registration !== null &&
+    (!registration.pid || processLiveness(registration.pid) !== "gone");
+  let occupant: Awaited<ReturnType<AgentRegistry["findLiveSessionSurface"]>>;
+  try {
+    occupant = await this.registry.findLiveSessionSurface(
+      agent,
+      registrationMayRun ? registration.surface_uuid : null,
+    );
+  } catch (error) {
+    if (force) return agent;
+    throw new Error(
+      `Agent "${agent.agent_id}" cannot resume: cannot prove its session is ` +
+        `not already running (${
+          error instanceof Error ? error.message : String(error)
+        }); retry once cmux lists its surfaces, or pass force`,
+    );
+  }
+  if (!occupant) return agent;
+  const { surface, via } = occupant;
+  if (via === "binding") {
+    throw new Error(
+      `Agent "${agent.agent_id}" cannot resume: its pane ${surface.ref} is still ` +
+        `live and may be running session ${agent.cli_session_id}; send_to it, ` +
+        `or close that pane first`,
+    );
+  }
+  const rebound = this.stateMgr.updateRecord(agent.agent_id, {
+    surface_id: surface.ref,
+    surface_uuid: surface.id ?? null,
+    workspace_id: surface.workspace_ref ?? null,
+  });
+  this.registry.set(rebound.agent_id, rebound);
+  throw new Error(
+    `Agent "${agent.agent_id}" cannot resume: session ${agent.cli_session_id} ` +
+      `is running on ${surface.ref}; rebound the agent to that pane, send_to it`,
+  );
 }
 
 /** Resolve either cmuxlayer's public label or the harness's full session id. */

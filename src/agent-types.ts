@@ -318,6 +318,30 @@ export function isRetainedResumableSession(
   );
 }
 
+/**
+ * A terminal session row past the retention window (or marked for deletion):
+ * bounded like any other row. Close/crash tombstones keep their own cap.
+ */
+export function isExpiredResumableSession(
+  agent: Pick<
+    AgentRecord,
+    | "state"
+    | "cli_session_id"
+    | "updated_at"
+    | "deletion_intent"
+    | "user_killed"
+    | "error"
+  >,
+  now = Date.now(),
+): boolean {
+  return (
+    (agent.state === "done" || agent.state === "error") &&
+    !!agent.cli_session_id &&
+    !isRetainedResumableSession(agent, now) &&
+    !shouldRetainForExplicitResume(agent)
+  );
+}
+
 /** A retained resumable row that the purges have detached from its pane. */
 export function isUnboundResumableSession(
   agent: Pick<AgentRecord, "state" | "cli_session_id" | "surface_id">,

@@ -184,6 +184,19 @@ function expectedResume(cli: CliType, path: LauncherPath, root: string): string 
   }
 }
 
+/**
+ * #926: resume must prove the session is not running elsewhere, so the
+ * topology shows a live pane that is not the spawned one (its pane closed).
+ */
+const PANE_CLOSED_WITNESS: CmuxSurface = {
+  ref: "surface:witness",
+  id: "eeeeeeee-1111-4222-8333-444444444444",
+  title: "",
+  type: "terminal",
+  index: 0,
+  selected: false,
+};
+
 describe.each<LauncherPath>(["registry", "raw"])(
   "spawn/resume contract parity — %s launcher path",
   (path) => {
@@ -322,6 +335,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
 
+        liveSurfaces = [PANE_CLOSED_WITNESS];
         const resumed = await engine.resumeAgent(spawned.agent_id);
 
         // Public identity survives a resume on BOTH lanes (U5 spawn-resume law).
@@ -368,6 +382,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
 
+        liveSurfaces = [PANE_CLOSED_WITNESS];
         await engine.resumeAgent(spawned.agent_id);
         const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
@@ -396,6 +411,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
 
         if (path === "raw") {
           // `gemini --resume` takes "latest" or an index, never a UUID.
+          liveSurfaces = [PANE_CLOSED_WITNESS];
           await expect(engine.resumeAgent(spawned.agent_id)).rejects.toThrow(
             /no runnable resume command/i,
           );
@@ -409,6 +425,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         // The registered launcher has a UUID resume form. Main's #486 policy
         // refuses only on proof of absence; an unreadable Gemini store leaves
         // the registry claim standing instead of fabricating a disk verdict.
+        liveSurfaces = [PANE_CLOSED_WITNESS];
         await engine.resumeAgent(spawned.agent_id);
         expect(client.send).toHaveBeenCalled();
         expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(true);

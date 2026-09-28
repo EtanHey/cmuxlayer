@@ -234,4 +234,99 @@ describe("resumable agents survive a cmux restart (#926)", () => {
     ).resolves.toEqual([]);
     expect(stateMgr.readState("cmuxlayerClaude-2c16c8c8")).not.toBeNull();
   });
+  // ---- Round 2 (#928 review) ----
+
+  it("startup unbinding also drops the recorded workspace ref, which recycles like surface refs", async () => {
+    stateMgr.writeState(makeRecord({ workspace_id: "workspace:gone" }));
+    surfaces = [surface("surface:7", RECYCLED_UUID)];
+    await boot();
+
+    registry.purgeAllTerminal({ surfaces });
+    expect(
+      stateMgr.readState("cmuxlayerClaude-2c16c8c8")?.workspace_id ?? null,
+    ).toBeNull();
+  });
+
+  it("evictSurfaceless never deletes a recent session row owned by another observer", async () => {
+    stateMgr.writeState(
+      makeRecord({ surface_observer_id: "cmux:/tmp/previous.sock" }),
+    );
+    surfaces = [surface("surface:witness", RECYCLED_UUID)];
+    await boot();
+    const firstObservedAt = Date.now();
+
+    await registry.evictSurfaceless({ confirmationMs: 0, now: firstObservedAt });
+    await expect(
+      registry.evictSurfaceless({
+        confirmationMs: 0,
+        now: firstObservedAt + 10 * 60_000,
+      }),
+    ).resolves.toEqual([]);
+    expect(stateMgr.readState("cmuxlayerClaude-2c16c8c8")).toMatchObject({
+      state: "done",
+      cli_session_id: SESSION,
+    });
+  });
+
+  it("a ref-only match never keeps a retained session row bound (purgeTerminal)", async () => {
+    stateMgr.writeState(makeRecord({ surface_uuid: null }));
+    // A cmux build without surface UUIDs: surface:7 may be any pane now.
+    surfaces = [{ ref: "surface:7", title: "", type: "terminal", index: 0, selected: false }];
+    await boot();
+
+    await expect(registry.purgeTerminal({ confirmationMs: 0 })).resolves.toBe(0);
+    expect(stateMgr.readState("cmuxlayerClaude-2c16c8c8")).toMatchObject({
+      state: "done",
+      surface_id: UNBOUND_SURFACE_REF,
+    });
+  });
+
+  it("a ref-only match never keeps a retained session row bound (evictSurfaceless)", async () => {
+    stateMgr.writeState(makeRecord({ surface_uuid: null }));
+    surfaces = [{ ref: "surface:7", title: "", type: "terminal", index: 0, selected: false }];
+    await boot();
+
+    await expect(
+      registry.evictSurfaceless({ confirmationMs: 0 }),
+    ).resolves.toEqual([]);
+    expect(stateMgr.readState("cmuxlayerClaude-2c16c8c8")).toMatchObject({
+      state: "done",
+      surface_id: UNBOUND_SURFACE_REF,
+    });
+  });
+
+  it("the periodic purgeTerminal deletes an unbound row once it ages past the window", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        surface_id: UNBOUND_SURFACE_REF,
+        surface_uuid: null,
+        updated_at: new Date(
+          Date.now() - RESUMABLE_SESSION_RETENTION_MS - 60_000,
+        ).toISOString(),
+      }),
+    );
+    surfaces = [surface("surface:witness", RECYCLED_UUID)];
+    await boot();
+
+    await expect(registry.purgeTerminal({ confirmationMs: 0 })).resolves.toBe(1);
+    expect(stateMgr.readState("cmuxlayerClaude-2c16c8c8")).toBeNull();
+  });
+
+  it("evictSurfaceless deletes an unbound row once it ages past the window", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        surface_id: UNBOUND_SURFACE_REF,
+        surface_uuid: null,
+        updated_at: new Date(
+          Date.now() - RESUMABLE_SESSION_RETENTION_MS - 60_000,
+        ).toISOString(),
+      }),
+    );
+    surfaces = [surface("surface:witness", RECYCLED_UUID)];
+    await boot();
+
+    await expect(
+      registry.evictSurfaceless({ confirmationMs: 0 }),
+    ).resolves.toEqual(["cmuxlayerClaude-2c16c8c8"]);
+  });
 });

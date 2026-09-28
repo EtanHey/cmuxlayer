@@ -547,8 +547,8 @@ export class StateManager {
   }
 
   /**
-   * #926: detach a retained terminal row from a surface it no longer owns.
-   * Keeps state, id and session, and does not refresh lifecycle age: the
+   * #926: detach a retained terminal row from a surface (and workspace) it no
+   * longer owns. Keeps state, id and session, and does not refresh lifecycle age: the
    * retention window counts from the agent's last real update, not from the
    * restart that unbound it.
    */
@@ -560,15 +560,19 @@ export class StateManager {
     }
     if (
       current.surface_id === UNBOUND_SURFACE_REF &&
-      !current.surface_uuid
+      !current.surface_uuid &&
+      !current.workspace_id
     ) {
       return current;
     }
 
+    // Workspace refs recycle across a restart exactly like surface refs, so
+    // resume must not aim at the old one: it falls back to placement rules.
     const updated: AgentRecord = {
       ...current,
       surface_id: UNBOUND_SURFACE_REF,
       surface_uuid: null,
+      workspace_id: null,
       version: current.version + 1,
     };
     const stateFile = this.stateFilePath(dirName!);

@@ -4494,6 +4494,9 @@ export class AgentEngine {
   resolveResumeAgent(...args: Parameters<typeof lifecycleImpl.resolveResumeAgent>): ReturnType<typeof lifecycleImpl.resolveResumeAgent> {
     return lifecycleImpl.resolveResumeAgent.call(this.lifecycleHost(), ...args);
   }
+  private assertSessionNotRunningElsewhere(...args: Parameters<typeof lifecycleImpl.assertSessionNotRunningElsewhere>): ReturnType<typeof lifecycleImpl.assertSessionNotRunningElsewhere> {
+    return lifecycleImpl.assertSessionNotRunningElsewhere.call(this.lifecycleHost(), ...args);
+  }
   cascadeKill(...args: Parameters<typeof lifecycleImpl.cascadeKill>): ReturnType<typeof lifecycleImpl.cascadeKill> {
     return lifecycleImpl.cascadeKill.call(this.lifecycleHost(), ...args);
   }
@@ -4550,6 +4553,7 @@ export class AgentEngine {
       resolveAgentRoute: (...args) => engine.resolveAgentRoute(...args),
       resolveAgentStopIoRoute: (...args) => engine.resolveAgentStopIoRoute(...args),
       resolveResumeAgent: (...args) => engine.resolveResumeAgent(...args),
+      assertSessionNotRunningElsewhere: (...args) => engine.assertSessionNotRunningElsewhere(...args),
       resolveStopSurfaceClosePolicy: (...args) => engine.resolveStopSurfaceClosePolicy(...args),
       resolveUnchangedAgentStopIoRoute: (...args) => engine.resolveUnchangedAgentStopIoRoute(...args),
       sameSurfaceRoute: (...args) => engine.sameSurfaceRoute(...args),

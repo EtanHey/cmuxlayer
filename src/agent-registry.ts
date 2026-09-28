@@ -14,7 +14,9 @@ import {
 } from "./agent-discovery.js";
 import {
   type MergedAgent,
+  isExpiredResumableSession,
   isRetainedResumableSession,
+  isUnboundResumableSession,
   shouldRetainForExplicitResume,
   UNBOUND_SURFACE_REF,
   type AgentRecord,
@@ -1829,6 +1831,8 @@ export class AgentRegistry {
     const liveSurfaceKeys = this.liveSurfaceKeys(surfaces);
     this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceKeys);
     const evicted: string[] = [];
+    // Retention age is wall-clock; `opts.now` is the confirmation clock.
+    const now = Date.now();
 
     for (const [id, agent] of [...this.agents.entries()]) {
       if (agent.transcript_session_capture_deferred === true) {
@@ -1841,6 +1845,27 @@ export class AgentRegistry {
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
         continue;
       }
+      const sessionRow = this.sweepSessionRow(
+        id,
+        agent,
+        surfaces,
+        now,
+        observerSnapshot.ownerId,
+        "evictSurfaceless",
+        () =>
+          this.hasLiveManagedSeatSibling(
+            agent,
+            surfaces,
+            opts.liveSeatProof,
+            observerSnapshot,
+            agent.cli_session_id,
+          ),
+      );
+      if (sessionRow === "deleted") {
+        evicted.push(agent.agent_id);
+        continue;
+      }
+      if (sessionRow === "kept") continue;
       if (this.matchingLiveSurface(agent, surfaces)) {
         this.surfacelessObservations.delete(agent.agent_id);
         this.unclaimedAbsenceObservations.delete(agent.agent_id);
@@ -1899,22 +1924,6 @@ export class AgentRegistry {
       ) {
         continue;
       }
-      // #926: same yield as the tombstones above: a live successor on the
-      // same seat supersedes the row; otherwise it stays resumable, unbound.
-      if (
-        isRetainedResumableSession(agent, opts.now ?? Date.now()) &&
-        !this.hasLiveManagedSeatSibling(
-          agent,
-          surfaces,
-          opts.liveSeatProof,
-          observerSnapshot,
-        )
-      ) {
-        if (this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId)) {
-          this.unbindRetainedSession(id, agent, surfaces, "evictSurfaceless");
-        }
-        continue;
-      }
 
       if (!this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId)) {
         continue;
@@ -1933,6 +1942,8 @@ export class AgentRegistry {
     surfaces: readonly CmuxSurface[],
     liveSeatProof: LiveSeatDiscoveryProof | null | undefined,
     observerSnapshot: RegistryObserverSnapshot,
+    /** #926: count only a sibling running exactly this session. */
+    sameSessionId?: string | null,
   ): boolean {
     const seatId = agent.seat_id?.trim();
     if (!seatId) return false;
@@ -1952,7 +1963,9 @@ export class AgentRegistry {
         isAutoAgentId(candidate.agent_id) ||
         isPendingAgentId(candidate.agent_id) ||
         TERMINAL_STATES.has(candidate.state) ||
-        candidate.seat_id !== seatId
+        candidate.seat_id !== seatId ||
+        (sameSessionId !== undefined &&
+          (!sameSessionId || candidate.cli_session_id !== sameSessionId))
       ) {
         return false;
       }
@@ -2113,6 +2126,46 @@ export class AgentRegistry {
   }
 
   /**
+   * #926: the periodic sweeps' decision for a terminal row with a captured
+   * session, taken before any live-match or deletion branch. An observation
+   * never deletes such a row inside the retention window: it stays bound only
+   * by a UUID match, otherwise it is unbound (when this observer owns it).
+   * Past the window an unbound row is deleted outright, since no surface
+   * absence can ever be observed for it. `null` leaves the row to the normal
+   * path (no session, or expired but still bound).
+   */
+  private sweepSessionRow(
+    id: string,
+    agent: AgentRecord,
+    surfaces: readonly CmuxSurface[],
+    now: number,
+    ownerId: string | null | undefined,
+    source: string,
+    runsInLiveSibling?: () => boolean,
+  ): "kept" | "deleted" | null {
+    if (isRetainedResumableSession(agent, now)) {
+      // The same session live on the seat's successor: this row is the stale
+      // duplicate, and the normal path may remove it.
+      if (runsInLiveSibling?.()) return null;
+      if (this.canMutateForObservedAbsence(agent, ownerId)) {
+        this.unbindRetainedSession(id, agent, surfaces, source);
+      }
+      this.surfacelessObservations.delete(agent.agent_id);
+      this.unclaimedAbsenceObservations.delete(agent.agent_id);
+      return "kept";
+    }
+    if (
+      isExpiredResumableSession(agent, now) &&
+      isUnboundResumableSession(agent) &&
+      this.canMutateForObservedAbsence(agent, ownerId)
+    ) {
+      this.evictUnchecked(id);
+      return "deleted";
+    }
+    return null;
+  }
+
+  /**
    * #926: keep a retained resumable row but detach it from a surface it can
    * no longer prove it owns. Only a UUID match in the fresh topology keeps
    * the binding: after a cmux restart a bare ref can name a different pane.
@@ -2123,7 +2176,11 @@ export class AgentRegistry {
     surfaces: readonly CmuxSurface[] | undefined,
     source: string,
   ): void {
-    if (agent.surface_id === UNBOUND_SURFACE_REF && !agent.surface_uuid) {
+    if (
+      agent.surface_id === UNBOUND_SURFACE_REF &&
+      !agent.surface_uuid &&
+      !agent.workspace_id
+    ) {
       return;
     }
     const uuid = surfaceUuidKey(agent.surface_uuid);
@@ -2141,6 +2198,58 @@ export class AgentRegistry {
     }
     this.surfacelessObservations.delete(agent.agent_id);
     this.unclaimedAbsenceObservations.delete(agent.agent_id);
+  }
+
+  /**
+   * #926: the live surface that may still run this row's CLI session: its own
+   * pane, or the pane the session self-registered on. A UUID (the row's or the
+   * registration's) must be proven absent from a coherent, identified
+   * topology, else this throws. A bare ref is checked only on an all-ref
+   * topology and proves nothing when the listing is inconclusive.
+   */
+  async findLiveSessionSurface(
+    agent: AgentRecord,
+    sessionSurfaceUuid: string | null,
+  ): Promise<{ surface: CmuxSurface; via: "binding" | "session" } | null> {
+    const ownUuid = surfaceUuidKey(agent.surface_uuid);
+    const ownRef =
+      !ownUuid && agent.surface_id !== UNBOUND_SURFACE_REF
+        ? agent.surface_id
+        : null;
+    const sessionUuid = surfaceUuidKey(sessionSurfaceUuid);
+    if (!ownUuid && !ownRef && !sessionUuid) return null;
+    const needsProof = Boolean(ownUuid || sessionUuid);
+
+    const observerSnapshot = this.captureObserverSnapshot();
+    let surfaces: readonly CmuxSurface[] = [];
+    try {
+      surfaces = await this.observedSurfaces();
+    } catch {
+      surfaces = [];
+    }
+    const identified = surfaces.some((surface) => surface.id);
+    if (
+      !this.isObserverSnapshotCurrent(observerSnapshot) ||
+      surfaces.length === 0 ||
+      !hasCoherentSurfaceIdentity(surfaces) ||
+      (needsProof && !identified)
+    ) {
+      if (needsProof) {
+        throw new Error("the cmux surface topology is inconclusive");
+      }
+      return null;
+    }
+    const byUuid = (key: string) =>
+      surfaces.find((surface) => surfaceUuidKey(surface.id) === key);
+    const own = ownUuid
+      ? byUuid(ownUuid)
+      : !identified && ownRef
+        ? surfaces.find((surface) => surface.ref === ownRef)
+        : undefined;
+    if (own) return { surface: own, via: "binding" };
+    const registered = sessionUuid ? byUuid(sessionUuid) : undefined;
+    if (registered) return { surface: registered, via: "session" };
+    return null;
   }
 
   private canPurgeAtStartup(agent: AgentRecord): boolean {
@@ -2788,6 +2897,19 @@ export class AgentRegistry {
       if (role === null || role === "orchestrator") {
         continue;
       }
+      const sessionRow = this.sweepSessionRow(
+        id,
+        agent,
+        surfaces,
+        Date.now(),
+        observerSnapshot.ownerId,
+        "purgeTerminal",
+      );
+      if (sessionRow === "deleted") {
+        purged++;
+        continue;
+      }
+      if (sessionRow === "kept") continue;
       if (this.matchingLiveSurface(agent, surfaces)) {
         this.surfacelessObservations.delete(agent.agent_id);
         continue;
@@ -2805,11 +2927,6 @@ export class AgentRegistry {
           observerSnapshot.ownerId,
         )
       ) {
-        // #926: a dead pane is exactly when a lead resumes by id.
-        if (isRetainedResumableSession(agent, opts.now ?? Date.now())) {
-          this.unbindRetainedSession(id, agent, surfaces, "purgeTerminal");
-          continue;
-        }
         const removedAgentId = this.deleteAgentAndAliases(id);
         this.stateMgr.removeState(removedAgentId);
         purged++;

@@ -12280,6 +12280,7 @@ Session ID: ${sessionId}`,
       const parent = makeRecord({
         agent_id: "cmuxlayerClaude-parent",
         surface_id: "surface:halt-parent",
+        surface_uuid: "a1a1a1a1-1111-4222-8333-444444444444",
         state: "working",
         role: "orchestrator",
         parent_agent_id: null,
@@ -12288,6 +12289,8 @@ Session ID: ${sessionId}`,
       const child = makeRecord({
         agent_id: "cmuxlayerCodex-awaiting",
         surface_id: "surface:halt-awaiting",
+        // #926: a done row with a session keeps a binding only by UUID.
+        surface_uuid: "b2b2b2b2-1111-4222-8333-444444444444",
         // #408 regression: persisted done must not override a live blocked screen.
         state: "done",
         parent_agent_id: parent.agent_id,
@@ -12298,8 +12301,8 @@ Session ID: ${sessionId}`,
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
       liveSurfaces = [
-        makeSurface(parent.surface_id),
-        makeSurface(child.surface_id),
+        { ...makeSurface(parent.surface_id), id: parent.surface_uuid },
+        { ...makeSurface(child.surface_id), id: child.surface_uuid },
       ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
         async (surface: string) => ({
