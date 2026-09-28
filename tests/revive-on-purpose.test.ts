@@ -1151,6 +1151,33 @@ describe("revive on purpose (#492)", () => {
       }
     });
 
+    it("resumes codex despite an unattributed live claude pane", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(makeRecord({
+        state: "done", surface_id: UNBOUND_SURFACE_REF, surface_uuid: null,
+        workspace_id: null, pid: DEAD_PID,
+      }));
+      liveSurfaces = [{ ...LIVE_PANE, title: "cmuxlayerClaude" }];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: LIVE_PANE.ref, text: "Claude Code\n✻ Thinking…",
+        lines: 20, scrollback_used: false,
+      });
+      await registry.reconstitute();
+      withFakeRightSplitClient(mockClient);
+      const cleanScanEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null,
+        inboxOpts: { baseDir: TEST_DIR }, sessionProcessScanner: async () => [],
+      });
+      try {
+        await expect(cleanScanEngine.resumeAgent("cmuxlayerCodex-revive"))
+          .resolves.toMatchObject({ surface_id: "surface:new" });
+        expect(mockClient.newSplit).toHaveBeenCalled();
+        expect(mockClient.send).toHaveBeenCalled();
+      } finally {
+        cleanScanEngine.dispose();
+      }
+    });
+
     it("refuses when discovery loses the live pane after attribution", async () => {
       writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
       stateMgr.writeState(makeRecord({

@@ -4531,7 +4531,7 @@ export class AgentEngine {
         const uuid = row.surface_uuid?.trim().toLowerCase();
         if (uuid && snapshot.attributedUuids.has(uuid)) return false;
         if (row.read_error) return true;
-        return row.has_agent || row.cli === cli;
+        return row.cli === cli || (row.has_agent && row.cli === "unknown");
       })
       .map((row) => row.surface_id);
   }
