@@ -154,7 +154,7 @@ import {
   removePendingChannelMarkerAfterRegistration,
   type InboxOpts,
 } from "./inbox.js";
-import type { TailOwnerState } from "./inbox-tail-reaper.js";
+import type { ProcessRow, TailOwnerState } from "./inbox-tail-reaper.js";
 import {
   agentProcessLiveness,
   agentProcessMayBeAlive,
@@ -4260,8 +4260,11 @@ export class AgentEngine {
     return sweepImpl.reapInboxTailsBestEffort.call(this.sweepHost(), ...args);
   }
   /** #911: whether a mailbox tailer's owner is live, proven gone, or unknowable. */
-  inboxTailOwnerState(agentId: string): TailOwnerState {
-    return sweepImpl.inboxTailOwnerState.call(this.sweepHost(), agentId);
+  inboxTailOwnerState(
+    agentId: string,
+    processes: ReadonlyMap<number, ProcessRow>,
+  ): TailOwnerState {
+    return sweepImpl.inboxTailOwnerState.call(this.sweepHost(), agentId, processes);
   }
   private runCloseForensicsBestEffort(...args: Parameters<typeof sweepImpl.runCloseForensicsBestEffort>): ReturnType<typeof sweepImpl.runCloseForensicsBestEffort> {
     return sweepImpl.runCloseForensicsBestEffort.call(this.sweepHost(), ...args);

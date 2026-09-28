@@ -7,7 +7,8 @@
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { inboxBaseDir as inboxBaseDirOf } from "../inbox.js";
 import { CmuxClient, type ExecFn } from "../cmux-client.js";
 import type { CmuxSocketClient } from "../cmux-socket-client.js";
 import { type SeatManifestWriter } from "../seat-manifest.js";
@@ -462,14 +463,19 @@ export function createServerContext(
 /**
  * #911: the registry may call a record-less tailer an orphan only when its
  * state dir and the inbox dir are a pair: both the production defaults, or
- * both configured. A scratch state dir over the real inbox dir is not.
+ * both elsewhere. Compared as resolved paths, not by whether an override was
+ * passed, so a scratch state dir over the real inbox dir is never a pair and
+ * the defaults spelled out explicitly still are.
  */
 export function hasInboxTailRecordAuthority(
   stateDir: string,
   inboxBaseDir: string | undefined,
 ): boolean {
-  const defaultStateDir = join(homedir(), ".local", "state", "cmux-agents");
-  return (stateDir === defaultStateDir) === (inboxBaseDir === undefined);
+  const isDefaultState =
+    resolve(stateDir) === resolve(homedir(), ".local", "state", "cmux-agents");
+  const isDefaultInbox =
+    resolve(inboxBaseDir ?? inboxBaseDirOf()) === resolve(inboxBaseDirOf());
+  return isDefaultState === isDefaultInbox;
 }
 
 export function resolveServerInboxBaseDir(input: {

@@ -50,7 +50,7 @@ const ROW_RE =
 // Current title: `cmuxlayer-inbox-tail <agent_id> <token>`. Legacy title:
 // `cmuxlayer-inbox-tail:<token>`, possibly followed by leaked environment.
 const WRAPPER_RE =
-  /^cmuxlayer-inbox-tail(?::([A-Za-z0-9-]{8,128})|\s+([A-Za-z0-9._-]+)\s+([A-Za-z0-9-]{8,128}))(?:\s|$)/;
+  /^cmuxlayer-inbox-tail(?::([A-Za-z0-9-]{8,128})|\s+(\S+)\s+([A-Za-z0-9-]{8,128}))(?:\s|$)/;
 const TOKEN_RECORD_RE = /^([1-9][0-9]*)(?: ([A-Za-z0-9-]{8,128}))?\n?$/;
 
 export function parseProcessRows(output: string): ProcessRow[] {

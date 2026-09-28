@@ -1144,10 +1144,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           inboxTailers: async () => {
             const engine = context.lifecycleSweepEngine;
             if (!engine) return null;
+            const rows = await snapshotProcessRows();
+            const processes = new Map(rows.map((row) => [row.pid, row]));
             const result = await sweepInboxTailers({
-              rows: await snapshotProcessRows(),
+              rows,
               inboxOpts,
-              ownerState: (agentId) => engine.inboxTailOwnerState(agentId),
+              ownerState: (agentId) => engine.inboxTailOwnerState(agentId, processes),
             });
             return { live: result.live.length, orphaned: result.orphaned.length };
           },

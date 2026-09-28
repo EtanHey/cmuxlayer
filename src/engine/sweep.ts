@@ -13,11 +13,12 @@ import {
 import type { AgentRecord, CloseForensicsEvent } from "../agent-types.js";
 import { getTransportHealth } from "../cmux-transport-self-heal.js";
 import {
+  type ProcessRow,
   type TailOwnerState,
   snapshotProcessRows,
   sweepInboxTailers,
 } from "../inbox-tail-reaper.js";
-import { agentProcessLiveness } from "../util/pid-alive.js";
+import { qualifyAgentProcessLiveness } from "../util/pid-alive.js";
 import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
   agentDir,
@@ -787,12 +788,29 @@ const PENDING_AGENT_ID_RE = /-pending-\d+-[a-z0-9]+$/i;
  * `done` alone is NOT gone: a lead that wrote DONE keeps its pane, its process
  * and its mailbox until something closes it.
  */
-export function inboxTailOwnerState(this: SweepHost, agentId: string): TailOwnerState {
+export function inboxTailOwnerState(
+  this: SweepHost,
+  agentId: string,
+  processes: ReadonlyMap<number, ProcessRow>,
+): TailOwnerState {
   // A provisional id is renamed in place once the real one is known.
   if (PENDING_AGENT_ID_RE.test(agentId)) return "unknown";
   const record = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
   if (!record) return this.inboxTailReaper?.recordAuthority ? "gone" : "unknown";
-  if (record.pid) return agentProcessLiveness(record) === "gone" ? "gone" : "live";
+  if (record.pid) {
+    // Judged from the same `ps` snapshot as the tailers: no per-owner
+    // synchronous probe on the event loop.
+    const row = processes.get(record.pid);
+    if (!row) return "gone";
+    const startedAtMs = Date.parse(row.started_at);
+    return qualifyAgentProcessLiveness(
+      record,
+      "alive",
+      Number.isFinite(startedAtMs) ? startedAtMs : null,
+    ) === "gone"
+      ? "gone"
+      : "live";
+  }
   return TERMINAL_STATES.has(record.state) && record.user_killed === true ? "gone" : "live";
 }
 
@@ -809,10 +827,12 @@ export async function reapInboxTailsBestEffort(this: SweepHost): Promise<void> {
   this.lastInboxTailReapAt = now;
   this.inboxTailReapInFlight = true;
   try {
+    const rows = await snapshotProcessRows();
+    const processes = new Map(rows.map((row) => [row.pid, row]));
     const result = await sweepInboxTailers({
-      rows: await snapshotProcessRows(),
+      rows,
       inboxOpts: this.inboxOpts,
-      ownerState: (agentId) => inboxTailOwnerState.call(this, agentId),
+      ownerState: (agentId) => inboxTailOwnerState.call(this, agentId, processes),
       reap: true,
     });
     for (const tailer of result.live) {

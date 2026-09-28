@@ -22,6 +22,8 @@ import {
   sweepInboxTailers,
 } from "../src/inbox-tail-reaper.js";
 import { StateManager } from "../src/state-manager.js";
+import { hasInboxTailRecordAuthority } from "../src/mcp/context.js";
+import { homedir } from "node:os";
 import { alive, armTailer as armRealTailer, waitGone } from "./helpers/inbox-tailer.js";
 
 const cleanups: Array<() => void> = [];
@@ -159,6 +161,19 @@ describe("#911 inbox tailer reaping", () => {
     expect(alive(tail)).toBe(true);
   });
 
+  it("record authority requires a resolved state/inbox pair, not merely two overrides", () => {
+    const prodState = join(homedir(), ".local", "state", "cmux-agents");
+    const prodInbox = join(homedir(), ".cmux", "agents");
+    expect(hasInboxTailRecordAuthority(prodState, undefined)).toBe(true);
+    // The defaults spelled out are still the production pair.
+    expect(hasInboxTailRecordAuthority(`${prodState}/`, prodInbox)).toBe(true);
+    // A scratch state dir pointed at the real fleet inbox is never a pair.
+    expect(hasInboxTailRecordAuthority("/tmp/bench-state", prodInbox)).toBe(false);
+    expect(hasInboxTailRecordAuthority("/tmp/bench-state", undefined)).toBe(false);
+    expect(hasInboxTailRecordAuthority(prodState, "/tmp/bench-inbox")).toBe(false);
+    expect(hasInboxTailRecordAuthority("/tmp/bench-state", "/tmp/bench-inbox")).toBe(true);
+  });
+
   it("a recorded PID now running something else is never signalled (pid_reused)", async () => {
     const tailer: InboxTailer = {
       agent_id: "fleetWorker-reused01",
@@ -188,7 +203,8 @@ describe("#911 inbox tailer reaping", () => {
   it("classifies tailers for control_health without signalling anything", async () => {
     const { inboxOpts } = scratch();
     const live = armTailer("fleetWorker-count001", inboxOpts);
-    const orphan = armTailer("fleetWorker-count002", inboxOpts);
+    // A resumed id may carry characters outside [A-Za-z0-9._-].
+    const orphan = armTailer("fleetWorker+count002", inboxOpts);
 
     const result = await sweepInboxTailers({
       rows: await snapshotProcessRows(),
@@ -197,7 +213,7 @@ describe("#911 inbox tailer reaping", () => {
     });
 
     expect(result.live.map((tailer) => tailer.agent_id)).toEqual(["fleetWorker-count001"]);
-    expect(result.orphaned.map((tailer) => tailer.agent_id)).toEqual(["fleetWorker-count002"]);
+    expect(result.orphaned.map((tailer) => tailer.agent_id)).toEqual(["fleetWorker+count002"]);
     expect(result.orphaned[0]).toMatchObject({ recorded: true, wrapper_pid: orphan.wrapper, tail_pid: orphan.tail });
     expect(alive(live.tail) && alive(orphan.tail)).toBe(true);
   });
