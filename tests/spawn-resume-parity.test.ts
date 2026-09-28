@@ -23,7 +23,6 @@ import {
   resolveRepoRootFromLauncherRegistry,
 } from "../src/launcher-registry.js";
 import { StateManager } from "../src/state-manager.js";
-import { RAISE_NOFILE_SOFT_LIMIT } from "../src/nofile-limit.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient, CmuxNewSplitResult } from "../src/cmux-client.js";
 import type { CliType } from "../src/agent-types.js";
@@ -35,12 +34,6 @@ const TEST_DIR = join(tmpdir(), "cmux-parity-registry-optional");
 const REPO = "parityrepo";
 const SESSION = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
 const SPAWN_SURFACE_UUID = "11111111-2222-4333-8444-555555555555";
-
-function withoutNofilePrelude(command: string): string {
-  const prelude = `${RAISE_NOFILE_SOFT_LIMIT}; `;
-  expect(command.startsWith(prelude)).toBe(true);
-  return command.slice(prelude.length);
-}
 
 type LauncherPath = "registry" | "raw";
 
@@ -147,11 +140,10 @@ const RESUMABLE_CLIS = CLIS.filter(
 );
 
 function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string {
-  const workerEnv = cli === "claude" ? "" : "GOLEM_ROLE=worker ";
   if (path === "registry") {
-    return `${workerEnv}${EXPECTED_LAUNCHER_NAME[cli]} -s${cli === "codex" ? " --worker" : ""}`;
+    return `${EXPECTED_LAUNCHER_NAME[cli]} -s --worker`;
   }
-  const cd = `cd '${root}' && ${workerEnv}`;
+  const cd = `cd '${root}' && `;
   switch (cli) {
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions`;
@@ -311,7 +303,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
       // --- Launch command: launcher form vs raw form. ---
       const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
-      expect(withoutNofilePrelude(launchCmd)).toBe(expectedLaunch(cli, path, repoRoot));
+      expect(launchCmd).toBe(expectedLaunch(cli, path, repoRoot));
 
       // The tab title names the AGENT (#492), and must not vary by lane.
       expect(client.renameTab).toHaveBeenCalledWith(
@@ -346,7 +338,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
 
         const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(withoutNofilePrelude(resumeCmd)).toBe(expectedResume(cli, path, repoRoot));
+        expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
         // Whatever the lane, the resumed command names the captured session.
         expect(resumeCmd).toContain(SESSION);
       },

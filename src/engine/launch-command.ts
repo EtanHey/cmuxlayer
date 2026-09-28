@@ -314,7 +314,7 @@ export function buildLaunchCommand(
     allowModelOverride?: boolean;
     effort?: CodexEffort;
     launchMode?: AgentLaunchMode;
-    /** Non-Claude worker authority skips launcher persona injection. */
+    /** Worker authority is conveyed to repoGolem launchers with --worker. */
     authority?: AgentAuthority;
     /** Approval handling for this launch; defaults to the machine's setting. */
     permissionMode?: SpawnPermissionMode;
@@ -343,8 +343,6 @@ export function buildLaunchCommand(
   const codexModelOverride =
     cli === "codex" && modelFlag !== null && modelFlag !== "codex";
   const envParts = [
-    // Claude maps GOLEM_ROLE=worker to medium effort; preserve its existing effort.
-    opts?.authority === "worker" && cli !== "claude" ? "GOLEM_ROLE=worker" : null,
     codexModelOverride ? `${MODEL_OVERRIDE_ENV}=1` : null,
     opts?.envPrefix ?? null,
   ].filter((part): part is string => Boolean(part));
@@ -358,8 +356,6 @@ export function buildLaunchCommand(
     // REPOGOLEM_ALLOW_MODEL is a launcher-only escape hatch; it means nothing
     // to a raw binary, so raw mode carries only the harness + caller env.
     const rawEnvParts = [
-      // Claude maps GOLEM_ROLE=worker to medium effort; preserve its existing effort.
-      opts?.authority === "worker" && cli !== "claude" ? "GOLEM_ROLE=worker" : null,
       cli === "claude" || cli === "gemini" ? AGENT_ENV : null,
       opts?.envPrefix ?? null,
     ].filter((part): part is string => Boolean(part));
@@ -389,17 +385,17 @@ export function buildLaunchCommand(
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${claudeModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${launcherWorkerArg}${claudeModelArgs}${launcherWorktreeArg}`;
     case "codex":
       return `${envPrefix}${launcherName ?? `${safeRepo}Codex`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "gemini":
       // repoGolem launcher (e.g. golemsGemini -s) wires antigravity + MCP.
-      return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`}${launcherSkipArg}${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherWorktreeArg}`;
     case "kiro":
       return `${rawCdPrefix || defaultKiroCd(repo)}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
-      return `${envPrefix}${launcherName ?? `${safeRepo}Cursor`}${launcherSkipArg}${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Cursor`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherWorktreeArg}`;
   }
 }
 

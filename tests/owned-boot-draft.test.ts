@@ -63,7 +63,7 @@ function makeSlowComposerPane() {
     if (args.includes("send") && !args.includes("send-key")) {
       const text = String(args.at(-1));
       // The launcher command is echoed by the shell, not typed into Claude.
-      if (!/ulimit -Sn/.test(text)) state.composer += text;
+      if (!/^brainlayerClaude(?: |$)/.test(text)) state.composer += text;
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("read-screen")) {

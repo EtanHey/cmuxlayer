@@ -41,6 +41,18 @@ not assume a fixed repository layout. See
 [docs/guides/registry-optional-spawn.md](docs/guides/registry-optional-spawn.md) for how each
 lane behaves.
 
+## Raise the open-files limit for agent CLIs
+
+Agent CLIs open many files, while macOS login shells can start with a low soft
+open-files limit. If you use repoGolem launchers, put this POSIX shell snippet
+in a `global.prelaunch` entry so it runs before each agent CLI. You can also
+put it in your shell rc file. It raises a low soft limit up to the hard limit,
+capped at 65536, and never lowers an existing soft limit.
+
+```sh
+cmux_nf_s=$(ulimit -Sn); cmux_nf_h=$(ulimit -Hn); [ "$cmux_nf_s" = unlimited ] || [ "$cmux_nf_s" -ge 65536 ] || { [ "$cmux_nf_h" = unlimited ] && cmux_nf_h=65536; [ "$cmux_nf_h" -gt 65536 ] && cmux_nf_h=65536; ulimit -Sn "$cmux_nf_h"; }
+```
+
 Add to your MCP config:
 
 **Codex CLI / T3 Code**
