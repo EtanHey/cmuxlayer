@@ -81,7 +81,7 @@ const ps = (pid: number): { parent: number; group: number; command: string } | n
   const match = /^\s*(\d+)\s+(\d+)\s+([^\n]*)/.exec(result.stdout);
   return match ? { parent: Number(match[1]), group: Number(match[2]), command: match[3]! } : null;
 };
-const pidfileMatches = (pid: number): boolean => {
+const pidfileMatches = (pid: number, token: string): boolean => {
   const pending = [root];
   while (pending.length > 0) {
     const dir = pending.pop()!;
@@ -92,12 +92,22 @@ const pidfileMatches = (pid: number): boolean => {
       if (entry.isDirectory()) pending.push(path);
       if (entry.isFile() && entry.name === "inbox-tail.pid") {
         try {
-          if (Number(readFileSync(path, "utf8").split(" ")[0]) === pid) return true;
+          if (readFileSync(path, "utf8").trim() === `${pid} ${token}`) return true;
         } catch { /* a test may remove its fixture while we inspect it */ }
       }
     }
   }
   return false;
+};
+const hasScopedTailChild = (pid: number): boolean => {
+  const result = spawnSync("ps", ["-axww", "-o", "ppid=,command="], {
+    encoding: "utf8", timeout: 1000, maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.status !== 0) return false;
+  return result.stdout.split("\n").some((line) => {
+    const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+    return Number(match?.[1]) === pid && match?.[2]?.startsWith(`tail -n0 -F ${root}/`) === true;
+  });
 };
 process.kill = ((pid: number, signal?: NodeJS.Signals | number): boolean => {
   if (signal === 0) return nativeKill(pid, signal);
@@ -121,7 +131,8 @@ process.kill = ((pid: number, signal?: NodeJS.Signals | number): boolean => {
   if (pid < 0 && observed?.group !== target) owned = false;
   if (pid > 0 && !owned && observed?.command.startsWith(`tail -n0 -F ${root}/`)) owned = true;
   if (!owned && observed?.command.startsWith("cmuxlayer-inbox-tail ")) {
-    owned = pidfileMatches(pid);
+    const token = /^cmuxlayer-inbox-tail \S+ ([A-Za-z0-9-]{8,128})(?:\s|$)/.exec(observed.command)?.[1];
+    owned = pid > 0 && token !== undefined && pidfileMatches(pid, token) && hasScopedTailChild(pid);
   }
   // This live restart fixture deliberately detaches a real daemon. Its path
   // embeds the current Vitest worker PID, so it cannot match a fleet daemon.
