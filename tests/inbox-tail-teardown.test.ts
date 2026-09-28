@@ -89,11 +89,14 @@ describe("boot contract mailbox teardown", () => {
     }
   });
 
-  it("#911: the supervisor's ps line is a fixed title with no environment text", async () => {
+  // A resumed id can carry characters outside [A-Za-z0-9._-]; the title must
+  // still name the whole id, or stop_agent's reaper reads it as a mismatch.
+  it.each(["fleetWorker-t911abcd", "fleetWorker+resumed1"])(
+    "#911: the supervisor's ps line is a fixed title with no environment text (%s)",
+    async (agentId) => {
     // The seat's environment carries CMUX_* vars and cmux's .../claude and
     // .../codex shim paths. On main, `$0=` left ps reading on into that
     // environment, so every tailer looked like a "claude" process.
-    const agentId = "fleetWorker-t911abcd";
     const base = mkdtempSync(join(tmpdir(), "cmux-inbox-title-"));
     const agentDir = join(base, agentId);
     const inbox = join(agentDir, "inbox.jsonl");
@@ -138,7 +141,8 @@ describe("boot contract mailbox teardown", () => {
       }
       rmSync(base, { recursive: true, force: true });
     }
-  });
+  },
+  );
 
   it("gives the exact stop command, addressed by pid", () => {
     const block = mailboxBlock(render());
