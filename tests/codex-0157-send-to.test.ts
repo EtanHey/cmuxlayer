@@ -40,6 +40,7 @@ function makeCodexPane(frames: Frames) {
   const pane = {
     frames, live: false, phase: "empty" as "empty" | "buffered" | "draft" | "after",
     bufferedReads: 0, repaint: false, swallow: 0, returns: 0, submitted: [] as string[], text: "",
+    failWhileEmpty: false,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
@@ -74,6 +75,7 @@ function makeCodexPane(frames: Frames) {
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("read-screen")) {
+      if (pane.failWhileEmpty && pane.phase === "empty") throw new Error("transient read failure");
       return { stdout: JSON.stringify({ surface: "surface:new", text: read(), lines: 30, scrollback_used: false }), stderr: "" };
     }
     return { stdout: JSON.stringify(listing(args)), stderr: "" };
@@ -128,7 +130,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, context, spawned, send, keyReturn, surfaceSend };
+    return { pane, context, spawned, engine, send, keyReturn, surfaceSend };
   }
 
   it("idle: reports submitted only once the message is in the transcript", async () => {
@@ -236,6 +238,93 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
+  // #917 (review of #913): the reviewer's probes. Whitespace-only foreign
+  // edits are foreign; one Return must not submit them under our token.
+  it.each([
+    ["review foo bar", "review  foo bar", "review  foo bar"],
+    ["prefixsuffix", "prefix\n  suffix", "prefix suffix"],
+  ])("#917: an edit from %j to %j revokes the sender's Return", async (own, visible, actual) => {
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: () => fixture("idle-draft").replace(PONG, own), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      await t.send(own);
+      t.pane.frames.draft = fixture("idle-draft").replace(PONG, visible);
+      t.pane.text = actual;
+      t.pane.swallow = 0;
+      const before = t.pane.returns;
+      const receipt = await t.keyReturn(LEAD_UUID);
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(t.pane.returns).toBe(before);
+      expect(t.pane.submitted).toEqual([]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // #917: a repeated message is proven by its position below the pre-type
+  // transcript, not by the count of matching rows rising.
+  const withBody = (body: string) => fixture("idle-empty").replace("› Ask", `${body}\n\n› Ask`);
+  const headerless = (body: string) => withBody(body).replace(/^[\s\S]*?Tip: [^\n]*\n/, "");
+  it.each([
+    // The live response cell changed too; the new row is below it.
+    [
+      "the response above it changed",
+      withBody("› again\n\n• old response"),
+      withBody("› again\n\n• old response, finished\n\n› again\n\nWorking (0s • esc to interrupt)"),
+    ],
+    // Scrolled: the header and the first `again` left the window; the rest moved up.
+    [
+      "the first row scrolled out",
+      withBody("› again\n\n• old response\n\n  14:06\n\n› status?\n\n• all green"),
+      headerless("  14:06\n\n› status?\n\n• all green\n\n› again\n\n• new response"),
+    ],
+  ])("#917: sending an identical message again verifies when %s", async (_why, before, after) => {
+    const t = await setup({
+      empty: before, buffered: before,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after,
+    });
+    try {
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual(["again"]);
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ submitted: true });
+      expect(t.pane.returns).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // Round 2 (review of #923): the live response cell changes while the old
+  // identical row stays put. The frame cannot prove a new row, so the receipt
+  // never says submitted, whether the Return was swallowed or landed.
+  it.each([
+    ["swallowed", 99, []],
+    ["landed", 0, ["again"]],
+  ])("#923: a Return %s under a changing response is never a verified repeat", async (_why, swallow, actual) => {
+    const oldFrame = withBody("› again\n\n• old response");
+    const changed = withBody("› again\n\n• new response");
+    const t = await setup({ empty: oldFrame, buffered: changed, draft: changed.replace("› Ask Codex to do anything", "› again"), after: changed });
+    try {
+      t.pane.swallow = swallow as number;
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual(actual);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+      expect(receipt.delivery_state, JSON.stringify(receipt)).not.toBe("submitted");
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#917: an unchanged stale identical row never verifies", async () => {
+    const stale = fixture("idle-empty").replace("› Ask", "› ok\n\n• old response\n\n› Ask");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "ok"), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("ok");
+      expect(t.pane.submitted).toEqual([]);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
   // Round 2 (review finding 6): surface-mode and background sends observe the
   // payload before Return too, so one Return lands after the burst.
   it.each([false, true])("r2: a surface-mode send (background=%s) waits for the payload before Return", async (background) => {
@@ -248,6 +337,130 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(receipt.ok, JSON.stringify(receipt)).toBe(true);
       await vi.waitFor(() => expect(t.pane.submitted).toEqual([PONG]), { timeout: 10_000 });
       expect(t.pane.returns).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+  // #923 follow-up (r2 review, Macroscope 4122511645): a wrap swallows the
+  // whitespace it breaks at, so two spaces there look like one. The caller's
+  // two-space text cannot be told from a one-space edit, and never owns it.
+  it("#923: a one-space edit at a wrap revokes the sender's Return on a two-space draft", async () => {
+    const row = Array.from({ length: 19 }, () => "word").join(" ");
+    const tail = Array.from({ length: 4 }, () => "word").join(" ");
+    const own = `${row}  ${tail}`;
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: () => fixture("idle-draft").replace(PONG, own), after: fixture("idle-submitted-working"),
+    });
+    try {
+      t.pane.swallow = 99;
+      await t.send(own);
+      t.pane.frames.draft = fixture("idle-draft").replace(PONG, `${row}\n  ${tail}`);
+      t.pane.text = `${row} ${tail}`;
+      t.pane.swallow = 0;
+      const before = t.pane.returns;
+      const receipt = await t.keyReturn(LEAD_UUID);
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(t.pane.returns).toBe(before);
+      expect(t.pane.submitted).toEqual([]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // #923 follow-up (r2 review): with no pre-type frame there is no baseline,
+  // so an old identical row on screen proves nothing.
+  it("#923: a send whose pre-type reads failed never takes an old row as proof", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      t.pane.failWhileEmpty = true;
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual([]);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+  // #935 r2: the background pending sweep uses the same Codex proof as the
+  // send itself. A placeholder repaint (empty composer) over an old identical
+  // row is no proof, with or without a pre-type frame.
+  it.each([
+    ["the pre-type reads failed", true],
+    ["the pre-type frame was read", false],
+  ])("#935: the pending sweep never verifies an old row when %s", async (_why, failPreType) => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      t.pane.failWhileEmpty = failPreType as boolean;
+      const receipt = await t.send("again");
+      expect(receipt.delivery_state, JSON.stringify(receipt)).toBe("pending_verify");
+      t.pane.repaint = true;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual([]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("pending_verify");
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#935: the pending sweep verifies a late submit drawn below the pre-type frame", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("again");
+      expect(receipt.delivery_state, JSON.stringify(receipt)).toBe("pending_verify");
+      // The Return lands late: the pane submits, and the new row is drawn below.
+      t.pane.submitted.push(t.pane.text);
+      t.pane.frames.after = withBody("› again\n\n• old response\n\n› again\n\n• new response");
+      t.pane.phase = "after";
+      t.pane.repaint = false;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual(["again"]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("submitted");
+    } finally { t.context.dispose(); }
+  }, 30_000);
+  // #935 follow-up (r2 re-verify): a pre-type read that succeeds blank is not
+  // a baseline. Neither the send nor the pending sweep may take the old row
+  // it then repaints as new, and the blank frame is never stored.
+  it("#935: a blank pre-type read never proves an old row, now or in the sweep", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: "", buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual([]);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+      expect(t.context.deliveryPreTypeScreens.has(receipt.delivery_id)).toBe(false);
+      t.pane.repaint = true;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual([]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).not.toBe("submitted");
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#935: the pending sweep never takes a blank stored frame as a baseline", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("again");
+      expect(receipt.delivery_state, JSON.stringify(receipt)).toBe("pending_verify");
+      t.context.deliveryPreTypeScreens.set(receipt.delivery_id, "");
+      t.pane.repaint = true;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual([]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("pending_verify");
     } finally { t.context.dispose(); }
   }, 30_000);
 });

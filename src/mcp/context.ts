@@ -226,6 +226,12 @@ export interface CmuxServerContext {
   >;
   eventLog: ReturnType<StateManager["getEventLog"]>;
   deliveries: Map<string, DeliveryRecord>;
+  /**
+   * The screen read before typing, by delivery_id: the baseline the pending
+   * sweep needs for a Codex submit proof. In memory only (receipts never
+   * persist screen text); bounded by the delivery engine (#935).
+   */
+  deliveryPreTypeScreens: Map<string, string>;
   latestDeliveryBySurface: Map<string, string>;
   activeDeliveryBySurface: Map<string, string>;
   activeSurfaceWrites: Map<string, string>;
@@ -385,6 +391,7 @@ export function createServerContext(
     eventLog: stateMgr.getEventLog(),
     typedDraftOwners: new Map(),
     deliveries: new Map(),
+    deliveryPreTypeScreens: new Map(),
     latestDeliveryBySurface: new Map(),
     activeDeliveryBySurface: new Map(),
     activeSurfaceWrites: new Map(),

@@ -63,7 +63,7 @@ import {
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
   countVisibleExactQueuedRows,
-  codexTranscriptEchoCount,
+  codexScreenShowsSubmit,
   composerRegionMatchesPayload,
   screenShowsCursorFollowupNeedsEnter,
   screenShowsQueuedCursorFollowup,
@@ -280,6 +280,9 @@ export interface DeliveryEngineDeps {
   }) => Promise<void>;
 }
 
+/** Pre-type frames kept for the pending sweep; far above any live pending set. */
+const MAX_REMEMBERED_PRE_TYPE_SCREENS = 256;
+
 export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   const {
     context,
@@ -293,6 +296,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   const stateMgr = context.stateMgr;
   const eventLog = context.eventLog;
   const deliveries = context.deliveries;
+  const deliveryPreTypeScreens = context.deliveryPreTypeScreens;
   const latestDeliveryBySurface = context.latestDeliveryBySurface;
   const activeDeliveryBySurface = context.activeDeliveryBySurface;
   const activeSurfaceWrites = context.activeSurfaceWrites;
@@ -752,7 +756,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const region = extractComposerInputRegion(text, token.text, record?.cli, true);
       // A truncated read without a composer anchor observes no draft state.
       if (region === null) continue;
-      const unchanged = composerRegionMatchesPayload(region, token.text, record?.cli);
+      const unchanged = composerRegionMatchesPayload(region, token.text, record?.cli, text);
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
@@ -1050,7 +1054,6 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let sawNewInterrupt = false;
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
-    const codexEchoBaseline = codexTranscriptEchoCount(opts.pre_type_screen ?? "", opts.text);
 
     while (Date.now() - startedAt < timeoutMs) {
       await opts.beforeMutation?.();
@@ -1179,9 +1182,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const codexSubmitEchoed =
         codexScreen &&
         !hasPendingSubmitEvidence &&
-        composerInput !== null &&
-        composerInput.trim() === "" &&
-        codexTranscriptEchoCount(snapshot.text, opts.text) > codexEchoBaseline;
+        codexScreenShowsSubmit(opts.pre_type_screen, snapshot.text, opts.text);
       const bootHasTranscriptEcho =
         opts.require_attributable_submit_evidence === true &&
         bootFrameAdvanced &&
@@ -1878,6 +1879,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ? { draftGuardText }
         : {}),
     });
+    // The pending sweep proves a later Codex submit against this same frame
+    // (#935). Without one (or with a blank read), it has no baseline and
+    // proves nothing.
+    if (opts.delivery_id && deliverySafetySnapshot?.text.trim()) {
+      deliveryPreTypeScreens.delete(opts.delivery_id);
+      deliveryPreTypeScreens.set(opts.delivery_id, deliverySafetySnapshot.text);
+      while (deliveryPreTypeScreens.size > MAX_REMEMBERED_PRE_TYPE_SCREENS) {
+        const oldest = deliveryPreTypeScreens.keys().next().value;
+        if (oldest === undefined) break;
+        deliveryPreTypeScreens.delete(oldest);
+      }
+    }
     // This screen read is already required by the safety gate and occurs under
     // the surface write lock. Reuse it for raw tracked-surface verification.
     const verifySubmit =

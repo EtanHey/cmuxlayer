@@ -189,6 +189,7 @@ import {
   screenShowsQueuedCursorFollowup,
   screenShowsPendingShellInput,
   classifyPendingLauncherLine,
+  codexScreenShowsSubmit,
   composeBootDeliveryText,
 } from "./delivery/composer-screen.js";
 import {
@@ -3577,6 +3578,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 }
               : {}),
           };
+        }
+        // AIDEV-NOTE (#935): a Codex submit is proven here exactly as the send
+        // proves it (codexScreenShowsSubmit): an empty composer alone is a
+        // paste-burst placeholder, and the payload somewhere on screen can be
+        // an old identical row. The baseline is this delivery's pre-type
+        // frame; without one (its read failed, or the daemon restarted) the
+        // receipt stays pending until its deadline.
+        if (cli === "codex" || agent.cli === "codex") {
+          return !pending && codexScreenShowsSubmit(
+            context.deliveryPreTypeScreens.get(receipt.delivery_id),
+            resolvedSnapshot.text,
+            receipt.text,
+          )
+            ? { outcome: "delivered" as const, submit_verified: true }
+            : { outcome: "pending" as const };
         }
         const composerCleared = composer !== null && composer.trim() === "";
         const correlationTail = receipt.text

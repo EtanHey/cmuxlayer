@@ -468,83 +468,173 @@ export function composerPromptLineInput(screenText: string, knownCli?: CliType, 
   return null;
 }
 
+/** Columns Codex spends on a message row's `› ` or two-space prefix. */
+const CODEX_ROW_PREFIX_COLS = 2;
+/** Right-edge slack between the widest screen row and Codex's wrap width. */
+const CODEX_WRAP_EDGE_SLACK_COLS = 2;
+
 /**
- * Whether Codex's rendering of a message (its first row without the `› `
- * prefix, then continuation rows) is exactly this payload.
- *
- * AIDEV-NOTE (#905 r2): Codex soft-wraps a long message onto rows indented by
- * two spaces and indents every row after a paragraph break the same way. Only
- * those renderer-added breaks are forgiven: each row break may stand for one
- * space or none (a wrap at a space consumes it; a wrap after a hyphen does
- * not), and a blank row stands for a paragraph break. Inside a row, text must
- * match with only runs of spaces collapsed, so `review foobar` never matches
- * `review foo bar` (#802/#636).
+ * The narrowest wrap width Codex can have used on this screen: no row is wider
+ * than the pane, and a message row wraps within a column or two of its edge.
+ * Captured 0.157 panes put a wrapped message row at the widest row's column.
  */
-function codexRenderedRowsMatch(rows: string[], payload: string): boolean {
-  const squeeze = (text: string) => text.replace(/[ \t]+/g, " ").trim();
-  const paragraphs: string[][] = [[]];
-  for (const row of rows) {
-    if (!row.trim()) {
-      if (paragraphs[paragraphs.length - 1]!.length > 0) paragraphs.push([]);
-      continue;
-    }
-    paragraphs[paragraphs.length - 1]!.push(squeeze(row));
+export function codexWrapWidthFloor(screenText: string): number {
+  let widest = 0;
+  for (const line of normalizeTerminalText(screenText).split("\n")) {
+    widest = Math.max(widest, [...line.trimEnd()].length);
   }
-  if (paragraphs[paragraphs.length - 1]!.length === 0) paragraphs.pop();
-  if (paragraphs.length === 0) return false;
-  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = paragraphs
-    .map((paragraph) => paragraph.map(escape).join(" ?"))
-    .join("\n");
-  const expected = normalizeTerminalText(payload)
-    .split(/\n[ \t]*\n\s*/)
-    .map((paragraph) => squeeze(paragraph.replace(/\n/g, " ")))
-    .filter(Boolean)
-    .join("\n");
-  return new RegExp(`^${pattern}$`).test(expected);
+  return Math.max(1, widest - CODEX_ROW_PREFIX_COLS - CODEX_WRAP_EDGE_SLACK_COLS);
 }
 
-/** Composer or transcript rows after the first: drop the two-space wrap indent. */
-function codexContinuationRows(first: string, following: string[]): string[] {
-  return [first, ...following.map((row) => row.replace(/^ {1,2}/, ""))];
+/**
+ * The text Codex keeps on one row when wrapping at `from`: up to the next
+ * whitespace, or up to and including a hyphen between two alphanumerics (the
+ * textwrap hyphen split Codex's wrapper uses).
+ */
+function codexWrapFragment(text: string, from: number): string {
+  const word = /^[^\s]*/.exec(text.slice(from))?.[0] ?? "";
+  const hyphen = /[\p{L}\p{N}]-(?=[\p{L}\p{N}])/u.exec(word);
+  return hyphen ? word.slice(0, hyphen.index + 2) : word;
+}
+
+/**
+ * Whether Codex's rendering of a message (its first row without the `› `
+ * prefix, then continuation rows) is exactly this payload at some wrap width
+ * of at least `minWidth` columns.
+ *
+ * AIDEV-NOTE (#917): forgive only what the renderer does. Codex wraps first-fit
+ * and indents every row after the first by two spaces. A row break is then
+ * one of: the payload's own newline; a wrap at whitespace, which consumes that
+ * whitespace and is possible only when the next fragment would not have fit;
+ * a wrap after a hyphen between alphanumerics, which consumes nothing; or a
+ * forced break of a word wider than the row, which fills it exactly. Each
+ * break bounds the width, and a match needs one width that satisfies every
+ * row. Inside a row, text matches exactly, spaces included, and each blank row
+ * is one empty payload line, so blank-line counts must match too. A short row
+ * cannot be a wrap, so `prefix` / `suffix` is not `prefixsuffix` or
+ * `prefix suffix` (#802/#636, #917).
+ *
+ * AIDEV-NOTE (#923 follow-up): whitespace at a row end is invisible (a
+ * terminal shows trailing spaces as empty cells), so `a  b` wrapped after `a`
+ * looks exactly like `a b`. Only the single space a wrap consumes is the
+ * renderer's; any other whitespace at a row break (two spaces, a tab, spaces
+ * before a newline) cannot be proven from the screen and never matches.
+ */
+function codexRenderedRowsMatch(rows: string[], payload: string, minWidth = 1): boolean {
+  const text = normalizeTerminalText(payload).trimEnd();
+  const visible = rows.map((row) => row.trimEnd());
+  while (visible.length > 0 && !visible[visible.length - 1]) visible.pop();
+  if (!text || visible.length === 0) return false;
+  const width = (value: string) => [...value].length;
+  let low = Math.max(1, minWidth);
+  let high = Number.POSITIVE_INFINITY;
+  let position = 0;
+  for (const [index, visibleRow] of visible.entries()) {
+    let row = visibleRow;
+    if (index > 0 && row) {
+      if (!row.startsWith("  ")) return false;
+      row = row.slice(CODEX_ROW_PREFIX_COLS);
+    }
+    if (!text.startsWith(row, position)) return false;
+    position += row.length;
+    low = Math.max(low, width(row));
+    const whitespace = /^[ \t]*/.exec(text.slice(position))?.[0] ?? "";
+    const next = position + whitespace.length;
+    const lastRow = index === visible.length - 1;
+    if (whitespace && whitespace !== " ") return false;
+    if (next >= text.length) {
+      if (!lastRow) return false;
+      position = next;
+      break;
+    }
+    if (lastRow) return false;
+    if (text[next] === "\n") {
+      if (whitespace) return false;
+      position = next + 1;
+      continue;
+    }
+    if (!row) return false;
+    if (whitespace) {
+      high = Math.min(high, width(row) + width(whitespace) + width(codexWrapFragment(text, next)));
+      position = next;
+    } else if (/[\p{L}\p{N}]-$/u.test(row) && /^[\p{L}\p{N}]/u.test(text.slice(position))) {
+      high = Math.min(high, width(row) + width(codexWrapFragment(text, position)));
+    } else {
+      high = Math.min(high, width(row) + 1);
+    }
+  }
+  return position === text.length && low < high;
 }
 
 /**
  * Whether a composer region is exactly this payload as the CLI renders it.
- * For Codex, soft-wrap and paragraph indentation are forgiven; inline text,
- * including its spaces, must still match (see codexRenderedRowsMatch).
+ * For Codex, only renderer-made row breaks are forgiven, measured against the
+ * screen's wrap width (see codexRenderedRowsMatch); pass the screen so a
+ * short row cannot pass as a wrap.
  */
 export function composerRegionMatchesPayload(
   region: string,
   payload: string,
   cli: CliType | null | undefined,
+  screenText?: string,
 ): boolean {
-  if (region === normalizeTerminalText(payload).trimEnd()) return true;
-  if (cli !== "codex") return false;
+  const expected = normalizeTerminalText(payload).trimEnd();
+  // An empty composer is an empty payload on every CLI. For Codex a
+  // multi-row region is never compared literally: `a\n  b` on screen is the
+  // payload `a\nb` (or a wrap), not `a\n  b`.
+  if (cli !== "codex") return region === expected;
+  if (!region.trim()) return expected === "";
   const [first = "", ...following] = region.split("\n");
-  return codexRenderedRowsMatch(codexContinuationRows(first, following), payload);
+  return codexRenderedRowsMatch(
+    [first, ...following],
+    payload,
+    screenText === undefined ? 1 : codexWrapWidthFloor(screenText),
+  );
+}
+
+type CodexTranscript = { lines: string[]; composerIndex: number; history: number[] };
+
+/**
+ * The Codex transcript on screen: the composer row, and the indexes of the
+ * non-blank rows above the live region between the transcript and the
+ * composer (status row, tip, footer chrome, queue blocks). Null with no
+ * composer on screen.
+ */
+function codexTranscript(screenText: string): CodexTranscript | null {
+  const lines = normalizeTerminalText(screenText).split("\n").map((line) => line.trimEnd());
+  let composerIndex = lines.length - 1;
+  while (composerIndex >= 0 && !matchComposerPromptLine(lines[composerIndex] ?? "")) composerIndex -= 1;
+  if (composerIndex < 0) return null;
+  let top = composerIndex - 1;
+  for (;;) {
+    while (
+      top >= 0 &&
+      (!(lines[top] ?? "").trim() ||
+        CODEX_STATUS_ROW_RE.test(stripCodexQueueGutter(lines[top] ?? "")) ||
+        CODEX_TIP_ROW_RE.test(lines[top] ?? "") ||
+        isComposerFooterOrChromeLine(lines[top] ?? ""))
+    ) top -= 1;
+    const scanned = codexQueueScan(lines, top).top;
+    if (scanned === top) break;
+    top = scanned;
+  }
+  const history: number[] = [];
+  for (let index = 0; index <= top; index += 1) if ((lines[index] ?? "").trim()) history.push(index);
+  return { lines, composerIndex, history };
 }
 
 /**
- * How many Codex user-message rows above the visible composer are exactly
- * this payload. Codex renders a submitted message as a `› ` row at column 0
- * plus two-space continuation rows; the composer is the last prompt row. With
- * no composer on screen, nothing counts.
- *
- * AIDEV-NOTE (#905): this is the Codex submit proof, compared against the
- * pre-type frame. An empty composer is not: when Return lands inside a paste
- * burst, 0.157 briefly paints only its placeholder, then repaints the same
- * text with the Return as a newline. Assistant output (`• …`), status chrome
- * (`Working`, `Thinking`) and queue rows (`↳ …`) are never user rows, so an
- * assistant that happens to say the payload cannot forge a submit (r2).
+ * Start rows of Codex user messages above the composer that are exactly this
+ * payload. Codex renders a submitted message as a `› ` row at column 0 plus
+ * two-space continuation rows.
  */
-export function codexTranscriptEchoCount(screenText: string, submittedText: string): number {
-  if (!submittedText.trim()) return 0;
-  const lines = normalizeTerminalText(screenText).split("\n");
-  let composerIndex = lines.length - 1;
-  while (composerIndex >= 0 && !matchComposerPromptLine(lines[composerIndex] ?? "")) composerIndex -= 1;
-  let count = 0;
+function codexMatchingUserRows(transcript: CodexTranscript, screenText: string, submittedText: string): number[] {
+  if (!submittedText.trim()) return [];
+  const { lines, composerIndex } = transcript;
+  const minWidth = codexWrapWidthFloor(screenText);
+  const starts: number[] = [];
   for (let index = 0; index < composerIndex; index += 1) {
+    const start = index;
     const first = /^› (.*)$/.exec(lines[index] ?? "");
     if (!first) continue;
     const following: string[] = [];
@@ -552,10 +642,125 @@ export function codexTranscriptEchoCount(screenText: string, submittedText: stri
       index += 1;
       following.push(lines[index] ?? "");
     }
-    while (following.length > 0 && !following[following.length - 1]!.trim()) following.pop();
-    if (codexRenderedRowsMatch(codexContinuationRows(first[1] ?? "", following), submittedText)) count += 1;
+    if (codexRenderedRowsMatch([first[1] ?? "", ...following], submittedText, minWidth)) starts.push(start);
   }
-  return count;
+  return starts;
+}
+
+/**
+ * Start rows of the Codex user messages on screen that are exactly this
+ * payload. Classification only, with no claim that a row is new: assistant
+ * output (`• …`), status chrome and queue rows (`↳ …`) are never user rows,
+ * and with no composer on screen nothing counts (#905 r2).
+ */
+export function codexTranscriptUserRows(screenText: string, submittedText: string): number[] {
+  const transcript = codexTranscript(screenText);
+  return transcript ? codexMatchingUserRows(transcript, screenText, submittedText) : [];
+}
+
+/**
+ * The first row of `post` that was not already on screen in `pre`, or null
+ * when the frames cannot be aligned well enough to say. `preMatches` are the
+ * rows of `pre` where this payload already stood as a user message.
+ *
+ * Codex only appends to its transcript, so the pre-type rows are either all
+ * still there, or the top ones scrolled away and the rest lead the screen.
+ * When that alignment fails (a live row changed in place), the boundary is
+ * the latest pre-type row still on screen, found with the longest run of
+ * pre-type rows ending at it, at its last occurrence, which never admits an
+ * older row. A payload row of `pre` below that anchor is unaccounted for (a
+ * reflow re-wraps it), so it could be the one on screen now: null. When no
+ * pre-type row is on screen at all (a boot repaint, or everything scrolled
+ * away), every visible row is newer, unless `pre` held the payload.
+ */
+function codexNewTranscriptStart(pre: CodexTranscript | null, post: CodexTranscript, preMatches: number[]): number | null {
+  if (!pre || pre.history.length === 0) return 0;
+  const after = post.history.map((index) => post.lines[index] ?? "");
+  // Rows that end both frames and are not user messages are persistent
+  // chrome (a footer drawn above the composer), not transcript: new messages
+  // appear above them. Stopping at a user row keeps every stale message
+  // above the anchor.
+  let end = pre.history.length;
+  while (
+    end > 0 &&
+    end > pre.history.length - after.length &&
+    !/^› /.test(pre.lines[pre.history[end - 1] ?? -1] ?? "") &&
+    pre.lines[pre.history[end - 1] ?? -1] === after[after.length - (pre.history.length - end) - 1]
+  ) end -= 1;
+  const before = pre.history.slice(0, end).map((index) => pre.lines[index] ?? "");
+  if (before.length === 0) return 0;
+  const lineAfter = (kept: number) => (post.history[kept - 1] ?? -1) + 1;
+  for (let shift = 0; shift < before.length; shift += 1) {
+    const kept = before.length - shift;
+    if (kept <= after.length && before.slice(shift).every((row, offset) => row === after[offset])) {
+      return lineAfter(kept);
+    }
+  }
+  const unaccounted = (anchor: number) => preMatches.some((start) => start > anchor);
+  for (let last = before.length - 1; last >= 0; last -= 1) {
+    let best = -1;
+    let bestRun = 0;
+    for (let at = after.length - 1; at >= 0; at -= 1) {
+      let run = 0;
+      while (run <= Math.min(last, at) && before[last - run] === after[at - run]) run += 1;
+      if (run > bestRun) { best = at; bestRun = run; }
+    }
+    if (best >= 0) return unaccounted(pre.history[last] ?? -1) ? null : lineAfter(best + 1);
+  }
+  return unaccounted(-1) ? null : 0;
+}
+
+/**
+ * Whether this payload is on screen as a Codex user message that arrived
+ * after the pre-type frame: a matching `› ` row below everything that frame
+ * already showed. This is the Codex submit proof; the caller also requires an
+ * empty composer.
+ *
+ * AIDEV-NOTE (#905, #917, #923): an empty composer alone is not proof: when
+ * Return lands inside a paste burst, 0.157 briefly paints only its
+ * placeholder, then repaints the same text with the Return as a newline. Nor
+ * is a rising count of matching rows: when an earlier identical message
+ * scrolls out as the new one appears, the count stays level. Position is the
+ * proof, so an unchanged stale row never verifies and a repeated message
+ * does. When the frames cannot be aligned, nothing is proven: false here, and
+ * the send stays pending rather than claiming a submit (#923).
+ */
+export function codexTranscriptShowsNewEcho(
+  preTypeScreen: string | null | undefined,
+  screenText: string,
+  submittedText: string,
+): boolean {
+  // No pre-type frame (its read failed) is no baseline: an old identical row
+  // would pass as new, so nothing here is proof (#923 follow-up). A blank
+  // frame is a failed read too: a live Codex pane always paints its composer
+  // (#935 follow-up).
+  if (!preTypeScreen?.trim()) return false;
+  const post = codexTranscript(screenText);
+  if (!post) return false;
+  const starts = codexMatchingUserRows(post, screenText, submittedText);
+  if (starts.length === 0) return false;
+  const pre = codexTranscript(preTypeScreen);
+  const preMatches = pre ? codexMatchingUserRows(pre, preTypeScreen, submittedText) : [];
+  const boundary = codexNewTranscriptStart(pre, post, preMatches);
+  return boundary !== null && starts.some((start) => start >= boundary);
+}
+
+/**
+ * The Codex submit proof: an empty composer and this payload as a new user
+ * row below the pre-type frame (codexTranscriptShowsNewEcho). The send's own
+ * verifier and the pending sweep both use it; the caller adds its own
+ * pending-input guard. An empty composer alone is not proof (a paste burst
+ * paints only the placeholder), and neither is the payload somewhere on
+ * screen (an old identical row) (#905, #935).
+ */
+export function codexScreenShowsSubmit(
+  preTypeScreen: string | null | undefined,
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const composer = extractComposerInputRegion(screenText);
+  return composer !== null && composer.trim() === "" &&
+    codexTranscriptShowsNewEcho(preTypeScreen, screenText, submittedText);
 }
 
 /**
@@ -597,7 +802,7 @@ export function composerHoldsForeignDraft(
   const promptLine = composerPromptLineInput(screenText, options?.cli, true);
   if (options?.exact) {
     const region = extractComposerInputRegion(screenText, submittedText, options.cli);
-    return region !== null && !composerRegionMatchesPayload(region, submittedText, cli);
+    return region !== null && !composerRegionMatchesPayload(region, submittedText, cli, screenText);
   }
   // Antigravity has no prompt prefix (a bare `>` under a rule), so the prefix
   // reader sees nothing; read its composer structurally (#809 review F7).
@@ -762,66 +967,90 @@ function codexQueueHeadingStart(lines: string[], index: number): number {
   return -1;
 }
 
+const CODEX_STATUS_ROW_RE = /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i;
+const CODEX_TIP_ROW_RE = /^\s*Tip: /;
+
+/** A queue row's indent, measured from its gutter glyph when it has one. */
+function codexQueueRowIndent(line: string): number {
+  return /^ */.exec(line.replace(/^\s*[│┃║┆┊]/, ""))?.[0].length ?? 0;
+}
+
 /**
- * Queued items shown above the Codex composer, or null when no composer is
- * visible. Codex 0.157 can stack two blocks there: "Messages to be submitted
- * after next tool call" (Return during a turn, drains at the next tool call)
- * and "Queued follow-up inputs" (Tab, drains when the turn ends). A block is
- * counted only once its heading is found.
+ * Queue blocks read upward from `cursor` (the row above the composer), and
+ * `top`, the row above the last complete block. Codex 0.157 can stack two
+ * blocks there: "Messages to be submitted after next tool call" (Return during
+ * a turn, drains at the next tool call) and "Queued follow-up inputs" (Tab,
+ * drains when the turn ends). A block is counted only once its heading is
+ * found.
  */
-function codexQueuedItems(screenText: string): CodexQueuedItem[] | null {
-  const lines = normalizeTerminalText(screenText).split("\n");
-  let cursor = lines.length - 1;
-  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
-  if (cursor < 0) return null;
-  cursor -= 1;
+function codexQueueScan(lines: string[], cursor: number): { items: CodexQueuedItem[]; top: number } {
   const skipBlank = () => {
     while (cursor >= 0 && !stripCodexQueueGutter(lines[cursor] ?? "").trim()) cursor -= 1;
   };
   while (
     cursor >= 0 &&
     (!stripCodexQueueGutter(lines[cursor] ?? "").trim() ||
-      /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(stripCodexQueueGutter(lines[cursor] ?? "")))
+      CODEX_STATUS_ROW_RE.test(stripCodexQueueGutter(lines[cursor] ?? "")))
   ) cursor -= 1;
   const items: CodexQueuedItem[] = [];
   for (;;) {
-    const block: CodexQueuedItem[] = [];
-    let wrappedRows: string[] = [];
+    const blockBottom = cursor;
+    const rows: string[] = [];
     let headingStart = -1;
+    let belowIsArrow = false;
     while (cursor >= 0) {
       const rawLine = lines[cursor] ?? "";
       const activeLine = stripCodexQueueGutter(rawLine).trim();
-      if (!activeLine) break;
+      if (!activeLine) {
+        if (!belowIsArrow) break;
+        skipBlank();
+        continue;
+      }
+      // A heading sits directly above the block's first item row.
+      if (belowIsArrow) {
+        headingStart = codexQueueHeadingStart(lines, cursor);
+        if (headingStart >= 0) break;
+      }
       if (/^⌥\+↑ edit last queued message$/.test(activeLine)) {
         cursor -= 1;
         continue;
       }
-      // An item starts at the block's two-space indent. A deeper row is a
-      // continuation of the item above it, even when its text begins with `↳`,
-      // so classify on the raw indent before trimming.
-      const itemIndent = /^ */.exec(stripCodexQueueGutter(rawLine))?.[0].length ?? 0;
-      const itemMatch = itemIndent < 4 ? /^↳(?:\s+(.*)|\s*$)/.exec(activeLine) : null;
-      if (itemMatch) {
-        block.unshift({
-          rows: [itemMatch[1] ?? "", ...wrappedRows],
-          exact: wrappedRows.length === 0 ? (/^↳ (.*)$/.exec(activeLine)?.[1] ?? null) : null,
-        });
-        wrappedRows = [];
-        cursor -= 1;
-        skipBlank();
-        headingStart = codexQueueHeadingStart(lines, cursor);
-        if (headingStart >= 0) break;
-        continue;
-      }
-      if (!/^\s*[│┃║┆┊]/.test(rawLine) && !/^\s{2,}\S/.test(rawLine)) break;
-      wrappedRows.unshift(activeLine);
+      const arrow = activeLine.startsWith("↳");
+      if (!arrow && !/^\s*[│┃║┆┊]/.test(rawLine) && !/^\s{2,}\S/.test(rawLine)) break;
+      rows.unshift(rawLine);
+      belowIsArrow = arrow;
       cursor -= 1;
     }
-    if (headingStart < 0 || block.length === 0) return items;
-    items.unshift(...block);
+    if (headingStart < 0 || rows.length === 0) return { items, top: blockBottom };
+    // AIDEV-NOTE (#917): an item starts at the indent of the block's first
+    // row. A deeper row continues the item above it, even when its text
+    // begins with `↳`. Indents are measured from the gutter glyph, not after
+    // its optional padding, so `│    ↳ …` under `│  ↳ …` stays a continuation.
+    const itemIndent = codexQueueRowIndent(rows[0] ?? "");
+    const block: { rows: string[]; exact: string | null }[] = [];
+    for (const rawLine of rows) {
+      const activeLine = stripCodexQueueGutter(rawLine).trim();
+      const itemMatch = codexQueueRowIndent(rawLine) <= itemIndent ? /^↳(?:\s+(.*)|\s*$)/.exec(activeLine) : null;
+      const current = block[block.length - 1];
+      if (itemMatch || !current) {
+        block.push({ rows: [itemMatch?.[1] ?? activeLine], exact: /^↳ (.*)$/.exec(activeLine)?.[1] ?? null });
+      } else {
+        current.rows.push(activeLine);
+      }
+    }
+    items.unshift(...block.map((item) => ({ rows: item.rows, exact: item.rows.length === 1 ? item.exact : null })));
     cursor = headingStart - 1;
     skipBlank();
   }
+}
+
+/** Queued items shown above the Codex composer, or null when no composer is visible. */
+function codexQueuedItems(screenText: string): CodexQueuedItem[] | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let cursor = lines.length - 1;
+  while (cursor >= 0 && !matchComposerPromptLine(stripCodexQueueGutter(lines[cursor] ?? ""))) cursor -= 1;
+  if (cursor < 0) return null;
+  return codexQueueScan(lines, cursor - 1).items;
 }
 
 export function screenShowsQueuedAgentInput(
