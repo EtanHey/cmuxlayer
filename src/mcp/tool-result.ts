@@ -261,6 +261,8 @@ export function err(error: unknown, extra: Record<string, unknown> = {}): ToolRe
   const lifecycleTimeoutExtra =
     error instanceof LifecycleStartTimeoutError
       ? { error_code: error.code, waited_ms: error.waitedMs, retryable: true }
+      : error instanceof LifecycleNotReadyError
+        ? { error_code: error.code, attempt: error.attempt, retryable: true }
       : error instanceof LifecycleLockTimeoutError
         ? {
             error_code: error.code,
@@ -376,6 +378,22 @@ export function requireValue(
 ): asserts value is string | number {
   if (value === undefined || value === "") {
     throw new Error(message);
+  }
+}
+
+/**
+ * #938: lifecycle initialization failed and is retrying with backoff. Tools
+ * that need the engine answer with this named, retryable cause instead of a
+ * silent drop or a latched error.
+ */
+export class LifecycleNotReadyError extends Error {
+  readonly code = "ELIFECYCLENOTREADY";
+  readonly attempt: number;
+
+  constructor(message: string, attempt: number) {
+    super(message);
+    this.name = "LifecycleNotReadyError";
+    this.attempt = attempt;
   }
 }
 

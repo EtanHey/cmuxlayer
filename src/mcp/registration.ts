@@ -30,6 +30,7 @@ import {
   PUBLIC_TOOL_OUTPUT_SCHEMAS,
 } from "./schemas.js";
 import {
+  err,
   ok,
   shapeSuccessfulSendToResult,
   type ToolReturn,
@@ -139,7 +140,20 @@ export interface ToolRegistrationOptions {
   palette: DefaultToolPalette | null;
   /** Caller agent stamped onto send_to receipts. */
   resolveCallerAgentId: () => string | null;
+  /**
+   * #938: throws a named error while lifecycle initialization is retrying;
+   * applied to every tool that needs the lifecycle engine.
+   */
+  lifecycleGate?: () => Promise<void>;
 }
+
+/** #938: tools that answer from cmux or process state, not the engine. */
+const LIFECYCLE_FREE_TOOLS = new Set([
+  "control_health",
+  "list_surfaces",
+  "read_screen",
+  "expand_palette",
+]);
 
 export interface ToolRegistration {
   toolHandlersByName: ToolHandlerRegistry;
@@ -186,6 +200,7 @@ export function installToolRegistration(
     client,
     palette,
     resolveCallerAgentId,
+    lifecycleGate,
   }: ToolRegistrationOptions,
 ): ToolRegistration {
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
@@ -363,6 +378,13 @@ export function installToolRegistration(
                 ? (handlerArgs[0] as Record<string, unknown>)
                 : {};
             const verbose = rawArgs.verbose === true;
+            if (lifecycleGate && !LIFECYCLE_FREE_TOOLS.has(toolNameString)) {
+              try {
+                await lifecycleGate();
+              } catch (error) {
+                return err(error);
+              }
+            }
             const callerAgentId = toolNameString === "send_to" ? resolveCallerAgentId() : null;
             let handled = (await handler(...handlerArgs)) as ToolReturn;
             if (toolNameString === "send_to") {

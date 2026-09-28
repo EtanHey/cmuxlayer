@@ -25,7 +25,10 @@ import type {
 } from "./types.js";
 import { CmuxClient } from "./cmux-client.js";
 import { normalizeKeyName } from "./key-names.js";
-import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
+import {
+  CmuxPersistentSocket,
+  type PollingOptions,
+} from "./cmux-persistent-socket.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
@@ -40,6 +43,28 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
 const RETRY_SAFE_V2_METHODS = new Set([
   "system.ping",
+]);
+// AIDEV-NOTE (#938): cmux 0.64.23+ charges exactly these read-plane methods to
+// a per-connection token bucket (ControlCommandExecutionPolicy.pollingMethods,
+// cmux v0.64.25) and refuses them with rate_limited BEFORE executing; every
+// other method is always admitted. Only these go through the polling budget
+// and its rate_limited retry, so a mutation is never retried blindly.
+export const CMUX_POLLING_METHODS: ReadonlySet<string> = new Set([
+  "system.top",
+  "system.memory",
+  "system.tree",
+  "system.identify",
+  "window.list",
+  "window.current",
+  "window.displays",
+  "workspace.list",
+  "workspace.current",
+  "surface.list",
+  "surface.current",
+  "surface.read_text",
+  "surface.read_selection",
+  "pane.list",
+  "pane.surfaces",
 ]);
 
 interface V1RawArg {
@@ -59,6 +84,11 @@ export interface CmuxSocketClientOptions {
   cliFallback?: CmuxClient;
   /** Re-resolve a live socket when the current path stops accepting requests */
   socketPathResolver?: () => Promise<string | null>;
+  /**
+   * Polling budget for cmux read-plane methods (defaults match cmux 0.64.24+).
+   * Pacing engages once cmux answers rate_limited unless `budget` says always.
+   */
+  polling?: PollingOptions;
 }
 
 // ── The Client ─────────────────────────────────────────────────────────
@@ -72,6 +102,7 @@ export class CmuxSocketClient {
   private cliFallback?: CmuxClient;
   private transport: CmuxPersistentSocket;
   private maxInFlight?: number;
+  private polling?: PollingOptions;
   private socketPathResolver?: () => Promise<string | null>;
   private reconnecting?: Promise<void>;
   private transportSerial = 0;
@@ -85,6 +116,8 @@ export class CmuxSocketClient {
     this.authPassword = opts?.password;
     this.cliFallback = opts?.cliFallback;
     this.maxInFlight = opts?.maxInFlight;
+    // #938: cmux 0.64.22 has no limiter; pace reads only once cmux says so.
+    this.polling = { budget: "on_rate_limit", ...opts?.polling };
     this.socketPathResolver = opts?.socketPathResolver;
     this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
@@ -92,6 +125,7 @@ export class CmuxSocketClient {
       capability: this.capability,
       timeoutMs: this.timeoutMs,
       maxInFlight: opts?.maxInFlight,
+      polling: this.polling,
     });
   }
 
@@ -157,7 +191,9 @@ export class CmuxSocketClient {
     return this.withConnectionRetry(
       async () => {
         await this.ensureAuthenticated();
-        return this.transport.call<T>(method, params);
+        return this.transport.call<T>(method, params, {
+          polling: CMUX_POLLING_METHODS.has(method),
+        });
       },
       RETRY_SAFE_V2_METHODS.has(method),
     );
@@ -206,6 +242,7 @@ export class CmuxSocketClient {
       capability: this.capability,
       timeoutMs: this.timeoutMs,
       maxInFlight: this.maxInFlight,
+      polling: this.polling,
     });
   }
 

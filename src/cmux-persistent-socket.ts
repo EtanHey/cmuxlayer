@@ -12,6 +12,7 @@ import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 import { isCmuxSidebarStatusFrame } from "./cmux-status-frame.js";
+import { recordTransportRetry } from "./transport-retry-context.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 2_000;
@@ -60,6 +61,13 @@ export interface PollingOptions {
   rateLimitBackoffMaxMs?: number;
   /** Apply jitter to limiter backoff (default: true). */
   jitter?: boolean;
+  /**
+   * When to pace polling calls through the budget. "always" (default) paces
+   * from the first call; "on_rate_limit" paces only once cmux has answered
+   * rate_limited on the current connection (cmux < 0.64.23 has no limiter).
+   * rate_limited responses are retried either way.
+   */
+  budget?: "always" | "on_rate_limit";
 }
 
 export interface CmuxCallOptions {
@@ -148,6 +156,9 @@ export class CmuxPersistentSocket {
   private rateLimitBackoffBaseMs: number;
   private rateLimitBackoffMaxMs: number;
   private rateLimitJitter: boolean;
+  private pollingBudgetAlways: boolean;
+  /** #938: cmux has answered rate_limited on the current connection. */
+  private rateLimitObserved = false;
   private pollingTokens: number;
   private pollingLastRefillAt = Date.now();
   private pollingActive = 0;
@@ -199,6 +210,7 @@ export class CmuxPersistentSocket {
       this.rateLimitBackoffBaseMs,
     );
     this.rateLimitJitter = opts?.polling?.jitter ?? true;
+    this.pollingBudgetAlways = (opts?.polling?.budget ?? "always") === "always";
     this.pollingTokens = this.pollingBurst;
     this.createConnection = opts?.createConnection ?? net.createConnection;
   }
@@ -363,6 +375,9 @@ export class CmuxPersistentSocket {
         this.pollingTimer = null;
         this.pollingTokens = this.pollingBurst;
         this.pollingLastRefillAt = Date.now();
+        // #938 r2: cmux's limiter is per connection, and a restarted cmux may
+        // have none (0.64.22). Pace again only after THIS connection says so.
+        this.rateLimitObserved = false;
         this.pumpPollingQueue();
         resolve();
       });
@@ -441,6 +456,9 @@ export class CmuxPersistentSocket {
         );
         this.pollingCancellationGeneration += 1;
         this.cancelPollingWaiters(disconnected);
+        // #938 r2: the observation belonged to the connection that just
+        // closed; reads issued before the reconnect must not inherit it.
+        this.rateLimitObserved = false;
         // Reject all inflight requests — transport is gone
         this.rejectAllPending(disconnected);
       });
@@ -762,20 +780,30 @@ export class CmuxPersistentSocket {
     const pollingGeneration = this.pollingCancellationGeneration;
     try {
       for (let attempt = 0; ; attempt += 1) {
-        const release = await this.acquirePollingSlot();
+        const release =
+          this.pollingBudgetAlways || this.rateLimitObserved
+            ? await this.acquirePollingSlot()
+            : () => {};
         try {
           return await this.callOnce<T>(method, params, pollingGeneration);
         } catch (error) {
           if (
             !(error instanceof CmuxSocketError) ||
-            error.code !== "rate_limited" ||
-            attempt >= this.maxRateLimitRetries
+            error.code !== "rate_limited"
           ) {
+            throw error;
+          }
+          this.rateLimitObserved = true;
+          if (attempt >= this.maxRateLimitRetries) {
+            // #938: say how hard we tried; `retry_count: undefined` made the
+            // exhausted limiter look like an unbudgeted call.
+            error.retry_count = attempt;
             throw error;
           }
         } finally {
           release();
         }
+        recordTransportRetry();
         await this.waitForPollingBackoff(this.rateLimitBackoffMs(attempt));
       }
     } finally {
@@ -820,6 +848,7 @@ export class CmuxPersistentSocket {
     );
     this.pollingCancellationGeneration += 1;
     this.cancelPollingWaiters(disconnected);
+    this.rateLimitObserved = false;
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;

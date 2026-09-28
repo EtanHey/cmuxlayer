@@ -231,6 +231,9 @@ import {
   DEFAULT_REPORT_WATCH_DEADLINE_MS,
   resolveLifecycleStartTimeoutMs,
   awaitBoundedLifecycleStart,
+  assertLifecycleReadyForTool,
+  lifecycleInitState,
+  startLifecycleInitialization,
   registerAutoVitestTempDir,
   createServerContext,
   resolveServerInboxBaseDir,
@@ -938,6 +941,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
       ),
       resolveCallerAgentId: () => resolveCurrentCallerAgent()?.agent_id ?? null,
+      ...(opts?.gateLifecycleTools
+        ? {
+            lifecycleGate: () =>
+              assertLifecycleReadyForTool(
+                context,
+                resolveLifecycleStartTimeoutMs(),
+              ),
+          }
+        : {}),
     });
   // AIDEV-NOTE: handlers leaving this closure take their dependencies from
   // here (CX-3 S6+); the lifecycle block below fills engine and registry.
@@ -1129,6 +1141,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : Date.now() - context.lifecycleStartStartedAtMs,
       timeout_ms: resolveLifecycleStartTimeoutMs(),
       error: context.lifecycleStartError?.message ?? null,
+      state: lifecycleInitState(context),
+      attempt: context.lifecycleStartAttempts,
+      last_error: context.lifecycleStartError?.message ?? null,
       timeouts: context.lifecycleStartTimeouts,
       last_timeout_at: context.lifecycleStartLastTimeoutAt,
     };
@@ -2561,6 +2576,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw error;
         }
       }
+      // #938: while lifecycle retries this is the last attempt's error, not
+      // a latch; it clears when a retry succeeds.
       if (context.lifecycleStartError) {
         throw context.lifecycleStartError;
       }
@@ -3615,39 +3632,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Reconstitute and discover live surfaces before the first sidebar paint.
     // The engine initializer is idempotent because daemon connections share a
     // context and may construct more than one MCP server over its lifetime.
+    // #938: a failed attempt (e.g. cmux rate_limited) is retried with
+    // backoff until it succeeds; it is never latched for the daemon's life.
     if (!context.lifecycleStarted) {
-      context.lifecycleStarted = true;
-      context.lifecycleStartError = null;
-      context.lifecycleStartStartedAtMs = Date.now();
-      context.lifecycleStartSettledAtMs = null;
-      const lifecycleInitialization = lifecycleInitializer
-        ? Promise.resolve().then(() => lifecycleInitializer())
-        : engine.initialize(discovery);
-      context.lifecycleStartPromise = lifecycleInitialization
-        .catch((error) => {
-          context.lifecycleStartError =
-            error instanceof Error ? error : new Error(String(error));
-          console.error(
-            "[cmuxlayer] lifecycle initialization failed:",
-            context.lifecycleStartError,
-          );
-        })
-        .then(() => {
-          context.lifecycleStartSettledAtMs = Date.now();
-          if (
-            !context.lifecycleStartError &&
-            context.lifecycleStarted &&
-            context.lifecycleSweepEngine === engine
-          ) {
-            engine.startSweep(resolveSweepTiming());
-          }
-        });
+      startLifecycleInitialization(context, () =>
+        lifecycleInitializer
+          ? lifecycleInitializer()
+          : engine.initialize(discovery),
+      );
+      void (context.lifecycleReadyPromise ?? Promise.resolve()).then(() => {
+        if (
+          !context.lifecycleStartError &&
+          context.lifecycleStarted &&
+          context.lifecycleSweepEngine === engine
+        ) {
+          engine.startSweep(resolveSweepTiming());
+        }
+      });
     }
     context.lifecycleLockStateProvider = () => engine.lifecycleLockState();
     // The daemon may immediately use this relay for monitor recovery. Publish
     // it only after persisted lifecycle state has been reconstituted so route
     // resolution is ready, then wake any boot-time recovery claim.
-    void (context.lifecycleStartPromise ?? Promise.resolve()).then(() => {
+    void (
+      context.lifecycleReadyPromise ??
+      context.lifecycleStartPromise ??
+      Promise.resolve()
+    ).then(() => {
       if (
         !context.lifecycleStartError &&
         context.lifecycleStarted &&
