@@ -248,6 +248,48 @@ describe("#938 persistent daemon log", () => {
     }
   });
 
+  it("writes only allowlisted error codes and names, even on the lifecycle path", async () => {
+    vi.stubEnv("CMUXLAYER_LIFECYCLE_RETRY_BASE_MS", "5");
+    vi.stubEnv("CMUXLAYER_LIFECYCLE_RETRY_MAX_MS", "20");
+    const logPath = uniquePath("allowlist", ".log");
+    enableDaemonLog({ path: logPath });
+    const synthetic = "QwErTyUiOpAsDfGhJkLzXcVb";
+    let calls = 0;
+    const context = createProductionServerContext(
+      withTestObserver({
+        exec: emptyExec(),
+        stateDir: uniquePath("state"),
+        disableSpawnPreflight: true,
+        lifecycleInitializer: async () => {
+          calls += 1;
+          if (calls === 1) {
+            // cmux's V2 error.code is external data copied onto the error.
+            const error = new CmuxSocketError("x", synthetic);
+            Object.defineProperty(error, "name", { value: synthetic });
+            throw error;
+          }
+          if (calls === 2) {
+            throw new CmuxSocketError("x", "rate_limited");
+          }
+          if (calls === 3) {
+            throw Object.assign(new Error("x"), { code: "ECONNREFUSED" });
+          }
+        },
+      }),
+    );
+    cleanups.push(() => context.dispose());
+    createServer({ context });
+
+    await context.lifecycleReadyPromise;
+    await flushDaemonLog();
+
+    const log = readLog(logPath);
+    expect(log).not.toContain(synthetic);
+    expect(log).toMatch(/attempt=1 retry_in_ms=\d+ error_code=other error_name=Error/);
+    expect(log).toMatch(/attempt=2 retry_in_ms=\d+ error_code=rate_limited error_name=CmuxSocketError/);
+    expect(log).toMatch(/attempt=3 retry_in_ms=\d+ error_code=ECONNREFUSED error_name=Error/);
+  });
+
   it("the backstop redactor masks secret shapes, including a slash tail", () => {
     const hex = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4";
     const lettersOnly = "QwErTyUiOpAsDfGhJkLzXcVbNmQwErTyUiOpAsDf";
@@ -428,8 +470,8 @@ describe("#938 persistent daemon log", () => {
       },
     });
 
-    expect(logErrorName(hostile)).toBe("unknown");
-    expect(logErrorCode(hostileCode)).toBe("unknown");
+    expect(logErrorName(hostile)).toBe("Error");
+    expect(logErrorCode(hostileCode)).toBe("other");
     expect(logErrorName(hostileString)).toBe("non_error_object");
   });
 });

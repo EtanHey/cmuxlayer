@@ -377,33 +377,121 @@ export async function closeDaemonLog(timeoutMs = 500): Promise<void> {
   }
 }
 
-/** A stable code for a thrown value (e.g. `rate_limited`). Never throws. */
+/**
+ * Error codes the log may name. `error.code` can be external data (a
+ * `CmuxSocketError` copies cmux's V2 `error.code`), so only codes cmuxlayer
+ * itself knows, or the errno shape, are written; anything else is `other`.
+ */
+export const KNOWN_LOG_ERROR_CODES: ReadonlySet<string> = new Set([
+  // cmux V2 / socket transport
+  "rate_limited",
+  "access_denied",
+  "cmux_unavailable",
+  "connection_closed",
+  "connection_error",
+  "method_not_found",
+  "not_found",
+  "protocol_error",
+  "timeout",
+  "too_many_requests",
+  "unsupported_focus_option",
+  "unsupported_send_option",
+  // daemon and lifecycle
+  "EDAEMONREADINESSTIMEOUT",
+  "EDAEMONSOCKETINUSE",
+  "EDAEMONSOCKETPATHOCCUPIED",
+  "EDAEMONSTARTUPFAILED",
+  "ELIFECYCLELOCKTIMEOUT",
+  "ELIFECYCLENOTREADY",
+  "ELIFECYCLESTARTTIMEOUT",
+  // engine
+  "AGENT_NOT_FOUND",
+  "PLACEMENT_TOPOLOGY_BLOCKED",
+  "PLACEMENT_WORKSPACE_UNRESOLVED",
+  "SPAWN_RATE_LIMITED",
+  "SURFACE_IDENTITY_CONFLICT",
+  "placement_pending",
+  "placement_timeout",
+]);
+
+const ERRNO_SHAPE = /^E[A-Z0-9]{2,15}$/;
+
+/**
+ * Error class names the log may name: JS built-ins and cmuxlayer's own
+ * error classes. Anything else is written as `Error`.
+ */
+export const KNOWN_LOG_ERROR_NAMES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "AbortError",
+  "TimeoutError",
+  "AgentLaunchError",
+  "AgentNotFoundError",
+  "AgentRoleInferenceError",
+  "AmbiguousBootRecoveryReturnError",
+  "BootComposerResidueError",
+  "BootPromptDeliveryError",
+  "BootPromptTimeoutError",
+  "BootPromptUpdateMenuBlockedError",
+  "CmuxSocketError",
+  "DaemonReadinessTimeoutError",
+  "DaemonSocketInUseError",
+  "DaemonSocketPathOccupiedError",
+  "DaemonStartupFailedError",
+  "DeliveryError",
+  "DeliverySafetyGateError",
+  "LauncherReadinessError",
+  "LifecycleLockTimeoutError",
+  "LifecycleNotReadyError",
+  "LifecycleStartTimeoutError",
+  "ManualModeMutationError",
+  "PlacementTopologyError",
+  "PlacementWorkspaceError",
+  "RetryableDeliveryError",
+  "SpawnRateLimitedError",
+  "SubmitVerificationError",
+  "SurfaceBindingChangedDuringDiscoveryError",
+  "SurfaceEnumerationError",
+  "SurfaceGoneError",
+  "SurfaceIdentityConflictError",
+  "SurfaceRuntimeNotStartedError",
+  "WatchArmError",
+]);
+
+/** An allowlisted code for a thrown value (e.g. `rate_limited`), else `other`. Never throws. */
 export function logErrorCode(error: unknown): string {
   try {
     if (error && typeof error === "object" && "code" in error) {
       const code = (error as { code: unknown }).code;
-      if (typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code)) {
+      if (
+        typeof code === "string" &&
+        (KNOWN_LOG_ERROR_CODES.has(code) || ERRNO_SHAPE.test(code))
+      ) {
         return code;
       }
+      return "other";
     }
-    if (error instanceof Error && /^[A-Za-z0-9_]{1,64}$/.test(error.name)) {
-      return error.name;
-    }
+    return "none";
   } catch {
-    // fall through
+    return "other";
   }
-  return "unknown";
 }
 
-/** The thrown value's class name (e.g. `CmuxSocketError`). Never throws. */
+/** An allowlisted class name for a thrown value, else `Error`. Never throws. */
 export function logErrorName(error: unknown): string {
   try {
-    if (error instanceof Error && /^[A-Za-z0-9_]{1,64}$/.test(error.name)) {
-      return error.name;
+    if (error instanceof Error) {
+      return KNOWN_LOG_ERROR_NAMES.has(error.name) ? error.name : "Error";
     }
     if (error === null) return "null";
     return typeof error === "object" ? "non_error_object" : typeof error;
   } catch {
-    return "unknown";
+    return "Error";
   }
 }
