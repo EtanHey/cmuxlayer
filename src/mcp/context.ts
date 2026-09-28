@@ -38,7 +38,11 @@ import { type SeatRegistry } from "../seat-identity.js";
 import { SurfaceWriteLivenessTracker } from "../surface-write-liveness.js";
 import type { PublicDeliveryReceipt, DeliveryRecord } from "../delivery/receipts.js";
 import { CmuxSocketError } from "../cmux-socket-error.js";
-import { appendDaemonLog, describeLogError } from "../daemon-log.js";
+import {
+  appendDaemonLog,
+  describeLogError,
+  logErrorCode,
+} from "../daemon-log.js";
 import {
   LifecycleNotReadyError,
   LifecycleStartTimeoutError,
@@ -368,7 +372,7 @@ export function startLifecycleInitialization(
           );
           appendDaemonLog(
             "lifecycle_attempt_failed",
-            `attempt=${attemptNumber} retry_in_ms=${delayMs} error=${describeLogError(context.lifecycleStartError)}`,
+            `attempt=${attemptNumber} retry_in_ms=${delayMs} error_code=${logErrorCode(context.lifecycleStartError)} error=${describeLogError(context.lifecycleStartError)}`,
           );
           resolveFirstOutcome();
           const timer = setTimeout(attempt, delayMs);
