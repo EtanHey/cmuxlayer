@@ -4522,7 +4522,7 @@ export class AgentEngine {
       });
     let rows: DiscoveredAgent[];
     try {
-      rows = await discovery.scan(true);
+      rows = await discovery.scan(true, snapshot.surfaces);
     } catch {
       return null;
     }
@@ -4531,7 +4531,7 @@ export class AgentEngine {
         const uuid = row.surface_uuid?.trim().toLowerCase();
         if (uuid && snapshot.attributedUuids.has(uuid)) return false;
         if (row.read_error) return true;
-        return row.has_agent && (row.cli === cli || row.cli === "unknown");
+        return row.cli === cli || (row.has_agent && row.cli === "unknown");
       })
       .map((row) => row.surface_id);
   }

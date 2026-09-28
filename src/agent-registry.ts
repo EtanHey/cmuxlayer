@@ -2255,8 +2255,8 @@ export class AgentRegistry {
   /**
    * #926: a coherent, non-empty topology plus the surface UUIDs that real
    * (non-placeholder) agent records claim, or `null` when the topology cannot
-   * support attribution. Discovery's `auto-` rows are not identities: a pane
-   * only they claim is still unattributed.
+   * support attribution. Discovery's `auto-` and stale `-pending-` rows are
+   * not identities: a pane only they claim is still unattributed.
    */
   async attributionSnapshot(): Promise<{
     surfaces: CmuxSurface[];
@@ -2278,7 +2278,7 @@ export class AgentRegistry {
     }
     const attributedUuids = new Set<string>();
     for (const record of this.agents.values()) {
-      if (isAutoAgentId(record.agent_id)) continue;
+      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) continue;
       const key = surfaceUuidKey(record.surface_uuid);
       if (key) attributedUuids.add(key);
     }
