@@ -31,7 +31,7 @@ The launch chain:
 
 ```
 ~/.golems/config.yaml                 mcpServers.cmuxlayer  (SOURCE OF TRUTH)
-   │  scripts/sync-config.sh --enforce  (regenerates per-repo configs)
+   │  scripts/sync/sync-config.sh --enforce  (regenerates per-repo configs)
    ▼
 ~/Gits/<repo>/.mcp.json               mcpServers.cmuxlayer.command  (GENERATED; do not hand-edit)
    ▼
@@ -45,8 +45,8 @@ brew --prefix/opt/cmuxlayer/bin/cmuxlayer   (brew, default)
 (the source), then propagate to every profiled repo's generated `.mcp.json`:
 
 ```bash
-~/Gits/golems/scripts/sync-config.sh --diff      # preview
-~/Gits/golems/scripts/sync-config.sh --enforce   # write
+~/Gits/golems/scripts/sync/sync-config.sh --diff      # preview
+~/Gits/golems/scripts/sync/sync-config.sh --enforce   # write
 ```
 
 The `.mcp.json` files are generated artifacts — never hand-edit them; they get
