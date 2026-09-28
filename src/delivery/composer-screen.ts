@@ -640,29 +640,21 @@ function codexMatchingUserRows(transcript: CodexTranscript, screenText: string, 
 }
 
 /**
- * How many Codex user-message rows above the visible composer are exactly
- * this payload. With no composer on screen, nothing counts. Assistant output
- * (`• …`), status chrome (`Working`, `Thinking`) and queue rows (`↳ …`) are
- * never user rows, so an assistant that happens to say the payload cannot
- * forge a submit (#905 r2).
- */
-export function codexTranscriptEchoCount(screenText: string, submittedText: string): number {
-  const transcript = codexTranscript(screenText);
-  return transcript ? codexMatchingUserRows(transcript, screenText, submittedText).length : 0;
-}
-
-/**
- * The first row of `post` that was not already on screen in `pre`.
+ * The first row of `post` that was not already on screen in `pre`, or null
+ * when the frames cannot be aligned well enough to say. `preMatches` are the
+ * rows of `pre` where this payload already stood as a user message.
  *
  * Codex only appends to its transcript, so the pre-type rows are either all
  * still there, or the top ones scrolled away and the rest lead the screen.
- * When that alignment fails (a live row above the composer changed), the last
- * pre-type row is found by the longest run of pre-type rows ending at it, at
- * its last occurrence, which never admits an older row. When not even that
- * row is on screen, it scrolled away with everything above it, so every
- * visible row is newer.
+ * When that alignment fails (a live row changed in place), the boundary is
+ * the latest pre-type row still on screen, found with the longest run of
+ * pre-type rows ending at it, at its last occurrence, which never admits an
+ * older row. A payload row of `pre` below that anchor is unaccounted for (a
+ * reflow re-wraps it), so it could be the one on screen now: null. When no
+ * pre-type row is on screen at all (a boot repaint, or everything scrolled
+ * away), every visible row is newer, unless `pre` held the payload.
  */
-function codexNewTranscriptStart(pre: CodexTranscript | null, post: CodexTranscript): number {
+function codexNewTranscriptStart(pre: CodexTranscript | null, post: CodexTranscript, preMatches: number[]): number | null {
   if (!pre || pre.history.length === 0) return 0;
   const after = post.history.map((index) => post.lines[index] ?? "");
   // Rows that end both frames and are not user messages are persistent
@@ -685,13 +677,18 @@ function codexNewTranscriptStart(pre: CodexTranscript | null, post: CodexTranscr
       return lineAfter(kept);
     }
   }
-  for (let start = 0; start < before.length; start += 1) {
-    const run = before.slice(start);
-    for (let at = after.length - run.length; at >= 0; at -= 1) {
-      if (run.every((row, offset) => row === after[at + offset])) return lineAfter(at + run.length);
+  const unaccounted = (anchor: number) => preMatches.some((start) => start > anchor);
+  for (let last = before.length - 1; last >= 0; last -= 1) {
+    let best = -1;
+    let bestRun = 0;
+    for (let at = after.length - 1; at >= 0; at -= 1) {
+      let run = 0;
+      while (run <= Math.min(last, at) && before[last - run] === after[at - run]) run += 1;
+      if (run > bestRun) { best = at; bestRun = run; }
     }
+    if (best >= 0) return unaccounted(pre.history[last] ?? -1) ? null : lineAfter(best + 1);
   }
-  return 0;
+  return unaccounted(-1) ? null : 0;
 }
 
 /**
@@ -700,12 +697,14 @@ function codexNewTranscriptStart(pre: CodexTranscript | null, post: CodexTranscr
  * already showed. This is the Codex submit proof; the caller also requires an
  * empty composer.
  *
- * AIDEV-NOTE (#905, #917): an empty composer alone is not proof: when Return
- * lands inside a paste burst, 0.157 briefly paints only its placeholder, then
- * repaints the same text with the Return as a newline. Nor is a rising count
- * of matching rows: when an earlier identical message scrolls out as the new
- * one appears, the count stays level. Position is the proof, so an unchanged
- * stale row never verifies and a repeated message does.
+ * AIDEV-NOTE (#905, #917, #923): an empty composer alone is not proof: when
+ * Return lands inside a paste burst, 0.157 briefly paints only its
+ * placeholder, then repaints the same text with the Return as a newline. Nor
+ * is a rising count of matching rows: when an earlier identical message
+ * scrolls out as the new one appears, the count stays level. Position is the
+ * proof, so an unchanged stale row never verifies and a repeated message
+ * does. When the frames cannot be aligned, nothing is proven: false here, and
+ * the send stays pending rather than claiming a submit (#923).
  */
 export function codexTranscriptShowsNewEcho(
   preTypeScreen: string | null | undefined,
@@ -717,8 +716,9 @@ export function codexTranscriptShowsNewEcho(
   const starts = codexMatchingUserRows(post, screenText, submittedText);
   if (starts.length === 0) return false;
   const pre = preTypeScreen === null || preTypeScreen === undefined ? null : codexTranscript(preTypeScreen);
-  const boundary = codexNewTranscriptStart(pre, post);
-  return starts.some((start) => start >= boundary);
+  const preMatches = pre && preTypeScreen ? codexMatchingUserRows(pre, preTypeScreen, submittedText) : [];
+  const boundary = codexNewTranscriptStart(pre, post, preMatches);
+  return boundary !== null && starts.some((start) => start >= boundary);
 }
 
 /**

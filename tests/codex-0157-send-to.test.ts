@@ -265,8 +265,12 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   const withBody = (body: string) => fixture("idle-empty").replace("› Ask", `${body}\n\n› Ask`);
   const headerless = (body: string) => withBody(body).replace(/^[\s\S]*?Tip: [^\n]*\n/, "");
   it.each([
-    // The reviewer's probe: the old exchange is gone and the new row stands above an empty composer.
-    ["the old response is gone", withBody("› again\n\n• old response"), withBody("› again\n\n• new response")],
+    // The live response cell changed too; the new row is below it.
+    [
+      "the response above it changed",
+      withBody("› again\n\n• old response"),
+      withBody("› again\n\n• old response, finished\n\n› again\n\nWorking (0s • esc to interrupt)"),
+    ],
     // Scrolled: the header and the first `again` left the window; the rest moved up.
     [
       "the first row scrolled out",
@@ -283,6 +287,25 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(t.pane.submitted).toEqual(["again"]);
       expect(receipt, JSON.stringify(receipt)).toMatchObject({ submitted: true });
       expect(t.pane.returns).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // Round 2 (review of #923): the live response cell changes while the old
+  // identical row stays put. The frame cannot prove a new row, so the receipt
+  // never says submitted, whether the Return was swallowed or landed.
+  it.each([
+    ["swallowed", 99, []],
+    ["landed", 0, ["again"]],
+  ])("#923: a Return %s under a changing response is never a verified repeat", async (_why, swallow, actual) => {
+    const oldFrame = withBody("› again\n\n• old response");
+    const changed = withBody("› again\n\n• new response");
+    const t = await setup({ empty: oldFrame, buffered: changed, draft: changed.replace("› Ask Codex to do anything", "› again"), after: changed });
+    try {
+      t.pane.swallow = swallow as number;
+      const receipt = await t.send("again");
+      expect(t.pane.submitted).toEqual(actual);
+      expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+      expect(receipt.delivery_state, JSON.stringify(receipt)).not.toBe("submitted");
     } finally { t.context.dispose(); }
   }, 30_000);
 

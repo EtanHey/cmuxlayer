@@ -3,7 +3,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
-  codexTranscriptEchoCount,
   codexTranscriptShowsNewEcho,
   composerHoldsForeignDraft,
 } from "../src/delivery/composer-screen.js";
@@ -36,15 +35,15 @@ describe("#905 own-draft recognition across soft-wrap", () => {
 
 describe("#905 Codex submit evidence is the message in the transcript", () => {
   it("finds no echo in the burst frame that shows only the placeholder", () => {
-    expect(codexTranscriptEchoCount(fixture("burst-return-placeholder-frame"), PANG)).toBe(0);
-    expect(codexTranscriptEchoCount(fixture("burst-return-draft-reappears"), PANG)).toBe(0);
+    expect(codexTranscriptShowsNewEcho(null, fixture("burst-return-placeholder-frame"), PANG)).toBe(false);
+    expect(codexTranscriptShowsNewEcho(null, fixture("burst-return-draft-reappears"), PANG)).toBe(false);
   });
 
   it("counts a submitted message, but never the draft in the composer", () => {
-    expect(codexTranscriptEchoCount(fixture("idle-submitted-working"), "Reply with the single word pong and nothing else.")).toBe(1);
-    expect(codexTranscriptEchoCount(fixture("idle-draft"), "Reply with the single word pong and nothing else.")).toBe(0);
-    expect(codexTranscriptEchoCount(fixture("midturn-steer-drained-draft-pending"), LONG)).toBe(1);
-    expect(codexTranscriptEchoCount(fixture("midturn-steer-drained-draft-pending"), BRANCH)).toBe(0);
+    expect(codexTranscriptShowsNewEcho(null, fixture("idle-submitted-working"), "Reply with the single word pong and nothing else.")).toBe(true);
+    expect(codexTranscriptShowsNewEcho(null, fixture("idle-draft"), "Reply with the single word pong and nothing else.")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(null, fixture("midturn-steer-drained-draft-pending"), LONG)).toBe(true);
+    expect(codexTranscriptShowsNewEcho(null, fixture("midturn-steer-drained-draft-pending"), BRANCH)).toBe(false);
   });
 });
 
@@ -54,15 +53,15 @@ describe("#905 r2: proof is a user-message row; ownership keeps inline spaces", 
     `OpenAI Codex\n${body}\n\n› Ask Codex to do anything\n  gpt-6-sol medium · ~/Gits/cmuxlayer\n`;
 
   it("never counts assistant output, status chrome, or a frame with no composer", () => {
-    expect(codexTranscriptEchoCount(frame("• ok"), "ok")).toBe(0);
-    expect(codexTranscriptEchoCount(frame("Thinking (1s • esc to interrupt)"), "Thinking")).toBe(0);
-    expect(codexTranscriptEchoCount("OpenAI Codex\n› ok\nWorking (1s • esc to interrupt)", "ok")).toBe(0);
-    expect(codexTranscriptEchoCount(frame("› ok and more"), "ok")).toBe(0);
-    expect(codexTranscriptEchoCount(frame("› ok"), "ok")).toBe(1);
+    expect(codexTranscriptShowsNewEcho(null, frame("• ok"), "ok")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(null, frame("Thinking (1s • esc to interrupt)"), "Thinking")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(null, "OpenAI Codex\n› ok\nWorking (1s • esc to interrupt)", "ok")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(null, frame("› ok and more"), "ok")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(null, frame("› ok"), "ok")).toBe(true);
   });
 
   it("counts a soft-wrapped user row, including a mid-word hyphen wrap", () => {
-    expect(codexTranscriptEchoCount(fixture("midturn-steer-drained-draft-pending"), LONG)).toBe(1);
+    expect(codexTranscriptShowsNewEcho(null, fixture("midturn-steer-drained-draft-pending"), LONG)).toBe(true);
   });
 
   it("refuses a draft that differs only by an inline space", () => {
@@ -91,13 +90,13 @@ describe("#917 own-draft match is exact", () => {
 
   it("refuses a foreign double space", () => {
     expect(foreign(draft("review  foo bar"), "review foo bar")).toBe(true);
-    expect(codexTranscriptEchoCount(frame("› review  foo bar"), "review foo bar")).toBe(0);
+    expect(codexTranscriptShowsNewEcho(null, frame("› review  foo bar"), "review foo bar")).toBe(false);
   });
 
   it("refuses a row break the pane width could not have made", () => {
     expect(foreign(draft("prefix\n  suffix"), "prefixsuffix")).toBe(true);
     expect(foreign(draft("review\n  foo bar"), "review foo bar")).toBe(true);
-    expect(codexTranscriptEchoCount(frame("› prefix\n  suffix"), "prefixsuffix")).toBe(0);
+    expect(codexTranscriptShowsNewEcho(null, frame("› prefix\n  suffix"), "prefixsuffix")).toBe(false);
   });
 
   it("refuses a different number of blank paragraph rows", () => {
@@ -133,7 +132,6 @@ describe("#917 a new user row is proven by position", () => {
 
   it("verifies a repeated message whose predecessor scrolled out", () => {
     const post = frame("  14:06\n\n› status?\n\n• all green\n\n› again\n\nWorking (0s • esc to interrupt)");
-    expect(codexTranscriptEchoCount(post, "again")).toBe(codexTranscriptEchoCount(pre, "again"));
     expect(codexTranscriptShowsNewEcho(pre, post, "again")).toBe(true);
   });
 
@@ -141,6 +139,21 @@ describe("#917 a new user row is proven by position", () => {
     const post = pre.replace("› Ask", "› again\n\n› Ask");
     expect(codexTranscriptShowsNewEcho(pre, post, "again")).toBe(true);
     expect(codexTranscriptShowsNewEcho(pre, post, "status?")).toBe(false);
+  });
+
+  // Round 2 (review of #923): an assistant cell that changes in place breaks
+  // the alignment. That must leave the old identical row stale, never new.
+  it("never verifies an old row when a live assistant cell changed in place", () => {
+    const before = frame("› again\n\n• old response");
+    expect(codexTranscriptShowsNewEcho(before, frame("› again\n\n• new response"), "again")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(before, frame("› again\n\n• new response\n\n› again"), "again")).toBe(true);
+  });
+
+  it("never verifies an old identical message that a reflow re-wrapped", () => {
+    const narrow = `OpenAI Codex\n› alpha beta\n  gamma\n\n• old\n\n› Ask\n  gpt-6 · ~/x\n`;
+    expect(codexTranscriptShowsNewEcho(null, narrow, "alpha beta gamma")).toBe(true);
+    expect(codexTranscriptShowsNewEcho(narrow, frame("› alpha beta gamma\n\n• old"), "alpha beta gamma")).toBe(false);
+    expect(codexTranscriptShowsNewEcho(narrow, frame("› alpha beta gamma\n\n• old\n\n› alpha beta gamma"), "alpha beta gamma")).toBe(true);
   });
 
   it("reads a footer above the composer as chrome, never as the anchor", () => {
