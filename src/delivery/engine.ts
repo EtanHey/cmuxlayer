@@ -63,7 +63,7 @@ import {
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
   countVisibleExactQueuedRows,
-  codexTranscriptShowsNewEcho,
+  codexScreenShowsSubmit,
   composerRegionMatchesPayload,
   screenShowsCursorFollowupNeedsEnter,
   screenShowsQueuedCursorFollowup,
@@ -280,6 +280,9 @@ export interface DeliveryEngineDeps {
   }) => Promise<void>;
 }
 
+/** Pre-type frames kept for the pending sweep; far above any live pending set. */
+const MAX_REMEMBERED_PRE_TYPE_SCREENS = 256;
+
 export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   const {
     context,
@@ -293,6 +296,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   const stateMgr = context.stateMgr;
   const eventLog = context.eventLog;
   const deliveries = context.deliveries;
+  const deliveryPreTypeScreens = context.deliveryPreTypeScreens;
   const latestDeliveryBySurface = context.latestDeliveryBySurface;
   const activeDeliveryBySurface = context.activeDeliveryBySurface;
   const activeSurfaceWrites = context.activeSurfaceWrites;
@@ -1178,9 +1182,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const codexSubmitEchoed =
         codexScreen &&
         !hasPendingSubmitEvidence &&
-        composerInput !== null &&
-        composerInput.trim() === "" &&
-        codexTranscriptShowsNewEcho(opts.pre_type_screen, snapshot.text, opts.text);
+        codexScreenShowsSubmit(opts.pre_type_screen, snapshot.text, opts.text);
       const bootHasTranscriptEcho =
         opts.require_attributable_submit_evidence === true &&
         bootFrameAdvanced &&
@@ -1877,6 +1879,17 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ? { draftGuardText }
         : {}),
     });
+    // The pending sweep proves a later Codex submit against this same frame
+    // (#935). Without one, it has no baseline and proves nothing.
+    if (opts.delivery_id && deliverySafetySnapshot) {
+      deliveryPreTypeScreens.delete(opts.delivery_id);
+      deliveryPreTypeScreens.set(opts.delivery_id, deliverySafetySnapshot.text);
+      while (deliveryPreTypeScreens.size > MAX_REMEMBERED_PRE_TYPE_SCREENS) {
+        const oldest = deliveryPreTypeScreens.keys().next().value;
+        if (oldest === undefined) break;
+        deliveryPreTypeScreens.delete(oldest);
+      }
+    }
     // This screen read is already required by the safety gate and occurs under
     // the surface write lock. Reuse it for raw tracked-surface verification.
     const verifySubmit =

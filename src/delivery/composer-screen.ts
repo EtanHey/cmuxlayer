@@ -744,6 +744,24 @@ export function codexTranscriptShowsNewEcho(
 }
 
 /**
+ * The Codex submit proof: an empty composer and this payload as a new user
+ * row below the pre-type frame (codexTranscriptShowsNewEcho). The send's own
+ * verifier and the pending sweep both use it; the caller adds its own
+ * pending-input guard. An empty composer alone is not proof (a paste burst
+ * paints only the placeholder), and neither is the payload somewhere on
+ * screen (an old identical row) (#905, #935).
+ */
+export function codexScreenShowsSubmit(
+  preTypeScreen: string | null | undefined,
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const composer = extractComposerInputRegion(screenText);
+  return composer !== null && composer.trim() === "" &&
+    codexTranscriptShowsNewEcho(preTypeScreen, screenText, submittedText);
+}
+
+/**
  * True when the target composer holds text that this delivery did not put
  * there -- a human's half-written draft, or an earlier message still unflushed.
  *

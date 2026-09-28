@@ -130,7 +130,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, context, spawned, send, keyReturn, surfaceSend };
+    return { pane, context, spawned, engine, send, keyReturn, surfaceSend };
   }
 
   it("idle: reports submitted only once the message is in the transcript", async () => {
@@ -378,6 +378,50 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       const receipt = await t.send("again");
       expect(t.pane.submitted).toEqual([]);
       expect(receipt.submitted, JSON.stringify(receipt)).toBe(false);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+  // #935 r2: the background pending sweep uses the same Codex proof as the
+  // send itself. A placeholder repaint (empty composer) over an old identical
+  // row is no proof, with or without a pre-type frame.
+  it.each([
+    ["the pre-type reads failed", true],
+    ["the pre-type frame was read", false],
+  ])("#935: the pending sweep never verifies an old row when %s", async (_why, failPreType) => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      t.pane.failWhileEmpty = failPreType as boolean;
+      const receipt = await t.send("again");
+      expect(receipt.delivery_state, JSON.stringify(receipt)).toBe("pending_verify");
+      t.pane.repaint = true;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual([]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("pending_verify");
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#935: the pending sweep verifies a late submit drawn below the pre-type frame", async () => {
+    const stale = withBody("› again\n\n• old response");
+    const t = await setup({
+      empty: stale, buffered: stale,
+      draft: () => fixture("idle-draft").replace(PONG, "again"), after: stale,
+    });
+    try {
+      t.pane.swallow = 99;
+      const receipt = await t.send("again");
+      expect(receipt.delivery_state, JSON.stringify(receipt)).toBe("pending_verify");
+      // The Return lands late: the pane submits, and the new row is drawn below.
+      t.pane.submitted.push(t.pane.text);
+      t.pane.frames.after = withBody("› again\n\n• old response\n\n› again\n\n• new response");
+      t.pane.phase = "after";
+      t.pane.repaint = false;
+      await t.engine.verifyPendingDeliveries();
+      expect(t.pane.submitted).toEqual(["again"]);
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("submitted");
     } finally { t.context.dispose(); }
   }, 30_000);
 });
