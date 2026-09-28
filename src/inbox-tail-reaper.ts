@@ -103,6 +103,14 @@ export function observeInboxTailers(rows: ProcessRow[], opts?: InboxOpts): Inbox
     // agree with its child, or it is not ours to judge.
     const agentId = titledAgent ?? childAgent;
     if (!agentId || (titledAgent && childAgent && titledAgent !== childAgent)) continue;
+    // A title alone says nothing about which inbox root owns the supervisor.
+    // With no scoped child, require this root's pidfile and token to identify
+    // it. Otherwise every scratch sweep invents a path under its own root for
+    // every live fleet supervisor with a title.
+    if (!child) {
+      const record = readRecord(agentId, opts);
+      if (record?.pid !== row.pid || record.token !== (match[1] ?? match[3] ?? null)) continue;
+    }
     if (child) claimedTails.add(child.pid);
     tailers.push({
       agent_id: agentId,

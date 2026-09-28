@@ -1,5 +1,7 @@
-import { mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { expect } from "vitest";
 import { setResumeArtifactResolver } from "../src/resume-verification.js";
 
 // The release script bumps package.json before its pre-push Vitest rerun.
@@ -60,6 +62,82 @@ process.env.TEMP = root;
 const home = join(root, "home");
 mkdirSync(home, { recursive: true });
 process.env.HOME = home;
+// Keep CLI subprocesses and direct engine construction on the same run root.
+process.env.CMUXLAYER_INBOX_BASE_DIR = join(root, "agents");
+process.env.CMUX_AGENTS_DIR = process.env.CMUXLAYER_INBOX_BASE_DIR;
+process.env.CMUXLAYER_STATE_DIR = join(root, "state");
+
+// A suite must never signal another seat. Signal 0 is an observation. For a
+// mutating signal, require a live child of this worker or a detached inbox
+// tailer whose command/pidfile is rooted in this run's sandbox. Log denials
+// with the test name before throwing so a caught error remains visible.
+const nativeKill = process.kill.bind(process);
+const signalLog = join(root, "foreign-signals.jsonl");
+const ps = (pid: number): { parent: number; group: number; command: string } | null => {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "ppid=", "-o", "pgid=", "-o", "command="], {
+    encoding: "utf8", timeout: 1000,
+  });
+  if (result.status !== 0) return null;
+  const match = /^\s*(\d+)\s+(\d+)\s+([^\n]*)/.exec(result.stdout);
+  return match ? { parent: Number(match[1]), group: Number(match[2]), command: match[3]! } : null;
+};
+const pidfileMatches = (pid: number): boolean => {
+  const pending = [root];
+  while (pending.length > 0) {
+    const dir = pending.pop()!;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) pending.push(path);
+      if (entry.isFile() && entry.name === "inbox-tail.pid") {
+        try {
+          if (Number(readFileSync(path, "utf8").split(" ")[0]) === pid) return true;
+        } catch { /* a test may remove its fixture while we inspect it */ }
+      }
+    }
+  }
+  return false;
+};
+process.kill = ((pid: number, signal?: NodeJS.Signals | number): boolean => {
+  if (signal === 0) return nativeKill(pid, signal);
+  const target = Math.abs(pid);
+  const observed = target > 1 ? ps(target) : null;
+  // A cleanup often reaches a child that already exited. Preserve ESRCH
+  // without risking a signal if that PID appears between inspection and kill.
+  if (target > 1 && observed === null) {
+    const error = new Error(`kill ESRCH: ${pid}`) as NodeJS.ErrnoException;
+    error.code = "ESRCH";
+    throw error;
+  }
+  let owned = false;
+  let current = observed;
+  const seen = new Set<number>();
+  while (current && current.parent > 1 && !seen.has(current.parent)) {
+    if (current.parent === process.pid) { owned = true; break; }
+    seen.add(current.parent);
+    current = ps(current.parent);
+  }
+  if (pid < 0 && observed?.group !== target) owned = false;
+  if (pid > 0 && !owned && observed?.command.startsWith(`tail -n0 -F ${root}/`)) owned = true;
+  if (!owned && observed?.command.startsWith("cmuxlayer-inbox-tail ")) {
+    owned = pidfileMatches(pid);
+  }
+  // This live restart fixture deliberately detaches a real daemon. Its path
+  // embeds the current Vitest worker PID, so it cannot match a fleet daemon.
+  if (pid > 0 && !owned && observed?.command.includes(`/cmuxlayer-live-restart-${process.pid}-`)) {
+    owned = true;
+  }
+  if (!owned) {
+    const test = expect.getState().currentTestName ?? "<setup or teardown>";
+    const attempt = { test, pid, signal: signal ?? "SIGTERM", command: observed?.command ?? null,
+      stack: new Error().stack };
+    appendFileSync(signalLog, `${JSON.stringify(attempt)}\n`);
+    console.error(`FOREIGN_PID_SIGNAL ${JSON.stringify(attempt)}`);
+    throw new Error(`FOREIGN_PID_SIGNAL test=${test} pid=${pid} signal=${signal ?? "SIGTERM"}`);
+  }
+  return nativeKill(pid, signal);
+}) as typeof process.kill;
 // #482: `resumable` is now an observation of the harness session store. The
 // suite must never read the developer's real ~/.claude to decide it, so the
 // default here is the honest "I did not look" answer — which is exactly the

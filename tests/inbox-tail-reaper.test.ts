@@ -123,6 +123,23 @@ async function classifyWithSink(
 }
 
 describe("#911 inbox tailer reaping", () => {
+  it("ignores a titled fleet supervisor with no child or pidfile in this inbox root", () => {
+    const { inboxOpts } = scratch();
+    const rows = [{ pid: 424242, ppid: 1, started_at: "Mon Sep 28 10:00:00 2026",
+      command: "cmuxlayer-inbox-tail foreignWorker-12345678 abcdef0123456789" }];
+    expect(observeInboxTailers(rows, inboxOpts)).toEqual([]);
+  });
+
+  it("does not reap a scratch tailer without verified record authority", async () => {
+    const { inboxOpts, stateMgr } = scratch();
+    const agentId = "fleetWorker-noauthority";
+    const tailer = armTailer(agentId, inboxOpts);
+    stateMgr.writeState(record(agentId, { state: "stopped", user_killed: true }));
+    const { engine } = await freshEngine(stateMgr, inboxOpts, { authority: false });
+    await (engine as unknown as { reapInboxTailsBestEffort(): Promise<void> }).reapInboxTailsBestEffort();
+    expect(alive(tailer.tail)).toBe(true);
+  });
+
   it("a restarted daemon stops the tailer of an agent whose record was purged", async () => {
     const { inboxOpts, stateMgr } = scratch();
     const { wrapper, tail } = armTailer("fleetWorker-closed01", inboxOpts);
