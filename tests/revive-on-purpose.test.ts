@@ -1181,6 +1181,36 @@ describe("revive on purpose (#492)", () => {
       }
     });
 
+    it("keeps a live registration when a recovered row was discovered after process launch", async () => {
+      writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
+      stateMgr.writeState(makeRecord({
+        state: "done", surface_id: UNBOUND_SURFACE_REF, surface_uuid: null,
+        workspace_id: null, pid: DEAD_PID, surface_provenance: "unknown",
+        // Recovered rows record discovery time, which need not be launch time.
+        created_at: new Date(Date.now() + 60_000).toISOString(),
+      }));
+      liveSurfaces = [LIVE_PANE];
+      await registry.reconstitute();
+      withFakeRightSplitClient(mockClient);
+      const recoveredEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null,
+        inboxOpts: { baseDir: TEST_DIR }, sessionProcessScanner: async () => [],
+        selfRegistrationSessionLookup: () => ({
+          session_id: CODEX_SESSION, surface_uuid: LIVE_PANE.id!,
+          cwd: null, pid: process.pid, cli: "codex", launcher: "cmuxlayerCodex",
+          session_path: null, ts: Date.now(),
+        }),
+      });
+      try {
+        await expect(recoveredEngine.resumeAgent("cmuxlayerCodex-revive"))
+          .rejects.toThrow(/surface:12/);
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        expect(mockClient.send).not.toHaveBeenCalled();
+      } finally {
+        recoveredEngine.dispose();
+      }
+    });
+
     it("refuses a live pane claimed only by a stale pending row", async () => {
       writeCodexSessionArtifact(harnessHome, CODEX_SESSION);
       stateMgr.writeState(makeRecord({

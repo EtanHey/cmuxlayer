@@ -62,19 +62,21 @@ export function qualifyAgentProcessLiveness(
   agent: AgentProcessRecord,
   observed: ProcessLiveness,
   startedAtMs: number | null,
+  opts?: { ignoreCreationLowerBound?: boolean },
 ): ProcessLiveness {
   if (observed !== "alive") return observed;
   const createdAtMs = Date.parse(agent.created_at);
   const registeredAtMs = Date.parse(agent.pid_registered_at ?? "");
   if (
-    !Number.isFinite(createdAtMs) ||
+    (!opts?.ignoreCreationLowerBound && !Number.isFinite(createdAtMs)) ||
     !Number.isFinite(registeredAtMs) ||
     startedAtMs === null
   ) {
     return "unknown";
   }
   if (
-    startedAtMs < createdAtMs - PROCESS_START_SKEW_MS ||
+    (!opts?.ignoreCreationLowerBound &&
+      startedAtMs < createdAtMs - PROCESS_START_SKEW_MS) ||
     startedAtMs > registeredAtMs
   ) {
     return "gone";
@@ -93,6 +95,7 @@ export function qualifyAgentProcessLiveness(
 
 export function agentProcessLiveness(
   agent: AgentProcessRecord,
+  opts?: { ignoreCreationLowerBound?: boolean },
 ): ProcessLiveness {
   const observed = processLiveness(agent.pid);
   if (observed !== "alive" || !agent.pid) return observed;
@@ -100,6 +103,7 @@ export function agentProcessLiveness(
     agent,
     observed,
     processStartedAtMs(agent.pid),
+    opts,
   );
 }
 

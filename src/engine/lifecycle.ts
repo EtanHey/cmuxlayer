@@ -768,6 +768,9 @@ export async function assertSessionNotRunningElsewhere(
       pid: registration.pid,
       created_at: agent.created_at,
       pid_registered_at: registeredAt,
+    }, {
+      // Recovered rows record discovery time, not process launch time.
+      ignoreCreationLowerBound: agent.surface_provenance !== "cmuxlayer_spawn",
     }) !== "gone");
   let occupant: Awaited<ReturnType<AgentRegistry["findLiveSessionSurface"]>>;
   try {
