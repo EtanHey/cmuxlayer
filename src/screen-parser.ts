@@ -1689,7 +1689,7 @@ export function codexScreenHasActiveTurn(text: string): boolean {
   const lines = normalized.split("\n");
   let composer = lines.length;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (/^\s*[›»]\s+\S/.test(lines[index] ?? "")) {
+    if (/^\s*[›»](?:\s+\S|\s*$)/.test(lines[index] ?? "")) {
       composer = index;
       break;
     }

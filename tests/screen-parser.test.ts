@@ -8,6 +8,7 @@ import {
   inferContextWindow,
   isPickerOrMenuScreen,
   classifyPromptDisposition,
+  codexScreenHasActiveTurn,
 } from "../src/screen-parser.js";
 
 const readFixture = (name: string) =>
@@ -37,6 +38,28 @@ const codexBannerOverlayReadyFixture = Buffer.from(
   readFixture("live/codex-0.154-update-banner-chronicle-ready.b64").trim(),
   "base64",
 ).toString("utf8");
+
+describe("codexScreenHasActiveTurn", () => {
+  it("detects an active turn above a bare composer", () => {
+    expect(codexScreenHasActiveTurn([
+      "OpenAI Codex",
+      "› Run the task",
+      "• Working (12s • esc to interrupt)",
+      "› ",
+      "gpt-6-sol high · ~/Gits/cmuxlayer",
+    ].join("\n"))).toBe(true);
+  });
+
+  it("keeps an idle bare composer idle", () => {
+    expect(codexScreenHasActiveTurn([
+      "OpenAI Codex",
+      "› Run the task",
+      "• Done with the task",
+      "› ",
+      "gpt-6-sol high · ~/Gits/cmuxlayer",
+    ].join("\n"))).toBe(false);
+  });
+});
 
 describe("parseScreen", () => {
   it("treats the finished 0.4.81 Claude proof pane as ready and extracts its reply", () => {
