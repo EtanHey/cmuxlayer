@@ -997,6 +997,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     require_working_status?: boolean;
     require_attributable_submit_evidence?: boolean;
     allow_recovery_enter_retry?: boolean;
+    submit_key?: "return" | "tab";
     timeout_ms?: number;
     cursor_response_baseline: readonly string[] | null;
     pre_type_screen?: string | null;
@@ -1336,20 +1337,26 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         Date.now() - retryEligiblePendingSince >= retryObserveMs
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
+        // A Codex relay that queued with Tab must not turn into a Return
+        // retry while the target is still working. If the turn has ended,
+        // Return is now the correct submit key.
+        const recoveryKey = opts.submit_key === "tab" &&
+          codexTurnActive(snapshot.text, snapshot.parsed)
+          ? "tab" : "return";
         const recoveryRpcMethod = await sendKeyWithRetry(
           opts.surface,
-          "return",
+          recoveryKey,
           opts.workspace,
           opts.beforeMutation,
         );
         if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
         retryCount += 1;
         appendDeliveryEvent({
-          event_type: "press_enter",
+          event_type: recoveryKey === "tab" ? "send_key" : "press_enter",
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes: opts.bytes,
-          press_enter: true,
+          press_enter: recoveryKey === "return",
           submit_verified: null,
           retry_count: retryCount,
         });
@@ -1457,6 +1464,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       delivery: "submitted",
     };
   };
+
+  // A dirty Codex composer parses as draft_pending in both idle and working
+  // states. Its active-turn footer is the deciding signal for Tab vs Return.
+  const codexTurnActive = (text: string, parsed: ParsedScreenResult): boolean =>
+    parsed.control_state === "busy" ||
+    normalizeTerminalText(text).split("\n").slice(-8).some((line) =>
+      /^\s*Working \(/.test(line));
 
   /**
    * AIDEV-NOTE (#484/#500): key mode writes no payload, so post-key composer
@@ -2003,6 +2017,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         submit_verification_reason = null;
         deliveryOutcome = "pending_verify";
       } else {
+        const codexRelay = targetCli === "codex" &&
+          (opts.source_event === "send_to" ||
+            opts.source_event === "dispatch_nudge" ||
+            opts.source_event === "report_to_parent");
+        const submitFrame = preReturnBootEvidence?.screenText ??
+          deliverySafetySnapshot?.text ?? "";
+        const submitKey = codexRelay &&
+          codexTurnActive(submitFrame, parseScreen(submitFrame))
+          ? "tab" : "return";
         if (
           verifySubmit &&
           deliverySafetySnapshot &&
@@ -2028,7 +2051,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           await delay(computeEnterDelayMs(bytes, opts.chunks.length));
           const submitRpcMethod = await sendKeyWithRetry(
             opts.surface,
-            "return",
+            submitKey,
             opts.workspace,
             opts.beforeMutation,
           );
@@ -2036,11 +2059,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
         });
         appendDeliveryEvent({
-          event_type: "press_enter",
+          event_type: submitKey === "tab" ? "send_key" : "press_enter",
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes,
-          press_enter: true,
+          press_enter: submitKey === "return",
           submit_verified: null,
           retry_count,
         });
@@ -2058,6 +2081,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               source_agent: opts.source_agent,
               verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+              submit_key: submitKey,
               timeout_ms: opts.submit_verify_timeout_ms,
               cursor_response_baseline: cursorResponseBaseline,
               pre_type_screen: deliverySafetySnapshot?.text,

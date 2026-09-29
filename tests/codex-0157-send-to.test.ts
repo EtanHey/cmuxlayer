@@ -39,7 +39,8 @@ const BOOT_ROWS = "› You are a scratch capture pane for issue 905. Reply with 
 function makeCodexPane(frames: Frames) {
   const pane = {
     frames, live: false, phase: "empty" as "empty" | "buffered" | "draft" | "after",
-    bufferedReads: 0, repaint: false, swallow: 0, returns: 0, submitted: [] as string[], text: "",
+    bufferedReads: 0, repaint: false, swallow: 0, returns: 0, tabs: 0,
+    queued: [] as string[], submitted: [] as string[], text: "",
     failWhileEmpty: false,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
@@ -67,6 +68,11 @@ function makeCodexPane(frames: Frames) {
       pane.returns += 1;
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
       else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
+      return { stdout: "{}", stderr: "" };
+    }
+    if (args.includes("send-key") && args.includes("tab") && pane.live) {
+      pane.tabs += 1;
+      if (pane.phase === "draft") { pane.queued.push(pane.text); pane.phase = "after"; }
       return { stdout: "{}", stderr: "" };
     }
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
@@ -143,10 +149,12 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       const receipt = await t.send(PONG);
       expect(t.pane.submitted, JSON.stringify(receipt)).toEqual([PONG]);
       expect(receipt).toMatchObject({ ok: true, submitted: true, retry_count: 1 });
+      expect(t.pane.tabs).toBe(0);
+      expect(t.pane.returns).toBe(2);
     } finally { t.context.dispose(); }
   }, 30_000);
 
-  it("mid-turn: reports the steer queue honestly, never submitted", async () => {
+  it("mid-turn: Tab queues the relay without leaving it in the composer", async () => {
     const t = await setup({
       empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
       draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued"),
@@ -156,7 +164,32 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(receipt, JSON.stringify(receipt)).toMatchObject({
         ok: true, submitted: false, delivery_state: "queued", queued_behind_turn: true,
       });
-      expect(t.pane.submitted).toEqual([LIST]);
+      expect(t.pane.tabs).toBe(1);
+      expect(t.pane.returns).toBe(0);
+      expect(t.pane.queued).toEqual([LIST]);
+      expect(t.pane.submitted).toEqual([]);
+      expect(fixture("midturn-steer-queued")).toContain(`↳ ${LIST}`);
+      t.pane.submitted.push(t.pane.queued.shift()!);
+      t.pane.frames.after = fixture("midturn-steer-queued").replace(
+        `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${LIST}`,
+        `› ${LIST}\n\n• Files listed after the prior turn.`,
+      );
+      await t.engine.verifyPendingDeliveries();
+      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "submitted", submit_verified: true,
+      });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("refuses a relay when a stray character already occupies the Codex composer", async () => {
+    const dirty = fixture("idle-empty").replace("› Ask Codex to do anything", "› z");
+    const t = await setup({ empty: dirty, buffered: dirty, draft: dirty, after: dirty });
+    try {
+      const receipt = await t.send("Read and follow /tmp/contract.md");
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(t.pane.text).toBe("");
+      expect(t.pane.tabs).toBe(0);
+      expect(t.pane.returns).toBe(0);
     } finally { t.context.dispose(); }
   }, 30_000);
 

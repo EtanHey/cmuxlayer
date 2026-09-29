@@ -333,7 +333,7 @@ export function registerSpawnAgentTool(
         })
         .optional()
         .describe(
-          'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
+          'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified. Inspect the pane, then relay with send_to({agent_id, text:"Read and follow <contract_path>", press_enter:true}); do not use raw cmux send/send-key. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
         ),
       force_new: z
         .boolean()
@@ -1306,8 +1306,9 @@ export function registerSpawnAgentTool(
               next_action:
                 "Return WAS dispatched: the brief was submitted and the agent is working on it, " +
                 "but the text in composer_residue stayed unsent in its composer. Do not re-spawn. " +
-                "If the residue is the contract pointer, relay contract_path, report_path and done_marker " +
-                "to the agent yourself; otherwise send the residue with send_to once the draft is cleared.",
+                "If the residue is the contract pointer, inspect and clear that exact owned draft, then " +
+                "relay with send_to({agent_id, text:'Read and follow <contract_path>', press_enter:true}). " +
+                "Do not use a raw cmux send/send-key pair. Otherwise send the residue with send_to once the draft is cleared.",
             });
           }
           if (e instanceof BootPromptDeliveryError) {
