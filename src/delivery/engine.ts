@@ -28,6 +28,7 @@ import {
   isCodexUpdateMenuScreen,
   isPickerOrMenuScreen,
   parseScreen,
+  codexScreenHasActiveTurn,
 } from "../screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -670,7 +671,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   const sendKeyWithRetry = async (
     surface: string,
-    key: string,
+    key: string | (() => Promise<string>),
     workspace?: string,
     beforeMutation?: () => Promise<void>,
     maxAttempts = SEND_INPUT_RETRY_ATTEMPTS,
@@ -681,8 +682,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     while (attempt < maxAttempts) {
       try {
         await beforeMutation?.();
+        const dispatchKey = typeof key === "string" ? key : await key();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
-        await client.sendKey(surface, key, { workspace });
+        await client.sendKey(surface, dispatchKey, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
           "surface.send_key",
@@ -703,7 +705,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
     throw lastError instanceof Error
       ? lastError
-      : new Error(`Failed to send key ${key} to ${surface}`);
+      : new Error(`Failed to send key ${typeof key === "string" ? key : "selected key"} to ${surface}`);
   };
 
   const appendDeliveryEvent = (event: Omit<DeliveryTelemetryEvent, "ts">) => {
@@ -986,6 +988,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     return null;
   };
 
+  class CodexQueueRecoveryChanged extends Error {
+    constructor(readonly state: "active" | "gone") {
+      super(`Codex queue changed before recovery: ${state}`);
+    }
+  }
+
   const verifySubmitAfterEnter = async (opts: {
     surface: string;
     workspace?: string;
@@ -997,6 +1005,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     require_working_status?: boolean;
     require_attributable_submit_evidence?: boolean;
     allow_recovery_enter_retry?: boolean;
+    submit_key?: "return" | "tab";
     timeout_ms?: number;
     cursor_response_baseline: readonly string[] | null;
     pre_type_screen?: string | null;
@@ -1033,6 +1042,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const startedAt = Date.now();
     let retried = false;
     let retryCount = 0;
+    let lastCodexRelayKey = opts.submit_key ?? "return";
+    let idleQueueDrainAttempted = false;
     let sawClearedComposerEvidence = false;
     let sawAllowedClearedComposerEvidence = false;
     let lastHasPendingSubmitEvidence = false;
@@ -1083,6 +1094,63 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         opts.text,
       );
       if (hasQueuedAgentInput) {
+        // Tab can land just as the turn ends. A visible exact queue row in an
+        // idle pane still needs Return; recheck both facts at the key dispatch.
+        if (lastCodexRelayKey === "tab" && !idleQueueDrainAttempted &&
+          !codexScreenHasActiveTurn(snapshot.text) &&
+          screenShowsQueuedAgentInput(snapshot.text, opts.text, { exact: true })) {
+          try {
+            const recoveryRpcMethod = await sendKeyWithRetry(
+              opts.surface,
+              async () => {
+                const latest = await readParsedSurface(opts.surface, opts.workspace, {
+                  throwOnSurfaceGone: true,
+                });
+                if (!latest?.text.trim()) {
+                  throw new Error(`Cannot recover Codex queue: unreadable surface ${opts.surface}`);
+                }
+                if (codexScreenHasActiveTurn(latest.text)) {
+                  throw new CodexQueueRecoveryChanged("active");
+                }
+                if (!screenShowsQueuedAgentInput(latest.text, opts.text, { exact: true })) {
+                  throw new CodexQueueRecoveryChanged("gone");
+                }
+                return "return";
+              },
+              opts.workspace,
+              opts.beforeMutation,
+            );
+            if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
+            retryCount += 1;
+            retried = true;
+            idleQueueDrainAttempted = true;
+            retriedAt = Date.now();
+            appendDeliveryEvent({
+              event_type: "press_enter",
+              source_agent: opts.source_agent ?? null,
+              target_surface: opts.surface,
+              bytes: opts.bytes,
+              press_enter: true,
+              submit_verified: null,
+              retry_count: retryCount,
+            });
+            continue;
+          } catch (error) {
+            if (error instanceof CodexQueueRecoveryChanged) {
+              if (error.state === "gone") continue;
+            } else throw error;
+          }
+        }
+        if (lastCodexRelayKey === "tab" && idleQueueDrainAttempted &&
+          !codexScreenHasActiveTurn(snapshot.text)) {
+          return {
+            submit_verified: null,
+            submit_evidence: null,
+            submit_verification_reason: "input_still_pending",
+            retry_count: retryCount,
+            delivery: "pending_verify",
+          };
+        }
         if (
           opts.source_event !== "send_to" &&
           opts.source_event !== "dispatch_nudge" &&
@@ -1336,20 +1404,29 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         Date.now() - retryEligiblePendingSince >= retryObserveMs
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
+        const codexRelay = screenCli === "codex" &&
+          (opts.source_event === "send_to" ||
+            opts.source_event === "dispatch_nudge" ||
+            opts.source_event === "report_to_parent");
+        const recoverySelection: { key: "tab" | "return" } = { key: "return" };
         const recoveryRpcMethod = await sendKeyWithRetry(
           opts.surface,
-          "return",
+          codexRelay ? async () => {
+            recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
+            lastCodexRelayKey = recoverySelection.key;
+            return recoverySelection.key;
+          } : "return",
           opts.workspace,
           opts.beforeMutation,
         );
         if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
         retryCount += 1;
         appendDeliveryEvent({
-          event_type: "press_enter",
+          event_type: recoverySelection.key === "tab" ? "send_key" : "press_enter",
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes: opts.bytes,
-          press_enter: true,
+          press_enter: recoverySelection.key === "return",
           submit_verified: null,
           retry_count: retryCount,
         });
@@ -1456,6 +1533,19 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       retry_count: retryCount,
       delivery: "submitted",
     };
+  };
+
+  const currentCodexRelayKey = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<"tab" | "return"> => {
+    const snapshot = await readParsedSurface(surface, workspace, {
+      throwOnSurfaceGone: true,
+    });
+    if (!snapshot?.text.trim()) {
+      throw new Error(`Cannot choose Codex relay key: unreadable surface ${surface}`);
+    }
+    return codexScreenHasActiveTurn(snapshot.text) ? "tab" : "return";
   };
 
   /**
@@ -2003,6 +2093,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         submit_verification_reason = null;
         deliveryOutcome = "pending_verify";
       } else {
+        const codexRelay = targetCli === "codex" &&
+          (opts.source_event === "send_to" ||
+            opts.source_event === "dispatch_nudge" ||
+            opts.source_event === "report_to_parent");
+        const submitSelection: { key: "tab" | "return" } = { key: "return" };
         if (
           verifySubmit &&
           deliverySafetySnapshot &&
@@ -2028,7 +2123,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           await delay(computeEnterDelayMs(bytes, opts.chunks.length));
           const submitRpcMethod = await sendKeyWithRetry(
             opts.surface,
-            "return",
+            codexRelay ? async () => {
+              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
+              return submitSelection.key;
+            } : "return",
             opts.workspace,
             opts.beforeMutation,
           );
@@ -2036,11 +2134,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
         });
         appendDeliveryEvent({
-          event_type: "press_enter",
+          event_type: submitSelection.key === "tab" ? "send_key" : "press_enter",
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes,
-          press_enter: true,
+          press_enter: submitSelection.key === "return",
           submit_verified: null,
           retry_count,
         });
@@ -2058,6 +2156,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               source_agent: opts.source_agent,
               verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+              submit_key: submitSelection.key,
               timeout_ms: opts.submit_verify_timeout_ms,
               cursor_response_baseline: cursorResponseBaseline,
               pre_type_screen: deliverySafetySnapshot?.text,

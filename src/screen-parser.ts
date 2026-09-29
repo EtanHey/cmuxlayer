@@ -251,6 +251,8 @@ const CLAUDE_BELOW_COMPOSER_FOOTER_RE =
 const CLAUDE_SHORTCUTS_FOOTER_RE = /^[ \t]*\?[ \t]+for shortcuts\b/i;
 const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
+const CODEX_TURN_ACTIVITY_LINE_RE =
+  /^\s*(?:[•·]\s*)?(?:Working|Thinking|Waiting(?: for background terminal)?)\s*\([^\n)]*\)(?:\s*[•·].*)?\s*$/i;
 const TERMINAL_ACTIVITY_LINE_RE =
   /^\s*(?:[•·]\s*)?(?:Working|Waiting for background terminal)\s*\((?:[0-9]+(?:\.[0-9]+)?[hms]\s*)+\s*[•·-]\s*esc to interrupt\)(?:\s*[•·].*)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
@@ -1678,6 +1680,41 @@ export function hasVisibleAgentProgress(
       GEMINI_WORKING_RE.test(normalized) ||
       antigravityScreenIsActive(normalized))
   );
+}
+
+/** Current Codex activity above the composer, including a dirty mid-turn draft. */
+export function codexScreenHasActiveTurn(text: string): boolean {
+  const normalized = normalizeText(text);
+  if (CODEX_MIDTURN_DRAFT_FOOTER_RE.test(normalized)) return true;
+  const lines = normalized.split("\n");
+  let composer = lines.length;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/^\s*[›»]\s+\S/.test(lines[index] ?? "")) {
+      composer = index;
+      break;
+    }
+  }
+  let previousPrompt = -1;
+  for (let index = composer - 1; index >= 0; index -= 1) {
+    if (/^\s*[›»]\s+\S/.test(lines[index] ?? "")) {
+      previousPrompt = index;
+      break;
+    }
+  }
+  let latestActivity = -1;
+  let latestReply = -1;
+  for (let index = previousPrompt + 1; index < composer; index += 1) {
+    const line = lines[index] ?? "";
+    if (CODEX_TURN_ACTIVITY_LINE_RE.test(line) || THINKING_RE.test(line)) {
+      latestActivity = index;
+    }
+    else if (/^\s*[•·]\s+\S/.test(line) &&
+      !/^\s*[•·]\s+Messages to be submitted after next tool call\b/.test(line) &&
+      !CODEX_CURRENT_ACTION_RE.test(line.replace(/^\s*[•·]\s+/, ""))) {
+      latestReply = index;
+    }
+  }
+  return latestActivity > latestReply;
 }
 
 function hasActiveAgentWork(
