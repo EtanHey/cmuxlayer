@@ -42,7 +42,6 @@ import {
   toPublicAgent,
 } from "./agent-facade.js";
 import type {
-  CmuxNewSplitResult,
   CmuxReadScreenResult,
   CmuxStatusUpdate,
 } from "./types.js";
@@ -81,7 +80,6 @@ import {
   chooseSurfaceClosePolicy,
   deriveRoleColumnIndex,
   inferRecordRoleOrNull,
-  topPaneInRoleColumn,
   type RoleSurfaceIds,
 } from "./layout-policy.js";
 import {
@@ -3473,8 +3471,28 @@ export class AgentEngine {
       return { moved: [], skipped: [] };
     }
     const summary: RolePlacementReconcileSummary = { moved: [], skipped: [] };
+    const selfRegistrationId = (agent: AgentRecord): string | null => {
+      if (
+        process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT === "0" ||
+        agent.surface_provenance !== "unknown" ||
+        !agent.surface_uuid
+      ) return null;
+      const registration = this.selfRegistrationSessionResolver?.(agent);
+      const sessionId = typeof registration === "string"
+        ? registration
+        : registration?.session_id;
+      if (
+        !sessionId ||
+        (agent.cli_session_id && agent.cli_session_id !== sessionId)
+      ) return null;
+      return `${agent.surface_uuid.toLowerCase()}:${sessionId}`;
+    };
     const eligibleForTrigger = (agent: AgentRecord): boolean => {
-      if (agent.surface_provenance !== "cmuxlayer_spawn") return false;
+      if (agent.surface_provenance !== "cmuxlayer_spawn") {
+        return trigger !== "spawn" &&
+          !TERMINAL_STATES.has(agent.state) &&
+          selfRegistrationId(agent) !== null;
+      }
       if (trigger === "spawn") {
         // Spawn reconciliation runs synchronously after registry persistence
         // and before the launch command is sent, so membership is sufficient:
@@ -3494,6 +3512,7 @@ export class AgentEngine {
     });
 
     for (const agent of candidates) {
+      const registrationId = selfRegistrationId(agent);
       const role = inferRecordRoleOrNull(agent);
       if (!role) continue;
       const targetColumn = canonicalRoleColumn(role);
@@ -3522,6 +3541,27 @@ export class AgentEngine {
       ) {
         continue;
       }
+      if (
+        registrationId &&
+        agent.placement_reconciled_registration === registrationId
+      ) {
+        const currentTopology = await this.collectFreshObservedSurfaceTopology();
+        const currentBinding = currentTopology?.complete
+          ? resolveAgentSurfaceBinding(agent, currentTopology)
+          : null;
+        const currentColumn = currentBinding?.provenance === "uuid" &&
+          currentBinding.workspaceId === agent.workspace_id
+          ? currentTopology?.topologyBySurface.get(currentBinding.surfaceRef)?.column
+          : null;
+        if (currentColumn !== null && currentColumn !== undefined &&
+            currentColumn !== targetColumn && !agent.placement_override) {
+          const overridden = this.stateMgr.updateRecord(agent.agent_id, {
+            placement_override: true,
+          });
+          this.registry.set(agent.agent_id, overridden);
+        }
+        continue;
+      }
 
       const observerEpoch = this.captureSurfaceObserverEpoch();
       try {
@@ -3542,6 +3582,7 @@ export class AgentEngine {
             current.surface_uuid?.trim().toLowerCase() !==
               agent.surface_uuid?.trim().toLowerCase() ||
             (current.workspace_id ?? null) !== (agent.workspace_id ?? null)
+            || (registrationId !== null && selfRegistrationId(current) !== registrationId)
           ) {
             throw new Error(
               "agent provenance, state, or stable binding changed before mutation",
@@ -3586,6 +3627,9 @@ export class AgentEngine {
         const panes = await this.client.listPanes({
           workspace: agent.workspace_id,
         });
+        if (panes.workspace_ref && panes.workspace_ref !== agent.workspace_id) {
+          throw new Error("pane enumeration crossed the agent workspace");
+        }
         const rawPaneSurfaces = await Promise.all(
           panes.panes.map(async (pane) => {
             const observed = await this.client.listPaneSurfaces({
@@ -3640,43 +3684,34 @@ export class AgentEngine {
         }
         if (fromColumn === targetColumn) continue;
 
-        let targetPane = topPaneInRoleColumn(panes.panes, role)?.ref ?? null;
-        let seed: CmuxNewSplitResult | null = null;
-        if (!targetPane && role === "worker") {
-          const leadPane = topPaneInRoleColumn(panes.panes, "orchestrator");
-          if (!leadPane) {
-            throw new Error("column 0 anchor is unavailable");
-          }
-          const createdSeed = await this.client.newSplit("right", {
-            pane: leadPane.ref,
-            surface: sourceRef,
-            workspace: agent.workspace_id,
-            type: "terminal",
-            stableSurfaceIdentity: agent.surface_uuid,
-            beforeMutation: () =>
-              assertFreshAgentBinding(sourceRef, "worker-column seed"),
-          });
-          this.invalidateSweepTopologyGeneration();
-          this.assertSurfaceObserverEpochCurrent(
-            observerEpoch,
-            "role placement",
+        const targetPanes = panes.panes
+          .filter((pane) => columnByPane.get(pane.ref) === targetColumn)
+          .sort((a, b) =>
+            (a.pixel_frame?.y ?? a.index) - (b.pixel_frame?.y ?? b.index) ||
+            a.index - b.index,
           );
-          if (
-            createdSeed.surface === sourceRef ||
-            (createdSeed.surface_id ?? null) === agent.surface_uuid
-          ) {
-            throw new Error(
-              "worker-column seed collided with the spawned surface binding",
-            );
-          }
-          seed = createdSeed;
-          targetPane = seed.pane;
-        }
+        const target = role === "orchestrator"
+          ? targetPanes.at(-1)
+          : targetPanes[0];
+        const targetPane = target?.ref ?? null;
         if (!targetPane) {
           throw new Error(`canonical column ${targetColumn} is unavailable`);
         }
 
-        try {
+        const assertSafeMove = async (): Promise<void> => {
+          await assertFreshAgentBinding(sourceRef, "role placement move");
+          const freshPanes = await this.client.listPanes({
+            workspace: agent.workspace_id ?? undefined,
+          });
+          if (
+            (freshPanes.workspace_ref && freshPanes.workspace_ref !== agent.workspace_id) ||
+            deriveRoleColumnIndex(freshPanes.panes).get(targetPane) !== targetColumn
+          ) {
+            throw new Error("target pane left the agent workspace or role column");
+          }
+        };
+        {
+          await assertSafeMove();
           this.assertSurfaceObserverEpochCurrent(
             observerEpoch,
             "role placement",
@@ -3684,11 +3719,11 @@ export class AgentEngine {
           await this.client.moveSurface({
             surface: sourceRef,
             pane: targetPane,
+            ...(role === "orchestrator" ? { index: target!.surface_count } : {}),
             workspace: agent.workspace_id,
             focus: false,
             stableSurfaceIdentity: agent.surface_uuid,
-            beforeMutation: () =>
-              assertFreshAgentBinding(sourceRef, "role placement move"),
+            beforeMutation: assertSafeMove,
           });
           this.invalidateSweepTopologyGeneration();
           summary.moved.push({
@@ -3698,68 +3733,17 @@ export class AgentEngine {
             to_column: targetColumn,
             pane: targetPane,
           });
+          if (registrationId) {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+              placement_override: false,
+            });
+            this.registry.set(agent.agent_id, reconciled);
+          }
           this.assertSurfaceObserverEpochCurrent(
             observerEpoch,
             "role placement",
           );
-        } finally {
-          if (seed) {
-            if (!seed.surface_id) {
-              throw new Error(
-                "worker-column seed has no stable UUID; refusing cleanup by mutable ref",
-              );
-            }
-            const seedTopology =
-              await this.collectFreshObservedSurfaceTopology();
-            const seedBinding = seedTopology?.complete
-              ? resolveAgentSurfaceBinding(
-                  {
-                    surface_id: seed.surface,
-                    surface_uuid: seed.surface_id,
-                  },
-                  seedTopology,
-                )
-              : null;
-            if (!seedBinding || seedBinding.provenance !== "uuid") {
-              throw new Error(
-                `worker-column seed UUID ${seed.surface_id} is no longer uniquely bound; refusing cleanup`,
-              );
-            }
-            await this.client.closeSurface(seedBinding.surfaceRef, {
-              workspace: seedBinding.workspaceId ?? seed.workspace,
-              stableSurfaceIdentity: seed.surface_id,
-              beforeMutation: async () => {
-                this.assertSurfaceObserverEpochCurrent(
-                  observerEpoch,
-                  "role placement seed cleanup",
-                );
-                const freshSeedTopology =
-                  await this.collectFreshObservedSurfaceTopology();
-                this.assertSurfaceObserverEpochCurrent(
-                  observerEpoch,
-                  "role placement seed cleanup",
-                );
-                const freshSeedBinding = freshSeedTopology?.complete
-                  ? resolveAgentSurfaceBinding(
-                      {
-                        surface_id: seed.surface,
-                        surface_uuid: seed.surface_id,
-                      },
-                      freshSeedTopology,
-                    )
-                  : null;
-                if (
-                  !freshSeedBinding ||
-                  freshSeedBinding.provenance !== "uuid" ||
-                  freshSeedBinding.surfaceRef !== seedBinding.surfaceRef
-                ) {
-                  throw new Error(
-                    "worker-column seed binding changed before cleanup",
-                  );
-                }
-              },
-            });
-          }
         }
       } catch (error) {
         if (summary.moved.some((moved) => moved.agent_id === agent.agent_id)) {

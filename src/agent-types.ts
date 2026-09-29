@@ -49,6 +49,10 @@ export interface AgentRecord {
   surface_observer_id?: string | null;
   /** Durable authority for automated role-placement mutations. */
   surface_provenance?: SurfaceProvenance;
+  /** One automatic move is allowed for this stable surface and registration. */
+  placement_reconciled_registration?: string | null;
+  /** A later mismatch after that move is treated as an operator override. */
+  placement_override?: boolean;
   workspace_id?: string | null;
   state: AgentState;
   repo: string;
@@ -213,6 +217,7 @@ export interface PublicAgent {
 export interface ObservedPublicAgent {
   agent_id: string;
   repo: string;
+  placement_mismatch?: true;
   surface_provenance: SurfaceProvenance;
   model: Observed<string | null>;
   state: Observed<AgentState | null>;

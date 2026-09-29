@@ -43,6 +43,7 @@ import { inferRecordRoleOrNull } from "../../layout-policy.js";
 import {
   invalidateSurfaceTopologyCallScope,
   healthTopologyOverrides,
+  placementMismatchForAgent,
   type SurfaceTopologySnapshot,
 } from "../../surface-topology.js";
 import { ANNOTATIONS } from "../schemas.js";
@@ -732,6 +733,7 @@ export function registerListAgentsTool(
     /** #905: present only while the composer holds unsent text. */
     composer?: "draft_pending";
     parsed_cli_mismatch?: true;
+    placement_mismatch?: true;
     health?: AgentHealth;
   };
   type ListAgentsCacheEntry = {
@@ -752,6 +754,7 @@ export function registerListAgentsTool(
               surface,
               workspace,
               uuid: topology.surfaceIdByRef.get(surface) ?? null,
+              column: topology.topologyBySurface.get(surface)?.column ?? null,
             }))
             .sort((a, b) => a.surface.localeCompare(b.surface))
         : [],
@@ -881,6 +884,9 @@ export function registerListAgentsTool(
                 ...(agent.composer ? { composer: agent.composer } : {}),
                 ...(agent.parsed_cli_mismatch === true
                   ? { parsed_cli_mismatch: true }
+                  : {}),
+                ...(agent.placement_mismatch === true
+                  ? { placement_mismatch: true }
                   : {}),
               }));
         const data = {
@@ -1034,6 +1040,8 @@ export function registerListAgentsTool(
                 topology,
               );
               const reconciledState = health.reconciled_state ?? agent.state;
+              const role = inferRecordRoleOrNull(agent);
+              const placementMismatch = placementMismatchForAgent(agent, topology);
               // #863: the health block keeps an unsubmitted boot `booting`;
               // that state is the registry's, not the screen's.
               const bootUnsubmitted = health.issue_codes.includes(
@@ -1079,7 +1087,10 @@ export function registerListAgentsTool(
                         : {}),
                   }),
                   cli: agent.cli,
-                  role: inferRecordRoleOrNull(agent),
+                  role,
+                  ...(placementMismatch
+                    ? { placement_mismatch: true as const }
+                    : {}),
                   ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                   surface_id: agent.surface_id,
                   send_via: "send_to" as const,
@@ -1241,6 +1252,19 @@ export function registerListAgentsTool(
           // holder cannot stale this scan, so it must not invalidate it (#892).
           { label: "list-agents", observeOnly: true },
         );
+        const selfRegisteredIds = new Set(
+          live.merged
+            .filter((agent) => agent.surface_provenance === "unknown")
+            .map((agent) => agent.agent_id),
+        );
+        if (selfRegisteredIds.size > 0) {
+          await engine.runLifecycleMutation(
+            () => engine.reconcileRolePlacements("idle", {
+              agentIds: selfRegisteredIds,
+            }),
+            { label: "self-registration-placement" },
+          );
+        }
         invalidateSurfaceTopologyCallScope(client as object);
         const reconciledTopology = await collectSurfaceTopology();
         const reconciledTopologySignature =

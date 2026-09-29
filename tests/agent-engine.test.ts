@@ -7496,6 +7496,150 @@ Session ID: ${sessionId}`,
       expect(mockClient.moveSurface).not.toHaveBeenCalled();
     });
 
+    it("moves a self-registered worker right only once per registration", async () => {
+      const record = makeRecord({
+        agent_id: "registered-worker",
+        surface_id: "surface:registered-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "working",
+        role: "worker",
+        cli_session_id: "session-worker",
+        surface_provenance: "unknown",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      (engine as any).selfRegistrationSessionResolver = () => ({
+        session_id: "session-worker",
+        path: null,
+      });
+      installTwoColumnTopology(record);
+
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+      expect(mockClient.moveSurface).toHaveBeenCalledWith(
+        expect.objectContaining({
+          surface: record.surface_id,
+          pane: "pane:right",
+          workspace: record.workspace_id,
+          stableSurfaceIdentity: record.surface_uuid,
+        }),
+      );
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+      expect(stateMgr.readState(record.agent_id)?.placement_override).toBe(true);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    });
+
+    it("leaves a self-registered lead in a single-pane workspace", async () => {
+      const record = makeRecord({
+        agent_id: "registered-lead",
+        surface_id: "surface:registered-lead",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "working",
+        role: "orchestrator",
+        cli_session_id: "session-lead",
+        surface_provenance: "unknown",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      (engine as any).selfRegistrationSessionResolver = () => ({
+        session_id: "session-lead",
+        path: null,
+      });
+      liveSurfaces = [{
+        ...makeSurface(record.surface_id),
+        id: record.surface_uuid ?? undefined,
+        workspace_ref: record.workspace_id ?? undefined,
+      }];
+
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
+    it("appends a self-registered lead after existing lead surfaces", async () => {
+      const record = makeRecord({
+        agent_id: "registered-lead-right",
+        surface_id: "surface:registered-lead-right",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "working",
+        role: "orchestrator",
+        cli_session_id: "session-lead-right",
+        surface_provenance: "unknown",
+      });
+      const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const lead = { ...makeSurface("surface:existing-lead"), id: leadUuid,
+        workspace_ref: "ws:placement" };
+      const source = { ...makeSurface(record.surface_id),
+        id: record.surface_uuid ?? undefined, workspace_ref: "ws:placement" };
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      (engine as any).selfRegistrationSessionResolver = () => ({
+        session_id: "session-lead-right", path: null,
+      });
+      liveSurfaces = [lead, source];
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:placement", window_ref: "window:placement",
+        panes: [
+          { ref: "pane:left", index: 0, focused: false, surface_count: 1,
+            surface_refs: [lead.ref], surface_ids: [leadUuid], pixel_frame: leftFrame },
+          { ref: "pane:right", index: 1, focused: true, surface_count: 1,
+            surface_refs: [source.ref], surface_ids: [record.surface_uuid], pixel_frame: rightFrame },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>)
+        .mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "ws:placement", window_ref: "window:placement",
+          pane_ref: pane, surfaces: pane === "pane:left" ? [lead] : [source],
+        }));
+
+      const summary = await engine.reconcileRolePlacements("idle");
+      expect(summary.moved).toHaveLength(1);
+      expect(mockClient.moveSurface).toHaveBeenCalledWith(
+        expect.objectContaining({
+          surface: source.ref, pane: "pane:left", index: 1,
+          workspace: "ws:placement", stableSurfaceIdentity: record.surface_uuid,
+        }),
+      );
+    });
+
+    it("does not move a self-registered surface across workspaces or when disabled", async () => {
+      const record = makeRecord({
+        agent_id: "registered-cross-workspace-worker",
+        surface_id: "surface:registered-cross-workspace-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:other",
+        state: "working", role: "worker", cli_session_id: "session-cross",
+        surface_provenance: "unknown",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      (engine as any).selfRegistrationSessionResolver = () => ({
+        session_id: "session-cross", path: null,
+      });
+      installTwoColumnTopology(record);
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+
+      const sameWorkspace = stateMgr.updateRecord(record.agent_id, {
+        workspace_id: "ws:placement",
+      });
+      engine.getRegistry().set(record.agent_id, sameWorkspace);
+      const previous = process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT;
+      process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT = "0";
+      try {
+        await engine.reconcileRolePlacements("idle");
+      } finally {
+        if (previous === undefined) delete process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT;
+        else process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT = previous;
+      }
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+    });
+
     it("moves an idle programmatic worker from column 0 to column 1", async () => {
       const record = makeRecord({
         agent_id: "idle-worker",
@@ -7726,7 +7870,7 @@ Session ID: ${sessionId}`,
       ]);
     });
 
-    it("does not count a successful move as skipped when seed cleanup lacks a stable UUID", async () => {
+    it("does not create or close a pane to reconcile a worker in a single column", async () => {
       const record = makeRecord({
         agent_id: "missing-seed-uuid-worker",
         surface_id: "surface:missing-seed-uuid-worker",
@@ -7775,218 +7919,18 @@ Session ID: ${sessionId}`,
         pane_ref: "pane:left",
         surfaces: liveSurfaces,
       });
-      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (_direction, opts) => {
-          await opts.beforeMutation?.();
-          return {
-            workspace: "ws:placement",
-            surface: "surface:worker-column-seed",
-            pane: "pane:right",
-            title: "",
-            type: "terminal",
-          };
-        },
-      );
-      (
-        mockClient.moveSurface as ReturnType<typeof vi.fn>
-      ).mockImplementationOnce(async (opts) => {
-        await opts.beforeMutation?.();
-        return {
-          ok: true,
-          workspace: "ws:placement",
-          surface: opts.surface,
-          pane: "pane:right",
-        };
-      });
-
       const summary = await engine.reconcileRolePlacements("idle");
 
-      expect(summary.moved).toHaveLength(1);
-      expect(summary.skipped).toEqual([]);
-      expect(mockClient.closeSurface).not.toHaveBeenCalled();
-    });
-
-    it("serializes worker-column seed cleanup by the seed's stable UUID", async () => {
-      const record = makeRecord({
-        agent_id: "single-column-worker",
-        surface_id: "surface:single-column-worker",
-        surface_uuid: "11111111-2222-4333-8444-555555555555",
-        workspace_id: "ws:placement",
-        state: "idle",
-        role: "worker",
-        surface_provenance: "cmuxlayer_spawn",
-      });
-      const leadRef = "surface:lead";
-      const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-      const seedRef = "surface:worker-column-seed";
-      const seedUuid = "33333333-4444-4555-8666-777777777777";
-      let workerPane: "pane:left" | "pane:right" = "pane:left";
-      let seedOpen = false;
-      const refreshLiveSurfaces = () => {
-        liveSurfaces = [
-          {
-            ...makeSurface(leadRef),
-            id: leadUuid,
-            workspace_ref: "ws:placement",
-          },
-          {
-            ...makeSurface(record.surface_id),
-            id: record.surface_uuid ?? undefined,
-            workspace_ref: "ws:placement",
-          },
-          ...(seedOpen
-            ? [
-                {
-                  ...makeSurface(seedRef),
-                  id: seedUuid,
-                  workspace_ref: "ws:placement",
-                },
-              ]
-            : []),
-        ];
-      };
-      refreshLiveSurfaces();
-      stateMgr.writeState(record);
-      engine.getRegistry().set(record.agent_id, record);
-      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
-        async () => {
-          const leftRefs = [
-            leadRef,
-            ...(workerPane === "pane:left" ? [record.surface_id] : []),
-          ];
-          const leftIds = [
-            leadUuid,
-            ...(workerPane === "pane:left" ? [record.surface_uuid] : []),
-          ];
-          const rightRefs = [
-            ...(seedOpen ? [seedRef] : []),
-            ...(workerPane === "pane:right" ? [record.surface_id] : []),
-          ];
-          const rightIds = [
-            ...(seedOpen ? [seedUuid] : []),
-            ...(workerPane === "pane:right" ? [record.surface_uuid] : []),
-          ];
-          return {
-            workspace_ref: "ws:placement",
-            window_ref: "window:placement",
-            panes: [
-              {
-                ref: "pane:left",
-                index: 0,
-                focused: true,
-                surface_count: leftRefs.length,
-                surface_refs: leftRefs,
-                surface_ids: leftIds,
-                pixel_frame: leftFrame,
-              },
-              ...(rightRefs.length > 0
-                ? [
-                    {
-                      ref: "pane:right",
-                      index: 1,
-                      focused: false,
-                      surface_count: rightRefs.length,
-                      surface_refs: rightRefs,
-                      surface_ids: rightIds,
-                      pixel_frame: rightFrame,
-                    },
-                  ]
-                : []),
-            ],
-          };
-        },
-      );
-      (
-        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
-      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
-        workspace_ref: "ws:placement",
-        window_ref: "window:placement",
-        pane_ref: pane,
-        surfaces:
-          pane === "pane:right"
-            ? [
-                ...(seedOpen
-                  ? [
-                      {
-                        ...makeSurface(seedRef),
-                        id: seedUuid,
-                        workspace_ref: "ws:placement",
-                      },
-                    ]
-                  : []),
-                ...(workerPane === "pane:right"
-                  ? [
-                      {
-                        ...makeSurface(record.surface_id),
-                        id: record.surface_uuid ?? undefined,
-                        workspace_ref: "ws:placement",
-                      },
-                    ]
-                  : []),
-              ]
-            : [
-                {
-                  ...makeSurface(leadRef),
-                  id: leadUuid,
-                  workspace_ref: "ws:placement",
-                },
-                ...(workerPane === "pane:left"
-                  ? [
-                      {
-                        ...makeSurface(record.surface_id),
-                        id: record.surface_uuid ?? undefined,
-                        workspace_ref: "ws:placement",
-                      },
-                    ]
-                  : []),
-              ],
-      }));
-      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (_direction, opts) => {
-          await opts.beforeMutation?.();
-          seedOpen = true;
-          refreshLiveSurfaces();
-          return {
-            workspace: "ws:placement",
-            surface: seedRef,
-            surface_id: seedUuid,
-            pane: "pane:right",
-            title: "",
-            type: "terminal",
-          };
-        },
-      );
-      (
-        mockClient.moveSurface as ReturnType<typeof vi.fn>
-      ).mockImplementationOnce(async (opts) => {
-        await opts.beforeMutation?.();
-        workerPane = "pane:right";
-        return {
-          ok: true,
-          workspace: "ws:placement",
-          surface: opts.surface,
-          pane: "pane:right",
-        };
-      });
-      (
-        mockClient.closeSurface as ReturnType<typeof vi.fn>
-      ).mockImplementationOnce(async (_surface, opts) => {
-        await opts.beforeMutation?.();
-        seedOpen = false;
-        refreshLiveSurfaces();
-      });
-
-      const summary = await engine.reconcileRolePlacements("idle");
-
-      expect(summary.moved).toHaveLength(1);
-      expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        seedRef,
+      expect(summary.moved).toEqual([]);
+      expect(summary.skipped).toEqual([
         expect.objectContaining({
-          workspace: "ws:placement",
-          stableSurfaceIdentity: seedUuid,
-          beforeMutation: expect.any(Function),
+          agent_id: record.agent_id,
+          reason: expect.stringContaining("column 1 is unavailable"),
         }),
-      );
+      ]);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
     });
 
     it("orders boot ingestion before provable-leftover sweep and first reconcile", async () => {
