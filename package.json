@@ -81,10 +81,12 @@
     "vitest": "4.1.11"
   },
   "overrides": {
+    "fast-uri": "3.1.7",
     "vite": "7.3.5"
   },
   "pnpm": {
     "overrides": {
+      "fast-uri": "3.1.7",
       "vite": "7.3.5"
     }
   }
