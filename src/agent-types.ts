@@ -51,6 +51,8 @@ export interface AgentRecord {
   surface_provenance?: SurfaceProvenance;
   /** One automatic move is allowed for this stable surface and registration. */
   placement_reconciled_registration?: string | null;
+  /** Durable guard written before attempting an automatic move. */
+  placement_move_attempted_registration?: string | null;
   /** A later mismatch after that move is treated as an operator override. */
   placement_override?: boolean;
   workspace_id?: string | null;

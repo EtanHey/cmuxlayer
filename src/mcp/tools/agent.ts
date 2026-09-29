@@ -1254,16 +1254,20 @@ export function registerListAgentsTool(
         );
         const selfRegisteredIds = new Set(
           live.merged
-            .filter((agent) => agent.surface_provenance === "unknown")
+            .filter((agent) => (agent.surface_provenance ?? "unknown") === "unknown")
             .map((agent) => agent.agent_id),
         );
         if (selfRegisteredIds.size > 0) {
-          await engine.runLifecycleMutation(
-            () => engine.reconcileRolePlacements("idle", {
-              agentIds: selfRegisteredIds,
-            }),
-            { label: "self-registration-placement" },
-          );
+          try {
+            await engine.runLifecycleMutation(
+              () => engine.reconcileRolePlacements("idle", {
+                agentIds: selfRegisteredIds,
+              }),
+              { label: "self-registration-placement" },
+            );
+          } catch {
+            // Listing remains available; the unresolved mismatch stays visible.
+          }
         }
         invalidateSurfaceTopologyCallScope(client as object);
         const reconciledTopology = await collectSurfaceTopology();

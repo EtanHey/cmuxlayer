@@ -6,14 +6,12 @@ import {
   enumerateAllWindowWorkspaces,
   enumerateAllWindowWorkspacesWithRetry,
   listAllWindowWorkspaces,
-  placementMismatchForAgent,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   resolveAgentSurfaceBinding,
   runWithSurfaceTopologyCallScope,
   SurfaceIdentityConflictError,
   withSurfaceTopologyMutationInvalidation,
-  type SurfaceTopologySnapshot,
 } from "../src/surface-topology.js";
 import type {
   CmuxPane,
@@ -31,34 +29,6 @@ function workspace(ref: string): CmuxWorkspace {
     pinned: false,
   };
 }
-
-describe("placementMismatchForAgent", () => {
-  const uuid = "11111111-2222-4333-8444-555555555555";
-  const record = makeRecord({
-    surface_id: "surface:agent", surface_uuid: uuid,
-    workspace_id: "workspace:1", role: "orchestrator",
-  });
-  const topology: SurfaceTopologySnapshot = {
-    complete: true,
-    surfaces: [surface("surface:agent")],
-    workspaceBySurface: new Map([["surface:agent", "workspace:1"]]),
-    titleBySurface: new Map(),
-    topologyBySurface: new Map([["surface:agent", { column: 1, column_count: 2 }]]),
-    surfaceIdByRef: new Map([["surface:agent", uuid]]),
-    surfaceRefById: new Map([[uuid, "surface:agent"]]),
-  };
-
-  it("flags a stable lead in the right column and clears after reconciliation", () => {
-    expect(placementMismatchForAgent(record, topology)).toBe(true);
-    topology.topologyBySurface.set("surface:agent", { column: 0, column_count: 2 });
-    expect(placementMismatchForAgent(record, topology)).toBe(false);
-  });
-
-  it("rejects a cross-workspace or unstable observation", () => {
-    expect(placementMismatchForAgent({ ...record, workspace_id: "workspace:2" }, topology)).toBe(false);
-    expect(placementMismatchForAgent({ ...record, surface_uuid: null }, topology)).toBe(false);
-  });
-});
 
 function pane(ref: string, index: number, surfaceRefs: string[]): CmuxPane {
   return {

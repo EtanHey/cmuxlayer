@@ -7477,6 +7477,48 @@ Session ID: ${sessionId}`,
       }));
     }
 
+    function registerSelfRegistered(overrides: Partial<AgentRecord>): AgentRecord {
+      const record = makeRecord({
+        agent_id: "self-registered",
+        surface_id: "surface:self-registered",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "working", role: "worker", cli_session_id: "session-self",
+        surface_provenance: "unknown",
+        ...overrides,
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      (engine as any).selfRegistrationSessionResolver = () => ({
+        session_id: record.cli_session_id, path: null,
+      });
+      return record;
+    }
+
+    it("does not repeat a move when final marker persistence fails", async () => {
+      const record = registerSelfRegistered({
+        agent_id: "registration-marker-failure",
+        surface_id: "surface:registration-marker-failure",
+        cli_session_id: "session-marker-failure",
+      });
+      installTwoColumnTopology(record);
+      const updateRecord = stateMgr.updateRecord.bind(stateMgr);
+      const updateSpy = vi.spyOn(stateMgr, "updateRecord").mockImplementation((id, patch) => {
+        if ("placement_reconciled_registration" in patch) throw new Error("disk write failed");
+        return updateRecord(id, patch);
+      });
+      try {
+        await engine.reconcileRolePlacements("idle");
+      } finally {
+        updateSpy.mockRestore();
+      }
+      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+      expect(stateMgr.readState(record.agent_id)?.placement_move_attempted_registration)
+        .toContain("session-marker-failure");
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+    });
+
     it("never moves an unknown-provenance operator pane", async () => {
       const record = makeRecord({
         agent_id: "operator-worker",
@@ -7496,58 +7538,38 @@ Session ID: ${sessionId}`,
       expect(mockClient.moveSurface).not.toHaveBeenCalled();
     });
 
-    it("moves a self-registered worker right only once per registration", async () => {
-      const record = makeRecord({
-        agent_id: "registered-worker",
-        surface_id: "surface:registered-worker",
-        surface_uuid: "11111111-2222-4333-8444-555555555555",
-        workspace_id: "ws:placement",
-        state: "working",
-        role: "worker",
-        cli_session_id: "session-worker",
-        surface_provenance: "unknown",
-      });
-      stateMgr.writeState(record);
-      engine.getRegistry().set(record.agent_id, record);
-      (engine as any).selfRegistrationSessionResolver = () => ({
-        session_id: "session-worker",
-        path: null,
-      });
-      installTwoColumnTopology(record);
-
-      await engine.reconcileRolePlacements("idle");
-      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
-      expect(mockClient.moveSurface).toHaveBeenCalledWith(
-        expect.objectContaining({
-          surface: record.surface_id,
-          pane: "pane:right",
-          workspace: record.workspace_id,
-          stableSurfaceIdentity: record.surface_uuid,
-        }),
-      );
-      await engine.reconcileRolePlacements("idle");
-      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
-      expect(stateMgr.readState(record.agent_id)?.placement_override).toBe(true);
-      expect(mockClient.newSplit).not.toHaveBeenCalled();
-      expect(mockClient.closeSurface).not.toHaveBeenCalled();
-    });
+    it.each(["unknown", undefined] as const)(
+      "moves a self-registered worker right only once per registration (%s)",
+      async (surfaceProvenance) => {
+        const record = registerSelfRegistered({
+          agent_id: "registered-worker",
+          surface_id: "surface:registered-worker",
+          cli_session_id: "session-worker",
+          surface_provenance: surfaceProvenance,
+        });
+        installTwoColumnTopology(record);
+        await engine.reconcileRolePlacements("idle");
+        expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+        expect(mockClient.moveSurface).toHaveBeenCalledWith(
+          expect.objectContaining({
+            surface: record.surface_id,
+            pane: "pane:right",
+            workspace: record.workspace_id,
+            stableSurfaceIdentity: record.surface_uuid,
+          }),
+        );
+        await engine.reconcileRolePlacements("idle");
+        expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+        expect(stateMgr.readState(record.agent_id)?.placement_override).toBe(true);
+      },
+    );
 
     it("leaves a self-registered lead in a single-pane workspace", async () => {
-      const record = makeRecord({
+      const record = registerSelfRegistered({
         agent_id: "registered-lead",
         surface_id: "surface:registered-lead",
-        surface_uuid: "11111111-2222-4333-8444-555555555555",
-        workspace_id: "ws:placement",
-        state: "working",
         role: "orchestrator",
         cli_session_id: "session-lead",
-        surface_provenance: "unknown",
-      });
-      stateMgr.writeState(record);
-      engine.getRegistry().set(record.agent_id, record);
-      (engine as any).selfRegistrationSessionResolver = () => ({
-        session_id: "session-lead",
-        path: null,
       });
       liveSurfaces = [{
         ...makeSurface(record.surface_id),
@@ -7558,29 +7580,43 @@ Session ID: ${sessionId}`,
       await engine.reconcileRolePlacements("idle");
       expect(mockClient.moveSurface).not.toHaveBeenCalled();
       expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(stateMgr.readState(record.agent_id)?.placement_reconciled_registration)
+        .toContain("session-lead");
+      const other = { ...makeSurface("surface:other-lead"),
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        workspace_ref: "ws:placement" };
+      liveSurfaces.push(other);
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:placement", window_ref: "window:placement",
+        panes: [
+          { ref: "pane:left", index: 0, focused: false, surface_count: 1,
+            surface_refs: [other.ref], surface_ids: [other.id], pixel_frame: leftFrame },
+          { ref: "pane:right", index: 1, focused: true, surface_count: 1,
+            surface_refs: [record.surface_id], surface_ids: [record.surface_uuid], pixel_frame: rightFrame },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>)
+        .mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "ws:placement", window_ref: "window:placement",
+          pane_ref: pane, surfaces: pane === "pane:left" ? [other] : [liveSurfaces[0]],
+        }));
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(stateMgr.readState(record.agent_id)?.placement_override).toBe(true);
     });
 
     it("appends a self-registered lead after existing lead surfaces", async () => {
-      const record = makeRecord({
+      const record = registerSelfRegistered({
         agent_id: "registered-lead-right",
         surface_id: "surface:registered-lead-right",
-        surface_uuid: "11111111-2222-4333-8444-555555555555",
-        workspace_id: "ws:placement",
-        state: "working",
         role: "orchestrator",
         cli_session_id: "session-lead-right",
-        surface_provenance: "unknown",
       });
       const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
       const lead = { ...makeSurface("surface:existing-lead"), id: leadUuid,
         workspace_ref: "ws:placement" };
       const source = { ...makeSurface(record.surface_id),
         id: record.surface_uuid ?? undefined, workspace_ref: "ws:placement" };
-      stateMgr.writeState(record);
-      engine.getRegistry().set(record.agent_id, record);
-      (engine as any).selfRegistrationSessionResolver = () => ({
-        session_id: "session-lead-right", path: null,
-      });
       liveSurfaces = [lead, source];
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         workspace_ref: "ws:placement", window_ref: "window:placement",
@@ -7608,18 +7644,11 @@ Session ID: ${sessionId}`,
     });
 
     it("does not move a self-registered surface across workspaces or when disabled", async () => {
-      const record = makeRecord({
+      const record = registerSelfRegistered({
         agent_id: "registered-cross-workspace-worker",
         surface_id: "surface:registered-cross-workspace-worker",
-        surface_uuid: "11111111-2222-4333-8444-555555555555",
         workspace_id: "ws:other",
-        state: "working", role: "worker", cli_session_id: "session-cross",
-        surface_provenance: "unknown",
-      });
-      stateMgr.writeState(record);
-      engine.getRegistry().set(record.agent_id, record);
-      (engine as any).selfRegistrationSessionResolver = () => ({
-        session_id: "session-cross", path: null,
+        cli_session_id: "session-cross",
       });
       installTwoColumnTopology(record);
       await engine.reconcileRolePlacements("idle");

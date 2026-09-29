@@ -3474,7 +3474,7 @@ export class AgentEngine {
     const selfRegistrationId = (agent: AgentRecord): string | null => {
       if (
         process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT === "0" ||
-        agent.surface_provenance !== "unknown" ||
+        (agent.surface_provenance ?? "unknown") !== "unknown" ||
         !agent.surface_uuid
       ) return null;
       const registration = this.selfRegistrationSessionResolver?.(agent);
@@ -3535,17 +3535,14 @@ export class AgentEngine {
         opts.surfaceTopology ?? null,
       );
       if (
-        sweepBinding?.provenance === "uuid" &&
-        opts.surfaceTopology?.topologyBySurface.get(sweepBinding.surfaceRef)
-          ?.column === targetColumn
-      ) {
-        continue;
-      }
-      if (
         registrationId &&
-        agent.placement_reconciled_registration === registrationId
+        (agent.placement_reconciled_registration === registrationId ||
+          agent.placement_move_attempted_registration === registrationId)
       ) {
-        const currentTopology = await this.collectFreshObservedSurfaceTopology();
+        if (agent.placement_override) continue;
+        const currentTopology = opts.surfaceTopology?.complete
+          ? opts.surfaceTopology
+          : await this.collectFreshObservedSurfaceTopology();
         const currentBinding = currentTopology?.complete
           ? resolveAgentSurfaceBinding(agent, currentTopology)
           : null;
@@ -3553,12 +3550,48 @@ export class AgentEngine {
           currentBinding.workspaceId === agent.workspace_id
           ? currentTopology?.topologyBySurface.get(currentBinding.surfaceRef)?.column
           : null;
-        if (currentColumn !== null && currentColumn !== undefined &&
-            currentColumn !== targetColumn && !agent.placement_override) {
-          const overridden = this.stateMgr.updateRecord(agent.agent_id, {
-            placement_override: true,
+        try {
+          if (currentColumn === targetColumn &&
+              agent.placement_reconciled_registration !== registrationId) {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+            });
+            this.registry.set(agent.agent_id, reconciled);
+          } else if (currentColumn !== null && currentColumn !== undefined &&
+              currentColumn !== targetColumn &&
+              agent.placement_reconciled_registration === registrationId) {
+            const overridden = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_override: true,
+            });
+            this.registry.set(agent.agent_id, overridden);
+          }
+        } catch (error) {
+          summary.skipped.push({
+            agent_id: agent.agent_id,
+            surface_id: agent.surface_id,
+            reason: error instanceof Error ? error.message : String(error),
           });
-          this.registry.set(agent.agent_id, overridden);
+        }
+        continue;
+      }
+      if (
+        sweepBinding?.provenance === "uuid" &&
+        opts.surfaceTopology?.topologyBySurface.get(sweepBinding.surfaceRef)
+          ?.column === targetColumn
+      ) {
+        if (registrationId) {
+          try {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+            });
+            this.registry.set(agent.agent_id, reconciled);
+          } catch (error) {
+            summary.skipped.push({
+              agent_id: agent.agent_id,
+              surface_id: agent.surface_id,
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
         continue;
       }
@@ -3682,7 +3715,15 @@ export class AgentEngine {
         if (fromColumn === undefined) {
           throw new Error("spawned surface pane is not observable");
         }
-        if (fromColumn === targetColumn) continue;
+        if (fromColumn === targetColumn) {
+          if (registrationId) {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+            });
+            this.registry.set(agent.agent_id, reconciled);
+          }
+          continue;
+        }
 
         const targetPanes = panes.panes
           .filter((pane) => columnByPane.get(pane.ref) === targetColumn)
@@ -3712,6 +3753,13 @@ export class AgentEngine {
         };
         {
           await assertSafeMove();
+          if (registrationId) {
+            const attempted = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_move_attempted_registration: registrationId,
+              placement_override: false,
+            });
+            this.registry.set(agent.agent_id, attempted);
+          }
           this.assertSurfaceObserverEpochCurrent(
             observerEpoch,
             "role placement",
@@ -3747,8 +3795,7 @@ export class AgentEngine {
         }
       } catch (error) {
         if (summary.moved.some((moved) => moved.agent_id === agent.agent_id)) {
-          // Seed cleanup is best-effort and must not overwrite a completed move
-          // by counting the same agent as skipped as well.
+          // A successful move still counts when final marker persistence fails.
           continue;
         }
         summary.skipped.push({
