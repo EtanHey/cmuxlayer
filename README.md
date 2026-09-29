@@ -94,6 +94,10 @@ key.
 
 > **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
 
+## Drive panes through the MCP, not the raw `cmux` CLI
+
+Use cmuxlayer's MCP tools for pane operations. Calling the raw `cmux` CLI yourself bypasses stable-UUID guards, draft ownership, delivery receipts, tailer reaping, and placement. After a cmux restart, run `/mcp reconnect cmuxlayer` before any pane operation.
+
 ## What you can do
 
 Tell your AI agent things like:
