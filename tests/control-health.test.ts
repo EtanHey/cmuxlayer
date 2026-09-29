@@ -780,7 +780,11 @@ describe("control health", () => {
     expect(
       recycledRefTerse.structuredContent.health.caller_live_watches,
     ).toEqual({ count: 0, watches: [] });
-    expect(terse.content[0].text.length).toBeLessThan(full.content[0].text.length);
+    expect(JSON.parse(terse.content[0].text).health).toEqual(
+      terse.structuredContent.health,
+    );
+    expect(terse.structuredContent.health).not.toHaveProperty("cmux_instances");
+    expect(full.structuredContent.health).toHaveProperty("cmux_instances");
     await server.close();
   });
 
