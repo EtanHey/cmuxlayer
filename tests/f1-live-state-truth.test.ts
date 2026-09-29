@@ -122,19 +122,17 @@ class LiveSurfaceClient {
     this.typed[surface] = (this.typed[surface] ?? "") + text;
   }
 
-  /**
-   * #905: Return behaves like Codex 0.157. At a prompt the message becomes a
-   * transcript row; mid-turn it waits in the steer queue above the prompt.
-   */
+  /** Codex 0.157 submits with Return when idle and queues with Tab mid-turn. */
   async sendKey(surface: string, key: string) {
     if (!(surface in this.screens))
       throw new Error(`Unknown surface: ${surface}`);
     this.sendKeyCalls.push(`${surface}:${key}`);
     const typed = this.typed[surface];
-    if (key !== "return" || !typed) return;
+    const working = /Working/.test(this.screens[surface]);
+    if (!typed || (working ? key !== "tab" : key !== "return")) return;
     delete this.typed[surface];
     const lines = this.screens[surface].split("\n");
-    lines.splice(lines.length - 1, 0, /Working/.test(this.screens[surface])
+    lines.splice(lines.length - 1, 0, working
       ? `• Messages to be submitted after next tool call\n  ↳ ${typed}`
       : `› ${typed}`);
     this.screens[surface] = lines.join("\n");
@@ -466,6 +464,7 @@ describe("F1 — live state, not the stale registry record", () => {
     expect(parsed.delivery_state ?? parsed.delivery).toBe("queued");
     expect(parsed.submitted).toBe(false);
     expect(parsed.queued_behind_turn).toBe(true);
+    expect(client.sendKeyCalls).toContain(`${client.workingSurface}:tab`);
   });
 
   it("caller resolution prefers a live record over a stale one on the same surface", async () => {
