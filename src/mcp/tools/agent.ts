@@ -1254,7 +1254,9 @@ export function registerListAgentsTool(
         );
         const selfRegisteredIds = new Set(
           live.merged
-            .filter((agent) => (agent.surface_provenance ?? "unknown") === "unknown")
+            .filter((agent) =>
+              (agent.surface_provenance ?? "unknown") === "unknown" &&
+              Boolean(agent.cli_session_id && agent.surface_uuid))
             .map((agent) => agent.agent_id),
         );
         if (selfRegisteredIds.size > 0) {
