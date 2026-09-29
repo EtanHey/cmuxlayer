@@ -74,6 +74,10 @@ import {
   cleanScreenText,
   parseScreen,
 } from "./screen-parser.js";
+import {
+  codexScreenShowsSubmit,
+  extractComposerInputRegion,
+} from "./delivery/composer-screen.js";
 
 import {
   canonicalRoleColumn,
@@ -1785,9 +1789,30 @@ export class AgentEngine {
   }
 
   private isBootPromptPendingStale(agent: AgentRecord): boolean {
-    const since = Date.parse(agent.updated_at);
+    const since = Date.parse(agent.boot_verify_started_at ?? agent.updated_at);
     if (Number.isNaN(since)) return false;
     return Date.now() - since >= BOOT_PROMPT_PENDING_STALE_MS;
+  }
+
+  private failPendingBoot(
+    agent: AgentRecord,
+    settlement: Partial<AgentRecord> = {},
+  ): AgentRecord {
+    const failedSettlement = this.stateMgr.updateRecord(agent.agent_id, {
+      ...settlement,
+      boot_prompt_pending: false,
+      prompt_delivered: false,
+      submit_verified: false,
+      boot_pre_type_screen: null,
+      boot_delivery_text: null,
+      boot_resumed_at: null,
+      boot_submit_dispatched: false,
+    });
+    const failed = this.stateMgr.transition(failedSettlement.agent_id, "error", {
+      error: "Boot prompt delivery was not verified before the verification deadline",
+    });
+    this.registry.set(agent.agent_id, failed);
+    return failed;
   }
 
   private readReadyEvidence(
@@ -2453,6 +2478,39 @@ export class AgentEngine {
         effort_mismatch: computeEffortMismatch(agent.effort, parsedEffort),
       };
       const evidence = this.readReadyEvidence(agent, screen.text);
+      const composerInput = extractComposerInputRegion(screen.text, undefined, agent.cli);
+      const bootEchoed = agent.cli === "codex" &&
+        !!agent.boot_pre_type_screen && !!agent.boot_delivery_text &&
+        codexScreenShowsSubmit(
+          agent.boot_pre_type_screen, screen.text, agent.boot_delivery_text,
+        );
+      const activeBoot =
+        (agent.boot_submit_dispatched === true || !!agent.boot_resumed_at) &&
+        composerInput !== null && composerInput.trim() === "" &&
+        parsed.control_state !== "shell" &&
+        screenHasReadyAgentIdentity(agent.cli, screen.text, parsed) &&
+        screenHasActiveAgentMarker(agent.cli, screen.text, parsed);
+      if (
+        agent.boot_prompt_pending === true &&
+        agent.prompt_delivered !== true &&
+        (bootEchoed || activeBoot)
+      ) {
+        const settled = this.stateMgr.updateRecord(agent.agent_id, {
+          ...settlement,
+          boot_prompt_pending: false,
+          prompt_delivered: true,
+          submit_verified: true,
+          boot_pre_type_screen: null,
+          boot_delivery_text: null,
+          boot_resumed_at: null,
+          boot_submit_dispatched: false,
+        });
+        let updated = this.stateMgr.transition(settled.agent_id, "ready");
+        if (activeBoot) updated = this.stateMgr.transition(updated.agent_id, "working");
+        this.registry.set(agent.agent_id, updated);
+        this.readyPatternMatches.delete(agent.agent_id);
+        return updated;
+      }
       const promptStillPending =
         agent.boot_prompt_pending === true &&
         this.screenShowsPendingBootPrompt(agent, screen.text);
@@ -2463,22 +2521,7 @@ export class AgentEngine {
       if (promptStillPending || awaitingManagedBootPrompt) {
         this.readyPatternMatches.delete(agent.agent_id);
         if (this.isBootPromptPendingStale(agent)) {
-          const failedSettlement = this.stateMgr.updateRecord(agent.agent_id, {
-            ...settlement,
-            boot_prompt_pending: false,
-            prompt_delivered: false,
-            submit_verified: false,
-          });
-          const failed = this.stateMgr.transition(
-            failedSettlement.agent_id,
-            "error",
-            {
-              error:
-                "Boot prompt delivery was not verified before the pending-input timeout",
-            },
-          );
-          this.registry.set(agent.agent_id, failed);
-          return failed;
+          return this.failPendingBoot(agent, settlement);
         }
         if (
           agent.submit_verified !== false ||
@@ -2536,6 +2579,8 @@ export class AgentEngine {
 
       const settled = this.stateMgr.updateRecord(agent.agent_id, {
         ...settlement,
+        boot_resumed_at: null,
+        boot_submit_dispatched: false,
         ...(agent.boot_prompt_pending && agent.prompt_delivered !== false
           ? {
               boot_prompt_pending: false,
@@ -2561,6 +2606,14 @@ export class AgentEngine {
       this.readyPatternMatches.delete(agent.agent_id);
       return updated;
     } catch {
+      if (agent.boot_prompt_pending && this.isBootPromptPendingStale(agent) &&
+          this.assertSweepInputCurrent(ctx)) {
+        try {
+          return this.failPendingBoot(agent);
+        } catch {
+          // A failed state write is retried on the next sweep.
+        }
+      }
       return agent;
     }
   }

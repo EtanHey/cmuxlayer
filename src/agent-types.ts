@@ -172,6 +172,15 @@ export interface AgentRecord {
   boot_prompt_pending?: boolean;
   /** Changes on each managed boot, including resume under the same agent ID. */
   boot_instance_id?: string;
+  /** Fixed start of a pending boot verification; ordinary updates must not extend it. */
+  boot_verify_started_at?: string | null;
+  /** A resumed session may prove its previous boot by working on the restored turn. */
+  boot_resumed_at?: string | null;
+  /** Exact pre-type frame and wire text for a new Codex user-row proof. */
+  boot_pre_type_screen?: string | null;
+  boot_delivery_text?: string | null;
+  /** A working frame proves a boot only after its submit key was dispatched. */
+  boot_submit_dispatched?: boolean;
   // Spawn settlement evidence (PR #326): a managed agent must not report
   // ready without retaining what was actually observed about prompt delivery
   // and the model shown by the CLI.

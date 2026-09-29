@@ -1137,6 +1137,17 @@ export function registerSpawnAgentTool(
               boot_prompt_path: bootPromptPath,
               injected_prompt: injectedBootPrompt,
               timeout_ms: args.boot_prompt_timeout_ms,
+              onPreTypeScreen: (screenText, deliveryText) => {
+                try {
+                  const updated = stateMgr.updateRecord(result.agent_id, {
+                    boot_pre_type_screen: screenText,
+                    boot_delivery_text: deliveryText,
+                  });
+                  registry.set(result.agent_id, updated);
+                } catch {
+                  // This optional proof must not interrupt the actual delivery.
+                }
+              },
               onUpdateShellRelaunch: () =>
                 relaunchSpawnAgentAfterUpdate({
                   agentId: result.agent_id,
@@ -1166,6 +1177,14 @@ export function registerSpawnAgentTool(
                 ),
                 boot_prompt_pending:
                   bootPromptDelivery.submit_verified !== true,
+                boot_verify_started_at:
+                  bootPromptDelivery.submit_verified !== true
+                    ? new Date().toISOString() : null,
+                boot_submit_dispatched:
+                  bootPromptDelivery.submit_dispatched === true,
+                ...(bootPromptDelivery.submit_verified === true
+                  ? { boot_pre_type_screen: null, boot_delivery_text: null }
+                  : {}),
                 prompt_delivered: bootPromptDelivery.submit_verified === true,
                 submit_verified: bootPromptDelivery.submit_verified,
               });
@@ -1174,6 +1193,10 @@ export function registerSpawnAgentTool(
               const updated = stateMgr.updateRecord(result.agent_id, {
                 boot_prompt_pending:
                   bootPromptDelivery.delivery_state === "queued",
+                boot_verify_started_at:
+                  bootPromptDelivery.delivery_state === "queued"
+                    ? new Date().toISOString() : null,
+                boot_submit_dispatched: false,
                 prompt_delivered: false,
                 submit_verified: null,
               });
@@ -1227,6 +1250,13 @@ export function registerSpawnAgentTool(
                   boot_prompt_pending:
                     e instanceof BootPromptTimeoutError ||
                     e instanceof BootPromptDeliveryError,
+                  boot_verify_started_at:
+                    e instanceof BootPromptTimeoutError ||
+                    e instanceof BootPromptDeliveryError
+                      ? new Date().toISOString() : null,
+                  boot_submit_dispatched:
+                    e instanceof BootPromptDeliveryError &&
+                    e.submit_dispatched,
                   prompt_delivered: false,
                   submit_verified:
                     e instanceof BootPromptDeliveryError ? false : null,

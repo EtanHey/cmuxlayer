@@ -10366,6 +10366,138 @@ Session ID: ${sessionId}`,
       );
     });
 
+    it("#950 resolves a pending spawn from a new Codex boot user row", async () => {
+      const prompt = "Read and follow docs.local/phase-3.md";
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-spawn-echo", state: "booting",
+        surface_id: "surface:pending-spawn-echo", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, task_summary: prompt,
+        boot_pre_type_screen: "OpenAI Codex\nModel: gpt-5.5\n› ",
+        boot_delivery_text: prompt,
+        boot_submit_dispatched: true,
+        boot_verify_started_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-spawn-echo")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-spawn-echo",
+        text: ["OpenAI Codex", "Model: gpt-5.5", `› ${prompt}`, "• Done", "› "].join("\n"),
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-spawn-echo")).toMatchObject({
+        state: "ready", boot_prompt_pending: false,
+        prompt_delivered: true, submit_verified: true,
+      });
+    });
+
+    it("#950 resolves a pending resume when the restored Codex turn is working", async () => {
+      const prompt = "Read and follow docs.local/phase-3.md";
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-resume-working", state: "error",
+        surface_id: "surface:pending-resume-working", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, task_summary: prompt,
+      }));
+      stateMgr.reopenForResume("pending-resume-working");
+      stateMgr.transition("pending-resume-working", "booting");
+      liveSurfaces = [makeSurface("surface:pending-resume-working")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-resume-working",
+        text: ["OpenAI Codex", "Model: gpt-5.5", `› ${prompt}`,
+          "• Working (12s • esc to interrupt)", "› "].join("\n"),
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-resume-working")).toMatchObject({
+        state: "working", boot_prompt_pending: false,
+        prompt_delivered: true, submit_verified: true,
+        boot_resumed_at: null, boot_submit_dispatched: false,
+      });
+    });
+
+    it("#950 fails pending boot at its fixed verification deadline despite later registry updates", async () => {
+      const old = new Date(Date.now() - 6 * 60_000).toISOString();
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-spawn-deadline", state: "booting",
+        surface_id: "surface:pending-spawn-deadline", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, task_summary: "Read and follow docs.local/phase-3.md",
+        boot_verify_started_at: old,
+        updated_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-spawn-deadline")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-spawn-deadline",
+        text: "OpenAI Codex\nModel: gpt-5.5\n› Read and follow docs.local/phase-3.md",
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-spawn-deadline")).toMatchObject({
+        state: "error", boot_prompt_pending: false,
+        prompt_delivered: false, submit_verified: false,
+        error: expect.stringMatching(/boot prompt.*deadline|boot prompt.*timeout/i),
+      });
+    });
+
+    it("#950 fails a pending boot at the deadline when its screen cannot be read", async () => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-unreadable-deadline", state: "booting",
+        surface_id: "surface:pending-unreadable-deadline", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null,
+        boot_verify_started_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-unreadable-deadline")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("screen unavailable"),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-unreadable-deadline")).toMatchObject({
+        state: "error", boot_prompt_pending: false,
+        prompt_delivered: false, submit_verified: false,
+        error: expect.stringMatching(/boot prompt.*deadline/i),
+      });
+    });
+
+    it("#950 leaves a queued boot pending when unrelated Codex work is visible", async () => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-queued-working", state: "booting",
+        surface_id: "surface:pending-queued-working", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, boot_submit_dispatched: false,
+        boot_verify_started_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-queued-working")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-queued-working",
+        text: "OpenAI Codex\nModel: gpt-5.5\n• Working (12s • esc to interrupt)\n› ",
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-queued-working")).toMatchObject({
+        state: "booting", boot_prompt_pending: true,
+        prompt_delivered: false, submit_verified: false,
+      });
+    });
+
     it("does not promote booting agents while boot prompt delivery is pending", async () => {
       stateMgr.writeState(
         makeRecord({
