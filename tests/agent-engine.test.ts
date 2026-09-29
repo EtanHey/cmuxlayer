@@ -10392,6 +10392,7 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("pending-spawn-echo")).toMatchObject({
         state: "ready", boot_prompt_pending: false,
         prompt_delivered: true, submit_verified: true,
+        boot_verify_started_at: null,
       });
     });
 
@@ -10419,6 +10420,7 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("pending-resume-working")).toMatchObject({
         state: "working", boot_prompt_pending: false,
         prompt_delivered: true, submit_verified: true,
+        boot_verify_started_at: null,
         boot_resumed_at: null, boot_submit_dispatched: false,
       });
     });
@@ -10446,6 +10448,7 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("pending-spawn-deadline")).toMatchObject({
         state: "error", boot_prompt_pending: false,
         prompt_delivered: false, submit_verified: false,
+        boot_verify_started_at: old,
         error: expect.stringMatching(/boot prompt.*deadline|boot prompt.*timeout/i),
       });
     });
