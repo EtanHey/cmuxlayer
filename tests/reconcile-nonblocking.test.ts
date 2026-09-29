@@ -51,14 +51,14 @@ const HOSTED = Boolean(process.env.CI) && process.env.CI !== "false";
  * idle control is quiet (notably when guest scheduling is absent from Linux
  * schedstat). A hosted failure therefore needs a synchronous span belonging
  * to the sweep: CPU spent in one uninterrupted loop gap, or a blocked mock
- * readScreen call. The latter catches Atomics.wait without CPU use, including
+ * connector call. The latter catches Atomics.wait without CPU use, including
  * the first read before the first timer tick. Locally delay still fails hard.
  */
 interface TrialReading {
   delayMs: number;
   /** Longest loop gap minus this thread's run-queue wait inside it. */
   heldMs?: number;
-  /** Longest thread CPU gap or synchronous readScreen call in the sweep. */
+  /** Longest thread CPU gap or synchronous connector call in the sweep. */
   workMs?: number;
 }
 
@@ -460,22 +460,28 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
       runTrial: async () => {
         armTrial?.();
         const readsBefore = readScreen.mock.calls.length;
-        const originalRead = readScreen.getMockImplementation();
-        if (!originalRead) throw new Error("readScreen mock is missing its implementation");
-        let readCallMs = 0;
-        readScreen.mockImplementation((surface: string) => {
-          const waitBefore = runQueueWaitMs();
-          const start = performance.now();
-          try {
-            return originalRead(surface);
-          } finally {
-            const end = performance.now();
-            const waitAfter = runQueueWaitMs();
-            const queued = waitBefore !== null && waitAfter !== null
-              ? Math.max(0, waitAfter - waitBefore) : 0;
-            readCallMs = Math.max(readCallMs, end - start - queued);
-          }
-        });
+        const originals: Array<{ mock: ReturnType<typeof vi.fn>; implementation: (...args: unknown[]) => unknown }> = [];
+        let connectorCallMs = 0;
+        for (const value of Object.values(client)) {
+          const mock = value as ReturnType<typeof vi.fn>;
+          if (typeof mock?.getMockImplementation !== "function") continue;
+          const implementation = mock.getMockImplementation();
+          if (!implementation) continue;
+          originals.push({ mock, implementation });
+          mock.mockImplementation((...args: unknown[]) => {
+            const waitBefore = runQueueWaitMs();
+            const start = performance.now();
+            try {
+              return implementation(...args);
+            } finally {
+              const end = performance.now();
+              const waitAfter = runQueueWaitMs();
+              const queued = waitBefore !== null && waitAfter !== null
+                ? Math.max(0, waitAfter - waitBefore) : 0;
+              connectorCallMs = Math.max(connectorCallMs, end - start - queued);
+            }
+          });
+        }
         const delay = monitorEventLoopDelay({ resolution: 1 });
         delay.enable();
         const stopProbe = startHeldLoopProbe();
@@ -487,7 +493,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
         } finally {
           probe = stopProbe();
           delay.disable();
-          readScreen.mockImplementation(originalRead);
+          for (const { mock, implementation } of originals) mock.mockImplementation(implementation);
         }
         // Proof of work: every sweep read every agent's screen (not a no-op sweep).
         expect(readScreen.mock.calls.length - readsBefore).toBeGreaterThanOrEqual(
@@ -496,7 +502,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
         return {
           delayMs: Math.max(delay.max / 1e6, probe.heldMs),
           heldMs: probe.heldMs,
-          workMs: Math.max(probe.cpuMs, readCallMs),
+          workMs: Math.max(probe.cpuMs, connectorCallMs),
         };
       },
     });
@@ -557,6 +563,29 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
         Atomics.wait(cell, 0, 0, 150);
       }
       return { surface, text: SCREEN, lines: 200, scrollback_used: false };
+    });
+    await engine.getRegistry().reconstitute();
+    await engine.runSweep();
+    const result = await measure(true, () => { armed = true; });
+    report(result.attempts);
+    expect(blocks).toBe(TRIALS);
+    expect(result.verdict).toBe("fail");
+  }, 30_000);
+
+  it("hosted: a blocked topology connector call also fails", async () => {
+    const listPaneSurfaces = client.listPaneSurfaces as ReturnType<typeof vi.fn>;
+    const original = listPaneSurfaces.getMockImplementation();
+    if (!original) throw new Error("listPaneSurfaces mock is missing its implementation");
+    const cell = new Int32Array(new SharedArrayBuffer(4));
+    let armed = false;
+    let blocks = 0;
+    listPaneSurfaces.mockImplementation((...args: unknown[]) => {
+      if (armed) {
+        armed = false;
+        blocks += 1;
+        Atomics.wait(cell, 0, 0, 150);
+      }
+      return original(...args);
     });
     await engine.getRegistry().reconstitute();
     await engine.runSweep();
