@@ -199,6 +199,7 @@ export interface ControlHealth {
   daemon_lifecycle: ControlHealthDaemonLifecycle;
   /** #911: inbox tailers, kept out of the cmux production/nightly pid sets. */
   tailers?: InboxTailerCounts | null;
+  placement_mismatch?: Array<{ agent_id: string; surface_id: string }>;
   warnings: string[];
 }
 
@@ -1093,6 +1094,9 @@ export function formatControlHealth(health: ControlHealth): string {
       ? [`inbox tailers: live=${health.tailers.live} orphaned=${health.tailers.orphaned}`]
       : []),
     `pane_pty_dead: ${health.self_heal.pane_pty_dead.count}`,
+    ...(health.placement_mismatch?.length
+      ? [`placement_mismatch: ${health.placement_mismatch.map((row) => row.agent_id).join(", ")}`]
+      : []),
     ...health.self_heal.pane_pty_dead.surfaces.map(
       (surface) =>
         `  ${surface.surface_id} since ${surface.since_at ?? surface.last_attempt_at}`,

@@ -157,6 +157,7 @@ import {
   invalidateSurfaceTopologyCallScope,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
+  placementMismatchForAgent,
   resolveAgentSurfaceBinding,
   withSurfaceTopologyMutationInvalidation,
   type SurfaceObserverIdProvider,
@@ -1191,6 +1192,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         panePtyDeadSince: surfacePtyDeadSince,
       }),
     };
+    const placementAgents = stateMgr.listStates().filter((agent) =>
+      agent.state !== "done" && agent.state !== "error" &&
+      agent.surface_uuid && agent.workspace_id && inferRecordRoleOrNull(agent),
+    );
+    const placementTopology = placementAgents.length > 0
+      ? await collectSurfaceTopology().catch(() => null)
+      : null;
+    const placementMismatch = placementTopology?.complete
+      ? placementAgents.flatMap((agent) => {
+          if (!placementMismatchForAgent(agent, placementTopology)) return [];
+          const binding = resolveAgentSurfaceBinding(agent, placementTopology);
+          return binding
+            ? [{ agent_id: agent.agent_id, surface_id: binding.surfaceRef }]
+            : [];
+        })
+      : [];
     const health =
       controlHealthWarnings.length > 0
         ? {
@@ -1201,6 +1218,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ],
           }
         : healthWithSelfHeal;
+    health.placement_mismatch = placementMismatch;
+    if (placementMismatch.length > 0) {
+      health.warnings = [
+        ...health.warnings,
+        `placement_mismatch: ${placementMismatch.length} agent(s)`,
+      ];
+    }
     eventLog.appendControlHealth({
       ts: health.generated_at,
       event_type: "control_health",

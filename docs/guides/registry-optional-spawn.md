@@ -95,10 +95,11 @@ forcing strict mode on and re-breaking fresh installs.
 | `CMUXLAYER_REPO_HOME` | colon-separated roots searched first on the raw lane |
 | `CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY=1` | restore the pre-#392 hard failure when a repo is unregistered |
 | `CMUXLAYER_SPAWN_PERMISSION_MODE` | `skip-permissions` (default) or `default` — see below |
-
+| `CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT=0` | disable automatic placement moves for self-registered seats; mismatch remains visible in `list_agents` and `control_health` |
 | `CMUXLAYER_CONFIG_FILE` | override the config file read at startup (default `~/.config/cmuxlayer/env.sh`) |
 
-`cmuxlayer init` writes all of these; see [fresh-install.md](fresh-install.md).
+`cmuxlayer init` writes the launch settings; placement reconciliation is enabled
+unless explicitly disabled. See [fresh-install.md](fresh-install.md).
 
 They are read from the **process environment**, and cmuxlayer also reads its own
 config file at startup so a GUI-launched client (which never sources a shell
@@ -192,4 +193,3 @@ The spawn receipt's `worktree.node_modules_bootstrapped` records the result:
 `node_modules_bootstrap_error` carries the error. The worktree is kept and the
 agent still starts. The install is bounded at 180 s; on timeout its whole
 process group is killed and the error says `timed out after 180000 ms`.
-
