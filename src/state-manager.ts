@@ -454,6 +454,13 @@ export class StateManager {
       task_done_candidate_at: null,
       task_done_detected_at: null,
       halt_last_active_at: null,
+      boot_resumed_at: new Date().toISOString(),
+      boot_pre_type_screen: null,
+      boot_delivery_text: null,
+      boot_submit_dispatched: false,
+      ...(current.boot_prompt_pending === true
+        ? { boot_verify_started_at: new Date().toISOString() }
+        : {}),
       version: current.version + 1,
       updated_at: new Date().toISOString(),
     };

@@ -1642,6 +1642,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     press_enter: boolean;
     rename_to_task?: string;
     onChunkDelivered?: (sentChunks: number) => void;
+    onPreTypeScreen?: (screenText: string) => void;
     source_event?: DeliveryEventType;
     source_agent?: string | null;
     delivery_id?: string;
@@ -1969,6 +1970,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ? { draftGuardText }
         : {}),
     });
+    if (deliverySafetySnapshot?.text.trim()) {
+      opts.onPreTypeScreen?.(deliverySafetySnapshot.text);
+    }
     // The pending sweep proves a later Codex submit against this same frame
     // (#935). Without one (or with a blank read), it has no baseline and
     // proves nothing.
@@ -3289,6 +3293,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     onUpdateShellRelaunch?: () => Promise<void>;
     resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
     assertStableSurfaceIdentity?: () => Promise<void>;
+    onPreTypeScreen?: (screenText: string, deliveryText: string) => void;
   }): Promise<
     PublicDeliveryReceipt & {
       bytes: number;
@@ -3439,6 +3444,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             onChunkDelivered: (count) => {
               sentChunks = count;
             },
+            onPreTypeScreen: (screenText) =>
+              opts.onPreTypeScreen?.(screenText, sanitizedText),
             verify_submit: true,
             // Submission evidence is a boot-delivery invariant. CLI-specific
             // readiness patterns decide when typing may begin; no CLI may turn

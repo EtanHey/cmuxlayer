@@ -728,8 +728,9 @@ export function registerListAgentsTool(
     surface_id: string;
     send_via: "send_to";
     closure: ClosureState;
-    /** #863: present only while the managed boot prompt is unsubmitted. */
-    boot?: "unsubmitted";
+    /** #950: expose pending boot resolution without another full-detail call. */
+    boot?: "unsubmitted" | "submitted" | "failed";
+    boot_reason?: string;
     /** #905: present only while the composer holds unsent text. */
     composer?: "draft_pending";
     parsed_cli_mismatch?: true;
@@ -881,6 +882,7 @@ export function registerListAgentsTool(
                 send_via: agent.send_via,
                 closure: agent.closure,
                 ...(agent.boot ? { boot: agent.boot } : {}),
+                ...(agent.boot_reason ? { boot_reason: agent.boot_reason } : {}),
                 ...(agent.composer ? { composer: agent.composer } : {}),
                 ...(agent.parsed_cli_mismatch === true
                   ? { parsed_cli_mismatch: true }
@@ -1047,6 +1049,18 @@ export function registerListAgentsTool(
               const bootUnsubmitted = health.issue_codes.includes(
                 "boot_prompt_unsubmitted",
               );
+              const bootResolvedFromPending =
+                !!agent.boot_verify_started_at &&
+                agent.boot_prompt_pending === false;
+              const boot = bootUnsubmitted
+                ? "unsubmitted" as const
+                : bootResolvedFromPending && agent.prompt_delivered === true &&
+                    agent.submit_verified === true
+                  ? "submitted" as const
+                  : bootResolvedFromPending && agent.state === "error" &&
+                      agent.submit_verified === false
+                    ? "failed" as const
+                    : null;
               const screenObservation = trustedScreenObservation
                 ? {
                     observed_at_ms: liveDiscovery!.observed_at_ms,
@@ -1107,7 +1121,10 @@ export function registerListAgentsTool(
                   // (pending -> wait) WITHOUT a second full-detail call. A bare
                   // boolean made both of those `false`; that was the S3 bug.
                   closure: rowHarvestability.closure,
-                  ...(bootUnsubmitted ? { boot: "unsubmitted" as const } : {}),
+                  ...(boot ? { boot } : {}),
+                  ...(boot === "failed"
+                    ? { boot_reason: agent.error ?? "Boot submission was not verified" }
+                    : {}),
                   ...(health.issue_codes.includes("composer_draft_pending")
                     ? { composer: "draft_pending" as const }
                     : {}),

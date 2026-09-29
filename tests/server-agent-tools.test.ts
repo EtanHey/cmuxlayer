@@ -7221,7 +7221,10 @@ describe("agent lifecycle tool handlers", () => {
       expect(manifests[0]?.agent_id).toBe(parsed.agent_id);
       const state = parseToolResult(
         await getState.handler({ agent_id: parsed.agent_id }, {} as any));
-      expect(state).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false });
+      expect(state).toMatchObject({
+        boot_prompt_pending: true, prompt_delivered: false,
+        boot_verify_started_at: expect.any(String),
+      });
       expect(state.state).not.toBe("error");
     }
   });
@@ -7303,6 +7306,8 @@ describe("agent lifecycle tool handlers", () => {
     expect(state).toMatchObject({
       surface_id: "surface:new",
       boot_prompt_pending: true,
+      boot_verify_started_at: expect.any(String),
+      boot_submit_dispatched: false,
       prompt_delivered: false,
       submit_verified: null,
     });
@@ -9221,6 +9226,37 @@ describe("agent lifecycle tool handlers", () => {
     expect(row.state).toBe("working");
     expect(row).not.toHaveProperty("boot");
   });
+
+  it.each(["submitted", "failed"] as const)(
+    "#950 list_agents exposes a resolved pending boot as %s",
+    async (outcome) => {
+      const server = createLifecycleServer(mockExec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const list = (server as any)._registeredTools["list_agents"];
+      const spawned = parseToolResult(await spawn.handler(
+        { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+        {} as any,
+      ));
+      const engine = engineForTests(server) as AgentEngine;
+      const reason = "Boot prompt verification deadline elapsed without submission evidence";
+      const resolved = engine.stateMgr.updateRecord(spawned.agent_id, {
+        state: outcome === "submitted" ? "working" : "error",
+        boot_prompt_pending: false,
+        prompt_delivered: outcome === "submitted",
+        submit_verified: outcome === "submitted",
+        boot_verify_started_at: new Date().toISOString(),
+        error: outcome === "failed" ? reason : null,
+      } as any);
+      engine.getRegistry().set(resolved.agent_id, resolved);
+
+      const parsed = parseToolResult(await list.handler({}, {} as any));
+      const row = parsed.agents.find((agent: any) => agent.agent_id === spawned.agent_id);
+      expect(row).toMatchObject(outcome === "failed"
+        ? { boot: "failed", boot_reason: reason }
+        : { state: "working", boot: "submitted" });
+      expect(row.state).not.toBe("booting");
+    },
+  );
 
   it("list_agents does not invert a UUID-backed row from its recycled cached ref", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
