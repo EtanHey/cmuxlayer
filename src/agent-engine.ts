@@ -2498,6 +2498,7 @@ export class AgentEngine {
         const settled = this.stateMgr.updateRecord(agent.agent_id, {
           ...settlement,
           boot_prompt_pending: false,
+          boot_verify_started_at: null,
           prompt_delivered: true,
           submit_verified: true,
           boot_pre_type_screen: null,
@@ -2584,6 +2585,7 @@ export class AgentEngine {
         ...(agent.boot_prompt_pending && agent.prompt_delivered !== false
           ? {
               boot_prompt_pending: false,
+              boot_verify_started_at: null,
               prompt_delivered: true,
               submit_verified: true,
             }
