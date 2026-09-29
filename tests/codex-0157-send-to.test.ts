@@ -39,9 +39,10 @@ const BOOT_ROWS = "› You are a scratch capture pane for issue 905. Reply with 
 function makeCodexPane(frames: Frames) {
   const pane = {
     frames, live: false, phase: "empty" as "empty" | "buffered" | "draft" | "after",
-    bufferedReads: 0, repaint: false, swallow: 0, returns: 0, tabs: 0,
+    bufferedReads: 0, repaint: false, swallow: 0, swallowTabs: 0, returns: 0, tabs: 0,
     queued: [] as string[], submitted: [] as string[], text: "",
-    failWhileEmpty: false,
+    failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
+    endTurnAtPostTabRead: 0, postTabReads: 0,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
@@ -50,7 +51,15 @@ function makeCodexPane(frames: Frames) {
       return frame(pane.frames.buffered);
     }
     if (pane.repaint) { pane.repaint = false; return frame(pane.frames.buffered); }
-    return frame(pane.frames[pane.phase]);
+    const shown = frame(pane.frames[pane.phase]);
+    if (pane.phase === "draft" && pane.tabs > 0) pane.postTabReads += 1;
+    if (pane.phase === "draft" && (pane.endTurnAfterDraftRead ||
+      (pane.endTurnAtPostTabRead > 0 && pane.postTabReads === pane.endTurnAtPostTabRead))) {
+      pane.endTurnAfterDraftRead = false;
+      pane.endTurnAtPostTabRead = 0;
+      pane.frames.draft = (typed) => fixture("idle-draft").replace(PONG, typed);
+    }
+    return shown;
   };
   const listing = (args: string[]) => {
     if (args.includes("list-windows")) return { windows: [{ ref: "window:1", workspace_count: 1 }] };
@@ -68,11 +77,16 @@ function makeCodexPane(frames: Frames) {
       pane.returns += 1;
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
       else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
+      else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
+        pane.submitted.push(pane.queued.shift()!);
+        pane.frames.after = (typed) => fixture("idle-submitted-working").replace(PONG, typed);
+      }
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("send-key") && args.includes("tab") && pane.live) {
       pane.tabs += 1;
-      if (pane.phase === "draft") { pane.queued.push(pane.text); pane.phase = "after"; }
+      if (pane.swallowTabs > 0) pane.swallowTabs -= 1;
+      else if (pane.phase === "draft") { pane.queued.push(pane.text); pane.phase = "after"; }
       return { stdout: "{}", stderr: "" };
     }
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
@@ -180,6 +194,79 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       });
     } finally { t.context.dispose(); }
   }, 30_000);
+
+  it("#961 r2: a turn ending after the payload read submits with Return", async () => {
+    const t = await setup({
+      empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"),
+      after: fixture("idle-submitted-working").replace(PONG, LIST),
+    });
+    try {
+      t.pane.endTurnAfterDraftRead = true;
+      const receipt = await t.send(LIST);
+      expect(t.pane.returns, JSON.stringify(receipt)).toBe(1);
+      expect(t.pane.tabs).toBe(0);
+      expect(t.pane.submitted).toEqual([LIST]);
+      expect(receipt).toMatchObject({ submitted: true, delivery_state: "submitted" });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#961 r2: retry rereads a turn that ended during the recovery delay", async () => {
+    const t = await setup({
+      empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"),
+      after: fixture("idle-submitted-working").replace(PONG, LIST),
+    });
+    try {
+      t.pane.swallowTabs = 1;
+      t.pane.endTurnAtPostTabRead = 4;
+      const receipt = await t.send(LIST);
+      expect(t.pane.tabs, JSON.stringify(receipt)).toBe(1);
+      expect(t.pane.returns).toBe(1);
+      expect(t.pane.submitted).toEqual([LIST]);
+      expect(receipt).toMatchObject({ submitted: true, retry_count: 1 });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("#961 r2: a queued row remaining after turn end is submitted with Return", async () => {
+    const idleQueue = fixture("midturn-steer-queued").replace(
+      /Working \(11s • esc to interrupt\)[^\n]*/,
+      "• Prior turn complete",
+    );
+    const t = await setup({
+      empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: idleQueue,
+    });
+    try {
+      t.pane.drainQueueOnReturn = true;
+      const receipt = await t.send(LIST);
+      expect(t.pane.tabs).toBe(1);
+      expect(t.pane.returns, JSON.stringify(receipt)).toBe(1);
+      expect(t.pane.submitted).toEqual([LIST]);
+      expect(receipt).toMatchObject({ submitted: true, delivery_state: "submitted" });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["• Working (12s • esc to interrupt)", "Thinking (12s • esc to interrupt)", "Waiting (12s • esc to interrupt)"])(
+    "#961 r2: a dirty composer queues under %s",
+    async (activity) => {
+      const draft = fixture("midturn-draft-tab-to-queue").replace(
+        /Working \(6s • esc to interrupt\)[^\n]*/,
+        `${activity}${"\n".repeat(10)}`,
+      );
+      const t = await setup({
+        empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+        draft, after: fixture("midturn-steer-queued"),
+      });
+      try {
+        const receipt = await t.send(LIST);
+        expect(t.pane.tabs, JSON.stringify(receipt)).toBe(1);
+        expect(t.pane.returns).toBe(0);
+        expect(receipt).toMatchObject({ delivery_state: "queued", queued_behind_turn: true });
+      } finally { t.context.dispose(); }
+    },
+    30_000,
+  );
 
   it("refuses a relay when a stray character already occupies the Codex composer", async () => {
     const dirty = fixture("idle-empty").replace("› Ask Codex to do anything", "› z");

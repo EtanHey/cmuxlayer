@@ -28,6 +28,7 @@ import {
   isCodexUpdateMenuScreen,
   isPickerOrMenuScreen,
   parseScreen,
+  codexScreenHasActiveTurn,
 } from "../screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -670,7 +671,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   const sendKeyWithRetry = async (
     surface: string,
-    key: string,
+    key: string | (() => Promise<string>),
     workspace?: string,
     beforeMutation?: () => Promise<void>,
     maxAttempts = SEND_INPUT_RETRY_ATTEMPTS,
@@ -681,8 +682,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     while (attempt < maxAttempts) {
       try {
         await beforeMutation?.();
+        const dispatchKey = typeof key === "string" ? key : await key();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
-        await client.sendKey(surface, key, { workspace });
+        await client.sendKey(surface, dispatchKey, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
           "surface.send_key",
@@ -703,7 +705,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
     throw lastError instanceof Error
       ? lastError
-      : new Error(`Failed to send key ${key} to ${surface}`);
+      : new Error(`Failed to send key ${typeof key === "string" ? key : "selected key"} to ${surface}`);
   };
 
   const appendDeliveryEvent = (event: Omit<DeliveryTelemetryEvent, "ts">) => {
@@ -986,6 +988,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     return null;
   };
 
+  class CodexQueueRecoveryChanged extends Error {
+    constructor(readonly state: "active" | "gone") {
+      super(`Codex queue changed before recovery: ${state}`);
+    }
+  }
+
   const verifySubmitAfterEnter = async (opts: {
     surface: string;
     workspace?: string;
@@ -1034,6 +1042,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const startedAt = Date.now();
     let retried = false;
     let retryCount = 0;
+    let lastCodexRelayKey = opts.submit_key ?? "return";
+    let idleQueueDrainAttempted = false;
     let sawClearedComposerEvidence = false;
     let sawAllowedClearedComposerEvidence = false;
     let lastHasPendingSubmitEvidence = false;
@@ -1084,6 +1094,63 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         opts.text,
       );
       if (hasQueuedAgentInput) {
+        // Tab can land just as the turn ends. A visible exact queue row in an
+        // idle pane still needs Return; recheck both facts at the key dispatch.
+        if (lastCodexRelayKey === "tab" && !idleQueueDrainAttempted &&
+          !codexScreenHasActiveTurn(snapshot.text) &&
+          screenShowsQueuedAgentInput(snapshot.text, opts.text, { exact: true })) {
+          try {
+            const recoveryRpcMethod = await sendKeyWithRetry(
+              opts.surface,
+              async () => {
+                const latest = await readParsedSurface(opts.surface, opts.workspace, {
+                  throwOnSurfaceGone: true,
+                });
+                if (!latest?.text.trim()) {
+                  throw new Error(`Cannot recover Codex queue: unreadable surface ${opts.surface}`);
+                }
+                if (codexScreenHasActiveTurn(latest.text)) {
+                  throw new CodexQueueRecoveryChanged("active");
+                }
+                if (!screenShowsQueuedAgentInput(latest.text, opts.text, { exact: true })) {
+                  throw new CodexQueueRecoveryChanged("gone");
+                }
+                return "return";
+              },
+              opts.workspace,
+              opts.beforeMutation,
+            );
+            if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
+            retryCount += 1;
+            retried = true;
+            idleQueueDrainAttempted = true;
+            retriedAt = Date.now();
+            appendDeliveryEvent({
+              event_type: "press_enter",
+              source_agent: opts.source_agent ?? null,
+              target_surface: opts.surface,
+              bytes: opts.bytes,
+              press_enter: true,
+              submit_verified: null,
+              retry_count: retryCount,
+            });
+            continue;
+          } catch (error) {
+            if (error instanceof CodexQueueRecoveryChanged) {
+              if (error.state === "gone") continue;
+            } else throw error;
+          }
+        }
+        if (lastCodexRelayKey === "tab" && idleQueueDrainAttempted &&
+          !codexScreenHasActiveTurn(snapshot.text)) {
+          return {
+            submit_verified: null,
+            submit_evidence: null,
+            submit_verification_reason: "input_still_pending",
+            retry_count: retryCount,
+            delivery: "pending_verify",
+          };
+        }
         if (
           opts.source_event !== "send_to" &&
           opts.source_event !== "dispatch_nudge" &&
@@ -1337,26 +1404,29 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         Date.now() - retryEligiblePendingSince >= retryObserveMs
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
-        // A Codex relay that queued with Tab must not turn into a Return
-        // retry while the target is still working. If the turn has ended,
-        // Return is now the correct submit key.
-        const recoveryKey = opts.submit_key === "tab" &&
-          codexTurnActive(snapshot.text, snapshot.parsed)
-          ? "tab" : "return";
+        const codexRelay = screenCli === "codex" &&
+          (opts.source_event === "send_to" ||
+            opts.source_event === "dispatch_nudge" ||
+            opts.source_event === "report_to_parent");
+        const recoverySelection: { key: "tab" | "return" } = { key: "return" };
         const recoveryRpcMethod = await sendKeyWithRetry(
           opts.surface,
-          recoveryKey,
+          codexRelay ? async () => {
+            recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
+            lastCodexRelayKey = recoverySelection.key;
+            return recoverySelection.key;
+          } : "return",
           opts.workspace,
           opts.beforeMutation,
         );
         if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
         retryCount += 1;
         appendDeliveryEvent({
-          event_type: recoveryKey === "tab" ? "send_key" : "press_enter",
+          event_type: recoverySelection.key === "tab" ? "send_key" : "press_enter",
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes: opts.bytes,
-          press_enter: recoveryKey === "return",
+          press_enter: recoverySelection.key === "return",
           submit_verified: null,
           retry_count: retryCount,
         });
@@ -1465,12 +1535,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     };
   };
 
-  // A dirty Codex composer parses as draft_pending in both idle and working
-  // states. Its active-turn footer is the deciding signal for Tab vs Return.
-  const codexTurnActive = (text: string, parsed: ParsedScreenResult): boolean =>
-    parsed.control_state === "busy" ||
-    normalizeTerminalText(text).split("\n").slice(-8).some((line) =>
-      /^\s*Working \(/.test(line));
+  const currentCodexRelayKey = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<"tab" | "return"> => {
+    const snapshot = await readParsedSurface(surface, workspace, {
+      throwOnSurfaceGone: true,
+    });
+    if (!snapshot?.text.trim()) {
+      throw new Error(`Cannot choose Codex relay key: unreadable surface ${surface}`);
+    }
+    return codexScreenHasActiveTurn(snapshot.text) ? "tab" : "return";
+  };
 
   /**
    * AIDEV-NOTE (#484/#500): key mode writes no payload, so post-key composer
@@ -2021,11 +2097,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           (opts.source_event === "send_to" ||
             opts.source_event === "dispatch_nudge" ||
             opts.source_event === "report_to_parent");
-        const submitFrame = preReturnBootEvidence?.screenText ??
-          deliverySafetySnapshot?.text ?? "";
-        const submitKey = codexRelay &&
-          codexTurnActive(submitFrame, parseScreen(submitFrame))
-          ? "tab" : "return";
+        const submitSelection: { key: "tab" | "return" } = { key: "return" };
         if (
           verifySubmit &&
           deliverySafetySnapshot &&
@@ -2051,7 +2123,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           await delay(computeEnterDelayMs(bytes, opts.chunks.length));
           const submitRpcMethod = await sendKeyWithRetry(
             opts.surface,
-            submitKey,
+            codexRelay ? async () => {
+              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
+              return submitSelection.key;
+            } : "return",
             opts.workspace,
             opts.beforeMutation,
           );
@@ -2059,11 +2134,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
         });
         appendDeliveryEvent({
-          event_type: submitKey === "tab" ? "send_key" : "press_enter",
+          event_type: submitSelection.key === "tab" ? "send_key" : "press_enter",
           source_agent: opts.source_agent ?? null,
           target_surface: opts.surface,
           bytes,
-          press_enter: submitKey === "return",
+          press_enter: submitSelection.key === "return",
           submit_verified: null,
           retry_count,
         });
@@ -2081,7 +2156,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               source_agent: opts.source_agent,
               verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
-              submit_key: submitKey,
+              submit_key: submitSelection.key,
               timeout_ms: opts.submit_verify_timeout_ms,
               cursor_response_baseline: cursorResponseBaseline,
               pre_type_screen: deliverySafetySnapshot?.text,

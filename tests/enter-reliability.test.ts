@@ -1705,9 +1705,9 @@ describe("enter reliability", () => {
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(1);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      2,
-    );
+    // The lost Return leaves an active Codex frame; its retry uses Tab.
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(client.sendKeyCalls.filter((key) => key === "tab")).toHaveLength(1);
     expect(client.sendCalls.join("")).toBe(followUp);
     expect(events).toHaveLength(1);
     expect(events[0]?.delivery_state).toBe("pending_verify");
@@ -1895,9 +1895,8 @@ describe("enter reliability", () => {
     expect(settledAt).not.toBeNull();
     expect(settledAt! - startedAt).toBeLessThanOrEqual(1000);
     expect(client.postReturnScreenReadAttempts).toBeGreaterThanOrEqual(2);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      2,
-    );
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(client.sendKeyCalls.filter((key) => key === "tab")).toHaveLength(1);
   }, 10_000);
 
   it("Probe E: accepts when a correlated Codex queue appears before a truncated composer transition", async () => {
