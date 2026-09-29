@@ -96,7 +96,7 @@ key.
 
 ## Drive panes through the MCP, not the raw `cmux` CLI
 
-Use cmuxlayer's MCP tools for pane operations. Calling the raw `cmux` CLI yourself bypasses stable-UUID guards, draft ownership, delivery receipts, tailer reaping, and placement. After a cmux restart, run `/mcp reconnect cmuxlayer` before any pane operation.
+Use cmuxlayer's MCP tools for pane operations. Calling the raw `cmux` CLI yourself bypasses stable-UUID guards, draft ownership, delivery receipts, tailer reaping, and placement. After a cmux restart, reconnect cmuxlayer before any pane operation: run `/mcp reconnect cmuxlayer` in Claude Code, restart Codex CLI or T3 Code, or use **MCP: List Servers → Restart Server** in VS Code. Use the equivalent MCP reconnect control in other clients.
 
 ## What you can do
 
