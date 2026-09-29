@@ -357,7 +357,7 @@ export const COORDINATION_CONTRACT_DELIVERED_NOTE =
   "delivered_via_contract_file: the boot prompt is a one-line pointer at contract_path, which carries the mailbox contract AND report_path/done_marker. The pointer keeps boot delivery under the 500-char chunk threshold, so it is not split. Caveat: an agent that ignores the pointer never reads the contract. That is OBSERVABLE IN PRINCIPLE -- the file is on disk unread, unlike a chunked boot prompt that never submitted -- but NO health or closure path checks it today; nothing here detects it for you. coordination_footer_bytes measures the inline one-line rendering, which is NOT what was sent: the wire carried a ~130-byte pointer and the contract lives in a file of a different size again.";
 
 export const COORDINATION_CONTRACT_POINTER_NOT_VERIFIED =
-  "not_delivered: the contract file was written, but its pointer was folded into a boot prompt whose submission was not verified. The LEAD must relay contract_path, report_path, and done_marker to this worker.";
+  "not_delivered: the contract file was written, but its pointer was folded into a boot prompt whose submission was not verified. Inspect the pane; if the pointer needs re-delivery, use send_to with agent_id, text `Read and follow <contract_path>`, and press_enter:true. send_to queues a busy worker and verifies an idle submit. Never split a raw cmux send and send-key; stop if its draft guard reports existing text.";
 
 /**
  * #782/#801 (Etan's ruling): a `mcp_profile:"sterile"` seat never gets the
@@ -378,7 +378,7 @@ export const COORDINATION_CONTRACT_SKIPPED_STERILE_NO_FILE =
  * the undisclosed non-delivery this lane exists to eliminate.
  */
 export const COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED =
-  "refreshed_not_redelivered: the spawn contract file at contract_path was rewritten on resume (identical bytes -- both strings derive from agent_id alone), and report_path/done_marker are re-issued and re-persisted. The boot POINTER was NOT re-typed into the resuming pane: `--resume` restores the prior session, which already contains it, and typing into a pane mid-resume is a delivery-path change this did not make. If the resumed session did NOT restore its context, the LEAD must point the worker at contract_path.";
+  "refreshed_not_redelivered: the spawn contract file at contract_path was rewritten on resume (identical bytes -- both strings derive from agent_id alone), and report_path/done_marker are re-issued and re-persisted. The boot POINTER was NOT re-typed into the resuming pane: `--resume` restores the prior session, which already contains it. If the restored session lost context, inspect the pane and use send_to with agent_id, text `Read and follow <contract_path>`, and press_enter:true; do not use a raw cmux send/send-key pair.";
 
 // ---------------------------------------------------------------------------
 // H1 round 2 (#889), narrowed in #898: wait_for's file-backed done may only
