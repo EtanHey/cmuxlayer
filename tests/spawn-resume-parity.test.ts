@@ -141,14 +141,14 @@ const RESUMABLE_CLIS = CLIS.filter(
 
 function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string {
   if (path === "registry") {
-    return `${EXPECTED_LAUNCHER_NAME[cli]} -s --worker`;
+    return `${EXPECTED_LAUNCHER_NAME[cli]} -s --worker${cli === "codex" ? " -E medium" : ""}`;
   }
   const cd = `cd '${root}' && `;
   switch (cli) {
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions`;
     case "codex":
-      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c model_reasoning_effort=medium`;
     case "cursor":
       return `${cd}cursor agent --force`;
     case "gemini":
