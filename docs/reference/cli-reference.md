@@ -51,7 +51,7 @@ For example: `spawn_agent({repo: "cmuxlayer", cli: "codex", effort: "medium"})`.
 Missing or blank effort returns `EFFORT_REQUIRED` before any worktree or pane is created.
 Choose medium for well-specified lanes, high for security or open-ended work; higher levels cost more.
 Resume keeps the session's effort; terminal spawns are exempt, and effort is invalid for other CLIs.
-App Server `thread/start` also requires an explicit `effort` field for a new Codex thread.
+App Server `thread/start` uses `params.effort` when supplied; otherwise it uses `CMUXLAYER_APP_SERVER_CODEX_EFFORT`. Both are validated against the same six choices. If neither is set, it fails before allocation with instructions to supply the parameter or environment variable. There is no implicit launch effort default.
 
 ### Default models
 

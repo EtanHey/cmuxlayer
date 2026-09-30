@@ -1,4 +1,4 @@
-import { resolveSpawnEffort } from "./model-policy.js";
+import { CODEX_EFFORT_VALUES, resolveSpawnEffort } from "./model-policy.js";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -431,7 +431,16 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     model?: string;
     effort?: string;
   }): Promise<BridgeThread> {
-    const effort = resolveSpawnEffort("codex", input.effort)!;
+    const launchEffort = input.effort ?? process.env.CMUXLAYER_APP_SERVER_CODEX_EFFORT;
+    if (launchEffort === undefined) {
+      throw new Error(
+        `App Server thread/start needs a Codex launch effort: send params.effort or set CMUXLAYER_APP_SERVER_CODEX_EFFORT (${CODEX_EFFORT_VALUES.join(", ")})`,
+      );
+    }
+    const effort = resolveSpawnEffort("codex", launchEffort);
+    if (effort === null) {
+      throw new Error("App Server thread/start did not resolve a Codex launch effort");
+    }
     const repo = deriveRepoFromCwd(input.cwd);
     const createdAt = Math.floor(Date.now() / 1000);
     const observerEpoch = this.captureSurfaceObserverEpoch();
