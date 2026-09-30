@@ -759,7 +759,7 @@ describe("pane input pointer discipline", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "x".repeat(601),
       },
       {} as any,
@@ -804,7 +804,7 @@ describe("pane input pointer discipline", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: denseIncidentPayload,
       },
       {} as any,
@@ -848,7 +848,7 @@ describe("pane input pointer discipline", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         prompt: "x".repeat(2_000),
         allow_long_inline: true,
@@ -884,7 +884,7 @@ describe("pane input pointer discipline", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         boot_prompt_path: promptPath,
       },
@@ -905,7 +905,7 @@ describe("pane input pointer discipline", () => {
       const context = createServerContext({ exec: makeLifecycleExec(), stateDir: join(testDir, `receipt-${index}`),
         disableSpawnPreflight: true, sessionIdentityResolver: () => null });
       const result = await (createServer({ context }) as any)._registeredTools.spawn_agent.handler(
-        { repo: "brainlayer", model: "codex", cli: "codex", workspace: "workspace:1",
+        { repo: "brainlayer", model: "codex", cli: "codex", effort: "medium", workspace: "workspace:1",
           ...(index === 0 ? { prompt } : { boot_prompt_path: promptPath }) }, {} as any);
       const receipt = parseToolResult(result).boot_prompt_receipt;
       expect(receipt).toMatchObject({ prompt_bytes: Buffer.byteLength(prompt), prompt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
@@ -921,7 +921,7 @@ describe("pane input pointer discipline", () => {
       args: {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "x".repeat(1_801),
         worktree: false,
       },
@@ -932,7 +932,7 @@ describe("pane input pointer discipline", () => {
       args: {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: denseIncidentPayload,
         worktree: false,
       },
@@ -943,7 +943,7 @@ describe("pane input pointer discipline", () => {
       args: {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "first paragraph\n\nsecond paragraph",
         worktree: false,
       },

@@ -1346,7 +1346,7 @@ async function measureSpawnLifecycleOnce(
       "spawn_agent",
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         authority: "worker",
         placement: "right",
@@ -1619,7 +1619,7 @@ async function measureLiveListAgentsAcrossClients(clients) {
       "spawn_agent",
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         authority: "worker",
         placement: "right",

@@ -18,8 +18,7 @@ import {
 import { assertMutationAllowed } from "./mode-policy.js";
 import { extractPrefix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
-import {
-} from "./model-policy.js";
+import { resolveSpawnEffort } from "./model-policy.js";
 import { shellQuote } from "./agent-command.js";
 import { agentProcessLiveness } from "./util/pid-alive.js";
 import {
@@ -2790,6 +2789,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cwd: launchCwd,
             envPrefix: opts.mcpEnv,
             authority: record.authority,
+            effort: resolveSpawnEffort(record.cli, record.effort ?? undefined) ?? undefined,
             launchMode: record.launch_mode === "raw" ? "raw" : "launcher",
             allowModelOverride:
               record.cli === "codex"

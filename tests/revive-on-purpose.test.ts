@@ -658,7 +658,7 @@ describe("revive on purpose (#492)", () => {
 
     const spawned = await engine.spawnAgent({
       repo: "cmuxlayer",
-      cli: "codex",
+      cli: "codex", effort: "medium",
       prompt: "capture my real harness id",
     });
 
@@ -718,7 +718,7 @@ describe("revive on purpose (#492)", () => {
 
     await engine.spawnAgent({
       repo: "cmuxlayer",
-      cli: "codex",
+      cli: "codex", effort: "medium",
       prompt: "lane work",
       title: "cmuxlayer-WORKER · golden-path",
     });

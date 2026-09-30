@@ -301,7 +301,7 @@ describe("workspace spawn placement", () => {
     const childResult = await spawnAgent.handler(
       {
         repo: childRepo,
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: fixture.spawn_request.explicit_workspace ?? undefined,
         parent_agent_id: parent.agent_id,

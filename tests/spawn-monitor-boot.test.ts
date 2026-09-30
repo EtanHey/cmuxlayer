@@ -205,7 +205,7 @@ describe("spawn monitor boot", () => {
       {
         repo: "cmuxlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "workspace:1",
         boot_prompt_timeout_ms: 500,

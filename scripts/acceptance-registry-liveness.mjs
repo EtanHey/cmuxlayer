@@ -697,7 +697,8 @@ async function main() {
 
     // 1. spawn N agents into a scoped workspace
     for (let i = 0; i < opt.count; i += 1) {
-      const args = { repo: opt.repo, cli: opt.cli, workspace };
+      const args = { repo: opt.repo, cli: opt.cli, workspace,
+        ...(opt.cli === "codex" ? { effort: "medium" } : {}) };
       const r = await mcp.call("spawn_agent", args, 90_000);
       if (!r.agent_id) throw new Error(`spawn_agent ${i} returned no agent_id: ${JSON.stringify(r)}`);
       spawned.push({ agent_id: r.agent_id, surface_id: r.surface_id, workspace_id: r.workspace_id });

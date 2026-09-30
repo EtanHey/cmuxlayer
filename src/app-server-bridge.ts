@@ -21,6 +21,7 @@ export interface AppServerBridgeRuntime {
   startThread(input: {
     cwd: string;
     model?: string;
+    effort?: string;
   }): Promise<BridgeThread>;
   readThread(threadId: string): Promise<BridgeThread | null>;
   sendTurn(input: {
@@ -231,7 +232,8 @@ export class CodexAppServerBridge {
     }
 
     const model = typeof params.model === "string" ? params.model : undefined;
-    const thread = await this.runtime.startThread({ cwd, model });
+    const effort = typeof params.effort === "string" ? params.effort : undefined;
+    const thread = await this.runtime.startThread({ cwd, model, effort });
     const wireThread = threadToWire(thread);
 
     this.emitNotification({

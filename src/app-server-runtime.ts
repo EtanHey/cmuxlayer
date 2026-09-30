@@ -1,3 +1,4 @@
+import { resolveSpawnEffort } from "./model-policy.js";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -428,7 +429,9 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
   async startThread(input: {
     cwd: string;
     model?: string;
+    effort?: string;
   }): Promise<BridgeThread> {
+    const effort = resolveSpawnEffort("codex", input.effort)!;
     const repo = deriveRepoFromCwd(input.cwd);
     const createdAt = Math.floor(Date.now() / 1000);
     const observerEpoch = this.captureSurfaceObserverEpoch();
@@ -459,6 +462,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         repo,
         model: input.model ?? "codex",
         cli: "codex",
+        effort,
         prompt: `App Server bridge session for ${repo}`,
         ...(workspace ? { workspace } : {}),
         ...(priorFocus

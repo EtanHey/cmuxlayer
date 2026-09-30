@@ -222,10 +222,12 @@ export function registerSpawnAgentTool(
           "OPTIONAL — leave UNSET so the launcher pins the top-tier model. For cli:'codex', an explicit model is checked against Codex's runtime model list before any worktree or surface is created, then passed through to the launcher. Never pass 'opus' for claude — the top Claude model is already the default.",
         ),
       effort: z
-        .enum(CODEX_EFFORT_VALUES)
-        .optional()
+        .preprocess(
+          (value) => typeof value === "string" && !value.trim() ? undefined : value,
+          z.enum(CODEX_EFFORT_VALUES).optional(),
+        )
         .describe(
-          "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. The installed launcher currently accepts: low, medium, high, xhigh, max, ultra. spawn_agent rejects other values before creating a worktree or surface. The live launcher defaults to HIGH when omitted (~/.config/ralphtools/golem-dispatch.zsh). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
+          'Required for codex new agent spawns: low, medium, high, xhigh, max, ultra. Choose deliberately: medium for well-specified lanes, high for security/open-ended; xhigh and above cost more. Omit on resume (the session keeps its effort) and for other CLIs (effort is invalid).',
         ),
       cli: z
         .enum(["claude", "codex", "gemini", "kiro", "cursor"])
@@ -670,6 +672,7 @@ export function registerSpawnAgentTool(
           });
         }
         const spawnProblems: string[] = [];
+        let effortRequired = false;
         if (!args.repo) {
           spawnProblems.push("repo is required for type=agent");
         }
@@ -696,6 +699,7 @@ export function registerSpawnAgentTool(
           try {
             resolveSpawnEffort(args.cli, args.effort);
           } catch (error) {
+            effortRequired = (error as { code?: string }).code === "EFFORT_REQUIRED";
             spawnProblems.push(
               error instanceof Error ? error.message : String(error),
             );
@@ -707,9 +711,11 @@ export function registerSpawnAgentTool(
             rolelessClaude &&
             args.cli === "claude"
               ? "ROLE_REQUIRED"
-              : spawnProblems.length > 1
-                ? "INVALID_SPAWN_SPEC"
-                : undefined;
+              : spawnProblems.length === 1 && effortRequired
+                ? "EFFORT_REQUIRED"
+                : spawnProblems.length > 1
+                  ? "INVALID_SPAWN_SPEC"
+                  : undefined;
           return err(
             new Error(spawnProblems.join("; ")),
             error_code ? { error_code } : {},

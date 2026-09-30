@@ -44,6 +44,15 @@ applies to resume commands (`src/agent-command.ts:93-100`).
 **If a raw launch cannot apply the model you asked for**, the spawn result carries a
 `MODEL PIN NOT APPLIED` warning instead of failing silently (`src/agent-engine.ts:1513-1534`).
 
+### Codex effort
+
+New Codex agents require `effort`: `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
+For example: `spawn_agent({repo: "cmuxlayer", cli: "codex", effort: "medium"})`.
+Missing or blank effort returns `EFFORT_REQUIRED` before any worktree or pane is created.
+Choose medium for well-specified lanes, high for security or open-ended work; higher levels cost more.
+Resume keeps the session's effort; terminal spawns are exempt, and effort is invalid for other CLIs.
+App Server `thread/start` also requires an explicit `effort` field for a new Codex thread.
+
 ### Default models
 
 From `src/model-policy.ts`:
