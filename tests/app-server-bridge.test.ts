@@ -152,12 +152,14 @@ describe("CodexAppServerBridge thread lifecycle", () => {
       params: {
         cwd: "/home/test-user/Gits/brainlayer",
         model: "gpt-5.4",
+        effort: "medium",
       },
     });
 
     expect(runtime.startThread).toHaveBeenCalledWith({
       cwd: "/home/test-user/Gits/brainlayer",
       model: "gpt-5.4",
+      effort: "medium",
     });
     expect(started).toEqual({
       id: 2,

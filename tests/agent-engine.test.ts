@@ -441,7 +441,7 @@ describe("AgentEngine", () => {
           await guardedEngine.spawnAgent({
             repo: "brainlayer",
             model: "codex",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             prompt: "Fix gap F",
             workspace: "workspace:brainlayer",
           });
@@ -476,7 +476,7 @@ describe("AgentEngine", () => {
     it("sends the launcher without a nofile or role prelude", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Verify seat file-descriptor budget",
       });
       const command = (mockClient.send as ReturnType<typeof vi.fn>).mock.calls
@@ -516,7 +516,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not focus across an observer epoch",
           workspace: "ws:1",
         }),
@@ -554,6 +554,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "Verify authoritative role",
           ...(role ? { role } : {}),
         });
@@ -580,12 +581,12 @@ describe("AgentEngine", () => {
 
       const first = await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "First worker",
       });
       const second = await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Second worker",
       });
 
@@ -632,7 +633,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           parent_agent_id: parent.agent_id,
         }),
@@ -667,7 +668,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           parent_agent_id: parent.agent_id,
         }),
@@ -700,7 +701,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         }),
       ).rejects.toThrow(/waiting for agent launch readiness/);
@@ -720,7 +721,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
       });
 
@@ -745,7 +746,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         });
 
@@ -784,7 +785,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         });
 
@@ -816,7 +817,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         });
         liveSurfaces = [
@@ -912,7 +913,7 @@ describe("AgentEngine", () => {
 
       const result = await engine.spawnAgent({
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix seat identity",
       });
 
@@ -950,7 +951,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Must not occupy the wrong seat",
         }),
       ).rejects.toThrow(/Spawn blocked by seat identity mismatch.*cmuxlayer/i);
@@ -985,7 +986,7 @@ describe("AgentEngine", () => {
 
       const result = await engine.spawnAgent({
         repo: "orchestrator",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Coordinate fleet",
       });
 
@@ -1034,16 +1035,16 @@ describe("AgentEngine", () => {
       });
     });
 
-    it("persists the live launcher default effort for Codex", async () => {
+    it("persists the explicitly chosen effort for Codex", async () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
-        prompt: "Track the launcher default",
+        cli: "codex", effort: "medium",
+        prompt: "Track the chosen effort",
       });
 
       expect(stateMgr.readState(result.agent_id)).toMatchObject({
-        effort: "high",
+        effort: "medium",
       });
     });
 
@@ -1056,7 +1057,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail before durable binding",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1094,7 +1095,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail after surface renumbering",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1140,7 +1141,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail before mutable close",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1186,7 +1187,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail after the close gate",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1231,7 +1232,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail with unprovable surface binding",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1254,7 +1255,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Retain durable binding",
         }),
       ).rejects.toThrow("post-commit telemetry failed");
@@ -1356,7 +1357,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -1394,7 +1395,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "workspace:red-team",
       });
@@ -1448,7 +1449,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix placement",
           workspace: "workspace:intended",
         }),
@@ -1464,7 +1465,7 @@ describe("AgentEngine", () => {
       expect(mockClient.renameTab).not.toHaveBeenCalled();
       expect(mockClient.send).not.toHaveBeenCalled();
       await expect(engine.spawnAgent({
-        repo: "brainlayer", model: "gpt-5.4", cli: "codex",
+        repo: "brainlayer", model: "gpt-5.4", cli: "codex", effort: "medium",
         prompt: "Retry placement", workspace: "workspace:intended",
         boot_prompt_timeout_ms: 100,
       })).rejects.toThrow("Spawn placement blocked");
@@ -1518,7 +1519,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "voicelayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix prompt delivery",
       });
 
@@ -1588,7 +1589,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix the watcher",
         parent_agent_id: "parent-claude",
         cwd: "/home/test-user/Gits/brainlayer.wt/watcher-fix",
@@ -1736,7 +1737,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Implement delegated task",
         parent_agent_id: parent.agent_id,
       });
@@ -1813,7 +1814,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "voicelayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix the voice worker",
         parent_agent_id: parent.agent_id,
       });
@@ -1884,7 +1885,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Implement delegated task",
           parent_agent_id: parent.agent_id,
         }),
@@ -1945,7 +1946,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix the watcher",
         parent_agent_id: "parent-claude",
         cwd: "/home/test-user/Gits/brainlayer.wt/watcher-fix",
@@ -2065,7 +2066,7 @@ describe("AgentEngine", () => {
       await Promise.all([
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           model: "gpt-5.4",
           prompt: "First worker",
           role: "worker",
@@ -2075,7 +2076,7 @@ describe("AgentEngine", () => {
         }),
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           model: "gpt-5.4",
           prompt: "Second worker",
           role: "worker",
@@ -2121,7 +2122,7 @@ describe("AgentEngine", () => {
         type: "terminal",
       });
       await expect(engine.spawnAgent({
-        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        repo: "brainlayer", cli: "codex", effort: "medium", model: "gpt-5.4",
         prompt: "Worker", role: "worker", placement: "right",
         workspace, boot_prompt_timeout_ms: 100,
       })).rejects.toThrow(/timed out.*split|split.*timed out/i);
@@ -2155,7 +2156,7 @@ describe("AgentEngine", () => {
 
       await expect(engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         model: "gpt-5.4",
         prompt: "Second worker",
         role: "worker",
@@ -2201,7 +2202,7 @@ describe("AgentEngine", () => {
 
       await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         model: "gpt-5.4",
         prompt: "Replacement worker",
         role: "worker",
@@ -2247,7 +2248,7 @@ describe("AgentEngine", () => {
       });
       const spawn = () => engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         model: "gpt-5.4",
         prompt: "Worker",
         role: "worker",
@@ -2302,7 +2303,7 @@ describe("AgentEngine", () => {
         }),
       );
       const spawn = () => engine.spawnAgent({
-        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        repo: "brainlayer", cli: "codex", effort: "medium", model: "gpt-5.4",
         prompt: "Worker", role: "worker", placement: "right",
         workspace, boot_prompt_timeout_ms: 100,
       });
@@ -2385,7 +2386,7 @@ describe("AgentEngine", () => {
           title: "", type: "terminal" };
       });
       const spawn = (timeout = 100) => engine.spawnAgent({
-        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        repo: "brainlayer", cli: "codex", effort: "medium", model: "gpt-5.4",
         prompt: "Worker", role: "worker", placement: "right",
         workspace, boot_prompt_timeout_ms: timeout,
       });
@@ -2450,7 +2451,7 @@ describe("AgentEngine", () => {
           surfaces: pane === "pane:lead" ? [makeSurface("surface:lead")] : [] }),
       );
       exposeWorkerColumnAfterSplit(mockClient);
-      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
         model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: 500 });
 
@@ -2536,7 +2537,7 @@ describe("AgentEngine", () => {
         title: "", type: "terminal",
       }));
       const spawn = (timeout: number) => engine.spawnAgent({ repo: "brainlayer",
-        cli: "codex", model: "gpt-5.4", prompt: "Worker", role: "worker",
+        cli: "codex", effort: "medium", model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: timeout });
 
       const first = spawn(100);
@@ -2615,7 +2616,7 @@ describe("AgentEngine", () => {
             workspace, surface: "surface:adopted", pane: "pane:worker",
             title: "", type: "terminal",
           });
-          const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+          const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
             model: "gpt-5.4", prompt: "Worker", role: "worker",
             placement: "right", workspace, boot_prompt_timeout_ms: timeoutMs });
 
@@ -2670,7 +2671,7 @@ describe("AgentEngine", () => {
           return { workspace, surface: "surface:worker", pane: "pane:worker",
             title: "", type: "terminal" };
         });
-      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
         model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: 100 });
       await expect(spawn()).rejects.toThrow("pane not found");
@@ -2712,7 +2713,7 @@ describe("AgentEngine", () => {
       (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(
         () => new Promise<CmuxNewSplitResult>((resolve) => { release = resolve; started(); }),
       );
-      const spawn = engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+      const spawn = engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
         model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: 100 });
       await called;
@@ -2761,7 +2762,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -2818,7 +2819,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -2846,7 +2847,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           workspace: "ws:1",
         }),
@@ -2870,7 +2871,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           workspace: "ws:1",
         }),
@@ -2879,7 +2880,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           workspace: "ws:1",
         }),
@@ -2947,7 +2948,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -3165,7 +3166,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not place against a subset",
           workspace: "ws:1",
         }),
@@ -3220,7 +3221,7 @@ describe("AgentEngine", () => {
         await expect(
           engine.spawnAgent({
             repo: "brainlayer",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             prompt: "Do not place against ambiguous identity",
             workspace: "ws:1",
           }),
@@ -3272,7 +3273,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix observer-safe placement",
           workspace: "ws:1",
         }),
@@ -3327,7 +3328,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not cross a reconnect generation",
           workspace: "ws:1",
         }),
@@ -3397,7 +3398,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not launch across an observer epoch",
           workspace: "ws:1",
         }),
@@ -3514,7 +3515,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Clean a tab created across reconnect",
           workspace: "ws:1",
         }),
@@ -3569,7 +3570,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Refuse a blind fallback split",
           workspace: "ws:1",
         }),
@@ -3633,7 +3634,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Refuse placement into a third-column workspace",
           workspace: "ws:1",
         }),
@@ -3668,7 +3669,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not launch after observer replacement",
           workspace: "ws:1",
         }),
@@ -3730,7 +3731,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Guard launch readiness",
           workspace: "ws:1",
         }),
@@ -3788,7 +3789,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
       });
 
@@ -3842,7 +3843,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -3891,7 +3892,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -3971,7 +3972,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -4011,7 +4012,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           parent_agent_id: "parent-unknown",
         }),
@@ -4073,7 +4074,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Implement delegated task",
         workspace: "ws:1",
         parent_agent_id: "ic-1",
@@ -5771,7 +5772,7 @@ Session ID: ${sessionId}`,
       const pending = engine.spawnAgent({
         repo: "cmuxlayer",
         model: "gpt-5.6-sol",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Capture Codex registration",
       });
       await vi.advanceTimersByTimeAsync(60);
@@ -5799,7 +5800,7 @@ Session ID: ${sessionId}`,
       const pending = engine.spawnAgent({
         repo: "cmuxlayer",
         model: "gpt-5.6-sol",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Return after the bounded registration window",
       });
       await vi.advanceTimersByTimeAsync(100);
@@ -5829,7 +5830,7 @@ Session ID: ${sessionId}`,
         .spawnAgent({
           repo: "cmuxlayer",
           model: "gpt-5.6-sol",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Use the product timeout",
         })
         .then((result) => {
@@ -6205,7 +6206,7 @@ Session ID: ${sessionId}`,
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
       });
 
@@ -7067,7 +7068,7 @@ Session ID: ${sessionId}`,
       const spawned = await engine.spawnAgent({
         repo: "cmuxlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
         cwd: process.cwd(),
       });
@@ -8022,7 +8023,7 @@ Session ID: ${sessionId}`,
       await engine.initialize(discovery as any);
       await engine.spawnAgent({
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "spawn immediately after boot",
         workspace: "ws:placement",
         role: "worker",
@@ -13894,6 +13895,7 @@ Session ID: ${sessionId}`,
             defaultEngine.spawnAgent({
               repo: `missinglauncher${suffix}`,
               cli,
+              ...(cli === "codex" ? { effort: "medium" } : {}),
               prompt: "",
             }),
           ).rejects.toThrow(

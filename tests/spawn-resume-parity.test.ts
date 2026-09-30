@@ -141,14 +141,14 @@ const RESUMABLE_CLIS = CLIS.filter(
 
 function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string {
   if (path === "registry") {
-    return `${EXPECTED_LAUNCHER_NAME[cli]} -s --worker`;
+    return `${EXPECTED_LAUNCHER_NAME[cli]} -s --worker${cli === "codex" ? " -E medium" : ""}`;
   }
   const cd = `cd '${root}' && `;
   switch (cli) {
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions`;
     case "codex":
-      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c model_reasoning_effort=medium`;
     case "cursor":
       return `${cd}cursor agent --force`;
     case "gemini":
@@ -262,6 +262,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
       const result = await engine.spawnAgent({
         repo: REPO,
         cli,
+        ...(cli === "codex" ? { effort: "medium" } : {}),
         prompt: "parity probe",
       });
 
@@ -319,6 +320,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const updated = stateMgr.updateRecord(spawned.agent_id, {
@@ -351,7 +353,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
     it.each(CLIS)(
       "launches %s with an approval bypass on either lane",
       async (cli) => {
-        await engine.spawnAgent({ repo: REPO, cli, prompt: "parity probe" });
+        await engine.spawnAgent({ repo: REPO, cli, ...(cli === "codex" ? { effort: "medium" } : {}), prompt: "parity probe" });
 
         const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
@@ -365,6 +367,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
@@ -395,6 +398,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const updated = stateMgr.updateRecord(spawned.agent_id, {
@@ -434,6 +438,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const result = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
@@ -488,6 +493,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const updated = stateMgr.updateRecord(spawned.agent_id, {

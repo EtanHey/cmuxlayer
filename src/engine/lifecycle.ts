@@ -344,7 +344,7 @@ export async function spawnAgent(this: LifecycleHost, params: SpawnAgentParams):
     boot_instance_id: randomUUID(),
     repo: spawnParams.repo,
     model: spawnParams.model ?? modelPolicy.effective_model,
-    effort: spawnParams.cli === "codex" ? (effort ?? "high") : null,
+    effort,
     cli: spawnParams.cli,
     cli_session_id: null,
     cli_session_path: null,

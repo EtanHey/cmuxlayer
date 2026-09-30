@@ -141,7 +141,7 @@ function makeLifecycleExec(opts?: {
   let surfaceLive = true;
   let promptPending = false;
   let pendingText = "";
-  let activeCli: "claude" | "codex" | "cursor" = "claude";
+  let activeCli: "claude" | "codex" | "cursor" | "gemini" = "claude";
   let createdSurfaceCount = 0;
   let bootPromptReturnFailures = 0;
   let promptReturns = 0;
@@ -220,6 +220,10 @@ function makeLifecycleExec(opts?: {
       if (text.includes("Claude")) {
         activeCli = "claude";
         readyText = "Claude Code\nWhat can I help you with?\n>";
+      }
+      if (text.includes("Gemini")) {
+        activeCli = "gemini";
+        readyText = "Gemini CLI\n> ";
       }
       if (text.includes("Cursor")) {
         activeCli = "cursor";
@@ -758,7 +762,7 @@ describe("lean spawn tool responses", () => {
         spawn.inputSchema.parse({
           version: 1,
           repo: "cmuxlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           ...(field === "placement" ? { role: "implementor" } : {}),
           [field]: value,
         }),
@@ -903,7 +907,7 @@ describe("lean spawn tool responses", () => {
       const prompt = "Verify JRC CLI fallback delivery";
       const spawned = parseToolResult(
         await registeredTestTool(server, "spawn_agent").handler({
-          repo: "jobRadarCoach", cli: "codex", role: "worker", prompt,
+          repo: "jobRadarCoach", cli: "codex", effort: "medium", role: "worker", prompt,
           worktree: { name: "jrc-fallback", branch: "wt/jrc-fallback", create: true },
           boot_prompt_timeout_ms: 2_000, verbose: true,
         }, {}),
@@ -945,7 +949,7 @@ describe("lean spawn tool responses", () => {
       await registeredTestTool(server, "spawn_agent").handler(
         {
           repo: "cmuxlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           prompt,
           boot_prompt_timeout_ms: 2_000,
@@ -1015,7 +1019,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools.spawn_agent;
 
     const result = await spawn.handler({
-      version: 1, type: "agent", repo: "cmuxlayer", cli: "codex",
+      version: 1, type: "agent", repo: "cmuxlayer", cli: "codex", effort: "medium",
       role: "implementor", placement: "right", prompt: "Worker",
     }, {} as any);
 
@@ -1109,6 +1113,7 @@ describe("lean spawn tool responses", () => {
           version: 1,
           repo: "cmuxlayer",
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           role: "implementor",
           force_new: true,
         }),
@@ -1494,7 +1499,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", cli: "codex" },
+      { repo: "cmuxlayer", cli: "codex", effort: "medium" },
       {} as any,
     );
     const parsed = JSON.parse(result.content[0].text);
@@ -1522,7 +1527,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", cli: "codex", verbose: true },
+      { repo: "cmuxlayer", cli: "codex", effort: "medium", verbose: true },
       {} as any,
     );
 
@@ -1560,7 +1565,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex", verbose: true },
+      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex", effort: "medium", verbose: true },
       {} as any,
     );
 
@@ -1570,6 +1575,54 @@ describe("lean spawn tool responses", () => {
       launcher_model: "gpt-5.5",
       override_allowed: true,
     });
+  });
+
+  it.each([undefined, "", "   "])("requires Codex effort %j before any allocation", async (effort) => {
+    const exec = makeLifecycleExec();
+    const worktreeExec = vi.fn();
+    const server = createTrackedServer({ exec, stateDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      worktreeHomeDir: join(TEST_DIR, "Gits"), worktreeExec });
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler(spawn.inputSchema.parse({ repo: "cmuxlayer", cli: "codex", effort,
+      worktree: { name: "required-effort", branch: "wt/required-effort" } }), {});
+    expect(result.structuredContent).toMatchObject({ ok: false, error_code: "EFFORT_REQUIRED" });
+    expect(result.structuredContent.error).toContain('effort is required for cli "codex"');
+    expect(worktreeExec).not.toHaveBeenCalled();
+    expect(exec.mock.calls.some(([, args]) => args.includes("new-split") || args.includes("new-surface"))).toBe(false);
+  });
+
+  it("collects missing effort with other spawn problems", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const result = await (server as any)._registeredTools.spawn_agent.handler({ cli: "codex" }, {});
+    expect(result.structuredContent).toMatchObject({ ok: false, error_code: "INVALID_SPAWN_SPEC" });
+    expect(result.structuredContent.error).toContain("repo is required");
+    expect(result.structuredContent.error).toContain('effort is required for cli "codex"');
+  });
+
+  it("exempts terminal spawns even with Codex selected", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const result = await (server as any)._registeredTools.spawn_agent.handler({ type: "terminal", cli: "codex" }, {});
+    expect(result.structuredContent).toMatchObject({ ok: true, type: "terminal" });
+  });
+
+  it.each(["claude", "gemini"])("allows %s without effort", async (cli) => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler({ repo: "cmuxlayer", cli,
+      role: "implementor", authority: "lead" }, {});
+    expect(result.structuredContent.ok, JSON.stringify(result.structuredContent)).toBe(true);
+  });
+
+  it.each(["claude", "gemini"])("rejects supplied blank effort for %s", async (cli) => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler(spawn.inputSchema.parse({ repo: "cmuxlayer", cli,
+      role: "implementor", authority: "lead", effort: "   " }), {});
+    expect(result.structuredContent.ok).toBe(false);
+    expect(result.structuredContent.error).toContain("cannot be used with cli");
+    expect(exec.mock.calls.some(([, args]) => args.includes("new-split") || args.includes("new-surface"))).toBe(false);
   });
 
   it("spawn_agent passes an explicit Codex effort to the launcher", async () => {
@@ -3221,7 +3274,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "skillcreator",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
       },
       {} as any,
     );
@@ -3343,7 +3396,7 @@ describe("agent lifecycle tool handlers", () => {
             {
               repo: "voicelayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
             },
             {} as any,
           ),
@@ -3402,7 +3455,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "workspace:t3layer",
       },
@@ -3450,7 +3503,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "workspace:brainlayer",
       },
@@ -3515,7 +3568,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "gpt-5.5",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           parent_agent_id: parentRecord.agent_id,
         },
@@ -3821,7 +3874,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
       },
@@ -3838,7 +3891,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
       },
@@ -3866,7 +3919,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
       },
@@ -3883,7 +3936,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
         force_new: true,
@@ -3982,7 +4035,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "fix prompt delivery",
       },
       {} as any,
@@ -4088,7 +4141,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "UUID-bound boot prompt",
       },
       {} as any,
@@ -4142,7 +4195,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "must not type in manual mode",
       },
       {} as any,
@@ -4167,7 +4220,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
       },
       {} as any,
@@ -4203,7 +4256,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
       },
       {} as any,
@@ -4286,7 +4339,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
         allow_long_inline: true,
       },
@@ -4334,7 +4387,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "cmuxlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "probe renamed state",
       },
       {} as any,
@@ -4384,7 +4437,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "cmuxlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: {
           name: "skill eval",
@@ -4424,7 +4477,7 @@ describe("agent lifecycle tool handlers", () => {
         "send",
         "--surface",
         "surface:new",
-        `cmuxlayerCodex -s --worker -w '${worktreePath}'`,
+        `cmuxlayerCodex -s --worker -E medium -w '${worktreePath}'`,
       ]),
     );
   });
@@ -4453,7 +4506,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "skillcreator",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: { name: "registry-root" },
       },
@@ -4498,7 +4551,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "ralph",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: { name: "outside-root" },
       },
@@ -4536,7 +4589,7 @@ describe("agent lifecycle tool handlers", () => {
     });
     const server = createLifecycleServer(exec);
     const result = await (server as any)._registeredTools.spawn_agent.handler({
-      repo: "brainlayer", cli: "codex", role: "worker",
+      repo: "brainlayer", cli: "codex", effort: "medium", role: "worker",
       prompt: "typed before refusal", verbose: true,
     }, {} as any);
     const parsed = parseToolResult(result);
@@ -4568,7 +4621,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "wt-eval-scratch",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: true,
       },
@@ -4628,7 +4681,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "ralph",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: {
           name: "spawn-failure",
@@ -4695,7 +4748,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: {
           name: "recoverable-surface",
@@ -4778,7 +4831,7 @@ describe("agent lifecycle tool handlers", () => {
       const resultPromise = spawn.handler(
         {
           repo: "ralph",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           worktree: {
             name: "post-surface-failure",
@@ -4824,7 +4877,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherSentAt: number | null = null;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === "voicelayerCodex -s --worker") {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker -E medium") {
           launcherSentAt = Date.now();
           return { stdout: "{}", stderr: "" };
         }
@@ -4840,7 +4893,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: elapsed < 800 ? "$ voicelayerCodex -s --worker" : "codex> ",
+              text: elapsed < 800 ? "$ voicelayerCodex -s --worker -E medium" : "codex> ",
               lines: 20,
               scrollback_used: false,
             }),
@@ -4856,7 +4909,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "voicelayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_timeout_ms: 2_000,
         },
         {} as any,
@@ -4931,7 +4984,7 @@ describe("agent lifecycle tool handlers", () => {
       const resultPromise = spawn.handler(
         {
           repo: "ralph",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           worktree: {
             name: "boot-progress",
@@ -5037,7 +5090,7 @@ describe("agent lifecycle tool handlers", () => {
       });
       const server = createTrackedServer({ exec, stateDir: TEST_DIR, sessionIdentityResolver: () => null, worktreeExec });
       const result = (server as any)._registeredTools.spawn_agent.handler({
-        repo: "ralph", cli: "codex", role: "worker",
+        repo: "ralph", cli: "codex", effort: "medium", role: "worker",
         worktree: { name: "unrealized", branch: "wt/unrealized", ...(reuse ? { reuse: true } : {}) },
         boot_prompt_timeout_ms: 20,
       }, {});
@@ -5083,7 +5136,7 @@ describe("agent lifecycle tool handlers", () => {
       const resultPromise = spawn.handler(
         {
           repo: "ralph",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           worktree: {
             name: "launch-timeout",
@@ -5293,7 +5346,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
       },
       {} as any,
@@ -5380,7 +5433,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === "voicelayerCodex -s --worker") {
+        if (lastSentText === "voicelayerCodex -s --worker -E medium") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -5394,7 +5447,7 @@ describe("agent lifecycle tool handlers", () => {
               : lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
-                  ? "$ voicelayerCodex -s --worker"
+                  ? "$ voicelayerCodex -s --worker -E medium"
                   : "codex> ",
             lines: 20,
             scrollback_used: false,
@@ -5429,7 +5482,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "voicelayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
         boot_prompt_timeout_ms: 5_000,
       },
@@ -5469,7 +5522,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherReturns = 0;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === "voicelayerCodex -s --worker") {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker -E medium") {
           launcherSent = true;
           return { stdout: "{}", stderr: "" };
         }
@@ -5485,7 +5538,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: "bash-5.2$ voicelayerCodex -s --worker",
+              text: "bash-5.2$ voicelayerCodex -s --worker -E medium",
               lines: 20,
               scrollback_used: false,
             }),
@@ -5501,7 +5554,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "voicelayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_timeout_ms: 20,
         },
         {} as any,
@@ -5514,7 +5567,7 @@ describe("agent lifecycle tool handlers", () => {
         "launcher command remained pending after Return",
       );
       expect(parsed.last_10_lines).toContain(
-        "bash-5.2$ voicelayerCodex -s --worker",
+        "bash-5.2$ voicelayerCodex -s --worker -E medium",
       );
       expect(launcherReturns).toBeGreaterThanOrEqual(1);
     } finally {
@@ -6506,7 +6559,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === "voicelayerCodex -s --worker") {
+        if (lastSentText === "voicelayerCodex -s --worker -E medium") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -6519,7 +6572,7 @@ describe("agent lifecycle tool handlers", () => {
               ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
               : lastSentText === ""
                 ? "$ "
-                : "$ voicelayerCodex -s --worker\ncodex> ",
+                : "$ voicelayerCodex -s --worker -E medium\ncodex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -6553,7 +6606,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "voicelayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
         boot_prompt_timeout_ms: 1_000,
       },
@@ -6579,7 +6632,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
       },
       {} as any,
@@ -6614,7 +6667,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "inline",
         boot_prompt_path: promptPath,
       },
@@ -6635,7 +6688,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: join(TEST_DIR, "missing.md"),
       },
       {} as any,
@@ -6662,7 +6715,7 @@ describe("agent lifecycle tool handlers", () => {
       const spawnArgs = spawn.inputSchema.parse({
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "readiness timeout contract",
         boot_prompt_timeout_ms: 90_000,
       });
@@ -6691,7 +6744,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_timeout_ms: 20,
         },
         {} as any,
@@ -6744,7 +6797,7 @@ describe("agent lifecycle tool handlers", () => {
       const spawnArgs = spawn.inputSchema.parse({
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "default readiness timeout contract",
       });
       const resultPromise = spawn.handler(spawnArgs, {} as any);
@@ -6779,7 +6832,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "readiness failure identity",
           boot_prompt_timeout_ms: 20,
         },
@@ -6849,7 +6902,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "agent-launch timeout contract",
           boot_prompt_timeout_ms: 37,
         },
@@ -6921,7 +6974,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "fresh-shell timeout contract",
           boot_prompt_timeout_ms: 400,
         },
@@ -7110,7 +7163,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "",
         boot_prompt_path: promptPath,
         boot_prompt_timeout_ms: 20,
@@ -7195,7 +7248,7 @@ describe("agent lifecycle tool handlers", () => {
     const readScreen = (server as any)._registeredTools["read_screen"];
     const getState = agentStateTool(server);
     const result = await spawn.handler(
-      { repo: "brainlayer", model: "codex", cli: "codex",
+      { repo: "brainlayer", model: "codex", cli: "codex", effort: "medium",
         boot_prompt_path: promptPath, boot_prompt_timeout_ms: 20, verbose },
       {} as any,
     );
@@ -7275,7 +7328,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_path: promptPath,
           boot_prompt_timeout_ms: 250,
           verbose,
@@ -7361,7 +7414,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_timeout_ms: 250,
         },
         {} as any,
@@ -7387,7 +7440,7 @@ describe("agent lifecycle tool handlers", () => {
     const defaultArgs = spawn.inputSchema.parse({
       repo: "cmuxlayer",
       model: "gpt-5.4",
-      cli: "codex",
+      cli: "codex", effort: "medium",
       role: "implementor",
       authority: "worker",
       prompt: "default escalation",
@@ -7395,7 +7448,7 @@ describe("agent lifecycle tool handlers", () => {
     const optedOutArgs = spawn.inputSchema.parse({
       repo: "cmuxlayer",
       model: "gpt-5.4",
-      cli: "codex",
+      cli: "codex", effort: "medium",
       role: "implementor",
       authority: "worker",
       prompt: "debug CLI death",
@@ -9159,7 +9212,7 @@ describe("agent lifecycle tool handlers", () => {
           : baseExec(cmd, args));
       const server = createLifecycleServer(exec);
       const spawned = parseToolResult(await (server as any)._registeredTools["spawn_agent"].handler(
-        { repo: "brainlayer", model: "codex", cli: "codex" }, {} as any));
+        { repo: "brainlayer", model: "codex", cli: "codex", effort: "medium" }, {} as any));
       const engine = engineForTests(server) as AgentEngine;
       engine.getRegistry().set(spawned.agent_id, engine.stateMgr.updateRecord(spawned.agent_id, { state: registryState } as any));
       drafted = true;
@@ -9541,7 +9594,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "golems",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "prune skills",
       },
       {} as any,
@@ -9576,7 +9629,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "golems",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
       },
       {} as any,
@@ -10202,7 +10255,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "golems",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
       },
       {} as any,
@@ -10346,7 +10399,7 @@ codex>
       {
         repo: "cmuxlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
       },
       {} as any,
     );
@@ -10429,7 +10482,7 @@ codex>
       {
         repo: "golems",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "prune skills",
       },
       {} as any,
@@ -11194,7 +11247,7 @@ codex>
       {
         repo: "cmuxlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "implementor",
         workspace: "workspace:B",
         force_new: true,
@@ -11270,7 +11323,7 @@ codex>
           {
             repo: "cmuxlayer",
             model: "gpt-5.5",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             role: "implementor",
             force_new: true,
           },
@@ -12848,7 +12901,7 @@ codex>
         {
           repo: "cmuxlayer",
           model: "gpt-5.6-sol",
-          cli: "codex",
+          cli: "codex", effort: "medium",
         },
         {} as any,
       );
@@ -13347,7 +13400,7 @@ codex>
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "initial work",
         },
         {} as any,
@@ -13439,7 +13492,7 @@ codex>
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "initial work",
         },
         {} as any,
@@ -13532,7 +13585,7 @@ codex>
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "initial work",
         },
         {} as any,
@@ -14748,7 +14801,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         force_new: true,
       },
@@ -14767,7 +14820,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:2",
         force_new: true,
       },
@@ -14815,6 +14868,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli,
+            ...(cli === "codex" ? { effort: "medium" } : {}),
             placement,
             workspace: "workspace:1",
             force_new: true,
@@ -14961,7 +15015,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         force_new: true,
       },
@@ -14989,7 +15043,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         force_new: true,
       },
@@ -15033,7 +15087,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:2",
         force_new: true,
       },

@@ -6024,7 +6024,7 @@ describe("tool handler integration", () => {
           string
         >;
       };
-      const workerLauncherCommand = fixture.launcher_command.replace(" -s ", " -s --worker ");
+      const workerLauncherCommand = fixture.launcher_command.replace(" -s ", " -s --worker ") + " -E medium";
 
       let launcherSends = 0;
       let promptSent = false;
@@ -6168,7 +6168,7 @@ describe("tool handler integration", () => {
               {
                 repo: "cmuxlayer",
                 model: "gpt-5.5",
-                cli: "codex",
+                cli: "codex", effort: "medium",
                 boot_prompt_path: promptPath,
                 boot_prompt_timeout_ms: 2_000,
               },
@@ -6357,7 +6357,7 @@ describe("tool handler integration", () => {
       corrupted_command: string;
       screen: string;
     };
-    const workerLauncherCommand = `${fixture.launcher_command} --worker`;
+    const workerLauncherCommand = `${fixture.launcher_command} --worker -E medium`;
 
     let composer = "";
     let launcherSendAttempts = 0;
@@ -6468,7 +6468,7 @@ describe("tool handler integration", () => {
           tool.handler(
             {
               repo: "brainlayer",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               workspace: "workspace:1",
             },
             {} as any,
@@ -6536,7 +6536,7 @@ describe("tool handler integration", () => {
         pending_probe_screen: string;
       };
     };
-    const workerLauncherCommand = `${fixture.launcher_command} --worker`;
+    const workerLauncherCommand = `${fixture.launcher_command} --worker -E medium`;
     const workerCorruptedCommand =
       workerLauncherCommand + workerLauncherCommand;
     const workerPendingProbeScreen = fixture.replay.pending_probe_screen.replace(
@@ -6653,7 +6653,7 @@ describe("tool handler integration", () => {
           tool.handler(
             {
               repo: "skillcreator",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               workspace: "workspace:2",
             },
             {} as any,
@@ -6955,7 +6955,7 @@ describe("tool handler integration", () => {
             {
               repo: "cmuxlayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               boot_prompt_path: promptPath,
               boot_prompt_timeout_ms: 500,
             },
@@ -7192,7 +7192,7 @@ describe("tool handler integration", () => {
             {
               repo: "cmuxlayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               boot_prompt_path: promptPath,
               boot_prompt_timeout_ms: 500,
             },
@@ -7359,7 +7359,7 @@ describe("tool handler integration", () => {
             {
               repo: "cmuxlayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               boot_prompt_path: promptPath,
               boot_prompt_timeout_ms: 500,
             },

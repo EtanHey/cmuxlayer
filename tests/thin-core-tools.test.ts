@@ -185,7 +185,7 @@ describe("thin-core tool palette", () => {
     expect(
       server._registeredTools.spawn_agent.inputSchema.safeParse({
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: "tool-usage",
       }).success,
