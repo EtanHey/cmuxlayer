@@ -1021,6 +1021,7 @@ async function runFullProbes({ client, log, options, probeWindow }) {
   const spawnA = await log.call(busySpawn, client, "spawn_agent", {
     repo: options.repo,
     cli: options.cli,
+    ...(options.cli === "codex" ? { effort: "medium" } : {}),
     role: "implementor",
     authority: "worker",
     workspace: probeWindow.workspaceRef,
@@ -1098,6 +1099,7 @@ async function runFullProbes({ client, log, options, probeWindow }) {
   const spawnB = await log.call(fastSpawn, client, "spawn_agent", {
     repo: options.repo,
     cli: options.cli,
+    ...(options.cli === "codex" ? { effort: "medium" } : {}),
     role: "implementor",
     authority: "worker",
     workspace: probeWindow.workspaceRef,
@@ -1161,6 +1163,7 @@ async function runFullProbes({ client, log, options, probeWindow }) {
     const spawnPromise = log.call(step, client, "spawn_agent", {
       repo: options.repo,
       cli: options.cli,
+      ...(options.cli === "codex" ? { effort: "medium" } : {}),
       role: "implementor",
       authority: "worker",
       workspace: probeWindow.workspaceRef,

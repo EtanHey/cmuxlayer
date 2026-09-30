@@ -134,7 +134,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     }
     const spawned = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
       server._registeredTools.spawn_agent.handler({
-        repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", workspace: "workspace:1",
+        repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
         boot_prompt_timeout_ms: bootPrompt ? 5_000 : 100, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
     if (bootPrompt) return { pane, context, spawned };
