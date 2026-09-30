@@ -1614,6 +1614,17 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.ok, JSON.stringify(result.structuredContent)).toBe(true);
   });
 
+  it.each(["claude", "gemini"])("rejects supplied blank effort for %s", async (cli) => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler(spawn.inputSchema.parse({ repo: "cmuxlayer", cli,
+      role: "implementor", authority: "lead", effort: "   " }), {});
+    expect(result.structuredContent.ok).toBe(false);
+    expect(result.structuredContent.error).toContain("cannot be used with cli");
+    expect(exec.mock.calls.some(([, args]) => args.includes("new-split") || args.includes("new-surface"))).toBe(false);
+  });
+
   it("spawn_agent passes an explicit Codex effort to the launcher", async () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);

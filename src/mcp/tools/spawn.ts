@@ -223,8 +223,9 @@ export function registerSpawnAgentTool(
         ),
       effort: z
         .preprocess(
-          (value) => typeof value === "string" && !value.trim() ? undefined : value,
-          z.enum(CODEX_EFFORT_VALUES).optional(),
+          // Keep supplied blanks distinct from omission for non-Codex validation.
+          (value) => typeof value === "string" && !value.trim() ? "" : value,
+          z.enum([...CODEX_EFFORT_VALUES, ""]).optional(),
         )
         .describe(
           'Required for codex new agent spawns: low, medium, high, xhigh, max, ultra. Choose deliberately: medium for well-specified lanes, high for security/open-ended; xhigh and above cost more. Omit on resume (the session keeps its effort) and for other CLIs (effort is invalid).',

@@ -173,6 +173,11 @@ export function resolveSpawnEffort(
         { code: "EFFORT_REQUIRED" },
       );
     }
+    if (effort !== undefined) {
+      throw new Error(
+        `Codex effort "${effort}" cannot be used with cli "${cli}". Set cli to "codex" or omit effort. No agent was spawned.`,
+      );
+    }
     return null;
   }
 
