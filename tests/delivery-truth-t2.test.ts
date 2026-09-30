@@ -75,6 +75,7 @@ async function spawnReadyAgent(
       repo: "brainlayer",
       model: "sonnet",
       cli,
+      ...(cli === "codex" ? { effort: "medium" } : {}),
       workspace: "workspace:1",
       boot_prompt_timeout_ms: 100,
     },

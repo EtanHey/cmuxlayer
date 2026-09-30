@@ -1161,7 +1161,7 @@ describe("CmuxLayerDaemon", () => {
       arguments: {
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
       },
     });
@@ -1232,7 +1232,7 @@ describe("CmuxLayerDaemon", () => {
         arguments: {
           repo: "brainlayer",
           model: "gpt-5.5",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           force_new: true,
         },
         _meta: {
@@ -1315,7 +1315,7 @@ describe("CmuxLayerDaemon", () => {
           arguments: {
             repo: "brainlayer",
             model: "gpt-5.5",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             force_new: true,
           },
           _meta: {
@@ -1330,7 +1330,7 @@ describe("CmuxLayerDaemon", () => {
           arguments: {
             repo: "voicelayer",
             model: "gpt-5.5",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             force_new: true,
           },
           _meta: {
@@ -1394,7 +1394,7 @@ describe("CmuxLayerDaemon", () => {
         arguments: {
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           workspace: "workspace:1",
         },
       });
