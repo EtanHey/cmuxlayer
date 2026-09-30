@@ -97,7 +97,7 @@ describe("delivery failure tickets", () => {
 
   it.each([false, true])("allowlists all public arguments for recurrence=%s", async (recurrence) => {
     const planted = [
-      "synthetic receipt secret", "/Users/synthetic/private.txt",
+      "synthetic receipt secret", ["", "Users", "synthetic", "private.txt"].join("/"),
       "SYNTHETIC_KEY=private", "12345678-1234-4234-8234-123456789abc",
     ];
     const raw = planted.join(" ");
