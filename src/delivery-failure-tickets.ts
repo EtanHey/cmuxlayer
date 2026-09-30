@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { RUNNING_VERSION } from "./version.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TICKET_DIR = join(homedir(), ".cmuxlayer", "tickets");
@@ -84,17 +85,29 @@ export async function fileDeliveryFailureGithubIssue(
   const run =
     opts?.runner ??
     (async (file, args) => execFileAsync(file, args, { timeout: 15_000 }));
-  const marker = `cmuxlayer-delivery-failure-${ticket.signature}`;
-  const title = ticketTitle(ticket);
+  const signature = /^[a-f0-9]{16}$/.test(ticket.signature)
+    ? ticket.signature
+    : deliveryFailureSignature(ticket);
+  const cli = ["claude", "codex", "cursor", "gemini", "kiro"].includes(
+    ticket.cli ?? "",
+  ) ? ticket.cli : "unknown";
+  const marker = `cmuxlayer-delivery-failure-${signature}`;
+  const title = `delivery failure (${cli})`;
   const body = [
     marker,
     "",
-    ticket.what_happened,
+    "A delivery failure was confirmed after background verification.",
     "",
-    ticket.what_fixed_it,
+    `Full evidence remains on the host in local ticket ${signature}.`,
     "",
     "```json",
-    JSON.stringify(ticket.evidence, null, 2),
+    JSON.stringify({
+      signature,
+      cli,
+      version: RUNNING_VERSION,
+      delivery_state: "failed_confirmed",
+      reported_occurrences: 1,
+    }, null, 2),
     "```",
   ].join("\n");
   try {
@@ -140,6 +153,17 @@ export async function fileDeliveryFailureGithubIssue(
   } catch {
     return null;
   }
+}
+
+/** Public auto-filing is off unless explicitly enabled; local tickets are independent. */
+export function defaultDeliveryIssueFiler(
+  env: NodeJS.ProcessEnv = process.env,
+  opts?: Parameters<typeof fileDeliveryFailureGithubIssue>[1],
+): ((ticket: DeliveryFailureTicket) => Promise<void>) | undefined {
+  if (env.CMUXLAYER_FILE_DELIVERY_TICKETS !== "1") return undefined;
+  return async (ticket) => {
+    await fileDeliveryFailureGithubIssue(ticket, opts);
+  };
 }
 
 function ticketTitle(ticket: DeliveryFailureTicket): string {

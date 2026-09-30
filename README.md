@@ -92,6 +92,8 @@ cmuxlayer never answers a prompt chooser on an agent's behalf. It detects the
 chooser, marks the agent `blocked_on_prompt`, and escalates without sending a
 key.
 
+`CMUXLAYER_FILE_DELIVERY_TICKETS=1` opts into public delivery-failure auto-filing with allowlisted bodies; full evidence stays in local tickets by default.
+
 > **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
 
 ## Drive panes through the MCP, not the raw `cmux` CLI

@@ -15,7 +15,7 @@ import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { defaultOutboxDrain } from "./outbox-drainer.js";
 import {
   defaultDeliveryTicketDir,
-  fileDeliveryFailureGithubIssue,
+  defaultDeliveryIssueFiler,
 } from "./delivery-failure-tickets.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
@@ -410,9 +410,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         deliveryIssueFiler:
           process.env.VITEST === "true" || process.env.NODE_ENV === "test"
             ? undefined
-            : async (ticket) => {
-                await fileDeliveryFailureGithubIssue(ticket);
-              },
+            : defaultDeliveryIssueFiler(),
       },
     );
   }

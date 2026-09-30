@@ -300,6 +300,20 @@ function registerAgent(
 }
 
 describe("send_to v2 background verify", () => {
+  it.each([undefined, "0", "1"])("gates MCP production public filing with flag %s", (flag) => {
+    vi.stubEnv("VITEST", "false");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("CMUXLAYER_FILE_DELIVERY_TICKETS", flag);
+    try {
+      server = createVerifyServer(new FakeAgentSurfaceClient());
+      const queue = (engineForTests(server) as any).deliveryQueue;
+      expect(typeof queue.deliveryIssueFiler).toBe(flag === "1" ? "function" : "object");
+      if (flag !== "1") expect(queue.deliveryIssueFiler).toBeNull();
+      expect(queue.deliveryTicketDir).toBe(defaultDeliveryTicketDir());
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   let server: any;
 
   beforeEach(() => {
