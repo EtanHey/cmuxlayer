@@ -11,7 +11,7 @@ import { createDefaultCloseForensicsRunner } from "../../close-forensics.js";
 import { SURFACE_EVICTION_CONFIRMATION_MS } from "../../agent-registry.js";
 import { AgentEngine } from "../../agent-engine.js";
 import { type ClosureState } from "../../coordination-paths.js";
-import { defaultDeliveryTicketDir, fileDeliveryFailureGithubIssue } from "../../delivery-failure-tickets.js";
+import { defaultDeliveryTicketDir, defaultDeliveryIssueFiler } from "../../delivery-failure-tickets.js";
 import {
   canonicalAgentId,
   resolveWatchOwnerFromSources,
@@ -682,11 +682,7 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
           (testProcess ? undefined : defaultDeliveryTicketDir()),
         deliveryIssueFiler:
           opts?.deliveryIssueFiler ??
-          (testProcess
-            ? undefined
-            : async (ticket) => {
-                await fileDeliveryFailureGithubIssue(ticket);
-              }),
+          (testProcess ? undefined : defaultDeliveryIssueFiler()),
       },
     );
   return engine;

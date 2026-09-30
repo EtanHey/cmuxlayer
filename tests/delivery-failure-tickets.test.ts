@@ -1,8 +1,9 @@
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  defaultDeliveryIssueFiler,
   fileDeliveryFailureGithubIssue,
   writeDeliveryFailureTicket,
   type DeliveryFailureTicket,
@@ -14,7 +15,7 @@ function makeTicket(
   overrides?: Partial<DeliveryFailureTicket>,
 ): DeliveryFailureTicket {
   return {
-    signature: "sigdeadbeef1234",
+    signature: "deadbeef12345678",
     delivery_id: "delivery-1",
     agent_id: "agent-1",
     reason: "verify_deadline_elapsed",
@@ -79,5 +80,48 @@ describe("delivery failure tickets", () => {
     expect(searches).toHaveLength(1);
     expect(searches[0]).toBe(`cmuxlayer-delivery-failure-${ticket.signature}`);
     expect(searches[0]).not.toMatch(/:/);
+  });
+
+  it.each([undefined, "0", "true", " 1"])("keeps evidence local with filing flag %s", async (flag) => {
+    const runner = vi.fn();
+    const ticket = makeTicket({ evidence: { text: "synthetic local receipt" } });
+    const written = writeDeliveryFailureTicket(ticket, { dir: TEST_DIR });
+    const filer = defaultDeliveryIssueFiler(
+      { CMUXLAYER_FILE_DELIVERY_TICKETS: flag }, { runner },
+    );
+    await filer?.(ticket);
+    expect(filer).toBeUndefined();
+    expect(runner).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(written.path, "utf8")).occurrences[0]).toEqual(ticket);
+  });
+
+  it.each([false, true])("allowlists all public arguments for recurrence=%s", async (recurrence) => {
+    const planted = [
+      "synthetic receipt secret", "/Users/synthetic/private.txt",
+      "SYNTHETIC_KEY=private", "12345678-1234-4234-8234-123456789abc",
+    ];
+    const raw = planted.join(" ");
+    const ticket = makeTicket({
+      what_happened: raw, what_fixed_it: raw,
+      evidence: { receipt: { text: raw }, screen: raw },
+    });
+    const runner = vi.fn(async (_file: string, args: string[]) => ({
+      stdout: args[1] === "list"
+        ? (recurrence ? '[{"number":42,"url":"https://example.test/42"}]' : "[]")
+        : "https://example.test/42",
+      stderr: "",
+    }));
+    await fileDeliveryFailureGithubIssue(ticket, { runner });
+    expect(runner.mock.calls[1][1][1]).toBe(recurrence ? "comment" : "create");
+    const args = runner.mock.calls[1][1];
+    expect(args[args.indexOf("--body") + 1]).toContain(`local ticket ${ticket.signature}`);
+    for (const secret of planted) expect(JSON.stringify(runner.mock.calls)).not.toContain(secret);
+    runner.mockClear();
+    const filer = defaultDeliveryIssueFiler(
+      { CMUXLAYER_FILE_DELIVERY_TICKETS: "1" }, { runner },
+    );
+    expect(filer).toBeTypeOf("function");
+    await filer?.({ ...ticket, signature: raw, reason: raw, cli: raw });
+    for (const secret of planted) expect(JSON.stringify(runner.mock.calls)).not.toContain(secret);
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { defaultDeliveryTicketDir } from "../src/delivery-failure-tickets.js";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -97,6 +98,22 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it.each([undefined, "0", "1"])("gates production public filing with flag %s", (flag) => {
+    vi.stubEnv("VITEST", "false");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("CMUXLAYER_FILE_DELIVERY_TICKETS", flag);
+    const runtime = new CmuxAppServerRuntime({ client: makeClient(), stateDir: TEST_DIR });
+    try {
+      const queue = (runtime as any).engine.deliveryQueue;
+      expect(typeof queue.deliveryIssueFiler).toBe(flag === "1" ? "function" : "object");
+      if (flag !== "1") expect(queue.deliveryIssueFiler).toBeNull();
+      expect(queue.deliveryTicketDir).toBe(defaultDeliveryTicketDir());
+    } finally {
+      runtime.dispose();
+      vi.unstubAllEnvs();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
   it("passes its inbox directory to the engine marker reaper", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
