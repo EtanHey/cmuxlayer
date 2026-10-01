@@ -58,12 +58,14 @@ import {
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
   screenContainsCompleteSubmittedText,
+  screenTranscriptContainsText,
   composerPromptLineInput,
   composerHoldsForeignDraft,
   cursorSubmittedResponseEvidenceSignatures,
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
   countVisibleExactQueuedRows,
+  countVisibleCodexQueuedInputs,
   codexScreenShowsSubmit,
   composerRegionMatchesPayload,
   screenShowsCursorFollowupNeedsEnter,
@@ -715,12 +717,25 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     });
   };
 
-  // Tokens authorize a single manual Return after an observed-empty text-only
-  // send. Identical clear/retype entirely between snapshots is unobservable.
+  // Each caller retains its typed/queued entries until verified submission.
   const typedDraftOwners = context.typedDraftOwners;
-  const DRAFT_OWNER_TTL_MS = 300_000;
+  const rememberDraftOwner = (key: string, token: TypedDraftOwner): void => {
+    const entries = token.texts ?? [token.text];
+    token.texts = entries.slice(-8);
+    token.deliveryIds = entries.map((_, index) => token.deliveryIds?.[index] ?? "").slice(-8);
+    typedDraftOwners.set(key, token);
+    while (typedDraftOwners.size > 128) {
+      let oldestKey: string | undefined;
+      let oldestAt = Infinity;
+      for (const [candidate, owner] of typedDraftOwners) {
+        if (owner.at < oldestAt) { oldestKey = candidate; oldestAt = owner.at; }
+      }
+      if (oldestKey === undefined) break;
+      typedDraftOwners.delete(oldestKey);
+    }
+  };
   const draftOwnerKey = (surface: string, workspace?: string, uuid?: string | null) =>
-    JSON.stringify([workspace ?? null, uuid ?? surface]);
+    JSON.stringify([workspace ?? null, uuid ?? surface, resolveCurrentCallerAgent()?.agent_id ?? null]);
   const draftTargetFingerprint = (surface: string, uuid?: string | null) => {
     const record = resolveLatestSurfaceAgentRecord(stateMgr, surface, uuid);
     return JSON.stringify([record?.agent_id ?? null, record?.cli ?? null, record?.cli_session_id ?? null]);
@@ -749,6 +764,41 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   };
   const observedSurfaceUuid = (surface: string): string | null =>
     context.capturedSurfaceUuidByRef.get(surface) ?? (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(surface) ? surface : null);
+  const ownedComposerText = (token: TypedDraftOwner, region: string, cli: CliType | undefined, screen: string): string | null => {
+    const entries = token.texts ?? [token.text];
+    for (let start = 0; start < entries.length; start++) {
+      for (let end = start + 1; end <= entries.length; end++) {
+        for (const separator of ["\n", "", "\n\n"]) {
+          const candidate = entries.slice(start, end).join(separator);
+          if (composerRegionMatchesPayload(region, candidate, cli, screen)) return candidate;
+        }
+      }
+    }
+    return null;
+  };
+  const spendVerifiedDraft = (key: string, submitted: string, deliveryId?: string): void => {
+    const token = typedDraftOwners.get(key);
+    if (!token) return;
+    const entries = token.texts ?? [token.text];
+    for (let start = 0; start < entries.length; start++) {
+      if (deliveryId && token.deliveryIds?.[start] !== deliveryId) continue;
+      for (let end = start + 1; end <= entries.length; end++) {
+        if (!["\n", "", "\n\n"].some(separator => entries.slice(start, end).join(separator) === submitted)) continue;
+        const remaining = [...entries.slice(0, start), ...entries.slice(end)];
+        const last = remaining.at(-1);
+        if (last === undefined) typedDraftOwners.delete(key);
+        else { token.texts = remaining; token.text = last; token.deliveryIds?.splice(start, end - start); }
+        return;
+      }
+    }
+  };
+  const settleVerifiedDeliveryDraft = (deliveryId: string, text: string): void => {
+    for (const [key, owner] of typedDraftOwners) {
+      if (owner.deliveryIds?.includes(deliveryId)) {
+        spendVerifiedDraft(key, text, deliveryId);
+      }
+    }
+  };
   const observeDraftOwnership = (surface: string, workspace: string | undefined, text: string, uuid: string | null): void => {
     for (const [key, token] of typedDraftOwners) {
       const matches = token.uuid ? uuid?.toLowerCase() === token.uuid.toLowerCase()
@@ -758,9 +808,21 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const region = extractComposerInputRegion(text, token.text, record?.cli, true);
       // A truncated read without a composer anchor observes no draft state.
       if (region === null) continue;
-      const unchanged = composerRegionMatchesPayload(region, token.text, record?.cli, text);
+      const empty = extractComposerInputRegion(text, undefined, record?.cli) === "";
+      if (empty) {
+        const entries = token.texts ?? [token.text];
+        const retained = entries.map((entry, index) => ({ entry, deliveryId: token.deliveryIds?.[index] ?? "" }))
+          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || screenShowsQueuedAgentInput(text, entry, { exact: true }));
+        const last = retained.at(-1);
+        if (!last) { typedDraftOwners.delete(key); continue; }
+        token.texts = retained.map(({ entry }) => entry);
+        token.deliveryIds = retained.map(({ deliveryId }) => deliveryId);
+        token.text = last.entry;
+      }
+      const unchanged = ownedComposerText(token, region, record?.cli, text) !== null;
+      const queued = (token.texts ?? [token.text]).some(entry => screenShowsQueuedAgentInput(text, entry, { exact: true }));
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
-      if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !renderingPrefix)) typedDraftOwners.delete(key);
+      if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !empty && !queued && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
     }
   };
@@ -1095,10 +1157,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         opts.require_attributable_submit_evidence === true
           ? screenShowsCompletePendingInput(snapshot.text, opts.text)
           : screenShowsPendingInput(snapshot.text, opts.text);
-      const hasQueuedAgentInput = screenShowsQueuedAgentInput(
-        snapshot.text,
-        opts.text,
-      );
+      const hasQueuedAgentInput = screenShowsQueuedAgentInput(snapshot.text, opts.text);
       if (hasQueuedAgentInput) {
         // Tab can land just as the turn ends. A visible exact queue row in an
         // idle pane still needs Return; recheck both facts at the key dispatch.
@@ -1566,6 +1625,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     surface: string;
     workspace?: string;
     baseline: { text: string; parsed: ParsedScreenResult } | null;
+    owned_text?: string;
   }): Promise<{
     submit_verified: boolean | null;
     submit_verification_reason: SubmitKeyVerificationReason | null;
@@ -1612,6 +1672,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       if (
         baselineComposerInput !== null &&
         baselineComposerInput.trim() !== "" &&
+        (!opts.owned_text || (composerInput === "" && (
+          transitionedFromIdleDraftToWorking ||
+          codexScreenShowsSubmit(opts.baseline?.text, snapshot.text, opts.owned_text) ||
+          (inferComposerCli(snapshot.text) !== "codex" && screenTranscriptContainsText(snapshot.text, opts.owned_text) && !screenTranscriptContainsText(opts.baseline?.text ?? "", opts.owned_text))
+        ))) &&
         ((composerInput !== null && composerInput.trim() === "") ||
           transitionedFromIdleDraftToWorking)
       ) {
@@ -1665,7 +1730,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       bytes: number;
       /** Present only on the key path: the key really reached the pane. */
       key_dispatched?: boolean;
-      submit_verification_reason?: SubmitKeyVerificationReason | null;
+      submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null;
     }
   > => {
     const rpcMethods = new Set<DeliveryRpcMethod>();
@@ -1687,13 +1752,25 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const submitBaseline = submitAttempted && !opts.engineSubmitProof
         ? await readParsedSurface(opts.surface, opts.workspace) : null;
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
+      const owner = typedDraftOwners.get(ownerKey);
+      const caller = resolveCurrentCallerAgent()?.agent_id;
+      const ownerCurrent = !!caller && owner?.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+      const ownedEntries = ownerCurrent && owner ? owner.texts ?? [owner.text] : [];
+      const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
+      const ownedQueueRows = submitBaseline ? [...new Set(ownedEntries)].reduce((count, text) => {
+        const visible = countVisibleExactQueuedRows(submitBaseline.text, text) ?? 0;
+        return count + (visible <= ownedEntries.filter(entry => entry === text).length ? visible : 0);
+      }, 0) : 0;
+      if (callerSubmit && queueRows > ownedQueueRows) {
+        throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline!.parsed);
+      }
       const eligibleQueuedReceipts = callerSubmit && targetAgent && submitBaseline &&
         targetCli === "codex"
         ? context.lifecycleSweepEngine?.listDeliveryReceipts().filter((receipt) =>
             receipt.agent_id === targetAgent.agent_id &&
             receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true &&
-            receipt.press_enter
+            receipt.press_enter && ownedEntries.includes(receipt.text)
           ) ?? []
         : [];
       const ownedQueuedReceipt = submitBaseline
@@ -1705,7 +1782,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             const ownedCount = eligibleQueuedReceipts.filter(
               (candidate) => candidate.text === receipt.text,
             ).length;
-            return visibleCount === 1 && visibleCount <= ownedCount &&
+            return visibleCount !== null && visibleCount > 0 && visibleCount <= ownedCount &&
               screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true });
           })
         : undefined;
@@ -1719,13 +1796,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       }
       // #793: set only when this Return submits the caller's own bound boot draft.
       let ownedBoot: { agentId: string; instanceId: string } | undefined;
+      let ownedSubmitText = "";
       if (callerSubmit && submitBaseline &&
           submitBaseline.parsed.control_state !== "permission_prompt" &&
           !isPickerOrMenuScreen(submitBaseline.text)) {
-        const owner = typedDraftOwners.get(ownerKey);
-        const caller = resolveCurrentCallerAgent()?.agent_id;
-        const ownerCurrent = !!caller && owner?.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && Date.now() - owner.at < DRAFT_OWNER_TTL_MS && bootTokenInstanceCurrent(owner);
-        const ownedText = ownerCurrent ? owner!.text : (ownedQueuedReceipt?.text ?? "");
+        const currentRegion = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
+        const ownedText = ownerCurrent && currentRegion !== null
+          ? ownedComposerText(owner!, currentRegion, targetCli, submitBaseline.text) ?? ""
+          : (ownedQueuedReceipt?.text ?? "");
+        ownedSubmitText = ownedText;
         if (ownerCurrent && owner!.bootAgentId && owner!.bootInstanceId) {
           ownedBoot = { agentId: owner!.bootAgentId, instanceId: owner!.bootInstanceId };
         }
@@ -1738,10 +1817,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         if (!ownedQueuedReceipt && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
-        if (!composerHoldsForeignDraft(submitBaseline.text, "", { cli: targetCli })) typedDraftOwners.delete(ownerKey);
       }
-      // Spend before dispatch, including ambiguous ACKs and verification.
-      if (submitAttempted) typedDraftOwners.delete(ownerKey);
+      // An ignored or ambiguous key leaves ownership available for retry.
       // sendKeyWithRetry throws when nothing reached the pane, so reaching the
       // next line is the dispatch evidence the receipt was missing (#484).
       // #879: re-check the bound boot instance at the last pre-mutation hook,
@@ -1773,11 +1850,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 surface: opts.surface,
                 workspace: opts.workspace,
                 baseline: submitBaseline,
+                owned_text: ownedSubmitText,
               }),
             )
           : { submit_verified: null, submit_verification_reason: null };
       if (verification.submit_verified === true) {
-        typedDraftOwners.delete(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+        spendVerifiedDraft(ownerKey, ownedSubmitText);
         if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
       }
       const receipt = buildPublicDeliveryReceipt({
@@ -2023,7 +2101,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       !requireObservedPayloadBeforeEnter &&
       deliverySafetySnapshot !== null &&
       inferComposerCli(deliverySafetySnapshot.text, deliverySafetySnapshot.parsed) === "codex";
-    const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
+    const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
+    const caller = resolveCurrentCallerAgent()?.agent_id;
+    const previousOwner = typedDraftOwners.get(ownerKey);
+    const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
+    const ownedRetry = !!caller && previousOwner?.caller === caller && typeof beforeDraft === "string" &&
+      draftOwnerFingerprintMatches(previousOwner, opts.surface, opts.stableSurfaceIdentity) &&
+      bootTokenInstanceCurrent(previousOwner) &&
+      ownedComposerText(previousOwner, extractComposerInputRegion(deliverySafetySnapshot!.text, undefined, targetCli, true) ?? beforeDraft, targetCli, deliverySafetySnapshot!.text) === draftGuardText;
+    const deliveryBatches = ownedRetry ? [] : buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,
       deliveryBatches.length,
@@ -2058,16 +2144,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       0,
     );
     const submittedText = opts.chunks.join("");
-    const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
-    const caller = resolveCurrentCallerAgent()?.agent_id;
-    const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
-    if (textDispatched && !opts.press_enter && caller && beforeDraft === "") {
-      typedDraftOwners.delete(ownerKey);
-      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
-      typedDraftOwners.set(ownerKey, { caller, text: submittedText, at: Date.now(),
+    if (textDispatched && caller && beforeDraft === "") {
+      const entries = previousOwner?.caller === caller ? previousOwner.texts ?? [previousOwner.text] : [];
+      rememberDraftOwner(ownerKey, { caller, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
         ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
-        fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false });
-    } else if (textDispatched) typedDraftOwners.delete(ownerKey);
+        fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false,
+        deliveryIds: [...(previousOwner?.deliveryIds ?? entries.map(() => "")), opts.delivery_id ?? ""] });
+    }
     let submit_verified: boolean | null = null;
     let submit_evidence: SubmitEvidence | null = null;
     let submit_verification_reason: SubmitVerificationFailureReason | null =
@@ -2242,15 +2325,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       });
     }
 
-    if (submit_verified === true) typedDraftOwners.delete(ownerKey);
+    if (submit_verified === true) spendVerifiedDraft(ownerKey, submittedText);
     else if (
       // #793: the boot payload was typed but never observed in time, so no
       // Return went out. The draft is the spawning caller's to submit.
       textDispatched && opts.press_enter && !submitDispatched &&
       opts.source_event === "boot_prompt" && caller && pendingBootAgent
     ) {
-      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
-      typedDraftOwners.set(ownerKey, {
+      rememberDraftOwner(ownerKey, {
         caller,
         text: submittedText,
         at: Date.now(),
@@ -2261,24 +2343,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         seen: false,
         bootAgentId: pendingBootAgent.agent_id,
       });
-    } else if (
-      textDispatched &&
-      opts.press_enter &&
-      ownedDraftPending &&
-      (targetCli === "claude" || targetCli === "codex") &&
-      caller
-    ) {
-      if (typedDraftOwners.size >= 128) typedDraftOwners.delete(typedDraftOwners.keys().next().value!);
-      typedDraftOwners.set(ownerKey, {
-        caller,
-        text: submittedText,
-        at: Date.now(),
-        ref: opts.surface,
-        uuid: opts.stableSurfaceIdentity ?? null,
-        workspace: opts.workspace ?? null,
-        fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity),
-        seen: true,
-      });
+    } else if (ownedDraftPending) {
+      const owner = typedDraftOwners.get(ownerKey);
+      if (owner) owner.seen = true;
     }
     const receipt = buildPublicDeliveryReceipt({
       delivery_state: !opts.press_enter
@@ -2297,7 +2364,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                     ? "typed"
                     : undefined,
       delivery_id: opts.delivery_id,
-      typed: bytes > 0,
+      typed: textDispatched,
       submit_attempted: Boolean(opts.press_enter),
       submit_dispatched: submitDispatched,
       submit_verified,
@@ -3782,7 +3849,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const caller = resolveCurrentCallerAgent()?.agent_id;
     const owned = !!caller && owner?.caller === caller &&
       draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) &&
-      Date.now() - owner.at < DRAFT_OWNER_TTL_MS && bootTokenInstanceCurrent(owner);
+      bootTokenInstanceCurrent(owner);
     if (owned && owner!.bootAgentId && !owner!.bootInstanceId) {
       owner!.bootInstanceId = stateMgr.readState(owner!.bootAgentId)?.boot_instance_id ?? undefined;
     }
@@ -3791,6 +3858,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   return {
     callerOwnsTypedDraft,
+    settleVerifiedDeliveryDraft,
     getSurfaceDelivery,
     withSurfaceWrite,
     observedSurfaceUuid,
