@@ -926,7 +926,7 @@ describe("CmuxLayerDaemon", () => {
     const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
       socketPath: join(leaf, "daemon.sock"), createClient,
     }));
-    await expect(daemon.start()).rejects.toThrow("unsafe ancestor: " + realpathSync(ancestor));
+    await expect(daemon.start()).rejects.toThrow(`unsafe ancestor: ${realpathSync(ancestor)}`);
     expect(createClient).not.toHaveBeenCalled();
     expect(existsSync(join(leaf, "daemon.sock"))).toBe(false);
   });
@@ -950,14 +950,15 @@ describe("CmuxLayerDaemon", () => {
   it("refuses a directory chain owned by an unrelated uid", async () => {
     const leaf = stateDir("foreign-owner");
     mkdirSync(leaf, { recursive: true, mode: 0o700 });
-    const currentUid = process.getuid!();
+    const currentUid = process.getuid?.();
+    if (currentUid === undefined) throw new Error("UID unavailable for socket ownership test");
     const getuid = vi.spyOn(process, "getuid").mockReturnValue(currentUid + 1);
     const createClient = vi.fn();
     const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
       socketPath: join(leaf, "daemon.sock"), createClient,
     }));
     try {
-      await expect(daemon.start()).rejects.toThrow("unsafe ancestor: " + realpathSync(leaf));
+      await expect(daemon.start()).rejects.toThrow(`unsafe ancestor: ${realpathSync(leaf)}`);
       expect(createClient).not.toHaveBeenCalled();
     } finally { getuid.mockRestore(); }
   });
