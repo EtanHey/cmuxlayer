@@ -152,8 +152,102 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend };
+    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend };
   }
+
+  it("RESCOPE background settlement spends only the proven delivery ownership", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      target.pane.swallow = 99;
+      expect((await target.send(PONG)).submitted).toBe(false);
+      expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
+      target.pane.phase = "after";
+      await target.engine.verifyPendingDeliveries();
+      expect(target.engine.listDeliveryReceipts()).toEqual(expect.arrayContaining([expect.objectContaining({ delivery_state: "submitted", submit_verified: true })]));
+      expect(target.context.typedDraftOwners.size, JSON.stringify([...target.context.typedDraftOwners])).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE an unchanged owner draft does not expire before verified submission", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      await target.typeDraft(PONG);
+      target.pane.phase = "draft";
+      for (const owner of target.context.typedDraftOwners.values()) owner.at -= 300_001;
+      const receipt = await target.keyReturn(LEAD_UUID);
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([PONG]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE another caller cannot Return an owned visible queue", async () => {
+    const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+    const target = await setup({ empty: render(""), buffered: render(""), draft: render, after: render("") });
+    try {
+      target.pane.frames.after = () => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${PONG}\n›\n  GPT-6.1-Sol high · ~/repo`;
+      expect((await target.send(PONG)).ok).toBe(true);
+      const returns = target.pane.returns;
+      const receipt = await target.keyReturn(OTHER_UUID);
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(target.pane.returns).toBe(returns);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE a same-caller text retry only retries submission", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      target.pane.swallow = 99;
+      expect((await target.send(PONG)).submitted).toBe(false);
+      const writes = target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      expect((await target.send(PONG)).submitted).toBe(false);
+      target.pane.swallow = 0;
+      expect(await target.send(PONG)).toMatchObject({ ok: true, submitted: true });
+      expect(target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length).toBe(writes);
+      expect(target.pane.submitted).toEqual([PONG]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["agent", "surface"])("RESCOPE ignored submits fail honestly and preserve repeated owner retries (%s)", async mode => {
+    const t = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: (text) => fixture("idle-draft").replace(PONG, text), after: (text) => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      t.pane.swallow = 99;
+      const receipt = mode === "agent" ? await t.send(PONG) : await t.surfaceSend(PONG, false);
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ delivery_state: "pending_verify", submitted: false });
+      const writes = t.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      const firstRetry = await t.keyReturn(LEAD_UUID);
+      expect(firstRetry.error_code).not.toBe("blocked_by_foreign_draft");
+      t.pane.swallow = 0;
+      const retry = await t.keyReturn(LEAD_UUID);
+      expect(retry, JSON.stringify(retry)).toMatchObject({ ok: true, submit_verified: true });
+      expect(t.pane.submitted).toEqual([PONG]);
+      expect(t.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length).toBe(writes);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each([LEAD_UUID, OTHER_UUID])("RESCOPE two owned queues moved into the composer remain attributed (%s)", async caller => {
+    const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer\n  tab to queue message`;
+    const t = await setup({ empty: render("Ask Codex to do anything"), buffered: render("Ask Codex to do anything"), draft: render, after: render("Ask Codex to do anything") });
+    try {
+      t.pane.frames.after = () => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n${t.pane.queued.map(text => `  ↳ ${text}`).join("\n")}\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      for (const text of ["first request", "second request"]) {
+        const queued = await t.send(text);
+        expect(queued, JSON.stringify(queued)).toMatchObject({ ok: true, delivery_state: "queued", queued_behind_turn: true });
+      }
+      const combined = t.pane.queued.join("\n");
+      t.pane.queued = []; t.pane.text = combined; t.pane.phase = "draft";
+      t.pane.frames.draft = text => `OpenAI Codex\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      t.pane.frames.after = text => `OpenAI Codex\n${codexRows(text)}\nWorking (0s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      const returns = t.pane.returns;
+      const released = await t.keyReturn(caller);
+      if (caller === LEAD_UUID) {
+        expect(released, JSON.stringify(released)).toMatchObject({ ok: true, submit_verified: true });
+        expect(t.pane.submitted).toEqual([combined]);
+      } else {
+        expect(released.error_code).toBe("blocked_by_foreign_draft");
+        expect(t.pane.returns).toBe(returns);
+      }
+    } finally { t.context.dispose(); }
+  }, 30_000);
 
   it("idle: reports submitted only once the message is in the transcript", async () => {
     const t = await setup({

@@ -183,6 +183,7 @@ import {
   extractComposerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
+  screenContainsCompleteSubmittedText,
   composerHoldsForeignDraft,
   screenShowsQueuedAgentInput,
   screenShowsQueuedCursorFollowup,
@@ -978,6 +979,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // in src/delivery/engine.ts; these are its bindings, names unchanged.
   const {
     callerOwnsTypedDraft,
+    settleVerifiedDeliveryDraft,
     getSurfaceDelivery,
     withSurfaceWrite,
     observedSurfaceUuid,
@@ -3628,13 +3630,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // frame; without one (its read failed, or the daemon restarted) the
         // receipt stays pending until its deadline.
         if (cli === "codex" || agent.cli === "codex") {
-          return !pending && codexScreenShowsSubmit(
-            context.deliveryPreTypeScreens.get(receipt.delivery_id),
-            resolvedSnapshot.text,
-            receipt.text,
-          )
-            ? { outcome: "delivered" as const, submit_verified: true }
-            : { outcome: "pending" as const };
+          const verified = !pending && codexScreenShowsSubmit(
+            context.deliveryPreTypeScreens.get(receipt.delivery_id), resolvedSnapshot.text, receipt.text,
+          );
+          if (verified) settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+          return verified ? { outcome: "delivered" as const, submit_verified: true } : { outcome: "pending" as const };
         }
         const composerCleared = composer !== null && composer.trim() === "";
         const correlationTail = receipt.text
@@ -3646,7 +3646,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             correlationTail,
           ) &&
           !pending;
-        if (composerCleared || inTranscript) {
+        const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
+        const relayProof = receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
+          (screenContainsCompleteSubmittedText(resolvedSnapshot.text, receipt.text) && !screenContainsCompleteSubmittedText(baseline, receipt.text)) ||
+          (["working", "thinking"].includes(parsed?.status ?? "") && !["working", "thinking"].includes(parseScreen(baseline).status))
+        ));
+        if (relayProof && (composerCleared || inTranscript)) {
+          settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
           return { outcome: "delivered" as const, submit_verified: true };
         }
         return { outcome: "pending" as const };
@@ -3895,6 +3901,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       collectDeliveryEvidence,
       collectTargetRecords,
       deliverAgentInput,
+      callerOwnsTypedDraft,
       engine,
       observePausedTarget,
       registry,
