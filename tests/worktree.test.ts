@@ -316,7 +316,7 @@ describe("worktree helpers", () => {
     expect(existsSync(join(outside, "worker"))).toBe(false);
   });
 
-  it.each([false, true])("detects an escape during git add and attempts cleanup (remove fails=%s)", async (removeFails) => {
+  it.each(["none", "remove", "branch", "prune"])("detects an escape and cleans up its branch (failure=%s)", async (failure) => {
     const repoRoot = join(TEST_ROOT, "repo");
     const outside = join(TEST_ROOT, "outside");
     const parent = join(repoRoot, ".worktrees");
@@ -330,18 +330,24 @@ describe("worktree helpers", () => {
         symlinkSync(outside, parent, "dir");
         mkdirSync(path);
       }
-      if (args.includes("remove") && removeFails) {
+      if ((args.includes("remove") || args.includes("prune") || args.includes("-D")) && args.includes(failure === "branch" ? "-D" : failure)) {
         return Promise.reject(new Error("cleanup unavailable"));
       }
       return Promise.resolve({ stdout: "", stderr: "" });
     });
     const bootstrapExec = vi.fn();
-    await expect(prepareWorktree({
+    const attempt = prepareWorktree({
       repo: "cmuxlayer", repoRoot, homeGitsDir: TEST_ROOT,
       worktree: { name: "worker" }, exec, bootstrapExec,
-    })).rejects.toThrow("Worktree escaped containment during creation; removed");
+    });
+    if (failure === "remove" || failure === "branch") {
+      await expect(attempt).rejects.toThrow(`cleanup failed for worktree ${path}`);
+    } else {
+      await expect(attempt).rejects.toThrow("Worktree escaped containment during creation; removed");
+    }
     expect(exec).toHaveBeenCalledWith("git", ["-C", repoRoot, "worktree", "remove", "--force", path]);
     expect(exec).toHaveBeenCalledWith("git", ["-C", repoRoot, "worktree", "prune"]);
+    expect(exec).toHaveBeenCalledWith("git", ["-C", repoRoot, "branch", "-D", "wt/worker"]);
     expect(existsSync(join(outside, "worker", ".mcp.json"))).toBe(false);
     expect(bootstrapExec).not.toHaveBeenCalled();
   });

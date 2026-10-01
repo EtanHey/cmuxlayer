@@ -539,15 +539,28 @@ export async function prepareWorktree(
     // A missing/unresolvable destination also cannot be verified safely.
   }
   if (!contained) {
+    const cleanupFailures: string[] = [];
     try {
       await exec("git", ["-C", repoRoot, "worktree", "remove", "--force", worktreePath]);
     } catch {
-      // Best effort: prune must still run if removal fails.
+      cleanupFailures.push("worktree remove");
     }
     try {
       await exec("git", ["-C", repoRoot, "worktree", "prune"]);
     } catch {
-      // Preserve the containment error even if cleanup fails.
+      cleanupFailures.push("worktree prune");
+    }
+    try {
+      await exec("git", ["-C", repoRoot, "branch", "-D", branch]);
+    } catch {
+      cleanupFailures.push("branch delete");
+    }
+    // Pruning stale metadata is best-effort; removal and branch deletion are
+    // required before cleanup can be reported as successful.
+    if (cleanupFailures.some((step) => step !== "worktree prune")) {
+      throw new Error(
+        `Worktree escaped containment during creation; cleanup failed for worktree ${worktreePath} (${cleanupFailures.join("; ")})`,
+      );
     }
     throw new Error("Worktree escaped containment during creation; removed");
   }
