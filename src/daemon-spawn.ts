@@ -100,7 +100,7 @@ function defaultDaemonScriptPath(): string {
 export async function spawnDaemonProcess(
   opts: SpawnDaemonOptions,
 ): Promise<ChildProcess> {
-  await mkdir(dirname(opts.socketPath), { recursive: true });
+  await mkdir(dirname(opts.socketPath), { recursive: true, mode: 0o700 });
   const daemonScriptPath = opts.daemonScriptPath ?? defaultDaemonScriptPath();
   const env: NodeJS.ProcessEnv = {
     ...process.env,

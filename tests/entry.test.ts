@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Writable } from "node:stream";
@@ -13,6 +13,8 @@ import {
 } from "../src/entry.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { createServer } from "../src/server.js";
+
+const SOCKET_ROOT = join(tmpdir(), "cmuxlayer-entry-socket-test");
 
 function createEntryOptions(
   overrides: Partial<DaemonFirstEntryOptions> = {},
@@ -38,8 +40,10 @@ function createEntryOptions(
 }
 
 describe("daemon-first MCP entry", () => {
+  beforeEach(() => { mkdirSync(SOCKET_ROOT, { recursive: true, mode: 0o700 }); });
   afterEach(() => {
     vi.restoreAllMocks();
+    rmSync(SOCKET_ROOT, { recursive: true, force: true });
   });
 
   it("uses the state-dir daemon socket by default and allows an env override", () => {
@@ -53,18 +57,51 @@ describe("daemon-first MCP entry", () => {
     ).toBe("/custom/cmuxlayer.sock");
   });
 
+  it.each(["non-socket", "unsafe-parent"])("refuses %s before the entry probe or autostart", async (kind) => {
+    const dir = mkdtempSync(join(tmpdir(), "entry-socket-safety-"));
+    const path = join(dir, "daemon.sock");
+    if (kind === "non-socket") writeFileSync(path, "fixture");
+    else chmodSync(dir, 0o777);
+    const opts = createEntryOptions({ env: { CMUXLAYER_DAEMON_SOCKET: path } });
+    try {
+      await expect(runDaemonFirstEntry(opts)).rejects.toThrow(/daemon socket not owned by this user|unsafe parent/);
+      expect(opts.probeDaemon).not.toHaveBeenCalled();
+      expect(opts.spawnDaemon).not.toHaveBeenCalled();
+      expect(opts.runProxy).not.toHaveBeenCalled();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each(["before-spawn", "during-readiness"])("rechecks unsafe endpoint state %s", async (stage) => {
+    const path = join(SOCKET_ROOT, "changed.sock");
+    const spawned = { kill: vi.fn() };
+    const opts = createEntryOptions({
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      probeDaemon: vi.fn().mockResolvedValue(false),
+      probeCmuxSocket: () => {
+        if (stage === "before-spawn") writeFileSync(path, "fixture");
+        return Promise.resolve({ usable: true, socketPath: "/tmp/cmux.sock" });
+      },
+      spawnDaemon: vi.fn(() => { writeFileSync(path, "fixture"); return spawned; }),
+      autostartTimeoutMs: 100,
+    });
+    await expect(runDaemonFirstEntry(opts)).rejects.toThrow(/daemon socket not owned by this user/);
+    expect(opts.runProxy).not.toHaveBeenCalled();
+    if (stage === "before-spawn") expect(opts.spawnDaemon).not.toHaveBeenCalled();
+    else expect(spawned.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
   it("connects to an already-running daemon and starts only the thin proxy", async () => {
     const startSweep = vi.spyOn(AgentEngine.prototype, "startSweep");
     const opts = createEntryOptions({
-      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/running-daemon.sock" },
+      env: { CMUXLAYER_DAEMON_SOCKET: join(SOCKET_ROOT, "running-daemon.sock") },
     });
 
     const result = await runDaemonFirstEntry(opts);
 
     expect(result.mode).toBe("daemon-proxy");
-    expect(opts.probeDaemon).toHaveBeenCalledWith("/tmp/running-daemon.sock");
+    expect(opts.probeDaemon).toHaveBeenCalledWith(join(SOCKET_ROOT, "running-daemon.sock"));
     expect(opts.runProxy).toHaveBeenCalledWith(
-      expect.objectContaining({ socketPath: "/tmp/running-daemon.sock" }),
+      expect.objectContaining({ socketPath: join(SOCKET_ROOT, "running-daemon.sock") }),
     );
     expect(opts.spawnDaemon).not.toHaveBeenCalled();
     expect(opts.startInProcess).not.toHaveBeenCalled();
@@ -77,7 +114,7 @@ describe("daemon-first MCP entry", () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
     const opts = createEntryOptions({
-      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/autostarted.sock" },
+      env: { CMUXLAYER_DAEMON_SOCKET: join(SOCKET_ROOT, "autostarted.sock") },
       probeDaemon,
       autostartTimeoutMs: 100,
     });
@@ -86,10 +123,10 @@ describe("daemon-first MCP entry", () => {
 
     expect(result.mode).toBe("daemon-proxy");
     expect(opts.spawnDaemon).toHaveBeenCalledWith(
-      expect.objectContaining({ socketPath: "/tmp/autostarted.sock" }),
+      expect.objectContaining({ socketPath: join(SOCKET_ROOT, "autostarted.sock") }),
     );
     expect(opts.runProxy).toHaveBeenCalledWith(
-      expect.objectContaining({ socketPath: "/tmp/autostarted.sock" }),
+      expect.objectContaining({ socketPath: join(SOCKET_ROOT, "autostarted.sock") }),
     );
     expect(opts.startInProcess).not.toHaveBeenCalled();
   });
@@ -97,7 +134,7 @@ describe("daemon-first MCP entry", () => {
   it("does not autostart a daemon when this proxy is denied by cmux", async () => {
     const logger = { error: vi.fn() };
     const opts = createEntryOptions({
-      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/denied-parent.sock" },
+      env: { CMUXLAYER_DAEMON_SOCKET: join(SOCKET_ROOT, "denied-parent.sock") },
       logger,
       probeDaemon: vi.fn().mockResolvedValue(false),
       probeCmuxSocket: vi.fn().mockResolvedValue({
@@ -211,7 +248,7 @@ describe("daemon-first MCP entry", () => {
   it("falls back to in-process mode with a loud warning when daemon start fails", async () => {
     const logger = { error: vi.fn() };
     const opts = createEntryOptions({
-      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/down.sock" },
+      env: { CMUXLAYER_DAEMON_SOCKET: join(SOCKET_ROOT, "down.sock") },
       logger,
       probeDaemon: vi.fn().mockResolvedValue(false),
       spawnDaemon: vi.fn().mockRejectedValue(new Error("spawn denied")),
@@ -238,7 +275,7 @@ describe("daemon-first MCP entry", () => {
   it("terminates an autostarted daemon before fallback when readiness times out", async () => {
     const spawned = { kill: vi.fn() };
     const opts = createEntryOptions({
-      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/slow.sock" },
+      env: { CMUXLAYER_DAEMON_SOCKET: join(SOCKET_ROOT, "slow.sock") },
       probeDaemon: vi.fn().mockResolvedValue(false),
       spawnDaemon: vi.fn().mockResolvedValue(spawned),
       autostartTimeoutMs: 0,
@@ -259,7 +296,7 @@ describe("daemon-first MCP entry", () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
     const opts = createEntryOptions({
-      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/raced-online.sock" },
+      env: { CMUXLAYER_DAEMON_SOCKET: join(SOCKET_ROOT, "raced-online.sock") },
       probeDaemon,
       spawnDaemon: vi.fn().mockResolvedValue(spawned),
       autostartTimeoutMs: 0,
@@ -270,7 +307,7 @@ describe("daemon-first MCP entry", () => {
     expect(result.mode).toBe("daemon-proxy");
     expect(spawned.kill).not.toHaveBeenCalled();
     expect(opts.runProxy).toHaveBeenCalledWith(
-      expect.objectContaining({ socketPath: "/tmp/raced-online.sock" }),
+      expect.objectContaining({ socketPath: join(SOCKET_ROOT, "raced-online.sock") }),
     );
     expect(opts.startInProcess).not.toHaveBeenCalled();
   });

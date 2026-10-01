@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 
 import net from "node:net";
+import { chmodSync } from "node:fs";
 import {
+  chmod,
   lstat,
   mkdir,
   open,
+  realpath,
   rename,
   unlink,
 } from "node:fs/promises";
-import { dirname, basename } from "node:path";
+import { dirname, basename, resolve } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
   Transport,
@@ -516,6 +519,9 @@ export class CmuxLayerDaemon {
   private contextPromise: Promise<CmuxServerContext> | null = null;
   private readonly socketPath: string;
   private readonly listenFd?: number;
+  private readonly socketPathKnown: boolean;
+  private readonly defaultSocketPath: boolean;
+  private socketPermissionsReady = false;
   private readonly drainTimeoutMs: number;
   private readonly activeTransports = new Set<SocketJsonRpcTransport>();
   private readonly activeServers = new Set<McpServer>();
@@ -539,6 +545,11 @@ export class CmuxLayerDaemon {
     this.context = opts.context ?? null;
     this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.listenFd = opts.listenFd ?? parseListenFd(process.env);
+    this.socketPathKnown = this.listenFd === undefined || opts.socketPath !== undefined ||
+      Boolean(process.env.CMUXLAYER_DAEMON_SOCKET?.trim());
+    this.defaultSocketPath = resolve(this.socketPath) === resolve(defaultDaemonSocketPath({
+      ...process.env, CMUXLAYER_DAEMON_SOCKET: undefined,
+    }));
     this.drainTimeoutMs = opts.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
     this.detectStaleBuildFn = opts.detectStaleBuild ?? detectStaleBuild;
     this.staleCheckIntervalMs =
@@ -561,15 +572,18 @@ export class CmuxLayerDaemon {
       });
     }
 
+    if (this.socketPathKnown) await this.prepareSocketDirectory();
     if (this.listenFd === undefined) {
-      await mkdir(dirname(this.socketPath), { recursive: true });
       await unlinkStaleSocket(this.socketPath);
     }
 
     await this.getContext();
 
     this.server = (this.opts.serverFactory ?? net.createServer)(
-      (socket) => void this.acceptConnection(socket),
+      (socket) => {
+        if (!this.socketPermissionsReady) socket.destroy();
+        else void this.acceptConnection(socket);
+      },
     );
     this.server.on("error", (error) => {
       if (!this.draining) {
@@ -903,6 +917,34 @@ export class CmuxLayerDaemon {
     }
   }
 
+  private async prepareSocketDirectory(): Promise<void> {
+    const dir = dirname(this.socketPath);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const stats = await lstat(dir);
+    if (!stats.isDirectory()) {
+      throw new Error(`Daemon socket directory is not a directory: ${dir}`);
+    }
+    if (this.defaultSocketPath) {
+      if ((stats.mode & 0o777) !== 0o700) await chmod(dir, 0o700);
+    } else if ((stats.mode & 0o022) !== 0) {
+      const error = `Refusing daemon socket directory: group/other-writable parent ${dir}`;
+      this.logger.error(`[cmuxlayer-daemon] ${error}`);
+      throw new Error(error);
+    }
+    const uid = process.getuid?.();
+    for (let ancestor = await realpath(dir); ; ancestor = dirname(ancestor)) {
+      const ancestorStats = await lstat(ancestor);
+      if (uid === undefined || !ancestorStats.isDirectory() ||
+        (ancestorStats.uid !== uid && ancestorStats.uid !== 0) ||
+        ((ancestorStats.mode & 0o022) !== 0 && (ancestorStats.mode & 0o1000) === 0)) {
+        const error = `Refusing daemon socket directory; unsafe ancestor: ${ancestor}`;
+        this.logger.error(`[cmuxlayer-daemon] ${error}`);
+        throw new Error(error);
+      }
+      if (dirname(ancestor) === ancestor) break;
+    }
+  }
+
   private listen(options: string | { fd: number }): Promise<void> {
     const server = this.server;
     if (!server) {
@@ -915,7 +957,17 @@ export class CmuxLayerDaemon {
       };
       const onListening = () => {
         server.off("error", onError);
-        resolve();
+        try {
+          // Synchronous chmod finishes in the listening event before a connection
+          // can be handed to MCP. Socket activation may not supply a pathname.
+          if (this.socketPathKnown) chmodSync(this.socketPath, 0o600);
+          else this.logger.error("[cmuxlayer-daemon] socket activation path unknown; skipping socket chmod");
+          this.socketPermissionsReady = true;
+          resolve();
+        } catch (error) {
+          server.close();
+          reject(error);
+        }
       };
       server.once("error", onError);
       if (typeof options === "string") {

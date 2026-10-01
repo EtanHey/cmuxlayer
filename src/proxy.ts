@@ -8,6 +8,7 @@ import type {
   RequestId,
 } from "@modelcontextprotocol/sdk/types.js";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import { assertSafeDaemonSocket, UnsafeDaemonSocketError, type DaemonSocketLstat } from "./daemon-socket-security.js";
 import {
   extractJsonRpcFrameMetadata,
   JsonRpcLineBuffer,
@@ -135,6 +136,8 @@ export interface CmuxLayerProxyOptions {
   input?: Readable;
   output?: Writable;
   connect?: (socketPath: string) => net.Socket;
+  /** Filesystem metadata seam for endpoint safety tests. */
+  socketLstat?: DaemonSocketLstat;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
   reconnectJitterRatio?: number;
@@ -279,6 +282,7 @@ export class CmuxLayerProxy {
   private readonly input: Readable;
   private readonly output: Writable;
   private readonly connect: (socketPath: string) => net.Socket;
+  private readonly socketLstat?: DaemonSocketLstat;
   private readonly initialBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly reconnectJitterRatio: number;
@@ -362,6 +366,7 @@ export class CmuxLayerProxy {
     this.input = opts.input ?? process.stdin;
     this.output = opts.output ?? process.stdout;
     this.connect = opts.connect ?? ((path) => net.createConnection(path));
+    this.socketLstat = opts.socketLstat;
     this.initialBackoffMs = opts.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS;
     this.maxBackoffMs = opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.reconnectJitterRatio =
@@ -595,6 +600,10 @@ export class CmuxLayerProxy {
             "attempt-failed",
             `[cmuxlayer-proxy] reconnect attempt ${attempt} failed (${errorClass}): ${message}`,
           );
+          if (error instanceof UnsafeDaemonSocketError) {
+            this.startBufferedRequestTimer();
+            return;
+          }
           await this.spawnInstalledDaemonAfterReconnectFailure(attempt);
           this.startBufferedRequestTimer();
           const delayMs = computeReconnectDelay(attempt, {
@@ -616,6 +625,7 @@ export class CmuxLayerProxy {
   }
 
   private openDaemonSocket(): Promise<net.Socket> {
+    assertSafeDaemonSocket(this.socketPath, this.socketLstat);
     const socket = this.connect(this.socketPath);
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -676,6 +686,7 @@ export class CmuxLayerProxy {
         return;
       }
       const spawnStartedAt = Date.now();
+      assertSafeDaemonSocket(this.socketPath, this.socketLstat);
       const spawned = await this.spawnDaemonForVersionBump({
         socketPath: this.socketPath,
         env: process.env,
@@ -705,6 +716,7 @@ export class CmuxLayerProxy {
   private async canSpawnSharedDaemon(
     trigger: "reconnect-failure" | "version-bump",
   ): Promise<boolean> {
+    assertSafeDaemonSocket(this.socketPath, this.socketLstat);
     if (isEnabled(this.env.CMUXLAYER_FORCE_INPROCESS)) {
       this.logSpawnSuppression("force-inprocess", "none", trigger);
       return false;
@@ -1431,6 +1443,7 @@ export class CmuxLayerProxy {
         try {
           if (await this.canSpawnSharedDaemon("version-bump")) {
             const spawnStartedAt = Date.now();
+            assertSafeDaemonSocket(this.socketPath, this.socketLstat);
             const spawned = await this.spawnDaemonForVersionBump({
               socketPath: this.socketPath,
               env: process.env,
