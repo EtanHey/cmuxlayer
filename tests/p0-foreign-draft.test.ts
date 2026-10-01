@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { normalizeKeyName, isSubmitKey } from "../src/key-names.js";
+import { computeModelMismatch, computeEffortMismatch, parseCodexEffort } from "../src/engine/launch-command.js";
 import { parseScreen } from "../src/screen-parser.js";
 import { matchReadyPattern } from "../src/pattern-registry.js";
 import { extractComposerInputRegion, composerHoldsForeignDraft } from "../src/delivery/composer-screen.js";
@@ -61,5 +62,26 @@ Update available!
 › 1. Update now
   2. Skip until next version
 Press enter to continue`)).toBeNull();
+  });
+});
+
+
+describe("P0 Codex model identity and effort", () => {
+  it.each([
+    { header: "gpt-6.1-sol", footer: "GPT-6.1-Sol high", model: "gpt-6.1-sol", requested: "gpt-6.1-sol", mismatch: false, effort: "high" },
+    { header: "Model: gpt-6.1-sol", footer: "Daybreak Blue medium", model: "gpt-6.1-sol", requested: "gpt-6.1-sol", mismatch: false, effort: "medium" },
+    { header: "", footer: "GPT-6.1-Sol high", model: "GPT-6.1-Sol", requested: "gpt-6.1-sol", mismatch: false, effort: "high" },
+    { header: "", footer: "Daybreak Blue high", model: "Daybreak Blue", requested: "gpt-daybreak-blue-latest", mismatch: null, effort: "high" },
+    { header: "gpt-6.1-sol high", footer: "GPT-6.1-Sol", model: "gpt-6.1-sol", requested: "gpt-6.1-sol", mismatch: false, effort: "high" },
+    { header: "", footer: "Daybreak high", model: "Daybreak", requested: "gpt-daybreak-blue-latest", mismatch: null, effort: "high" },
+  ])("keeps the model separate from effort: $footer / $header", ({ header, footer, model, requested, mismatch, effort }) => {
+    const screen = `OpenAI Codex\n${header}\n›\n  ${footer} · ~/Gits/cmuxlayer`;
+    const parsed = parseScreen(screen);
+    expect(parsed.model).toBe(model);
+    expect(computeModelMismatch(requested, parsed.model)).toBe(mismatch);
+    const parsedEffort = parseCodexEffort(parsed.model, screen);
+    expect(parsedEffort).toBe(effort);
+    expect(computeEffortMismatch(effort, parsedEffort)).toBe(false);
+    expect(computeEffortMismatch(effort === "high" ? "medium" : "high", parsedEffort)).toBe(true);
   });
 });

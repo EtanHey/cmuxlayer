@@ -1974,10 +1974,13 @@ function parseModelAndCost(
 ): { model: string | null; cost: number | null } {
   if (agentType === "codex") {
     const footerMatch = text.split("\n").reverse().map(line => line.match(CODEX_FOOTER_RE)).find(Boolean);
-    const codexMatch = text.match(CODEX_HEADER_RE);
+    // Canonical header/panel IDs outrank display labels in the footer.
+    const headerText = text.split("\n").filter(line => !CODEX_FOOTER_RE.test(line)).join("\n");
+    const codexMatch = headerText.match(CODEX_HEADER_RE);
     const panelModelMatch = text.match(CODEX_PANEL_MODEL_RE);
+    const canonical = codexMatch?.[1]?.trim() ?? panelModelMatch?.[1]?.trim();
     return {
-      model: footerMatch ? footerMatch[0].trim().split(/[·•]/)[0].trim() : codexMatch?.[1]?.trim() ?? panelModelMatch?.[1]?.trim() ?? null,
+      model: canonical?.replace(/\s+(?:minimal|low|medium|high|xhigh|max|ultra|none)$/i, "") ?? footerMatch?.[1]?.trim() ?? null,
       cost: null,
     };
   }

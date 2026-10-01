@@ -1576,7 +1576,7 @@ Working (2m 06s • esc to interrupt)
 
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("working");
-    expect(parsed.model).toBe("gpt-5.4 high");
+    expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.context_pct).toBe(13); // 100 - 87% left = 13% used
     expect(parsed.actions).toContain('Ran rg -n "read_screen" src tests');
   });
@@ -1591,7 +1591,7 @@ Working (2m 08s • esc to interrupt)
 
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("working");
-    expect(parsed.model).toBe("gpt-5.4 xhigh");
+    expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.context_pct).toBeNull();
   });
 
@@ -1602,7 +1602,7 @@ Working (2m 06s • esc to interrupt)
 `);
 
     expect(parsed.agent_type).toBe("codex");
-    expect(parsed.model).toBe("gpt-5.4 high");
+    expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.context_pct).toBe(13);
   });
 
@@ -1696,7 +1696,7 @@ TASK_DONE
 
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("idle");
-    expect(parsed.model).toBe("gpt-5.5 xhigh");
+    expect(parsed.model).toBe("gpt-5.5");
   });
 
   it("keeps an explicit Codex header authoritative over a dot action glyph", () => {

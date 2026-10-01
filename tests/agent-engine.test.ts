@@ -5231,7 +5231,7 @@ describe("AgentEngine", () => {
 
     it("guard for #629: the switched-model pane parses to terra and mismatches the spark pin", () => {
       const parsed = parseScreen(TERRA_CODEX_SCREEN).model;
-      expect(parsed).toBe("gpt-5.6-terra medium");
+      expect(parsed).toBe("gpt-5.6-terra");
       expect(computeModelMismatch("gpt-5.3-codex-spark", parsed)).toBe(true);
     });
 
@@ -10197,6 +10197,28 @@ Session ID: ${sessionId}`,
         model: "claude-opus-5-5[1m]",
         parsed_model: banner,
         model_mismatch: mismatch,
+      });
+    });
+
+    it.each([
+      { header: "Model: gpt-6.1-sol", footer: "GPT-6.1-Sol high", requested: "gpt-6.1-sol", parsed: "gpt-6.1-sol", mismatch: false, effort: "high" },
+      { header: "", footer: "Daybreak Blue medium", requested: "gpt-daybreak-blue-latest", parsed: "Daybreak Blue", mismatch: null, effort: "medium" },
+    ])("settles Codex model and effort independently: $footer", async ({ header, footer, requested, parsed, mismatch, effort }) => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-codex-display", state: "booting", surface_id: "surface:codex-display",
+        cli: "codex", model: requested, effort,
+      }));
+      liveSurfaces = [makeSurface("surface:codex-display")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:codex-display",
+        text: `OpenAI Codex\n${header}\n›\n  ${footer} · ~/Gits/cmuxlayer`,
+        lines: 80, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-codex-display")).toMatchObject({
+        state: "ready", parsed_model: parsed, model_mismatch: mismatch,
+        parsed_effort: effort, effort_mismatch: false,
       });
     });
 
