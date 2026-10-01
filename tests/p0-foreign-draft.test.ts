@@ -88,7 +88,7 @@ describe("P0 Codex model identity and effort", () => {
 
 
 describe("P0 hosted review regressions", () => {
-  it.each(["~/My Projects/repo", "/Users/example/My Projects/repo"])("reads a structural footer with spaces in cwd: %s", cwd => {
+  it.each(["~/My Projects/repo", "/tmp/My Projects/repo"])("reads a structural footer with spaces in cwd: %s", cwd => {
     const screen = `›\n  Daybreak Blue high · ${cwd}`;
     expect(matchReadyPattern("codex", screen).matched).toBe(true);
     expect(extractComposerInputRegion(screen)).toBe("");
