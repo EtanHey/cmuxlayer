@@ -185,15 +185,62 @@ function assertAllowedWorktreePath(
   homeGitsDir: string,
   path: string,
 ): void {
-  if (
-    isInside(repoRoot, path) ||
-    (isInside(homeGitsDir, repoRoot) && isInside(homeGitsDir, path))
-  ) {
-    return;
+  const root = isInside(repoRoot, path)
+    ? repoRoot
+    : isInside(homeGitsDir, repoRoot) && isInside(homeGitsDir, path)
+      ? homeGitsDir
+      : undefined;
+  if (!root) {
+    throw new Error(
+      `Worktree path ${path} must be inside ${repoRoot} or ${homeGitsDir}`,
+    );
   }
-  throw new Error(
-    `Worktree path ${path} must be inside ${repoRoot} or ${homeGitsDir}`,
-  );
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (stat?.isSymbolicLink()) {
+    throw new Error(`Worktree path exists but is not a directory: ${path}`);
+  }
+  const ancestor = existingAncestor(path);
+  // Pin the allowed root itself, rather than trusting a redirected .worktrees.
+  if (!isInside(realpathSync(root), realpathSync(ancestor))) {
+    throw new Error(`Worktree path violates physical containment: ${path}`);
+  }
+}
+
+function existingAncestor(path: string): string {
+  let ancestor = path;
+  while (!lstatSync(ancestor, { throwIfNoEntry: false })) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) throw new Error(`No existing ancestor for ${path}`);
+    ancestor = parent;
+  }
+  return ancestor;
+}
+
+function createWorktreeParents(
+  repoRoot: string,
+  homeGitsDir: string,
+  path: string,
+): void {
+  const parent = dirname(path);
+  let ancestor = existingAncestor(parent);
+  const missing: string[] = [];
+  for (let next = parent; next !== ancestor; next = dirname(next)) {
+    missing.unshift(basename(next));
+  }
+  for (const component of missing) {
+    // Validate before each write, then reject symlinks even if mkdir raced.
+    assertAllowedWorktreePath(repoRoot, homeGitsDir, path);
+    ancestor = join(ancestor, component);
+    try {
+      mkdirSync(ancestor);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    if (!lstatSync(ancestor).isDirectory()) {
+      throw new Error(`Worktree parent is not a directory: ${ancestor}`);
+    }
+    assertAllowedWorktreePath(repoRoot, homeGitsDir, path);
+  }
 }
 
 function normalizeWorktreeRequest(
@@ -405,6 +452,7 @@ export async function prepareWorktree(
     : defaultPath;
   if (spec.generatedName && !spec.path) {
     for (let attempts = 0; attempts < 10; attempts++) {
+      assertAllowedWorktreePath(repoRoot, homeGitsDir, worktreePath);
       const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
       const pathExists = existsSync(worktreePath);
       const branchTaken = pathExists
@@ -438,6 +486,7 @@ export async function prepareWorktree(
   ) {
     worktreePath = legacyPath;
   }
+  assertAllowedWorktreePath(repoRoot, homeGitsDir, worktreePath);
 
   if (existsSync(worktreePath)) {
     if (!spec.reuse) {
@@ -448,6 +497,7 @@ export async function prepareWorktree(
       throw new Error(`Worktree path exists but is not a directory: ${worktreePath}`);
     }
     await assertExistingWorktree(worktreePath, repoRoot, exec);
+    assertAllowedWorktreePath(repoRoot, homeGitsDir, worktreePath);
     return {
       path: worktreePath,
       name: basename(worktreePath),
@@ -464,8 +514,9 @@ export async function prepareWorktree(
     throw new Error(`Worktree does not exist: ${worktreePath}`);
   }
 
-  mkdirSync(dirname(worktreePath), { recursive: true });
+  createWorktreeParents(repoRoot, homeGitsDir, worktreePath);
   await warnIfWorktreesNotIgnored(repoRoot, exec);
+  assertAllowedWorktreePath(repoRoot, homeGitsDir, worktreePath);
   const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
   await exec("git", [
     "-C",
