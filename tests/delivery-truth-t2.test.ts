@@ -15,6 +15,7 @@ import { CLI_READY_PATTERNS } from "../src/pattern-registry.js";
 import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { engineForTests } from "../src/server.js";
+import { getTool } from "./helpers/mcp-tool-harness.js";
 import { internalToolForTests } from "../src/mcp/registration.js";
 
 let testDir = "";
@@ -195,23 +196,22 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
-  it.each(["surface", "key"].flatMap(mode => ["footer-only", "chrome-input", "unknown-layout", "placeholder", "picker", "human"].map(shape => ({ mode, shape }))))
-    ("P0 labels refusals truthfully before mutation (%j)", async ({ mode, shape }) => {
+  it.each(["surface", "key"].flatMap(mode => ["footer-only", "chrome-input", "unknown-layout", "placeholder", "picker", "human"].map(shape => ({ mode, shape }))))("P0 labels refusals truthfully before mutation (%j)", async ({ mode, shape }) => {
       const { createServer, createServerContext } = await loadServerModule();
       let screen = "OpenAI Codex\n› Ask Codex to do anything";
       const exec = makeLifecycleExec(() => screen);
       const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
       try {
-        const server = createServer({ context }) as any;
+        const server = createServer({ context });
         await spawnReadyAgent(server, "codex");
         const footer = "  Daybreak Blue high · ~/Gits/cmuxlayer\n  ? for shortcuts\n  ⚠ 1 warning · f2 to view";
-        screen = shape === "footer-only" ? footer : shape === "chrome-input" ? `OpenAI Codex\n› Daybreak Blue high · ~/Gits/cmuxlayer` : shape === "unknown-layout" ? "OpenAI Codex loading unknown layout" : shape === "picker" ? "OpenAI Codex\nUpdate available!\n› 1. Update now\n  2. Skip until next version\nPress enter to continue" : `OpenAI Codex\n› ${shape === "human" ? "private human draft" : "Ask Codex to do anything"}\n${footer}`;
+        screen = shape === "footer-only" ? footer : shape === "chrome-input" ? "OpenAI Codex\n› Daybreak Blue high · ~/Gits/cmuxlayer" : shape === "unknown-layout" ? "OpenAI Codex loading unknown layout" : shape === "picker" ? "OpenAI Codex\nUpdate available!\n› 1. Update now\n  2. Skip until next version\nPress enter to continue" : `OpenAI Codex\n› ${shape === "human" ? "private human draft" : "Ask Codex to do anything"}\n${footer}`;
         exec.mockClear();
-        const result = parseToolResult(await server._registeredTools.send_to.handler({ mode, surface: "surface:new", text: mode === "key" ? "RETURN" : "new request", press_enter: false }, {}));
-        if (["footer-only", "chrome-input", "unknown-layout"].includes(shape)) {
+        const result = parseToolResult(await getTool(server, "send_to").handler({ mode, surface: "surface:new", text: mode === "key" ? "RETURN" : "new request", press_enter: false }, {}));
+        if (["footer-only", "unknown-layout"].includes(shape)) {
           expect(result.error_code, JSON.stringify(result)).toBe("composer_unrecognized");
           expect(result.error).toContain("nothing was typed or submitted");
-        } else if (shape === "human") expect(result.error_code).toBe("blocked_by_foreign_draft");
+        } else if (["human", "chrome-input"].includes(shape)) expect(result.error_code).toBe("blocked_by_foreign_draft");
         else expect(result.error_code).not.toBe("blocked_by_foreign_draft");
         if (shape !== "placeholder" && !(shape === "picker" && mode === "key")) {
           expect(mutatedPane(exec)).toBe(false);
@@ -226,8 +226,8 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     const exec = makeLifecycleExec(() => "$ ");
     const context = createServerContext({ exec, stateDir: testDir, sessionIdentityResolver: () => null });
     try {
-      const server = createServer({ context }) as any;
-      const result = parseToolResult(await server._registeredTools.send_to.handler({ mode: "key", surface: "surface:new", text: key, verify_submit: false }, {}));
+      const server = createServer({ context });
+      const result = parseToolResult(await getTool(server, "send_to").handler({ mode: "key", surface: "surface:new", text: key, verify_submit: false }, {}));
       expect(result.submit_attempted).toBe(true);
       const keys = exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send-key")).map(([, args]: [string, string[]]) => args.at(-1));
       expect(keys).toEqual([key.toLowerCase()]);

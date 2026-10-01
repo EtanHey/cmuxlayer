@@ -197,11 +197,11 @@ const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const CODEX_READY_PLACEHOLDER_RE =
-  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/;
-const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/m;
+  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/u;
+const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/mu;
 const CODEX_ALT_COMPOSER_LINE_RE = /^[ \t]*»[ \t]+\S/m;
 const CODEX_MODEL_FOOTER_RE = CODEX_FOOTER_RE;
-const CODEX_QUEUED_FOLLOWUP_RE = /^[ \t]*• Messages to be submitted after next tool call\b/m;
+const CODEX_QUEUED_FOLLOWUP_RE = /^[ \t]*• Messages to be submitted after next tool call\b/mu;
 // Codex 0.157 prints this as the last row only while its composer holds a
 // draft during a running turn (#905).
 const CODEX_MIDTURN_DRAFT_FOOTER_RE = /(?:^|\n)[ \t]*tab to queue message[ \t]*\s*$/;
@@ -233,16 +233,16 @@ const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
 const CODEX_PANEL_MODEL_RE =
   /(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\b/im;
 const CODEX_CONTEXT_LEFT_RE =
-  /^\s*[^·\r\n]{1,120}\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
+  /^\s*[^·\r\n]{1,120}\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/mu;
 const CODEX_CHROME_FOOTER_RE = CODEX_FOOTER_RE;
 // Shared structural footer matcher includes warning/task segments.
 const CODEX_BELOW_COMPOSER_FOOTER_RE = CODEX_FOOTER_RE;
 const CODEX_CHROME_BANNER_RE =
-  /^\s*(?:[│┃║]\s*|>_\s*)?OpenAI Codex(?:\s*[│┃║])?\s*$/i;
+  /^\s*(?:[│┃║]\s*|>_\s*)?OpenAI Codex(?:\s*[│┃║])?\s*$/iu;
 const CODEX_CHROME_MODEL_RE =
-  /^\s*(?:[│┃║]\s*)?Model:[ \t]+[^│┃║\r\n]{1,120}(?:[│┃║])?\s*$/i;
+  /^\s*(?:[│┃║]\s*)?Model:[ \t]+[^│┃║\r\n]{1,120}(?:[│┃║])?\s*$/iu;
 const CLAUDE_CHROME_BANNER_RE = /^\s*Claude Code v\d+(?:\.\d+)*\b.*$/i;
-const CLAUDE_CHROME_BYPASS_RE = /^\s*⏵⏵\s*bypass permissions on\b/i;
+const CLAUDE_CHROME_BYPASS_RE = /^\s*⏵⏵\s*bypass permissions on\b/iu;
 const CLAUDE_BELOW_COMPOSER_FOOTER_RE =
   /^[ \t]*(?:⏸[ \t]+plan mode on\b|⏵⏵[ \t]+accept edits on\b)/i;
 const CLAUDE_SHORTCUTS_FOOTER_RE = /^[ \t]*\?[ \t]+for shortcuts\b/i;

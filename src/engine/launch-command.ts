@@ -206,9 +206,9 @@ export function parseCodexEffort(
   screen?: string,
 ): CodexEffort | null {
   const footer = screen?.split("\n").reverse().map(line => line.match(CODEX_FOOTER_RE)).find(Boolean);
-  const footerWord = footer?.[0].split(/[·•]/)[0].trim().split(/\s+/).at(-1)?.toLowerCase();
+  const footerWord = footer?.[0].split(/[·•]/u)[0].trim().split(/\s+/u).at(-1)?.toLowerCase();
   const footerEffort = footerWord && (CODEX_EFFORT_VALUES as readonly string[]).includes(footerWord) ? footerWord : null;
-  const headerEffort = screen?.match(/(?:^|\n)[ \t]*(?:[│┃║][ \t]*)?(?:Model:[ \t]*)?gpt-\d[\w.-]*[ \t]+(minimal|low|medium|high|xhigh|max|ultra|none)\b/i)?.[1];
+  const headerEffort = screen?.match(/(?:^|\n)[ \t]*(?:[│┃║][ \t]*)?(?:Model:[ \t]*)?gpt-\d[\w.-]*[ \t]+(minimal|low|medium|high|xhigh|max|ultra|none)\b/iu)?.[1];
   const candidate = (footerEffort ?? headerEffort ?? parsedModel?.trim().split(/\s+/).at(-1))?.toLowerCase();
   return candidate &&
     (CODEX_EFFORT_VALUES as readonly string[]).includes(candidate)

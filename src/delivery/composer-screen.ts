@@ -143,7 +143,7 @@ export function lineIsCurrentComposerRegionAnchor(
       return /Claude Code|What can I help you with\?/i.test(trimmed);
     case "codex":
       return (
-        /\bOpenAI\s+Codex\b/i.test(trimmed) || /^Model:[ \t]+\S/i.test(trimmed)
+        /\bOpenAI\s+Codex\b/i.test(trimmed) || /^[│┃║][ \t]*Model:[ \t]+[^│┃║]+[│┃║]$/iu.test(trimmed)
       );
     case "cursor":
       return /^Cursor Agent$/i.test(trimmed) || /^cursor>\s*$/i.test(trimmed);
@@ -155,7 +155,7 @@ export function lineIsCurrentComposerRegionAnchor(
       return (
         /Claude Code|What can I help you with\?/i.test(trimmed) ||
         /\bOpenAI\s+Codex\b/i.test(trimmed) ||
-        /^Model:[ \t]+\S/i.test(trimmed) ||
+        /^[│┃║][ \t]*Model:[ \t]+[^│┃║]+[│┃║]$/iu.test(trimmed) ||
         /^Cursor Agent$/i.test(trimmed) ||
         /^cursor>\s*$/i.test(trimmed) ||
         /^Gemini CLI$/i.test(trimmed) ||
@@ -183,12 +183,13 @@ export function currentComposerRegionStart(
 
 export function isComposerFooterOrChromeLine(line: string): boolean {
   const trimmed = line.trim();
+  if (/^[›»❯](?:[ \t]|$)/u.test(trimmed)) return false;
   if (!trimmed) {
     return true;
   }
   return (
-    /^─{8,}$/.test(trimmed) ||
-    /^(?:⎇|🤖)(?:\s|$)/.test(trimmed) ||
+    /^─{8,}$/u.test(trimmed) ||
+    /^(?:⎇|🤖)(?:\s|$)/u.test(trimmed) ||
     /^⏵+.*\bbypass permissions on\b/i.test(trimmed) ||
     /^[✻✢✳✶]\s+Cogitated\s+for\s+\d+s\b/i.test(trimmed) ||
     /^CLAUDE_COUNTER:/i.test(trimmed) ||
@@ -302,8 +303,6 @@ export function extractComposerInputRegion(
     if (!match) {
       continue;
     }
-    // Chrome at the selected row is ambiguous, never an empty safe baseline.
-    if (match.input.trim() && isComposerFooterOrChromeLine(match.input)) return null;
 
     const inputLines = [match.input];
     const remainingLines = lines.slice(index + 1, end);
@@ -340,8 +339,6 @@ export function extractComposerInputRegion(
     if (!match) {
       continue;
     }
-    // Chrome at the selected row is ambiguous, never an empty safe baseline.
-    if (match.input.trim() && isComposerFooterOrChromeLine(match.input)) return null;
 
     const inputLines = [match.input];
     const remainingLines = lines.slice(index + 1, end);

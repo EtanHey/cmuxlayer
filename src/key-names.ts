@@ -1,3 +1,5 @@
+const KEY_GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 const CTRL_C_ALIASES = new Set(["c-c", "ctrl-c", "ctrl+c", "^c"]);
 
 // AIDEV-NOTE (#484): every one of these means "submit" to the target CLI, but
@@ -31,7 +33,7 @@ export function isSubmitKey(key: string): boolean {
 
 export function normalizeKeyName(key: string): string {
   // Single printable characters are literal pane input, including uppercase.
-  if (Array.from(key).length === 1 && !/[\r\n\t]/.test(key)) return key;
+  if (Array.from(KEY_GRAPHEMES.segment(key)).length === 1 && !/[\r\n\t]/.test(key)) return key;
   const trimmed = key.trim();
   if (!trimmed) {
     return trimmed;

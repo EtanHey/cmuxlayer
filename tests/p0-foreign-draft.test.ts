@@ -52,9 +52,9 @@ ${footer}`, "new request")).toBe(true);
   ${footer}`).agent_type).toBe("codex");
     }
   });
-  it.each(["Daybreak Blue high · ~/Gits/cmuxlayer", "? for shortcuts", "⚠ 1 warning · f2 to view"])("does not identify chrome as input: %s", chrome => {
+  it.each(["Daybreak Blue high · ~/Gits/cmuxlayer", "? for shortcuts", "⚠ 1 warning · f2 to view"])("treats a prompt row as input even when it resembles chrome: %s", chrome => {
     expect(extractComposerInputRegion(`OpenAI Codex
-› ${chrome}`)).toBeNull();
+› ${chrome}`)).toBe(chrome);
   });
   it("does not identify a picker option as a composer", () => {
     expect(extractComposerInputRegion(`OpenAI Codex
@@ -83,5 +83,45 @@ describe("P0 Codex model identity and effort", () => {
     expect(parsedEffort).toBe(effort);
     expect(computeEffortMismatch(effort, parsedEffort)).toBe(false);
     expect(computeEffortMismatch(effort === "high" ? "medium" : "high", parsedEffort)).toBe(true);
+  });
+});
+
+
+describe("P0 hosted review regressions", () => {
+  it.each(["~/My Projects/repo", "/Users/example/My Projects/repo"])("reads a structural footer with spaces in cwd: %s", cwd => {
+    const screen = `›\n  Daybreak Blue high · ${cwd}`;
+    expect(matchReadyPattern("codex", screen).matched).toBe(true);
+    expect(extractComposerInputRegion(screen)).toBe("");
+    expect(parseScreen(screen).model).toBe("Daybreak Blue");
+  });
+  it("keeps a Model continuation inside the composer", () => {
+    const draft = "first line\nModel: customer";
+    expect(extractComposerInputRegion(`OpenAI Codex\n› ${draft}\n  GPT-6.1-Sol high · ~/repo`)).toBe(draft);
+  });
+  it("keeps prose beginning with a shortcuts hint inside the composer", () => {
+    const draft = "? for shortcuts explain this";
+    expect(extractComposerInputRegion(`OpenAI Codex\n› ${draft}\n  GPT-6.1-Sol high · ~/repo`)).toBe(draft);
+  });
+  it("preserves a decomposed literal grapheme", () => {
+    expect(normalizeKeyName("E\u0301")).toBe("E\u0301");
+  });
+});
+
+// The prompt glyph positively identifies input; only unprompted footer rows are chrome.
+describe("P0 prompted draft review regressions", () => {
+  it.each(["gpt-5.5", "compare /tmp/old · /tmp/new", "Review · /tmp/output", "? for shortcuts explain this"])("preserves prompted input %s", draft => {
+    for (const glyph of ["›", "»", "❯"]) {
+      const screen = `OpenAI Codex\n${glyph} ${draft}\n  GPT-6.1-Sol high · ~/repo`;
+      expect(extractComposerInputRegion(screen)).toBe(draft);
+      expect(composerHoldsForeignDraft(screen, draft)).toBe(false);
+      expect(composerHoldsForeignDraft(screen, "another message")).toBe(true);
+    }
+  });
+  it("keeps even an id-like Model continuation in input", () => {
+    const draft = "first line\nModel: gpt-5.5";
+    expect(extractComposerInputRegion(`OpenAI Codex\n› ${draft}\n  GPT-6.1-Sol high · ~/repo`)).toBe(draft);
+  });
+  it("recognizes boxed model panels before input", () => {
+    expect(extractComposerInputRegion("│ OpenAI Codex │\n│ Model: Daybreak Blue │\n› draft\n  Daybreak Blue high · ~/repo")).toBe("draft");
   });
 });

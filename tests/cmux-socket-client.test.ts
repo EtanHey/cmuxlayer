@@ -604,8 +604,8 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     async key => {
       const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
       await client.sendKey("surface:1", key, { workspace: "workspace:1" });
-      expect(lastV2Request!.method).toBe("surface.send_key");
-      expect(lastV2Request!.params.key).toBe(key === "A" ? "A" : key.toLowerCase());
+      expect(lastV2Request?.method).toBe("surface.send_key");
+      expect(lastV2Request?.params.key).toBe(key === "A" ? "A" : key.toLowerCase());
     },
   );
 
