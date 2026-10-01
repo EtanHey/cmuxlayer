@@ -336,17 +336,16 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     },
   );
 
-  it("dispatches the caller's key verbatim rather than rewriting it for cmux", async () => {
-    // The receipt is what had to become truthful; the bytes cmux receives are
-    // not this lane's to change, and "\n" in particular is shift+enter.
+  it("dispatches a lowercase named key and reports the dispatched value", async () => {
+    // cmux ignores capitalized named keys; the receipt must match dispatch.
     const exec = makeExec({ screen: () => WORKING_AND_CLEARED_CLAUDE_SCREEN });
     const result = await sendKey(makeServer(exec), "Enter");
 
     expect(result.isError).toBeUndefined();
-    expect(payload(result).key).toBe("Enter");
+    expect(payload(result).key).toBe("enter");
     expect(
       exec.calls.some(
-        (args) => args.includes("send-key") && args.includes("Enter"),
+        (args) => args.includes("send-key") && args.includes("enter"),
       ),
     ).toBe(true);
   });
@@ -434,19 +433,14 @@ describe("#484 — send_to(mode:key) must not report success for an unattempted 
     expect(data.submit_verification_reason).toBe("submit_evidence_absent");
   });
 
-  it("will not treat a working status as proof when the composer cannot be read", async () => {
-    // A composer that renders boxed reads as unreadable, and the reported
-    // target was ALREADY working — so status cannot tell "my submit started a
-    // turn" from "a turn was already running". Unconfirmed says unconfirmed.
+  it("refuses submit before dispatch when a working composer cannot be read", async () => {
     const exec = makeExec({ screen: () => WORKING_CLAUDE_SCREEN });
-
     const result = await sendKey(makeServer(exec), "return");
-
     const data = payload(result);
-    expect(result.isError).toBeUndefined();
-    expect(data.key_dispatched).toBe(true);
-    expect(data.submit_verified).toBeNull();
-    expect(data.submit_verification_reason).toBe("submit_evidence_absent");
+    expect(result.isError).toBe(true);
+    expect(data.error_code).toBe("composer_unrecognized");
+    expect(data.key_dispatched).not.toBe(true);
+    expect(exec.calls.some(args => args.includes("send-key"))).toBe(false);
   });
 
   it("leaves non-submit keys unverified but still states that they were dispatched", async () => {

@@ -7673,7 +7673,7 @@ describe("agent lifecycle tool handlers", () => {
     });
     expect(agent.state.observed_at_ms).toBeGreaterThanOrEqual(before);
     expect(agent.model).toMatchObject({
-      value: "gpt-5.6-sol xhigh",
+      value: "gpt-5.6-sol",
       source: "screen",
       observed_at_ms: agent.state.observed_at_ms,
     });
@@ -9476,7 +9476,7 @@ describe("agent lifecycle tool handlers", () => {
     const { server, client } = await createBroadcastServer([record]);
     client.readScreen.mockResolvedValue({
       surface: record.surface_id,
-      text: "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (41s - esc to interrupt)",
+      text: "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (41s - esc to interrupt)\ncodex> ",
       lines: 20,
       scrollback_used: false,
     });
@@ -10885,7 +10885,7 @@ codex>
       },
     ]);
     routeClient.setScreenText(
-      "OpenAI Codex\nModel: gpt-5.5\nWorking (1s - esc to interrupt)",
+      "OpenAI Codex\nModel: gpt-5.5\nWorking (1s - esc to interrupt)\ncodex> ",
     );
     const record = makeServerAgentRecord({
       agent_id: "healthy-target-during-unrelated-churn",

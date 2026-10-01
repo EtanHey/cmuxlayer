@@ -3080,6 +3080,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
+      if (args.includes("read-screen")) {
+        return { stdout: JSON.stringify({ surface: "surface:95", text: "Claude Code\n❯ ", lines: 2 }), stderr: "" };
+      }
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({
@@ -3289,7 +3292,7 @@ describe("tool handler integration", () => {
             text: `${mockExec.mock.calls
               .filter(([, a]: [string, string[]]) => a.includes("send"))
               .map(([, a]: [string, string[]]) => `› ${a.at(-1)}\n`)
-              .join("")}Working (1s • esc to interrupt)\n› \ngpt-5.5 xhigh · 99% left`,
+              .join("")}Working (1s • esc to interrupt)\n› \ngpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`,
             lines: 30,
             scrollback_used: false,
           }),
@@ -5436,8 +5439,8 @@ describe("tool handler integration", () => {
             text:
               textSent && returnPresses > 0
                 ? // #905: Codex proof is the message above an empty composer.
-                  "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · idle\n"
-                : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
+                  "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · ~/Gits/cmuxlayer\n"
+                : "OpenAI Codex\ncodex> ping codex\ngpt-5 · ~/Gits/cmuxlayer\n",
             lines: 4,
           }),
           stderr: "",
@@ -5519,8 +5522,8 @@ describe("tool handler integration", () => {
               surface_ref: "surface:stale-working",
               text:
                 textSent && returnPresses > 0
-                  ? "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · idle\n"
-                  : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
+                  ? "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · ~/Gits/cmuxlayer\n"
+                  : "OpenAI Codex\ncodex> ping codex\ngpt-5 · ~/Gits/cmuxlayer\n",
               lines: 4,
             }),
             stderr: "",
@@ -5597,8 +5600,8 @@ describe("tool handler integration", () => {
             surface_ref: "surface:codex-dropped",
             text:
               textSent && returnPresses >= 2
-                ? "OpenAI Codex\ncodex> \ngpt-5 · idle\n"
-                : "OpenAI Codex\ncodex> retry me\ngpt-5 · idle\n",
+                ? "OpenAI Codex\ncodex> \ngpt-5 · ~/Gits/cmuxlayer\n"
+                : "OpenAI Codex\ncodex> retry me\ngpt-5 · ~/Gits/cmuxlayer\n",
             lines: 4,
           }),
           stderr: "",
