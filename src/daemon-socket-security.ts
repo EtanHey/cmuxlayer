@@ -16,6 +16,9 @@ export function assertSafeDaemonSocket(
   if (uid === undefined || (socket && (!socket.isSocket() || socket.uid !== uid))) {
     throw new UnsafeDaemonSocketError(`daemon socket not owned by this user: ${socketPath}`);
   }
+  if (socket && (socket.mode & 0o022) !== 0) {
+    throw new UnsafeDaemonSocketError(`Refusing group/other-writable daemon socket: ${socketPath}`);
+  }
   const parentPath = dirname(socketPath);
   const parent = readStat(parentPath);
   if ((socket && !parent) || (parent && (!parent.isDirectory() || (parent.mode & 0o022) !== 0 ||
