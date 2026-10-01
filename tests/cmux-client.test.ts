@@ -806,6 +806,17 @@ describe("CmuxClient.sendKey", () => {
     ]);
   });
 
+  it.each(["Enter", "Return", "RETURN", "Escape", "Tab", "A"])(
+    "P0 dispatches normalized key %s without changing literal case",
+    async key => {
+      const { client, exec } = mockClient({});
+      await client.sendKey("surface:1", key);
+      expect(exec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+        "send-key", "--surface", "surface:1", key === "A" ? "A" : key.toLowerCase(),
+      ]));
+    },
+  );
+
   it.each(["C-c", "ctrl-c", "^c", "Ctrl+C", "Ctrl-C"])(
     "normalizes %s to ctrl-c",
     async (key) => {

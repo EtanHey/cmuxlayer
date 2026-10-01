@@ -168,10 +168,11 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
-  it("mid-turn: Tab queues the relay without leaving it in the composer", async () => {
+  it.each(["GPT-6-Sol medium", "Daybreak Blue high", "GPT-6.1-Sol high", "GPT-6.1-Sol medium"])("P0 mid-turn: %s queues the relay without leaving it in the composer", async label => {
+    const replay = (name: string) => fixture(name).replaceAll("GPT-6-Sol medium", label);
     const t = await setup({
-      empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
-      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued"),
+      empty: replay("midturn-empty"), buffered: replay("midturn-empty"),
+      draft: replay("midturn-draft-tab-to-queue"), after: replay("midturn-steer-queued"),
     });
     try {
       const receipt = await t.send(LIST);
@@ -182,9 +183,9 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(t.pane.returns).toBe(0);
       expect(t.pane.queued).toEqual([LIST]);
       expect(t.pane.submitted).toEqual([]);
-      expect(fixture("midturn-steer-queued")).toContain(`↳ ${LIST}`);
+      expect(replay("midturn-steer-queued")).toContain(`↳ ${LIST}`);
       t.pane.submitted.push(t.pane.queued.shift()!);
-      t.pane.frames.after = fixture("midturn-steer-queued").replace(
+      t.pane.frames.after = replay("midturn-steer-queued").replace(
         `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${LIST}`,
         `› ${LIST}\n\n• Files listed after the prior turn.`,
       );

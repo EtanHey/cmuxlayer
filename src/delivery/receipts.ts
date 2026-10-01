@@ -522,6 +522,7 @@ export class DeliverySafetyGateError extends Error {
       | "blocked_by_interactive_prompt"
       | "blocked_by_permission_prompt"
       | "blocked_by_foreign_draft"
+      | "composer_unrecognized"
       | "owned_boot_contract_pending"
       | "nothing_owned_to_submit"
       | "draft_ownership_unverified"
@@ -530,7 +531,9 @@ export class DeliverySafetyGateError extends Error {
     readonly draftText?: string,
   ) {
     super(
-      error_code === "draft_ownership_unverified"
+      error_code === "composer_unrecognized"
+        ? "could not identify the input box on this screen; nothing was typed or submitted; read_screen and report to the lead"
+        : error_code === "draft_ownership_unverified"
         ? "Cannot verify composer ownership from the current frame. Return was not sent; read the pane and retry when its composer is observable."
         : error_code === "boot_instance_changed"
         ? "Managed boot instance changed before recovered Return; no key was sent. Re-read the agent before retrying."

@@ -4,6 +4,7 @@
  * Low-confidence patterns require consecutive matches to prevent false positives.
  */
 
+import { CODEX_FOOTER_RE } from "./codex-chrome.js";
 import type { CliType } from "./agent-types.js";
 import {
   antigravityScreenIsActive,
@@ -59,6 +60,7 @@ const CURSOR_READY_RE = new RegExp(
 const CODEX_READY_RE = new RegExp(
   [
     String.raw`codex>`,
+    String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)[ \t]*[›»][^\n]*(?:\n|$)[\s\S]*` + CODEX_FOOTER_RE.source,
     String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)\s*(?:›|»)[^\n]*(?:\n|$)[\s\S]*\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[^\n]+`,
     String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*gpt-\d[\w.-]*(?:\s+\w+)?\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)\s*(?:›|»)[^\n]*(?:\n|$)`,
     String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename)\s*(?:\n|$)`,

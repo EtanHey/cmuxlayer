@@ -1,3 +1,4 @@
+import { CODEX_FOOTER_RE } from "./codex-chrome.js";
 import type {
   ParsedCliUpdateState,
   ParsedScreenAgentType,
@@ -199,8 +200,7 @@ const CODEX_READY_PLACEHOLDER_RE =
   /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/;
 const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/m;
 const CODEX_ALT_COMPOSER_LINE_RE = /^[ \t]*»[ \t]+\S/m;
-const CODEX_MODEL_FOOTER_RE =
-  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s]+(?:[ \t]+·[ \t]+\S[^\r\n·]{0,119})?$/i;
+const CODEX_MODEL_FOOTER_RE = CODEX_FOOTER_RE;
 const CODEX_QUEUED_FOLLOWUP_RE = /^[ \t]*• Messages to be submitted after next tool call\b/m;
 // Codex 0.157 prints this as the last row only while its composer holds a
 // draft during a running turn (#905).
@@ -233,17 +233,14 @@ const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
 const CODEX_PANEL_MODEL_RE =
   /(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\b/im;
 const CODEX_CONTEXT_LEFT_RE =
-  /^\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
-const CODEX_CHROME_FOOTER_RE =
-  /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*\d+%\s+left\s*[·•]\s*(?:~\/|\/|\.{1,2}\/)[^\s]+(?:\s*[·•]\s*[^\n]*)?$/i;
-// Identity-only footer matcher. Composer/draft detection keeps its stricter
-// CODEX_MODEL_FOOTER_RE; live Codex chrome can append warning/task segments.
-const CODEX_BELOW_COMPOSER_FOOTER_RE =
-  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s·]+[ \t]*(?:·[^·\r\n]{0,240}){0,8}$/i;
+  /^\s*[^·\r\n]{1,120}\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
+const CODEX_CHROME_FOOTER_RE = CODEX_FOOTER_RE;
+// Shared structural footer matcher includes warning/task segments.
+const CODEX_BELOW_COMPOSER_FOOTER_RE = CODEX_FOOTER_RE;
 const CODEX_CHROME_BANNER_RE =
   /^\s*(?:[│┃║]\s*|>_\s*)?OpenAI Codex(?:\s*[│┃║])?\s*$/i;
 const CODEX_CHROME_MODEL_RE =
-  /^\s*(?:[│┃║]\s*)?Model:\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?(?:\s*[│┃║])?\s*$/i;
+  /^\s*(?:[│┃║]\s*)?Model:[ \t]+[^│┃║\r\n]{1,120}(?:[│┃║])?\s*$/i;
 const CLAUDE_CHROME_BANNER_RE = /^\s*Claude Code v\d+(?:\.\d+)*\b.*$/i;
 const CLAUDE_CHROME_BYPASS_RE = /^\s*⏵⏵\s*bypass permissions on\b/i;
 const CLAUDE_BELOW_COMPOSER_FOOTER_RE =
@@ -1976,10 +1973,11 @@ function parseModelAndCost(
   agentType: ParsedScreenAgentType,
 ): { model: string | null; cost: number | null } {
   if (agentType === "codex") {
+    const footerMatch = text.split("\n").reverse().map(line => line.match(CODEX_FOOTER_RE)).find(Boolean);
     const codexMatch = text.match(CODEX_HEADER_RE);
     const panelModelMatch = text.match(CODEX_PANEL_MODEL_RE);
     return {
-      model: codexMatch?.[1]?.trim() ?? panelModelMatch?.[1]?.trim() ?? null,
+      model: footerMatch ? footerMatch[0].trim().split(/[·•]/)[0].trim() : codexMatch?.[1]?.trim() ?? panelModelMatch?.[1]?.trim() ?? null,
       cost: null,
     };
   }
