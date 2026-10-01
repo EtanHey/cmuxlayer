@@ -187,7 +187,7 @@ function makeExec(
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        setScreenText(`Claude Code\n${pendingPromptText}\n✻ Working\n`, promptSurface);
+        setScreenText(`Claude Code\n${pendingPromptText}\n✻ Working\n❯ `, promptSurface);
         promptPending = false;
       }
       return { stdout: "{}", stderr: "" };
@@ -2079,7 +2079,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           id: exactOwnerUuid,
           ref: "surface:exact-owner",
           title: "exact-owner-pane",
-          text: "Claude Code\n✻ Working\n",
+          text: "Claude Code\n✻ Working\n❯ ",
         },
       ],
       seatCollisionUuid,
@@ -2247,7 +2247,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           id: liveUuid,
           ref: "surface:live-owner",
           title: "live-owner-pane",
-          text: "Claude Code\n✻ Working\n",
+          text: "Claude Code\n✻ Working\n❯ ",
         },
       ],
       retiredUuid,
@@ -4987,7 +4987,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           id: actualParentUuid,
           ref: "surface:actual-parent",
           title: "actual-working-parent",
-          text: "Claude Code\n✻ Working\n",
+          text: "Claude Code\n✻ Working\n❯ ",
         },
       ],
       unrelatedUuid,

@@ -116,7 +116,7 @@ function makeSurfaceClient(title: string) {
     }),
     readScreen: vi.fn().mockResolvedValue({
       surface: surface.ref,
-      text: "claude> ",
+      text: "Claude Code\n❯ ",
       lines: 20,
       scrollback_used: false,
     }),

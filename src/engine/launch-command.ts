@@ -6,6 +6,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { CODEX_FOOTER_RE } from "../codex-chrome.js";
 import { isSafeShellToken } from "../sanitize.js";
 import {
   AGENT_ENV,
@@ -193,13 +194,22 @@ export function computeModelMismatch(
     }
     return requestedClaude.context === parsedClaude.context ? false : null;
   }
+  // Codex display labels do not identify a pinned model ID.
+  if (requested.startsWith("gpt-") && !/^gpt-\d[\w.-]*(?:\s+(?:minimal|low|medium|high|xhigh|max|ultra|none))?$/.test(parsed)) {
+    return null;
+  }
   return !parsed.includes(requested) && !requested.includes(parsed);
 }
 
 export function parseCodexEffort(
   parsedModel: string | null,
+  screen?: string,
 ): CodexEffort | null {
-  const candidate = parsedModel?.trim().split(/\s+/).at(-1)?.toLowerCase();
+  const footer = screen?.split("\n").reverse().map(line => line.match(CODEX_FOOTER_RE)).find(Boolean);
+  const footerWord = footer?.[0].split(/[·•]/u)[0].trim().split(/\s+/u).at(-1)?.toLowerCase();
+  const footerEffort = footerWord && (CODEX_EFFORT_VALUES as readonly string[]).includes(footerWord) ? footerWord : null;
+  const headerEffort = screen?.match(/(?:^|\n)[ \t]*(?:[│┃║][ \t]*)?(?:Model:[ \t]*)?gpt-\d[\w.-]*[ \t]+(minimal|low|medium|high|xhigh|max|ultra|none)\b/iu)?.[1];
+  const candidate = (footerEffort ?? headerEffort ?? parsedModel?.trim().split(/\s+/).at(-1))?.toLowerCase();
   return candidate &&
     (CODEX_EFFORT_VALUES as readonly string[]).includes(candidate)
     ? (candidate as CodexEffort)

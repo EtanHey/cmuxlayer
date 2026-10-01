@@ -2470,7 +2470,7 @@ export class AgentEngine {
       if (!this.assertSweepInputCurrent(ctx)) return agent;
       const parsed = parseScreen(screen.text);
       const parsedEffort =
-        agent.cli === "codex" ? parseCodexEffort(parsed.model) : null;
+        agent.cli === "codex" ? parseCodexEffort(parsed.model, screen.text) : null;
       const settlement = {
         parsed_model: parsed.model,
         model_mismatch: computeModelMismatch(agent.model, parsed.model),

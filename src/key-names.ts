@@ -1,3 +1,5 @@
+const KEY_GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 const CTRL_C_ALIASES = new Set(["c-c", "ctrl-c", "ctrl+c", "^c"]);
 
 // AIDEV-NOTE (#484): every one of these means "submit" to the target CLI, but
@@ -5,7 +7,7 @@ const CTRL_C_ALIASES = new Set(["c-c", "ctrl-c", "ctrl+c", "^c"]);
 // pressing "Enter" therefore got a receipt claiming submit_attempted:false for
 // a submit that really was dispatched — a success receipt whose own fields said
 // nothing had been attempted. This set exists to make the RECEIPT truthful; it
-// deliberately does NOT rewrite the key handed to cmux. Raw "\r"/"\n" are not
+// is paired with named-key normalization before cmux dispatch. Raw "\r"/"\n" are not
 // listed: a newline is how a composer expresses shift+enter, so treating it as
 // a submit would claim an attempt the caller did not make.
 const SUBMIT_KEY_ALIASES = new Set([
@@ -30,6 +32,8 @@ export function isSubmitKey(key: string): boolean {
 }
 
 export function normalizeKeyName(key: string): string {
+  // Single printable characters are literal pane input, including uppercase.
+  if (Array.from(KEY_GRAPHEMES.segment(key)).length === 1 && !/[\r\n\t]/.test(key)) return key;
   const trimmed = key.trim();
   if (!trimmed) {
     return trimmed;
@@ -39,5 +43,5 @@ export function normalizeKeyName(key: string): string {
     return "ctrl-c";
   }
 
-  return trimmed;
+  return trimmed.toLowerCase();
 }

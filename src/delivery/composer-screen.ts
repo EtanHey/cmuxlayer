@@ -4,6 +4,7 @@
  * verbatim from server.ts (CX-2 S1); imports nothing from the server.
  */
 
+import { CODEX_FOOTER_RE, CODEX_HINT_LINE_RE } from "../codex-chrome.js";
 import type { CliType } from "../agent-types.js";
 import {
   antigravityComposerDraft,
@@ -115,6 +116,7 @@ export function inferComposerCli(
   }
   if (
     /\bOpenAI\s+Codex\b/i.test(screenText) ||
+    screenText.split("\n").some(line => CODEX_FOOTER_RE.test(line)) ||
     /(?:^|\n)\s*(?:Model:\s*)?gpt-[0-9]/i.test(screenText) ||
     screenHasWorkingCodexChrome(screenText)
   ) {
@@ -141,7 +143,7 @@ export function lineIsCurrentComposerRegionAnchor(
       return /Claude Code|What can I help you with\?/i.test(trimmed);
     case "codex":
       return (
-        /\bOpenAI\s+Codex\b/i.test(trimmed) || /\bModel:\s*gpt-/i.test(trimmed)
+        /\bOpenAI\s+Codex\b/i.test(trimmed) || /^[│┃║][ \t]*Model:[ \t]+[^│┃║]+[│┃║]$/iu.test(trimmed)
       );
     case "cursor":
       return /^Cursor Agent$/i.test(trimmed) || /^cursor>\s*$/i.test(trimmed);
@@ -153,7 +155,7 @@ export function lineIsCurrentComposerRegionAnchor(
       return (
         /Claude Code|What can I help you with\?/i.test(trimmed) ||
         /\bOpenAI\s+Codex\b/i.test(trimmed) ||
-        /\bModel:\s*gpt-/i.test(trimmed) ||
+        /^[│┃║][ \t]*Model:[ \t]+[^│┃║]+[│┃║]$/iu.test(trimmed) ||
         /^Cursor Agent$/i.test(trimmed) ||
         /^cursor>\s*$/i.test(trimmed) ||
         /^Gemini CLI$/i.test(trimmed) ||
@@ -181,16 +183,18 @@ export function currentComposerRegionStart(
 
 export function isComposerFooterOrChromeLine(line: string): boolean {
   const trimmed = line.trim();
+  if (/^[›»❯](?:[ \t]|$)/u.test(trimmed)) return false;
   if (!trimmed) {
     return true;
   }
   return (
-    /^─{8,}$/.test(trimmed) ||
-    /^(?:⎇|🤖)(?:\s|$)/.test(trimmed) ||
+    /^─{8,}$/u.test(trimmed) ||
+    /^(?:⎇|🤖)(?:\s|$)/u.test(trimmed) ||
     /^⏵+.*\bbypass permissions on\b/i.test(trimmed) ||
     /^[✻✢✳✶]\s+Cogitated\s+for\s+\d+s\b/i.test(trimmed) ||
     /^CLAUDE_COUNTER:/i.test(trimmed) ||
-    /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*/i.test(trimmed) ||
+    CODEX_FOOTER_RE.test(trimmed) ||
+    CODEX_HINT_LINE_RE.test(trimmed) ||
     /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?$/i.test(trimmed) ||
     /^\d+(?:\.\d+)?%\s+(?:context\s+)?left\b/i.test(trimmed) ||
     /^\/ commands\b/i.test(trimmed) ||
@@ -286,6 +290,8 @@ export function extractComposerInputRegion(
   }
   const lines = normalizeTerminalText(screenText).split("\n");
   const cli = knownCli ?? inferComposerCli(screenText);
+  // Menu selectors are not input boxes; their existing safety gate owns them.
+  if (isPickerOrMenuScreen(screenText, cli ?? undefined)) return null;
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {

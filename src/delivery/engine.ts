@@ -886,6 +886,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       );
     }
 
+    if (opts.draftGuardText !== undefined &&
+        (cli || inferComposerCli(snapshot.text, snapshot.parsed)) &&
+        extractComposerInputRegion(snapshot.text, opts.draftGuardText, cli) === null) {
+      throw new DeliverySafetyGateError("composer_unrecognized", snapshot.parsed);
+    }
+
     // AIDEV-NOTE (T2 #442): a composer that already holds text nobody in this
     // delivery wrote is a human (or another agent) mid-draft. Typing into it
     // concatenates, and the Return that follows SUBMITS their words. The
@@ -905,7 +911,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       throw new DeliverySafetyGateError(
         "blocked_by_foreign_draft",
         snapshot.parsed,
-        extractComposerInputRegion(snapshot.text)?.trim() || undefined,
+        extractComposerInputRegion(snapshot.text, undefined, cli)?.trim() || undefined,
       );
     }
 
@@ -1704,12 +1710,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           })
         : undefined;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
-          (targetCli && ["claude", "codex", "cursor"].includes(targetCli) &&
+          ((targetCli || inferComposerCli(submitBaseline.text)) &&
             submitBaseline.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(submitBaseline.text) &&
             extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null &&
             !ownedQueuedReceipt))) {
         typedDraftOwners.delete(ownerKey);
-        throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
+        throw new DeliverySafetyGateError(submitBaseline?.text.trim() ? "composer_unrecognized" : "draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
       }
       // #793: set only when this Return submits the caller's own bound boot draft.
       let ownedBoot: { agentId: string; instanceId: string } | undefined;
@@ -1893,6 +1899,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             throw new DeliverySafetyGateError(
               "boot_instance_changed", current.parsed,
             );
+          }
+          if (extractComposerInputRegion(current.text, undefined, "claude") === null) {
+            throw new DeliverySafetyGateError("composer_unrecognized", current.parsed);
           }
           if (
             !screenShowsCompletePendingInput(current.text, pointer) ||

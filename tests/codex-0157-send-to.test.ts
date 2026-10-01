@@ -143,6 +143,8 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     pane.live = true;
     const as = <T>(uuid: string, fn: () => Promise<T>) =>
       runWithCallerContext({ surfaceId: uuid, workspaceId: "workspace:1" }, fn);
+    const typeDraft = (text: string) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ agent_id: spawned.agent_id, text, press_enter: false }, {})));
     const send = (text: string) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ agent_id: spawned.agent_id, text, press_enter: true }, {})));
     const keyReturn = (uuid: string) => as(uuid, async () => parseToolResult(
@@ -150,7 +152,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, context, spawned, engine, send, keyReturn, surfaceSend };
+    return { pane, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend };
   }
 
   it("idle: reports submitted only once the message is in the transcript", async () => {
@@ -168,31 +170,51 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
-  it("mid-turn: Tab queues the relay without leaving it in the composer", async () => {
-    const t = await setup({
-      empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
-      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued"),
+  it.each(["gpt-5.5", "compare /tmp/old · /tmp/new", "Review · /tmp/output", "? for shortcuts explain this", "first line\nModel: customer", "first line\nModel: gpt-5.5"])("P0 owned prompted draft submits with Return: %s", async draft => {
+    const target = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => `OpenAI Codex\n${codexRows(typed)}\n  GPT-6.1-Sol high · ~/repo`,
+      after: typed => `OpenAI Codex\n${codexRows(typed)}\n• Working (1s · esc to interrupt)\n›\n  GPT-6.1-Sol high · ~/repo`,
     });
     try {
-      const receipt = await t.send(LIST);
+      const typed = await target.typeDraft(draft);
+      expect(typed.ok).toBe(true);
+      target.pane.phase = "draft";
+      const receipt = await target.keyReturn(LEAD_UUID);
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([draft]);
+      expect(target.pane.returns).toBeGreaterThan(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["GPT-6-Sol medium", "Daybreak Blue high", "GPT-6.1-Sol high", "GPT-6.1-Sol medium"])("P0 mid-turn: %s queues the relay without leaving it in the composer", async label => {
+    const replay = (name: string) => fixture(name).replaceAll("GPT-6-Sol medium", label);
+    const target = await setup({
+      empty: replay("midturn-empty"), buffered: replay("midturn-empty"),
+      draft: replay("midturn-draft-tab-to-queue"), after: replay("midturn-steer-queued"),
+    });
+    try {
+      const receipt = await target.send(LIST);
       expect(receipt, JSON.stringify(receipt)).toMatchObject({
         ok: true, submitted: false, delivery_state: "queued", queued_behind_turn: true,
       });
-      expect(t.pane.tabs).toBe(1);
-      expect(t.pane.returns).toBe(0);
-      expect(t.pane.queued).toEqual([LIST]);
-      expect(t.pane.submitted).toEqual([]);
-      expect(fixture("midturn-steer-queued")).toContain(`↳ ${LIST}`);
-      t.pane.submitted.push(t.pane.queued.shift()!);
-      t.pane.frames.after = fixture("midturn-steer-queued").replace(
+      expect(target.pane.tabs).toBe(1);
+      expect(target.pane.returns).toBe(0);
+      expect(target.pane.queued).toEqual([LIST]);
+      expect(target.pane.submitted).toEqual([]);
+      expect(replay("midturn-steer-queued")).toContain(`↳ ${LIST}`);
+      const queuedText = target.pane.queued.shift();
+      if (queuedText === undefined) throw new Error("Expected queued input");
+      target.pane.submitted.push(queuedText);
+      target.pane.frames.after = replay("midturn-steer-queued").replace(
         `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${LIST}`,
         `› ${LIST}\n\n• Files listed after the prior turn.`,
       );
-      await t.engine.verifyPendingDeliveries();
-      expect(t.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+      await target.engine.verifyPendingDeliveries();
+      expect(target.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
         delivery_state: "submitted", submit_verified: true,
       });
-    } finally { t.context.dispose(); }
+    } finally { target.context.dispose(); }
   }, 30_000);
 
   it("#961 r2: a turn ending after the payload read submits with Return", async () => {
