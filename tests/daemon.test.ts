@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { StateManager } from "../src/state-manager.js";
 import { dirname, join } from "node:path";
 import { defaultDaemonSocketPath } from "../src/daemon-socket-path.js";
@@ -915,6 +915,51 @@ describe("CmuxLayerDaemon", () => {
       expect(existsSync(join(dir, "daemon.sock"))).toBe(false);
       expect(statSync(dir).mode & 0o777).toBe(mode);
     } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each([0o777, 0o770])("refuses a writable non-sticky ancestor (%s)", async (mode) => {
+    const ancestor = stateDir("unsafe-ancestor");
+    const leaf = join(ancestor, "private");
+    mkdirSync(leaf, { recursive: true, mode: 0o700 });
+    chmodSync(ancestor, mode);
+    const createClient = vi.fn();
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
+      socketPath: join(leaf, "daemon.sock"), createClient,
+    }));
+    await expect(daemon.start()).rejects.toThrow("unsafe ancestor: " + realpathSync(ancestor));
+    expect(createClient).not.toHaveBeenCalled();
+    expect(existsSync(join(leaf, "daemon.sock"))).toBe(false);
+  });
+
+  it("allows a sticky world-writable ancestor with a private leaf", async () => {
+    const ancestor = stateDir("sticky-ancestor");
+    const leaf = join(ancestor, "private");
+    mkdirSync(leaf, { recursive: true, mode: 0o700 });
+    chmodSync(ancestor, 0o1777);
+    const path = join(leaf, "daemon.sock");
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
+      socketPath: path, exec: createListSurfacesExec(), skipAgentLifecycle: true,
+    }));
+    await daemon.start();
+    const client = await connectClient(path);
+    try { expect((await client.listTools()).tools.length).toBeGreaterThan(0); }
+    finally { await client.close(); }
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses a directory chain owned by an unrelated uid", async () => {
+    const leaf = stateDir("foreign-owner");
+    mkdirSync(leaf, { recursive: true, mode: 0o700 });
+    const currentUid = process.getuid!();
+    const getuid = vi.spyOn(process, "getuid").mockReturnValue(currentUid + 1);
+    const createClient = vi.fn();
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
+      socketPath: join(leaf, "daemon.sock"), createClient,
+    }));
+    try {
+      await expect(daemon.start()).rejects.toThrow("unsafe ancestor: " + realpathSync(leaf));
+      expect(createClient).not.toHaveBeenCalled();
+    } finally { getuid.mockRestore(); }
   });
 
   it("serves initialize and list_surfaces over a unix socket", async () => {

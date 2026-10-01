@@ -27,6 +27,7 @@ import {
   type SocketProbeResult,
 } from "./cmux-socket-probe.js";
 import { sleep as defaultSleep } from "./util/sleep.js";
+import { assertSafeDaemonSocket, type DaemonSocketLstat } from "./daemon-socket-security.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTOSTART_POLL_MS = 50;
@@ -52,6 +53,7 @@ export interface DaemonFirstEntryOptions {
   output?: Writable;
   logger?: Pick<Console, "error">;
   probeDaemon?: (socketPath: string) => Promise<boolean>;
+  socketLstat?: DaemonSocketLstat;
   probeCmuxSocket?: () => Promise<SocketProbeResult>;
   spawnDaemon?: (opts: SpawnDaemonOptions) => Promise<unknown> | unknown;
   runProxy?: (opts: CmuxLayerProxyOptions) => Promise<CmuxLayerProxy>;
@@ -119,6 +121,7 @@ function terminateSpawnedDaemon(
 }
 
 export async function probeDaemonSocket(socketPath: string): Promise<boolean> {
+  assertSafeDaemonSocket(socketPath);
   return new Promise((resolveProbe) => {
     const socket = net.createConnection(socketPath);
     let settled = false;
@@ -501,7 +504,16 @@ export async function runDaemonFirstEntry(
   const env = opts.env ?? process.env;
   const logger = opts.logger ?? console;
   const socketPath = resolveDefaultDaemonSocketPath(env);
-  const probeDaemon = opts.probeDaemon ?? probeDaemonSocket;
+  let spawnedDaemon: unknown;
+  const probeDaemon = (path: string) => {
+    try {
+      assertSafeDaemonSocket(path, opts.socketLstat);
+    } catch (error) {
+      terminateSpawnedDaemon(spawnedDaemon, logger);
+      throw error;
+    }
+    return (opts.probeDaemon ?? probeDaemonSocket)(path);
+  };
   const probeCmuxSocket =
     opts.probeCmuxSocket ?? (() => probeEntryCmuxSocket(env));
   const runProxy = opts.runProxy ?? runProxyRuntime;
@@ -523,6 +535,7 @@ export async function runDaemonFirstEntry(
       env,
       probeCmuxSocket,
       spawnDaemonForVersionBump: spawnDaemon,
+      socketLstat: opts.socketLstat,
     });
     bindProxyStdioLifecycle({ input, proxy, logger, exit });
     return {
@@ -580,7 +593,7 @@ export async function runDaemonFirstEntry(
     );
   }
 
-  let spawnedDaemon: unknown;
+  assertSafeDaemonSocket(socketPath, opts.socketLstat);
   try {
     spawnedDaemon = await spawnDaemon({
       socketPath,

@@ -7,6 +7,7 @@ import {
   lstat,
   mkdir,
   open,
+  realpath,
   rename,
   unlink,
 } from "node:fs/promises";
@@ -929,6 +930,18 @@ export class CmuxLayerDaemon {
       const error = `Refusing daemon socket directory: group/other-writable parent ${dir}`;
       this.logger.error(`[cmuxlayer-daemon] ${error}`);
       throw new Error(error);
+    }
+    const uid = process.getuid?.();
+    for (let ancestor = await realpath(dir); ; ancestor = dirname(ancestor)) {
+      const ancestorStats = await lstat(ancestor);
+      if (uid === undefined || !ancestorStats.isDirectory() ||
+        (ancestorStats.uid !== uid && ancestorStats.uid !== 0) ||
+        ((ancestorStats.mode & 0o022) !== 0 && (ancestorStats.mode & 0o1000) === 0)) {
+        const error = `Refusing daemon socket directory; unsafe ancestor: ${ancestor}`;
+        this.logger.error(`[cmuxlayer-daemon] ${error}`);
+        throw new Error(error);
+      }
+      if (dirname(ancestor) === ancestor) break;
     }
   }
 
