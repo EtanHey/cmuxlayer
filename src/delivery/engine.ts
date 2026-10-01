@@ -719,6 +719,21 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   // Each caller retains its typed/queued entries until verified submission.
   const typedDraftOwners = context.typedDraftOwners;
+  const rememberDraftOwner = (key: string, token: TypedDraftOwner): void => {
+    const entries = token.texts ?? [token.text];
+    token.texts = entries.slice(-8);
+    token.deliveryIds = entries.map((_, index) => token.deliveryIds?.[index] ?? "").slice(-8);
+    typedDraftOwners.set(key, token);
+    while (typedDraftOwners.size > 128) {
+      let oldestKey: string | undefined;
+      let oldestAt = Infinity;
+      for (const [candidate, owner] of typedDraftOwners) {
+        if (owner.at < oldestAt) { oldestKey = candidate; oldestAt = owner.at; }
+      }
+      if (oldestKey === undefined) break;
+      typedDraftOwners.delete(oldestKey);
+    }
+  };
   const draftOwnerKey = (surface: string, workspace?: string, uuid?: string | null) =>
     JSON.stringify([workspace ?? null, uuid ?? surface, resolveCurrentCallerAgent()?.agent_id ?? null]);
   const draftTargetFingerprint = (surface: string, uuid?: string | null) => {
@@ -770,8 +785,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       for (let end = start + 1; end <= entries.length; end++) {
         if (!["\n", "", "\n\n"].some(separator => entries.slice(start, end).join(separator) === submitted)) continue;
         const remaining = [...entries.slice(0, start), ...entries.slice(end)];
-        if (!remaining.length) typedDraftOwners.delete(key);
-        else { token.texts = remaining; token.text = remaining.at(-1)!; token.deliveryIds?.splice(start, end - start); }
+        const last = remaining.at(-1);
+        if (last === undefined) typedDraftOwners.delete(key);
+        else { token.texts = remaining; token.text = last; token.deliveryIds?.splice(start, end - start); }
         return;
       }
     }
@@ -792,8 +808,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const region = extractComposerInputRegion(text, token.text, record?.cli, true);
       // A truncated read without a composer anchor observes no draft state.
       if (region === null) continue;
-      const unchanged = ownedComposerText(token, region, record?.cli, text) !== null;
       const empty = extractComposerInputRegion(text, undefined, record?.cli) === "";
+      if (empty) {
+        const entries = token.texts ?? [token.text];
+        const retained = entries.map((entry, index) => ({ entry, deliveryId: token.deliveryIds?.[index] ?? "" }))
+          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || screenShowsQueuedAgentInput(text, entry, { exact: true }));
+        const last = retained.at(-1);
+        if (!last) { typedDraftOwners.delete(key); continue; }
+        token.texts = retained.map(({ entry }) => entry);
+        token.deliveryIds = retained.map(({ deliveryId }) => deliveryId);
+        token.text = last.entry;
+      }
+      const unchanged = ownedComposerText(token, region, record?.cli, text) !== null;
       const queued = (token.texts ?? [token.text]).some(entry => screenShowsQueuedAgentInput(text, entry, { exact: true }));
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !empty && !queued && !renderingPrefix)) typedDraftOwners.delete(key);
@@ -2120,7 +2146,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const submittedText = opts.chunks.join("");
     if (textDispatched && caller && beforeDraft === "") {
       const entries = previousOwner?.caller === caller ? previousOwner.texts ?? [previousOwner.text] : [];
-      typedDraftOwners.set(ownerKey, { caller, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
+      rememberDraftOwner(ownerKey, { caller, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
         ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
         fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false,
         deliveryIds: [...(previousOwner?.deliveryIds ?? entries.map(() => "")), opts.delivery_id ?? ""] });
@@ -2306,7 +2332,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       textDispatched && opts.press_enter && !submitDispatched &&
       opts.source_event === "boot_prompt" && caller && pendingBootAgent
     ) {
-      typedDraftOwners.set(ownerKey, {
+      rememberDraftOwner(ownerKey, {
         caller,
         text: submittedText,
         at: Date.now(),

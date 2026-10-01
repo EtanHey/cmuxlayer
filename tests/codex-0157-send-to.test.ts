@@ -41,6 +41,7 @@ function makeCodexPane(frames: Frames) {
     frames, live: false, phase: "empty" as "empty" | "buffered" | "draft" | "after",
     bufferedReads: 0, repaint: false, swallow: 0, swallowTabs: 0, returns: 0, tabs: 0,
     queued: [] as string[], submitted: [] as string[], text: "",
+    extraSurfaces: [] as { ref: string; id: string; title: string; type: string; index: number; selected: boolean }[],
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
   };
@@ -64,11 +65,12 @@ function makeCodexPane(frames: Frames) {
   const listing = (args: string[]) => {
     if (args.includes("list-windows")) return { windows: [{ ref: "window:1", workspace_count: 1 }] };
     if (args.includes("list-workspaces")) return { workspaces: [{ ref: "workspace:1", title: "Main", index: 0, selected: true, pinned: false }] };
-    if (args.includes("list-panes")) return { workspace_ref: "workspace:1", window_ref: "window:1", panes: [{ ref: "pane:1", index: 0, focused: true, surface_count: 3, surface_refs: ["surface:lead", "surface:other", "surface:new"], surface_ids: [LEAD_UUID, OTHER_UUID, NEW_UUID], selected_surface_ref: "surface:lead" }] };
+    if (args.includes("list-panes")) return { workspace_ref: "workspace:1", window_ref: "window:1", panes: [{ ref: "pane:1", index: 0, focused: true, surface_count: 3 + pane.extraSurfaces.length, surface_refs: ["surface:lead", "surface:other", "surface:new", ...pane.extraSurfaces.map(s => s.ref)], surface_ids: [LEAD_UUID, OTHER_UUID, NEW_UUID, ...pane.extraSurfaces.map(s => s.id)], selected_surface_ref: "surface:lead" }] };
     if (args.includes("list-pane-surfaces")) return { workspace_ref: "workspace:1", window_ref: "window:1", pane_ref: "pane:1", surfaces: [
       { ref: "surface:lead", id: LEAD_UUID, title: "lead", type: "terminal", index: 0, selected: true },
       { ref: "surface:other", id: OTHER_UUID, title: "other", type: "terminal", index: 1, selected: false },
       { ref: "surface:new", id: NEW_UUID, title: "agent-pane", type: "terminal", index: 2, selected: false },
+      ...pane.extraSurfaces,
     ] };
     return { workspace: "workspace:1", surface: "surface:new", surface_id: NEW_UUID, pane: "pane:1", title: "", type: "terminal" };
   };
@@ -143,8 +145,9 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     pane.live = true;
     const as = <T>(uuid: string, fn: () => Promise<T>) =>
       runWithCallerContext({ surfaceId: uuid, workspaceId: "workspace:1" }, fn);
-    const typeDraft = (text: string) => as(LEAD_UUID, async () => parseToolResult(
-      await server._registeredTools.send_to.handler({ agent_id: spawned.agent_id, text, press_enter: false }, {})));
+    const typeDraft = (text: string, surface?: string) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ ...(surface ? { mode: "surface", surface } : { agent_id: spawned.agent_id }), text, press_enter: false }, {})));
+    const readScreen = () => server._registeredTools.read_screen.handler({ surface: spawned.surface_id }, {});
     const send = (text: string) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ agent_id: spawned.agent_id, text, press_enter: true }, {})));
     const keyReturn = (uuid: string) => as(uuid, async () => parseToolResult(
@@ -152,8 +155,57 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend };
+    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen };
   }
+
+  it("RESCOPE bounds retain only the newest eight unverified entries and their delivery IDs", async () => {
+    const t = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
+    try {
+      const ids: string[] = [];
+      for (let index = 0; index < 200; index++) {
+        const receipt = await t.typeDraft(`unverified request ${index}`);
+        expect(receipt).toMatchObject({ typed: true, submitted: false });
+        ids.push(receipt.delivery_id);
+      }
+      expect(t.context.typedDraftOwners.size).toBe(1);
+      const owner = [...t.context.typedDraftOwners.values()][0];
+      expect(owner.texts).toEqual(Array.from({ length: 8 }, (_, index) => `unverified request ${192 + index}`));
+      expect(owner.deliveryIds).toEqual(ids.slice(-8));
+    } finally { t.context.dispose(); }
+  });
+
+  it("RESCOPE bounds evict the oldest timestamps after 200 unverified surfaces", async () => {
+    const t = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
+    try {
+      for (let index = 0; index < 200; index++) {
+        const surface = { ref: `surface:bounded-${index}`, id: `dddddddd-dddd-4ddd-8ddd-${String(index).padStart(12, "0")}`, title: "synthetic", type: "terminal", index: index + 3, selected: false };
+        t.pane.extraSurfaces.push(surface);
+        expect(await t.typeDraft(`unverified surface ${index}`, surface.ref)).toMatchObject({ typed: true, submitted: false });
+        // Protect the first insertion with a newer timestamp: eviction must use at, not insertion order.
+        const owner = [...t.context.typedDraftOwners.values()].find(entry => entry.ref === surface.ref);
+        if (owner) owner.at = index === 0 ? Number.MAX_SAFE_INTEGER : index;
+      }
+      expect(t.context.typedDraftOwners.size).toBe(128);
+      expect([...t.context.typedDraftOwners.values()].map(owner => owner.ref)).toEqual([
+        "surface:bounded-0", ...Array.from({ length: 127 }, (_, index) => `surface:bounded-${73 + index}`),
+      ]);
+    } finally { t.context.dispose(); }
+  });
+
+  it("RESCOPE bounds prune transcript-seen entries above an empty composer but retain queued entries", async () => {
+    const t = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
+    try {
+      await t.typeDraft("submitted first request");
+      const second = await t.typeDraft("queued second request");
+      t.pane.frames.draft = `OpenAI Codex\n${codexRows("submitted first request")}\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ queued second request\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`;
+      t.pane.phase = "draft";
+      await t.readScreen();
+      expect([...t.context.typedDraftOwners.values()]).toEqual([expect.objectContaining({ text: "queued second request", texts: ["queued second request"], deliveryIds: [second.delivery_id] })]);
+      t.pane.frames.draft = `OpenAI Codex\n${codexRows("queued second request")}\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`;
+      await t.readScreen();
+      expect(t.context.typedDraftOwners.size).toBe(0);
+    } finally { t.context.dispose(); }
+  });
 
   it("RESCOPE background settlement spends only the proven delivery ownership", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
