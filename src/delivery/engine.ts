@@ -787,7 +787,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         const remaining = [...entries.slice(0, start), ...entries.slice(end)];
         const last = remaining.at(-1);
         if (last === undefined) typedDraftOwners.delete(key);
-        else { token.texts = remaining; token.text = last; token.deliveryIds?.splice(start, end - start); }
+        else { token.texts = remaining; token.text = last; token.deliveryIds = entries.map((_, index) => token.deliveryIds?.[index] ?? "").filter((_, index) => index < start || index >= end); }
         return;
       }
     }
@@ -1711,6 +1711,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     chunk_size: number;
     chunk_delay_ms: number;
     press_enter: boolean;
+    retry_owned_draft?: boolean;
     rename_to_task?: string;
     onChunkDelivered?: (sentChunks: number) => void;
     onPreTypeScreen?: (screenText: string) => void;
@@ -1754,15 +1755,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
       const owner = typedDraftOwners.get(ownerKey);
       const caller = resolveCurrentCallerAgent()?.agent_id;
-      const ownerCurrent = !!caller && owner?.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+      const ownerCurrent = Boolean(caller) && owner !== undefined && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
       const ownedEntries = ownerCurrent && owner ? owner.texts ?? [owner.text] : [];
       const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
       const ownedQueueRows = submitBaseline ? [...new Set(ownedEntries)].reduce((count, text) => {
         const visible = countVisibleExactQueuedRows(submitBaseline.text, text) ?? 0;
         return count + (visible <= ownedEntries.filter(entry => entry === text).length ? visible : 0);
       }, 0) : 0;
-      if (callerSubmit && queueRows > ownedQueueRows) {
-        throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline!.parsed);
+      if (callerSubmit && submitBaseline && queueRows > ownedQueueRows) {
+        throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed);
       }
       const eligibleQueuedReceipts = callerSubmit && targetAgent && submitBaseline &&
         targetCli === "codex"
@@ -1801,12 +1802,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           submitBaseline.parsed.control_state !== "permission_prompt" &&
           !isPickerOrMenuScreen(submitBaseline.text)) {
         const currentRegion = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
-        const ownedText = ownerCurrent && currentRegion !== null
-          ? ownedComposerText(owner!, currentRegion, targetCli, submitBaseline.text) ?? ""
+        const ownedText = ownerCurrent && owner && currentRegion !== null
+          ? ownedComposerText(owner, currentRegion, targetCli, submitBaseline.text) ?? ""
           : (ownedQueuedReceipt?.text ?? "");
         ownedSubmitText = ownedText;
-        if (ownerCurrent && owner!.bootAgentId && owner!.bootInstanceId) {
-          ownedBoot = { agentId: owner!.bootAgentId, instanceId: owner!.bootInstanceId };
+        if (ownerCurrent && owner?.bootAgentId && owner.bootInstanceId) {
+          ownedBoot = { agentId: owner.bootAgentId, instanceId: owner.bootInstanceId };
         }
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
@@ -2105,10 +2106,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const caller = resolveCurrentCallerAgent()?.agent_id;
     const previousOwner = typedDraftOwners.get(ownerKey);
     const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
-    const ownedRetry = !!caller && previousOwner?.caller === caller && typeof beforeDraft === "string" &&
+    const ownedRetry = Boolean(caller) && previousOwner !== undefined && previousOwner.caller === caller && deliverySafetySnapshot !== null && typeof beforeDraft === "string" &&
       draftOwnerFingerprintMatches(previousOwner, opts.surface, opts.stableSurfaceIdentity) &&
       bootTokenInstanceCurrent(previousOwner) &&
-      ownedComposerText(previousOwner, extractComposerInputRegion(deliverySafetySnapshot!.text, undefined, targetCli, true) ?? beforeDraft, targetCli, deliverySafetySnapshot!.text) === draftGuardText;
+      ownedComposerText(previousOwner, extractComposerInputRegion(deliverySafetySnapshot.text, undefined, targetCli, true) ?? beforeDraft, targetCli, deliverySafetySnapshot.text) === draftGuardText;
+    if (opts.retry_owned_draft && !ownedRetry) {
+      throw new DeliverySafetyGateError("draft_ownership_unverified", deliverySafetySnapshot?.parsed ?? parseScreen(""));
+    }
     const deliveryBatches = ownedRetry ? [] : buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,
@@ -3844,14 +3848,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     surface: string;
     workspace?: string;
     stableSurfaceIdentity?: string | null;
+    text?: string; deliveryId?: string;
   }): boolean => {
     const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
     const caller = resolveCurrentCallerAgent()?.agent_id;
-    const owned = !!caller && owner?.caller === caller &&
+    const owned = Boolean(caller) && owner !== undefined && owner.caller === caller &&
       draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) &&
-      bootTokenInstanceCurrent(owner);
-    if (owned && owner!.bootAgentId && !owner!.bootInstanceId) {
-      owner!.bootInstanceId = stateMgr.readState(owner!.bootAgentId)?.boot_instance_id ?? undefined;
+      bootTokenInstanceCurrent(owner) && (opts.deliveryId === undefined ||
+        (owner.texts ?? [owner.text]).some((text, index) => text === opts.text && owner.deliveryIds?.[index] === opts.deliveryId));
+    if (owned && owner?.bootAgentId && !owner.bootInstanceId) {
+      owner.bootInstanceId = stateMgr.readState(owner.bootAgentId)?.boot_instance_id ?? undefined;
     }
     return owned;
   };

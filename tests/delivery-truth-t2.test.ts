@@ -37,6 +37,10 @@ async function loadServerModule() {
   };
 }
 
+function withTranscriptEcho(screen: string, text: string): string {
+  const lines = screen.split("\n"); lines.splice(1, 0, text); return lines.join("\n");
+}
+
 function parseToolResult(result: any) {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
@@ -467,7 +471,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       if (args.includes("read-screen") && gateRead) await readBarrier;
       if (args.includes("read-screen") && readUnavailable) throw new Error("read unavailable");
       if (args.includes("send")) screen = render(String(args.at(-1)));
-      if (args.includes("send-key") && args.includes("return") && !["spent", "auto-spent"].includes(kind)) screen = render("").replace("\n", `\nmy undelivered message\n`);
+      if (args.includes("send-key") && args.includes("return") && !["spent", "auto-spent"].includes(kind)) screen = withTranscriptEcho(render(""), "my undelivered message");
       return base(cmd, args);
     });
     const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
@@ -1204,7 +1208,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
   it("send_to still delivers when the composer is empty", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";
-    const mockExec = makeLifecycleExec(() => mockExec.mock.calls.some(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return")) ? screenText.replace("\n", "\nfleet message\n") : screenText);
+    const mockExec = makeLifecycleExec(() => mockExec.mock.calls.some(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return")) ? withTranscriptEcho(screenText, "fleet message") : screenText);
     const context = createServerContext({
       exec: mockExec,
       stateDir: testDir,
@@ -1361,7 +1365,7 @@ describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () =>
   it("send_to delivers to a busy Claude pane whose composer is empty", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n\u276f ";
-    const mockExec = makeLifecycleExec(() => mockExec.mock.calls.some(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return")) ? screenText.replace("\n", "\nfleet message\n") : screenText);
+    const mockExec = makeLifecycleExec(() => mockExec.mock.calls.some(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return")) ? withTranscriptEcho(screenText, "fleet message") : screenText);
     const context = createServerContext({
       exec: mockExec,
       stateDir: testDir,

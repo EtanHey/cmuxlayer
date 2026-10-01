@@ -2896,6 +2896,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       text: string;
       press_enter: boolean;
       allow_busy?: boolean;
+      retry_owned_draft?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
       timings?: DeliveryPhaseTimings;
@@ -3129,6 +3130,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (args.timings) {
         args.timings.route += Math.max(0, routeElapsed - enumerateElapsed);
       }
+      const retrySettled = new Error("Owned retry already verified");
+      let settledRetry: AgentDeliveryReceipt | null = null;
       const assertDeliveryRouteCurrent = async (): Promise<void> => {
         let current: typeof deliveryRoute;
         try {
@@ -3154,11 +3157,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               `delivery; refusing to continue on another surface.`,
           );
         }
+        const receipt = args.retry_owned_draft && args.delivery_id ? engine.getDeliveryReceipt(args.delivery_id) : null;
+        if (receipt?.terminal && receipt.submit_verified === true && receipt.delivery_state === "submitted" && receipt.agent_id === args.agent_id && receipt.text === args.text) {
+          settledRetry = receipt;
+          throw retrySettled;
+        }
       };
 
       return withSurfaceWrite(
         deliveryRoute.surface_id,
         async () => {
+          try {
           await assertDeliveryRouteCurrent();
           const delivery = await executeDeliveryEngine({
             surface: deliveryRoute.surface_id,
@@ -3167,6 +3176,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
+            retry_owned_draft: args.retry_owned_draft,
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: resolveCurrentCallerAgent()?.agent_id ?? null,
@@ -3211,6 +3221,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           }
           return { ...delivery, queued_behind_turn: queuedBehindTurn };
+          } catch (error) {
+            if (error !== retrySettled || !settledRetry) throw error;
+            return { ...buildPublicDeliveryReceipt({ delivery_state: "submitted", delivery_id: args.delivery_id,
+              typed: false, submit_attempted: args.press_enter, submit_verified: true, retry_count: settledRetry.retry_count }), bytes: 0, queued_behind_turn: false };
+          }
         },
         {
           toolName: args.source_event,

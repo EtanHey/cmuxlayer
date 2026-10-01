@@ -502,9 +502,9 @@ export interface SendToToolDeps {
   canonicalWorkspaceRef: (candidate?: string) => Promise<string | undefined>;
   collectDeliveryEvidence: (agentId: string) => Promise<{ registry_state: null; screen: null; state_conflict: boolean; health: undefined; } | { registry_state: AgentState; screen: { status: ParsedScreenStatus; agent_type: ParsedScreenAgentType; model: string | null; done_signal: string | null; actions: string[]; } | null; state_conflict: boolean; health: { screen_observation?: { observed_at_ms: number; status: ParsedScreenStatus; agent_type: ParsedScreenAgentType; control_state: ParsedControlPlaneState; model: string | null; } | undefined; status: AgentHealthStatus; issue_codes: AgentHealthIssueCode[]; issues: string[]; issue_severities?: Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>>; reconciled_state?: AgentState; screen_confirmed_state?: AgentState; recommended_actions?: string[]; }; }>;
   collectTargetRecords: () => Promise<AgentRecord[]>;
-  deliverAgentInput: (args: { agent_id: string; text: string; press_enter: boolean; allow_busy?: boolean; source_event: DeliveryEventType; delivery_id?: string; timings?: DeliveryPhaseTimings; }) => Promise<{ queued_behind_turn: boolean; delivered: boolean; terminal: boolean; typed: boolean; submit_attempted: boolean; submit_dispatched?: boolean; submit_verified: boolean | null; submitted: boolean; submit_evidence?: SubmitEvidence | null; retry_count: number; rpc_methods: Array<"surface.send_text" | "surface.send_key">; delivery?: PublicDeliveryState; delivery_state?: PublicDeliveryState; delivery_id?: string; duplicate_of?: string; needs_attention?: boolean; attention_reason?: string; timings_ms?: DeliveryPhaseTimings; observation?: { status: ParsedScreenResult["status"]; composer_empty: boolean; prompt_echoed: boolean; last_10_lines: string[]; }; WARNING?: string; bytes: number; key_dispatched?: boolean; submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null; }>;
+  deliverAgentInput: (args: { agent_id: string; text: string; press_enter: boolean; allow_busy?: boolean; retry_owned_draft?: boolean; source_event: DeliveryEventType; delivery_id?: string; timings?: DeliveryPhaseTimings; }) => Promise<{ queued_behind_turn: boolean; delivered: boolean; terminal: boolean; typed: boolean; submit_attempted: boolean; submit_dispatched?: boolean; submit_verified: boolean | null; submitted: boolean; submit_evidence?: SubmitEvidence | null; retry_count: number; rpc_methods: Array<"surface.send_text" | "surface.send_key">; delivery?: PublicDeliveryState; delivery_state?: PublicDeliveryState; delivery_id?: string; duplicate_of?: string; needs_attention?: boolean; attention_reason?: string; timings_ms?: DeliveryPhaseTimings; observation?: { status: ParsedScreenResult["status"]; composer_empty: boolean; prompt_echoed: boolean; last_10_lines: string[]; }; WARNING?: string; bytes: number; key_dispatched?: boolean; submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null; }>;
   engine: AgentEngine;
-  callerOwnsTypedDraft: (opts: { surface: string; workspace?: string; stableSurfaceIdentity?: string | null }) => boolean;
+  callerOwnsTypedDraft: (opts: { surface: string; workspace?: string; stableSurfaceIdentity?: string | null; text?: string; deliveryId?: string }) => boolean;
   observePausedTarget: (agent: AgentRecord | null | undefined) => Promise<{ paused: boolean; source: string; }>;
   /** send_input / send_command / send_key as plain functions (CX-3 S7). */
   rawSend: {
@@ -833,7 +833,7 @@ export function registerSendToTool(
               text: args.text,
               press_enter: args.press_enter,
             });
-            if (duplicate && (duplicate.delivery_state !== "pending_verify" || !callerOwnsTypedDraft({ surface: agent.surface_id, workspace: agent.workspace_id ?? undefined, stableSurfaceIdentity: agent.surface_uuid }))) {
+            if (duplicate && (duplicate.delivery_state !== "pending_verify" || !callerOwnsTypedDraft({ surface: agent.surface_id, workspace: agent.workspace_id ?? undefined, stableSurfaceIdentity: agent.surface_uuid, text: args.text, deliveryId: duplicate.delivery_id }))) {
               mutableReceipts.push({
                 ...resolutionMetadata,
                 agent_id: agent.agent_id,
@@ -855,7 +855,7 @@ export function registerSendToTool(
               continue;
             }
             const deliveryId = duplicate?.delivery_state === "pending_verify" ? duplicate.delivery_id : randomUUID();
-            engine.acceptPendingVerify({
+            if (!duplicate) engine.acceptPendingVerify({
               delivery_id: deliveryId,
               agent_id: agent.agent_id,
               text: args.text,
@@ -894,6 +894,7 @@ export function registerSendToTool(
                 text: args.text,
                 press_enter: args.press_enter,
                 allow_busy: args.allow_busy,
+                retry_owned_draft: Boolean(duplicate),
                 source_event: "send_to",
                 delivery_id: deliveryId,
               });
@@ -1135,7 +1136,7 @@ export function registerSendToTool(
           text: args.text,
           press_enter: args.press_enter,
         });
-        if (duplicate && (duplicate.delivery_state !== "pending_verify" || !callerOwnsTypedDraft({ surface: targetAgent?.surface_id ?? "", workspace: targetAgent?.workspace_id ?? undefined, stableSurfaceIdentity: targetAgent?.surface_uuid }))) {
+        if (duplicate && (duplicate.delivery_state !== "pending_verify" || !callerOwnsTypedDraft({ surface: targetAgent?.surface_id ?? "", workspace: targetAgent?.workspace_id ?? undefined, stableSurfaceIdentity: targetAgent?.surface_uuid, text: args.text, deliveryId: duplicate.delivery_id }))) {
           const data = {
             accepted: true,
             agent_id: agentId,
@@ -1160,7 +1161,7 @@ export function registerSendToTool(
           );
         }
         const deliveryId = duplicate?.delivery_state === "pending_verify" ? duplicate.delivery_id : randomUUID();
-        engine.acceptPendingVerify({
+        if (!duplicate) engine.acceptPendingVerify({
           delivery_id: deliveryId,
           agent_id: agentId,
           text: args.text,
@@ -1217,6 +1218,7 @@ export function registerSendToTool(
             text: args.text,
             press_enter: args.press_enter,
             allow_busy: args.allow_busy,
+            retry_owned_draft: Boolean(duplicate),
             source_event: "send_to",
             delivery_id: deliveryId,
             timings,
