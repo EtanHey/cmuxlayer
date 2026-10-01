@@ -21,6 +21,15 @@ import {
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-worktree-test");
 
+function successfulGitExec() {
+  return vi.fn().mockImplementation((_cmd: string, args: string[]) => {
+    if (args.includes("worktree") && args.includes("add")) {
+      mkdirSync(args[args.length - 2], { recursive: true });
+    }
+    return Promise.resolve({ stdout: "", stderr: "" });
+  });
+}
+
 function worktreeListOutput(paths: string[]): string {
   return paths.map((path) => `worktree ${path}\n`).join("");
 }
@@ -43,7 +52,7 @@ describe("worktree helpers", () => {
     vi.spyOn(Math, "random")
       .mockReturnValueOnce(0.123456789)
       .mockReturnValueOnce(0.987654321);
-    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const exec = successfulGitExec();
 
     const first = await prepareWorktree({
       repo: "cmuxlayer",
@@ -170,7 +179,7 @@ describe("worktree helpers", () => {
   it("creates a named git worktree with a deterministic default path", async () => {
     const repoRoot = join(TEST_ROOT, "repo");
     mkdirSync(repoRoot, { recursive: true });
-    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const exec = successfulGitExec();
 
     const result = await prepareWorktree({
       repo: "cmuxlayer",
@@ -206,7 +215,7 @@ describe("worktree helpers", () => {
   it("accepts a worktree name string as shorthand for a named request", async () => {
     const repoRoot = join(TEST_ROOT, "repo");
     mkdirSync(repoRoot, { recursive: true });
-    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const exec = successfulGitExec();
 
     const result = await prepareWorktree({
       repo: "cmuxlayer",
@@ -263,7 +272,7 @@ describe("worktree helpers", () => {
   it("creates a normal nested path", async () => {
     const repoRoot = join(TEST_ROOT, "repo");
     mkdirSync(repoRoot);
-    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const exec = successfulGitExec();
     const result = await prepareWorktree({
       repo: "cmuxlayer", repoRoot, homeGitsDir: TEST_ROOT,
       worktree: { name: "nested/deep/worker" }, exec,
@@ -292,12 +301,12 @@ describe("worktree helpers", () => {
     const outside = join(TEST_ROOT, "outside");
     mkdirSync(repoRoot, { recursive: true });
     mkdirSync(outside);
-    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+    const exec = vi.fn().mockImplementation((_cmd: string, args: string[]) => {
       if (args.includes("check-ignore")) {
         rmSync(join(repoRoot, ".worktrees"), { recursive: true });
         symlinkSync(outside, join(repoRoot, ".worktrees"), "dir");
       }
-      return { stdout: "", stderr: "" };
+      return Promise.resolve({ stdout: "", stderr: "" });
     });
     await expect(prepareWorktree({
       repo: "cmuxlayer", repoRoot, homeGitsDir: join(TEST_ROOT, "gits"),
@@ -305,6 +314,36 @@ describe("worktree helpers", () => {
     })).rejects.toThrow(/physical containment/);
     expect(exec).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree", "add"]));
     expect(existsSync(join(outside, "worker"))).toBe(false);
+  });
+
+  it.each([false, true])("detects an escape during git add and attempts cleanup (remove fails=%s)", async (removeFails) => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const outside = join(TEST_ROOT, "outside");
+    const parent = join(repoRoot, ".worktrees");
+    const path = join(parent, "worker");
+    mkdirSync(repoRoot);
+    mkdirSync(outside);
+    writeFileSync(join(repoRoot, ".mcp.json"), "{}");
+    const exec = vi.fn().mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("add")) {
+        rmSync(parent, { recursive: true });
+        symlinkSync(outside, parent, "dir");
+        mkdirSync(path);
+      }
+      if (args.includes("remove") && removeFails) {
+        return Promise.reject(new Error("cleanup unavailable"));
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+    const bootstrapExec = vi.fn();
+    await expect(prepareWorktree({
+      repo: "cmuxlayer", repoRoot, homeGitsDir: TEST_ROOT,
+      worktree: { name: "worker" }, exec, bootstrapExec,
+    })).rejects.toThrow("Worktree escaped containment during creation; removed");
+    expect(exec).toHaveBeenCalledWith("git", ["-C", repoRoot, "worktree", "remove", "--force", path]);
+    expect(exec).toHaveBeenCalledWith("git", ["-C", repoRoot, "worktree", "prune"]);
+    expect(existsSync(join(outside, "worker", ".mcp.json"))).toBe(false);
+    expect(bootstrapExec).not.toHaveBeenCalled();
   });
 
   it("rejects an empty explicit worktree name", async () => {
@@ -927,7 +966,7 @@ describe("worktree helpers", () => {
 
   it("skips .mcp.json copy when the source file is missing", async () => {
     const repoRoot = join(TEST_ROOT, "repo");
-    const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "missing-mcp");
+    const worktreePath = join(repoRoot, ".worktrees", "missing-mcp");
     mkdirSync(repoRoot, { recursive: true });
     const exec = vi.fn().mockImplementation(async () => {
       mkdirSync(worktreePath, { recursive: true });

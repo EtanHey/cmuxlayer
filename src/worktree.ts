@@ -184,7 +184,7 @@ function assertAllowedWorktreePath(
   repoRoot: string,
   homeGitsDir: string,
   path: string,
-): void {
+): string {
   const root = isInside(repoRoot, path)
     ? repoRoot
     : isInside(homeGitsDir, repoRoot) && isInside(homeGitsDir, path)
@@ -201,9 +201,11 @@ function assertAllowedWorktreePath(
   }
   const ancestor = existingAncestor(path);
   // Pin the allowed root itself, rather than trusting a redirected .worktrees.
-  if (!isInside(realpathSync(root), realpathSync(ancestor))) {
+  const canonicalRoot = realpathSync(root);
+  if (!isInside(canonicalRoot, realpathSync(ancestor))) {
     throw new Error(`Worktree path violates physical containment: ${path}`);
   }
+  return canonicalRoot;
 }
 
 function existingAncestor(path: string): string {
@@ -216,6 +218,8 @@ function existingAncestor(path: string): string {
   return ancestor;
 }
 
+// AIDEV-NOTE: Path-based mkdir/Git retain a same-user replacement race (no
+// privilege gain); post-create containment verification bounds its outcome.
 function createWorktreeParents(
   repoRoot: string,
   homeGitsDir: string,
@@ -516,7 +520,7 @@ export async function prepareWorktree(
 
   createWorktreeParents(repoRoot, homeGitsDir, worktreePath);
   await warnIfWorktreesNotIgnored(repoRoot, exec);
-  assertAllowedWorktreePath(repoRoot, homeGitsDir, worktreePath);
+  const containmentRoot = assertAllowedWorktreePath(repoRoot, homeGitsDir, worktreePath);
   const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
   await exec("git", [
     "-C",
@@ -528,6 +532,25 @@ export async function prepareWorktree(
     worktreePath,
     spec.base,
   ]);
+  let contained = false;
+  try {
+    contained = isInside(containmentRoot, realpathSync(worktreePath));
+  } catch {
+    // A missing/unresolvable destination also cannot be verified safely.
+  }
+  if (!contained) {
+    try {
+      await exec("git", ["-C", repoRoot, "worktree", "remove", "--force", worktreePath]);
+    } catch {
+      // Best effort: prune must still run if removal fails.
+    }
+    try {
+      await exec("git", ["-C", repoRoot, "worktree", "prune"]);
+    } catch {
+      // Preserve the containment error even if cleanup fails.
+    }
+    throw new Error("Worktree escaped containment during creation; removed");
+  }
   const prepared: PreparedWorktree = {
     path: worktreePath,
     name: basename(worktreePath),
