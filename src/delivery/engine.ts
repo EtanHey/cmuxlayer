@@ -1261,7 +1261,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           retry_count: retryCount,
           delivery: "queued_followup",
           queue_verified: screenShowsQueuedCursorFollowup(snapshot.text, opts.text, { exact: true }) &&
-            !screenShowsQueuedCursorFollowup(opts.pre_type_screen ?? "", opts.text, { exact: true }),
+            Boolean(opts.pre_type_screen?.trim()) && !screenTranscriptContainsText(opts.pre_type_screen ?? "", opts.text),
         };
       }
       // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative. An agent
