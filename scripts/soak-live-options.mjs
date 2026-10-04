@@ -30,8 +30,8 @@ export function options(argv) {
   if (!Number.isInteger(opts.freshEvery) || (opts.pool > 0 && opts.freshEvery < 1)
     || (opts.pool === 0 && opts.freshEvery !== 0)) throw new Error("fresh-every requires a pool and must be positive");
   opts.cases = typeof opts.cases === "string" ? opts.cases.split(",") : opts.cases;
-  if (opts.cases.some((id) => !/^[a-g]$/.test(id)) || new Set(opts.cases).size !== opts.cases.length) {
-    throw new Error("cases must be unique letters a..g");
+  if (opts.cases.some((id) => !/^[a-h]$/.test(id)) || new Set(opts.cases).size !== opts.cases.length) {
+    throw new Error("cases must be unique letters a..h");
   }
   if (!Number.isInteger(opts.queueDeadlineMs) || opts.queueDeadlineMs < 1000 || opts.queueDeadlineMs > 300_000) {
     throw new Error("queue-deadline-ms must be 1000..300000");

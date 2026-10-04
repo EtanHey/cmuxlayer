@@ -36,3 +36,22 @@ it("does not count a key success without independently observed submission", asy
   const result = await run(["f"], { inComposer: true, busy: false });
   expect(result.violations).toContain("owned_key_submit_failed");
 });
+
+it("sends a long h relay only while busy and requires wrapped queue evidence before settling", async () => {
+  const relayText = `Read and follow /tmp/SOAK_RELAY_${"x".repeat(220)}.md`;
+  const sends: string[] = [], settled: string[] = [], violations: string[] = [];
+  let reads = 0;
+  await runDeliveryCases({ cases: ["h"], seat: {}, relayText,
+    owner: { agentId: "owner", surface: "uuid-1" }, foreign: { agentId: "foreign", surface: "uuid-2" },
+    opts: { timeoutMs: 1000 }, now: () => 0, sleep: async () => {},
+    read: async () => reads++ === 0 ? { busy: true } : { readable: true },
+    send: async (_seat: unknown, args: { text: string }) => {
+      sends.push(args.text);
+      return { receipt: { ok: true, queued_behind_turn: true }, evidence: { queued: true, queueRows: 3 } };
+    }, settle: async (_seat: unknown, text: string) => { settled.push(text); },
+    check: (_name: string, failures: string[]) => violations.push(...failures), log: () => {} });
+  expect(violations).toEqual([]);
+  expect(sends[0]).toMatch(/^Run sleep 30/);
+  expect(sends[1]).toBe(relayText);
+  expect(settled).toEqual([relayText]);
+});

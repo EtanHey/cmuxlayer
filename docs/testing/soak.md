@@ -81,13 +81,15 @@ queue and transcript evidence. False `ok:true` receipts and false
 also fails. The ordinary cycle path still requires an eventual authored reply.
 
 ```bash
-node scripts/soak-live.mjs --agent-id WORKER_ID --entry /opt/homebrew/opt/cmuxlayer/bin/cmuxlayer --cases a,b,c,d,e,f,g
+node scripts/soak-live.mjs --agent-id WORKER_ID --entry /opt/homebrew/opt/cmuxlayer/bin/cmuxlayer --cases a,b,c,d,e,f,g,h
 ```
 
 `--cases` selects busy delivery (a), interrupted owned queue and foreign retry
 (b), foreign draft plus attention (c), submit-key casing matrix (d), long-turn
 queue plus attention (e), idle owned draft plus Return (f), and idle stalled
-queue refusal (g). No cases are selected by default; the original 40-cycle,
+queue refusal (g), and a ~250-character file relay to a busy target (h).
+Case h requires three visible queue rows or a truncated item with a matching
+prefix of at least 40 characters, then eventual submission. No cases are selected by default; the original 40-cycle,
 60-minute floor remains unchanged. `--queue-deadline-ms` bounds eventual queue
 submission (default 90000); `--long-turn-minutes` sets the long-turn threshold
 (default 2). Unobserved prerequisites fail rather than skip. A failed case stops

@@ -131,7 +131,7 @@ export function replyMarkerEvidence(screen, marker) {
       // Empty lines can occur inside a wrapped prompt or tool result. Only a
       // positive boundary below can change their provenance.
       if (!trimmed) continue;
-      if (/^\s*[❯›>]\s*\S/.test(line)) {
+      if (/^\s*[❯›»>]\s*\S/.test(line)) {
         inPrompt = true;
         inToolOutput = false;
       } else if (/^\s*(?:⎿|Result:|Output:)/.test(line)) {
@@ -282,25 +282,33 @@ export function checkSoakSession(session) {
 export function deliveryEvidence(screen, text) {
   const content = record(screen).content;
   const lines = typeof content === "string" ? content.replace(/\r/g, "").split("\n") : [];
-  const prompt = /^\s*[❯›>]\s?(.*)$/;
+  const prompt = /^\s*[❯›»>]\s?(.*)$/;
   const composer = lines.findLastIndex((line) => prompt.test(line));
   const readable = screen?.ok === true && composer >= 0 && typeof text === "string" && !!text;
   const flat = (value) => value.replace(/\s+/g, " ").trim();
+  const compact = (value) => value.replace(/\s+/g, "");
   const draft = composer < 0 ? "" : [lines[composer].replace(prompt, "$1"),
     ...lines.slice(composer + 1).filter((line) => !/context left|for shortcuts|^[─━]+/.test(line))].join(" ");
   const before = lines.slice(0, composer);
   const queueStart = before.findLastIndex((line) => /^(?:\s*[•│]\s*)?(?:Queued follow-up inputs|Messages to be submitted after next tool call)/i.test(line));
   const queue = queueStart < 0 ? [] : before.slice(queueStart + 1);
   const transcript = queueStart < 0 ? before : before.slice(0, queueStart);
-  const inComposer = readable && flat(draft).includes(flat(text));
+  const inComposer = readable && compact(draft).includes(compact(text));
+  let queueRows = 0, queueTruncated = false;
   const queued = readable && queue.some((line, i) => {
     if (!/^\s*[│┃║]?\s*↳\s+/.test(line)) return false;
-    const rows = [line];
+    const rows = [line.replace(/^\s*[│┃║]?\s*↳\s+/, "")];
     for (const row of queue.slice(i + 1)) {
       if (!/^\s{2,}\S/.test(row) || /↳/.test(row)) break;
       rows.push(row);
     }
-    return flat(rows.join(" ")).includes(flat(text));
+    const visible = flat(rows.join(" "));
+    const truncated = /(?:…|\.\.\.)$/.test(visible);
+    const prefix = visible.replace(/(?:…|\.\.\.)$/, "").trim();
+    const matches = truncated ? prefix.length >= 40 && compact(text).startsWith(compact(prefix))
+      : compact(visible) === compact(text);
+    if (matches) { queueRows = rows.length; queueTruncated = truncated; }
+    return matches;
   });
   const submitted = readable && !inComposer && transcript.some((line, i) => {
     if (!prompt.test(line)) return false;
@@ -309,9 +317,9 @@ export function deliveryEvidence(screen, text) {
       if (!/^\s{2,}\S/.test(row) || /^\s*[⎿↳]/.test(row)) break;
       rows.push(row);
     }
-    return flat(rows.join(" ")).includes(flat(text));
+    return compact(rows.join(" ")).includes(compact(text));
   });
-  return { readable, inComposer, queued, submitted };
+  return { readable, inComposer, queued, submitted, queueRows, queueTruncated };
 }
 
 export function checkPostSend(receipt, evidence, { staged = false } = {}) {

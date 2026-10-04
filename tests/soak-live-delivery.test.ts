@@ -59,3 +59,27 @@ describe("delivery stop rule", () => {
     expect(() => options(["--agent-id", "scratch", "--cases", "x"])).toThrow(/cases/);
   });
 });
+
+describe("long relay queue correlation", () => {
+  const relay = `Read and follow /tmp/SOAK_LONG_RELAY_${"abcdef0123456789".repeat(12)}.md`;
+  it("recognizes a three-row queued relay and the alt composer glyph", () => {
+    const rows = [relay.slice(0, 80), relay.slice(80, 160), relay.slice(160)];
+    expect(deliveryEvidence(frame(`• Queued follow-up inputs\n  ↳ ${rows.join("\n    ")}\n» `), relay))
+      .toMatchObject({ readable: true, queued: true, submitted: false });
+  });
+  it.each(["…", "..."])("correlates a >=40-character prefix ending in %s", (ellipsis) => {
+    expect(deliveryEvidence(frame(`• Queued follow-up inputs\n  ↳ ${relay.slice(0, 80)}${ellipsis}\n› `), relay).queued).toBe(true);
+    expect(deliveryEvidence(frame(`• Queued follow-up inputs\n  ↳ ${relay.slice(0, 40)}${ellipsis}\n› `), relay).queued).toBe(true);
+    expect(deliveryEvidence(frame(`• Queued follow-up inputs\n  ↳ ${relay.slice(0, 39)}${ellipsis}\n› `), relay).queued).toBe(false);
+    expect(deliveryEvidence(frame(`• Queued follow-up inputs\n  ↳ ${relay.slice(0, 80)}WRONG${ellipsis}\n› `), relay).queued).toBe(false);
+  });
+  it("joins a wrapped submitted echo and leaves composer text unsubmitted", () => {
+    const rows = [relay.slice(0, 80), relay.slice(80, 160), relay.slice(160)];
+    expect(deliveryEvidence(frame(`» ${rows.join("\n  ")}\n• done\n» `), relay).submitted).toBe(true);
+    expect(deliveryEvidence(frame(`» ${rows.join("\n  ")}`), relay))
+      .toMatchObject({ inComposer: true, submitted: false, queued: false });
+  });
+  it("selects the new h case", () => {
+    expect(options(["--agent-id", "scratch", "--cases", "h"]).cases).toEqual(["h"]);
+  });
+});

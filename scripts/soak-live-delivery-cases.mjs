@@ -2,7 +2,7 @@
 import { pollDelivery } from "./soak-live-timeline.mjs";
 
 export async function runDeliveryCases({ cases, seat, owner, foreign, send, read, settle,
-  check, log, opts, now, sleep }) {
+  check, log, opts, now, sleep, relayText }) {
   const requireCase = (condition, code, id) => {
     check("delivery_case", condition ? [] : [code], { case: id });
     if (!condition) throw new Error(code);
@@ -14,11 +14,12 @@ export async function runDeliveryCases({ cases, seat, owner, foreign, send, read
     { mode: "agent", text }, `case:${id}`, { caller: owner, ...extra });
   for (const id of cases) {
     log({ kind: "delivery_case_start", case: id });
-    const text = `Reply exactly SOAK_CASE_${id}_${now()} then stop.`;
+    const text = id === "h" ? relayText : `Reply exactly SOAK_CASE_${id}_${now()} then stop.`;
     try {
       requireCase(owner?.agentId && owner.surface && foreign?.agentId && foreign.surface && owner.agentId !== foreign.agentId,
         "case_callers_unavailable", id);
-      if (["a", "b", "e", "g"].includes(id)) {
+      if (["a", "b", "e", "g", "h"].includes(id)) {
+        if (id === "h") requireCase(typeof text === "string" && text.length >= 240, "long_relay_missing", id);
         const seconds = id === "e" ? opts.longTurnMinutes * 60 + 30 : 30;
         const busy = `Run sleep ${seconds} in the terminal, then reply exactly SOAK_BUSY_${id}_${now()}.`;
         const started = await message(id, busy);
@@ -33,7 +34,9 @@ export async function runDeliveryCases({ cases, seat, owner, foreign, send, read
         } else first = await message(id, text);
         requireCase(first.receipt.ok === true && first.evidence.queued &&
           (id === "g" || first.receipt.queued_behind_turn === true), "queue_case_not_exercised", id);
-        if (id === "a") { await settle(seat, text, `case:${id}`); }
+        if (id === "h") requireCase(first.evidence.queueRows >= 3 || first.evidence.queueTruncated,
+          "wrapped_queue_case_not_exercised", id);
+        if (["a", "h"].includes(id)) { await settle(seat, text, `case:${id}`); }
         if (id === "e") {
           await sleep(opts.longTurnMinutes * 60_000);
           const state = await read(text, first.receipt.delivery_id);

@@ -485,7 +485,11 @@ async function main() {
         const callerState = JSON.parse(readFileSync(join(stateDir, opts.agentId, "state.json"), "utf8"));
         const owner = { agentId: opts.agentId, surface: callerState.surface_uuid };
         const foreign = { agentId: seat.agentId, surface: seat.surfaceUuid };
-        await runDeliveryCases({ cases: opts.cases, seat, owner, foreign, send: sendChecked,
+        const relayPrefix = `Read and follow ${root}/SOAK_LONG_RELAY_${runId}_`;
+        const relayText = `${relayPrefix}${"x".repeat(Math.max(0, 247 - relayPrefix.length))}.md`;
+        if (opts.cases.includes("h")) writeFileSync(relayText.slice("Read and follow ".length),
+          `Reply exactly SOAK_LONG_RELAY_DONE_${runId} then stop.\n`);
+        await runDeliveryCases({ cases: opts.cases, seat, owner, foreign, send: sendChecked, relayText,
           read: (text, deliveryId) => readDelivery(seat, text, deliveryId), settle: settleDelivery,
           opts, now: Date.now, sleep, check, log });
       } catch (error) { check("delivery_case", ["delivery_case_setup_failed"], { error: String(error) }); }
