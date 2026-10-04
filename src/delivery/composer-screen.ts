@@ -422,6 +422,16 @@ export function screenShowsCompletePendingInput(
   );
 }
 
+/** Compare transcript text above the final composer, excluding its draft. */
+export function screenTranscriptContainsText(screen: string, text: string): boolean {
+  const lines = normalizeTerminalText(screen).split("\n");
+  let composer = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (/^[ \t]*(?:[❯›»>]|cursor>)(?:[ \t]|$)/u.test(lines[index])) { composer = index; break; }
+  }
+  return composer >= 0 && screenContainsCompleteSubmittedText(lines.slice(0, composer).join("\n"), text);
+}
+
 export function screenContainsCompleteSubmittedText(
   screenText: string,
   submittedText: string,
@@ -1086,6 +1096,11 @@ export function screenShowsQueuedAgentInput(
     );
     return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
   });
+}
+
+/** Number of visible queued inputs; an unreadable queue cannot prove ownership. */
+export function countVisibleCodexQueuedInputs(screenText: string): number {
+  return codexQueuedItems(screenText)?.length ?? 0;
 }
 
 export function countVisibleExactQueuedRows(

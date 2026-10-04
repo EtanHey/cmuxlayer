@@ -229,7 +229,7 @@ class FakeAgentSurfaceClient {
           ]
             .filter((line) => line !== "")
             .join("\n")
-        : `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`);
+        : `Claude Code\n${this.transcriptTail ?? ""}\n> ${tail}\nCLAUDE_COUNTER:1\n`);
     return {
       surface,
       text,
@@ -780,6 +780,16 @@ describe("send_to v2 background verify", () => {
     });
     expect(engine.getDeliveryReceipt(queued.delivery_id)?.error).not.toMatch(/Escape/i);
     expect(client.sendKeyCalls).toEqual([]);
+  });
+
+  it("RESCOPE background placeholder repaint without a new turn or echo stays pending", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    const sent = parseResult(await callTool(server, "send_to", { agent_id: "agent-1", text: "not consumed", press_enter: true }));
+    client.clearComposer();
+    await engineForTests(server).verifyPendingDeliveries();
+    expect(engineForTests(server).getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "pending_verify", terminal: false });
   });
 
   it("promotes a pending_verify delivery to submitted once the composer clears", async () => {

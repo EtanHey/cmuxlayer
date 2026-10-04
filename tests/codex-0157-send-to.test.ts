@@ -41,6 +41,8 @@ function makeCodexPane(frames: Frames) {
     frames, live: false, phase: "empty" as "empty" | "buffered" | "draft" | "after",
     bufferedReads: 0, repaint: false, swallow: 0, swallowTabs: 0, returns: 0, tabs: 0,
     queued: [] as string[], submitted: [] as string[], text: "",
+    extraSurfaces: [] as { ref: string; id: string; title: string; type: string; index: number; selected: boolean }[],
+    beforeRead: undefined as (() => Promise<void>) | undefined,
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
   };
@@ -64,11 +66,12 @@ function makeCodexPane(frames: Frames) {
   const listing = (args: string[]) => {
     if (args.includes("list-windows")) return { windows: [{ ref: "window:1", workspace_count: 1 }] };
     if (args.includes("list-workspaces")) return { workspaces: [{ ref: "workspace:1", title: "Main", index: 0, selected: true, pinned: false }] };
-    if (args.includes("list-panes")) return { workspace_ref: "workspace:1", window_ref: "window:1", panes: [{ ref: "pane:1", index: 0, focused: true, surface_count: 3, surface_refs: ["surface:lead", "surface:other", "surface:new"], surface_ids: [LEAD_UUID, OTHER_UUID, NEW_UUID], selected_surface_ref: "surface:lead" }] };
+    if (args.includes("list-panes")) return { workspace_ref: "workspace:1", window_ref: "window:1", panes: [{ ref: "pane:1", index: 0, focused: true, surface_count: 3 + pane.extraSurfaces.length, surface_refs: ["surface:lead", "surface:other", "surface:new", ...pane.extraSurfaces.map(surface => surface.ref)], surface_ids: [LEAD_UUID, OTHER_UUID, NEW_UUID, ...pane.extraSurfaces.map(surface => surface.id)], selected_surface_ref: "surface:lead" }] };
     if (args.includes("list-pane-surfaces")) return { workspace_ref: "workspace:1", window_ref: "window:1", pane_ref: "pane:1", surfaces: [
       { ref: "surface:lead", id: LEAD_UUID, title: "lead", type: "terminal", index: 0, selected: true },
       { ref: "surface:other", id: OTHER_UUID, title: "other", type: "terminal", index: 1, selected: false },
       { ref: "surface:new", id: NEW_UUID, title: "agent-pane", type: "terminal", index: 2, selected: false },
+      ...pane.extraSurfaces,
     ] };
     return { workspace: "workspace:1", surface: "surface:new", surface_id: NEW_UUID, pane: "pane:1", title: "", type: "terminal" };
   };
@@ -95,6 +98,7 @@ function makeCodexPane(frames: Frames) {
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("read-screen")) {
+      const beforeRead = pane.beforeRead; pane.beforeRead = undefined; await beforeRead?.();
       if (pane.failWhileEmpty && pane.phase === "empty") throw new Error("transient read failure");
       return { stdout: JSON.stringify({ surface: "surface:new", text: read(), lines: 30, scrollback_used: false }), stderr: "" };
     }
@@ -116,14 +120,19 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
-    const { pane, exec } = makeCodexPane(bootPrompt ? frames : { ...frames, buffered: frames.empty, draft: frames.empty, after: frames.empty });
-    pane.live = bootPrompt !== undefined;
+    const { pane, exec } = makeCodexPane(bootPrompt ? frames : {
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: text => `OpenAI Codex\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`,
+      after: text => `OpenAI Codex\n${codexRows(text)}\nWorking (5s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`,
+    });
+    pane.live = true;
     pane.swallow = swallow;
     const context = serverModule.createServerContext(withTestSurfaceObserver({
       exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
     }));
-    const server = serverModule.createServer({ context, inboxBaseDir: testDir }) as any;
+    const server = serverModule.createServer({ context, inboxBaseDir: testDir, lifecycleInitializer: async () => {} }) as any;
     const engine = engineForTests(server);
+    await context.lifecycleReadyPromise;
     const lead = {
       agent_id: "lead-seat", surface_id: "surface:lead", surface_uuid: LEAD_UUID, role: "orchestrator", cli: "claude",
       state: "working", repo: "cmuxlayer", model: "opus", version: 1,
@@ -135,25 +144,219 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const spawned = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
       server._registeredTools.spawn_agent.handler({
         repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
-        boot_prompt_timeout_ms: bootPrompt ? 5_000 : 100, ...(bootPrompt ? { prompt: bootPrompt } : {}),
+        boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
     if (bootPrompt) return { pane, context, spawned };
     engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready" });
+    // Spawn's contract relay has completed its observed submit before the
+    // scenario begins; don't leave an ignored boot write racing the fixture.
+    expect(context.typedDraftOwners.size).toBe(0);
     pane.frames = frames;
-    pane.live = true;
+    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], bufferedReads: 0 });
     const as = <T>(uuid: string, fn: () => Promise<T>) =>
       runWithCallerContext({ surfaceId: uuid, workspaceId: "workspace:1" }, fn);
-    const typeDraft = (text: string) => as(LEAD_UUID, async () => parseToolResult(
-      await server._registeredTools.send_to.handler({ agent_id: spawned.agent_id, text, press_enter: false }, {})));
-    const send = (text: string) => as(LEAD_UUID, async () => parseToolResult(
-      await server._registeredTools.send_to.handler({ agent_id: spawned.agent_id, text, press_enter: true }, {})));
+    const typeDraft = (text: string, surface?: string) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ ...(surface ? { mode: "surface", surface } : { agent_id: spawned.agent_id }), text, press_enter: false }, {})));
+    const readScreen = () => server._registeredTools.read_screen.handler({ surface: spawned.surface_id }, {});
+    const send = (text: string, targeting = false, verbose = false) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ ...(targeting ? { targeting: { agent_ids: [spawned.agent_id] } } : { agent_id: spawned.agent_id }), text, press_enter: true, verbose }, {})));
     const keyReturn = (uuid: string) => as(uuid, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "key", surface: spawned.surface_id, text: "return" }, {})));
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend };
+    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen };
   }
+
+  it("RESCOPE bounds retain only the newest eight unverified entries and their delivery IDs", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
+    try {
+      const ids: string[] = [];
+      for (let index = 0; index < 200; index++) {
+        const receipt = await target.typeDraft(`unverified request ${index}`);
+        expect(receipt).toMatchObject({ typed: true, submitted: false });
+        ids.push(receipt.delivery_id);
+      }
+      expect(target.context.typedDraftOwners.size).toBe(1);
+      const owner = [...target.context.typedDraftOwners.values()][0];
+      expect(owner.texts).toEqual(Array.from({ length: 8 }, (_, index) => `unverified request ${192 + index}`));
+      expect(owner.deliveryIds).toEqual(ids.slice(-8));
+    } finally { target.context.dispose(); }
+  });
+
+  it("RESCOPE bounds evict the oldest timestamps after 200 unverified surfaces", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
+    try {
+      for (let index = 0; index < 200; index++) {
+        const surface = { ref: `surface:bounded-${index}`, id: `dddddddd-dddd-4ddd-8ddd-${String(index).padStart(12, "0")}`, title: "synthetic", type: "terminal", index: index + 3, selected: false };
+        target.pane.extraSurfaces.push(surface);
+        expect(await target.typeDraft(`unverified surface ${index}`, surface.ref)).toMatchObject({ typed: true, submitted: false });
+        // Protect the first insertion with a newer timestamp: eviction must use at, not insertion order.
+        const owner = [...target.context.typedDraftOwners.values()].find(entry => entry.ref === surface.ref);
+        if (owner) owner.at = index === 0 ? Number.MAX_SAFE_INTEGER : index;
+      }
+      expect(target.context.typedDraftOwners.size).toBe(128);
+      expect([...target.context.typedDraftOwners.values()].map(owner => owner.ref)).toEqual([
+        "surface:bounded-0", ...Array.from({ length: 127 }, (_, index) => `surface:bounded-${73 + index}`),
+      ]);
+    } finally { target.context.dispose(); }
+  });
+
+  it("RESCOPE bounds prune transcript-seen entries above an empty composer but retain queued entries", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
+    try {
+      await target.typeDraft("submitted first request");
+      const second = await target.typeDraft("queued second request");
+      target.pane.frames.draft = `OpenAI Codex\n${codexRows("submitted first request")}\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ queued second request\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`;
+      target.pane.phase = "draft";
+      await target.readScreen();
+      expect([...target.context.typedDraftOwners.values()]).toEqual([expect.objectContaining({ text: "queued second request", texts: ["queued second request"], deliveryIds: [second.delivery_id] })]);
+      target.pane.frames.draft = `OpenAI Codex\n${codexRows("queued second request")}\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`;
+      await target.readScreen();
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  });
+
+  it("#994 an internal contract relay without a supplied ID registers spendable ownership", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      const { runWithCallerContext } = await import("../src/caller-context.js");
+      const deliver = target.context.lifecycleAgentInputDeliverer;
+      if (!deliver) throw new Error("lifecycle relay was not initialized");
+      const delivery = await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, () =>
+        deliver({ agent_id: target.spawned.agent_id, text: "cmuxlayer contract for synthetic-agent: Read and follow /tmp/synthetic/contract.md", press_enter: false, source_event: "send_input" }));
+      expect(delivery.delivery_id).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/));
+      expect([...target.context.typedDraftOwners.values()]).toEqual([expect.objectContaining({ deliveryIds: [delivery.delivery_id] })]);
+      target.pane.phase = "draft";
+      expect(await target.keyReturn(LEAD_UUID)).toMatchObject({ submit_verified: true });
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE background settlement spends only the proven delivery ownership", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      target.pane.swallow = 99;
+      expect((await target.send(PONG)).submitted).toBe(false);
+      expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
+      target.pane.phase = "after";
+      await target.engine.verifyPendingDeliveries();
+      expect(target.engine.listDeliveryReceipts()).toEqual(expect.arrayContaining([expect.objectContaining({ delivery_state: "submitted", submit_verified: true })]));
+      expect(target.context.typedDraftOwners.size, JSON.stringify([...target.context.typedDraftOwners])).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE an unchanged owner draft does not expire before verified submission", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      await target.typeDraft(PONG);
+      target.pane.phase = "draft";
+      for (const owner of target.context.typedDraftOwners.values()) owner.at -= 300_001;
+      const receipt = await target.keyReturn(LEAD_UUID);
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([PONG]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE another caller cannot Return an owned visible queue", async () => {
+    const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+    const target = await setup({ empty: render(""), buffered: render(""), draft: render, after: render("") });
+    try {
+      target.pane.frames.after = () => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${PONG}\n›\n  GPT-6.1-Sol high · ~/repo`;
+      expect((await target.send(PONG)).ok).toBe(true);
+      const returns = target.pane.returns;
+      const receipt = await target.keyReturn(OTHER_UUID);
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(target.pane.returns).toBe(returns);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true])("#994 a retry cannot retype after background settlement during validation (targeting=%s)", async targeting => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      target.pane.swallow = 99;
+      const first = await target.send(PONG, targeting, true);
+      const id = targeting ? first.receipts[0].delivery_id : first.delivery_id;
+      const writes = () => target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      const before = writes();
+      let settled: ReturnType<typeof target.engine.getDeliveryReceipt> = null;
+      const findDuplicate = target.engine.findOpenDuplicate.bind(target.engine);
+      vi.spyOn(target.engine, "findOpenDuplicate").mockImplementation(args => {
+        const duplicate = findDuplicate(args);
+        if (duplicate) target.pane.beforeRead = async () => {
+        target.pane.submitted.push(PONG); target.pane.phase = "after"; target.pane.swallow = 0;
+        await target.engine.verifyPendingDeliveries();
+        expect(target.engine.getDeliveryReceipt(id)).toMatchObject({ terminal: true, submit_verified: true });
+        const verified = target.engine.getDeliveryReceipt(id);
+        if (!verified) throw new Error("verified receipt disappeared");
+        settled = target.engine.resolveDelivery({ ...verified, rpc_methods: ["surface.send_text", "surface.send_key"], submit_evidence: "transcript_echo" });
+        };
+        return duplicate;
+      });
+      const result = await target.send(PONG, targeting, true);
+      expect(writes()).toBe(before);
+      expect(targeting ? result.receipts[0] : result).toMatchObject({ submitted: true, delivery_id: id });
+      expect(targeting ? result.receipts[0] : result).toMatchObject({ typed: settled?.typed, rpc_methods: settled?.rpc_methods, submit_dispatched: settled?.submit_dispatched, submit_evidence: "transcript_echo" });
+      expect(target.engine.getDeliveryReceipt(id)).toEqual(settled);
+      expect(target.pane.submitted).toEqual([PONG]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE a same-caller text retry only retries submission", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      target.pane.swallow = 99;
+      expect((await target.send(PONG)).submitted).toBe(false);
+      const writes = target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      expect((await target.send(PONG)).submitted).toBe(false);
+      target.pane.swallow = 0;
+      expect(await target.send(PONG)).toMatchObject({ ok: true, submitted: true });
+      expect(target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length).toBe(writes);
+      expect(target.pane.submitted).toEqual([PONG]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["agent", "surface"])("RESCOPE ignored submits fail honestly and preserve repeated owner retries (%s)", async mode => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: (text) => fixture("idle-draft").replace(PONG, text), after: (text) => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      target.pane.swallow = 99;
+      const receipt = mode === "agent" ? await target.send(PONG) : await target.surfaceSend(PONG, false);
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ delivery_state: "pending_verify", submitted: false });
+      const writes = target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      const firstRetry = await target.keyReturn(LEAD_UUID);
+      expect(firstRetry.error_code).not.toBe("blocked_by_foreign_draft");
+      target.pane.swallow = 0;
+      const retry = await target.keyReturn(LEAD_UUID);
+      expect(retry, JSON.stringify(retry)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([PONG]);
+      expect(target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length).toBe(writes);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([LEAD_UUID, OTHER_UUID])("RESCOPE two owned queues moved into the composer remain attributed (%s)", async caller => {
+    const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer\n  tab to queue message`;
+    const target = await setup({ empty: render("Ask Codex to do anything"), buffered: render("Ask Codex to do anything"), draft: render, after: render("Ask Codex to do anything") });
+    try {
+      target.pane.frames.after = () => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n${target.pane.queued.map(text => `  ↳ ${text}`).join("\n")}\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      for (const text of ["first request", "second request"]) {
+        const queued = await target.send(text);
+        expect(queued, JSON.stringify(queued)).toMatchObject({ ok: true, delivery_state: "queued", queued_behind_turn: true });
+      }
+      const combined = target.pane.queued.join("\n");
+      target.pane.queued = []; target.pane.text = combined; target.pane.phase = "draft";
+      target.pane.frames.draft = text => `OpenAI Codex\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      target.pane.frames.after = text => `OpenAI Codex\n${codexRows(text)}\nWorking (0s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      const returns = target.pane.returns;
+      const released = await target.keyReturn(caller);
+      if (caller === LEAD_UUID) {
+        expect(released, JSON.stringify(released)).toMatchObject({ ok: true, submit_verified: true });
+        expect(target.pane.submitted).toEqual([combined]);
+      } else {
+        expect(released.error_code).toBe("blocked_by_foreign_draft");
+        expect(target.pane.returns).toBe(returns);
+      }
+    } finally { target.context.dispose(); }
+  }, 30_000);
 
   it("idle: reports submitted only once the message is in the transcript", async () => {
     const t = await setup({

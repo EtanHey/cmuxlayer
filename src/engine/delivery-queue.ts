@@ -413,6 +413,7 @@ export class DeliveryQueue {
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
     const existing = this.deliveryReceipts.get(input.delivery_id);
+    if (existing?.terminal && existing.submit_verified === true && existing.agent_id === input.agent_id && existing.text === input.text) return snapshotDeliveryReceipt(existing);
     const receipt: AgentDeliveryReceipt = {
       ...input,
       delivery_state: "pending_verify",

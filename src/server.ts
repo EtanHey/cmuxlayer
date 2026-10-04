@@ -183,6 +183,7 @@ import {
   extractComposerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
+  screenContainsCompleteSubmittedText,
   composerHoldsForeignDraft,
   screenShowsQueuedAgentInput,
   screenShowsQueuedCursorFollowup,
@@ -978,6 +979,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // in src/delivery/engine.ts; these are its bindings, names unchanged.
   const {
     callerOwnsTypedDraft,
+    settleVerifiedDeliveryDraft,
     getSurfaceDelivery,
     withSurfaceWrite,
     observedSurfaceUuid,
@@ -2894,6 +2896,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       text: string;
       press_enter: boolean;
       allow_busy?: boolean;
+      retry_owned_draft?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
       timings?: DeliveryPhaseTimings;
@@ -3127,6 +3130,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (args.timings) {
         args.timings.route += Math.max(0, routeElapsed - enumerateElapsed);
       }
+      const retrySettled = new Error("Owned retry already verified");
+      let settledRetry: AgentDeliveryReceipt | null = null;
       const assertDeliveryRouteCurrent = async (): Promise<void> => {
         let current: typeof deliveryRoute;
         try {
@@ -3152,11 +3157,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               `delivery; refusing to continue on another surface.`,
           );
         }
+        const receipt = args.retry_owned_draft && args.delivery_id ? engine.getDeliveryReceipt(args.delivery_id) : null;
+        if (receipt?.terminal && receipt.submit_verified === true && receipt.delivery_state === "submitted" && receipt.agent_id === args.agent_id && receipt.text === args.text) {
+          settledRetry = receipt;
+          throw retrySettled;
+        }
       };
 
       return withSurfaceWrite(
         deliveryRoute.surface_id,
         async () => {
+          try {
           await assertDeliveryRouteCurrent();
           const delivery = await executeDeliveryEngine({
             surface: deliveryRoute.surface_id,
@@ -3165,6 +3176,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
+            retry_owned_draft: args.retry_owned_draft,
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: resolveCurrentCallerAgent()?.agent_id ?? null,
@@ -3209,6 +3221,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           }
           return { ...delivery, queued_behind_turn: queuedBehindTurn };
+          } catch (error) {
+            if (error !== retrySettled || !settledRetry) throw error;
+            return { ...buildPublicDeliveryReceipt({ ...settledRetry, typed: settledRetry.typed === true, submit_attempted: settledRetry.press_enter }),
+              bytes: Buffer.byteLength(settledRetry.text), queued_behind_turn: false, retry_settled: true };
+          }
         },
         {
           toolName: args.source_event,
@@ -3628,13 +3645,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // frame; without one (its read failed, or the daemon restarted) the
         // receipt stays pending until its deadline.
         if (cli === "codex" || agent.cli === "codex") {
-          return !pending && codexScreenShowsSubmit(
-            context.deliveryPreTypeScreens.get(receipt.delivery_id),
-            resolvedSnapshot.text,
-            receipt.text,
-          )
-            ? { outcome: "delivered" as const, submit_verified: true }
-            : { outcome: "pending" as const };
+          const verified = !pending && codexScreenShowsSubmit(
+            context.deliveryPreTypeScreens.get(receipt.delivery_id), resolvedSnapshot.text, receipt.text,
+          );
+          if (verified) settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+          return verified ? { outcome: "delivered" as const, submit_verified: true } : { outcome: "pending" as const };
         }
         const composerCleared = composer !== null && composer.trim() === "";
         const correlationTail = receipt.text
@@ -3646,7 +3661,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             correlationTail,
           ) &&
           !pending;
-        if (composerCleared || inTranscript) {
+        const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
+        const relayProof = receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
+          (screenContainsCompleteSubmittedText(resolvedSnapshot.text, receipt.text) && !screenContainsCompleteSubmittedText(baseline, receipt.text)) ||
+          (["working", "thinking"].includes(parsed?.status ?? "") && !["working", "thinking"].includes(parseScreen(baseline).status))
+        ));
+        if (relayProof && (composerCleared || inTranscript)) {
+          settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
           return { outcome: "delivered" as const, submit_verified: true };
         }
         return { outcome: "pending" as const };
@@ -3895,6 +3916,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       collectDeliveryEvidence,
       collectTargetRecords,
       deliverAgentInput,
+      callerOwnsTypedDraft,
       engine,
       observePausedTarget,
       registry,
