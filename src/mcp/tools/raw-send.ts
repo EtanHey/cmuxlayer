@@ -246,7 +246,7 @@ export async function sendInput(
           rpc_methods: [],
         });
       }
-      startBackgroundDelivery(record, backgroundLifecycle);
+      startBackgroundDelivery(record, backgroundLifecycle, sourceEvent);
       const publicBackgroundDeliveryId =
         backgroundLifecycle || sourceEvent !== "send_to"
           ? record.delivery_id

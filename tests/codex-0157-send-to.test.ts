@@ -237,12 +237,47 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
     try {
       target.pane.swallow = 99;
-      expect((await target.send(PONG)).submitted).toBe(false);
+      expect((await target.send(PONG)).error_code).toBe("submit_unverified");
       expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
       target.pane.phase = "after";
       await target.engine.verifyPendingDeliveries();
       expect(target.engine.listDeliveryReceipts()).toEqual(expect.arrayContaining([expect.objectContaining({ delivery_state: "submitted", submit_verified: true })]));
       expect(target.context.typedDraftOwners.size, JSON.stringify([...target.context.typedDraftOwners])).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE refuses to append to an idle stalled Codex queue", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: fixture("idle-empty") });
+    try {
+      target.pane.frames.empty = "OpenAI Codex\nQueued follow-up inputs\n  ↳ earlier queued message\n›\n  GPT-6.1-Sol high · ~/repo";
+      const writes = target.exec.mock.calls.filter(([, argv]: [string, string[]]) => argv.includes("send") || argv.includes("set-buffer")).length;
+      expect(await target.send(PONG)).toMatchObject({ ok: false, error_code: "queued_stalled_idle", typed: false });
+      expect(target.exec.mock.calls.filter(([, argv]: [string, string[]]) => argv.includes("send") || argv.includes("set-buffer"))).toHaveLength(writes);
+      expect(target.pane.returns + target.pane.tabs).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("RESCOPE an older identical queue row cannot prove a new surface send", async () => {
+    const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\nMessages to be submitted after next tool call\n  ↳ ${PONG}\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+    for (const swallowed of [true, false]) {
+      const target = await setup({ empty: render(""), buffered: render(""), draft: render, after: render("") });
+      try {
+        target.pane.swallowTabs = swallowed ? 99 : 0;
+        expect(await target.surfaceSend(PONG, false)).toMatchObject({ ok: false, error_code: "submit_unverified", submitted: false });
+        expect(target.pane.submitted).toEqual([]);
+        expect(target.pane.queued).toEqual(swallowed ? [] : [PONG]);
+        expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
+      } finally { target.context.dispose(); }
+    }
+  }, 30_000);
+
+  it("RESCOPE a truncated queue prefix is not verified success", async () => {
+    const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+    const target = await setup({ empty: render(""), buffered: render(""), draft: render, after: `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ request prefix…\n›\n  GPT-6.1-Sol high · ~/repo` });
+    try {
+      const receipt = await target.send("request prefix original full instruction");
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ ok: false, error_code: "submit_unverified", submitted: false });
+      expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
     } finally { target.context.dispose(); }
   }, 30_000);
 
@@ -306,9 +341,9 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
     try {
       target.pane.swallow = 99;
-      expect((await target.send(PONG)).submitted).toBe(false);
+      expect((await target.send(PONG)).error_code).toBe("submit_unverified");
       const writes = target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
-      expect((await target.send(PONG)).submitted).toBe(false);
+      expect((await target.send(PONG)).error_code).toBe("submit_unverified");
       target.pane.swallow = 0;
       expect(await target.send(PONG)).toMatchObject({ ok: true, submitted: true });
       expect(target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length).toBe(writes);
@@ -321,7 +356,8 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     try {
       target.pane.swallow = 99;
       const receipt = mode === "agent" ? await target.send(PONG) : await target.surfaceSend(PONG, false);
-      expect(receipt, JSON.stringify(receipt)).toMatchObject({ delivery_state: "pending_verify", submitted: false });
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ ok: false, error_code: "submit_unverified", delivery_state: "pending_verify", submitted: false });
+      expect(receipt.error).toContain("your text is still in the composer; nothing else was typed");
       const writes = target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
       const firstRetry = await target.keyReturn(LEAD_UUID);
       expect(firstRetry.error_code).not.toBe("blocked_by_foreign_draft");
@@ -367,7 +403,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       t.pane.swallow = 1;
       const receipt = await t.send(PONG);
       expect(t.pane.submitted, JSON.stringify(receipt)).toEqual([PONG]);
-      expect(receipt).toMatchObject({ ok: true, submitted: true, retry_count: 1 });
+      expect(receipt).toMatchObject({ ok: true, submitted: true });
       expect(t.pane.tabs).toBe(0);
       expect(t.pane.returns).toBe(2);
     } finally { t.context.dispose(); }
@@ -449,7 +485,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(t.pane.tabs, JSON.stringify(receipt)).toBe(1);
       expect(t.pane.returns).toBe(1);
       expect(t.pane.submitted).toEqual([LIST]);
-      expect(receipt).toMatchObject({ submitted: true, retry_count: 1 });
+      expect(receipt).toMatchObject({ submitted: true });
     } finally { t.context.dispose(); }
   }, 30_000);
 
@@ -518,7 +554,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     try {
       t.pane.swallow = 99;
       const receipt = await t.send(LONG);
-      expect(receipt, JSON.stringify(receipt)).toMatchObject({ ok: true, submitted: false });
+      expect(receipt, JSON.stringify(receipt)).toMatchObject({ ok: false, error_code: "submit_unverified", submitted: false });
       expect(t.pane.submitted).toHaveLength(0);
       t.pane.swallow = 0;
       const returns = t.pane.returns;
@@ -679,7 +715,8 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     });
     try {
       const receipt = await t.surfaceSend(PONG, background);
-      expect(receipt.ok, JSON.stringify(receipt)).toBe(true);
+      expect(receipt.ok, JSON.stringify(receipt)).toBe(!background);
+      if (background) expect(receipt.error_code).toBe("submit_unverified");
       await vi.waitFor(() => expect(t.pane.submitted).toEqual([PONG]), { timeout: 10_000 });
       expect(t.pane.returns).toBe(1);
     } finally { t.context.dispose(); }

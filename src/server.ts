@@ -183,7 +183,7 @@ import {
   extractComposerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
-  screenContainsCompleteSubmittedText,
+  screenTranscriptContainsText,
   composerHoldsForeignDraft,
   screenShowsQueuedAgentInput,
   screenShowsQueuedCursorFollowup,
@@ -3220,7 +3220,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               verifiedDelivery: args.source_event === "send_to",
             });
           }
-          return { ...delivery, queued_behind_turn: queuedBehindTurn };
+          return { ...delivery, queued_behind_turn: queuedBehindTurn || delivery.queue_verified === true };
           } catch (error) {
             if (error !== retrySettled || !settledRetry) throw error;
             return { ...buildPublicDeliveryReceipt({ ...settledRetry, typed: settledRetry.typed === true, submit_attempted: settledRetry.press_enter }),
@@ -3663,7 +3663,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !pending;
         const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
         const relayProof = receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
-          (screenContainsCompleteSubmittedText(resolvedSnapshot.text, receipt.text) && !screenContainsCompleteSubmittedText(baseline, receipt.text)) ||
+          (screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) && !screenTranscriptContainsText(baseline, receipt.text)) ||
           (["working", "thinking"].includes(parsed?.status ?? "") && !["working", "thinking"].includes(parseScreen(baseline).status))
         ));
         if (relayProof && (composerCleared || inTranscript)) {

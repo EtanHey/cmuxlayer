@@ -427,7 +427,7 @@ export function screenTranscriptContainsText(screen: string, text: string): bool
   const lines = normalizeTerminalText(screen).split("\n");
   let composer = -1;
   for (let index = lines.length - 1; index >= 0; index--) {
-    if (/^[ \t]*(?:[❯›»>]|cursor>)(?:[ \t]|$)/u.test(lines[index])) { composer = index; break; }
+    if (/^[ \t]*(?:[❯›»>→]|cursor>|codex>|gemini>|kiro>)(?:[ \t]|$)/u.test(lines[index])) { composer = index; break; }
   }
   return composer >= 0 && screenContainsCompleteSubmittedText(lines.slice(0, composer).join("\n"), text);
 }
@@ -1122,6 +1122,7 @@ export function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean
 export function screenShowsQueuedCursorFollowup(
   screenText: string,
   submittedText: string,
+  opts: { exact?: boolean } = {},
 ): boolean {
   if (inferComposerCli(screenText) !== "cursor") {
     return false;
@@ -1138,7 +1139,7 @@ export function screenShowsQueuedCursorFollowup(
   if (composer === null || composer.trim() !== "") {
     return false;
   }
-  if (!normalizeTerminalText(screenText).includes(tail)) {
+  if (opts.exact ? !screenContainsCompleteSubmittedText(screenText, submittedText) : !normalizeTerminalText(screenText).includes(tail)) {
     return false;
   }
   return (

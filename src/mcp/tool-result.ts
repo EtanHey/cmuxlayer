@@ -133,22 +133,34 @@ export function shapeSuccessfulSendToResult(
   args: Record<string, unknown>,
 ): ToolReturn {
   const full = result.structuredContent;
-  const verifiedSubmit =
-    (full?.delivery_state === "submitted" && full.submitted === true) ||
-    (args.mode === "key" &&
-      full?.submit_attempted === true &&
-      full.submit_dispatched === true &&
-      full.submit_verified === true);
-  if (
-    result.isError === true ||
-    !full ||
-    full.ok !== true ||
-    !verifiedSubmit
-  ) {
-    return result;
+  const proof = (receipt: Record<string, unknown>): boolean =>
+    (receipt.delivery_state === "submitted" && receipt.submitted === true) ||
+    ((receipt.delivery_state === "queued" || receipt.delivery_state === "queued_followup") && receipt.queue_verified === true);
+  const textSubmit = (args.mode === "agent" || args.mode === "surface" || args.mode === undefined) && args.press_enter !== false;
+  if (!full || full.ok !== true || result.isError === true) return result;
+  const attemptedReceipts = Array.isArray(full.receipts) ? full.receipts.filter(receipt => receipt?.resolution !== "filtered_out" && !receipt?.skipped) : [];
+  const batchVerified = attemptedReceipts.length > 0 && attemptedReceipts.every(receipt => receipt && typeof receipt === "object" && proof(receipt));
+  if (textSubmit && !proof(full) && !batchVerified) {
+    const message = full.submit_verification_reason === "input_still_pending"
+      ? "your text is still in the composer; nothing else was typed"
+      : "submission not verified; no additional text was typed; read_screen or wait_for the delivery result";
+    return err(new Error(message), { ...full, ok: false, error_code: "submit_unverified",
+      ...(Array.isArray(full.receipts) ? { receipts: full.receipts.map(receipt =>
+        attemptedReceipts.includes(receipt) && !proof(receipt)
+          ? { ...receipt, ok: false, error_code: "submit_unverified" } : receipt) } : {}),
+    });
   }
+  if (batchVerified && args.verbose !== true) {
+    const lean = { ok: true, caller_agent_id: full.caller_agent_id ?? null,
+      receipts: (attemptedReceipts as Record<string, unknown>[]).map(receipt => shapeSuccessfulSendToResult(
+        okFormatted("", { ...receipt, caller_agent_id: full.caller_agent_id ?? null }), { ...args, mode: "agent", agent_id: receipt.agent_id },
+      ).structuredContent) };
+    return { ...result, content: [{ type: "text", text: JSON.stringify(lean) }], structuredContent: lean };
+  }
+  const verifiedKey = args.mode === "key" && full.submit_attempted === true && full.submit_dispatched === true && full.submit_verified === true;
+  if (args.verbose === true || (!proof(full) && !verifiedKey)) return result;
 
-  const surfaceMode = args.mode !== "agent";
+  const surfaceMode = args.mode === "surface" || args.mode === "key" || args.mode === "command" || (args.mode === undefined && !args.agent_id && !args.target);
   const identityKey = surfaceMode ? "surface" : "agent_id";
   const identity =
     full[identityKey] ??
@@ -156,10 +168,7 @@ export function shapeSuccessfulSendToResult(
     (surfaceMode ? args.target : undefined);
   const receiptFloor = {
     ok: true,
-    retry_count:
-      typeof full.retry_count === "number"
-        ? full.retry_count
-        : currentTransportRetryCount(),
+    ...(args.mode === "key" ? { retry_count: full.retry_count ?? currentTransportRetryCount() } : {}),
     ...(typeof identity === "string" ? { [identityKey]: identity } : {}),
   };
   const lean: Record<string, unknown> = {
@@ -173,17 +182,17 @@ export function shapeSuccessfulSendToResult(
             full.submit_verification_reason ?? null,
         }
       : {
-          delivery_state: "submitted",
-          submitted: true,
+          delivery_state: full.delivery_state,
+          submitted: full.submitted,
         }),
     ...(typeof full.delivery_id === "string"
       ? { delivery_id: full.delivery_id }
       : {}),
     ...(full.queued_behind_turn === true ? { queued_behind_turn: true } : {}),
-    ...(typeof full.duplicate_of === "string"
+    ...(args.mode === "key" && typeof full.duplicate_of === "string"
       ? { duplicate_of: full.duplicate_of }
       : {}),
-    ...(Array.isArray(full.warnings) && full.warnings.length > 0
+    ...(args.mode === "key" && Array.isArray(full.warnings) && full.warnings.length > 0
       ? { warnings: full.warnings }
       : {}),
   };

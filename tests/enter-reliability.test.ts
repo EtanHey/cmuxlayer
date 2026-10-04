@@ -256,7 +256,7 @@ class FakeClaudeSurfaceClient {
     this.returnCount += 1;
     this.queuedCodexReadsRemaining = this.queuedCodexReadsAfterReturn;
     if (this.returnCount >= this.requiredReturns) {
-      if (this.cli === "codex") this.codexTranscript.push(this.pendingText);
+      this.codexTranscript.push(this.pendingText);
       this.pendingText = "";
       this.mode = this.completionMode;
       return;
@@ -320,7 +320,7 @@ class FakeClaudeSurfaceClient {
     ) {
       return this.postReturnPendingScreenText;
     }
-    if (!this.pendingText && this.postReturnScreenText !== null) {
+    if (this.returnCount > 0 && !this.pendingText && this.postReturnScreenText !== null) {
       return this.postReturnScreenText;
     }
     if (this.cli === "codex") {
@@ -354,11 +354,15 @@ class FakeClaudeSurfaceClient {
       return `OpenAI Codex\n${transcript}${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
     }
 
-    if (this.mode === "working") {
-      return "Claude Code\n✻ Working\n❯\n";
+    if (this.cli === "cursor") {
+      return `Cursor Agent\n${this.codexTranscript.join("\n")}\n${this.mode === "working" ? "Working" : "Auto"}\ncursor> ${tail}`;
     }
 
-    return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
+    if (this.mode === "working") {
+      return `Claude Code\n${this.codexTranscript.join("\n")}\n✻ Working\n❯\n`;
+    }
+
+    return `Claude Code\n${this.codexTranscript.join("\n")}\n> ${tail}\nCLAUDE_COUNTER:1\n`;
   }
 }
 
@@ -527,12 +531,12 @@ class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
     const tail = this.pendingText.slice(-160);
     if (this.cli === "cursor") {
       if (!tail && this.submittedText !== null) {
-        return "Cursor Agent\nGenerating 1.2k tokens\n";
+        return `Cursor Agent\n${this.submittedText}\nGenerating 1.2k tokens\ncursor> `;
       }
       return `Cursor Agent\ncursor> ${tail}\nAuto\n`;
     }
     if (!tail && this.submittedText !== null) {
-      return "Claude Code\n✻ Working\n";
+      return `Claude Code\n${this.submittedText}\n✻ Working\n❯`;
     }
     return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
   }
@@ -783,9 +787,11 @@ describe("enter reliability", () => {
     10_000,
   );
 
-  it("#636 D1 lets the original caller submit its exhausted owned Claude draft", async () => {
+  it.each(["key", "agent"])("#636 D1 lets the original caller retry its exhausted owned Claude draft (%s)", async mode => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 3;
+    client.preReturnScreenText = "Claude Code\n✻ Working\n❯";
+    client.postReturnPendingScreenText = "Claude Code\n✻ Working\n❯ D1 caller-owned exhausted draft";
     server = createReliabilityServer(client);
     const target = registerAgent(server, { cli: "claude", state: "ready" });
     const asCaller = <T>(operation: () => T) =>
@@ -804,6 +810,8 @@ describe("enter reliability", () => {
     await vi.advanceTimersByTimeAsync(6_000);
     const initial = parseResult(await initialPromise);
     expect(initial).toMatchObject({
+      ok: false,
+      error_code: "submit_unverified",
       delivery_state: "pending_verify",
       retry_count: 1,
       typed: true,
@@ -813,10 +821,9 @@ describe("enter reliability", () => {
     const recoveredPromise = asCaller(() =>
       server._registeredTools.send_to.handler(
         {
-          mode: "key",
-          surface: target.surface_id,
-          workspace: target.workspace_id ?? undefined,
-          text: "return",
+          ...(mode === "key"
+            ? { mode, surface: target.surface_id, text: "return" }
+            : { mode, agent_id: target.agent_id, text: "D1 caller-owned exhausted draft" }),
         },
         {} as any,
       ),
@@ -828,9 +835,9 @@ describe("enter reliability", () => {
     expect(recovered.error_code).not.toBe("blocked_by_foreign_draft");
     expect(recovered).toMatchObject({
       ok: true,
-      key_dispatched: true,
       submit_verified: true,
     });
+    expect(client.sendCalls).toEqual(["D1 caller-owned exhausted draft"]);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(3);
     expect(
       __submitEvidenceTestHooks.screenShowsPendingInput(
@@ -840,6 +847,21 @@ describe("enter reliability", () => {
     ).toBe(false);
     expect(finalScreen).toContain("Working");
   }, 10_000);
+
+  it("RESCOPE a cleared composer on an unchanged active turn is not submit proof", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    const stale = "Claude Code\n✻ Working\n❯";
+    client.preReturnScreenText = stale;
+    client.postReturnPendingScreenText = stale;
+    client.requiredReturns = 99;
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "working" });
+    const result = parseResult(await callTool(server, "send_to", { agent_id: "agent-1", text: "new unrelated request", press_enter: true }));
+    expect(result).toMatchObject({ ok: false, error_code: "submit_unverified", delivery_state: "pending_verify", submitted: false });
+    await engineForTests(server).verifyPendingDeliveries();
+    expect(engineForTests(server).getDeliveryReceipt(result.delivery_id)).toMatchObject({ delivery_state: "pending_verify", terminal: false });
+    expect(client.sendCalls).toEqual(["new unrelated request"]);
+  });
 
   it("verifies a cleared idle composer without waiting for working status", async () => {
     const client = new FakeClaudeSurfaceClient();
@@ -930,7 +952,8 @@ describe("enter reliability", () => {
     const result = await resultPromise;
     const parsed = parseResult(result);
 
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.submit_verified).toBeNull();
     expect(settledAt).not.toBeNull();
@@ -1141,18 +1164,17 @@ describe("enter reliability", () => {
       },
     });
     const parsed = result.structuredContent as Record<string, unknown>;
-    expect(result.isError).not.toBe(true);
+    expect(result.isError, JSON.stringify(parsed)).not.toBe(true);
     expect(parsed).toEqual({
       ok: true,
       caller_agent_id: null,
-      retry_count: 0,
       agent_id: "agent-1",
       delivery_state: "submitted",
       submitted: true,
       delivery_id: expect.any(String),
     });
     // #636 adds the required caller_agent_id:null scalar to this receipt.
-    expect(Buffer.byteLength(JSON.stringify(parsed))).toBe(170);
+    expect(Buffer.byteLength(JSON.stringify(parsed))).toBe(154);
     for (const field of ["rpc_methods", "timings_ms", "transport", "WARNING"])
       expect(parsed).not.toHaveProperty(field);
     expect(result.content).toEqual([
@@ -1329,7 +1351,8 @@ describe("enter reliability", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     const waited = await waitedPromise;
 
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parseResult(waited)).toMatchObject({
       agent_id: "agent-1",
       delivery_id: parsed.delivery_id,
@@ -1436,8 +1459,9 @@ describe("enter reliability", () => {
     const parsed = parseResult(result);
     const events = readEventLog();
 
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
@@ -1541,8 +1565,9 @@ describe("enter reliability", () => {
       const result = await resultPromise;
       const parsed = parseResult(result);
 
-      expect(result.isError).not.toBe(true);
-      expect(parsed.ok).toBe(true);
+      expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+      expect(parsed.ok).toBe(false);
       expect(parsed.delivery_state).toBe("pending_verify");
       expect(parsed.terminal).toBe(false);
       expect(parsed.submit_verified).toBeNull();
@@ -1699,8 +1724,9 @@ describe("enter reliability", () => {
     );
 
     expect(followUp).toHaveLength(541);
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
@@ -1714,7 +1740,7 @@ describe("enter reliability", () => {
     expect(events[0]?.retry_count).toBe(1);
   }, 10_000);
 
-  it("accepts the exact PR343 live Codex queue as a nonterminal delivery", async () => {
+  it("keeps the truncated PR343 live Codex queue unverified", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1743,10 +1769,11 @@ describe("enter reliability", () => {
       "› Summarize recent commits",
     );
     expect(client.sendCalls.join("")).toBe(PR343_LIVE_QUEUE_PAYLOAD);
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery).toBe("pending_verify");
+    expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
@@ -1755,7 +1782,7 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
-  it("accepts the exact Codex queue through send_to mode=surface", async () => {
+  it("keeps the truncated Codex queue unverified through send_to mode=surface", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1773,10 +1800,11 @@ describe("enter reliability", () => {
     });
     const parsed = parseResult(result);
 
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery).toBe("pending_verify");
+    expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.delivery_id).toEqual(expect.any(String));
     expect(parsed.submit_verified).toBeNull();
@@ -1802,13 +1830,12 @@ describe("enter reliability", () => {
     });
   }, 10_000);
 
-  it("accepts a correlated live Codex queue on the first verification frame within 600ms", async () => {
+  it("verifies a complete live Codex queue on the first verification frame within 600ms", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
     client.keepWorkingStatusWhilePending = true;
-    client.postReturnPendingScreenText =
-      CODEX_PR343_LIVE_QUEUED_FOLLOWUP_SCREEN;
+    client.postReturnPendingScreenText = "OpenAI Codex\nWorking (5s • esc to interrupt)\nMessages to be submitted after next tool call\n  ↳ complete queued request\n›\n  GPT-6.1-Sol high · ~/repo";
     server = createReliabilityServer(client);
     registerAgent(server, { state: "working", cli: "codex" });
     const tool = server._registeredTools.send_to;
@@ -1819,7 +1846,7 @@ describe("enter reliability", () => {
       .handler(
         {
           agent_id: "agent-1",
-          text: PR343_LIVE_QUEUE_PAYLOAD,
+          text: "complete queued request",
           press_enter: true,
           allow_busy: true,
         },
@@ -1889,7 +1916,8 @@ describe("enter reliability", () => {
     const result = await resultPromise;
     const parsed = parseResult(result);
 
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.submit_verified).toBeNull();
     expect(settledAt).not.toBeNull();
@@ -1899,7 +1927,7 @@ describe("enter reliability", () => {
     expect(client.sendKeyCalls.filter((key) => key === "tab")).toHaveLength(1);
   }, 10_000);
 
-  it("Probe E: accepts when a correlated Codex queue appears before a truncated composer transition", async () => {
+  it("Probe E: keeps a truncated queue unverified before a pending composer transition", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1932,13 +1960,14 @@ describe("enter reliability", () => {
     );
 
     expect(followUp).toHaveLength(541);
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery).toBe("pending_verify");
+    expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.retry_count).toBe(0);
+    expect(parsed.retry_count).toBe(1);
     expect(queuedScreen).toContain("↳ Probe E queued follow-up evidence");
     expect(queuedScreen).not.toContain(tail);
     expect(composerScreen).toContain("› ");
@@ -1948,7 +1977,7 @@ describe("enter reliability", () => {
     );
     expect(events).toHaveLength(1);
     expect(events[0]?.submit_verified).toBeNull();
-    expect(events[0]?.retry_count).toBe(0);
+    expect(events[0]?.retry_count).toBe(1);
   }, 10_000);
 
   it("ignores stale queue-like transcript prose when the current Codex composer is clear", async () => {
@@ -1982,7 +2011,7 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
-  it("accepts a wrapped live Codex queue heading as a nonterminal delivery", async () => {
+  it("keeps a wrapped Codex queue with a truncated item unverified", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -2007,19 +2036,20 @@ describe("enter reliability", () => {
       "Messages to be submitted after next\n  tool call",
     );
     expect(queuedScreen).toContain("↳ narrow-pane queued follow-up");
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery).toBe("pending_verify");
+    expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.retry_count).toBe(0);
+    expect(parsed.retry_count).toBe(1);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
   }, 10_000);
 
-  it("accepts decorated wrapped Codex queue chrome correlated to this send", async () => {
+  it("keeps decorated wrapped Codex queue chrome with a truncated item unverified", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -2045,13 +2075,14 @@ describe("enter reliability", () => {
 
     expect(queuedScreen).toContain("│   tool call");
     expect(queuedScreen).toContain("│   ↳ decorated correlated queue payload");
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery).toBe("pending_verify");
+    expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.retry_count).toBe(0);
+    expect(parsed.retry_count).toBe(1);
   }, 10_000);
 
   it("ignores adjacent Codex queue chrome for another sender's visible prefix", async () => {
@@ -2098,8 +2129,9 @@ describe("enter reliability", () => {
       (event) => event.event_type === "send_to",
     );
 
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
@@ -2137,7 +2169,7 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
-  it("accepts live Cursor response evidence when the composer retains accepted text", async () => {
+  it("keeps fresh Cursor response evidence unverified while its composer retains our text", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
     client.cli = "cursor";
@@ -2165,9 +2197,11 @@ describe("enter reliability", () => {
       "Running the read-only test command for CURSOR_WORKING_PROBE",
     );
     expect(client.screenReads.at(-1)).not.toContain("⬡ Running...");
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -2199,8 +2233,9 @@ describe("enter reliability", () => {
     expect(client.screenReads.at(-1)).toBe(
       CURSOR_PR343_V2_IMMEDIATE_WORKING_RESPONSE_SCREEN,
     );
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
@@ -2231,8 +2266,9 @@ describe("enter reliability", () => {
     expect(client.screenReads.at(-1)).toBe(
       CURSOR_PR343_LIVE_ACCEPTED_RESPONSE_SCREEN,
     );
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
@@ -2242,7 +2278,7 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
-  it("accepts a newly created Cursor Working response relative to the pre-Return screen", async () => {
+  it("keeps a new Cursor Working response unverified while its composer retains our text", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
     client.cli = "cursor";
@@ -2263,16 +2299,18 @@ describe("enter reliability", () => {
     expect(CURSOR_PR343_V2_PRE_RETURN_SCREEN).not.toContain("⠀⠞ Working");
     expect(client.screenReads.at(-1)).toContain("⠀⠞ Working");
     expect(parsed.screen?.status).toBe("working");
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
   }, 10_000);
 
-  it("accepts the live v3 Cursor Working transition when the retained composer truncates the submitted token", async () => {
+  it("keeps a live Cursor Working transition unverified with a truncated retained composer", async () => {
     const submittedText = "CURSOR_WORKING_PROBE_V3_1785621661796_Q7";
     const postReturnScreen =
       CURSOR_PR343_V2_IMMEDIATE_WORKING_RESPONSE_SCREEN.replace(
@@ -2304,9 +2342,11 @@ describe("enter reliability", () => {
     });
     const parsed = parseResult(result);
 
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -2331,8 +2371,9 @@ describe("enter reliability", () => {
 
     expect(client.screenReads.at(-1)).toContain("⬡ Running...");
     expect(client.screenReads.at(-1)).not.toContain("Thought for");
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.delivery_state).toBe("pending_verify");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
@@ -2356,7 +2397,8 @@ describe("enter reliability", () => {
     },
     {
       cli: "cursor" as const,
-      screen: CURSOR_BOOT_READY_SCREEN,
+      before: CURSOR_BOOT_READY_SCREEN,
+      screen: `new cursor request after placeholder\n${CURSOR_BOOT_READY_SCREEN}`,
       placeholder: "Plan, search, build anything",
     },
   ])(

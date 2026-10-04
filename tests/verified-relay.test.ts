@@ -206,9 +206,10 @@ describe("verified relay", () => {
 
     // A relay that cannot confirm the input landed must not report delivered.
     // Timeout-without-evidence is nonterminal pending_verify, not a false fail.
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
     expect(parsed).toMatchObject({
-      ok: true,
+      ok: false,
+      error_code: "submit_unverified",
       delivered: false,
       terminal: false,
       delivery_state: "pending_verify",

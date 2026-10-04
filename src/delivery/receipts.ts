@@ -42,6 +42,8 @@ export interface PublicDeliveryReceipt {
   needs_attention?: boolean;
   attention_reason?: string;
   queued_behind_turn?: boolean;
+  queue_verified?: boolean;
+  submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null;
   timings_ms?: DeliveryPhaseTimings;
   observation?: {
     status: ParsedScreenResult["status"];
@@ -249,6 +251,8 @@ export function buildPublicDeliveryReceipt(input: {
   needs_attention?: boolean;
   attention_reason?: string | null;
   queued_behind_turn?: boolean;
+  queue_verified?: boolean;
+  submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null;
   timings_ms?: DeliveryPhaseTimings;
   observation?: PublicDeliveryReceipt["observation"];
   submit_dispatched?: boolean;
@@ -310,6 +314,8 @@ export function buildPublicDeliveryReceipt(input: {
         }
       : {}),
     ...(input.queued_behind_turn === true ? { queued_behind_turn: true } : {}),
+    ...(input.queue_verified === true ? { queue_verified: true } : {}),
+    ...(input.submit_verification_reason !== undefined ? { submit_verification_reason: input.submit_verification_reason } : {}),
     ...(input.timings_ms ? { timings_ms: { ...input.timings_ms } } : {}),
     ...(input.observation ? { observation: input.observation } : {}),
     ...(warning ? { WARNING: warning } : {}),
@@ -522,6 +528,7 @@ export class DeliverySafetyGateError extends Error {
       | "blocked_by_interactive_prompt"
       | "blocked_by_permission_prompt"
       | "blocked_by_foreign_draft"
+      | "queued_stalled_idle"
       | "composer_unrecognized"
       | "owned_boot_contract_pending"
       | "nothing_owned_to_submit"
@@ -531,7 +538,9 @@ export class DeliverySafetyGateError extends Error {
     readonly draftText?: string,
   ) {
     super(
-      error_code === "composer_unrecognized"
+      error_code === "queued_stalled_idle"
+        ? "Codex has queued inputs while idle; nothing was typed or submitted; read_screen and report the stalled queue to the lead"
+        : error_code === "composer_unrecognized"
         ? "could not identify the input box on this screen; nothing was typed or submitted; read_screen and report to the lead"
         : error_code === "draft_ownership_unverified"
         ? "Cannot verify composer ownership from the current frame. Return was not sent; read the pane and retry when its composer is observable."
