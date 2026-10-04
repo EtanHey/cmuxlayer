@@ -66,3 +66,14 @@ export function soakSessionRecord({ startPid, endPid, startedAtMs, endedAtMs, mi
     elapsedMs: startedAtMs && endedAtMs ? endedAtMs - startedAtMs : 0,
     minCycles, minDurationMs, cyclesCompleted, healthSamples, rssStartKb, rssEndKb };
 }
+
+export async function pollDelivery({ read, now, sleep, timeoutMs, until = (e) => e.submitted }) {
+  const start = now();
+  let evidence;
+  do {
+    evidence = await read();
+    if (until(evidence) || now() - start >= timeoutMs) break;
+    await sleep(Math.min(1000, timeoutMs - (now() - start)));
+  } while (true);
+  return { ...evidence, elapsedMs: now() - start };
+}

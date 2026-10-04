@@ -276,3 +276,55 @@ export function checkSoakSession(session) {
   else if (value.rssEndKb > value.rssStartKb * 2) failures.push("server_rss_over_2x");
   return failures;
 }
+
+// Independent screen evidence: never use the delivery engine's own receipt or
+// parsed prompt_echoed flag to prove that the bytes left the composer.
+export function deliveryEvidence(screen, text) {
+  const content = record(screen).content;
+  const lines = typeof content === "string" ? content.replace(/\r/g, "").split("\n") : [];
+  const prompt = /^\s*[❯›>]\s?(.*)$/;
+  const composer = lines.findLastIndex((line) => prompt.test(line));
+  const readable = screen?.ok === true && composer >= 0 && typeof text === "string" && !!text;
+  const flat = (value) => value.replace(/\s+/g, " ").trim();
+  const draft = composer < 0 ? "" : [lines[composer].replace(prompt, "$1"),
+    ...lines.slice(composer + 1).filter((line) => !/context left|for shortcuts|^[─━]+/.test(line))].join(" ");
+  const before = lines.slice(0, composer);
+  const queueStart = before.findLastIndex((line) => /^(?:\s*[•│]\s*)?(?:Queued follow-up inputs|Messages to be submitted after next tool call)/i.test(line));
+  const queue = queueStart < 0 ? [] : before.slice(queueStart + 1);
+  const transcript = queueStart < 0 ? before : before.slice(0, queueStart);
+  const inComposer = readable && flat(draft).includes(flat(text));
+  const queued = readable && queue.some((line, i) => {
+    if (!/^\s*[│┃║]?\s*↳\s+/.test(line)) return false;
+    const rows = [line];
+    for (const row of queue.slice(i + 1)) {
+      if (!/^\s{2,}\S/.test(row) || /↳/.test(row)) break;
+      rows.push(row);
+    }
+    return flat(rows.join(" ")).includes(flat(text));
+  });
+  const submitted = readable && !inComposer && transcript.some((line, i) => {
+    if (!prompt.test(line)) return false;
+    const rows = [line.replace(prompt, "$1")];
+    for (const row of transcript.slice(i + 1)) {
+      if (!/^\s{2,}\S/.test(row) || /^\s*[⎿↳]/.test(row)) break;
+      rows.push(row);
+    }
+    return flat(rows.join(" ")).includes(flat(text));
+  });
+  return { readable, inComposer, queued, submitted };
+}
+
+export function checkPostSend(receipt, evidence, { staged = false } = {}) {
+  if (!evidence.readable) return ["delivery_observation_unavailable"];
+  if (staged) return receipt.ok === true && !evidence.inComposer ? ["draft_not_staged"] : [];
+  const accepted = evidence.submitted || evidence.queued;
+  if (receipt.ok === false && receipt.error_code === "submit_unverified" && accepted && evidence.newAccepted !== false) return ["false_negative_receipt"];
+  if (receipt.ok !== true) return [];
+  const claimsQueue = ["queued", "queued_followup"].includes(receipt.delivery_state);
+  return evidence.inComposer || !accepted || (!claimsQueue && !evidence.submitted)
+    ? ["false_positive_receipt"] : [];
+}
+
+export function checkDeliveryDeadline(evidence, elapsedMs, timeoutMs) {
+  return !evidence.submitted && elapsedMs >= timeoutMs ? ["stuck_delivery"] : [];
+}

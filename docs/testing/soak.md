@@ -73,3 +73,27 @@ unchanged server PID, healthy/total samples, and server RSS at start/end; any
 unhealthy sample or RSS growth above 2x fails the run. The server process must
 not reconnect or respawn during the full run. The MCP stdio PID is tracked
 separately from the control daemon PID returned by `control_health`.
+
+Delivery stop-rule cases use one additional reused scratch Codex seat. After
+**every** `send_to`, the runner reads its screen and records independent composer,
+queue and transcript evidence. False `ok:true` receipts and false
+`ok:false submit_unverified` receipts fail with separate codes. Missing evidence
+also fails. The ordinary cycle path still requires an eventual authored reply.
+
+```bash
+node scripts/soak-live.mjs --agent-id WORKER_ID --entry /opt/homebrew/opt/cmuxlayer/bin/cmuxlayer --cases a,b,c,d,e,f,g
+```
+
+`--cases` selects busy delivery (a), interrupted owned queue and foreign retry
+(b), foreign draft plus attention (c), submit-key casing matrix (d), long-turn
+queue plus attention (e), idle owned draft plus Return (f), and idle stalled
+queue refusal (g). No cases are selected by default; the original 40-cycle,
+60-minute floor remains unchanged. `--queue-deadline-ms` bounds eventual queue
+submission (default 90000); `--long-turn-minutes` sets the long-turn threshold
+(default 2). Unobserved prerequisites fail rather than skip. A failed case stops
+later cases and records them as unrun, then closes the exact scratch seat.
+The runner requires its registered worker ID for caller ownership and records
+both caller identities; a mismatched or unknown caller fails. Launch detached
+as described above so the proxy preserves the explicit per-call identities.
+Run only after the lead confirms the required installed release. Production
+cmux must never be quit, restarted or upgraded for this soak.
