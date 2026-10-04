@@ -72,11 +72,11 @@ export function checkToolFailure(result, opts = {}) {
   if (opts.acceptTerminalDone === true && isExpectedStopCompletion(value)) return [];
   const message = `${value.error ?? ""} ${value.error_code ?? ""} ${value.text ?? ""}`;
   const failures = [];
-  if (/too many in.flight/i.test(message)) failures.push("too_many_in_flight");
-  if (/topology.incomplete|surface enumeration failed|incomplete all.window/i.test(message)) {
+  if (/too many in.flight/iu.test(message)) failures.push("too_many_in_flight");
+  if (/topology.incomplete|surface enumeration failed|incomplete all.window/iu.test(message)) {
     failures.push("topology_incomplete_refusal");
   }
-  if (/route changed/i.test(message)) failures.push("route_changed");
+  if (/route changed/iu.test(message)) failures.push("route_changed");
   if (value.ok !== true || value.isError !== false ||
     value.error != null || value.error_code != null) failures.push("tool_error");
   return failures;
@@ -117,7 +117,7 @@ export function replyMarkerEvidence(screen, marker) {
   }
   const value = record(screen);
   const response = record(value.parsed).response;
-  const exactReplyLine = (line) => line.trim().replace(/^[⏺•]\s*/, "") === marker;
+  const exactReplyLine = (line) => line.trim().replace(/^[⏺•]\s*/u, "") === marker;
   let firstRejected = null;
   for (const source of ["parsed_response", "screen_preview", "content"]) {
     const content = source === "parsed_response" ? response : value[source];
@@ -131,24 +131,24 @@ export function replyMarkerEvidence(screen, marker) {
       // Empty lines can occur inside a wrapped prompt or tool result. Only a
       // positive boundary below can change their provenance.
       if (!trimmed) continue;
-      if (/^\s*[❯›»>]\s*\S/.test(line)) {
+      if (/^\s*[❯›»>]\s*\S/u.test(line)) {
         inPrompt = true;
         inToolOutput = false;
-      } else if (/^\s*(?:⎿|Result:|Output:)/.test(line)) {
+      } else if (/^\s*(?:⎿|Result:|Output:)/u.test(line)) {
         inToolOutput = true;
         inPrompt = false;
-      } else if (/^\s*[⏺•]\s+(?:mcp__\S+|[A-Z]\w*\()/.test(line)) {
+      } else if (/^\s*[⏺•]\s+(?:mcp__\S+|[A-Z]\w*\()/u.test(line)) {
         inToolOutput = true;
         inPrompt = false;
-      } else if (/^[⏺•]\s+/.test(line)) {
+      } else if (/^[⏺•]\s+/u.test(line)) {
         inPrompt = false;
         inToolOutput = false;
       }
       if (!line.includes(marker)) continue;
       const authoredLine = exactReplyLine(line) && (source === "parsed_response" ||
-        /^[⏺•]\s+/.test(line));
+        /^[⏺•]\s+/u.test(line));
       const origin = inPrompt ? "echoed_prompt" :
-        (inToolOutput || (source !== "parsed_response" && /^\s{2,}/.test(line)))
+        (inToolOutput || (source !== "parsed_response" && /^\s{2,}/u.test(line)))
         ? "tool_output" : authoredLine ? "authored_reply" : "unattributed_raw";
       const evidence = { found: origin === "authored_reply", origin, source,
         line: boundedLine(line),
@@ -221,7 +221,7 @@ export function checkParsedReadAgreement(fullRead, parsedOnlyRead, elapsedMs) {
     parsedOnly.isError !== false || !full.parsed || !parsedOnly.parsed ||
     !Number.isFinite(elapsedMs) || elapsedMs < 0 ||
     ![full.snapshot_hash, parsedOnly.snapshot_hash].every((hash) =>
-      typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash))) {
+      typeof hash === "string" && /^[0-9a-f]{64}$/u.test(hash))) {
     return ["parsed_read_unavailable"];
   }
   const a = record(full.parsed);
@@ -277,34 +277,60 @@ export function checkSoakSession(session) {
   return failures;
 }
 
+const stripQueueGutter = (line) => line.replace(/^\s*[│┃║┆┊](?=\s)/u, "");
+function queueRegionStart(lines) {
+  const headings = [], headingRows = new Set();
+  const heading = /^(?:Queued follow-up inputs|Messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?)$/iu;
+  for (let i = 0; i < lines.length; i++) {
+    let joined = "";
+    for (let end = i; end < Math.min(lines.length, i + 4); end++) {
+      joined = `${joined} ${lines[end].trim().replace(/^•\s*/u, "")}`.replace(/\s+/gu, " ").trim();
+      if (!heading.test(joined)) continue;
+      headings.push(i);
+      for (let row = i; row <= end; row++) headingRows.add(row);
+      break;
+    }
+  }
+  let start = -1;
+  for (const i of headings.reverse()) {
+    const end = start < 0 ? lines.length : start;
+    const contiguous = lines.slice(i, end).every((line, offset) => headingRows.has(i + offset) ||
+      !line.trim() || /^\s{2,}\S/u.test(line) || /^\s*↳\s/u.test(line) ||
+      /^\s*[•✻✢✳✶]?\s*(?:Working|Thinking)\b/iu.test(line));
+    if (!contiguous) break;
+    start = i;
+  }
+  return start;
+}
+
 // Independent screen evidence: never use the delivery engine's own receipt or
 // parsed prompt_echoed flag to prove that the bytes left the composer.
 export function deliveryEvidence(screen, text) {
   const content = record(screen).content;
-  const lines = typeof content === "string" ? content.replace(/\r/g, "").split("\n") : [];
-  const prompt = /^\s*[❯›»>]\s?(.*)$/;
+  const lines = typeof content === "string" ? content.replace(/\r/gu, "").split("\n") : [];
+  const prompt = /^\s*[❯›»>]\s?(.*)$/u;
   const composer = lines.findLastIndex((line) => prompt.test(line));
-  const readable = screen?.ok === true && composer >= 0 && typeof text === "string" && !!text;
-  const flat = (value) => value.replace(/\s+/g, " ").trim();
-  const compact = (value) => value.replace(/\s+/g, "");
+  const readable = screen?.ok === true && composer >= 0 && typeof text === "string" && Boolean(text);
+  const flat = (value) => value.replace(/\s+/gu, " ").trim();
+  const compact = (value) => value.replace(/\s+/gu, "");
   const draft = composer < 0 ? "" : [lines[composer].replace(prompt, "$1"),
-    ...lines.slice(composer + 1).filter((line) => !/context left|for shortcuts|^[─━]+/.test(line))].join(" ");
-  const before = lines.slice(0, composer);
-  const queueStart = before.findLastIndex((line) => /^(?:\s*[•│]\s*)?(?:Queued follow-up inputs|Messages to be submitted after next tool call)/i.test(line));
+    ...lines.slice(composer + 1).filter((line) => !/context left|for shortcuts|^[─━]+/u.test(line))].join(" ");
+  const before = lines.slice(0, composer).map(stripQueueGutter);
+  const queueStart = queueRegionStart(before);
   const queue = queueStart < 0 ? [] : before.slice(queueStart + 1);
   const transcript = queueStart < 0 ? before : before.slice(0, queueStart);
   const inComposer = readable && compact(draft).includes(compact(text));
   let queueRows = 0, queueTruncated = false;
   const queued = readable && queue.some((line, i) => {
-    if (!/^\s*[│┃║]?\s*↳\s+/.test(line)) return false;
-    const rows = [line.replace(/^\s*[│┃║]?\s*↳\s+/, "")];
+    if (!/^\s*[│┃║┆┊]?\s*↳\s+/u.test(line)) return false;
+    const rows = [line.replace(/^\s*[│┃║┆┊]?\s*↳\s+/u, "")];
     for (const row of queue.slice(i + 1)) {
-      if (!/^\s{2,}\S/.test(row) || /↳/.test(row)) break;
+      if (!/^\s{2,}\S/u.test(row) || /↳|edit last queued message/u.test(row)) break;
       rows.push(row);
     }
     const visible = flat(rows.join(" "));
-    const truncated = /(?:…|\.\.\.)$/.test(visible);
-    const prefix = visible.replace(/(?:…|\.\.\.)$/, "").trim();
+    const truncated = /(?:…|\.\.\.)$/u.test(visible);
+    const prefix = visible.replace(/(?:…|\.\.\.)$/u, "").trim();
     const matches = truncated ? prefix.length >= 40 && compact(text).startsWith(compact(prefix))
       : compact(visible) === compact(text);
     if (matches) { queueRows = rows.length; queueTruncated = truncated; }
@@ -314,7 +340,7 @@ export function deliveryEvidence(screen, text) {
     if (!prompt.test(line)) return false;
     const rows = [line.replace(prompt, "$1")];
     for (const row of transcript.slice(i + 1)) {
-      if (!/^\s{2,}\S/.test(row) || /^\s*[⎿↳]/.test(row)) break;
+      if (!/^\s{2,}\S/u.test(row) || /^\s*[⎿↳]/u.test(row)) break;
       rows.push(row);
     }
     return compact(rows.join(" ")).includes(compact(text));

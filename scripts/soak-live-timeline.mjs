@@ -69,11 +69,12 @@ export function soakSessionRecord({ startPid, endPid, startedAtMs, endedAtMs, mi
 
 export async function pollDelivery({ read, now, sleep, timeoutMs, until = (e) => e.submitted }) {
   const start = now();
-  let evidence;
+  let evidence = null;
+  let finished = false;
   do {
     evidence = await read();
-    if (until(evidence) || now() - start >= timeoutMs) break;
-    await sleep(Math.min(1000, timeoutMs - (now() - start)));
-  } while (true);
+    finished = until(evidence) || now() - start >= timeoutMs;
+    if (!finished) await sleep(Math.max(0, Math.min(1000, timeoutMs - (now() - start))));
+  } while (!finished);
   return { ...evidence, elapsedMs: now() - start };
 }

@@ -10,7 +10,7 @@ import {
   checkPostSend, checkDeliveryDeadline, deliveryEvidence, checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkPrematureIdle, checkReceipt, checkSoakSession, checkStateAgreement,
   checkReplyVisibility, checkSpawnIdentity, checkToolFailure, checkStopWait, healthSampleEntry, replyMarkerEvidence,
 } from "./soak-live-checks.mjs";
-import { runDeliveryCases } from "./soak-live-delivery-cases.mjs";
+import { deliveryCaseCaller, runDeliveryCases } from "./soak-live-delivery-cases.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 import { pollDelivery, runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
 import { cycleAssignment, isPoolSeatDead, options } from "./soak-live-options.mjs";
@@ -48,7 +48,7 @@ async function main() {
   const opts = options(process.argv.slice(2));
   const root = join(homedir(), ".cmux", "agents", opts.agentId, "soak");
   mkdirSync(root, { recursive: true });
-  const runId = new Date().toISOString().replace(/[:.]/g, "-");
+  const runId = new Date().toISOString().replace(/[:.]/gu, "-");
   const eventsPath = join(root, `${runId}.jsonl`);
   const summaryPath = join(root, `${runId}.summary.json`);
   const summary = { run_id: runId, started_at: new Date().toISOString(),
@@ -101,7 +101,7 @@ async function main() {
   let connected = false;
   const call = async (name, args, cycle, timeoutMs = Math.max(opts.timeoutMs + 15_000, 120_000), policy = {}) => {
     const start = performance.now();
-    let result;
+    let result = null;
     try {
       result = payload(await client.callTool({ name, arguments: args, ...(policy.caller ? { _meta: {
         "cmuxlayer/callerContext": { surfaceId: policy.caller.surface, workspaceId: WORKSPACE } } } : {}) }, undefined,
@@ -135,7 +135,7 @@ async function main() {
     const sample = { atMs, label, healthy: false };
     healthSamples.push(sample);
     try {
-      let result;
+      let result = null;
       try {
         result = await withHealthTimeout(() =>
           call("control_health", { detail: "full" }, `health:${label}`, 20_000),
@@ -162,7 +162,7 @@ async function main() {
     const fresh = bytes.subarray(inboxOffset).toString("utf8");
     inboxOffset = bytes.length;
     const hits = fresh.split("\n").filter((line) =>
-      /agent_halt_wedged/.test(line) && [...spawnedIds].some((id) => line.includes(id)));
+      /agent_halt_wedged/u.test(line) && [...spawnedIds].some((id) => line.includes(id)));
     check("lead_inbox", hits.length ? ["false_agent_halt_wedged"] : [], { cycle });
   };
   const observe = async (cycle, agentId, surface) => {
@@ -201,17 +201,20 @@ async function main() {
     inboxCheck(cycle);
     return screen;
   };
-  const readDelivery = async (seat, text = "__SOAK_NO_MESSAGE__", deliveryId) => {
+  const readDelivery = async (seat, text, deliveryId) => {
     const screen = await call("read_screen", { surface: seat.surface, workspace: WORKSPACE,
       raw: true, lines: 200 }, "delivery");
-    const evidence = deliveryEvidence(screen, text);
+    log({ kind: "delivery_screen", agent_id: seat.agentId, text: text ?? null,
+      content: screen.content ?? null, parsed: screen.parsed ?? null });
+    const evidence = deliveryEvidence(screen, text ?? "__SOAK_NO_MESSAGE__");
     const listed = deliveryId || opts.cases.length ? await call("list_agents", { agent_ids: [seat.agentId],
       detail: "full", max_age_ms: 0 }, "delivery") : null;
     const delivery = listed?.deliveries?.find((row) => row.delivery_id === deliveryId);
     const health = listed?.agents?.find((row) => row.agent_id === seat.agentId)?.health;
-    return { ...evidence, busy: ["working", "thinking"].includes(screen.parsed?.status) ||
+    return { ...evidence, securityBanner: /Set up security for Daybreak mode/u.test(screen.content ?? "") &&
+      /esc to dismiss/u.test(screen.content ?? ""), busy: ["working", "thinking"].includes(screen.parsed?.status) ||
       screen.parsed?.control_state === "busy", hasDraft: screen.parsed?.control_state === "composer_dirty",
-      hasQueue: /(?:Queued follow-up inputs|Messages to be submitted after next tool call)/i.test(screen.content ?? ""),
+      hasQueue: /(?:Queued follow-up inputs|Messages to be submitted after next tool call)/iu.test(screen.content ?? ""),
       needsAttention: delivery?.needs_attention === true,
       draftAttention: health?.issue_codes?.includes("composer_draft_pending") === true, delivery_state: delivery?.delivery_state };
   };
@@ -220,7 +223,13 @@ async function main() {
     const receipt = await call("send_to", { ...args,
       ...(args.mode === "agent" ? { agent_id: seat.agentId } : { surface: seat.surface, workspace: WORKSPACE }),
       verbose: true }, cycle, undefined, policy);
-    const evidence = await readDelivery(seat, policy.text ?? args.text, receipt.delivery_id);
+    // A completed socket write can precede the terminal's rendered frame.
+    // Bound that wait; visible composer text still fails an asserted submit.
+    const evidence = receipt.ok === true && !policy.control
+      ? await pollDelivery({ read: () => readDelivery(seat, policy.text ?? args.text, receipt.delivery_id),
+        now: Date.now, sleep, timeoutMs: 1000, until: (e) => e.readable &&
+          (policy.staged ? e.inComposer : e.inComposer || e.submitted || e.queued) })
+      : await readDelivery(seat, policy.text ?? args.text, receipt.delivery_id);
     evidence.newAccepted = (evidence.submitted && !before.submitted) || (evidence.queued && !before.queued);
     log({ kind: "post_send_evidence", cycle, receipt, before, evidence, text: policy.text ?? args.text });
     if (policy.caller) check("caller_identity", receipt.caller_agent_id === policy.caller.agentId
@@ -244,7 +253,7 @@ async function main() {
     check("wait_for", checkStopWait(waited), { cycle });
   };
   const readReply = async (cycle, agentId, surface, marker, waited) => {
-    let screen;
+    let screen = null;
     let firstObservation = true;
     const deadline = Date.now() + opts.timeoutMs;
     do {
@@ -483,8 +492,19 @@ async function main() {
           throw new Error("delivery case boot reply missing");
         }
         const callerState = JSON.parse(readFileSync(join(stateDir, opts.agentId, "state.json"), "utf8"));
-        const owner = { agentId: opts.agentId, surface: callerState.surface_uuid };
-        const foreign = { agentId: seat.agentId, surface: seat.surfaceUuid };
+        const owner = deliveryCaseCaller({ agentId: opts.agentId, surface: callerState.surface_id }, callerState, WORKSPACE);
+        const targetState = JSON.parse(readFileSync(join(stateDir, seat.agentId, "state.json"), "utf8"));
+        const foreign = deliveryCaseCaller(seat, targetState, WORKSPACE);
+        seat.surfaceUuid = foreign.surface;
+        active.get(seat.agentId).surfaceUuid = foreign.surface;
+        const initial = await readDelivery(seat);
+        if (initial.securityBanner) {
+          await sendChecked(seat, { mode: "key", text: "escape" }, "delivery-cases:banner",
+            { caller: owner, control: true });
+          const dismissed = await pollDelivery({ read: () => readDelivery(seat), now: Date.now,
+            sleep, timeoutMs: 1000, until: (e) => !e.securityBanner });
+          if (dismissed.securityBanner) throw new Error("security_banner_not_dismissed");
+        }
         const relayPrefix = `Read and follow ${root}/SOAK_LONG_RELAY_${runId}_`;
         const relayText = `${relayPrefix}${"x".repeat(Math.max(0, 247 - relayPrefix.length))}.md`;
         if (opts.cases.includes("h")) writeFileSync(relayText.slice("Read and follow ".length),

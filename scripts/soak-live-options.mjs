@@ -1,3 +1,7 @@
+function assertRange(value, minimum, maximum, message) {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(message);
+}
+
 export function options(argv) {
   const opts = { cycles: 40, concurrency: 2, timeoutMs: 90_000, durationMinutes: 60,
     agentId: process.env.GOLEM_SEAT || "", leadAgentId: "", entry: process.env.CMUXLAYER_SOAK_ENTRY || "cmuxlayer",
@@ -14,15 +18,11 @@ export function options(argv) {
     opts[field] = ["cycles", "concurrency", "timeoutMs", "durationMinutes", "pool", "freshEvery", "queueDeadlineMs", "longTurnMinutes"].includes(field)
       ? Number(argv[i + 1]) : argv[i + 1];
   }
-  if (!/^[A-Za-z0-9_-]+$/.test(opts.agentId)) throw new Error("--agent-id is required");
-  if (!Number.isInteger(opts.cycles) || opts.cycles < 1 || opts.cycles > 40) throw new Error("cycles must be 1..40");
-  if (!Number.isInteger(opts.concurrency) || opts.concurrency < 1 || opts.concurrency > 2) throw new Error("concurrency must be 1..2");
-  if (!Number.isInteger(opts.timeoutMs) || opts.timeoutMs < 1000 || opts.timeoutMs > 300_000) {
-    throw new Error("timeout-ms must be 1000..300000");
-  }
-  if (!Number.isInteger(opts.durationMinutes) || opts.durationMinutes < 0 || opts.durationMinutes > 360) {
-    throw new Error("duration-minutes must be 0..360");
-  }
+  if (!/^[A-Za-z0-9_-]+$/u.test(opts.agentId)) throw new Error("--agent-id is required");
+  assertRange(opts.cycles, 1, 40, "cycles must be 1..40");
+  assertRange(opts.concurrency, 1, 2, "concurrency must be 1..2");
+  assertRange(opts.timeoutMs, 1000, 300000, "timeout-ms must be 1000..300000");
+  assertRange(opts.durationMinutes, 0, 360, "duration-minutes must be 0..360");
   if (!Number.isInteger(opts.pool) || opts.pool < 0 || opts.pool > 40 || (opts.pool > 0 && opts.pool < opts.concurrency)) {
     throw new Error("pool must be 0 or between concurrency and 40");
   }
@@ -30,15 +30,11 @@ export function options(argv) {
   if (!Number.isInteger(opts.freshEvery) || (opts.pool > 0 && opts.freshEvery < 1)
     || (opts.pool === 0 && opts.freshEvery !== 0)) throw new Error("fresh-every requires a pool and must be positive");
   opts.cases = typeof opts.cases === "string" ? opts.cases.split(",") : opts.cases;
-  if (opts.cases.some((id) => !/^[a-h]$/.test(id)) || new Set(opts.cases).size !== opts.cases.length) {
+  if (opts.cases.some((id) => !/^[a-h]$/u.test(id)) || new Set(opts.cases).size !== opts.cases.length) {
     throw new Error("cases must be unique letters a..h");
   }
-  if (!Number.isInteger(opts.queueDeadlineMs) || opts.queueDeadlineMs < 1000 || opts.queueDeadlineMs > 300_000) {
-    throw new Error("queue-deadline-ms must be 1000..300000");
-  }
-  if (!Number.isInteger(opts.longTurnMinutes) || opts.longTurnMinutes < 1 || opts.longTurnMinutes > 15) {
-    throw new Error("long-turn-minutes must be 1..15");
-  }
+  assertRange(opts.queueDeadlineMs, 1000, 300000, "queue-deadline-ms must be 1000..300000");
+  assertRange(opts.longTurnMinutes, 1, 15, "long-turn-minutes must be 1..15");
   return opts;
 }
 

@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { runDeliveryCases } from "../scripts/soak-live-delivery-cases.mjs";
+import { deliveryCaseCaller, runDeliveryCases } from "../scripts/soak-live-delivery-cases.mjs";
 
 async function run(cases: string[], frame = {}) {
   const violations: string[] = [];
@@ -8,11 +8,11 @@ async function run(cases: string[], frame = {}) {
   let now = 0;
   await runDeliveryCases({ cases, seat: {}, owner: { agentId: "owner", surface: "uuid-1" },
     foreign: { agentId: "foreign", surface: "uuid-2" }, opts: { timeoutMs: 1000 },
-    now: () => now, sleep: async (ms: number) => { now += ms; },
-    read: async () => frame, settle: async () => {},
-    send: async (_seat: unknown, args: { text: string }) => {
+    now: () => now, sleep: (ms: number) => { now += ms; return Promise.resolve(); },
+    read: () => Promise.resolve(frame), settle: () => Promise.resolve(),
+    send: (_seat: unknown, args: { text: string }) => {
       sends.push(args.text);
-      return { receipt: { ok: true, submit_verified: true }, evidence: frame };
+      return Promise.resolve({ receipt: { ok: true, submit_verified: true }, evidence: frame });
     }, check: (_name: string, failures: string[]) => violations.push(...failures),
     log: (row: { kind: string; case: string }) => logs.push(row) });
   return { violations, sends, logs };
@@ -39,19 +39,34 @@ it("does not count a key success without independently observed submission", asy
 
 it("sends a long h relay only while busy and requires wrapped queue evidence before settling", async () => {
   const relayText = `Read and follow /tmp/SOAK_RELAY_${"x".repeat(220)}.md`;
-  const sends: string[] = [], settled: string[] = [], violations: string[] = [];
+  const sends: string[] = [], settled: string[] = [], violations: string[] = [], logs: unknown[] = [];
   let reads = 0;
   await runDeliveryCases({ cases: ["h"], seat: {}, relayText,
     owner: { agentId: "owner", surface: "uuid-1" }, foreign: { agentId: "foreign", surface: "uuid-2" },
-    opts: { timeoutMs: 1000 }, now: () => 0, sleep: async () => {},
-    read: async () => reads++ === 0 ? { busy: true } : { readable: true },
-    send: async (_seat: unknown, args: { text: string }) => {
+    opts: { timeoutMs: 1000 }, now: () => 0, sleep: () => Promise.resolve(),
+    read: () => Promise.resolve(reads++ === 0 ? { busy: true } : { readable: true }),
+    send: (_seat: unknown, args: { text: string }) => {
       sends.push(args.text);
-      return { receipt: { ok: true, queued_behind_turn: true }, evidence: { queued: true, queueRows: 3 } };
-    }, settle: async (_seat: unknown, text: string) => { settled.push(text); },
-    check: (_name: string, failures: string[]) => violations.push(...failures), log: () => {} });
+      return Promise.resolve({ receipt: { ok: true, queued_behind_turn: true }, evidence: { queued: true, queueRows: 3 } });
+    }, settle: (_seat: unknown, text: string) => { settled.push(text); return Promise.resolve(); },
+    check: (_name: string, failures: string[]) => violations.push(...failures), log: (entry: unknown) => { logs.push(entry); } });
   expect(violations).toEqual([]);
-  expect(sends[0]).toMatch(/^Run sleep 30/);
+  expect(sends[0]).toMatch(/^Run sleep 30/u);
   expect(sends[1]).toBe(relayText);
   expect(settled).toEqual([relayText]);
+});
+
+it("resolves a lean spawn's caller from its matching registered stable route", () => {
+  expect(deliveryCaseCaller({ agentId: "scratch", surface: "surface:7" },
+    { surface_id: "surface:7", surface_uuid: "scratch-uuid", workspace_id: "workspace:1" }))
+    .toEqual({ agentId: "scratch", surface: "scratch-uuid" });
+});
+
+it.each([
+  { surface_id: "surface:8", surface_uuid: "other-uuid", workspace_id: "workspace:1" },
+  { surface_id: "surface:7", surface_uuid: null, workspace_id: "workspace:1" },
+  { surface_id: "surface:7", surface_uuid: "scratch-uuid", workspace_id: "workspace:2" },
+])("refuses an unbound, moved, or mismatched caller route: %j", (state) => {
+  expect(() => deliveryCaseCaller({ agentId: "scratch", surface: "surface:7" }, state))
+    .toThrow("case_caller_route_unavailable");
 });

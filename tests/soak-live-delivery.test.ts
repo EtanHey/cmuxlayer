@@ -50,13 +50,13 @@ describe("delivery stop rule", () => {
   });
   it("polls through a queue and retains the final deadline evidence", async () => {
     let now = 0;
-    const evidence = await pollDelivery({ read: async () => ({ submitted: false, queued: true }),
-      now: () => now, sleep: async (ms: number) => { now += ms; }, timeoutMs: 1000 });
+    const evidence = await pollDelivery({ read: () => Promise.resolve({ submitted: false, queued: true }),
+      now: () => now, sleep: (ms: number) => { now += ms; return Promise.resolve(); }, timeoutMs: 1000 });
     expect(evidence).toMatchObject({ submitted: false, queued: true, elapsedMs: 1000 });
   });
   it("selects cases without changing the duration floor and rejects typos", () => {
     expect(options(["--agent-id", "scratch", "--cases", "a,f"])).toMatchObject({ cases: ["a", "f"], durationMinutes: 60 });
-    expect(() => options(["--agent-id", "scratch", "--cases", "x"])).toThrow(/cases/);
+    expect(() => options(["--agent-id", "scratch", "--cases", "x"])).toThrow(/cases/u);
   });
 });
 
@@ -82,4 +82,33 @@ describe("long relay queue correlation", () => {
   it("selects the new h case", () => {
     expect(options(["--agent-id", "scratch", "--cases", "h"]).cases).toEqual(["h"]);
   });
+});
+
+describe("Codex queue layout variants", () => {
+  it("keeps both adjacent queue blocks", () => {
+    const screen = frame(`• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${text}\n\n• Queued follow-up inputs\n  ↳ unrelated later item\n› `);
+    expect(deliveryEvidence(screen, text).queued).toBe(true);
+  });
+  it("recognizes a wrapped heading with its parenthetical suffix", () => {
+    const screen = frame(`• Messages to be submitted after next\n  tool call (press esc to interrupt\n  and send immediately)\n  ↳ ${text}\n› `);
+    expect(deliveryEvidence(screen, text).queued).toBe(true);
+  });
+  it.each(["│", "┃", "║", "┆", "┊"])("joins queue rows behind a %s gutter", (gutter) => {
+    const screen = frame(`${gutter} • Queued follow-up inputs\n${gutter}  ↳ Reply exactly SOAK_UNIQUE\n${gutter}    then stop.\n› `);
+    expect(deliveryEvidence(screen, text).queued).toBe(true);
+  });
+});
+
+it("does not accept a historical queue block above a later transcript turn", () => {
+  const screen = frame(`• Queued follow-up inputs\n  ↳ ${text}\n› Later request\n• Later response\n› `);
+  expect(deliveryEvidence(screen, text).queued).toBe(false);
+});
+
+it("observes a submission arriving at the queue deadline", async () => {
+  let now = 0;
+  const evidence = await pollDelivery({
+    read: () => Promise.resolve({ submitted: now === 1000 }),
+    now: () => now, sleep: (ms: number) => { now += ms; return Promise.resolve(); }, timeoutMs: 1000,
+  });
+  expect(evidence).toMatchObject({ submitted: true, elapsedMs: 1000 });
 });

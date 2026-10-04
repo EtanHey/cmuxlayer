@@ -43,7 +43,10 @@ The runner clears inherited pane identity before starting MCP stdio. The proxy
 can still recover a managed worker identity from process ancestry, so launch
 the runner as a genuinely external process when using a worker pane. Avoid
 `launchctl submit`: it restarts a nonzero soak and can create extra seats. Use a
-plain detached process, or a launchd job with `KeepAlive` false and `RunAtLoad`
+plain detached process with `CMUX_SURFACE_ID`, `CMUX_WORKSPACE_ID`, and
+`CMUX_TAB_ID` removed from the runner's own launch environment (clearing only
+the stdio child's environment still lets proxy ancestry recover the runner's
+pane and override per-call caller identities), or a launchd job with `KeepAlive` false and `RunAtLoad`
 true, when the run must survive the worker pane. The runner writes
 timed JSONL calls and a pass/fail, p50/p95 summary under
 `~/.cmux/agents/<worker-id>/soak/`. Any violation exits 1 while remaining cycles
@@ -76,7 +79,10 @@ separately from the control daemon PID returned by `control_health`.
 
 Delivery stop-rule cases use one additional reused scratch Codex seat. After
 **every** `send_to`, the runner reads its screen and records independent composer,
-queue and transcript evidence. False `ok:true` receipts and false
+queue and transcript evidence, including raw scratch-screen observations. A successful
+send waits up to one second for the terminal to render evidence; visible unsent
+composer text still fails an asserted submit. The scratch Codex security banner
+is dismissed only with Escape, never by selecting account setup. False `ok:true` receipts and false
 `ok:false submit_unverified` receipts fail with separate codes. Missing evidence
 also fails. The ordinary cycle path still requires an eventual authored reply.
 
