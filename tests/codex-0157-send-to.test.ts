@@ -120,14 +120,19 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
-    const { pane, exec } = makeCodexPane(bootPrompt ? frames : { ...frames, buffered: frames.empty, draft: frames.empty, after: frames.empty });
-    pane.live = bootPrompt !== undefined;
+    const { pane, exec } = makeCodexPane(bootPrompt ? frames : {
+      empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: text => `OpenAI Codex\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`,
+      after: text => `OpenAI Codex\n${codexRows(text)}\nWorking (5s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`,
+    });
+    pane.live = true;
     pane.swallow = swallow;
     const context = serverModule.createServerContext(withTestSurfaceObserver({
       exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
     }));
-    const server = serverModule.createServer({ context, inboxBaseDir: testDir }) as any;
+    const server = serverModule.createServer({ context, inboxBaseDir: testDir, lifecycleInitializer: async () => {} }) as any;
     const engine = engineForTests(server);
+    await context.lifecycleReadyPromise;
     const lead = {
       agent_id: "lead-seat", surface_id: "surface:lead", surface_uuid: LEAD_UUID, role: "orchestrator", cli: "claude",
       state: "working", repo: "cmuxlayer", model: "opus", version: 1,
@@ -139,19 +144,22 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const spawned = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
       server._registeredTools.spawn_agent.handler({
         repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
-        boot_prompt_timeout_ms: bootPrompt ? 5_000 : 100, ...(bootPrompt ? { prompt: bootPrompt } : {}),
+        boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
     if (bootPrompt) return { pane, context, spawned };
     engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready" });
+    // Spawn's contract relay has completed its observed submit before the
+    // scenario begins; don't leave an ignored boot write racing the fixture.
+    expect(context.typedDraftOwners.size).toBe(0);
     pane.frames = frames;
-    pane.live = true;
+    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], bufferedReads: 0 });
     const as = <T>(uuid: string, fn: () => Promise<T>) =>
       runWithCallerContext({ surfaceId: uuid, workspaceId: "workspace:1" }, fn);
     const typeDraft = (text: string, surface?: string) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ ...(surface ? { mode: "surface", surface } : { agent_id: spawned.agent_id }), text, press_enter: false }, {})));
     const readScreen = () => server._registeredTools.read_screen.handler({ surface: spawned.surface_id }, {});
-    const send = (text: string, targeting = false) => as(LEAD_UUID, async () => parseToolResult(
-      await server._registeredTools.send_to.handler({ ...(targeting ? { targeting: { agent_ids: [spawned.agent_id] } } : { agent_id: spawned.agent_id }), text, press_enter: true }, {})));
+    const send = (text: string, targeting = false, verbose = false) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ ...(targeting ? { targeting: { agent_ids: [spawned.agent_id] } } : { agent_id: spawned.agent_id }), text, press_enter: true, verbose }, {})));
     const keyReturn = (uuid: string) => as(uuid, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "key", surface: spawned.surface_id, text: "return" }, {})));
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
@@ -209,6 +217,22 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   });
 
+  it("#994 an internal contract relay without a supplied ID registers spendable ownership", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
+    try {
+      const { runWithCallerContext } = await import("../src/caller-context.js");
+      const deliver = target.context.lifecycleAgentInputDeliverer;
+      if (!deliver) throw new Error("lifecycle relay was not initialized");
+      const delivery = await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, () =>
+        deliver({ agent_id: target.spawned.agent_id, text: "cmuxlayer contract for synthetic-agent: Read and follow /tmp/synthetic/contract.md", press_enter: false, source_event: "send_input" }));
+      expect(delivery.delivery_id).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/));
+      expect([...target.context.typedDraftOwners.values()]).toEqual([expect.objectContaining({ deliveryIds: [delivery.delivery_id] })]);
+      target.pane.phase = "draft";
+      expect(await target.keyReturn(LEAD_UUID)).toMatchObject({ submit_verified: true });
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   it("RESCOPE background settlement spends only the proven delivery ownership", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
     try {
@@ -251,10 +275,11 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: text => fixture("idle-draft").replace(PONG, text), after: text => fixture("idle-submitted-working").replace(PONG, text) });
     try {
       target.pane.swallow = 99;
-      const first = await target.send(PONG, targeting);
+      const first = await target.send(PONG, targeting, true);
       const id = targeting ? first.receipts[0].delivery_id : first.delivery_id;
       const writes = () => target.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
       const before = writes();
+      let settled: ReturnType<typeof target.engine.getDeliveryReceipt> = null;
       const findDuplicate = target.engine.findOpenDuplicate.bind(target.engine);
       vi.spyOn(target.engine, "findOpenDuplicate").mockImplementation(args => {
         const duplicate = findDuplicate(args);
@@ -262,12 +287,17 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         target.pane.submitted.push(PONG); target.pane.phase = "after"; target.pane.swallow = 0;
         await target.engine.verifyPendingDeliveries();
         expect(target.engine.getDeliveryReceipt(id)).toMatchObject({ terminal: true, submit_verified: true });
+        const verified = target.engine.getDeliveryReceipt(id);
+        if (!verified) throw new Error("verified receipt disappeared");
+        settled = target.engine.resolveDelivery({ ...verified, submit_evidence: "transcript_echo" });
         };
         return duplicate;
       });
-      const result = await target.send(PONG, targeting);
+      const result = await target.send(PONG, targeting, true);
       expect(writes()).toBe(before);
       expect(targeting ? result.receipts[0] : result).toMatchObject({ submitted: true, delivery_id: id });
+      expect(targeting ? result.receipts[0] : result).toMatchObject({ typed: settled?.typed, rpc_methods: settled?.rpc_methods, submit_dispatched: settled?.submit_dispatched, submit_evidence: "transcript_echo" });
+      expect(target.engine.getDeliveryReceipt(id)).toEqual(settled);
       expect(target.pane.submitted).toEqual([PONG]);
     } finally { target.context.dispose(); }
   }, 30_000);

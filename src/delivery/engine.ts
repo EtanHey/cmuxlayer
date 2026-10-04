@@ -1734,6 +1734,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null;
     }
   > => {
+    if (opts.key === undefined && !opts.delivery_id) opts = { ...opts, delivery_id: randomUUID() };
     const rpcMethods = new Set<DeliveryRpcMethod>();
     let textDispatched = false;
     let submitDispatched = false;
@@ -2150,10 +2151,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const submittedText = opts.chunks.join("");
     if (textDispatched && caller && beforeDraft === "") {
       const entries = previousOwner?.caller === caller ? previousOwner.texts ?? [previousOwner.text] : [];
+      const boot = previousOwner?.text === submittedText ? previousOwner : undefined;
       rememberDraftOwner(ownerKey, { caller, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
         ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
         fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false,
-        deliveryIds: [...(previousOwner?.deliveryIds ?? entries.map(() => "")), opts.delivery_id ?? ""] });
+        deliveryIds: [...(previousOwner?.deliveryIds ?? entries.map(() => "")), opts.delivery_id ?? ""],
+        bootAgentId: boot?.bootAgentId, bootInstanceId: boot?.bootInstanceId });
     }
     let submit_verified: boolean | null = null;
     let submit_evidence: SubmitEvidence | null = null;
@@ -2346,6 +2349,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity),
         seen: false,
         bootAgentId: pendingBootAgent.agent_id,
+        bootInstanceId: pendingBootAgent.boot_instance_id ?? undefined,
+        deliveryIds: [opts.delivery_id ?? ""],
       });
     } else if (ownedDraftPending) {
       const owner = typedDraftOwners.get(ownerKey);
@@ -3715,7 +3720,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           rename_to_task: record.rename_to_task,
           stableSurfaceIdentity: record.stableSurfaceIdentity,
           source_event: lifecycle?.source_event ?? "send_input",
-          delivery_id: lifecycle ? record.delivery_id : undefined,
+          delivery_id: record.delivery_id,
           verify_submit: record.verify_submit,
           beforeMutation: record.beforeMutation,
           onChunkDelivered: (sentChunks) => {

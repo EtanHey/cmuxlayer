@@ -3223,8 +3223,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return { ...delivery, queued_behind_turn: queuedBehindTurn };
           } catch (error) {
             if (error !== retrySettled || !settledRetry) throw error;
-            return { ...buildPublicDeliveryReceipt({ delivery_state: "submitted", delivery_id: args.delivery_id,
-              typed: false, submit_attempted: args.press_enter, submit_verified: true, retry_count: settledRetry.retry_count }), bytes: 0, queued_behind_turn: false };
+            return { ...buildPublicDeliveryReceipt({ ...settledRetry, typed: settledRetry.typed === true, submit_attempted: settledRetry.press_enter }),
+              bytes: Buffer.byteLength(settledRetry.text), queued_behind_turn: false, retry_settled: true };
           }
         },
         {

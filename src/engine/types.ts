@@ -95,6 +95,7 @@ export interface AgentDeliveryReceipt {
   typed?: boolean;
   /** A submit key reached the target through either socket or CLI transport. */
   submit_dispatched?: boolean;
+  submit_evidence?: import("../delivery/receipts.js").SubmitEvidence | null;
   /** An uncertain recovered boot Return; passive confirmation completes boot. */
   boot_recovery?: boolean;
   /** The exact boot generation whose pointer the receipt verifies. */
