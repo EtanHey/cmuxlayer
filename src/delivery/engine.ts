@@ -1734,7 +1734,6 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null;
     }
   > => {
-    if (opts.key === undefined && !opts.delivery_id) opts = { ...opts, delivery_id: randomUUID() };
     const rpcMethods = new Set<DeliveryRpcMethod>();
     let textDispatched = false;
     let submitDispatched = false;
@@ -2059,6 +2058,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ? { draftGuardText }
         : {}),
     });
+    const caller = resolveCurrentCallerAgent()?.agent_id;
+    const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
+    if (!opts.delivery_id && caller && (beforeDraft === "" || (opts.source_event === "boot_prompt" && pendingBootAgent))) {
+      opts = { ...opts, delivery_id: randomUUID() };
+    }
     if (deliverySafetySnapshot?.text.trim()) {
       opts.onPreTypeScreen?.(deliverySafetySnapshot.text);
     }
@@ -2104,9 +2108,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       deliverySafetySnapshot !== null &&
       inferComposerCli(deliverySafetySnapshot.text, deliverySafetySnapshot.parsed) === "codex";
     const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
-    const caller = resolveCurrentCallerAgent()?.agent_id;
     const previousOwner = typedDraftOwners.get(ownerKey);
-    const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
     const ownedRetry = Boolean(caller) && previousOwner !== undefined && previousOwner.caller === caller && deliverySafetySnapshot !== null && typeof beforeDraft === "string" &&
       draftOwnerFingerprintMatches(previousOwner, opts.surface, opts.stableSurfaceIdentity) &&
       bootTokenInstanceCurrent(previousOwner) &&

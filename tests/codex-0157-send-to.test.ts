@@ -289,7 +289,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         expect(target.engine.getDeliveryReceipt(id)).toMatchObject({ terminal: true, submit_verified: true });
         const verified = target.engine.getDeliveryReceipt(id);
         if (!verified) throw new Error("verified receipt disappeared");
-        settled = target.engine.resolveDelivery({ ...verified, submit_evidence: "transcript_echo" });
+        settled = target.engine.resolveDelivery({ ...verified, rpc_methods: ["surface.send_text", "surface.send_key"], submit_evidence: "transcript_echo" });
         };
         return duplicate;
       });
