@@ -191,7 +191,7 @@ function isLeanSuccessfulTransportReceipt(
     structured.delivery_state === "submitted" && structured.submitted === true;
   const verifiedKeyReceipt =
     typeof structured.key === "string" && structured.submit_verified === true;
-  const verifiedBatch = Array.isArray(structured.receipts) && structured.receipts.length > 0 && structured.receipts.every(receipt => receipt?.ok === true);
+  const verifiedBatch = Array.isArray(structured.receipts) && structured.receipts.length > 0 && structured.receipts.every(receipt => receipt?.ok === true || Boolean(receipt?.skipped) || receipt?.resolution === "filtered_out");
   return verifiedBatch || submittedReceipt || structured.delivery_state === "queued" || structured.delivery_state === "queued_followup" || verifiedKeyReceipt;
 }
 
@@ -262,7 +262,7 @@ export function installToolRegistration(
       : [];
     const warnings = [...new Set([...existingWarnings, ...provenanceWarnings])];
     if (leanSuccessfulReceipt) {
-      if (typeof structured.key !== "string") return result;
+      if (toolName === "send_to" && typeof structured.key !== "string") return result;
       if (warnings.length === 0) return result;
       const nextStructured = { ...structured, warnings };
       return {

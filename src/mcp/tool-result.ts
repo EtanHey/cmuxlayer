@@ -139,6 +139,7 @@ export function shapeSuccessfulSendToResult(
   const textSubmit = (args.mode === "agent" || args.mode === "surface" || args.mode === undefined) && args.press_enter !== false;
   if (!full || full.ok !== true || result.isError === true) return result;
   const attemptedReceipts = Array.isArray(full.receipts) ? full.receipts.filter(receipt => receipt?.resolution !== "filtered_out" && !receipt?.skipped) : [];
+  if (Array.isArray(full.receipts) && attemptedReceipts.length === 0) return result;
   const batchVerified = attemptedReceipts.length > 0 && attemptedReceipts.every(receipt => receipt && typeof receipt === "object" && proof(receipt));
   if (textSubmit && !proof(full) && !batchVerified) {
     const message = full.submit_verification_reason === "input_still_pending"
@@ -152,9 +153,9 @@ export function shapeSuccessfulSendToResult(
   }
   if (batchVerified && args.verbose !== true) {
     const lean = { ok: true, caller_agent_id: full.caller_agent_id ?? null,
-      receipts: (attemptedReceipts as Record<string, unknown>[]).map(receipt => shapeSuccessfulSendToResult(
+      receipts: (full.receipts as Record<string, unknown>[]).map(receipt => attemptedReceipts.includes(receipt) ? shapeSuccessfulSendToResult(
         okFormatted("", { ...receipt, caller_agent_id: full.caller_agent_id ?? null }), { ...args, mode: "agent", agent_id: receipt.agent_id },
-      ).structuredContent) };
+      ).structuredContent : receipt) };
     return { ...result, content: [{ type: "text", text: JSON.stringify(lean) }], structuredContent: lean };
   }
   const verifiedKey = args.mode === "key" && full.submit_attempted === true && full.submit_dispatched === true && full.submit_verified === true;

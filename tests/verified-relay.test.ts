@@ -192,6 +192,20 @@ describe("verified relay", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
+  it("round 1 verifies a Gemini transcript echo above >>>", async () => {
+    const cli = "gemini";
+    const client = new FrozenClaudeSurfaceClient();
+    let input = "", echo = "";
+    client.send = async (_surface, text) => { input += text; };
+    client.sendKey = async (_surface, key) => { client.sendKeyCalls.push(key); echo = input; input = ""; };
+    client.readScreen = async surface => ({ surface, text: `Gemini CLI\n${echo}\n${input ? `${cli}> ${input}` : ">>>"}`, lines: 30, scrollback_used: false });
+    server = createRelayServer(client);
+    registerAgent(server, { cli });
+    const result = parseResult(await callTool(server, "send_to", { agent_id: "agent-1", text: "round one echoed instruction", press_enter: true }));
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, delivery_state: "submitted", submitted: true });
+    expect(client.sendKeyCalls).toEqual(["return"]);
+  }, 10_000);
+
   it("send_to a frozen terminal returns pending_verify instead of a false terminal fail (short relay)", async () => {
     const client = new FrozenClaudeSurfaceClient();
     server = createRelayServer(client);

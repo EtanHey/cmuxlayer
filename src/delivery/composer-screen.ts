@@ -425,9 +425,11 @@ export function screenShowsCompletePendingInput(
 /** Compare transcript text above the final composer, excluding its draft. */
 export function screenTranscriptContainsText(screen: string, text: string): boolean {
   const lines = normalizeTerminalText(screen).split("\n");
+  const cli = inferComposerCli(screen);
   let composer = -1;
   for (let index = lines.length - 1; index >= 0; index--) {
-    if (/^[ \t]*(?:[❯›»>→]|cursor>|codex>|gemini>|kiro>)(?:[ \t]|$)/u.test(lines[index])) { composer = index; break; }
+    const line = lines[index] ?? "";
+    if (matchComposerPromptLine(line) || matchLegacyClaudePromptLine(cli, line) || isEligibleBareReadyPromptLine(cli, line)) { composer = index; break; }
   }
   return composer >= 0 && screenContainsCompleteSubmittedText(lines.slice(0, composer).join("\n"), text);
 }
@@ -1123,7 +1125,7 @@ export function countVisibleQueuedSubmitMatches(screenText: string, text: string
     const normalized = compactQueueCorrelationText(visible);
     return compactQueueCorrelationText(displayed) === authored || (truncated &&
       normalized.length > 0 && authored.startsWith(normalized) &&
-      (visible.length >= 40 || normalized === compactQueueCorrelationText(text.split("\n")[0] ?? "")));
+      visible.length >= 40);
   }).length;
 }
 
