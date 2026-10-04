@@ -1027,7 +1027,7 @@ function codexQueueScan(lines: string[], cursor: number): { items: CodexQueuedIt
         headingStart = codexQueueHeadingStart(lines, cursor);
         if (headingStart >= 0) break;
       }
-      if (/^⌥\+↑ edit last queued message$/.test(activeLine)) {
+      if (/^(?:⌥\+↑|shift\+←) edit last queued message$/.test(activeLine)) {
         cursor -= 1;
         continue;
       }
@@ -1110,6 +1110,21 @@ export function countVisibleExactQueuedRows(
   const items = codexQueuedItems(screenText);
   if (items === null || items.length === 0) return null;
   return items.filter((item) => item.exact === authoredText).length;
+}
+
+/** Submission correlation only; Return ownership continues to require exact rows. */
+export function countVisibleQueuedSubmitMatches(screenText: string, text: string): number {
+  const authored = compactQueueCorrelationText(text);
+  if (!authored || inferComposerCli(screenText) !== "codex") return 0;
+  return (codexQueuedItems(screenText) ?? []).filter(item => {
+    const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
+    const truncated = /(?:…|\.\.\.)$/.test(displayed);
+    const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
+    const normalized = compactQueueCorrelationText(visible);
+    return compactQueueCorrelationText(displayed) === authored || (truncated &&
+      normalized.length > 0 && authored.startsWith(normalized) &&
+      (visible.length >= 40 || normalized === compactQueueCorrelationText(text.split("\n")[0] ?? "")));
+  }).length;
 }
 
 export function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {

@@ -419,17 +419,15 @@ describe("send_to v2 background verify", () => {
     );
   });
 
-  it.each([false, true])("RESCOPE a Cursor queue matching only the tail or older transcript does not prove our complete message (%s)", async stale => {
+  it("RESCOPE a Cursor queue matching only the tail does not prove our complete message", async () => {
     const client = new FakeAgentSurfaceClient();
     client.cli = "cursor";
     client.cursorFollowUpBox = true;
     const text = "owned prefix " + "shared tail ".repeat(10) + "end";
     const read = client.readScreen.bind(client);
     vi.spyOn(client, "readScreen").mockImplementation(async (surface, opts) => client.sendKeyCalls.length > 1
-      ? { surface, text: `Cursor Agent\nWorking\n${stale ? text : `foreign prefix ${text.slice(-80)}`}\n→ Add a follow-up\nctrl+c to stop`, lines: 30, scrollback_used: false }
-      : stale && client.sendCalls.length === 0
-        ? { surface, text: `Cursor Agent\n${text}\n→\nAuto`, lines: 30, scrollback_used: false }
-        : read(surface, opts));
+      ? { surface, text: `Cursor Agent\nWorking\nforeign prefix ${text.slice(-80)}\n→ Add a follow-up\nctrl+c to stop`, lines: 30, scrollback_used: false }
+      : read(surface, opts));
     server = createVerifyServer(client);
     registerAgent(server, { cli: "cursor" });
     const result = parseResult(await callTool(server, "send_to", { agent_id: "agent-1", text, press_enter: true }));

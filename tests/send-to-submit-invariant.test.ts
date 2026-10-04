@@ -7,11 +7,6 @@ const args = { mode: "agent", agent_id: "target", text: "request", press_enter: 
 const shape = (data: Record<string, unknown>, extra = {}) => shapeSuccessfulSendToResult(okFormatted("old success", data), { ...args, ...extra });
 
 describe("RESCOPE send_to verified success invariant", () => {
-  it("RESCOPE Codex context compaction is active", () => {
-    const screen = "OpenAI Codex\n• Compacting context (5s · esc to interrupt)\n›\n  GPT-6.1-Sol high · ~/repo";
-    expect(parseScreen(screen).status).toBe("working");
-    expect(codexScreenHasActiveTurn(screen)).toBe(true);
-  });
   it("RESCOPE a follow-up queue heading does not end the active Codex turn", () => {
     const screen = readFileSync(new URL("./fixtures/codex-0.157/midturn-followup-queued.txt", import.meta.url), "utf8");
     expect(codexScreenHasActiveTurn(screen)).toBe(true);

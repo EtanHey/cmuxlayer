@@ -65,6 +65,7 @@ import {
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
   countVisibleExactQueuedRows,
+  countVisibleQueuedSubmitMatches,
   countVisibleCodexQueuedInputs,
   codexScreenShowsSubmit,
   composerRegionMatchesPayload,
@@ -1165,10 +1166,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         opts.require_attributable_submit_evidence === true
           ? screenShowsCompletePendingInput(snapshot.text, opts.text)
           : screenShowsPendingInput(snapshot.text, opts.text);
-      const hasQueuedAgentInput = screenShowsQueuedAgentInput(snapshot.text, opts.text, { exact: opts.source_event === "send_to" }) &&
-        (opts.source_event !== "send_to" || (Boolean(opts.pre_type_screen?.trim()) && !hasPendingInput &&
-          (countVisibleExactQueuedRows(snapshot.text, opts.text) ?? 0) >
-          (countVisibleExactQueuedRows(opts.pre_type_screen ?? "", opts.text) ?? 0)));
+      const hasQueuedAgentInput = opts.source_event === "send_to"
+        ? Boolean(opts.pre_type_screen?.trim()) && !hasPendingInput &&
+          countVisibleQueuedSubmitMatches(snapshot.text, opts.text) > countVisibleQueuedSubmitMatches(opts.pre_type_screen ?? "", opts.text)
+        : screenShowsQueuedAgentInput(snapshot.text, opts.text);
       if (hasQueuedAgentInput) {
         // Tab can land just as the turn ends. A visible exact queue row in an
         // idle pane still needs Return; recheck both facts at the key dispatch.
@@ -1217,7 +1218,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             } else throw error;
           }
         }
-        if (((opts.source_event === "send_to" && lastCodexRelayKey !== "tab") || idleQueueDrainAttempted) &&
+        if ((opts.source_event === "send_to" || idleQueueDrainAttempted) &&
           !codexScreenHasActiveTurn(snapshot.text)) {
           return {
             submit_verified: null,
@@ -1261,7 +1262,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           retry_count: retryCount,
           delivery: "queued_followup",
           queue_verified: screenShowsQueuedCursorFollowup(snapshot.text, opts.text, { exact: true }) &&
-            Boolean(opts.pre_type_screen?.trim()) && !screenTranscriptContainsText(opts.pre_type_screen ?? "", opts.text),
+            !screenShowsQueuedCursorFollowup(opts.pre_type_screen ?? "", opts.text, { exact: true }),
         };
       }
       // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative. An agent

@@ -271,6 +271,18 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     }
   }, 30_000);
 
+  it.each(["one-row", "wrapped", "truncated"])("RESCOPE verifies a newly visible %s Codex queue", async shape => {
+    const rows = shape === "one-row" ? LONG : shape === "wrapped" ? `${LONG.slice(0, 55)}\n    ${LONG.slice(55, 100)}\n    ${LONG.slice(100)}` : `${LONG.slice(0, 55)}\n    ${LONG.slice(55, 100)}\n    …`;
+    const after = fixture("midturn-wrapped-steer-queued").replace(/  ↳ Read and follow[^\n]*\n    not-act[^\n]*/, `  ↳ ${rows}\n    shift+← edit last queued message`);
+    const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+    const target = await setup({ empty: render(""), buffered: render(""), draft: render, after });
+    try {
+      expect(await target.send(LONG)).toMatchObject({ ok: true, delivery_state: "queued", submitted: false, queued_behind_turn: true });
+      expect(target.pane.tabs).toBe(1);
+      expect(target.pane.returns).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   it("RESCOPE a truncated queue prefix is not verified success", async () => {
     const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
     const target = await setup({ empty: render(""), buffered: render(""), draft: render, after: `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ request prefix…\n›\n  GPT-6.1-Sol high · ~/repo` });

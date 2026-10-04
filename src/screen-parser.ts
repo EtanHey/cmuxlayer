@@ -249,7 +249,7 @@ const CLAUDE_SHORTCUTS_FOOTER_RE = /^[ \t]*\?[ \t]+for shortcuts\b/i;
 const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const CODEX_TURN_ACTIVITY_LINE_RE =
-  /^\s*(?:[•·]\s*)?(?:Working|Thinking|Compacting context|Waiting(?: for background terminal)?)\s*\([^\n)]*\)(?:\s*[•·].*)?\s*$/i;
+  /^\s*(?:[•·]\s*)?(?:Working|Thinking|Waiting(?: for background terminal)?)\s*\([^\n)]*\)(?:\s*[•·].*)?\s*$/i;
 const TERMINAL_ACTIVITY_LINE_RE =
   /^\s*(?:[•·]\s*)?(?:Working|Waiting for background terminal)\s*\((?:[0-9]+(?:\.[0-9]+)?[hms]\s*)+\s*[•·-]\s*esc to interrupt\)(?:\s*[•·].*)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
@@ -1663,7 +1663,7 @@ export function hasVisibleAgentProgress(
   }
   if (TERMINAL_ACTIVITY_LINE_RE.test(normalized)) return true;
   if (THINKING_RE.test(normalized)) return true;
-  if (agentType === "codex" && (CODEX_WORKING_RE.test(normalized) || codexScreenHasActiveTurn(normalized))) return true;
+  if (agentType === "codex" && CODEX_WORKING_RE.test(normalized)) return true;
   if (
     agentType === "cursor" &&
     (CURSOR_HEX_RUNNING_RE.test(normalized) ||
