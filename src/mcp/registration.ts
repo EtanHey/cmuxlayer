@@ -191,7 +191,8 @@ function isLeanSuccessfulTransportReceipt(
     structured.delivery_state === "submitted" && structured.submitted === true;
   const verifiedKeyReceipt =
     typeof structured.key === "string" && structured.submit_verified === true;
-  return submittedReceipt || verifiedKeyReceipt;
+  const verifiedBatch = Array.isArray(structured.receipts) && structured.receipts.length > 0 && structured.receipts.every(receipt => receipt?.ok === true || Boolean(receipt?.skipped) || receipt?.resolution === "filtered_out");
+  return verifiedBatch || submittedReceipt || structured.delivery_state === "queued" || structured.delivery_state === "queued_followup" || verifiedKeyReceipt;
 }
 
 export function installToolRegistration(
@@ -261,6 +262,7 @@ export function installToolRegistration(
       : [];
     const warnings = [...new Set([...existingWarnings, ...provenanceWarnings])];
     if (leanSuccessfulReceipt) {
+      if (toolName === "send_to" && typeof structured.key !== "string") return result;
       if (warnings.length === 0) return result;
       const nextStructured = { ...structured, warnings };
       return {
@@ -401,7 +403,7 @@ export function installToolRegistration(
               }) };
             }
             const shaped =
-              toolNameString === "send_to" && !verbose
+              toolNameString === "send_to"
                 ? shapeSuccessfulSendToResult(handled, rawArgs)
                 : handled;
             return attachTransportProvenance(shaped, toolNameString, verbose);

@@ -3377,7 +3377,8 @@ describe("tool handler integration", () => {
       { surface: "surface:receipt-parity", key: "escape" },
       {} as any,
     );
-    const publicMessageResult = await registeredTools.send_to.handler(
+    vi.useFakeTimers();
+    const publicMessagePromise = registeredTools.send_to.handler(
       {
         mode: "surface",
         surface: "surface:receipt-parity",
@@ -3386,6 +3387,9 @@ describe("tool handler integration", () => {
       },
       {} as any,
     );
+    await vi.advanceTimersByTimeAsync(6_000);
+    vi.useRealTimers();
+    const publicMessageResult = await publicMessagePromise;
     const publicCommandResult = await registeredTools.send_to.handler(
       {
         mode: "command",
@@ -3413,7 +3417,7 @@ describe("tool handler integration", () => {
     };
 
     expect(receiptShape(commandResult)).toEqual(receiptShape(messageResult));
-    expect(receiptShape(publicMessageResult)).toEqual(receiptShape(messageResult));
+    expect(publicMessageResult.structuredContent).toMatchObject({ ok: false, error_code: "submit_unverified", delivery_state: "pending_verify", terminal: false, typed: true });
     expect(receiptShape(publicCommandResult)).toEqual(receiptShape(commandResult));
     expect(receiptShape(publicKeyResult)).toEqual(receiptShape(keyResult));
     expect(receiptShape(commandResult)).toEqual({

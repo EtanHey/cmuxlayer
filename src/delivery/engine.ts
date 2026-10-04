@@ -65,6 +65,7 @@ import {
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
   countVisibleExactQueuedRows,
+  countVisibleQueuedSubmitMatches,
   countVisibleCodexQueuedInputs,
   codexScreenShowsSubmit,
   composerRegionMatchesPayload,
@@ -954,6 +955,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       throw new DeliverySafetyGateError("composer_unrecognized", snapshot.parsed);
     }
 
+    if (opts.draftGuardText !== undefined &&
+      inferComposerCli(snapshot.text, snapshot.parsed) === "codex" &&
+      countVisibleCodexQueuedInputs(snapshot.text) > 0 &&
+      !codexScreenHasActiveTurn(snapshot.text)) {
+      throw new DeliverySafetyGateError("queued_stalled_idle", snapshot.parsed);
+    }
+
     // AIDEV-NOTE (T2 #442): a composer that already holds text nobody in this
     // delivery wrote is a human (or another agent) mid-draft. Typing into it
     // concatenates, and the Return that follows SUBMITS their words. The
@@ -1086,6 +1094,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     submit_evidence: SubmitEvidence | null;
     submit_verification_reason: SubmitVerificationFailureReason | null;
     retry_count: number;
+    queue_verified?: boolean;
     delivery:
       "submitted" | "queued" | "queued_followup" | "rescued" | "pending_verify";
   }> => {
@@ -1157,7 +1166,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         opts.require_attributable_submit_evidence === true
           ? screenShowsCompletePendingInput(snapshot.text, opts.text)
           : screenShowsPendingInput(snapshot.text, opts.text);
-      const hasQueuedAgentInput = screenShowsQueuedAgentInput(snapshot.text, opts.text);
+      const hasQueuedAgentInput = opts.source_event === "send_to"
+        ? Boolean(opts.pre_type_screen?.trim()) && !hasPendingInput &&
+          countVisibleQueuedSubmitMatches(snapshot.text, opts.text) > countVisibleQueuedSubmitMatches(opts.pre_type_screen ?? "", opts.text)
+        : screenShowsQueuedAgentInput(snapshot.text, opts.text);
       if (hasQueuedAgentInput) {
         // Tab can land just as the turn ends. A visible exact queue row in an
         // idle pane still needs Return; recheck both facts at the key dispatch.
@@ -1206,7 +1218,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             } else throw error;
           }
         }
-        if (lastCodexRelayKey === "tab" && idleQueueDrainAttempted &&
+        if ((opts.source_event === "send_to" || idleQueueDrainAttempted) &&
           !codexScreenHasActiveTurn(snapshot.text)) {
           return {
             submit_verified: null,
@@ -1249,6 +1261,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           submit_verification_reason: null,
           retry_count: retryCount,
           delivery: "queued_followup",
+          queue_verified: screenShowsQueuedCursorFollowup(snapshot.text, opts.text, { exact: true }) &&
+            !screenShowsQueuedCursorFollowup(opts.pre_type_screen ?? "", opts.text, { exact: true }),
         };
       }
       // AIDEV-NOTE (T2 #427): `0 tokens` is a definitive negative. An agent
@@ -1316,6 +1330,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         codexScreen &&
         !hasPendingSubmitEvidence &&
         codexScreenShowsSubmit(opts.pre_type_screen, snapshot.text, opts.text);
+      const relaySubmitProof = opts.source_event !== "send_to" || (
+        opts.pre_type_screen !== undefined && opts.pre_type_screen !== null &&
+        composerInput !== null && composerInput.trim() === "" && !hasPendingSubmitEvidence && (
+          (isSubmitVerifiedStatus(snapshot.parsed.status) && !isSubmitVerifiedStatus(parseScreen(opts.pre_type_screen ?? "").status)) ||
+          (screenTranscriptContainsText(snapshot.text, opts.text) && !screenTranscriptContainsText(opts.pre_type_screen, opts.text)) ||
+          codexSubmitEchoed || cursorShowsSubmittedResponse
+        )
+      );
       const bootHasTranscriptEcho =
         opts.require_attributable_submit_evidence === true &&
         bootFrameAdvanced &&
@@ -1343,6 +1365,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       }
       if (
         !sawNewInterrupt &&
+        relaySubmitProof &&
         !hasPendingSubmitEvidence &&
         !bootConsumptionRefuted &&
         ((opts.require_attributable_submit_evidence !== true &&
@@ -1367,6 +1390,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         };
       }
       const hasClearedAgentComposer =
+        relaySubmitProof &&
         !codexScreen &&
         composerInput !== null &&
         composerInput.trim() === "" &&
@@ -1411,7 +1435,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         hasPendingSubmitEvidence &&
         (screenCli === "codex" ||
           (screenCli === "claude" &&
-            !isSubmitVerifiedStatus(snapshot.parsed.status)));
+            (opts.source_event === "send_to" || !isSubmitVerifiedStatus(snapshot.parsed.status))));
       if (
         agentRetryEligiblePendingInput &&
         screenCli === "claude" &&
@@ -1584,8 +1608,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         submit_evidence: null,
         // Keep the internal reason long enough for the delivery engine to
         // preserve same-caller ownership of an exact draft that visibly
-        // remains in the composer. The public pending receipt is still
-        // intentionally reasonless/nonterminal below.
+        // remains in the composer. Public pending receipts retain the reason
+        // while staying nonterminal for background verification.
         submit_verification_reason: failureReason,
         retry_count: retryCount,
         delivery: "pending_verify",
@@ -2081,6 +2105,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     // This screen read is already required by the safety gate and occurs under
     // the surface write lock. Reuse it for raw tracked-surface verification.
     const verifySubmit =
+      (opts.source_event === "send_to" && opts.press_enter) ||
       opts.verify_submit === true ||
       liveTrackedSurfaceIsDeliverable(
         opts.verify_submit_for_tracked_surface,
@@ -2166,6 +2191,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       null;
     let ownedDraftPending = false;
     let retry_count = 0;
+    let queueVerified = false;
     let deliveryOutcome:
       | "submitted"
       | "queued"
@@ -2198,7 +2224,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         submit_verification_reason = null;
         deliveryOutcome = "pending_verify";
       } else {
-        const codexRelay = targetCli === "codex" &&
+        const codexRelay = (targetCli ?? inferComposerCli(deliverySafetySnapshot?.text ?? "")) === "codex" &&
           (opts.source_event === "send_to" ||
             opts.source_event === "dispatch_nudge" ||
             opts.source_event === "report_to_parent");
@@ -2285,13 +2311,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           verification.submit_verification_reason === "input_still_pending";
         retry_count = verification.retry_count;
         deliveryOutcome = verification.delivery;
+        queueVerified = verification.delivery === "queued" || verification.queue_verified === true;
         if (
           deliveryOutcome === "pending_verify" ||
           deliveryOutcome === "queued_followup"
         ) {
           submit_verified = null;
           submit_evidence = null;
-          submit_verification_reason = null;
+          if (deliveryOutcome !== "pending_verify") submit_verification_reason = null;
         }
       }
     }
@@ -2376,6 +2403,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                     : undefined,
       delivery_id: opts.delivery_id,
       typed: textDispatched,
+      queued_behind_turn: queueVerified,
+      queue_verified: queueVerified,
+      submit_verification_reason,
       submit_attempted: Boolean(opts.press_enter),
       submit_dispatched: submitDispatched,
       submit_verified,
@@ -3696,6 +3726,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   const startBackgroundDelivery = (
     record: DeliveryRecord,
     lifecycle?: BackgroundDeliveryLifecycle,
+    sourceEvent: DeliveryEventType = "send_input",
   ) => {
     // Preserve the backend owner that accepted the asynchronous write. Reading
     // the observer after completion could attribute old-backend evidence to a
@@ -3721,7 +3752,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           press_enter: record.press_enter,
           rename_to_task: record.rename_to_task,
           stableSurfaceIdentity: record.stableSurfaceIdentity,
-          source_event: lifecycle?.source_event ?? "send_input",
+          source_event: lifecycle?.source_event ?? sourceEvent,
           delivery_id: record.delivery_id,
           verify_submit: record.verify_submit,
           beforeMutation: record.beforeMutation,

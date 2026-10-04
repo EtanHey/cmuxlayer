@@ -1706,7 +1706,7 @@ export function codexScreenHasActiveTurn(text: string): boolean {
       latestActivity = index;
     }
     else if (/^\s*[•·]\s+\S/.test(line) &&
-      !/^\s*[•·]\s+Messages to be submitted after next tool call\b/.test(line) &&
+      !/^\s*[•·]\s+(?:Messages to be submitted after next tool call|Queued follow-up inputs)\b/.test(line) &&
       !CODEX_CURRENT_ACTION_RE.test(line.replace(/^\s*[•·]\s+/, ""))) {
       latestReply = index;
     }

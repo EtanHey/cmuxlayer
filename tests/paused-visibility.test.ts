@@ -315,8 +315,9 @@ describe("paused pane visibility", () => {
     });
     const parsed = parseResult(result);
 
-    expect(result.isError).not.toBe(true);
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.delivered).toBe(false);
     expect(parsed.delivery_state).toBe("queued");
     expect(parsed.WARNING).toMatch(/paused/i);
@@ -355,7 +356,8 @@ describe("paused pane visibility", () => {
       (receipt) => receipt.agent_id === "agent-idle",
     );
 
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(pausedReceipt).toMatchObject({
       agent_id: "agent-paused",
       delivered: false,

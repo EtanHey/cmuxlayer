@@ -425,9 +425,11 @@ export function screenShowsCompletePendingInput(
 /** Compare transcript text above the final composer, excluding its draft. */
 export function screenTranscriptContainsText(screen: string, text: string): boolean {
   const lines = normalizeTerminalText(screen).split("\n");
+  const cli = inferComposerCli(screen);
   let composer = -1;
   for (let index = lines.length - 1; index >= 0; index--) {
-    if (/^[ \t]*(?:[❯›»>]|cursor>)(?:[ \t]|$)/u.test(lines[index])) { composer = index; break; }
+    const line = lines[index] ?? "";
+    if (matchComposerPromptLine(line) || matchLegacyClaudePromptLine(cli, line) || isEligibleBareReadyPromptLine(cli, line)) { composer = index; break; }
   }
   return composer >= 0 && screenContainsCompleteSubmittedText(lines.slice(0, composer).join("\n"), text);
 }
@@ -1027,7 +1029,7 @@ function codexQueueScan(lines: string[], cursor: number): { items: CodexQueuedIt
         headingStart = codexQueueHeadingStart(lines, cursor);
         if (headingStart >= 0) break;
       }
-      if (/^⌥\+↑ edit last queued message$/.test(activeLine)) {
+      if (/^(?:⌥\+↑|shift\+←) edit last queued message$/.test(activeLine)) {
         cursor -= 1;
         continue;
       }
@@ -1112,6 +1114,21 @@ export function countVisibleExactQueuedRows(
   return items.filter((item) => item.exact === authoredText).length;
 }
 
+/** Submission correlation only; Return ownership continues to require exact rows. */
+export function countVisibleQueuedSubmitMatches(screenText: string, text: string): number {
+  const authored = compactQueueCorrelationText(text);
+  if (!authored || inferComposerCli(screenText) !== "codex") return 0;
+  return (codexQueuedItems(screenText) ?? []).filter(item => {
+    const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
+    const truncated = /(?:…|\.\.\.)$/.test(displayed);
+    const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
+    const normalized = compactQueueCorrelationText(visible);
+    return compactQueueCorrelationText(displayed) === authored || (truncated &&
+      normalized.length > 0 && authored.startsWith(normalized) &&
+      visible.length >= 40);
+  }).length;
+}
+
 export function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {
   return (
     inferComposerCli(screenText) === "cursor" &&
@@ -1122,6 +1139,7 @@ export function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean
 export function screenShowsQueuedCursorFollowup(
   screenText: string,
   submittedText: string,
+  opts: { exact?: boolean } = {},
 ): boolean {
   if (inferComposerCli(screenText) !== "cursor") {
     return false;
@@ -1138,7 +1156,7 @@ export function screenShowsQueuedCursorFollowup(
   if (composer === null || composer.trim() !== "") {
     return false;
   }
-  if (!normalizeTerminalText(screenText).includes(tail)) {
+  if (opts.exact ? !screenContainsCompleteSubmittedText(screenText, submittedText) : !normalizeTerminalText(screenText).includes(tail)) {
     return false;
   }
   return (

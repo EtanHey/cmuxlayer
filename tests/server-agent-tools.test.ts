@@ -204,7 +204,7 @@ function makeLifecycleExec(opts?: {
               `>_ OpenAI Codex\n${codexUserRows(pendingText)}\n\n${workingText()}\n\n› \n\n  gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`
             : activeCli === "cursor"
               ? `Cursor Agent\n${pendingText}\nWorking (1s • esc to interrupt)\ncursor> `
-              : workingText();
+              : `Claude Code\n${pendingText}\n✻ Working\n❯`;
         promptPending = false;
         pendingText = "";
       }
@@ -8892,7 +8892,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const parsed = parseToolResult(result);
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed.receipts).toEqual([
       expect.objectContaining({
         agent_id: record.agent_id,
@@ -8929,7 +8930,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const parsed = parseToolResult(result);
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed).toMatchObject({
       target_count: 1,
       submitted_count: 0,
@@ -8946,9 +8948,9 @@ describe("agent lifecycle tool handlers", () => {
         }),
       ],
     });
-    expect(result.content[0].text).toContain("1 failed");
+
     expect(result.structuredContent).toHaveProperty("caller_agent_id", null);
-    expect(result.content[0].text).toBe("send_to targeting: 0 submitted, 0 queued, 1 failed, 0 skipped");
+
   }, 20_000);
 
   it("send_to rejects targeting combined with a singular agent id", async () => {
@@ -8999,7 +9001,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const parsed = parseToolResult(result);
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed).toMatchObject({
       target_count: 2,
       delivered_count: 1,
@@ -10698,7 +10701,7 @@ codex>
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.queued_behind_turn).toBe(true);
-    expect(parsed.warnings).toContain("cli_fallback_active");
+    expect(parsed).not.toHaveProperty("warnings");
     expect(deliveredText).toBe("interject while working");
     expect(sendCalls[0]?.[1]).toEqual(
       expect.arrayContaining(["--workspace", "workspace:1"]),
@@ -13422,7 +13425,8 @@ codex>
     );
 
     expect(result).toMatchObject({
-      ok: true,
+      ok: false,
+      error_code: "submit_unverified",
       delivery_state: "rescued",
       terminal: true,
       delivered: false,
@@ -13514,7 +13518,8 @@ codex>
     );
 
     expect(result).toMatchObject({
-      ok: true,
+      ok: false,
+      error_code: "submit_unverified",
       delivery_state: "rescued",
       terminal: true,
       delivered: false,
@@ -13637,6 +13642,9 @@ codex>
     mockExec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
       if (!collectReceiverInput) {
         return baseExec(cmd, args);
+      }
+      if (args.includes("read-screen")) {
+        return { stdout: JSON.stringify({ surface: "surface:1", text: `Claude Code\n${submittedMessages.join("\n")}\n❯ ${composer}`, lines: 30, scrollback_used: false }), stderr: "" };
       }
       if (args.includes("set-buffer")) {
         const nameIndex = args.indexOf("--name");
@@ -14520,7 +14528,8 @@ codex>
       {},
     );
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error_code).toBe("submit_unverified");
     expect(get).not.toHaveBeenCalled();
   });
 

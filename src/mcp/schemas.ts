@@ -274,6 +274,7 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
   send_to: z
     .object({
       ...BaseOutputShape,
+      retry_count: BaseOutputShape.retry_count.optional(),
       ...DeliveryOutputShape,
       agent_id: z.string().optional(),
       surface: z.string().optional(),

@@ -308,7 +308,7 @@ describe("send_to consolidated modes", () => {
     );
   });
 
-  it("returns terminal typed truth when raw surface Return was unverified", async () => {
+  it("returns an honest pending error when raw surface Return was unverified", async () => {
     const exec = makeExec();
     const server = createServer({
       exec,
@@ -317,7 +317,8 @@ describe("send_to consolidated modes", () => {
       controlHealthIntervalMs: 0,
     }) as any;
 
-    const result = await server._registeredTools.send_to.handler(
+    vi.useFakeTimers();
+    const resultPromise = server._registeredTools.send_to.handler(
       {
         mode: "surface",
         target: "surface:1",
@@ -326,21 +327,25 @@ describe("send_to consolidated modes", () => {
       },
       {},
     );
+    await vi.advanceTimersByTimeAsync(6_000);
+    vi.useRealTimers();
+    const result = await resultPromise;
     const parsed = parseResult(result);
 
-    expect(result.isError).toBeUndefined();
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.submit_attempted).toBe(true);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.delivery).toBe("typed");
-    expect(parsed.delivery_state).toBe("typed");
-    expect(parsed.terminal).toBe(true);
+    expect(parsed.delivery).toBe("pending_verify");
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
     expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
     expect(JSON.parse(result.content[0].text)).toEqual(
       result.structuredContent,
     );
-    expect(parsed.WARNING).toMatch(/not verified/i);
+    expect(parsed.WARNING).toMatch(/not delivered/i);
   });
 
   it("routes command mode through atomic raw-surface command delivery", async () => {
