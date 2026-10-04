@@ -1,7 +1,28 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+function codexTargetModel() {
+  if (process.env.CMUXLAYER_SOAK_CODEX_MODEL) return process.env.CMUXLAYER_SOAK_CODEX_MODEL;
+  const path = process.env.CMUXLAYER_MODEL_ROLES
+    || join(homedir(), "Gits/golems/standards/model-roles.json");
+  let reason;
+  try {
+    const roles = JSON.parse(readFileSync(path, "utf8"));
+    const model = roles?.roles?.["codex.subagent.mechanical"]?.model;
+    if (typeof model === "string" && model.trim()) return model;
+    reason = "roles file lacks a valid codex.subagent.mechanical model";
+  } catch (error) {
+    reason = error.code === "ENOENT" ? "roles file not found" : "roles file unreadable or malformed";
+  }
+  console.error(`soak: Codex target model is unpinned (${reason}); using launcher default`);
+  return null;
+}
+
 export function options(argv) {
   const opts = { cycles: 40, concurrency: 2, timeoutMs: 90_000, durationMinutes: 60,
     agentId: process.env.GOLEM_SEAT || "", leadAgentId: "", entry: process.env.CMUXLAYER_SOAK_ENTRY || "cmuxlayer",
-    claudeModel: null, codexModel: "gpt-6-sol", codexEffort: "low", pool: 0, freshEvery: 0 };
+    claudeModel: null, codexModel: null, codexEffort: "low", pool: 0, freshEvery: 0 };
   const fields = { "--cycles": "cycles", "--concurrency": "concurrency",
     "--timeout-ms": "timeoutMs", "--duration-minutes": "durationMinutes",
     "--agent-id": "agentId", "--lead-agent-id": "leadAgentId", "--entry": "entry",
@@ -28,6 +49,7 @@ export function options(argv) {
   if (opts.pool > 0 && !argv.includes("--fresh-every")) opts.freshEvery = 5;
   if (!Number.isInteger(opts.freshEvery) || (opts.pool > 0 && opts.freshEvery < 1)
     || (opts.pool === 0 && opts.freshEvery !== 0)) throw new Error("fresh-every requires a pool and must be positive");
+  if (opts.codexModel === null) opts.codexModel = codexTargetModel();
   return opts;
 }
 
@@ -42,4 +64,9 @@ export function cycleAssignment(cycle, pool, freshEvery) {
 
 export function isPoolSeatDead(row) {
   return !row || row.state === "error";
+}
+
+export function targetSeatOptions(cli, opts) {
+  const model = cli === "codex" ? opts.codexModel : opts.claudeModel;
+  return { ...(model ? { model } : {}), ...(cli === "codex" ? { effort: opts.codexEffort } : {}) };
 }

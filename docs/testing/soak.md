@@ -23,15 +23,16 @@ node scripts/soak-live.mjs --agent-id LEAD_SCRATCH_ID --lead-agent-id cmuxlayerC
 
 Defaults: at least 40 cycles and 60 minutes on one MCP stdio server process,
 concurrency 2, workspace:1 right column, alternating
-Claude launcher default and Codex `gpt-6-sol` low. Each spawned seat answers
+Claude launcher default and the resolved Codex target model at `low` effort. Each spawned seat answers
 two bounded prompts, then is closed. The fixed cycle budget is paced across
 the duration floor; once it finishes, the runner waits with health sampling.
 Use `--cycles 4 --duration-minutes 0` for an installed smoke;
 `--timeout-ms` (default 90000, max 300000) and `--entry` override the wait and
 installed executable. Source builds are useful for diagnosis but are not
 installed-release proof.
-`--claude-model` omits the launcher model override by default; `--codex-model`
-and `--codex-effort` default to `gpt-6-sol` and `low`. `--pool 0` retains the
+`--claude-model` omits the launcher model override by default; `--codex-effort` defaults to `low`.
+Codex targets resolve `--codex-model` → `CMUXLAYER_SOAK_CODEX_MODEL` → `codex.subagent.mechanical` from `CMUXLAYER_MODEL_ROLES` (or `~/Gits/golems/standards/model-roles.json`) → launcher default with one stderr warning if the roles file is missing, malformed, or lacks the role.
+`--pool 0` retains the
 fresh-seat behavior. With a pool, seats alternate Claude/Codex and are reused
 round-robin. Every fifth cycle uses the original two-prompt fresh spawn and
 close path unless `--fresh-every` sets another interval. The pool size must be

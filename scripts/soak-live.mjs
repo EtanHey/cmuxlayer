@@ -12,7 +12,7 @@ import {
 } from "./soak-live-checks.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
-import { cycleAssignment, isPoolSeatDead, options } from "./soak-live-options.mjs";
+import { cycleAssignment, isPoolSeatDead, options, targetSeatOptions } from "./soak-live-options.mjs";
 
 const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -260,8 +260,7 @@ async function main() {
   };
   const spawnSeat = async (cycle, cli, marker) => {
     const spawn = await call("spawn_agent", { repo: "cmuxlayer", workspace: WORKSPACE,
-      cli, ...(cli === "codex" ? { model: opts.codexModel, effort: opts.codexEffort }
-        : opts.claudeModel ? { model: opts.claudeModel } : {}),
+      cli, ...targetSeatOptions(cli, opts),
       role: "worker", authority: "worker", placement: "right", force_new: true,
       mcp_profile: "sterile", prompt: `Reply exactly ${marker} then stop.` }, cycle);
     const seat = { agentId: spawn.agent_id, surface: spawn.surface_id ?? spawn.surface,
