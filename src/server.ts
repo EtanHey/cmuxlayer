@@ -3085,7 +3085,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const queuedBehindTurn =
         args.source_event === "send_to" && liveRouteState.state === "working";
       const bypassLifecycleGate =
-        args.allow_busy === true || args.source_event === "send_to";
+        args.allow_busy === true || args.source_event === "send_to" ||
+        (expectedCli === "codex" && liveRouteState.state === "working" &&
+          (args.source_event === "report_to_parent" || args.source_event === "dispatch_nudge"));
       if (
         !bypassLifecycleGate &&
         !isLiveDeliverable(liveRouteState) &&
@@ -3291,6 +3293,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery:
         | "submitted"
         | "queued"
+        | "steer_pending"
         | "queued_followup"
         | "rescued"
         | "pending_verify";
@@ -3300,7 +3303,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         message,
         inboxPath(recipient.agent_id, inboxOpts),
       );
-      if (recipient.state === "working") {
+      if (recipient.state === "working" && recipient.cli !== "codex") {
         const queued = engine.queueDelivery({
           agent_id: recipient.agent_id,
           text: pointer,
@@ -3341,6 +3344,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (
         delivered.delivery !== "submitted" &&
         delivered.delivery !== "queued" &&
+        delivered.delivery !== "steer_pending" &&
         delivered.delivery !== "queued_followup" &&
         delivered.delivery !== "rescued" &&
         delivered.delivery !== "pending_verify"
@@ -3351,6 +3355,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       if (
         delivered.delivery === "queued" ||
+        delivered.delivery === "steer_pending" ||
         delivered.delivery === "queued_followup"
       ) {
         engine.acceptComposerQueue({

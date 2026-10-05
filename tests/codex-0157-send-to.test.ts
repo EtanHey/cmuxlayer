@@ -213,7 +213,11 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       const path = join(testDir, "synthetic-boot.txt"); writeFileSync(path, PONG);
       return as(LEAD_UUID, async () => parseToolResult(await internalToolForTests(server, "send_command").handler({ surface: spawned.surface_id, command: "cmuxlayerCodex -s cmuxlayer", boot_prompt_path: path, boot_prompt_timeout_ms: 5_000 }, {})));
     };
-    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites };
+    const report = (blocker: string) => as(OTHER_UUID, async () => {
+      engine.getRegistry().set("other-seat", { ...engine.getRegistry().get("other-seat"), role: "worker", parent_agent_id: spawned.agent_id, collab_path: null });
+      return parseToolResult(await server._registeredTools.report_to_parent.handler({ blocker }, {}));
+    });
+    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites, report };
   }
 
   it.each([false, true])("P0 STEER default busy send lands at next tool boundary (targeting=%s)", async targeting => {
@@ -249,6 +253,32 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         delivery_state: "steer_pending", terminal: false, submit_verified: null }), { timeout: 10_000 });
       expect(target.pane.tabs).toBe(0);
       expect(target.pane.returns).toBe(1);
+      expect(target.pane.keys).not.toContain("escape");
+    } finally { target.context.dispose(); }
+  });
+
+  it.each(["report", "watch", "dispatch"])("P0 STEER %s wakes busy Codex at the next boundary", async route => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n GPT-6-Luna low · ~/scratch`,
+      after: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call\n  ↳ ${text}\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch` });
+    try {
+      target.pane.steerOnReturn = true;
+      target.engine.getRegistry().set(target.spawned.agent_id, { ...target.engine.getAgentState(target.spawned.agent_id), state: "working" });
+      if (route === "report") {
+        const receipt = await target.report("Synthetic urgent blocker");
+        expect(receipt).toMatchObject({ ok: true, delivery: "steer_pending", route: "direct" });
+        expect(target.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "steer_pending", composer_accepted: true, source_event: "report_to_parent", terminal: false });
+      } else if (route === "watch") {
+        const path = join(testDir, "synthetic-watch.md"); writeFileSync(path, "");
+        setTimeout(() => writeFileSync(path, "DONE"), 30);
+        const result = await target.engine.waitForWatch({ owner: target.spawned.agent_id, target: path, marker: "DONE", deadline: Date.now() + 5000, provenance: "engine" }, 2500);
+        expect(result.watch).toMatchObject({ notification_pending: false, notification_attempts: 0 });
+        expect(target.engine.listDeliveryReceipts()).toContainEqual(expect.objectContaining({ agent_id: target.spawned.agent_id, source_event: "report_to_parent", delivery_state: "steer_pending", composer_accepted: true }));
+      } else {
+        const receipt = await target.context.lifecycleAgentInputDeliverer?.({ agent_id: target.spawned.agent_id, text: "Synthetic urgent correction", press_enter: true, source_event: "dispatch_nudge" });
+        expect(receipt).toMatchObject({ delivery_state: "steer_pending", delivered: false });
+      }
+      expect(target.pane.returns).toBe(1); expect(target.pane.tabs).toBe(0);
       expect(target.pane.keys).not.toContain("escape");
     } finally { target.context.dispose(); }
   });

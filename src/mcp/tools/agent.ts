@@ -659,8 +659,15 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
                 source_event: "report_to_parent",
                 delivery_id: randomUUID(),
               });
+              if (delivery.delivery_id && (delivery.delivery === "steer_pending" || delivery.delivery === "queued" || delivery.delivery === "queued_followup")) {
+                engine.acceptComposerQueue({ delivery_id: delivery.delivery_id, agent_id: owner.agent_id,
+                  text, press_enter: true, source_event: "report_to_parent", retry_count: delivery.retry_count,
+                  rpc_methods: delivery.rpc_methods, typed: delivery.typed, submit_dispatched: delivery.submit_dispatched,
+                  delivery_state: delivery.delivery });
+              }
               const ownerDelivered =
                 delivery.delivery === "submitted" ||
+                delivery.delivery === "steer_pending" ||
                 delivery.delivery === "queued";
               return ownerDelivered
                 ? true
