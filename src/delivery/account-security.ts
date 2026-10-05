@@ -31,8 +31,13 @@ export async function dismissAccountSecurityBanner<T extends { text: string }>(
   } finally {
     if (audit) {
       const fields = { agent_id: audit.agent_id, surface: audit.surface, variant, outcome };
-      appendDaemonLog("account_security_banner", fields);
-      audit.eventLog.appendAccountSecurityBanner({ ts: new Date().toISOString(), event_type: "account_security_banner", ...fields });
+      try {
+        appendDaemonLog("account_security_banner", fields);
+        audit.eventLog.appendAccountSecurityBanner({ ts: new Date().toISOString(), event_type: "account_security_banner", ...fields });
+      } catch (error) {
+        // Auditing must not replace the recovery result or its original failure.
+        console.error("[cmuxlayer] account_security_banner audit failed", { ...fields, error_name: error instanceof Error ? error.name : "unknown" });
+      }
     }
   }
 }

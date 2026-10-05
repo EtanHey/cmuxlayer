@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -7,12 +7,42 @@ import { composerHoldsForeignDraft, extractComposerInputRegion } from "../src/de
 import { dismissAccountSecurityBanner } from "../src/delivery/account-security.js";
 import { EventLog } from "../src/event-log.js";
 import { disableDaemonLog, enableDaemonLog, flushDaemonLog } from "../src/daemon-log.js";
+import * as daemonLog from "../src/daemon-log.js";
 
 const hooks = readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8");
 const composer = "› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch";
+const security = readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8");
 const roots: string[] = [];
+it.each([
+  { kind: "hooks", screen: hooks, outcome: "dismissed" }, { kind: "hooks", screen: hooks, outcome: "read failure" },
+  { kind: "security", screen: security, outcome: "dismissed" }, { kind: "security", screen: security, outcome: "read failure" },
+  { kind: "hooks", screen: hooks, outcome: "stuck" }, { kind: "security", screen: security, outcome: "stuck" },
+])("audit failure preserves $kind dismissal result: $outcome", async ({ kind, screen, outcome }) => {
+  vi.useFakeTimers();
+  const stderr = vi.spyOn(console, "error").mockReturnValue(undefined);
+  const root = mkdtempSync(join(tmpdir(), "cmux-overlay-audit-failure-")); roots.push(root);
+  const eventLog = new EventLog(root);
+  // A directory at the append path fails real filesystem I/O, even as root.
+  mkdirSync(join(root, "events.jsonl"));
+  const logPath = join(root, "daemon.log"); enableDaemonLog({ path: logPath });
+  const originalError = new Error("synthetic read failure");
+  const escape = vi.fn().mockResolvedValue(undefined);
+  const read = outcome === "read failure" ? vi.fn().mockRejectedValue(originalError) : vi.fn().mockResolvedValue({ text: outcome === "stuck" ? screen : composer });
+  const pending = dismissAccountSecurityBanner({ text: screen }, { escape, read }, { agent_id: "synthetic-audit", surface: "surface:synthetic", eventLog });
+  const settled = pending.then(value => ({ value, error: null }), error => ({ value: null, error }));
+  await vi.advanceTimersByTimeAsync(1_100);
+  const result = await settled;
+  if (outcome === "dismissed") expect(result).toEqual({ value: { text: composer }, error: null });
+  else if (kind === "hooks") expect(result.error).toMatchObject({ error_code: "hooks_review_not_dismissed" });
+  else if (outcome === "stuck") expect(result.error).toMatchObject({ error_code: "account_security_banner_not_dismissed" });
+  else expect(result.error).toBe(originalError);
+  expect(escape).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(outcome === "stuck" ? 5 : 1);
+  await flushDaemonLog();
+  expect(stderr).toHaveBeenCalledWith("[cmuxlayer] account_security_banner audit failed", expect.objectContaining({ agent_id: "synthetic-audit", variant: kind === "hooks" ? "hooks_review" : "daybreak", error_name: "Error" }));
+});
 afterEach(async () => {
-  await flushDaemonLog(); disableDaemonLog(); vi.useRealTimers();
+  await flushDaemonLog(); disableDaemonLog(); vi.useRealTimers(); vi.restoreAllMocks();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -61,4 +91,20 @@ it.each(["dismissed", "stuck", "escape failure", "read failure"])("Hooks review 
   expect(eventLog.readEntries()).toEqual([expect.objectContaining(fields)]);
   const lines = readFileSync(logPath, "utf8").trim().split("\n"); expect(lines).toHaveLength(1);
   for (const [key, value] of Object.entries(fields)) expect(lines[0]).toContain(`${key}=${value}`);
+});
+
+it("daemon audit failure cannot replace a successful dismissal", async () => {
+  vi.useFakeTimers();
+  const stderr = vi.spyOn(console, "error").mockReturnValue(undefined);
+  vi.spyOn(daemonLog, "appendDaemonLog").mockImplementation(() => { throw new Error("synthetic daemon audit failure"); });
+  const appendAccountSecurityBanner = vi.fn();
+  const escape = vi.fn().mockResolvedValue(undefined);
+  const pending = dismissAccountSecurityBanner({ text: hooks }, { escape, read: vi.fn().mockResolvedValue({ text: composer }) }, {
+    agent_id: "synthetic-audit", surface: "surface:synthetic", eventLog: { appendAccountSecurityBanner },
+  });
+  const settled = pending.then(value => ({ value, error: null }), error => ({ value: null, error }));
+  await vi.advanceTimersByTimeAsync(1_100);
+  expect(await settled).toEqual({ value: { text: composer }, error: null });
+  expect(escape).toHaveBeenCalledTimes(1);
+  expect(stderr).toHaveBeenCalledWith("[cmuxlayer] account_security_banner audit failed", expect.objectContaining({ variant: "hooks_review", error_name: "Error" }));
 });
