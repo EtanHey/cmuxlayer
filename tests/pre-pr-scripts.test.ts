@@ -75,7 +75,7 @@ describe("pre-PR script ladder", () => {
   it("runs the opt-in contract lane from the release preflight", () => {
     const release = readFileSync(join(repoRoot, "scripts", "release.sh"), "utf8");
     const hermeticGate = release.indexOf(
-      'run "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test"',
+      "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test",
     );
     const contractGate = release.indexOf('bun run test:contract 2>&1 | tee');
 
