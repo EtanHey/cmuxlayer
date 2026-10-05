@@ -11,6 +11,7 @@ import { replaceTaskSuffix } from "../naming.js";
 import { currentCliFallbackCount, withTransportRetryTracking } from "../transport-retry-context.js";
 import { AgentEngine } from "../agent-engine.js";
 import { bootContractPointer, coordinationContractPath } from "../coordination-paths.js";
+import { dismissAccountSecurityBanner } from "./account-security.js";
 import {
   INTERACTIVE_AGENT_STATES,
   isLiveDeliverable,
@@ -26,6 +27,7 @@ import type {
 import {
   isAntigravityScreen,
   isCodexUpdateMenuScreen,
+  isCodexAccountSecurityBanner,
   isPickerOrMenuScreen,
   parseScreen,
   codexScreenHasActiveTurn,
@@ -598,6 +600,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           cliFallbackCountBeforeDispatch,
         );
       } catch (error) {
+        if (error instanceof DeliverySafetyGateError) throw error;
         if (currentCliFallbackCount() !== cliFallbackCountBeforeDispatch) {
           attemptedRpcMethod = null;
         }
@@ -929,9 +932,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     cli?: CliType;
     /** When set, also refuse a composer already holding someone else's text. */
     draftGuardText?: string;
+    readSnapshot?: () => Promise<{ text: string; parsed: ParsedScreenResult } | null>;
   }): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
     const { surface, workspace, cli } = opts;
-    const snapshot = await readParsedSurface(surface, workspace, {
+    const snapshot = opts.readSnapshot ? await opts.readSnapshot() : await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
     });
     if (!snapshot) {
@@ -1733,6 +1737,33 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     };
   };
 
+  const closeOwnedPicker = async (
+    snapshot: { text: string; parsed: ParsedScreenResult }, text: string, cli: CliType | null | undefined,
+    opts: { surface: string; workspace?: string; stableSurfaceIdentity?: string | null; beforeMutation?: () => Promise<void> },
+    rpcMethods: Set<DeliveryRpcMethod>,
+  ) => {
+    const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+    const assertOwner = () => {
+      if (!owner || owner.caller !== resolveCurrentCallerAgent()?.agent_id || !bootTokenInstanceCurrent(owner) ||
+          !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity)) {
+        throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+      }
+    };
+    const region = composerPickerInputRegion(snapshot.text, cli ?? undefined);
+    assertOwner();
+    if (snapshot.parsed.control_state === "permission_prompt" || region === null ||
+        !composerRegionMatchesPayload(region, text, cli, snapshot.text)) throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+    const method = await sendKeyWithRetry(opts.surface, "escape", opts.workspace, async () => { await opts.beforeMutation?.(); assertOwner(); }, 1);
+    if (method) rpcMethods.add(method);
+    await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+    await opts.beforeMutation?.(); assertOwner();
+    const closed = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+    if (!closed || isPickerOrMenuScreen(closed.text, cli ?? undefined)) throw new DeliverySafetyGateError("composer_picker_not_closed", closed?.parsed ?? snapshot.parsed);
+    const closedRegion = extractComposerInputRegion(closed.text, text, cli ?? undefined, true);
+    if (closedRegion === null || !composerRegionMatchesPayload(closedRegion, text, cli, closed.text)) throw new DeliverySafetyGateError("draft_ownership_unverified", closed.parsed);
+    return closed;
+  };
+
   const executeDeliveryEngine = async (opts: {
     surface: string;
     workspace?: string;
@@ -1770,6 +1801,31 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let textDispatched = false;
     let submitDispatched = false;
     try {
+      const assertBinding = opts.beforeMutation;
+      let securityDismissed = false;
+      const readSafeInput = async () => {
+        await assertBinding?.();
+        const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+        if (!snapshot) return null;
+        const hadBanner = isCodexAccountSecurityBanner(snapshot.text);
+        const safe = await dismissAccountSecurityBanner(snapshot, {
+          escape: async () => {
+            const method = await sendKeyWithRetry(opts.surface, "escape", opts.workspace, assertBinding, 1);
+            if (method) rpcMethods.add(method);
+          },
+          read: async () => {
+            await assertBinding?.();
+            const closed = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+            if (!closed) throw new DeliverySafetyGateError("account_security_banner_not_dismissed", snapshot.parsed);
+            return closed;
+          },
+        });
+        securityDismissed ||= hadBanner;
+        return safe;
+      };
+      // Every input mutation, including a retry or launcher Return, rechecks
+      // the dangerous overlay. Never type or select its default setup option.
+      opts = { ...opts, beforeMutation: async () => { await readSafeInput(); } };
       await opts.beforeMutation?.();
       if (opts.key !== undefined) {
       if (opts.chunks.length > 0 || opts.press_enter) {
@@ -1782,7 +1838,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const targetCli = targetAgent?.cli;
       const submitAttempted = isSubmitKey(key);
       const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
-      const submitBaseline = submitAttempted && !opts.engineSubmitProof
+      let submitBaseline = submitAttempted && !opts.engineSubmitProof
         ? await readParsedSurface(opts.surface, opts.workspace) : null;
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
       const owner = typedDraftOwners.get(ownerKey);
@@ -1792,6 +1848,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
       const ownedQueue = submitBaseline ? assignVisibleOwnedQueuedInputs(submitBaseline.text, ownedEntries) : [];
       const ownedQueueRows = ownedQueue.length;
+      if (callerSubmit && submitBaseline && composerPickerInputRegion(submitBaseline.text, targetCli) !== null) {
+        const region = composerPickerInputRegion(submitBaseline.text, targetCli);
+        const ownText = ownerCurrent && owner && region !== null ? ownedComposerText(owner, region, targetCli, submitBaseline.text) : null;
+        if (!ownText) throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline.parsed);
+        submitBaseline = await closeOwnedPicker(submitBaseline, ownText, targetCli, opts, rpcMethods);
+      }
       if (callerSubmit && submitBaseline && queueRows > ownedQueueRows) {
         throw new DeliverySafetyGateError("blocked_by_foreign_queue", submitBaseline.parsed, visibleCodexQueuedText(submitBaseline.text));
       }
@@ -1844,7 +1906,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             }
           }
         : opts.beforeMutation;
-      const keyRpcMethod = await timeDeliveryPhase(opts.timings, "type", () =>
+      const keyRpcMethod = key === "escape" && securityDismissed ? null : await timeDeliveryPhase(opts.timings, "type", () =>
         sendKeyWithRetry(
           opts.surface,
           key,
@@ -2076,6 +2138,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       ...(draftGuardedEvent && draftGuardText.trim().length > 0
         ? { draftGuardText }
         : {}),
+      readSnapshot: async () => {
+        const snapshot = await readSafeInput();
+        if (!snapshot || composerPickerInputRegion(snapshot.text, targetCli) === null) return snapshot;
+        const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+        const region = composerPickerInputRegion(snapshot.text, targetCli);
+        if (!owner || owner.caller !== resolveCurrentCallerAgent()?.agent_id ||
+            !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) || !bootTokenInstanceCurrent(owner) ||
+            region === null || ownedComposerText(owner, region, targetCli, snapshot.text) !== draftGuardText) {
+          throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+        }
+        return closeOwnedPicker(snapshot, draftGuardText, targetCli, opts, rpcMethods);
+      },
     });
     const caller = resolveCurrentCallerAgent()?.agent_id;
     const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
@@ -2215,31 +2289,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       // Only the caller's complete, current payload permits closing one.
       await opts.beforeMutation?.();
       const pickerCapableCli = targetCli ?? inferComposerCli(deliverySafetySnapshot?.text ?? "");
-      const pickerSnapshot = (pickerCapableCli === "codex" || pickerCapableCli === "claude") && opts.source_event !== "spawn_agent"
-        ? await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true }) : null;
+      const pickerSnapshot = ["codex", "claude", "cursor"].includes(pickerCapableCli ?? "")
+        ? await readSafeInput() : null;
       const pickerCli = targetCli ?? (pickerSnapshot ? inferComposerCli(pickerSnapshot.text) : null);
-      if (pickerSnapshot && isPickerOrMenuScreen(pickerSnapshot.text, pickerCli ?? undefined)) {
-        const region = composerPickerInputRegion(pickerSnapshot.text, pickerCli ?? undefined);
-        const owner = typedDraftOwners.get(ownerKey);
-        if (pickerSnapshot.parsed.control_state === "permission_prompt" || region === null ||
-            !owner || owner.caller !== caller || !bootTokenInstanceCurrent(owner) ||
-            !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) ||
-            !composerRegionMatchesPayload(region, submittedText, pickerCli, pickerSnapshot.text)) {
-          throw new DeliverySafetyGateError("draft_ownership_unverified", pickerSnapshot.parsed);
-        }
-        const method = await sendKeyWithRetry(opts.surface, "Escape", opts.workspace, opts.beforeMutation);
-        if (method) rpcMethods.add(method);
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
-        await opts.beforeMutation?.();
-        const closed = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
-        if (!closed || isPickerOrMenuScreen(closed.text, pickerCli ?? undefined)) {
-          throw new DeliverySafetyGateError("composer_picker_not_closed", closed?.parsed ?? pickerSnapshot.parsed);
-        }
-        const closedRegion = extractComposerInputRegion(closed.text, submittedText, pickerCli ?? undefined, true);
-        if (closedRegion === null || !composerRegionMatchesPayload(closedRegion, submittedText, pickerCli, closed.text)) {
-          throw new DeliverySafetyGateError("draft_ownership_unverified", closed.parsed);
-        }
+      if (pickerSnapshot && composerPickerInputRegion(pickerSnapshot.text, pickerCli ?? undefined) !== null) {
+        const closed = await closeOwnedPicker(pickerSnapshot, submittedText, pickerCli, opts, rpcMethods);
         preReturnBootEvidence = { screenText: closed.text, metrics: parseSubmitEvidenceMetrics(closed.text, closed.parsed) };
+      } else if (pickerSnapshot && isPickerOrMenuScreen(pickerSnapshot.text, pickerCli ?? undefined)) {
+        throw new DeliverySafetyGateError("draft_ownership_unverified", pickerSnapshot.parsed);
       }
       if (
         requireObservedPayloadBeforeEnter &&
@@ -2555,11 +2612,25 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       try {
         target = opts.resolveRoute ? await opts.resolveRoute() : target;
         lastSurface = target.surface;
-        const screen = await client.readScreen(target.surface, {
+        let screen = await client.readScreen(target.surface, {
           workspace: target.workspace,
           lines: 80,
           scrollback: false,
         });
+        if (isCodexAccountSecurityBanner(screen.text)) {
+          screen = await withSurfaceWrite(target.surface, async () => {
+            const assertRoute = async () => {
+              await opts.assertStableSurfaceIdentity?.();
+              const current = opts.resolveRoute ? await opts.resolveRoute() : target;
+              if (current.surface !== target.surface || current.workspace !== target.workspace) throw new Error("Security-banner boot route changed");
+            };
+            const read = async () => { await assertRoute(); return client.readScreen(target.surface, { workspace: target.workspace, lines: 80, scrollback: false }); };
+            return dismissAccountSecurityBanner(await read(), {
+              escape: async () => { await sendKeyWithRetry(target.surface, "escape", target.workspace, assertRoute, 1); },
+              read,
+            });
+          });
+        }
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
         const now = Date.now();
@@ -2755,6 +2826,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           error instanceof BootPromptTimeoutError ||
           error instanceof LauncherReadinessError ||
           error instanceof BootPromptUpdateMenuBlockedError
+          || error instanceof DeliverySafetyGateError
         ) {
           throw error;
         }

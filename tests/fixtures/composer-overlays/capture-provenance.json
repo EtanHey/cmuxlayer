@@ -1,0 +1,75 @@
+{
+  "date": "2026-10-05",
+  "method": "cmuxlayer read_screen raw=true scrollback=false",
+  "sanitization": [
+    "user and worktree paths",
+    "right-edge terminal padding; blank rows and left indentation retained"
+  ],
+  "panes_closed": [
+    580,
+    585,
+    587
+  ],
+  "captures": [
+    {
+      "file": "codex-boot.txt",
+      "surface": "surface:580",
+      "original_snapshot_hash": "d82f794bd1ce88a633948d46ff254633d394b6e9265f4b235fbcb995250691a5",
+      "sanitized_sha256": "730290786cd4f950e1b8ccab6013b3507c3f1126a8caf91ccf7fc26aa19e9c6a"
+    },
+    {
+      "file": "codex-mention.txt",
+      "surface": "surface:580",
+      "original_snapshot_hash": "cec0a1de72372954410f12d8ebc35e0232ca44a1530ffb462264cadd4056becc",
+      "sanitized_sha256": "bdc0e03519d27db2cd7211601e08ac2f422d258815094a2f68b2939ce33bc71b"
+    },
+    {
+      "file": "claude-boot.txt",
+      "surface": "surface:587",
+      "original_snapshot_hash": "ee777f5f63fb0b54eeab80f42d1a800ebf3649d5c16087223ff8e8cbd24038fd",
+      "sanitized_sha256": "475a7002649905e1e2c854045785d8313eeef8c83b6c3b07232c13c60d8f1702"
+    },
+    {
+      "file": "codex-slash.txt",
+      "surface": "surface:580",
+      "original_snapshot_hash": "37a654190c6fb781dd8eef80974550440b0ae0d8855492d90840142b92e9155e",
+      "sanitized_sha256": "d23b38aad50f3a7a21ad81d255932d6087958bcda3ebd6feb6150e3a8b6b96e6"
+    },
+    {
+      "file": "cursor-path.txt",
+      "surface": "surface:585",
+      "original_snapshot_hash": "deb48f0e12766981608f69d478e6442b71cfeb3800d70f6c7c2965c6ac85d966",
+      "sanitized_sha256": "bf04489ce3aa29fb1445116a8bb4295332e0231c02cf0d4081cc3e2db700eeda"
+    },
+    {
+      "file": "claude-closed.txt",
+      "surface": "surface:587",
+      "original_snapshot_hash": "92d1845c94824cd3e4a96d39aea65ec74ecba923f20fb0f434db8a5a1dc97000",
+      "sanitized_sha256": "05cb4e8af697bea9dae92537e98c4f240e54cba424a69f1b7bb93c6a2c2041c9"
+    },
+    {
+      "file": "cursor-idle.txt",
+      "surface": "surface:585",
+      "original_snapshot_hash": "bf7628885146118cd7a230f0ac8d1c51f8742317f4545ceac3852d9d1ecf17e3",
+      "sanitized_sha256": "067de6a11baf5c40ea834d7a494dd379449b3086a39fd2c0a40e3e2ce0edd73b"
+    },
+    {
+      "file": "cursor-closed.txt",
+      "surface": "surface:585",
+      "original_snapshot_hash": "3de19e15ac270dd0b324142b68a19699b19539476cc33f0835227a249a7885fa",
+      "sanitized_sha256": "3014f33bf36f6e9c4b5764125397840f1e0799c3a4d5c962e10788158f3e4bf2"
+    },
+    {
+      "file": "codex-dismissed.txt",
+      "surface": "surface:580",
+      "original_snapshot_hash": "4a269d796402b48de08d0ce607316f99747c25945f23881cc93b3e0436c47811",
+      "sanitized_sha256": "677368299d398577797194d8193f4500ac5baa3893cf9ded26d81e8fa3551125"
+    },
+    {
+      "file": "claude-slash.txt",
+      "surface": "surface:587",
+      "original_snapshot_hash": "6dd98db0cbcae71b327a4bd85d0ac3d07177e666f8afe170ab4363dce7467302",
+      "sanitized_sha256": "7ecc3138a094dfaa57b8c5c77ab37a94e4e59ebad00ed36f86e21a6b051e80e8"
+    }
+  ]
+}

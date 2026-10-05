@@ -8,7 +8,7 @@ import { CODEX_FOOTER_RE, CODEX_HINT_LINE_RE } from "../codex-chrome.js";
 import type { CliType } from "../agent-types.js";
 import {
   antigravityComposerDraft,
-  composerPickerFooterIndex,
+  composerPickerBounds,
   isAntigravityScreen,
   isPickerOrMenuScreen,
   parseScreen,
@@ -277,26 +277,12 @@ export function normalizeKnownPlaceholderComposerInput(
   return input;
 }
 
-/** Read the draft above a completion popup, never its selectable rows. */
+/** Read only the composer; live completion rows may be above or below it. */
 export function composerPickerInputRegion(screenText: string, cli?: CliType): string | null {
   const knownCli = cli ?? inferComposerCli(screenText);
-  if (knownCli !== "codex" && knownCli !== "claude") return null;
-  const footer = composerPickerFooterIndex(screenText);
-  if (footer < 0) return null;
-  const lines = normalizeTerminalText(screenText).split("\n");
-  const menuOption = (line: string) => /^\s*(?:[>❯›]\s*)?\/\S+\s{2,}\S/.test(line);
-  let start = footer - 1;
-  while (start >= Math.max(0, footer - 32) &&
-    (!matchComposerPromptLine(lines[start] ?? "") || menuOption(lines[start] ?? ""))) start--;
-  if (start < Math.max(0, footer - 32)) return null;
-  let end = footer;
-  for (let index = start + 1; index < footer; index++) {
-    if (/^\s*(?:no matches|loading\.\.\.)\s*$/i.test(lines[index] ?? "") || menuOption(lines[index] ?? "")) {
-      end = index;
-      break;
-    }
-  }
-  return extractComposerInputRegion(lines.slice(start, end).join("\n"), undefined, knownCli, true);
+  const bounds = composerPickerBounds(screenText, knownCli ?? undefined);
+  if (!bounds) return null;
+  return extractComposerInputRegion(normalizeTerminalText(screenText).split("\n").slice(bounds.start, bounds.end).join("\n"), undefined, knownCli ?? undefined, true);
 }
 
 export function extractComposerInputRegion(
@@ -1143,11 +1129,11 @@ export function countVisibleExactQueuedRows(
  * protocol/hook acknowledgments (CONFIRMATION.md) retire that screen-evidence limit.
  */
 function completeQueuedItemMatches(item: CodexQueuedItem, text: string): boolean {
-  const authored = normalizeTerminalText(text).replace(/\s+/g, " ").trim();
+  const authored = normalizeTerminalText(text).replace(/\s+/gu, " ").trim();
   if (!authored) return false;
   let offsets = new Set([0]);
   for (const [index, row] of item.rows.entries()) {
-    const visible = normalizeTerminalText(row).replace(/\s+/g, " ").trim();
+    const visible = normalizeTerminalText(row).replace(/\s+/gu, " ").trim();
     if (!visible) return false;
     const next = new Set<number>();
     for (const offset of offsets) {
@@ -1167,9 +1153,9 @@ function queuedItemMatches(item: CodexQueuedItem, text: string, allowTruncation 
   if (!allowTruncation) return completeQueuedItemMatches(item, text);
   const authored = compactQueueCorrelationText(text);
   if (!authored) return false;
-  const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
-  const truncated = /(?:…|\.\.\.)$/.test(displayed);
-  const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
+  const displayed = item.rows.join(" ").replace(/\s+/gu, " ").trim();
+  const truncated = /(?:…|\.\.\.)$/u.test(displayed);
+  const visible = displayed.replace(/(?:…|\.\.\.)$/u, "").trim();
   const normalized = compactQueueCorrelationText(visible);
   return compactQueueCorrelationText(displayed) === authored || (allowTruncation && truncated &&
     normalized.length > 0 && authored.startsWith(normalized) && visible.length >= 40);

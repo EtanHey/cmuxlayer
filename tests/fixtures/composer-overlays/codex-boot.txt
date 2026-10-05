@@ -1,0 +1,35 @@
+
+  >_ OpenAI Codex (v0.160.0)
+     ~/scratch
+  permissions: YOLO mode
+
+  Practical, peculiar, or a little of both?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Set up security for Daybreak mode
+  Set up Advanced Account Security with a hardware security key. You can keep using Codex while
+  you finish setup.
+
+› 1. Set up security
+
+  Press a number to choose · esc to dismiss · type to continue
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · ~/scratch
+  ? for shortcuts                                                        ⚠ 2 warnings · f2 to view
