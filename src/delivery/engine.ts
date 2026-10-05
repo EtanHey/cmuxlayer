@@ -1094,6 +1094,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     pre_return_screen?: string | null;
     pre_return_metrics?: RawSubmitEvidenceMetrics | null;
     beforeMutation?: () => Promise<void>;
+    beforeRead?: () => Promise<void>;
     rpcMethods: Set<DeliveryRpcMethod>;
   }): Promise<{
     submit_verified: boolean | null;
@@ -1150,7 +1151,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       screenContainsCompleteSubmittedText(screenText, opts.text);
 
     while (Date.now() - startedAt < timeoutMs) {
-      await opts.beforeMutation?.();
+      await (opts.beforeRead ?? opts.beforeMutation)?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
@@ -1803,11 +1804,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     try {
       const assertBinding = opts.beforeMutation;
       let securityDismissed = false;
+      let securityCapable = true;
+      let inputSafetyObserved = false;
       const readSafeInput = async () => {
         await assertBinding?.();
         const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
         if (!snapshot) return null;
         const hadBanner = isCodexAccountSecurityBanner(snapshot.text);
+        securityCapable = hadBanner || snapshot.parsed.agent_type === "codex" ||
+          (snapshot.parsed.control_state !== "shell" && resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli === "codex");
         const safe = await dismissAccountSecurityBanner(snapshot, {
           escape: async () => {
             const method = await sendKeyWithRetry(opts.surface, "escape", opts.workspace, assertBinding, 1);
@@ -1821,12 +1826,19 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           },
         });
         securityDismissed ||= hadBanner;
+        inputSafetyObserved = true;
         return safe;
       };
       // Every input mutation, including a retry or launcher Return, rechecks
       // the dangerous overlay. Never type or select its default setup option.
-      opts = { ...opts, beforeMutation: async () => { await readSafeInput(); } };
-      await opts.beforeMutation?.();
+      opts = { ...opts, beforeMutation: async () => {
+        await assertBinding?.();
+        // The existing pre-type/key baseline is already a safe observation.
+        // Consume it once; subsequent input batches need a fresh overlay check.
+        if (!inputSafetyObserved && securityCapable) await readSafeInput();
+        inputSafetyObserved = false;
+      } };
+      await assertBinding?.();
       if (opts.key !== undefined) {
       if (opts.chunks.length > 0 || opts.press_enter) {
         throw new Error(
@@ -1839,7 +1851,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const submitAttempted = isSubmitKey(key);
       const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
       let submitBaseline = submitAttempted && !opts.engineSubmitProof
-        ? await readParsedSurface(opts.surface, opts.workspace) : null;
+        ? await readSafeInput() : null;
+      if (key === "escape") await readSafeInput();
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
       const owner = typedDraftOwners.get(ownerKey);
       const caller = resolveCurrentCallerAgent()?.agent_id;
@@ -2113,6 +2126,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           pre_return_screen: pending.text,
           pre_return_metrics: parseSubmitEvidenceMetrics(pending.text, pending.parsed),
           beforeMutation: opts.beforeMutation,
+          beforeRead: async () => { await assertBinding?.(); },
           rpcMethods,
         });
         if (verification.submit_verified !== true) {
@@ -2282,14 +2296,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                   SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
                 BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
               ),
-              beforeRead: opts.beforeMutation,
+              beforeRead: assertBinding,
             })
           : null;
       // #999(e): Return/Tab inserts a completion while these menus are open.
       // Only the caller's complete, current payload permits closing one.
-      await opts.beforeMutation?.();
+      await assertBinding?.();
       const pickerCapableCli = targetCli ?? inferComposerCli(deliverySafetySnapshot?.text ?? "");
-      const pickerSnapshot = ["codex", "claude", "cursor"].includes(pickerCapableCli ?? "")
+      const pickerSnapshot = opts.source_event !== "spawn_agent" && ["codex", "claude", "cursor"].includes(pickerCapableCli ?? "")
         ? await readSafeInput() : null;
       const pickerCli = targetCli ?? (pickerSnapshot ? inferComposerCli(pickerSnapshot.text) : null);
       if (pickerSnapshot && composerPickerInputRegion(pickerSnapshot.text, pickerCli ?? undefined) !== null) {
@@ -2384,6 +2398,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 requireObservedPayloadBeforeEnter,
               require_working_status: opts.source_event === "boot_prompt",
               beforeMutation: opts.beforeMutation,
+              beforeRead: async () => { await assertBinding?.(); },
               rpcMethods,
             }),
         );

@@ -372,7 +372,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       after: typed => matrixPlain(cli, typed, true) }, undefined, 0, cli);
     try {
       target.pane.pickerOpen = true;
-      target.pane.frames.buffered = () => overlayCapture(name);
+      target.pane.frames.buffered = typed => target.pane.pickerOpen ? overlayCapture(name) : matrixPlain(cli, typed);
       expect(await target.send(text, false, true)).toMatchObject({ ok: true, submit_verified: true });
       expect(target.pane.keys).toEqual(["escape", "return"]);
       expect(target.pane.submitted).toEqual([text]);
