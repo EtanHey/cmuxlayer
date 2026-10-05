@@ -9,7 +9,7 @@ Hashes and capture receipts are recorded in `capture-provenance.json`.
 
 | Files | Surface | Harness | Capture |
 | --- | --- | --- | --- |
-| `codex-*` | 580 | Codex 0.160.0, GPT-6-Luna low | Fresh security banner, Esc-dismissed idle, @ mention picker, slash menu |
+| Captured `codex-*` (excluding `codex-daybreak-synthetic.txt`) | 580 | Codex 0.160.0, GPT-6-Luna low | Fresh security banner, Esc-dismissed idle, @ mention picker, slash menu |
 | `cursor-*` | 585 | Cursor 2026.10.01-e373342, Auto (no model flag) | Idle, `/999e_no_match_capture` No matches picker, Esc-closed draft |
 | `claude-*` | 587 | Claude Code 2.1.289, Haiku 4.5 | Idle, slash menu, Esc-closed draft |
 
@@ -17,3 +17,5 @@ The security banner was dismissed using Esc only before typing. Its initial
 parser state was incorrectly `ready`; both Cursor's No matches and the slash
 menus were also missed by the installed parser. These captures establish UI
 shape, not successful delivery by a changed or installed cmuxlayer binary.
+
+`codex-daybreak-synthetic.txt` is synthetic from orc's quoted “security for Daybreak mode” stall, not a live capture. It deliberately has no composer below the modal.

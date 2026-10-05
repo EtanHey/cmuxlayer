@@ -48,12 +48,12 @@ function makeCodexPane(frames: Frames) {
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
     pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
-    bannerOpen: false, bannerStuck: false, bannerAfterType: false,
+    bannerVariant: "boot", bannerOpen: false, bannerStuck: false, bannerAfterType: false,
     bannerOnReturn: false, onEscape: undefined as (() => Promise<void>) | undefined,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
-    if (pane.bannerOpen) return overlayCapture("codex-boot").replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
+    if (pane.bannerOpen) return overlayCapture(`codex-${pane.bannerVariant}`).replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
     if (pane.phase === "buffered") {
       if (--pane.bufferedReads <= 0) pane.phase = "draft";
       return frame(pane.frames.buffered);
@@ -450,11 +450,11 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it.each([false, true])("#999(e) security banner is Esc-only before typing (stuck=%s)", async stuck => {
+  it.each([false, true].flatMap(stuck => ["boot", "daybreak-synthetic"].map(variant => [stuck, variant] as const)))("#999(e) security banner is Esc-only before typing (stuck=%s, %s)", async (stuck, variant) => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
       draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
     try {
-      target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
+      target.pane.bannerVariant = variant; target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
       const result = await target.send(PONG, false, true);
       if (stuck) {
         expect(result).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed", typed: false, submit_dispatched: false });

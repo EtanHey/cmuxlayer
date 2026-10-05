@@ -2480,7 +2480,7 @@ export class AgentEngine {
         return dismissAccountSecurityBanner(await read(), {
           escape: async () => { await assertCurrent(); await sendKey("escape"); },
           read,
-        });
+        }, { agent_id: agent.agent_id, surface: route.surface_id, eventLog: this.stateMgr.getEventLog() });
       }, { workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid });
     } catch (error) {
       if (error instanceof DeliverySafetyGateError) {

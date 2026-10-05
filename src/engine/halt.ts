@@ -12,6 +12,7 @@ import {
   cleanScreenText,
   hasVisibleAgentProgress,
   isBlockingPromptChooserScreen,
+  isCodexAccountSecurityBanner,
   parseScreen,
 } from "../screen-parser.js";
 import type { ParsedScreenResult } from "../types.js";
@@ -549,10 +550,11 @@ export async function maybeEscalateLiveHalt(
   agent = this.persistPausedState(agent, parsed.paused === true, nowIso);
   if (agent.halt_escalation === false) return agent;
   const hasHarnessApiError = parsed.errors.some((error) =>
-    error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
   );
   if (
     !hasHarnessApiError &&
+    !isCodexAccountSecurityBanner(screenText) &&
     parsed.paused !== true &&
     (parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
@@ -630,7 +632,7 @@ export async function maybeEscalateLiveHalt(
   }
   if (!haltType) return this.clearHaltEpisode(agent);
   const harnessApiError = parsed.errors.find((error) =>
-    error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
   );
   const haltObservableAction =
     haltType === "harness_api_error"
