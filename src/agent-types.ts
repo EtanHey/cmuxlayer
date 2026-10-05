@@ -29,7 +29,8 @@ export type AgentHaltType =
   | "idle_without_done"
   | "wedged"
   | "paused"
-  | "harness_api_error";
+  | "harness_api_error"
+  | "delivery_stalled";
 
 export interface Observed<T> {
   value: T;
@@ -424,6 +425,7 @@ export interface DeliveryTelemetryEvent {
     | "typed"
     | "submitted"
     | "queued"
+    | "steer_pending"
     | "queued_followup"
     | "rescued"
     | "failed"

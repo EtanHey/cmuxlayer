@@ -69,6 +69,7 @@ export type AgentDeliveryState =
   | "typed"
   | "submitted"
   | "queued"
+  | "steer_pending"
   | "queued_followup"
   | "rescued"
   | "failed"
@@ -82,6 +83,7 @@ export interface AgentDeliveryReceipt {
   text: string;
   press_enter: boolean;
   source_event: DeliveryEventType;
+  codex_busy_mode?: "steer" | "queue";
   delivery_state: AgentDeliveryState;
   terminal: boolean;
   created_at: string;
@@ -167,6 +169,7 @@ export type DeliveryVerifyObservation = {
   outcome: "pending" | "delivered" | "failed_confirmed";
   submit_verified?: boolean | null;
   reason?: string;
+  delivery_state?: "queued" | "steer_pending";
   evidence?: Record<string, unknown>;
 };
 
@@ -198,6 +201,7 @@ export type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   delivery?:
     | "submitted"
     | "queued"
+    | "steer_pending"
     | "queued_followup"
     | "rescued"
     | "pending_verify";
@@ -471,6 +475,8 @@ export interface AgentEngineOptions {
   /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
   deliveryVerifyDeadlineMs?: number;
   deliveryQueueDeadlineMs?: number;
+  /** Alert on queued/steer-pending age, default 10min; CMUXLAYER_DELIVERY_ATTENTION_MS. */
+  deliveryAttentionMs?: number;
   /**
    * Local evidence-ticket directory. Omitted/null disables tickets so bare
    * construction never writes ~/.cmuxlayer/tickets or calls gh. Production

@@ -144,6 +144,7 @@ export const SendToArgsSchema = z.object({
     .default(BOOT_PROMPT_TIMEOUT_MS),
   press_enter: z.boolean().optional().default(true),
   allow_busy: z.boolean().optional().default(false),
+  codex_busy_mode: z.enum(["steer", "queue"]).optional().describe("Busy Codex defaults to Return steering at the next tool call; queue opts into Tab after-turn delivery. Neither pending state is delivered."),
   allow_long_inline: z.boolean().optional().default(false),
   verbose: z.boolean().optional().default(false).describe("Return the full legacy success receipt, including transport and timing diagnostics. Failures always keep full detail."),
   targeting: z
@@ -178,6 +179,7 @@ export const DeliveryOutputShape = {
       "submitted",
       "typed",
       "queued",
+      "steer_pending",
       "queued_followup",
       "rescued",
       "failed",
@@ -191,6 +193,7 @@ export const DeliveryOutputShape = {
       "submitted",
       "typed",
       "queued",
+      "steer_pending",
       "queued_followup",
       "rescued",
       "failed",

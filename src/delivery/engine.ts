@@ -71,6 +71,7 @@ import {
   countVisibleOwnedQueuedInputs,
   visibleCodexQueuedText,
   countVisibleQueuedSubmitMatches,
+  codexPendingDeliveryKind,
   countVisibleCodexQueuedInputs,
   codexScreenShowsSubmit,
   composerRegionMatchesPayload,
@@ -1088,6 +1089,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     require_attributable_submit_evidence?: boolean;
     allow_recovery_enter_retry?: boolean;
     submit_key?: "return" | "tab";
+    codex_busy_mode?: "steer" | "queue";
     timeout_ms?: number;
     cursor_response_baseline: readonly string[] | null;
     pre_type_screen?: string | null;
@@ -1103,7 +1105,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     retry_count: number;
     queue_verified?: boolean;
     delivery:
-      "submitted" | "queued" | "queued_followup" | "rescued" | "pending_verify";
+      "submitted" | "queued" | "steer_pending" | "queued_followup" | "rescued" | "pending_verify";
   }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -1253,7 +1255,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           submit_evidence: null,
           submit_verification_reason: null,
           retry_count: retryCount,
-          delivery: "queued",
+          delivery: codexPendingDeliveryKind(snapshot.text, opts.text, opts.pre_type_screen) ?? (opts.codex_busy_mode === "queue" ? "queued" : "steer_pending"),
         };
       }
       if (
@@ -1508,7 +1510,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         const recoveryRpcMethod = await sendKeyWithRetry(
           opts.surface,
           codexRelay ? async () => {
-            recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
+            recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
             lastCodexRelayKey = recoverySelection.key;
             return recoverySelection.key;
           } : "return",
@@ -1634,6 +1636,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   const currentCodexRelayKey = async (
     surface: string,
     workspace?: string,
+    busyMode: "steer" | "queue" = "steer",
   ): Promise<"tab" | "return"> => {
     const snapshot = await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
@@ -1641,7 +1644,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (!snapshot?.text.trim()) {
       throw new Error(`Cannot choose Codex relay key: unreadable surface ${surface}`);
     }
-    return codexScreenHasActiveTurn(snapshot.text) ? "tab" : "return";
+    return busyMode === "queue" && codexScreenHasActiveTurn(snapshot.text) ? "tab" : "return";
   };
 
   /**
@@ -1775,6 +1778,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     chunk_size: number;
     chunk_delay_ms: number;
     press_enter: boolean;
+    codex_busy_mode?: "steer" | "queue";
     retry_owned_draft?: boolean;
     rename_to_task?: string;
     onChunkDelivered?: (sentChunks: number) => void;
@@ -2279,6 +2283,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let deliveryOutcome:
       | "submitted"
       | "queued"
+      | "steer_pending"
       | "queued_followup"
       | "rescued"
       | "pending_verify" = "submitted";
@@ -2353,7 +2358,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           const submitRpcMethod = await sendKeyWithRetry(
             opts.surface,
             codexRelay ? async () => {
-              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
+              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
               return submitSelection.key;
             } : "return",
             opts.workspace,
@@ -2386,6 +2391,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
               submit_key: submitSelection.key,
+              codex_busy_mode: opts.codex_busy_mode,
               timeout_ms: opts.submit_verify_timeout_ms,
               cursor_response_baseline: cursorResponseBaseline,
               pre_type_screen: deliverySafetySnapshot?.text,
@@ -2410,7 +2416,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           verification.submit_verification_reason === "input_still_pending";
         retry_count = verification.retry_count;
         deliveryOutcome = verification.delivery;
-        queueVerified = verification.delivery === "queued" || verification.queue_verified === true;
+        queueVerified = verification.delivery === "queued" || verification.delivery === "steer_pending" || verification.queue_verified === true;
         if (
           deliveryOutcome === "pending_verify" ||
           deliveryOutcome === "queued_followup"
@@ -2444,8 +2450,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               delivery_id: opts.delivery_id,
               delivery_state: !opts.press_enter
                 ? ("typed" as const)
-                : deliveryOutcome === "queued"
-                  ? ("queued" as const)
+                : (deliveryOutcome === "queued" || deliveryOutcome === "steer_pending")
+                  ? (deliveryOutcome as "queued" | "steer_pending")
                   : deliveryOutcome === "queued_followup"
                     ? ("queued_followup" as const)
                     : deliveryOutcome === "pending_verify"
@@ -2487,8 +2493,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const receipt = buildPublicDeliveryReceipt({
       delivery_state: !opts.press_enter
         ? "typed"
-        : deliveryOutcome === "queued"
-          ? "queued"
+        : (deliveryOutcome === "queued" || deliveryOutcome === "steer_pending")
+          ? deliveryOutcome
           : deliveryOutcome === "queued_followup"
             ? "queued_followup"
             : deliveryOutcome === "pending_verify"
@@ -2502,7 +2508,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                     : undefined,
       delivery_id: opts.delivery_id,
       typed: textDispatched,
-      queued_behind_turn: queueVerified,
+      queued_behind_turn: deliveryOutcome === "queued" && queueVerified,
       queue_verified: queueVerified,
       submit_verification_reason,
       submit_attempted: Boolean(opts.press_enter),
@@ -2523,6 +2529,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (
       submit_verified === false &&
       deliveryOutcome !== "queued" &&
+      deliveryOutcome !== "steer_pending" &&
       deliveryOutcome !== "queued_followup" &&
       deliveryOutcome !== "rescued" &&
       deliveryOutcome !== "pending_verify"
@@ -3866,6 +3873,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           chunk_size: record.chunk_size,
           chunk_delay_ms: record.chunk_delay_ms,
           press_enter: record.press_enter,
+          codex_busy_mode: record.codex_busy_mode,
           rename_to_task: record.rename_to_task,
           stableSurfaceIdentity: record.stableSurfaceIdentity,
           source_event: lifecycle?.source_event ?? sourceEvent,
@@ -3885,6 +3893,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         if (lifecycle) {
           if (
             delivery.delivery === "queued" ||
+            delivery.delivery === "steer_pending" ||
             delivery.delivery === "queued_followup"
           ) {
             lifecycle.engine.acceptComposerQueue({

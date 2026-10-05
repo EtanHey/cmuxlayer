@@ -1443,9 +1443,31 @@ describe("T2 delivery truth — a blocked composer is a terminal refusal (B1a)",
 });
 
 describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
+  it("P0 STEER real 0.160 captures distinguish pending sections and a committed boundary", async () => {
+    const { codexPendingDeliveryKind, codexScreenShowsSubmit } = await import("../src/delivery/composer-screen.js");
+    const capture = (name: string) => readFileSync(new URL(`./fixtures/codex-0.160-steer/${name}.txt`, import.meta.url), "utf8");
+    const steer = "At the next tool boundary, print SCRATCH_STEER_LANDED_B and continue waiting for the sleep command. Do not interrupt it or edit files.";
+    const queued = "When the turn ends, print SCRATCH_AFTER_TURN_QUEUE_B and stop. Do not edit files or use tools.";
+    const before = capture("busy");
+    const pending = capture("pending-both");
+    expect(codexPendingDeliveryKind(pending, steer, before)).toBe("steer_pending");
+    expect(codexPendingDeliveryKind(pending, queued, before)).toBe("queued");
+    expect(codexScreenShowsSubmit(before, pending, steer)).toBe(false);
+    const boundary = capture("steer-committed");
+    expect(codexScreenShowsSubmit(before, boundary, steer)).toBe(true);
+    expect(codexPendingDeliveryKind(boundary, queued, before)).toBe("queued");
+    expect(codexScreenShowsSubmit(before, capture("submitted-idle"), queued)).toBe(true);
+  });
+
+  it("P0 STEER wrapped headings retain next-tool semantics", async () => {
+    const { codexPendingDeliveryKind } = await import("../src/delivery/composer-screen.js");
+    const screen = "OpenAI Codex\nWorking (1s • esc to interrupt)\n• Messages to be\n  submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ synthetic request\n› Ask Codex to do anything\n  GPT-6-Luna low · ~/scratch";
+    expect(codexPendingDeliveryKind(screen, "synthetic request")).toBe("steer_pending");
+  });
+
   it("attaches a plain-language WARNING to every nonterminal receipt", async () => {
     const { buildPublicDeliveryReceipt } = await loadServerModule();
-    for (const state of ["pending_verify", "queued", "queued_followup"] as const) {
+    for (const state of ["pending_verify", "queued", "steer_pending", "queued_followup"] as const) {
       const receipt = buildPublicDeliveryReceipt({
         delivery_state: state,
         delivery_id: "d-1",

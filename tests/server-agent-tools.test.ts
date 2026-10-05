@@ -8876,9 +8876,9 @@ describe("agent lifecycle tool handlers", () => {
         terminal: true,
         accepted: true,
         delivered: true,
-        queued_behind_turn: true,
       }),
     ]);
+    expect(parsed.receipts[0]).not.toHaveProperty("queued_behind_turn");
     expect(sendCalls).toHaveLength(1);
   });
 
