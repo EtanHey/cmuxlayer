@@ -221,6 +221,21 @@ const result = {
   },
 };
 
+function budgetCandidate() {
+  const candidate = structuredClone(result);
+  return {
+    ...candidate,
+    marginal_resamples: undefined as Record<string, unknown> | undefined,
+    latency: {
+      ...candidate.latency,
+      first_send_after_spawn: {
+        ...candidate.latency.first_send_after_spawn,
+        sampled: undefined as typeof result.latency.send_to_surface_warm | undefined,
+      },
+    },
+  };
+}
+
 /**
  * The warm-agent tail row samples 192 per run (#791). A hosted 96-sample warm
  * artifact becomes one 192-sample run by replaying it as a second, later pass:
@@ -265,10 +280,10 @@ describe("daemon performance budget", () => {
     ["pass", 270, 290, true, 0],
     ["inclusive margin", 288.75, 275, true, 1],
   ])("re-samples once: %s", async (_name, initial, retry, passed, calls) => {
-    const candidate = structuredClone(result);
+    const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p95_ms = initial;
     let count = 0;
-    const samples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async (operation: string) => {
+    const samples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, (operation: string) => {
       count++;
       expect(operation).toBe("send_to_surface_warm");
       return { ...candidate.latency.send_to_surface_warm, p95_ms: retry,
@@ -291,9 +306,9 @@ describe("daemon performance budget", () => {
   });
 
   it("keeps contract failures and passing sibling metrics authoritative", async () => {
-    const candidate = structuredClone(result);
+    const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p95_ms = 276;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async () => ({
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
       ...candidate.latency.send_to_surface_warm, p50_ms: 999, p95_ms: 270,
       request_bytes: 999, request_sha256: "wrong", sample_count: 95, transport: "cli",
     }));
@@ -313,7 +328,7 @@ describe("daemon performance budget", () => {
         cli_send_ms: 65.016,
       },
     });
-    const candidate = structuredClone(result) as any;
+    const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm = { ...candidate.latency.send_to_surface_warm,
       p50_ms: 81.38, p95_ms: 82 };
     const initial = compareBenchmark(sameCeilingBaseline, candidate);
@@ -323,7 +338,7 @@ describe("daemon performance budget", () => {
       [81.38, 81.27, false], [81.38, 81.27, false],
     ]);
     let calls = 0;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(sameCeilingBaseline, candidate, {}, async (operation: string) => {
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(sameCeilingBaseline, candidate, {}, (operation: string) => {
       calls++;
       expect(operation).toBe("send_to_surface_warm");
       return { ...candidate.latency.send_to_surface_warm, p50_ms: freshP50,
@@ -340,20 +355,25 @@ describe("daemon performance budget", () => {
   });
 
   it.each(checkerModule.CANONICAL_OPERATIONS)("routes a fresh sample to %s only", async (operation: string) => {
-    const candidate = structuredClone(result) as any;
+    const candidate = budgetCandidate();
     const before = compareBenchmark(baseline, candidate);
     const ceiling = before.rows.find((entry) => entry.operation === operation && entry.metric === "p95_ms").ceiling;
-    const measurement = operation === "first_send_after_spawn"
-      ? { p50_ms: 950, p95_ms: 950, lock_hold_ms: 21, transport: "socket" }
-      : candidate.latency[operation] ?? candidate.latency.daemon_path[operation];
+    const measurements: Record<string, { p50_ms: number; p95_ms: number; lock_hold_ms?: number; transport: string }> = {
+      ...candidate.latency.daemon_path,
+      send_to_surface_warm: candidate.latency.send_to_surface_warm,
+      send_to_agent_warm: candidate.latency.send_to_agent_warm,
+      spawn_close_during_sweep: candidate.latency.spawn_close_during_sweep,
+      first_send_after_spawn: { p50_ms: 950, p95_ms: 950, lock_hold_ms: 21, transport: "socket" },
+    };
+    const measurement = measurements[operation];
     const initial = { ...measurement, p95_ms: ceiling * 1.001 };
     if (operation === "first_send_after_spawn") candidate.latency.first_send_after_spawn.sampled = initial;
-    else if (candidate.latency[operation]) candidate.latency[operation] = initial;
-    else candidate.latency.daemon_path[operation] = initial;
+    else candidate.latency = { ...candidate.latency, [operation]: initial,
+      daemon_path: { ...candidate.latency.daemon_path, [operation]: initial } };
     const fresh = { ...initial, p95_ms: ceiling, sample_count: checkerModule.canonicalSamplesPerRun(operation),
       request_bytes: baseline.replay.bytes[operation], request_sha256: baseline.replay.request_sha256[operation] };
     const samplerCalls: string[] = [];
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async (selected: string) => {
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, (selected: string) => {
       samplerCalls.push(selected);
       return fresh;
     });
@@ -365,11 +385,11 @@ describe("daemon performance budget", () => {
   });
 
   it("shares one sample across marginal metrics, preserving a large sibling miss", async () => {
-    const candidate = structuredClone(result) as any;
+    const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p50_ms = 251;
     candidate.latency.send_to_surface_warm.p95_ms = 276;
     let count = 0;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async () => {
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => {
       count++;
       return { ...candidate.latency.send_to_surface_warm, p50_ms: 240, p95_ms: 270,
         request_bytes: 180, request_sha256: "4".repeat(64), sample_count: 96 };
@@ -383,13 +403,26 @@ describe("daemon performance budget", () => {
   it.each([
     { sample_count: 95 }, { request_bytes: 999 }, { request_sha256: "wrong" }, { transport: "cli" },
   ])("rejects a re-sample with invalid workload proof %j", async (invalid) => {
-    const candidate = structuredClone(result) as any;
+    const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p95_ms = 276;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async () => ({
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
       ...candidate.latency.send_to_surface_warm, p95_ms: 270,
       sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64), ...invalid,
     }));
     expect(compareBenchmark(baseline, candidate).passed).toBe(false);
+  });
+
+  it("keeps an original intrinsic RED authoritative after a passing marginal retry", async () => {
+    const candidate = budgetCandidate();
+    candidate.verdict = "RED";
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
+      ...candidate.latency.send_to_surface_warm, p95_ms: 270,
+      sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64),
+    }));
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.passed).toBe(false);
+    expect(comparison.failures).toContain("benchmark intrinsic gates returned RED");
   });
 
   it("requires an explicit reason for any committed-row increase", () => {

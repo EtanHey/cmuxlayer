@@ -941,7 +941,7 @@ export function compareBenchmark(
     const invalid = retry.failures.filter((failure) => !metricFailures.has(failure));
     resampleFailures.push(...invalid.map((failure) => `marginal re-sample ${operation}: ${failure}`));
     for (const entry of eligible) {
-      const fresh = retry.rows.find((row) => row.operation === operation && row.metric === entry.metric);
+      const fresh = retry.rows.find((freshRow) => freshRow.operation === operation && freshRow.metric === entry.metric);
       entry.marginal_resample = {
         initial: entry.current, current: fresh.current, raw_current: fresh.raw_current,
         verdict_basis: fresh.verdict_basis,
