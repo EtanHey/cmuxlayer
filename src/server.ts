@@ -3225,7 +3225,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               verifiedDelivery: args.source_event === "send_to",
             });
           }
-          return { ...delivery, queued_behind_turn: delivery.delivery === "queued" && delivery.queued_behind_turn === true };
+          return { ...delivery, queued_behind_turn: expectedCli === "codex"
+            ? delivery.delivery === "queued" && delivery.queued_behind_turn === true
+            : queuedBehindTurn || delivery.queue_verified === true };
           } catch (error) {
             if (error !== retrySettled || !settledRetry) throw error;
             return { ...buildPublicDeliveryReceipt({ ...settledRetry, typed: settledRetry.typed === true, submit_attempted: settledRetry.press_enter }),
