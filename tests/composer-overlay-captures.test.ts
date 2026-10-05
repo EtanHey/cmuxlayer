@@ -24,4 +24,9 @@ describe("#999(e) real captured composer overlays", () => {
   it.each(["codex-dismissed", "cursor-closed", "claude-closed"])("does not mistake Esc-closed %s for an overlay", name => {
     expect(isPickerOrMenuScreen(capture(name))).toBe(false);
   });
+
+  it("keeps a historical completion footer inactive below a later empty composer", () => {
+    const stale = capture("codex-mention").replace("@999e_no_match_capture", "Ask Codex to do anything");
+    expect(isPickerOrMenuScreen(stale, "codex")).toBe(false);
+  });
 });

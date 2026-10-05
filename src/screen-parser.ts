@@ -1762,6 +1762,7 @@ export function composerPickerFooterIndex(screenText: string): number {
     const line = lines[index] ?? "";
     if (!/^\s*(?:no matches\s*[·•]\s*)?enter\/tab insert\s*[·•]\s*esc close(?:\s*[·•]\s*↑\/↓ select\s*[·•]\s*←\/→ filter)?\s*$/iu.test(line) &&
         !/^\s*↑(?:↓|\/↓) to navigate\s*[·•]\s*Enter to select\s*[·•]\s*Esc to cancel\s*$/iu.test(line)) continue;
+    if (lines.slice(index + 1).some(isReadyComposerLine)) return -1;
     return index;
   }
   return -1;
