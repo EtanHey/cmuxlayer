@@ -56,7 +56,9 @@ The fresh value must meet that same ceiling; the regression ratio remains
 so it shares that operation's fresh sample and is evaluated against its own
 unchanged ceiling. Passing rows, larger misses, and exact request checks get
 no retry. Multiple marginal metrics of one operation share
-one fresh sample; a second miss still fails. Existing paired controls, first-send
+one fresh sample; a second miss still fails. A sampler error retains the
+original measurements and records the failed retry reason in the report and
+artifact; it cannot turn the gate green. Existing paired controls, first-send
 cold/steady splitting, history-degraded rejection, margin rules, transport and
 canonical-workload checks still apply.
 

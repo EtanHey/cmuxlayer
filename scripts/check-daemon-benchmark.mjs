@@ -50,7 +50,14 @@ export async function sampleMarginalRows(baseline, result, options, sampleOperat
   const comparison = compareBenchmark(baseline, result, options);
   const samples = {};
   for (const operation of new Set(comparison.rows.filter(marginalRow).map((entry) => entry.operation))) {
-    samples[operation] = await sampleOperation(operation);
+    try {
+      samples[operation] = await sampleOperation(operation);
+    } catch (error) {
+      samples[operation] = {
+        sampling_error: error instanceof Error ? error.message : String(error),
+        transport: "missing",
+      };
+    }
   }
   return samples;
 }
@@ -938,12 +945,16 @@ export function compareBenchmark(
       expectedRounds, history, historyDegraded, historyDegradedReason,
     });
     const metricFailures = new Set(retry.rows.filter((entry) => !entry.passed && !entry.exact).map(rowFailure));
-    const invalid = retry.failures.filter((failure) => !metricFailures.has(failure));
+    const invalid = [
+      ...retry.failures.filter((failure) => !metricFailures.has(failure)),
+      ...(measurement.sampling_error ? [`sampling failed: ${measurement.sampling_error}`] : []),
+    ];
     resampleFailures.push(...invalid.map((failure) => `marginal re-sample ${operation}: ${failure}`));
     for (const entry of eligible) {
       const fresh = retry.rows.find((freshRow) => freshRow.operation === operation && freshRow.metric === entry.metric);
       entry.marginal_resample = {
         initial: entry.current, current: fresh.current, raw_current: fresh.raw_current,
+        sampling_error: measurement.sampling_error,
         verdict_basis: fresh.verdict_basis,
         paired_control_evaluation: retry.paired_control_evaluation[operation],
       };

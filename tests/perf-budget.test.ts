@@ -425,6 +425,27 @@ describe("daemon performance budget", () => {
     expect(comparison.failures).toContain("benchmark intrinsic gates returned RED");
   });
 
+  it.each(["throw", "reject"])("retains the original report when a sampler fails: %s", async (mode) => {
+    const candidate = budgetCandidate();
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    let calls = 0;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => {
+      calls++;
+      const error = new Error("synthetic resample failure");
+      if (mode === "throw") throw error;
+      return Promise.reject(error);
+    });
+    expect(calls).toBe(1);
+    expect(candidate.marginal_resamples.send_to_surface_warm).toMatchObject({ sampling_error: "synthetic resample failure" });
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.passed).toBe(false);
+    expect(comparison.failures.join(" ")).toContain("synthetic resample failure");
+    expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain("276 ms → re-sample missing");
+    expect(resultWithComparison(candidate, comparison).latency.send_to_surface_warm.p95_ms).toBe(276);
+    await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => { calls++; throw new Error("second attempt"); });
+    expect(calls).toBe(1);
+  });
+
   it("requires an explicit reason for any committed-row increase", () => {
     expect(() => requireBaselineIncreaseReason([[101, 100]], "")).toThrow(
       /without --reason/,
