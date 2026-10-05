@@ -1755,9 +1755,22 @@ export function classifyPromptDisposition(
  * Detect an active terminal picker/menu whose next text bytes would be
  * interpreted as navigation or selection keystrokes instead of composer text.
  */
+/** Completion menus in the composer; permission/model choosers have other footers. */
+export function composerPickerFooterIndex(screenText: string): number {
+  const lines = normalizeText(screenText).split("\n");
+  for (let index = lines.length - 1; index >= Math.max(0, lines.length - 32); index--) {
+    const line = lines[index] ?? "";
+    if (!/^\s*(?:no matches\s*[·•]\s*)?enter\/tab insert\s*[·•]\s*esc close\s*$/i.test(line) &&
+        !/^\s*↑(?:↓|\/↓) to navigate\s*[·•]\s*Enter to select\s*[·•]\s*Esc to cancel\s*$/i.test(line)) continue;
+    if (lines.slice(index + 1).some(isReadyComposerLine)) return -1;
+    return index;
+  }
+  return -1;
+}
+
 export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
   const normalized = normalizeText(text);
-  if (analyzeActiveChooser(normalized)) return true;
+  if (composerPickerFooterIndex(normalized) >= 0 || analyzeActiveChooser(normalized)) return true;
   if (
     (cli === undefined || cli === "codex") &&
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })

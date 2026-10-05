@@ -55,6 +55,7 @@ import {
   normalizeTerminalText,
   inferComposerCli,
   extractComposerInputRegion,
+  composerPickerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
   screenContainsCompleteSubmittedText,
@@ -1040,10 +1041,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
-      if (
-        snapshot &&
-        screenShowsCompletePendingInput(snapshot.text, opts.text)
-      ) {
+      const pickerRegion = snapshot ? composerPickerInputRegion(snapshot.text) : null;
+      if (snapshot && (screenShowsCompletePendingInput(snapshot.text, opts.text) ||
+          (pickerRegion !== null && composerRegionMatchesPayload(pickerRegion, opts.text, inferComposerCli(snapshot.text), snapshot.text)))) {
         return {
           screenText: snapshot.text,
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
@@ -2194,8 +2194,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
-      const preReturnBootEvidence =
-        (requireObservedPayloadBeforeEnter ? verifySubmit : observeCodexPayloadBeforeEnter)
+      let preReturnBootEvidence =
+        (requireObservedPayloadBeforeEnter ? verifySubmit : observeCodexPayloadBeforeEnter ||
+          (targetCli === "claude" && submittedText.trimStart().startsWith("/")))
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
               workspace: opts.workspace,
@@ -2208,6 +2209,36 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               beforeRead: opts.beforeMutation,
             })
           : null;
+      // #999(e): Return/Tab inserts a completion while these menus are open.
+      // Only the caller's complete, current payload permits closing one.
+      await opts.beforeMutation?.();
+      const pickerCapableCli = targetCli ?? inferComposerCli(deliverySafetySnapshot?.text ?? "");
+      const pickerSnapshot = (pickerCapableCli === "codex" || pickerCapableCli === "claude") && opts.source_event !== "spawn_agent"
+        ? await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true }) : null;
+      const pickerCli = targetCli ?? (pickerSnapshot ? inferComposerCli(pickerSnapshot.text) : null);
+      if (pickerSnapshot && isPickerOrMenuScreen(pickerSnapshot.text, pickerCli ?? undefined)) {
+        const region = composerPickerInputRegion(pickerSnapshot.text, pickerCli ?? undefined);
+        const owner = typedDraftOwners.get(ownerKey);
+        if (pickerSnapshot.parsed.control_state === "permission_prompt" || region === null ||
+            !owner || owner.caller !== caller || !bootTokenInstanceCurrent(owner) ||
+            !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) ||
+            !composerRegionMatchesPayload(region, submittedText, pickerCli, pickerSnapshot.text)) {
+          throw new DeliverySafetyGateError("draft_ownership_unverified", pickerSnapshot.parsed);
+        }
+        const method = await sendKeyWithRetry(opts.surface, "Escape", opts.workspace, opts.beforeMutation);
+        if (method) rpcMethods.add(method);
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        await opts.beforeMutation?.();
+        const closed = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+        if (!closed || isPickerOrMenuScreen(closed.text, pickerCli ?? undefined)) {
+          throw new DeliverySafetyGateError("composer_picker_not_closed", closed?.parsed ?? pickerSnapshot.parsed);
+        }
+        const closedRegion = extractComposerInputRegion(closed.text, submittedText, pickerCli ?? undefined, true);
+        if (closedRegion === null || !composerRegionMatchesPayload(closedRegion, submittedText, pickerCli, closed.text)) {
+          throw new DeliverySafetyGateError("draft_ownership_unverified", closed.parsed);
+        }
+        preReturnBootEvidence = { screenText: closed.text, metrics: parseSubmitEvidenceMetrics(closed.text, closed.parsed) };
+      }
       if (
         requireObservedPayloadBeforeEnter &&
         verifySubmit &&

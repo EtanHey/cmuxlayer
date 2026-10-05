@@ -8,6 +8,7 @@ import { CODEX_FOOTER_RE, CODEX_HINT_LINE_RE } from "../codex-chrome.js";
 import type { CliType } from "../agent-types.js";
 import {
   antigravityComposerDraft,
+  composerPickerFooterIndex,
   isAntigravityScreen,
   isPickerOrMenuScreen,
   parseScreen,
@@ -274,6 +275,28 @@ export function normalizeKnownPlaceholderComposerInput(
     return "";
   }
   return input;
+}
+
+/** Read the draft above a completion popup, never its selectable rows. */
+export function composerPickerInputRegion(screenText: string, cli?: CliType): string | null {
+  const knownCli = cli ?? inferComposerCli(screenText);
+  if (knownCli !== "codex" && knownCli !== "claude") return null;
+  const footer = composerPickerFooterIndex(screenText);
+  if (footer < 0) return null;
+  const lines = normalizeTerminalText(screenText).split("\n");
+  const menuOption = (line: string) => /^\s*(?:[>❯›]\s*)?\/\S+\s{2,}\S/.test(line);
+  let start = footer - 1;
+  while (start >= Math.max(0, footer - 32) &&
+    (!matchComposerPromptLine(lines[start] ?? "") || menuOption(lines[start] ?? ""))) start--;
+  if (start < Math.max(0, footer - 32)) return null;
+  let end = footer;
+  for (let index = start + 1; index < footer; index++) {
+    if (/^\s*(?:no matches|loading\.\.\.)\s*$/i.test(lines[index] ?? "") || menuOption(lines[index] ?? "")) {
+      end = index;
+      break;
+    }
+  }
+  return extractComposerInputRegion(lines.slice(start, end).join("\n"), undefined, knownCli, true);
 }
 
 export function extractComposerInputRegion(
@@ -1137,8 +1160,11 @@ export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonl
   const items = codexQueuedItems(screenText) ?? [];
   const assigned = new Map<number, number>();
   const match = (itemIndex: number, seen: Set<number>): boolean => {
+    const item = items[itemIndex];
+    if (item === undefined) return false;
     for (let ownerIndex = 0; ownerIndex < texts.length; ownerIndex++) {
-      if (seen.has(ownerIndex) || !queuedItemMatches(items[itemIndex]!, texts[ownerIndex]!)) continue;
+      const text = texts[ownerIndex];
+      if (text === undefined || seen.has(ownerIndex) || !queuedItemMatches(item, text)) continue;
       seen.add(ownerIndex);
       // Reassign ambiguous prefixes rather than starving a later exact item.
       const previousItem = assigned.get(ownerIndex);

@@ -45,6 +45,7 @@ function makeCodexPane(frames: Frames) {
     beforeRead: undefined as (() => Promise<void>) | undefined,
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
+    pickerOpen: false, pickerStuck: false, keys: [] as string[],
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
@@ -76,6 +77,14 @@ function makeCodexPane(frames: Frames) {
     return { workspace: "workspace:1", surface: "surface:new", surface_id: NEW_UUID, pane: "pane:1", title: "", type: "terminal" };
   };
   const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+    if (args.includes("send-key") && pane.live) {
+      pane.keys.push(String(args.at(-1)));
+      if (args.includes("escape")) {
+        if (!pane.pickerStuck) pane.pickerOpen = false;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (pane.pickerOpen) return { stdout: "{}", stderr: "" };
+    }
     if (args.includes("send-key") && args.includes("return") && pane.live) {
       pane.returns += 1;
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
@@ -116,7 +125,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex") {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
@@ -147,12 +156,13 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
     if (bootPrompt) return { pane, context, spawned };
-    engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready" });
+    engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready", cli });
+    if (cli !== "codex") engine.stateMgr.writeState(engine.getRegistry().get(spawned.agent_id));
     // Spawn's contract relay has completed its observed submit before the
     // scenario begins; don't leave an ignored boot write racing the fixture.
     expect(context.typedDraftOwners.size).toBe(0);
     pane.frames = frames;
-    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], bufferedReads: 0 });
+    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], keys: [], bufferedReads: 0 });
     const as = <T>(uuid: string, fn: () => Promise<T>) =>
       runWithCallerContext({ surfaceId: uuid, workspaceId: "workspace:1" }, fn);
     const typeDraft = (text: string, surface?: string) => as(LEAD_UUID, async () => parseToolResult(
@@ -254,6 +264,72 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(await target.send(PONG)).toMatchObject({ ok: false, error_code: "queued_stalled_idle", typed: false });
       expect(target.exec.mock.calls.filter(([, argv]: [string, string[]]) => argv.includes("send") || argv.includes("set-buffer"))).toHaveLength(writes);
       expect(target.pane.returns + target.pane.tabs).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  const pickerCases = [
+    ["codex", "mention", "Review the delta @124ccc35 before replying."],
+    ["codex", "slash", "/help"],
+    ["claude", "slash", "/help"],
+  ];
+  const pickerFrame = (cli: string, kind: string, text: string) =>
+    fixture(`issue-999-${cli}-${kind}-picker`).replace("PAYLOAD", text);
+  const plainFrame = (cli: string, text: string, submitted = false) => cli === "codex"
+    ? submitted ? fixture("idle-submitted-working").replace(PONG, text) : fixture("idle-draft").replace(PONG, text)
+    : `Claude Code · Opus 4.6\n${submitted ? `❯ ${text}\n✻ Working…\n❯ ` : `❯ ${text}`}`;
+
+  it.each(pickerCases)("#999(e) closes our %s %s picker before verified submit", async (cli, kind, text) => {
+    const target = await setup({ empty: plainFrame(cli, ""), buffered: plainFrame(cli, ""),
+      draft: text => plainFrame(cli, text), after: text => plainFrame(cli, text, true) }, undefined, 0, cli);
+    target.pane.pickerOpen = true;
+    target.pane.frames.buffered = typed => cli === "claude" ? plainFrame(cli, "") : target.pane.pickerOpen ? pickerFrame(cli, kind, typed) : plainFrame(cli, typed);
+    target.pane.frames.draft = typed => target.pane.pickerOpen ? pickerFrame(cli, kind, typed) : plainFrame(cli, typed);
+    try {
+      const result = await target.send(text, false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual([text]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) a stuck composer picker fails explicitly without submitting", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => pickerFrame("codex", "mention", typed), after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    target.pane.pickerStuck = true;
+    target.pane.frames.buffered = typed => pickerFrame("codex", "mention", typed);
+    try {
+      const result = await target.send(pickerCases[0][2]);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "composer_picker_not_closed", typed: true, submit_dispatched: false, submit_verified: false });
+      expect(target.pane.keys).toEqual(["escape"]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) refuses to close a picker over changed foreign text", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: pickerFrame("codex", "mention", "foreign @draft"),
+      draft: pickerFrame("codex", "mention", "foreign @draft"), after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    try {
+      const result = await target.send(pickerCases[0][2]);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "draft_ownership_unverified" });
+      expect(target.pane.keys).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) closing a picker does not prove submission when Return is swallowed", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => target.pane.pickerOpen ? pickerFrame("codex", "mention", typed) : plainFrame("codex", typed),
+      after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    target.pane.swallow = 10;
+    target.pane.frames.buffered = typed => target.pane.pickerOpen ? pickerFrame("codex", "mention", typed) : plainFrame("codex", typed);
+    try {
+      const result = await target.send(pickerCases[0][2], false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, submit_dispatched: true, submit_verified: null, delivery_state: "pending_verify" });
+      expect(target.pane.keys[0]).toBe("escape");
+      expect(target.pane.submitted).toEqual([]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
     } finally { target.context.dispose(); }
   }, 30_000);
 
