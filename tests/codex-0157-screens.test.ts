@@ -76,6 +76,21 @@ describe("#905 Codex 0.157 queue blocks", () => {
     expect(countVisibleOwnedQueuedInputs(screen, [`${text} hidden foreign suffix`])).toBe(0);
   });
 
+  it.each([
+    ["delete foo", "deletefoo", 0],
+    ["deletefoo", "delete foo", 0],
+    ["delete\nfoo", "deletefoo", 0],
+    ["Keep meaningful spaces across a long message", "Keep meaningful spaces\n    across a long message", 1],
+    ["wrap-tolerant", "wrap-\n    tolerant", 1],
+    ["delete  foo", "delete foo", 1],
+    ["delete foo", "delete  foo", 1],
+    ["a b", "a\n    b", 1],
+    ["ab", "a\n    b", 1],
+  ])("#1004 whitespace ownership: %j vs %j => %i", (text, rows, owned) => {
+    const screen = `OpenAI Codex\n• Queued follow-up inputs\n  ↳ ${rows}\n› Ask Codex to do anything`;
+    expect(countVisibleOwnedQueuedInputs(screen, [text])).toBe(owned);
+  });
+
   it("keeps the pre-0.157 single steer block working", () => {
     expect(screenShowsQueuedAgentInput(fixture("midturn-steer-queued"), LIST)).toBe(true);
     expect(screenShowsQueuedAgentInput(fixture("midturn-wrapped-steer-queued"), LONG)).toBe(true);

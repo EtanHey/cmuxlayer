@@ -393,6 +393,22 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
+  it("#1004 whitespace HIGH refuses a foreign single-row whitespace collision without Return", async () => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${queueRows("delete foo")}` });
+    try {
+      await target.send("delete foo");
+      target.pane.frames.after = queueRows("deletefoo");
+      target.pane.queued = ["deletefoo"];
+      target.pane.drainQueueOnReturn = true;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue", submit_attempted: false });
+      expect(target.pane.returns).toBe(returns);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   it("#1004 MEDIUM submits the assigned visible row rather than a stale shared-prefix candidate", async () => {
     const prefix = "This shared authored queue prefix has at least forty characters";
     const first = `${prefix} first request`, second = `${prefix} second request`;

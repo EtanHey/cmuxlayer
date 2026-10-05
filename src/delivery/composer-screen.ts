@@ -1137,8 +1137,34 @@ export function countVisibleExactQueuedRows(
   return items.filter((item) => item.exact === authoredText).length;
 }
 
-/** Wrapped text matches ownership; explicit >=40-char truncation only matches correlation. */
+/**
+ * Preserve spaces inside rows; only soft-wrap boundaries may join without a space.
+ * Text differing only by a space at a visual wrap is indistinguishable here;
+ * protocol/hook acknowledgments (CONFIRMATION.md) retire that screen-evidence limit.
+ */
+function completeQueuedItemMatches(item: CodexQueuedItem, text: string): boolean {
+  const authored = normalizeTerminalText(text).replace(/\s+/g, " ").trim();
+  if (!authored) return false;
+  let offsets = new Set([0]);
+  for (const [index, row] of item.rows.entries()) {
+    const visible = normalizeTerminalText(row).replace(/\s+/g, " ").trim();
+    if (!visible) return false;
+    const next = new Set<number>();
+    for (const offset of offsets) {
+      for (const boundary of index === 0 ? [""] : ["", " "]) {
+        const segment = boundary + visible;
+        if (authored.startsWith(segment, offset)) next.add(offset + segment.length);
+      }
+    }
+    offsets = next;
+    if (offsets.size === 0) return false;
+  }
+  return offsets.has(authored.length);
+}
+
+/** Complete ownership preserves spaces; explicit >=40-char truncation only matches correlation. */
 function queuedItemMatches(item: CodexQueuedItem, text: string, allowTruncation = true): boolean {
+  if (!allowTruncation) return completeQueuedItemMatches(item, text);
   const authored = compactQueueCorrelationText(text);
   if (!authored) return false;
   const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
