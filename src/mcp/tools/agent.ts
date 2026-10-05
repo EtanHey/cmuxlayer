@@ -683,6 +683,7 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
         seatRegistry,
         seatRegistryPath: opts?.seatRegistryPath,
         deliveryVerifyDeadlineMs: opts?.deliveryVerifyDeadlineMs,
+        deliveryAttentionMs: opts?.deliveryAttentionMs,
         deliveryTicketDir:
           opts?.deliveryTicketDir ??
           (testProcess ? undefined : defaultDeliveryTicketDir()),
@@ -1333,7 +1334,7 @@ export function registerListAgentsTool(
 export interface ReportToParentToolDeps {
   assertWorkerUpwardChannel: (target: string) => void;
   awaitLifecycleStart: () => Promise<void>;
-  deliverReportInboxPointer: (recipient: AgentRecord, message: ReturnType<typeof dispatch>) => Promise<{ delivery: "submitted" | "queued" | "queued_followup" | "rescued" | "pending_verify"; delivery_id?: string; }>;
+  deliverReportInboxPointer: (recipient: AgentRecord, message: ReturnType<typeof dispatch>) => Promise<{ delivery: "submitted" | "queued" | "steer_pending" | "queued_followup" | "rescued" | "pending_verify"; delivery_id?: string; }>;
   inboxOpts: InboxOpts;
   registry: AgentRegistry;
   resolveCurrentCallerAgent: () => AgentRecord | null;

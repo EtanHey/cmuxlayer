@@ -48,10 +48,15 @@ function makeCodexPane(frames: Frames) {
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
     pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
-    bannerOpen: false, bannerStuck: false, bannerAfterType: false,
+    bannerOpen: false, bannerStuck: false, bannerAfterType: false, steerOnReturn: false,
     bannerOnReturn: false, onEscape: undefined as (() => Promise<void>) | undefined,
   };
-  const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
+  const frame = (f: Frame): string => {
+    const text = typeof f === "string" ? f : f(pane.text);
+    // Legacy queue-recovery cases explicitly request Tab; the section must
+    // reflect Tab's after-turn semantics rather than the old shared heading.
+    return pane.phase === "after" && pane.tabs > 0 ? text.replace(/• Messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?/g, "• Queued follow-up inputs") : text;
+  };
   const read = (): string => {
     if (pane.bannerOpen) return overlayCapture("codex-boot").replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
     if (pane.phase === "buffered") {
@@ -86,7 +91,7 @@ function makeCodexPane(frames: Frames) {
       pane.returns += 1;
       if (pane.bannerOnReturn) { pane.bannerOnReturn = false; pane.bannerOpen = true; }
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
-      else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
+      else if (pane.phase === "draft") { (pane.steerOnReturn ? pane.queued : pane.submitted).push(pane.text); pane.phase = "after"; }
       else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
         const queued = pane.queued.shift();
         if (queued !== undefined) pane.submitted.push(queued);
@@ -194,13 +199,13 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const typeDraft = (text: string, surface?: string) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ ...(surface ? { mode: "surface", surface } : { agent_id: spawned.agent_id }), text, press_enter: false }, {})));
     const readScreen = () => server._registeredTools.read_screen.handler({ surface: spawned.surface_id }, {});
-    const send = (text: string, targeting = false, verbose = false) => as(LEAD_UUID, async () => parseToolResult(
-      await server._registeredTools.send_to.handler({ ...(targeting ? { targeting: { agent_ids: [spawned.agent_id] } } : { agent_id: spawned.agent_id }), text, press_enter: true, verbose }, {})));
+    const send = (text: string, targeting = false, verbose = false, codexBusyMode: "steer" | "queue" | null = "queue") => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ ...(targeting ? { targeting: { agent_ids: [spawned.agent_id] } } : { agent_id: spawned.agent_id }), text, press_enter: true, verbose, ...(codexBusyMode ? { codex_busy_mode: codexBusyMode } : {}) }, {})));
     const keyReturn = (uuid: string) => as(uuid, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "key", surface: spawned.surface_id, text: "return" }, {})));
-    const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
+    const surfaceSend = (text: string, background: boolean, codexBusyMode: "steer" | "queue" | null = "queue") => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
-        { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
+        { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background, ...(codexBusyMode ? { codex_busy_mode: codexBusyMode } : {}) }, {})));
     const sendChunks = (text: string) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "surface", surface: spawned.surface_id, text, press_enter: true, allow_long_inline: true, chunk_size: 20 }, {})));
     const rawBoot = async () => {
@@ -210,6 +215,88 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     };
     return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites };
   }
+
+  it.each([false, true])("P0 STEER default busy send lands at next tool boundary (targeting=%s)", async targeting => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued") });
+    try {
+      target.pane.steerOnReturn = true;
+      const receipt = await target.send(LIST, targeting, true, null);
+      const accepted = targeting ? receipt.receipts[0] : receipt;
+      expect(target.pane.tabs).toBe(0);
+      expect(target.pane.returns).toBe(1);
+      expect(target.pane.keys).not.toContain("escape");
+      expect(receipt.ok).toBe(true);
+      expect(accepted).toMatchObject({ submitted: false, delivered: false,
+        delivery_state: "steer_pending", terminal: false });
+      expect(target.engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({ delivery_state: "steer_pending", terminal: false });
+      // Committed user turn, not a still-visible next-tool queue or old echo.
+      target.pane.frames.after = fixture("midturn-steer-queued").replace(
+        `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${LIST}`,
+        `› ${LIST}\n\n• New boundary observed.`);
+      await target.engine.verifyPendingDeliveries();
+      expect(target.engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true, terminal: true });
+    } finally { target.context.dispose(); }
+  });
+
+  it.each([false, true])("P0 STEER surface send defaults to Return (background=%s)", async background => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued") });
+    try {
+      target.pane.steerOnReturn = true;
+      const receipt = await target.surfaceSend(LIST, background, null);
+      await vi.waitFor(() => expect(target.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "steer_pending", terminal: false, submit_verified: null }), { timeout: 10_000 });
+      expect(target.pane.tabs).toBe(0);
+      expect(target.pane.returns).toBe(1);
+      expect(target.pane.keys).not.toContain("escape");
+    } finally { target.context.dispose(); }
+  });
+
+  it("P0 STEER a new steer is distinguished from an older identical Tab queue", async () => {
+    const oldQueue = `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Queued follow-up inputs\n  ↳ ${LIST}\n› Ask Codex to do anything\n  GPT-6-Sol medium · ~/scratch`;
+    const after = oldQueue.replace("• Queued follow-up inputs", `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${LIST}\n\n• Queued follow-up inputs`);
+    const target = await setup({ empty: oldQueue, buffered: oldQueue,
+      draft: text => oldQueue.replace("› Ask Codex to do anything", codexRows(text)), after });
+    try {
+      target.pane.steerOnReturn = true;
+      const receipt = await target.send(LIST, false, true, null);
+      expect(receipt).toMatchObject({ ok: true, delivery_state: "steer_pending", submitted: false });
+      expect(receipt.queued_behind_turn).not.toBe(true);
+      target.pane.frames.after = oldQueue.replace("Working (5s • esc to interrupt)", `${codexRows(LIST)}\n• Fresh tool boundary\nWorking (6s • esc to interrupt)`);
+      await target.engine.verifyPendingDeliveries();
+      expect(target.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+    } finally { target.context.dispose(); }
+  });
+
+  it.each([false, true])("P0 STEER duplicate pending steer retains acceptance without retyping (targeting=%s)", async targeting => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued") });
+    try {
+      target.pane.steerOnReturn = true;
+      const first = await target.send(LIST, targeting, true, null);
+      const accepted = targeting ? first.receipts[0] : first;
+      const writes = [...target.pane.keys];
+      const chunks = target.exec.mock.calls.filter(([, args]) => args.includes("send")).length;
+      const second = await target.send(LIST, targeting, true, null);
+      const duplicate = targeting ? second.receipts[0] : second;
+      expect(second).toMatchObject({ ok: true });
+      expect(duplicate).toMatchObject({ duplicate_of: accepted.delivery_id,
+        delivery_state: "steer_pending", queue_verified: true, submitted: false, delivered: false });
+      expect(target.pane.keys).toEqual(writes);
+      expect(target.exec.mock.calls.filter(([, args]) => args.includes("send")).length).toBe(chunks);
+    } finally { target.context.dispose(); }
+  });
+
+  it("P0 STEER explicit queue opts into Tab and reports queued without delivery", async () => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Queued follow-up inputs\n  ↳ ${text}\n› Ask Codex to do anything\n  GPT-6-Sol medium · ~/scratch` });
+    try {
+      const receipt = await target.send(LONG, false, true, "queue");
+      expect(target.pane.tabs).toBe(1); expect(target.pane.returns).toBe(0);
+      expect(receipt).toMatchObject({ ok: true, submitted: false, delivered: false, delivery_state: "queued", terminal: false });
+    } finally { target.context.dispose(); }
+  });
 
   it("RESCOPE bounds retain only the newest eight unverified entries and their delivery IDs", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
@@ -827,7 +914,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it.each(["GPT-6-Sol medium", "Daybreak Blue high", "GPT-6.1-Sol high", "GPT-6.1-Sol medium"])("P0 mid-turn: %s queues the relay without leaving it in the composer", async label => {
+  it.each(["GPT-6-Sol medium", "Daybreak Blue high", "GPT-6.1-Sol high", "GPT-6.1-Sol medium"])("explicit queue mid-turn: %s queues the relay without leaving it in the composer", async label => {
     const replay = (name: string) => fixture(name).replaceAll("GPT-6-Sol medium", label);
     const target = await setup({
       empty: replay("midturn-empty"), buffered: replay("midturn-empty"),

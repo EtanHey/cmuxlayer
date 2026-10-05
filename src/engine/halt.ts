@@ -53,6 +53,7 @@ export interface HaltHost {
   readonly promptMotionScreenSignatures: AgentEngine["promptMotionScreenSignatures"];
   readonly registry: AgentEngine["registry"];
   readonly stateMgr: AgentEngine["stateMgr"];
+  listDeliveryReceipts: AgentEngine["listDeliveryReceipts"];
   sweepBackgroundProcessSnapshot: AgentEngine["sweepBackgroundProcessSnapshot"];
   appendHaltEscalationEvent: AgentEngine["appendHaltEscalationEvent"];
   assertSweepInputCurrent: AgentEngine["assertSweepInputCurrent"];
@@ -90,6 +91,7 @@ export function haltDwellMs(this: HaltHost, type: AgentHaltType): number {
     case "wedged":
       return this.haltWedgedDwellMs;
     case "harness_api_error":
+    case "delivery_stalled":
       return 0;
   }
 }
@@ -111,6 +113,8 @@ export function haltUnblockAction(this: HaltHost, agent: AgentRecord, type: Agen
         `the child is paused and cannot act — unpause the pane before send_to, ` +
         `or send_to({mode: "key", surface: "${agent.surface_id}", text: "return"}) if the screen says to resume`
       );
+    case "delivery_stalled":
+      return `inspect delivery receipts and the pending section on surface ${agent.surface_id}; verify whether the message has landed before any manual action; do not interrupt or resend automatically`;
     case "harness_api_error":
       return `inspect the harness API error and request ID on surface ${agent.surface_id}, then retry or resume the harness turn`;
   }
@@ -478,6 +482,7 @@ export async function maybeEscalateLiveHalt(
   ctx: SweepAgentContext = {},
 ): Promise<AgentRecord> {
   if (!this.assertSweepInputCurrent(ctx)) return agent;
+  const staleDelivery = this.listDeliveryReceipts().find(receipt => receipt.agent_id === agent.agent_id && !receipt.terminal && receipt.needs_attention === true && ["queued", "steer_pending"].includes(receipt.delivery_state));
   const nowMs = this.haltNow();
   const nowIso = new Date(nowMs).toISOString();
   const parsed = parseScreen(screenText);
@@ -533,7 +538,7 @@ export async function maybeEscalateLiveHalt(
     hasVisibleProgress &&
     motionObservedAt !== undefined &&
     nowMs - motionObservedAt < PROMPT_MOTION_GRACE_MS;
-  if (hasObservedPromptMotion) {
+  if (hasObservedPromptMotion && !staleDelivery) {
     agent = this.persistPromptBlockedState(agent, false, nowIso);
     return this.clearHaltEpisode(agent, {
       halt_last_active_at: nowIso,
@@ -552,7 +557,7 @@ export async function maybeEscalateLiveHalt(
     error.startsWith("harness_api_error:"),
   );
   if (
-    !hasHarnessApiError &&
+    !staleDelivery && !hasHarnessApiError &&
     parsed.paused !== true &&
     (parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
@@ -585,7 +590,9 @@ export async function maybeEscalateLiveHalt(
     parsed.status === "working" || parsed.status === "thinking";
   let haltType: AgentHaltType | null = null;
   let episodeStartedAtMs = nowMs;
-  if (hasHarnessApiError) {
+  if (staleDelivery) {
+    haltType = "delivery_stalled";
+  } else if (hasHarnessApiError) {
     haltType = "harness_api_error";
   } else if (
     parsed.control_state === "permission_prompt" ||
@@ -633,7 +640,9 @@ export async function maybeEscalateLiveHalt(
     error.startsWith("harness_api_error:"),
   );
   const haltObservableAction =
-    haltType === "harness_api_error"
+    haltType === "delivery_stalled"
+      ? staleDelivery?.attention_reason ?? `Delivery ${staleDelivery?.delivery_id} remains pending`
+      : haltType === "harness_api_error"
       ? (harnessApiError ?? parsed.current_action ?? haltType)
       : (parsed.current_action ?? harnessApiError ?? haltType);
   const harnessRequestId = (value: string | null | undefined): string | null =>
@@ -652,7 +661,7 @@ export async function maybeEscalateLiveHalt(
       halt_last_observable_action: haltObservableAction,
     });
     this.registry.set(agent.agent_id, episode);
-    if (haltType !== "harness_api_error") return episode;
+    if (haltType !== "harness_api_error" && haltType !== "delivery_stalled") return episode;
     agent = episode;
   }
   if (agent.halt_episode_type !== haltType) {
@@ -667,7 +676,7 @@ export async function maybeEscalateLiveHalt(
       halt_last_observable_action: haltObservableAction,
     });
     this.registry.set(agent.agent_id, episode);
-    if (haltType !== "harness_api_error") return episode;
+    if (haltType !== "harness_api_error" && haltType !== "delivery_stalled") return episode;
     agent = episode;
   }
   if (haltType === "wedged") {
@@ -677,7 +686,7 @@ export async function maybeEscalateLiveHalt(
     });
     this.registry.set(agent.agent_id, episode);
   } else if (
-    haltType === "harness_api_error" &&
+    (haltType === "harness_api_error" || haltType === "delivery_stalled") &&
     agent.halt_last_observable_action !== haltObservableAction
   ) {
     const sameRequestId =

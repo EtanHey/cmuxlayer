@@ -192,7 +192,7 @@ function isLeanSuccessfulTransportReceipt(
   const verifiedKeyReceipt =
     typeof structured.key === "string" && structured.submit_verified === true;
   const verifiedBatch = Array.isArray(structured.receipts) && structured.receipts.length > 0 && structured.receipts.every(receipt => receipt?.ok === true || Boolean(receipt?.skipped) || receipt?.resolution === "filtered_out");
-  return verifiedBatch || submittedReceipt || structured.delivery_state === "queued" || structured.delivery_state === "queued_followup" || verifiedKeyReceipt;
+  return verifiedBatch || submittedReceipt || structured.delivery_state === "queued" || structured.delivery_state === "steer_pending" || structured.delivery_state === "queued_followup" || verifiedKeyReceipt;
 }
 
 export function installToolRegistration(

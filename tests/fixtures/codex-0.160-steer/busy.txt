@@ -1,0 +1,35 @@
+
+
+› At the next tool boundary, print SCRATCH_STEER_LANDED and continue waiting for the sleep
+  command. Do not interrupt it or edit files.
+
+
+• Ran sleep 50
+  └ (no output)
+
+• SCRATCH_STEER_LANDED
+
+  SCRATCH_TOOL_BOUNDARY
+
+  Worked for 55s • 18:23
+
+
+› When the turn ends, print SCRATCH_AFTER_TURN_QUEUE and stop. Do not edit files or use tools.
+
+
+• SCRATCH_AFTER_TURN_QUEUE
+
+  Worked for 4s • 18:23
+
+
+› Run sleep 15 in the shell and wait for it to finish, then print SCRATCH_TOOL_BOUNDARY_B and
+  stop. Do not edit files or use any other tools.
+
+
+Working (0s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · ~/scratch · Print SCRATCH_STEER_READY
+  ? for shortcuts                                                        ⚠ 3 warnings · f2 to view

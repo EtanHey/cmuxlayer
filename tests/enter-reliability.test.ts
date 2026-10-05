@@ -1731,9 +1731,9 @@ describe("enter reliability", () => {
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(1);
-    // The lost Return leaves an active Codex frame; its retry uses Tab.
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
-    expect(client.sendKeyCalls.filter((key) => key === "tab")).toHaveLength(1);
+    // A lost busy Return retries steering with Return, never Tab or Esc.
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
+    expect(client.sendKeyCalls.filter((key) => key === "tab")).toHaveLength(0);
     expect(client.sendCalls.join("")).toBe(followUp);
     expect(events).toHaveLength(1);
     expect(events[0]?.delivery_state).toBe("pending_verify");
@@ -1772,8 +1772,8 @@ describe("enter reliability", () => {
     expect(client.sendCalls.join("")).toBe(PR343_LIVE_QUEUE_PAYLOAD);
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({ ok: true, submitted: false, queue_verified: true });
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.delivery).toBe("steer_pending");
+    expect(parsed.delivery_state).toBe("steer_pending");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
@@ -1803,8 +1803,8 @@ describe("enter reliability", () => {
 
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({ ok: true, submitted: false, queue_verified: true });
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.delivery).toBe("steer_pending");
+    expect(parsed.delivery_state).toBe("steer_pending");
     expect(parsed.terminal).toBe(false);
     expect(parsed.delivery_id).toEqual(expect.any(String));
     expect(parsed.submit_verified).toBeNull();
@@ -1868,8 +1868,8 @@ describe("enter reliability", () => {
 
     expect(result.isError).not.toBe(true);
     expect(parsed.ok).toBe(true);
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.delivery).toBe("steer_pending");
+    expect(parsed.delivery_state).toBe("steer_pending");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
@@ -1923,8 +1923,8 @@ describe("enter reliability", () => {
     expect(settledAt).not.toBeNull();
     expect(settledAt! - startedAt).toBeLessThanOrEqual(1000);
     expect(client.postReturnScreenReadAttempts).toBeGreaterThanOrEqual(2);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
-    expect(client.sendKeyCalls.filter((key) => key === "tab")).toHaveLength(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
+    expect(client.sendKeyCalls.filter((key) => key === "tab")).toHaveLength(0);
   }, 10_000);
 
   it("Probe E: accepts when a correlated Codex queue appears before a truncated composer transition", async () => {
@@ -1963,8 +1963,8 @@ describe("enter reliability", () => {
     expect(followUp).toHaveLength(541);
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({ ok: true, submitted: false, queue_verified: true });
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.delivery).toBe("steer_pending");
+    expect(parsed.delivery_state).toBe("steer_pending");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
@@ -2039,8 +2039,8 @@ describe("enter reliability", () => {
     expect(queuedScreen).toContain("↳ narrow-pane queued follow-up");
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({ ok: true, submitted: false, queue_verified: true });
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.delivery).toBe("steer_pending");
+    expect(parsed.delivery_state).toBe("steer_pending");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
@@ -2078,8 +2078,8 @@ describe("enter reliability", () => {
     expect(queuedScreen).toContain("│   ↳ decorated correlated queue payload");
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({ ok: true, submitted: false, queue_verified: true });
-    expect(parsed.delivery).toBe("queued");
-    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.delivery).toBe("steer_pending");
+    expect(parsed.delivery_state).toBe("steer_pending");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);

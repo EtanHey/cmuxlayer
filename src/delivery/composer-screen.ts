@@ -974,7 +974,7 @@ export function screenShowsFreshCursorResponseAfterSubmittedInput(
   return false;
 }
 
-type CodexQueuedItem = { rows: string[]; exact: string | null };
+type CodexQueuedItem = { rows: string[]; exact: string | null; kind: "queued" | "steer_pending" };
 
 const CODEX_QUEUE_HEADING_RE =
   /^(?:messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?|queued follow-up inputs)$/i;
@@ -1065,7 +1065,9 @@ function codexQueueScan(lines: string[], cursor: number): { items: CodexQueuedIt
         current.rows.push(activeLine);
       }
     }
-    items.unshift(...block.map((item) => ({ rows: item.rows, exact: item.rows.length === 1 ? item.exact : null })));
+    const heading = lines.slice(headingStart, cursor + 1).map(stripCodexQueueGutter).join(" ").replace(/\s+/g, " ");
+    const kind: CodexQueuedItem["kind"] = /messages to be submitted/i.test(heading) ? "steer_pending" : "queued";
+    items.unshift(...block.map((item) => ({ rows: item.rows, exact: item.rows.length === 1 ? item.exact : null, kind })));
     cursor = headingStart - 1;
     skipBlank();
   }
@@ -1161,9 +1163,9 @@ function queuedItemMatches(item: CodexQueuedItem, text: string, allowTruncation 
     normalized.length > 0 && authored.startsWith(normalized) && visible.length >= 40);
 }
 
-export function countVisibleQueuedSubmitMatches(screenText: string, text: string): number {
+export function countVisibleQueuedSubmitMatches(screenText: string, text: string, kind?: CodexQueuedItem["kind"]): number {
   if (inferComposerCli(screenText) !== "codex") return 0;
-  return (codexQueuedItems(screenText) ?? []).filter(item => queuedItemMatches(item, text)).length;
+  return (codexQueuedItems(screenText) ?? []).filter(item => (!kind || item.kind === kind) && queuedItemMatches(item, text)).length;
 }
 
 /** Assign complete queue rows to ownership entries, consuming each entry at most once. */
@@ -1408,4 +1410,10 @@ export function hasRawSubmitEvidenceIncrease(
       ? current.cost > 0
       : current.cost > baseline.cost)
   );
+}
+
+/** Actual pending section containing this payload; never infer acceptance from a key alone. */
+export function codexPendingDeliveryKind(screenText: string, text: string, baseline?: string | null): "queued" | "steer_pending" | null {
+  if (countVisibleQueuedSubmitMatches(screenText, text, "queued") > (baseline ? countVisibleQueuedSubmitMatches(baseline, text, "queued") : 0)) return "queued";
+  return countVisibleQueuedSubmitMatches(screenText, text, "steer_pending") > (baseline ? countVisibleQueuedSubmitMatches(baseline, text, "steer_pending") : 0) ? "steer_pending" : null;
 }

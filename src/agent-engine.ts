@@ -2796,6 +2796,7 @@ export class AgentEngine {
       get promptMotionScreenSignatures() { return engine.promptMotionScreenSignatures; },
       get registry() { return engine.registry; },
       get stateMgr() { return engine.stateMgr; },
+      listDeliveryReceipts: () => engine.listDeliveryReceipts(),
       get sweepBackgroundProcessSnapshot() { return engine.sweepBackgroundProcessSnapshot; },
       set sweepBackgroundProcessSnapshot(value) { engine.sweepBackgroundProcessSnapshot = value; },
       appendHaltEscalationEvent: (...args) => engine.appendHaltEscalationEvent(...args),
